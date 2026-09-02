@@ -32,12 +32,12 @@ The offline signer creates a signed `release.json` plus `release.sig` and `relea
 | PostgreSQL | documents, evidence, memories, provenance, audit and jobs |
 | Qdrant | tenant-filtered vectors |
 | Redis | durable ingestion and idempotency queues |
-| hm-core | canonical memory API, recall, temporal/graph and chat |
+| hm-core | canonical memory API, recall, temporal/graph, in-Core MCP and chat |
+| hm-control-plane | local identity, RBAC, API keys, licence, administration and audit |
 | hm-ingestion | asynchronous canonical ingestion |
 | hm-extract | document parsing |
 | hm-playwright | opt-in browser extraction |
 | hm-model-router | verified local/customer/cloud model routing |
-| hm-mcp | memory-specific MCP endpoints |
 | hm-supervisor | installation, health, update and rollback authority |
 
 ## Development safety

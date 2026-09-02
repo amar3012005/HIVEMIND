@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { createEngineBoxRuntimeConfig, evaluateReadiness } from '../lib/runtime-contract.mjs';
 import { canonicalize, selectModelRoute, validateModelCatalog, verifySignedCatalog } from '../lib/model-catalog.mjs';
 
-const localServices = Object.fromEntries(['postgres', 'qdrant', 'redis', 'core', 'ingestion', 'hm_extract', 'mcp', 'edge'].map((name) => [name, 'ready']));
+const localServices = Object.fromEntries(['postgres', 'qdrant', 'redis', 'core', 'control_plane', 'ingestion', 'hm_extract', 'mcp', 'edge'].map((name) => [name, 'ready']));
 const catalog = { catalogVersion: 1, routes: [
   { routeId: 'local-embed', capability: 'embedding', execution: 'local', dimension: 1024, dataEgress: 'none' },
   { routeId: 'cloud-embed', capability: 'embedding', execution: 'cloudflare_gateway', dimension: 1024, dataEgress: 'opt_in' },

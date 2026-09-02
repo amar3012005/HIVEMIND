@@ -3,7 +3,7 @@ import http from 'node:http';
 import test from 'node:test';
 import { createEngineBoxServer, probeEngineBoxServices } from '../../src/engine-box/lean-server.mjs';
 
-const readyServices = { postgres: 'ready', qdrant: 'ready', redis: 'ready', hm_extract: 'ready', model_router: 'ready', core: 'ready', ingestion: 'ready', mcp: 'ready', edge: 'ready' };
+const readyServices = { postgres: 'ready', qdrant: 'ready', redis: 'ready', hm_extract: 'ready', model_router: 'ready', core: 'ready', control_plane: 'ready', ingestion: 'ready', mcp: 'ready', edge: 'ready' };
 
 test('lean Engine Core exposes only liveness and local readiness before feature routes are composed', async () => {
   const server = createEngineBoxServer({ runtime: { apiVersion: 'v1' }, serviceProbe: async () => readyServices, lease: { expiresAt: '2030-01-01T00:00:00Z' } });

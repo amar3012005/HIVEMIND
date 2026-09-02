@@ -54,7 +54,8 @@ fn render_environment(root: &str, release: &Release) -> Result<(), String> {
         ("postgres", "POSTGRES_IMAGE"), ("qdrant", "QDRANT_IMAGE"), ("redis", "REDIS_IMAGE"),
         ("hm-extract", "HM_EXTRACT_IMAGE"), ("hm-playwright", "HM_PLAYWRIGHT_IMAGE"),
         ("hm-model-router", "HM_MODEL_ROUTER_IMAGE"), ("hm-core-engine", "HM_CORE_IMAGE"),
-        ("hm-ingestion-worker", "HM_INGESTION_IMAGE"), ("hm-mcp", "HM_MCP_IMAGE"), ("cloudflared", "CLOUDFLARED_IMAGE"),
+        ("hm-control-plane", "HM_CONTROL_PLANE_IMAGE"),
+        ("hm-ingestion-worker", "HM_INGESTION_IMAGE"), ("cloudflared", "CLOUDFLARED_IMAGE"),
         ("oauth2-proxy", "OAUTH2_PROXY_IMAGE"), ("caddy", "CADDY_IMAGE"),
     ];
     let lease_expiry = lease_expiry(root)?;
@@ -107,7 +108,9 @@ fn wait_for_local_ready(root: &str) -> Result<(), String> {
     let port = fs::read_to_string(format!("{root}/.env")).ok()
         .and_then(|env| env.lines().find_map(|line| line.strip_prefix("ENGINE_BOX_CORE_PORT=")).map(str::to_owned))
         .unwrap_or_else(|| "8787".to_string());
-    let url = format!("http://127.0.0.1:{port}/health");
+    // /health is liveness only. A successful install is not accepted until the
+    // engine has tested its local data plane and selected model route.
+    let url = format!("http://127.0.0.1:{port}/ready");
     for _ in 0..30 {
         let status = Command::new("curl").args(["--fail", "--silent", "--max-time", "2", &url]).status();
         if matches!(status, Ok(status) if status.success()) {

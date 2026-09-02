@@ -92,6 +92,28 @@ services:
     secrets: [postgres_password]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/lean-server.mjs"]
 
+  # This is deliberately a local Control Plane. It owns appliance identity,
+  # RBAC, local API keys, local administration, and audit. Hosted onboarding,
+  # connectors, employees, and workflow orchestration are not part of this
+  # product mode and must not be imported by its entrypoint.
+  hm-control-plane:
+    <<: *engine-service
+    image: ${HM_CONTROL_PLANE_IMAGE:?manifest must pin HM_CONTROL_PLANE_IMAGE}
+    environment:
+      ENGINE_BOX_MODE: 'true'
+      ENGINE_BOX_ENABLE: identity,rbac,api_keys,licence,admin,audit
+      HIVEMIND_RUNTIME_ROLE: control_plane
+      DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      DATABASE_HOST: postgres
+      DATABASE_PORT: '5432'
+      DATABASE_NAME: hivemind
+      CORE_LOCAL_URL: http://hm-core:3000
+    depends_on:
+      postgres: { condition: service_healthy }
+      hm-core: { condition: service_started }
+    secrets: [postgres_password]
+    command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/control-plane-server.mjs"]
+
   hm-auth:
     <<: *engine-service
     image: ${OAUTH2_PROXY_IMAGE:?manifest must pin OAUTH2_PROXY_IMAGE}
@@ -142,15 +164,6 @@ services:
       hm-core: { condition: service_started }
     secrets: [postgres_password]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/workers/engine-box-ingestion-worker.mjs"]
-
-  hm-mcp:
-    <<: *engine-service
-    image: ${HM_MCP_IMAGE:?manifest must pin HM_MCP_IMAGE}
-    environment:
-      ENGINE_BOX_MODE: 'true'
-      CORE_URL: http://hm-core:8787
-    depends_on:
-      hm-core: { condition: service_started }
 
   cloudflared:
     <<: *engine-service

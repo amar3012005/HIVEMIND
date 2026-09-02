@@ -10,7 +10,7 @@ export const EXCLUDED_CAPABILITIES = new Set([
 ]);
 
 export const REQUIRED_LOCAL_SERVICES = [
-  'postgres', 'qdrant', 'redis', 'core', 'ingestion', 'hm_extract', 'mcp', 'edge',
+  'postgres', 'qdrant', 'redis', 'core', 'control_plane', 'ingestion', 'hm_extract', 'mcp', 'edge',
 ];
 
 export function createEngineBoxRuntimeConfig(env = process.env) {

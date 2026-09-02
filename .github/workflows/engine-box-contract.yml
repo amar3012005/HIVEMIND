@@ -8,7 +8,7 @@ on:
       - 'core/src/runtime/runtime-role.js'
       - 'core/tests/unit/engine-box-*.test.mjs'
   push:
-    branches: ['codex/engine-box-enterprise-v1']
+    branches: ['codex/engine-box-enterprise-v1', 'singulance-selfhost']
     paths:
       - 'engine-box/**'
       - 'core/src/engine-box/**'
@@ -30,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify Engine Box contracts
         run: |
-          node --test engine-box/tests/*.test.mjs core/tests/unit/engine-box-runtime*.test.mjs
+          node --test engine-box/tests/*.test.mjs core/tests/unit/engine-box-*.test.mjs
           bash -n engine-box/install.sh
           cargo check --manifest-path engine-box/supervisor/Cargo.toml
           git diff --check HEAD^ HEAD

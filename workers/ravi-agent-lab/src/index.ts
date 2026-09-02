@@ -36,7 +36,13 @@ const DEFAULT_SOURCES = [
   'https://developers.cloudflare.com/agents/',
   'https://developers.cloudflare.com/agents/tools/browser/',
 ];
-const ALLOWED_HOSTS = new Set(['developers.cloudflare.com', 'blog.cloudflare.com']);
+const ALLOWED_HOSTS = new Set([
+  'developers.cloudflare.com', 'blog.cloudflare.com',
+  // Public company pages are permitted for the company-specific research lab.
+  // Tenant onboarding and HIVEMIND recall remain unavailable until their signed
+  // Core adapters are explicitly connected.
+  'singulancelabs.com', 'www.singulancelabs.com',
+]);
 
 function now() { return new Date().toISOString(); }
 

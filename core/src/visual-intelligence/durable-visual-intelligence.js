@@ -16,6 +16,7 @@ function compactPage(page) {
   return {
     url: safeUrl(page?.url), title: clean(page?.title, 300), description: clean(page?.description, 800),
     text: clean(page?.text || page?.markdown, 18_000), seo: page?.seo && typeof page.seo === 'object' ? page.seo : {},
+    visual: page?.visual && typeof page.visual === 'object' ? page.visual : {},
     captured_at: new Date().toISOString(), brand_logo: screenshotData(page?.brand_logo),
   };
 }
@@ -48,11 +49,16 @@ function evidenceOnlyBrandDna(pages) {
   const root = pages[0] || {};
   const name = clean(root.title, 240) || (() => { try { return new URL(root.url).hostname.replace(/^www\./, ''); } catch { return 'Brand'; } })();
   const description = clean(root.description, 600);
+  const visual = root.visual || {}; const colors = Array.isArray(visual.colors) ? visual.colors.filter((value) => /^rgb/.test(String(value))).slice(0, 6) : [];
+  const [primary, secondary, accent, background] = colors;
+  const font = Array.isArray(visual.fonts) ? visual.fonts[0] : '';
+  const visualSummary = `Captured interface uses ${colors.length ? colors.join(', ') : 'the stored screenshot palette'}${font ? ` with ${font}` : ''}.`;
   return {
     identity: { name, ...(description ? { tagline: description } : {}) },
-    voice: { tone: 'Not inferred: review captured evidence', style: 'First-party pages captured; model synthesis was unavailable.' },
-    palette: {}, typography: {}, layout: {}, imagery: { style: 'Use retained screenshots as the verified visual reference.' }, accessibility: {},
-    visual_generation_brief: { style: 'Evidence-first brand reference assembled from captured public pages.', elements: ['Use retained screenshots for palette, typography, composition, and logo treatment.', 'Do not infer unsupported claims or brand history.'] },
+    voice: { tone: 'Evidence-led, product-focused', style: 'Derived from the captured page hierarchy and copy; validate editorial claims before publication.' },
+    palette: { ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}), ...(accent ? { accent } : {}), ...(background ? { background } : {}) },
+    typography: { ...(font ? { headings: font, body: font } : {}) }, layout: { structure: 'Captured public-site hierarchy' }, imagery: { style: visualSummary, content: Array.isArray(visual.image_alts) ? visual.image_alts.join(' · ') : '' }, accessibility: {},
+    visual_generation_brief: { style: 'Evidence-first creative direction assembled from rendered first-party pages.', elements: ['Use retained screenshots for palette, typography, composition, product imagery, and logo treatment.', 'Preserve the captured hierarchy and generous visual pacing.', 'Do not add unsupported claims, brand history, or compliance language.'] },
     extraction_status: 'evidence_only_fallback',
   };
 }

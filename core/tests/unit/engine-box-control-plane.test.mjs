@@ -6,12 +6,23 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createEngineBoxControlPlane } from '../../src/engine-box/control-plane-server.mjs';
+import { writeActivationReceipt, writeSetupRecord } from '../../../engine-box/lib/local-state.mjs';
 
 function get(port, path) {
   return new Promise((resolve, reject) => http.get(`http://127.0.0.1:${port}${path}`, (response) => {
     let body = ''; response.on('data', (chunk) => { body += chunk; });
     response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(body) }));
   }).on('error', reject));
+}
+
+function request(port, method, path, { headers = {}, body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(`http://127.0.0.1:${port}${path}`, { method, headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) } }, (response) => {
+      let text = ''; response.on('data', (chunk) => { text += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(text) }));
+    });
+    req.on('error', reject); if (body) req.write(JSON.stringify(body)); req.end();
+  });
 }
 
 test('lean local control plane has no hosted routes and stays unready before local activation', async () => {
@@ -30,6 +41,31 @@ test('lean local control plane has no hosted routes and stays unready before loc
     assert.equal(ready.status, 503);
     assert.deepEqual(ready.body.capabilities, ['identity', 'rbac', 'api_keys', 'licence', 'admin', 'audit']);
     assert.equal((await get(port, '/v1/connectors')).status, 404);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('activated local Control Plane issues hashed scoped API keys only to mapped owners', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engine-box-control-auth-'));
+  const token = path.join(root, 'setup-token'); const key = path.join(root, 'state-key');
+  await fs.writeFile(token, 'x'.repeat(32)); await fs.writeFile(key, crypto.randomBytes(32).toString('base64'));
+  const env = { ENGINE_BOX_STATE_DIR: path.join(root, 'state'), ENGINE_BOX_SETUP_TOKEN_FILE: token, ENGINE_BOX_STATE_KEY_FILE: key };
+  await writeSetupRecord({ state: 'configured', oidc: { group_mapping: { owner: ['hm-owners'] } }, model_routes: {}, backup: {} }, env);
+  await writeActivationReceipt({ state: 'active', canary: { state: 'passed', receipt_id: 'canary-1' } }, env);
+  const server = createEngineBoxControlPlane({ runtime: { apiVersion: 'v1', capabilities: [] }, postgresProbe: async () => 'ready', env });
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const ownerHeaders = { 'x-auth-request-user': 'alice', 'x-auth-request-groups': 'hm-owners' };
+    const created = await request(port, 'POST', '/v1/admin/api-keys', { headers: ownerHeaders, body: { name: 'MCP', scopes: ['recall'] } });
+    assert.equal(created.status, 201);
+    assert.match(created.body.api_key, /^hmek_/);
+    assert.equal(created.body.record.key_hash, undefined);
+    const rejected = await request(port, 'POST', '/v1/admin/api-keys', { headers: { 'x-auth-request-user': 'eve', 'x-auth-request-groups': 'other' }, body: { name: 'nope' } });
+    assert.equal(rejected.status, 403);
   } finally {
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));

@@ -12,6 +12,7 @@ import {
   writeActivationReceipt,
   writeSetupRecord,
 } from '../../../engine-box/lib/local-state.mjs';
+import { createLocalApiKey, requireLocalAccess, resolveLocalPrincipal } from '../../../engine-box/lib/local-auth.mjs';
 
 function send(res, status, body) {
   res.writeHead(status, {
@@ -50,6 +51,14 @@ async function readJson(req, maxBytes = 256 * 1024) {
 function setupToken(req) {
   const token = req.headers['x-engine-box-setup-token'];
   return typeof token === 'string' ? token : '';
+}
+
+async function requireActivatedOwner(req, env) {
+  const [record, activation] = await Promise.all([readSetupRecord(env), readActivationReceipt(env)]);
+  if (!record || activation?.state !== 'active') throw Object.assign(new Error('local_appliance_not_activated'), { statusCode: 503 });
+  const principal = resolveLocalPrincipal({ headers: req.headers, record });
+  requireLocalAccess(principal, { role: 'owner' });
+  return { record, principal };
 }
 
 /**
@@ -95,6 +104,28 @@ export function createEngineBoxControlPlane({ runtime, postgresProbe, env = proc
         return send(res, 200, { state: 'ACTIVE', receipt });
       }
 
+      if (pathname === '/v1/admin/status' && req.method === 'GET') {
+        const { record, principal } = await requireActivatedOwner(req, env);
+        return send(res, 200, { state: 'READY', principal: { kind: principal.kind, id: principal.id, roles: principal.roles }, setup: redactStoredSetup(record) });
+      }
+      if (pathname === '/v1/admin/api-keys' && req.method === 'POST') {
+        const { record, principal } = await requireActivatedOwner(req, env);
+        const input = await readJson(req);
+        const created = createLocalApiKey({ name: input.name, scopes: input.scopes, expiresAt: input.expires_at || null });
+        const next = { ...record, api_keys: [...(record.api_keys || []), created.record] };
+        await writeSetupRecord(next, env);
+        return send(res, 201, { api_key: created.raw, record: { ...created.record, key_hash: undefined }, created_by: principal.id });
+      }
+      const revoke = pathname.match(/^\/v1\/admin\/api-keys\/([^/]+)$/);
+      if (revoke && req.method === 'DELETE') {
+        const { record } = await requireActivatedOwner(req, env);
+        const id = decodeURIComponent(revoke[1]);
+        const found = (record.api_keys || []).some((key) => key.id === id && !key.revoked_at);
+        if (!found) return send(res, 404, { error: 'local_api_key_not_found' });
+        await writeSetupRecord({ ...record, api_keys: record.api_keys.map((key) => key.id === id ? { ...key, revoked_at: now() } : key) }, env);
+        return send(res, 200, { revoked: true, id });
+      }
+
       if (pathname !== '/health' && pathname !== '/ready') return send(res, 404, { error: 'not_found' });
       const postgres = await postgresProbe();
       const configured = await readSetupRecord(env);
@@ -108,7 +139,9 @@ export function createEngineBoxControlPlane({ runtime, postgresProbe, env = proc
         capabilities: runtime.capabilities.filter((name) => ['identity', 'rbac', 'api_keys', 'licence', 'admin', 'audit'].includes(name)),
       });
     } catch (error) {
-      return send(res, error?.statusCode || 500, { error: 'local_control_plane_failed', message: error.message });
+      const authErrors = new Set(['local_auth_required', 'local_api_key_invalid', 'local_role_unmapped', 'local_role_forbidden', 'local_scope_forbidden']);
+      const status = error?.statusCode || (authErrors.has(error?.message) ? (error.message === 'local_auth_required' || error.message === 'local_api_key_invalid' ? 401 : 403) : 500);
+      return send(res, status, { error: status >= 500 ? 'local_control_plane_failed' : error.message, message: error.message });
     }
   });
 }

@@ -1985,3 +1985,16 @@ slides that find no unique anchor get a page instead of `null`.
   HyperAgent context.
 - Verification: focused Day-1/visual suite — **22 passed, 0 failed**; a B&B
   no-email canary completed every durable stage with 16 visual receipts.
+
+## 2026-09-03 UTC — Day 2 rich-PDF delivery boundary repaired
+
+- Committed and released `e8013ab1a996a9ddbbc1e547f970b23278a532c6` from
+  `singulance-main`; Playwright is healthy on immutable
+  `hivemind/hm-playwright:sha-e8013ab1`.
+- The authenticated internal PDF endpoint now accepts up to 1 MiB of report
+  HTML while preserving its 4 MiB output-PDF ceiling. This admits the bounded
+  five-image Day 2 evidence mosaic without weakening public browser endpoints.
+- An authorized Day 2 lifecycle replay for the owner completed its independent
+  Brand DNA run, then delivered its report email through Cloudflare Email
+  Service with a `delivered` receipt. The prior failed delivery was retained in
+  lifecycle state as historical diagnostic context.

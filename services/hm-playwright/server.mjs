@@ -478,7 +478,9 @@ async function crawl(input) {
         const finalUrl = await publicUrl(page.url());
         if (!finalUrl || finalUrl.origin !== origin) throw new Error('cross_origin_redirect_blocked');
         const evidence = await extractPage(page, response, { source: current.source, depth: current.depth, discovered_from: current.from });
-        if (captureScreenshot && current.depth === 0 && !pages.length) {
+        // Visual Intelligence requests a screenshot per captured page. The
+        // existing limits bound both page count and individual image size.
+        if (captureScreenshot) {
           const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false, timeout: NAVIGATION_TIMEOUT_MS });
           if (screenshot.length <= 5 * 1024 * 1024) evidence.screenshot = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
         }

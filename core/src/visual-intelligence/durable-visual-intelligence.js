@@ -4,7 +4,7 @@ import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 import { createWorkspaceNotification } from '../workspace/notifications.js';
 
 export const VISUAL_PIPELINE_VERSION = 1;
-export const VISUAL_STAGES = Object.freeze(['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'notify']);
+export const VISUAL_STAGES = Object.freeze(['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'render', 'notify']);
 const PROGRESS = Object.freeze(Object.fromEntries(VISUAL_STAGES.map((stage, index) => [stage, Math.round((index / (VISUAL_STAGES.length - 1)) * 100)])));
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
@@ -33,6 +33,57 @@ export function validateVisualAdmission(input) {
   if (!Number.isInteger(input?.processing_version) || input.processing_version < 1) throw Object.assign(new Error('invalid_visual_processing_version'), { retryable: false });
 }
 function parserJson(value) { try { return typeof value === 'object' ? value : JSON.parse(String(value).replace(/^```json\s*/i, '').replace(/\s*```$/i, '')); } catch { return null; } }
+
+/**
+ * The single admission path used by Rooms, lifecycle episodes, and future
+ * API callers. It sends identifiers and public HTTPS URLs only; page bytes,
+ * screenshots and credentials never leave the bounded browser/Worker path.
+ */
+export async function startVisualIntelligenceWorkflow({ orgId, userId, urls, roomId = null, lifecycleDay = null, mode = 'public', deliverable = 'brand_dna_v1', fetchImpl = globalThis.fetch } = {}) {
+  if (process.env.VISUAL_INTELLIGENCE_WORKFLOW_ENABLED !== 'true') return { ok: false, skipped: true, reason: 'feature_disabled' };
+  const endpoint = String(process.env.HIVEMIND_VISUAL_WORKFLOW_URL || '').replace(/\/$/, '');
+  const secret = String(process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');
+  if (!endpoint || !secret) return { ok: false, skipped: true, reason: 'workflow_not_configured' };
+  const trigger = { job_id: crypto.randomUUID(), org_id: orgId, user_id: userId, urls, mode, deliverable, processing_version: VISUAL_PIPELINE_VERSION, requested_at: new Date().toISOString(), ...(UUID.test(String(roomId || '')) ? { room_id: roomId } : {}), ...(lifecycleDay === 2 ? { lifecycle_day: 2 } : {}) };
+  validateVisualAdmission(trigger);
+  const response = await fetchImpl(`${endpoint}/start`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(trigger), signal: AbortSignal.timeout(15_000) });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) return { ok: false, status: response.status, error: payload.error || `workflow_http_${response.status}` };
+  return { ok: true, job_id: trigger.job_id, ...payload };
+}
+
+export function isDayTwoBrandDnaEnabled() { return process.env.HIVEMIND_D2_BRAND_DNA_WORKFLOW_ENABLED === 'true'; }
+function companyWebsite(company) {
+  const candidate = company?.website || company?.website_url || company?.profile?.website || '';
+  try { const url = new URL(String(candidate).includes('://') ? String(candidate) : `https://${candidate}`); return url.protocol === 'https:' ? url.href : null; } catch { return null; }
+}
+/** The Worker cron asks for candidates; eligibility is entirely PostgreSQL-backed. */
+export async function listEligibleDayTwoBrandDna({ prisma, limit = 25 } = {}) {
+  if (!isDayTwoBrandDnaEnabled()) throw Object.assign(new Error('day2_feature_disabled'), { retryable: false });
+  const rows = await prisma.$queryRawUnsafe(`SELECT id, org_id, user_id, "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms" WHERE "agent_connectors" ? '_company' AND archived_at IS NULL AND "agent_connectors" #>> '{_company,day1_first_move,status}' = 'sent' AND COALESCE("agent_connectors" #>> '{_company,day2_brand_dna,status}', '') NOT IN ('queued','running','completed','sent') ORDER BY created_at ASC LIMIT $1`, Math.max(1, Math.min(100, Number(limit) || 25))).catch(() => []);
+  const now = Date.now();
+  return rows.map((row) => {
+    const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
+    const target = Date.parse(company?.onboarded_at || ''); const website = companyWebsite(company);
+    return website && (!Number.isFinite(target) || target + 48 * 60 * 60 * 1000 <= now) ? { org_id: String(row.org_id), user_id: String(row.user_id), room_id: String(row.id), url: website } : null;
+  }).filter(Boolean);
+}
+/** Claims one Day-2 episode before scheduling, so cron replays never duplicate it. */
+export async function prepareDayTwoBrandDna({ prisma, orgId, userId, roomId, url, fetchImpl } = {}) {
+  if (!isDayTwoBrandDnaEnabled()) throw Object.assign(new Error('day2_feature_disabled'), { retryable: false });
+  if (!UUID.test(String(orgId)) || !UUID.test(String(userId)) || !UUID.test(String(roomId)) || !safeUrl(url)) throw Object.assign(new Error('invalid_day2_brand_dna_input'), { retryable: false });
+  const rows = await prisma.$queryRawUnsafe(`SELECT "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms" WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid AND archived_at IS NULL FOR UPDATE`, roomId, orgId, userId);
+  const company = rows?.[0]?.company && (typeof rows[0].company === 'string' ? JSON.parse(rows[0].company) : rows[0].company);
+  const state = company?.day2_brand_dna || {};
+  if (['queued', 'running', 'completed', 'sent'].includes(state.status)) return { ok: true, existing: true, job_id: state.job_id || null };
+  const scheduling = { ...state, status: 'scheduling', scheduled_at: new Date().toISOString(), website: safeUrl(url) };
+  company.day2_brand_dna = scheduling;
+  await prisma.$executeRawUnsafe(`UPDATE "hivemind"."hyper_rooms" SET "agent_connectors"=jsonb_set("agent_connectors", '{_company}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid`, JSON.stringify(company), roomId, orgId);
+  const scheduled = await startVisualIntelligenceWorkflow({ orgId, userId, urls: [safeUrl(url)], roomId, lifecycleDay: 2, fetchImpl });
+  company.day2_brand_dna = { ...scheduling, status: scheduled.ok ? 'queued' : 'failed', job_id: scheduled.job_id || null, workflow_response: scheduled.ok ? { queued: true } : { error: scheduled.error || scheduled.reason || 'schedule_failed' }, updated_at: new Date().toISOString() };
+  await prisma.$executeRawUnsafe(`UPDATE "hivemind"."hyper_rooms" SET "agent_connectors"=jsonb_set("agent_connectors", '{_company}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid`, JSON.stringify(company), roomId, orgId);
+  return scheduled;
+}
 
 export class DurableVisualIntelligenceLifecycle {
   constructor({ prisma, logger = console, browserFactory = () => new PlaywrightServiceRuntime(), fetchImpl = globalThis.fetch } = {}) { this.prisma = prisma; this.logger = logger; this.browserFactory = browserFactory; this.fetch = fetchImpl; }
@@ -87,11 +138,10 @@ export class DurableVisualIntelligenceLifecycle {
   async _capture(run) {
     const discovery = await this._stageOutput(run.id, 'discover'); const urls = (discovery?.urls || run.urls || []).map(safeUrl).filter(Boolean);
     const browser = this.browserFactory(); const captures = [];
-    for (const url of urls) {
-      const result = await browser.crawl({ urls: [url], depth: 0, pageLimit: 1, captureScreenshot: true, session: run.mode === 'user_takeover' ? run.browserSession : null });
-      const page = result.pages?.[0]; if (!page) continue;
-      captures.push({ page: compactPage(page), screenshot: screenshotData(page.screenshot) });
-    }
+    const depth = Math.max(0, Math.min(4, Number(process.env.VISUAL_INTELLIGENCE_CRAWL_DEPTH || 2)));
+    const pageLimit = Math.max(1, Math.min(40, Number(process.env.VISUAL_INTELLIGENCE_CRAWL_PAGE_LIMIT || 16)));
+    const result = await browser.crawl({ urls, depth, pageLimit, captureScreenshot: true, session: run.mode === 'user_takeover' ? run.browserSession : null, orgId: run.orgId });
+    for (const page of result.pages || []) captures.push({ page: compactPage(page), screenshot: screenshotData(page.screenshot) });
     if (!captures.length) throw Object.assign(new Error('visual_capture_empty'), { retryable: true });
     return { run_id: run.id, counts: { captured_pages: captures.length }, capture_payload: captures };
   }
@@ -125,7 +175,15 @@ export class DurableVisualIntelligenceLifecycle {
     if (!artifact.evidence.length || !Object.keys(artifact.visual_generation_brief).length) throw Object.assign(new Error('invalid_brand_dna_artifact'), { retryable: false });
     await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { artifact } }); return { ...this._receipt({ ...run, artifact }), artifact, counts: { evidence: artifact.evidence.length } };
   }
-  async _notify(run) { const fresh = await this.prisma.visualIntelligenceRun.findUnique({ where: { id: run.id } }); await createWorkspaceNotification(this.prisma, { orgId: run.orgId, userId: run.userId, type: 'visual_intelligence.brand_dna_ready', title: 'Your Brand DNA is ready', body: 'Your Agents captured and verified a reusable visual brief.', resourceType: 'visual_intelligence_run', resourceId: run.id, dedupeKey: `visual-intelligence:${run.id}:ready`, data: { run_id: run.id, artifact_type: 'brand_dna' } }); const now = new Date(); return this._receipt(await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { status: 'completed', currentStage: 'notify', progress: 100, finishedAt: now, heartbeatAt: now, terminalReason: 'verified_and_published', artifact: fresh?.artifact || {} } })); }
+  async _render(run, input) {
+    const fresh = await this.prisma.visualIntelligenceRun.findUnique({ where: { id: run.id } });
+    const report = input?.report;
+    if (!fresh?.artifact?.artifact_type || !String(report?.r2_key || '').startsWith(`org/${run.orgId}/runs/${run.id}/reports/`)) throw Object.assign(new Error('invalid_rendered_brand_dna_report'), { retryable: false });
+    const artifact = { ...fresh.artifact, rendered_report: { r2_key: String(report.r2_key), content_type: clean(report.content_type, 100) || 'text/html; charset=utf-8', version: clean(report.version, 120) || null } };
+    await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { artifact } });
+    return { ...this._receipt({ ...fresh, artifact }), artifact, counts: { rendered_reports: 1 } };
+  }
+  async _notify(run) { const fresh = await this.prisma.visualIntelligenceRun.findUnique({ where: { id: run.id } }); await createWorkspaceNotification(this.prisma, { orgId: run.orgId, userId: run.userId, type: 'visual_intelligence.brand_dna_ready', title: 'Your Brand DNA is ready', body: 'Your Agents captured, mapped and verified a reusable visual brief.', resourceType: 'visual_intelligence_run', resourceId: run.id, dedupeKey: `visual-intelligence:${run.id}:ready`, data: { run_id: run.id, artifact_type: 'brand_dna', rendered_report: fresh?.artifact?.rendered_report || null } }); const now = new Date(); return this._receipt(await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { status: 'completed', currentStage: 'notify', progress: 100, finishedAt: now, heartbeatAt: now, terminalReason: 'verified_and_published', artifact: fresh?.artifact || {} } })); }
   async _stageOutput(runId, stageKey) { const step = await this.prisma.visualIntelligenceStep.findUnique({ where: { runId_stageKey_shardKey: { runId, stageKey, shardKey: 'root' } } }); return step?.outputReceipt || null; }
   async _loadArtifactImage(key) {
     const base = String(process.env.HIVEMIND_VISUAL_ARTIFACT_URL || '').replace(/\/$/, ''); const secret = String(process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');

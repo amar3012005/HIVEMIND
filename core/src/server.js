@@ -675,6 +675,11 @@ async function runWebCrawlJob({ urls, depth, pageLimit, include, exclude, captur
   return { ok: true, httpStatus: 202, job_id: job.id, status: 'queued', type: 'crawl' };
 }
 
+async function startVisualIntelligenceFromAgent({ orgId, userId, urls, roomId = null }) {
+  const { startVisualIntelligenceWorkflow } = await import('./visual-intelligence/durable-visual-intelligence.js');
+  return startVisualIntelligenceWorkflow({ orgId, userId, urls, roomId });
+}
+
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   scheduleRecurringMaintenanceJob({
@@ -4558,6 +4563,7 @@ const server = http.createServer(async (req, res) => {
       browserRuntime,
       runWebCrawlJob,
       runWebSearchJob,
+      startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
       prisma,
       accessContext: null,
     };
@@ -6659,8 +6665,10 @@ exit \$RC
     let visualBody;
     try { visualBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body', retryable: false }, 400); }
     try {
-      const { DurableVisualIntelligenceLifecycle } = await import('./visual-intelligence/durable-visual-intelligence.js');
+      const { DurableVisualIntelligenceLifecycle, listEligibleDayTwoBrandDna, prepareDayTwoBrandDna } = await import('./visual-intelligence/durable-visual-intelligence.js');
       const lifecycle = new DurableVisualIntelligenceLifecycle({ prisma, logger: console });
+      if (pathname === '/internal/visual-intelligence/day2/eligible') return jsonResponse(res, { candidates: await listEligibleDayTwoBrandDna({ prisma, limit: visualBody.limit }) });
+      if (pathname === '/internal/visual-intelligence/day2/prepare') return jsonResponse(res, await prepareDayTwoBrandDna({ prisma, orgId: visualBody.org_id, userId: visualBody.user_id, roomId: visualBody.room_id, url: visualBody.url }));
       if (pathname === '/internal/visual-intelligence/admit') return jsonResponse(res, await lifecycle.admit(visualBody), 202);
       if (pathname === '/internal/visual-intelligence/stage') return jsonResponse(res, await lifecycle.executeStage(visualBody));
       if (pathname === '/internal/visual-intelligence/fail') return jsonResponse(res, await lifecycle.failRun(visualBody));
@@ -12163,6 +12171,7 @@ exit \$RC
                     browserRuntime,
                     runWebCrawlJob,
                     runWebSearchJob,
+                    startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
                   },
                 });
               } finally {
@@ -24814,6 +24823,7 @@ exit \$RC
                     browserRuntime,
                     runWebCrawlJob,
                     runWebSearchJob,
+                    startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
                     _trace: { traceId: crypto.randomUUID() },
                   },
                   apiKey: groqKey, onEvent: emit,
@@ -25097,6 +25107,7 @@ exit \$RC
                         browserRuntime,
                         runWebCrawlJob,
                         runWebSearchJob,
+                        startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
                       },
                       onEvent: emit,
                       streamAnswer: true,
@@ -25182,6 +25193,7 @@ exit \$RC
                     browserRuntime,
                     runWebCrawlJob,
                     runWebSearchJob,
+                    startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
                   },
                   onEvent: durableSink ? (event) => durableSink.push(event) : null,
                 });

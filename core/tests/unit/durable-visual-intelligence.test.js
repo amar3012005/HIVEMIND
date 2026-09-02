@@ -5,7 +5,7 @@ import { VISUAL_STAGES, DurableVisualIntelligenceLifecycle, validateVisualAdmiss
 const ids = { org_id: '47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f', user_id: '3b56a01a-7caf-4348-964a-566f52d8c437', job_id: '74fb72fc-08da-41cc-8c56-598eae67bfee' };
 
 test('visual intelligence exposes the fixed, checkpointed stage order', () => {
-  assert.deepEqual(VISUAL_STAGES, ['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'notify']);
+  assert.deepEqual(VISUAL_STAGES, ['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'render', 'notify']);
 });
 
 test('visual admission rejects cross-boundary input before any browser work', () => {

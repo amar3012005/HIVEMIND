@@ -1,6 +1,9 @@
 export const MODES = ['public', 'user_takeover'] as const;
 export const DELIVERABLES = ['brand_dna_v1', 'visual_artifact_brief_v1', 'ui_audit_v1'] as const;
-export const STAGES = ['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'notify'] as const;
+// Every stage is durable and replay-safe. `render` deliberately follows
+// `publish`: the structured Brand DNA remains the semantic source of truth,
+// while the report is a separately persisted presentation artifact.
+export const STAGES = ['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'render', 'notify'] as const;
 export type Mode = typeof MODES[number];
 export type Deliverable = typeof DELIVERABLES[number];
 export type Trigger = { job_id: string; org_id: string; user_id: string; urls: string[]; mode: Mode; deliverable: Deliverable; processing_version: number; requested_at: string; room_id?: string; lifecycle_day?: 2; browser_session?: string };

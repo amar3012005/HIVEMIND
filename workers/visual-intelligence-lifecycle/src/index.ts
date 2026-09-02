@@ -23,7 +23,12 @@ async function captureAndStore(env: Env, trigger: Trigger, runId: string) {
   if (!rows.length) throw new Error('visual_capture_payload_empty');
   const artifacts = [] as Array<Record<string, unknown>>;
   for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index]; if (!row?.page?.url || !row.screenshot) throw new NonRetryableError('visual_capture_evidence_missing');
+    const row = rows[index];
+    // A crawler can return useful page metadata for a page whose screenshot
+    // capture was blocked or timed out. It must never become evidence without
+    // its visual receipt, but one incomplete page must not discard every
+    // independently captured page in the same bounded crawl.
+    if (!row?.page?.url || !row.screenshot) continue;
     const image = decodeScreenshot(row.screenshot); const key = `org/${trigger.org_id}/runs/${runId}/screenshots/${index}.jpg`;
     await env.VISUAL_ARTIFACTS.put(key, image.bytes, { httpMetadata: { contentType: image.contentType }, customMetadata: { org_id: trigger.org_id, run_id: runId, captured_url: row.page.url } });
     const { brand_logo: rawLogo, ...page } = row.page;
@@ -31,6 +36,7 @@ async function captureAndStore(env: Env, trigger: Trigger, runId: string) {
     if (typeof rawLogo === 'string' && rawLogo) { const logo = decodeScreenshot(rawLogo); logo_r2_key = `org/${trigger.org_id}/runs/${runId}/brand/logo.png`; await env.VISUAL_ARTIFACTS.put(logo_r2_key, logo.bytes, { httpMetadata: { contentType: logo.contentType }, customMetadata: { org_id: trigger.org_id, run_id: runId, artifact_type: 'brand_logo' } }); }
     artifacts.push({ r2_key: key, ...(logo_r2_key ? { logo_r2_key } : {}), page_url: page.url, page, captured_at: new Date().toISOString() });
   }
+  if (!artifacts.length) throw new Error('visual_capture_evidence_missing');
   return api(env, '/internal/visual-intelligence/stage', { run_id: runId, stage: 'store', processing_version: trigger.processing_version, input: { artifacts } });
 }
 function escapeHtml(value: unknown) { return String(value ?? '').replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character] || character)); }

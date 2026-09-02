@@ -179,7 +179,26 @@ export class DurableVisualIntelligenceLifecycle {
     if (!run) throw Object.assign(new Error('visual_run_not_found'), { retryable: false });
     if (TERMINAL.has(run.status)) return this._receipt(run);
     const now = new Date();
-    return this._receipt(await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { status: 'failed', currentStage: clean(input.failed_stage, 48), terminalReason: clean(input.failure_code, 180), finishedAt: now, heartbeatAt: now } }));
+    const failed = await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { status: 'failed', currentStage: clean(input.failed_stage, 48), terminalReason: clean(input.failure_code, 180), finishedAt: now, heartbeatAt: now } });
+    // The Day-2 room claim is the scheduling fence. Release it only when this
+    // exact durable run failed, so a later workflow retry or another run can
+    // never overwrite a completed/sent episode for the tenant.
+    if (failed.latchedFlags?.lifecycle_day === 2 && failed.roomId) {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms" WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid FOR UPDATE`,
+        failed.roomId, failed.orgId, failed.userId,
+      ).catch(() => []);
+      const company = typeof rows?.[0]?.company === 'string' ? JSON.parse(rows[0].company) : rows?.[0]?.company;
+      const episode = company?.day2_brand_dna;
+      if (company && episode?.job_id === failed.jobId && !['sent', 'completed'].includes(episode.status)) {
+        company.day2_brand_dna = { ...episode, status: 'failed', failed_at: now.toISOString(), failure_reason: clean(input.failure_code, 180) || 'workflow_failure', updated_at: now.toISOString() };
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors"=jsonb_set("agent_connectors", '{_company}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid`,
+          JSON.stringify(company), failed.roomId, failed.orgId, failed.userId,
+        ).catch(() => null);
+      }
+    }
+    return this._receipt(failed);
   }
 
   async _admit(run) { return this._receipt(run); }

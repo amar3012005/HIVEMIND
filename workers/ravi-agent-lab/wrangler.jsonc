@@ -7,12 +7,18 @@
   "workers_dev": true,
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ai": { "binding": "AI" },
+  "browser": { "binding": "BROWSER", "remote": true },
+  "r2_buckets": [
+    { "binding": "ARTIFACTS", "bucket_name": "hivemind-ravi-agent-lab-artifacts" }
+  ],
   "durable_objects": {
     "bindings": [
-      { "name": "RAVI_RESEARCH_AGENT", "class_name": "RaviResearchAgent" }
+      { "name": "RAVI_RESEARCH_AGENT", "class_name": "RaviResearchAgent" },
+      { "name": "RAVI_REVIEWER_AGENT", "class_name": "RaviReviewerAgent" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["RaviResearchAgent"] }
+    { "tag": "v1", "new_sqlite_classes": ["RaviResearchAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["RaviReviewerAgent"] }
   ]
 }

@@ -8,6 +8,7 @@
     "deploy:lab": "wrangler deploy"
   },
   "dependencies": {
+    "@cloudflare/codemode": "^0.5.1",
     "agents": "^0.22.0"
   },
   "devDependencies": {

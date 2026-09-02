@@ -1,4 +1,5 @@
 import { Agent, getAgentByName, routeAgentRequest } from 'agents';
+import { connectBrowserSession, createBrowserSession, deleteBrowserSession, listBrowserTargets, type BrowserBinding } from 'agents/browser';
 
 type ToolName = 'fetch_public_source' | 'hivemind_web_search' | 'composio_execute';
 
@@ -7,9 +8,15 @@ type SourceReceipt = {
   captured_at: string; content_hash: string; excerpt: string;
 };
 
+type BrowserReceipt = {
+  tool: 'cloudflare_browser'; url: string; title: string; captured_at: string;
+  artifact_key: string; artifact_sha256: string;
+};
+
 type RunRecord = {
   request_id: string; task: string; status: 'running' | 'complete' | 'degraded';
   started_at: string; completed_at?: string; tools: ToolName[]; receipts: SourceReceipt[];
+  browser_receipts?: BrowserReceipt[]; reviewer_verdict?: { passed: boolean; reason: string };
   synthesis?: string; warnings: string[];
 };
 
@@ -19,6 +26,9 @@ interface Env {
   AI: { run(model: string, input: unknown): Promise<unknown> };
   RAVI_LAB_SECRET: string;
   RAVI_RESEARCH_AGENT: DurableObjectNamespace<RaviResearchAgent>;
+  RAVI_REVIEWER_AGENT: DurableObjectNamespace<RaviReviewerAgent>;
+  BROWSER: BrowserBinding;
+  ARTIFACTS: R2Bucket;
 }
 
 const RAVI_PERSONA = `You are Ravi Patel, the User & Market Researcher for Singulance. You uncover enterprise needs, competitive landscape, and adoption evidence for sovereign, low-latency AI solutions. Focus on regulated European enterprises, use only supplied evidence, distinguish verified facts from gaps, and do not invent pricing, compliance claims, customers, metrics, or provider actions.`;
@@ -84,6 +94,22 @@ function modelText(response: unknown): string {
   return visit(response);
 }
 
+export class RaviReviewerAgent extends Agent<Env, { reviewed: number }> {
+  initialState = { reviewed: 0 };
+
+  async review(receipts: SourceReceipt[], browserReceipts: BrowserReceipt[]) {
+    const passed = receipts.length >= 2 && receipts.every((receipt) => receipt.status >= 200 && receipt.status < 300)
+      && browserReceipts.length >= 1;
+    this.setState({ reviewed: this.state.reviewed + 1 });
+    return {
+      passed,
+      reason: passed
+        ? 'Independent reviewer found current, successful source receipts and an immutable browser screenshot artifact.'
+        : 'Review failed: required successful source receipts or browser artifact are missing.',
+    };
+  }
+}
+
 export class RaviResearchAgent extends Agent<Env, RaviState> {
   initialState: RaviState = { persona: RAVI_PERSONA, runs: {}, updated_at: now() };
 
@@ -106,14 +132,34 @@ export class RaviResearchAgent extends Agent<Env, RaviState> {
     };
   }
 
+  private async captureBrowser(value: unknown, requestId: string): Promise<BrowserReceipt> {
+    const url = allowedPublicUrl(value);
+    if (!url) throw new Error('browser_source_not_allowed');
+    const created = await createBrowserSession(this.env.BROWSER, { keepAliveMs: 60_000, includeTargets: true, recording: true });
+    try {
+      const target = (await listBrowserTargets(this.env.BROWSER, created.sessionId)).find((row) => row.type === 'page');
+      if (!target) throw new Error('browser_target_unavailable');
+      const cdp = await connectBrowserSession(this.env.BROWSER, created.sessionId, 20_000);
+      const sessionId = await cdp.attachToTarget(target.id, { timeoutMs: 20_000 });
+      await cdp.send('Page.enable', {}, { sessionId, timeoutMs: 10_000 });
+      await cdp.send('Page.navigate', { url: url.toString() }, { sessionId, timeoutMs: 20_000 });
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const screenshot = await cdp.send('Page.captureScreenshot', { format: 'png' }, { sessionId, timeoutMs: 20_000 }) as { data?: string };
+      const raw = Uint8Array.from(atob(String(screenshot.data || '')), (character) => character.charCodeAt(0));
+      const artifactKey = `runs/${requestId}/browser/${Date.now()}.png`;
+      await this.env.ARTIFACTS.put(artifactKey, raw, { httpMetadata: { contentType: 'image/png' } });
+      const title = await cdp.send('Runtime.evaluate', { expression: 'document.title', returnByValue: true }, { sessionId, timeoutMs: 10_000 }) as { result?: { value?: unknown } };
+      return { tool: 'cloudflare_browser', url: url.toString(), title: String(title.result?.value || 'Untitled').slice(0, 240), captured_at: now(), artifact_key: artifactKey, artifact_sha256: await sha256(screenshot.data || '') };
+    } finally {
+      await deleteBrowserSession(this.env.BROWSER, created.sessionId).catch(() => undefined);
+    }
+  }
+
   private async synthesize(task: string, receipts: SourceReceipt[]): Promise<{ text: string; warning?: string }> {
     const evidence = receipts.map((item, index) => `SOURCE ${index + 1}\nURL: ${item.url}\nTITLE: ${item.title}\nCAPTURED: ${item.captured_at}\nCONTENT:\n${item.excerpt}`).join('\n\n');
     try {
       const result = await this.env.AI.run('@cf/zai-org/glm-5.3-flash', {
-        messages: [
-          { role: 'system', content: this.state.persona },
-          { role: 'user', content: `Task: ${task}\n\nUse only this captured evidence. Return: (1) concise findings, (2) verified capability table, (3) explicit gaps, (4) next safe action.\n\n${evidence}` },
-        ],
+        prompt: `${this.state.persona}\n\nTask: ${task}\n\nUse only this captured evidence. Return: (1) concise findings, (2) verified capability table, (3) explicit gaps, (4) next safe action.\n\n${evidence}`,
         max_completion_tokens: 900,
         // This is a fast evidence synthesis, not a hidden-reasoning task. Keeping
         // thinking off makes its latency and token use predictable for the room UI.
@@ -151,9 +197,14 @@ export class RaviResearchAgent extends Agent<Env, RaviState> {
       try { receipts.push(await this.fetchPublicSource(source)); }
       catch (error) { running.warnings.push(`source_failed:${String(error).slice(0, 160)}`); }
     }
+    const browserReceipts: BrowserReceipt[] = [];
+    try { browserReceipts.push(await this.captureBrowser(requested[0], requestId)); }
+    catch (error) { running.warnings.push(`browser_capture_failed:${String(error).slice(0, 160)}`); }
     const synthesis = await this.synthesize(task, receipts);
     if (synthesis.warning) running.warnings.push(synthesis.warning);
-    const complete: RunRecord = { ...running, receipts, synthesis: synthesis.text, status: receipts.length ? 'complete' : 'degraded', completed_at: now() };
+    const reviewer = await getAgentByName(this.env.RAVI_REVIEWER_AGENT, 'ravi-lab-reviewer');
+    const reviewerVerdict = await reviewer.review(receipts, browserReceipts);
+    const complete: RunRecord = { ...running, receipts, browser_receipts: browserReceipts, reviewer_verdict: reviewerVerdict, synthesis: synthesis.text, status: receipts.length && reviewerVerdict.passed ? 'complete' : 'degraded', completed_at: now() };
     this.setState({ ...this.state, runs: { ...this.state.runs, [requestId]: complete }, updated_at: now() });
     return Response.json({ ok: complete.status === 'complete', idempotent: false, run: complete });
   }

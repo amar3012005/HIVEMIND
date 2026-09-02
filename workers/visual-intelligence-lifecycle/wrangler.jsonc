@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json", "name": "hivemind-visual-intelligence", "main": "src/index.ts", "compatibility_date": "2026-09-02", "compatibility_flags": ["nodejs_compat"],
-  "vars": { "HIVEMIND_VISUAL_API_URL": "https://api.singulancelabs.com", "HIVEMIND_VISUAL_INSTANCE_PREFIX": "visual" },
+  "vars": { "HIVEMIND_VISUAL_API_URL": "https://core.singulancelabs.com", "HIVEMIND_VISUAL_INSTANCE_PREFIX": "visual" },
   "flagship": [{ "binding": "FLAGS", "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9", "remote": true }],
   "queues": { "producers": [{ "binding": "VISUAL_TRIGGER_QUEUE", "queue": "hivemind-visual-intelligence" }], "consumers": [{ "queue": "hivemind-visual-intelligence", "max_batch_size": 5, "max_batch_timeout": 5, "max_retries": 6, "dead_letter_queue": "hivemind-visual-intelligence-dlq" }] },
   "workflows": [{ "name": "hivemind-visual-intelligence-workflow", "binding": "VISUAL_WORKFLOW", "class_name": "VisualIntelligenceWorkflow" }], "triggers": { "crons": ["17 * * * *"] },

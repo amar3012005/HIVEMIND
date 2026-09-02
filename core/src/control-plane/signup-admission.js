@@ -55,9 +55,11 @@ export function verifyPersonalInvitationLink({ token, configuredCode, secret, no
   }
 }
 
-export function createSignupAdmission({ accountType, secret, enterpriseInvitation = null, ttlSeconds = DEFAULT_SIGNUP_ADMISSION_TTL_SECONDS, now = Date.now() }) {
+export function createSignupAdmission({ accountType, secret, enterpriseInvitation = null, partnerReferral = null, ttlSeconds = DEFAULT_SIGNUP_ADMISSION_TTL_SECONDS, now = Date.now() }) {
   if (!secret || !['personal', 'enterprise'].includes(accountType)) return null;
   if (enterpriseInvitation && accountType !== 'enterprise') return null;
+  if (enterpriseInvitation && partnerReferral) return null;
+  if (partnerReferral && (!/^[0-9a-f-]{36}$/i.test(String(partnerReferral.id || '')) || !Number.isInteger(Number(partnerReferral.version)) || Number(partnerReferral.version) < 1)) return null;
   const invitation = enterpriseInvitation && {
     // EnterpriseInvitationService exposes `invitationId`; accept `id` as a
     // compatibility alias for direct callers and older tests.
@@ -71,6 +73,7 @@ export function createSignupAdmission({ accountType, secret, enterpriseInvitatio
     exp: Math.floor(now / 1000) + ttlSeconds,
     nonce: crypto.randomUUID(),
     ...(invitation ? { enterprise_invitation: invitation } : {}),
+    ...(partnerReferral ? { partner_referral: { id: String(partnerReferral.id), version: Number(partnerReferral.version) } } : {}),
   })).toString('base64url');
   const signature = crypto.createHmac('sha256', secret).update(`signup:${payload}`).digest('base64url');
   return `${payload}.${signature}`;
@@ -87,10 +90,13 @@ export function verifySignupAdmission({ ticket, accountType, secret, now = Date.
     if (decoded?.account_type !== accountType || !Number.isFinite(Number(decoded.exp)) || Number(decoded.exp) <= Math.floor(now / 1000)) return null;
     const invitation = decoded.enterprise_invitation;
     if (invitation && (!/^[0-9a-f-]{36}$/i.test(String(invitation.id || '')) || !['code', 'link'].includes(invitation.method) || !Number.isInteger(invitation.version) || invitation.version < 1)) return null;
+    const partnerReferral = decoded.partner_referral;
+    if (partnerReferral && (!/^[0-9a-f-]{36}$/i.test(String(partnerReferral.id || '')) || !Number.isInteger(partnerReferral.version) || partnerReferral.version < 1)) return null;
     return {
       accountType: decoded.account_type,
       expiresAt: Number(decoded.exp),
       ...(invitation ? { enterpriseInvitation: { id: invitation.id, method: invitation.method, version: invitation.version } } : {}),
+      ...(partnerReferral ? { partnerReferral: { id: partnerReferral.id, version: partnerReferral.version } } : {}),
     };
   } catch {
     return null;

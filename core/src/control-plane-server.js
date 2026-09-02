@@ -55,6 +55,14 @@ import {
   redeemPromotion,
 } from './billing/promotion-service.js';
 import {
+  createPartnerReferralCampaign,
+  getPartnerReferralCampaign,
+  listPartnerReferralCampaigns,
+  markPartnerReferralDelivery,
+  redeemPartnerReferral,
+  resolvePartnerReferral,
+} from './billing/partner-referral-service.js';
+import {
   activateEnterpriseRunway,
   createEnterpriseInvitation,
   extendEnterpriseInvitation,
@@ -92,6 +100,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
+import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
@@ -3627,6 +3636,69 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { ok: true });
   }
 
+  // ─── Platform Commercial: named, reusable partner referrals ─────────────
+  // One human-readable campaign in Admin, one opaque share URL in public, and
+  // one canonical Promotion underneath. Creating never sends email; Send is an
+  // explicit, audited operator action after preview.
+  if (pathname === '/admin/api/platform/partner-referrals' && (req.method === 'GET' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const baseUrl = resolveInvitationBaseUrl();
+    if (req.method === 'GET') return jsonResponse(res, { campaigns: await listPartnerReferralCampaigns({ prisma, baseUrl }) });
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      let created = await createPartnerReferralCampaign({ prisma, input: body, baseUrl });
+      if (created.campaign.offer.discount) {
+        try {
+          const billingMod = await import('./billing/stripe.js');
+          const stripeTerms = await billingMod.createManagedPromotionCode({ code: created.plaintextCode, name: created.campaign.internal_name, terms: created.campaign.offer.discount });
+          const promotionId = created.campaign.promotion_id;
+          const version = await prisma.promotionVersion.findFirst({ where: { promotionId }, orderBy: { version: 'desc' } });
+          await prisma.$transaction([
+            prisma.promotionVersion.update({ where: { id: version.id }, data: { commercialTerms: { ...version.commercialTerms, stripe_coupon_id: stripeTerms.couponId, stripe_promotion_code_id: stripeTerms.promotionCodeId } } }),
+            prisma.promotion.update({ where: { id: promotionId }, data: { status: 'active' } }),
+          ]);
+          const refreshed = await getPartnerReferralCampaign({ prisma, campaignId: created.campaign.campaign_id, baseUrl });
+          created = { campaign: refreshed.campaign, plaintextCode: created.plaintextCode };
+        } catch (stripeError) {
+          return jsonResponse(res, { error: 'Stripe promotion setup failed; the partner invitation remains a draft.' }, 502);
+        }
+      }
+      await audit({ eventType: 'commercial.partner_referral_created', eventCategory: 'billing', action: 'create', resourceType: 'partner_referral', resourceId: created.campaign.campaign_id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, referrer: created.campaign.referrer_email_hint, offer: created.campaign.offer }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { campaign: created.campaign, generated_code: created.plaintextCode }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
+
+  const adminPartnerReferralAction = pathname.match(/^\/admin\/api\/platform\/partner-referrals\/([0-9a-f-]{36})\/(preview|send|revoke)$/i);
+  if (adminPartnerReferralAction && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const [, campaignId, action] = adminPartnerReferralAction;
+    const found = await getPartnerReferralCampaign({ prisma, campaignId, baseUrl: resolveInvitationBaseUrl() });
+    if (!found) return jsonResponse(res, { error: 'Not found' }, 404);
+    if (action === 'revoke') {
+      await prisma.promotion.update({ where: { id: found.row.promotionId }, data: { status: 'revoked' } });
+      await audit({ eventType: 'commercial.partner_referral_revoked', eventCategory: 'billing', action: 'update', resourceType: 'partner_referral', resourceId: campaignId,
+        metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { ok: true });
+    }
+    const rendered = renderPartnerReferralInvitation({ referrerName: found.row.referrerDisplayName, invitationUrl: found.campaign.invitation_url,
+      offer: found.campaign.offer, welcomeMessage: found.row.welcomeMessage });
+    if (action === 'preview') return jsonResponse(res, { rendered, campaign: found.campaign });
+    if (found.campaign.status !== 'active') return jsonResponse(res, { error: 'Invitation is not active' }, 409);
+    const delivery = await sendRenderedSystemEmail({ to: found.row.referrerEmail,
+      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>', rendered, templateId: 'partner_referral_invitation' });
+    await markPartnerReferralDelivery({ prisma, campaignId, delivery });
+    await audit({ eventType: delivery.ok ? 'commercial.partner_referral_sent' : 'commercial.partner_referral_delivery_failed', eventCategory: 'billing', action: 'create', resourceType: 'partner_referral', resourceId: campaignId,
+      metadata: { operator: operator.operator, session_id: operator.sessionId, recipient: found.row.referrerEmailHint, provider: delivery.provider || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+    return jsonResponse(res, { ok: delivery.ok, delivery_status: delivery.deliveryStatus || (delivery.ok ? 'accepted' : 'failed'), error: delivery.error }, delivery.ok ? 200 : 502);
+  }
+
   // ─── Platform Commercial: B2B enterprise invitations ───────────────────
   // Invitations are deliberately distinct from reusable promotions/referrals:
   // one invited owner, one eventual organization, one onboarding grant.
@@ -4713,12 +4785,29 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { ok: true });
   }
 
+  if (pathname === '/v1/referral-invitations/preview' && req.method === 'GET') {
+    if (!prisma) return jsonResponse(res, { error: 'Invitation service unavailable' }, 503);
+    const token = url.searchParams.get('token');
+    const resolved = await resolvePartnerReferral({ prisma, token, recordVisit: url.searchParams.get('record_visit') === '1' }).catch(() => null);
+    if (!resolved) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
+    return jsonResponse(res, { invitation: resolved.preview });
+  }
+
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {
     if (signupAdmissionLimited(req)) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
     }
     const body = await parseBody(req);
-    const accountType = String(body.account_type || '').trim().toLowerCase();
+    let accountType = String(body.account_type || '').trim().toLowerCase();
+    const partnerReferralToken = String(body.referral_token || '').trim();
+    const partnerReferral = partnerReferralToken
+      ? await resolvePartnerReferral({ prisma, token: partnerReferralToken }).catch(() => null)
+      : null;
+    if (partnerReferralToken && !partnerReferral) {
+      recordSignupAdmissionAttempt(req, false);
+      return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
+    }
+    if (partnerReferral) accountType = partnerReferral.promotion.version.accountType === 'personal' ? 'personal' : 'enterprise';
     const code = String(body.invitation_code || body.enterprise_access_code || '').trim();
     const personalAdmission = accountType === 'personal'
       ? verifyPersonalInvitationLink({
@@ -4732,15 +4821,17 @@ const server = http.createServer(async (req, res) => {
       : null;
     // The environment allowlist is legacy-only. New B2B workspaces receive an
     // invitation bound to one recipient and one commercial profile.
-    const accepted = accountType === 'personal'
+    const accepted = Boolean(partnerReferral) || (accountType === 'personal'
       ? Boolean(personalAdmission) || invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
-      : Boolean(enterpriseAdmission) || (accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code)));
+      : Boolean(enterpriseAdmission) || (accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code))));
     recordSignupAdmissionAttempt(req, accepted);
     if (!accepted) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
     return jsonResponse(res, {
-      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, enterpriseInvitation: enterpriseAdmission, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
+      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, enterpriseInvitation: enterpriseAdmission,
+        partnerReferral: partnerReferral ? { id: partnerReferral.row.id, version: partnerReferral.row.shareTokenVersion } : null, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
       expires_in_seconds: SIGNUP_ADMISSION_TTL_SECONDS,
       ...(enterpriseAdmission ? { invitation: enterpriseAdmission.preview } : {}),
+      ...(partnerReferral ? { referral: partnerReferral.preview } : {}),
     });
   }
 
@@ -5133,11 +5224,25 @@ const server = http.createServer(async (req, res) => {
     // code is an allow-list (see billing/access-codes.js), never "any non-empty
     // string" — that would let anyone self-provision a paid enterprise workspace.
     const requestedPlanInput = typeof body.plan === 'string' ? body.plan.trim().toLowerCase() : 'free';
+    const referralToken = String(body.referralToken || body.referral_token || '').trim();
+    const signupUser = referralToken
+      ? await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null)
+      : null;
+    const partnerReferral = referralToken
+      ? await resolvePartnerReferral({ prisma, token: referralToken, email: signupUser?.email || '', orgId: null }).catch(() => null)
+      : null;
+    if (referralToken && !partnerReferral) return jsonResponse(res, { error: 'referral invitation unavailable', code: 'invitation_unavailable' }, 403);
+    const admissionAccountType = partnerReferral
+      ? (partnerReferral.promotion.version.accountType === 'personal' ? 'personal' : 'enterprise')
+      : (requestedPlanInput === 'enterprise' ? 'enterprise' : 'personal');
     const signupAdmission = verifySignupAdmission({
       ticket: body.signup_ticket,
-      accountType: requestedPlanInput === 'enterprise' ? 'enterprise' : 'personal',
+      accountType: admissionAccountType,
       secret: SIGNUP_ADMISSION_SECRET,
     });
+    if (partnerReferral && signupAdmission?.partnerReferral?.id !== partnerReferral.row.id) {
+      return jsonResponse(res, { error: 'referral invitation unavailable', code: 'invitation_unavailable' }, 403);
+    }
     const enterpriseInvitationAdmission = requestedPlanInput === 'enterprise'
       ? signupAdmission?.enterpriseInvitation || null : null;
     const existingMembershipCount = await prisma.userOrganization.count({ where: { userId: current.session.userId, isActive: true } });
@@ -5170,14 +5275,17 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
     const referralCode = normalizeReferralCode(body.referralCode || body.referral_code);
-    if (enterpriseInvitationAdmission && referralCode) {
-      return jsonResponse(res, { error: 'an enterprise invitation cannot be combined with a referral code' }, 400);
+    if (enterpriseInvitationAdmission && (referralCode || referralToken)) {
+      return jsonResponse(res, { error: 'an enterprise invitation cannot be combined with a referral invitation' }, 400);
+    }
+    if (referralCode && referralToken) {
+      return jsonResponse(res, { error: 'choose one referral invitation' }, 400);
     }
     let referralCampaign = null;
-    let signupPromotion = null;
+    let signupPromotion = partnerReferral?.promotion || null;
     if (referralCode) {
-      const signupUser = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
-      signupPromotion = await findPromotionForCode({ prisma, code: referralCode, email: signupUser?.email || '', orgId: null }).catch(() => null);
+      const codeSignupUser = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
+      signupPromotion = await findPromotionForCode({ prisma, code: referralCode, email: codeSignupUser?.email || '', orgId: null }).catch(() => null);
       referralCampaign = signupPromotion ? null : await prisma.referralCampaign.findUnique({ where: { code: referralCode } }).catch(() => null);
       const now = new Date();
       if (!signupPromotion && (!referralCampaign || !referralCampaign.active || (referralCampaign.startsAt && referralCampaign.startsAt > now)
@@ -5268,9 +5376,11 @@ const server = http.createServer(async (req, res) => {
         }
         let promotion = null;
         if (signupPromotion) {
-          const signupUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
-          promotion = await redeemPromotion({ prisma, tx, orgId: newOrg.id, userId: current.session.userId, email: signupUser?.email || '', code: referralCode,
-            requestId: req.headers['x-request-id'] || null, applyProfile: true });
+          const promotionUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
+          promotion = referralToken
+            ? await redeemPartnerReferral({ prisma, tx, token: referralToken, orgId: newOrg.id, userId: current.session.userId, email: promotionUser?.email || '', requestId: req.headers['x-request-id'] || null })
+            : await redeemPromotion({ prisma, tx, orgId: newOrg.id, userId: current.session.userId, email: promotionUser?.email || '', code: referralCode,
+              requestId: req.headers['x-request-id'] || null, applyProfile: true });
         }
         return { org: newOrg, promotion, enterpriseInvitation };
       });
@@ -13834,13 +13944,29 @@ Write the persona now.`;
       const targetPlan = plansMod.PLANS[targetPlanId];
       if (!targetPlan || targetPlanId === 'free') return jsonResponse(res, { error: 'invalid checkout plan' }, 400);
       const referralCode = normalizeReferralCode(body.referral_code);
-      const checkoutUser = referralCode
-        ? await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null)
+      const checkoutUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+      const attachedGrant = !referralCode
+        ? await prisma.entitlementGrant.findFirst({ where: { orgId, promotionId: { not: null }, source: 'promotion' }, orderBy: { createdAt: 'desc' } }).catch(() => null)
         : null;
-      const checkoutPromotion = referralCode
+      const attachedRedemption = attachedGrant?.promotionId
+        ? await prisma.promotionRedemption.findFirst({ where: { orgId, promotionId: attachedGrant.promotionId }, orderBy: { redeemedAt: 'desc' } }).catch(() => null)
+        : null;
+      const [attachedPromotion, attachedVersion] = attachedRedemption
+        ? await Promise.all([
+          prisma.promotion.findUnique({ where: { id: attachedRedemption.promotionId } }),
+          prisma.promotionVersion.findUnique({ where: { id: attachedRedemption.promotionVersionId } }),
+        ])
+        : [null, null];
+      // A partner URL is intentionally code-free for the recipient. Once it
+      // has been redeemed, recover its server-managed Stripe discount from the
+      // immutable entitlement grant instead of asking the user to re-enter a
+      // promotion code at checkout.
+      const resolvedCheckoutPromotion = referralCode
         ? await findPromotionForCode({ prisma, code: referralCode, email: checkoutUser?.email || '', orgId }).catch(() => null)
-        : null;
-      if (referralCode && checkoutPromotion) {
+        : attachedPromotion && attachedVersion ? { promotion: attachedPromotion, version: attachedVersion } : null;
+      const checkoutPromotion = referralCode || resolvedCheckoutPromotion?.promotion.billingMode === 'stripe_discount'
+        ? resolvedCheckoutPromotion : null;
+      if (checkoutPromotion) {
         if (checkoutPromotion.version.basePlan !== targetPlanId) {
           return jsonResponse(res, { error: 'This offer applies to a different plan' }, 409);
         }

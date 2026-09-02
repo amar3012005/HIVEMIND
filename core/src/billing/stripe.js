@@ -151,7 +151,10 @@ export async function createManagedPromotionCode({ code, name, terms = {} }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const kind = String(terms.kind || '').toLowerCase();
-  const couponData = { duration: 'once', name: String(name || 'HIVEMIND promotion').slice(0, 40) };
+  const duration = String(terms.discount_duration || 'once').toLowerCase();
+  if (!['once', 'repeating', 'forever'].includes(duration)) throw new Error('Invalid Stripe coupon duration');
+  const couponData = { duration, name: String(name || 'HIVEMIND promotion').slice(0, 40) };
+  if (duration === 'repeating') couponData.duration_in_months = Number(terms.duration_in_months);
   if (kind === 'percentage_discount') {
     couponData.percent_off = Number(terms.percent_off);
   } else if (kind === 'fixed_discount') {

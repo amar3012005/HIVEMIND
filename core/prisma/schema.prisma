@@ -2936,8 +2936,37 @@ model Promotion {
   notes             String?  @db.Text
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  partnerReferral   PartnerReferralCampaign?
 
   @@map("promotions")
+}
+
+/// A reusable, named partner invitation backed by the canonical Promotion
+/// entitlement chain. The public URL contains a signed opaque token; neither
+/// the referrer's email nor the promotion code is exposed to recipients.
+model PartnerReferralCampaign {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId         String    @unique @map("promotion_id") @db.Uuid
+  referrerDisplayName String    @map("referrer_display_name") @db.VarChar(120)
+  referrerEmail        String    @map("referrer_email") @db.VarChar(255)
+  referrerEmailHash    String    @map("referrer_email_hash") @db.Char(64)
+  referrerEmailHint    String    @map("referrer_email_hint") @db.VarChar(160)
+  shareTokenHash       String    @unique @map("share_token_hash") @db.Char(64)
+  shareTokenVersion    Int       @default(1) @map("share_token_version")
+  welcomeMessage       String?   @map("welcome_message") @db.Text
+  deliveryStatus       String    @default("not_sent") @map("delivery_status") @db.VarChar(24)
+  lastDeliveryError    String?   @map("last_delivery_error") @db.VarChar(240)
+  sentAt               DateTime? @map("sent_at") @db.Timestamptz(6)
+  lastSentAt           DateTime? @map("last_sent_at") @db.Timestamptz(6)
+  visitCount           Int       @default(0) @map("visit_count")
+  acceptedCount        Int       @default(0) @map("accepted_count")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  promotion            Promotion @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+  redemptions          PromotionRedemption[]
+
+  @@index([referrerEmailHash, createdAt])
+  @@map("partner_referral_campaigns")
 }
 
 /// Immutable terms snapshot. Material offer changes create a new version.
@@ -3009,21 +3038,24 @@ model EntitlementVersion {
 }
 
 model PromotionRedemption {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  promotionId        String   @map("promotion_id") @db.Uuid
-  promotionVersionId String   @map("promotion_version_id") @db.Uuid
-  entitlementGrantId String   @map("entitlement_grant_id") @db.Uuid
-  orgId              String   @map("org_id") @db.Uuid
-  redeemedByUserId   String   @map("redeemed_by_user_id") @db.Uuid
-  emailHash          String   @map("email_hash") @db.Char(64)
-  codeHint           String?  @map("code_hint") @db.VarChar(16)
-  termsSnapshot      Json     @map("terms_snapshot")
-  requestId          String?  @map("request_id") @db.VarChar(128)
-  redeemedAt         DateTime @default(now()) @map("redeemed_at") @db.Timestamptz(6)
+  id                        String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId               String                   @map("promotion_id") @db.Uuid
+  promotionVersionId        String                   @map("promotion_version_id") @db.Uuid
+  entitlementGrantId        String                   @map("entitlement_grant_id") @db.Uuid
+  orgId                     String                   @map("org_id") @db.Uuid
+  redeemedByUserId          String                   @map("redeemed_by_user_id") @db.Uuid
+  emailHash                 String                   @map("email_hash") @db.Char(64)
+  codeHint                  String?                  @map("code_hint") @db.VarChar(16)
+  termsSnapshot             Json                     @map("terms_snapshot")
+  requestId                 String?                  @map("request_id") @db.VarChar(128)
+  partnerReferralCampaignId String?                  @map("partner_referral_campaign_id") @db.Uuid
+  partnerReferralCampaign   PartnerReferralCampaign? @relation(fields: [partnerReferralCampaignId], references: [id], onDelete: SetNull)
+  redeemedAt                DateTime                 @default(now()) @map("redeemed_at") @db.Timestamptz(6)
 
   @@unique([promotionId, orgId])
   @@index([promotionId, emailHash])
   @@index([orgId, redeemedAt])
+  @@index([partnerReferralCampaignId])
   @@map("promotion_redemptions")
 }
 

@@ -78,6 +78,16 @@ function normalizeCommercialTerms(value) {
     out.amount_off_cents = amount;
     out.currency = String(terms.currency || 'EUR').toUpperCase();
   }
+  if (['percentage_discount', 'fixed_discount'].includes(kind)) {
+    const duration = String(terms.discount_duration || 'once').toLowerCase();
+    if (!['once', 'repeating', 'forever'].includes(duration)) throw new Error('invalid discount_duration');
+    out.discount_duration = duration;
+    if (duration === 'repeating') {
+      const months = Number(terms.duration_in_months);
+      if (!Number.isInteger(months) || months < 1 || months > 36) throw new Error('duration_in_months must be 1..36');
+      out.duration_in_months = months;
+    }
+  }
   if (terms.stripe_coupon_id) out.stripe_coupon_id = String(terms.stripe_coupon_id).slice(0, 255);
   if (terms.stripe_promotion_code_id) out.stripe_promotion_code_id = String(terms.stripe_promotion_code_id).slice(0, 255);
   return out;
@@ -164,10 +174,10 @@ function publicPromotion(promotion, version) {
   };
 }
 
-export async function createPromotion({ prisma, input }) {
+export async function createPromotion({ prisma, tx: suppliedTx = null, input }) {
   const data = normalizePromotionInput(input);
   if (!data.internalName) throw new Error('internal_name is required');
-  return prisma.$transaction(async (tx) => {
+  const work = async (tx) => {
     const promotion = await tx.promotion.create({ data: {
       internalName: data.internalName, codeHash: data.codeHash, codeHint: data.codeHint, visibility: data.visibility,
       status: data.status, billingMode: data.billingMode, maxRedemptions: data.maxRedemptions, perEmailMax: data.perEmailMax,
@@ -176,7 +186,8 @@ export async function createPromotion({ prisma, input }) {
     const version = await tx.promotionVersion.create({ data: { promotionId: promotion.id, version: 1, ...data.version } });
     await tx.promotionEligibility.createMany({ data: data.eligibilities.map((entry) => ({ promotionId: promotion.id, eligibilityType: entry.type, valueHash: entry.valueHash, valueHint: entry.valueHint })) });
     return { promotion: publicPromotion(promotion, version), plaintextCode: data.code };
-  });
+  };
+  return suppliedTx ? work(suppliedTx) : prisma.$transaction(work);
 }
 
 export async function listPromotions(prisma) {
@@ -200,6 +211,18 @@ export async function findPromotionForCode({ prisma, code, email, orgId, now = n
   return { promotion, version, eligibilities, code: normalized };
 }
 
+export async function findPromotionById({ prisma, promotionId, email, orgId, now = new Date() }) {
+  const promotion = await prisma.promotion.findUnique({ where: { id: promotionId } });
+  if (!isPromotionActive(promotion, now)) return null;
+  const [versions, eligibilities] = await Promise.all([
+    prisma.promotionVersion.findMany({ where: { promotionId }, orderBy: { version: 'desc' }, take: 1 }),
+    prisma.promotionEligibility.findMany({ where: { promotionId } }),
+  ]);
+  const version = currentVersion(versions);
+  if (!version || !eligibilityAllows(eligibilities, { email, orgId })) return null;
+  return { promotion, version, eligibilities, code: null };
+}
+
 async function activePromotionGrant(tx, orgId, now) {
   return tx.entitlementGrant.findFirst({ where: { orgId, status: 'active', startsAt: { lte: now }, OR: [{ endsAt: null }, { endsAt: { gt: now } }] }, orderBy: { startsAt: 'desc' } });
 }
@@ -210,9 +233,11 @@ function promotionEnd(promotion, version, now) {
   return days ? new Date(now.getTime() + days * 24 * 60 * 60 * 1000) : null;
 }
 
-export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, userId, email, code, requestId = null, now = new Date(), applyProfile = false }) {
+export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, userId, email, code = null, promotionId = null, partnerReferralCampaignId = null, requestId = null, now = new Date(), applyProfile = false }) {
   const work = async (tx) => {
-    const resolved = await findPromotionForCode({ prisma: tx, code, email, orgId, now });
+    const resolved = promotionId
+      ? await findPromotionById({ prisma: tx, promotionId, email, orgId, now })
+      : await findPromotionForCode({ prisma: tx, code, email, orgId, now });
     if (!resolved) throw new Error('promotion unavailable');
     const { promotion, version } = resolved;
     const perEmailCount = await tx.promotionRedemption.count({ where: { promotionId: promotion.id, emailHash: digestPromotionValue(email) } });
@@ -237,7 +262,7 @@ export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, us
     }
     const termsSnapshot = { promotion: publicPromotion(promotion, version), grant_ends_at: endsAt?.toISOString() || null };
     const redemption = await tx.promotionRedemption.create({ data: { promotionId: promotion.id, promotionVersionId: version.id, entitlementGrantId: grant.id, orgId, redeemedByUserId: userId,
-      emailHash: digestPromotionValue(email), codeHint: promotion.codeHint, termsSnapshot, requestId } });
+      emailHash: digestPromotionValue(email), codeHint: promotion.codeHint, termsSnapshot, requestId, partnerReferralCampaignId } });
     return { promotion: publicPromotion(promotion, version), grant, entitlementVersion, redemption, termsSnapshot };
   };
   return suppliedTx ? work(suppliedTx) : prisma.$transaction(work);

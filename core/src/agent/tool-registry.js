@@ -659,6 +659,18 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'hivemind_brand_dna',
+      description: 'Create a durable, source-backed Brand DNA artifact from a company public website. Uses a bounded same-origin browser crawl, captures rendered evidence, and returns a job_id to poll. Never use this for private URLs or as a replacement for a quick page lookup.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'Public HTTPS company homepage or approved same-origin seed URL.' } },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_web_job_status',
       description: 'Poll web_search / web_crawl until done.',
       parameters: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'] },
@@ -2217,6 +2229,15 @@ const TOOL_HANDLERS = {
     });
     const { ok, httpStatus, ...body } = result;
     return body;
+  },
+
+  async hivemind_brand_dna(args, ctx) {
+    if (!ctx.startVisualIntelligenceWorkflow) return { error: 'brand_dna_workflow_not_configured' };
+    try {
+      return await ctx.startVisualIntelligenceWorkflow({ orgId: ctx.orgId, userId: ctx.userId, urls: [args.url], roomId: ctx.roomId || null });
+    } catch (error) {
+      return { error: error.message || 'brand_dna_workflow_failed' };
+    }
   },
 
   async hivemind_web_job_status(args, ctx) {

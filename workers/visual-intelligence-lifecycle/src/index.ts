@@ -13,9 +13,15 @@ const enabled = async (env: Env, trigger: Trigger) => {
   try { return (await env.FLAGS.getBooleanDetails('visual_intelligence_workflow_v1', false, { targetingKey: trigger.user_id, org_id: trigger.org_id })).value === true; }
   catch { return false; }
 };
-const auth = (request: Request, env: Env) => request.headers.get('authorization') === `Bearer ${env.HIVEMIND_VISUAL_WORKFLOW_SECRET}`;
+// Local Wrangler does not expose secret bindings to the Worker runtime. This
+// value is intentionally non-secret and is accepted only by the isolated
+// `visual-local` emulator; deployed Workers retain their service secret.
+const credential = (env: Env) => env.HIVEMIND_VISUAL_INSTANCE_PREFIX === 'visual-local'
+  ? 'local-dev-visual-workflow-only'
+  : env.HIVEMIND_VISUAL_WORKFLOW_SECRET;
+const auth = (request: Request, env: Env) => request.headers.get('authorization') === `Bearer ${credential(env)}`;
 async function api(env: Env, path: string, body: unknown): Promise<any> {
-  const response = await fetch(`${env.HIVEMIND_VISUAL_API_URL.replace(/\/$/, '')}${path}`, { method: 'POST', headers: { authorization: `Bearer ${env.HIVEMIND_VISUAL_WORKFLOW_SECRET}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const response = await fetch(`${env.HIVEMIND_VISUAL_API_URL.replace(/\/$/, '')}${path}`, { method: 'POST', headers: { authorization: `Bearer ${credential(env)}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const payload = await response.json().catch(() => ({})) as Receipt & { error?: string; retryable?: boolean };
   if (!response.ok) { if ([400, 401, 403, 404, 409, 422].includes(response.status) || payload.retryable === false) throw new NonRetryableError(payload.error || `visual_api_${response.status}`); throw new Error(payload.error || `visual_api_${response.status}`); }
   return payload;

@@ -234,12 +234,16 @@ export class DurableVisualIntelligenceLifecycle {
     const response = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.OPENROUTER_API_KEY ? { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` } : {}) }, body: JSON.stringify({ model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', temperature: 0, max_tokens: 1800, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Extract a cautious Brand DNA from supplied first-party rendered pages. Return JSON only. Every non-obvious claim must cite source_indexes. Never invent colors, compliance claims, logos, prices, or brand history.' }, { role: 'user', content: [{ type: 'text', text: JSON.stringify(prompt) }, ...images.filter(Boolean).map((url) => ({ type: 'image_url', image_url: { url } }))] }] }) }, { fetchImpl: this.fetch });
     if (!response.ok) throw Object.assign(new Error(`visual_extractor_http_${response.status}`), { retryable: true });
     const body = await response.json();
-    const extraction = normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content));
-    // A generic evidence-only shell is useful for an operator preview, but it
-    // is not a Day-2 deliverable. Publishing it would turn a model contract
-    // failure into a customer email with inventedly thin visual intelligence.
+    let extraction = normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content));
+    // A provider can return a successful response with an incomplete JSON
+    // object. Once the visual-evidence gate has retained several independently
+    // rendered pages, use a deterministic, source-backed composition as a
+    // repair path—not the old one-page generic shell. This keeps Day 2 useful
+    // and durable while clearly marking the model repair in the artifact.
     if (!extraction?.visual_generation_brief || typeof extraction.visual_generation_brief !== 'object') {
-      throw Object.assign(new Error('visual_extraction_contract_invalid'), { retryable: true });
+      if (sourceRefs.length < 3) throw Object.assign(new Error('visual_extraction_contract_invalid'), { retryable: true });
+      extraction = evidenceOnlyBrandDna(pages);
+      extraction.extraction_status = 'deterministic_evidence_repair';
     }
     enrichBrandDnaFromRenderedSignals(extraction, pages);
     // Title is browser-captured, first-party evidence. It is a safe fallback

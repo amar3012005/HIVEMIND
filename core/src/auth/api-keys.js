@@ -1,30 +1,30 @@
 import crypto from 'crypto';
-import { PlatformRegistryClient, registryEventId } from '../control-plane/platform-registry-client.js';
+import { enqueuePlatformRegistryEvent } from '../control-plane/platform-registry-outbox.js';
 
-function registryRevision(record) {
-  const at = record?.updatedAt || record?.createdAt || new Date();
-  return Math.max(1, Math.floor(new Date(at).getTime()));
-}
-
-async function mirrorApiKey(record) {
-  const client = new PlatformRegistryClient();
-  if (!client.enabled) return;
-  const event = {
-    event_id: registryEventId(), entity_type: 'api_key', entity_id: record.id,
-    revision: registryRevision(record), operation: 'upsert',
-    payload: {
-      user_id: record.userId, org_id: record.orgId, key_hash: record.keyHash,
-      key_prefix: record.keyPrefix, expires_at: record.expiresAt?.toISOString?.() || null,
-      revoked_at: record.revokedAt?.toISOString?.() || null,
-      metadata: { name: record.name, key_kind: record.keyKind, scopes: record.scopes || [], project_id: record.projectId || null, team_id: record.teamId || null, rate_limit_per_minute: record.rateLimitPerMinute || null },
+function apiKeyRegistryPayload(record) {
+  return {
+    user_id: record.userId,
+    org_id: record.orgId,
+    key_hash: record.keyHash,
+    key_prefix: record.keyPrefix,
+    expires_at: record.expiresAt?.toISOString?.() || null,
+    revoked_at: record.revokedAt?.toISOString?.() || null,
+    metadata: {
+      name: record.name,
+      key_kind: record.keyKind,
+      scopes: record.scopes || [],
+      project_id: record.projectId || null,
+      team_id: record.teamId || null,
+      rate_limit_per_minute: record.rateLimitPerMinute || null,
     },
   };
-  try {
-    await client.mirror(event);
-  } catch (error) {
-    if (client.mode === 'authoritative') throw error;
-    console.warn('[platform-registry] api-key mirror failed', { key_id: record.id, mode: client.mode, error: error.message });
-  }
+}
+
+async function withRegistryTransaction(prisma, operation) {
+  // A Prisma transaction client does not expose $transaction.  This lets
+  // callers already inside a larger mutation keep the registry event atomic.
+  if (typeof prisma?.$transaction !== 'function') return operation(prisma);
+  return prisma.$transaction((tx) => operation(tx));
 }
 
 export const ENTITLEMENT_SCOPES = [
@@ -80,27 +80,31 @@ export async function createPersistedApiKey(prisma, {
   const keyPrefix = rawKey.slice(0, 12);
   const keyHash = hashApiKey(rawKey);
 
-  const record = await prisma.apiKey.create({
-    data: {
-      userId,
-      orgId,
-      name: name || 'HIVE-MIND API Key',
-      keyKind,
-      createdByUserId,
-      keyHash,
-      keyPrefix,
-      description,
-      scopes: normalizedScopes,
-      projectId,
-      teamId,
-      expiresAt,
-      rateLimitPerMinute,
-      createdByIp,
-      userAgent
-    }
+  const record = await withRegistryTransaction(prisma, async (tx) => {
+    const created = await tx.apiKey.create({
+      data: {
+        userId,
+        orgId,
+        name: name || 'HIVE-MIND API Key',
+        keyKind,
+        createdByUserId,
+        keyHash,
+        keyPrefix,
+        description,
+        scopes: normalizedScopes,
+        projectId,
+        teamId,
+        expiresAt,
+        rateLimitPerMinute,
+        createdByIp,
+        userAgent,
+      },
+    });
+    await enqueuePlatformRegistryEvent(tx, {
+      entityType: 'api_key', entityId: created.id, operation: 'upsert', payload: apiKeyRegistryPayload(created),
+    });
+    return created;
   });
-
-  await mirrorApiKey(record);
 
   return {
     rawKey,
@@ -181,13 +185,16 @@ export async function revokePersistedApiKey(prisma, keyId, userId, { orgId = nul
     return null;
   }
 
-  const revoked = await prisma.apiKey.update({
-    where: { id: keyId },
-    data: {
-      revokedAt: new Date()
-    }
+  const revoked = await withRegistryTransaction(prisma, async (tx) => {
+    const updated = await tx.apiKey.update({
+      where: { id: keyId },
+      data: { revokedAt: new Date() },
+    });
+    await enqueuePlatformRegistryEvent(tx, {
+      entityType: 'api_key', entityId: updated.id, operation: 'upsert', payload: apiKeyRegistryPayload(updated),
+    });
+    return updated;
   });
-  await mirrorApiKey(revoked);
   return revoked;
 }
 

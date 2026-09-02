@@ -1,7 +1,4 @@
-import {
-  PlatformRegistryClient,
-  registryEventId,
-} from "./platform-registry-client.js";
+import { PlatformRegistryClient } from "./platform-registry-client.js";
 
 const ENTITY_TYPES = new Set([
   "user",
@@ -34,21 +31,46 @@ export async function enqueuePlatformRegistryEvent(
 
 export async function dispatchPlatformRegistryOutbox(
   prisma,
-  { limit = 100, now = new Date(), client = new PlatformRegistryClient() } = {},
+  {
+    limit = 100,
+    now = new Date(),
+    leaseMs = 60_000,
+    workerId = `core-${process.pid}`,
+    client = new PlatformRegistryClient(),
+  } = {},
 ) {
   if (!client.enabled || !prisma?.platformRegistryOutbox)
     return { skipped: true, delivered: 0, failed: 0 };
-  const rows = await prisma.platformRegistryOutbox.findMany({
+  // A process may have died after claiming work.  Make those events retryable
+  // before selecting fresh rows.  This never changes the immutable revision.
+  await prisma.platformRegistryOutbox.updateMany({
+    where: { status: "processing", leaseExpiresAt: { lt: now } },
+    data: { status: "pending", leaseOwner: null, leaseExpiresAt: null },
+  });
+  const candidates = await prisma.platformRegistryOutbox.findMany({
     where: { status: "pending", nextAttemptAt: { lte: now } },
     orderBy: { revision: "asc" },
     take: Math.max(1, Math.min(500, limit)),
   });
   let delivered = 0;
   let failed = 0;
-  for (const row of rows) {
+  for (const candidate of candidates) {
+    const leaseExpiresAt = new Date(now.getTime() + leaseMs);
+    const claim = await prisma.platformRegistryOutbox.updateMany({
+      where: {
+        id: candidate.id,
+        status: "pending",
+        nextAttemptAt: { lte: now },
+      },
+      data: { status: "processing", leaseOwner: workerId, leaseExpiresAt },
+    });
+    if (claim.count !== 1) continue;
+    const row = candidate;
     try {
       await client.mirror({
-        event_id: registryEventId(),
+        // The outbox primary key is the idempotency key.  Replays must send
+        // exactly the same event ID so D1 can return the original receipt.
+        event_id: row.id,
         entity_type: row.entityType,
         entity_id: row.entityId,
         revision: Number(row.revision),
@@ -62,6 +84,8 @@ export async function dispatchPlatformRegistryOutbox(
           deliveredAt: new Date(),
           attempts: { increment: 1 },
           lastError: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
         },
       });
       delivered += 1;
@@ -71,6 +95,9 @@ export async function dispatchPlatformRegistryOutbox(
         where: { id: row.id },
         data: {
           attempts,
+          status: "pending",
+          leaseOwner: null,
+          leaseExpiresAt: null,
           lastError: String(error?.message || error).slice(0, 2000),
           nextAttemptAt: new Date(
             Date.now() + Math.min(300000, 1000 * 2 ** Math.min(8, attempts)),
@@ -82,4 +109,43 @@ export async function dispatchPlatformRegistryOutbox(
     }
   }
   return { skipped: false, delivered, failed };
+}
+
+export function startPlatformRegistryOutboxDispatcher(
+  prisma,
+  {
+    intervalMs = 5_000,
+    limit = 100,
+    logger = console,
+    client = new PlatformRegistryClient(),
+  } = {},
+) {
+  if (!client.enabled || !prisma?.platformRegistryOutbox) return () => {};
+  let stopped = false;
+  let running = false;
+  const run = async () => {
+    if (stopped || running) return;
+    running = true;
+    try {
+      const result = await dispatchPlatformRegistryOutbox(prisma, {
+        limit,
+        client,
+      });
+      if (result.failed)
+        logger.warn?.("[platform-registry] outbox replay failed", result);
+    } catch (error) {
+      logger.warn?.("[platform-registry] outbox dispatcher failed", {
+        error: error?.message,
+      });
+    } finally {
+      running = false;
+    }
+  };
+  void run();
+  const timer = setInterval(() => void run(), intervalMs);
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }

@@ -4,16 +4,51 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-02",
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "vars": { "ENVIRONMENT": "local", "PLATFORM_REGISTRY_MODE": "off" },
-  "d1_databases": [{ "binding": "PLATFORM_DB", "database_name": "hivemind-platform-registry-local", "database_id": "REPLACE_WITH_LOCAL_D1_ID", "migrations_dir": "migrations" }],
-  "workflows": [{ "name": "hivemind-platform-registry-reconcile-local", "binding": "REGISTRY_RECONCILE_WORKFLOW", "class_name": "PlatformRegistryReconcileWorkflow" }],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "PLATFORM_REGISTRY_MODE": "off",
+  },
+  "d1_databases": [
+    {
+      "binding": "PLATFORM_DB",
+      "database_name": "hivemind-platform-registry-local",
+      "database_id": "REPLACE_WITH_LOCAL_D1_ID",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "workflows": [
+    {
+      "name": "hivemind-platform-registry-reconcile-local",
+      "binding": "REGISTRY_RECONCILE_WORKFLOW",
+      "class_name": "PlatformRegistryReconcileWorkflow",
+    },
+  ],
   "env": {
     "production": {
       "name": "hivemind-platform-control",
-      "vars": { "ENVIRONMENT": "production", "PLATFORM_REGISTRY_MODE": "off" },
-      "d1_databases": [{ "binding": "PLATFORM_DB", "database_name": "hivemind-platform-registry-eu", "database_id": "REPLACE_WITH_EU_D1_ID", "migrations_dir": "migrations" }],
-      "workflows": [{ "name": "hivemind-platform-registry-reconcile", "binding": "REGISTRY_RECONCILE_WORKFLOW", "class_name": "PlatformRegistryReconcileWorkflow" }]
-    }
-  }
+      "vars": {
+        "ENVIRONMENT": "production",
+        "PLATFORM_REGISTRY_MODE": "off",
+      },
+      "d1_databases": [
+        {
+          "binding": "PLATFORM_DB",
+          "database_name": "hivemind-platform-registry-eu",
+          "database_id": "804b22b8-8c51-4906-acb9-56d610d88467",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "workflows": [
+        {
+          "name": "hivemind-platform-registry-reconcile",
+          "binding": "REGISTRY_RECONCILE_WORKFLOW",
+          "class_name": "PlatformRegistryReconcileWorkflow",
+        },
+      ],
+    },
+  },
 }

@@ -314,6 +314,8 @@ model PlatformRegistryOutbox {
   payload     Json
   status      String   @default("pending") @db.VarChar(24)
   attempts    Int      @default(0)
+  leaseOwner  String?  @map("lease_owner") @db.VarChar(96)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
   nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
   deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
   lastError   String?  @map("last_error") @db.Text
@@ -321,6 +323,7 @@ model PlatformRegistryOutbox {
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([status, nextAttemptAt])
+  @@index([status, leaseExpiresAt])
   @@index([entityType, entityId, revision])
   @@map("platform_registry_outbox")
 }

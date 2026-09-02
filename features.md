@@ -115,6 +115,20 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   `HIVEMIND_D1_WORKFLOW_ENABLED=false` as the backend master kill switch. The
   reconciliation scheduler remains throttled to five organizations per cron run.
 
+## feature-20260902T110700Z — Day 1 resumable competitor market research
+
+- Production status: deployed with the globally enabled `day1_first_move_v1`
+  flag. Runtime release `bd01edd9ebe0bced647d1951abb8b07e37acf06f`.
+- Website onboarding always creates the source-backed **Map competitors and the
+  local market** research task, marks it as the Day 1 first move, and includes
+  the verified company HQ / operating location in the task brief.
+- Day 1 now adopts an already-started research room and its latest sealed turn
+  before creating new work. This preserves the exact HyperAgents report,
+  prevents duplicate research runs, and makes errored lifecycle recovery safe.
+- Rollback: set `HIVEMIND_D1_WORKFLOW_ENABLED=false` or turn
+  `day1_first_move_v1` off. Existing sealed reports and provider receipts stay
+  intact; no schema migration is involved.
+
 ## feature-20260830T004500Z — Public AI discovery policy
 
 - Production status: deployed and verified. Public `singulancelabs.com` serves

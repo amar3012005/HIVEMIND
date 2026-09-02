@@ -1326,3 +1326,17 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   backend service, database, migration, or tenant data changed.
 - Rollback: Cloudflare Worker
   `d5c1c0f8-034b-4966-a9a1-35aadc9f2300` and parent `8d0d5004`.
+
+## bd01edd9 — Day 1 resumable competitor market research
+
+- Canonical parent SHA `bd01edd9ebe0bced647d1951abb8b07e37acf06f`.
+- Core, Control Plane, and Employees were rebuilt through the governed
+  `singulance-main` path and all became healthy on immutable `sha-bd01edd9`.
+- Day 1 now prioritizes the deterministic website-onboarding competitor/local
+  market task, reuses an active/sealed research-room turn instead of duplicating
+  work, and passes the company HQ location to a newly launched HyperAgents run.
+- Acceptance: focused Day 1 suite 15/15, clean syntax/diff checks, repaired
+  lifecycle prepare returned `completed`, and exactly one email delivery was
+  accepted. Flag remains globally on: `day1_first_move_v1`.
+- Rollback: set `HIVEMIND_D1_WORKFLOW_ENABLED=false` or disable the Flagship
+  flag. There is no migration and stored delivery receipts remain idempotent.

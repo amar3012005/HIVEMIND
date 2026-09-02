@@ -1847,3 +1847,25 @@ slides that find no unique anchor get a page instead of `null`.
   Cloudflare Worker `e85c67ef-0f25-4a92-9bb3-a7f091894835` is live; its served
   HyperAgents asset contains the exact target, introduction, and version marker,
   contains no early-access CTA, and the company route returned HTTP 200.
+
+## 2026-09-02 UTC — Day 1 research lifecycle recovery and onboarding contract
+
+- Committed and released `bd01edd9ebe0bced647d1951abb8b07e37acf06f` from
+  `singulance-main`. Focused command:
+  `node --test tests/unit/day1-first-move.test.mjs` — **15 passed, 0 failed**;
+  syntax checks for the Control Plane and lifecycle module plus `git diff --check`
+  were clean before release.
+- Root cause: Day 1 only accepted `todo` research tasks. A valid first-life
+  research task that was already active with a sealed report was rejected as
+  `day1_research_task_not_found`, despite being the report Day 1 was meant to
+  deliver.
+- Fix: prefer the deterministic website-onboarding competitor/local-market
+  task, otherwise adopt the existing active/done research room and its latest
+  turn. A new Day 1 launch includes the saved company HQ / operating location
+  in both the room goal and kickoff message.
+- Production verification: governed release rebuilt `core`, `control-plane`,
+  and `employees` at immutable `sha-bd01edd9`; all three reported healthy.
+  The affected lifecycle recovery returned `completed` for the existing sealed
+  turn, and the idempotent delivery endpoint accepted exactly one Cloudflare
+  Email Service send. The queued Cloudflare retry may later observe the stored
+  `sent` receipt but cannot duplicate delivery.

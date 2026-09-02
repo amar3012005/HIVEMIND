@@ -123,3 +123,87 @@ environment variables because the permanent integration worktree remains dirty.
 ## Exact next action
 
 Implement `/v1/meeting-v2-control` in `core/src/vector/mneme/embedded-agent.mjs`, add typed remote-backend/driver wrappers, and replace the remote v2 fail-closed guard only after policy/session/authorization/checkpoint parity tests pass.
+
+---
+
+# Visual Intelligence Workflow Handoff
+
+## Current state
+
+- Branch: `codex/visual-intelligence-workflow`
+- Worktree: `P:\HIVEMIND-worktrees\visual-intelligence-workflow`
+- Pushed commit: `35515ab7` (`feat: add durable visual intelligence workflow contract`)
+- Production: not deployed.
+
+## Completed and verified
+
+Created `workers/visual-intelligence-lifecycle` with:
+
+- tenant/user/job-scoped trigger contract;
+- deterministic `visual-{job_id}-v{processing_version}` Workflow identity;
+- fail-closed `visual_intelligence_workflow_v1` Flagship evaluation;
+- local/prod-separated Queue, DLQ, Workflow, and R2 binding names;
+- durable stages: `admit`, `discover`, `capture`, `store`, `extract`, `verify`, `publish`, `notify`;
+- publish gate requiring a cited `brand_dna` artifact and `visual_generation_brief`;
+- retryable versus non-retryable failures and terminal failure recording.
+
+Verified commands, run in `workers/visual-intelligence-lifecycle`:
+
+```text
+npm run check
+> tsc --noEmit
+
+npm test
+Test Files  1 passed (1)
+Tests  2 passed (2)
+```
+
+`npm run dry-run` was accidentally invoked from the repository root and failed
+with `Missing script: "dry-run"`; it has not yet been rerun from the Worker
+directory.
+
+## Required next implementation
+
+The Worker calls Core endpoints that do not yet exist:
+
+```text
+POST /internal/visual-intelligence/admit
+POST /internal/visual-intelligence/stage
+POST /internal/visual-intelligence/fail
+```
+
+Implement those in `core/src/control-plane-server.js` or a dedicated service,
+backed by additive Prisma models for run/stage/artifact receipts. Reuse:
+
+- `core/src/web/playwright-service-runtime.js` for capture;
+- `core/src/onboarding/company-research.js` for official-site discovery;
+- `core/src/artifacts/hyper-artifacts.js` and `gatewayFirstFetch` for AI Gateway
+  visual evaluation;
+- `core/src/lifecycle/day1-first-move.js` for the optional Day 2 notification
+  convention;
+- HyperRoom artifact persistence for Room consumption.
+
+Gemini 2.5 Flash Lite must receive selected R2 screenshot references/bytes via
+AI Gateway and return schema-constrained Brand DNA JSON. Its output is a
+candidate only; verified CSS/DOM/screenshot evidence must be linked before
+`publish` succeeds.
+
+## Decisions
+
+- Cloudflare Workflow orchestrates durability only; PostgreSQL owns run and
+  checkpoint state, R2 owns binary artifacts, HIVEMIND owns the cited reusable
+  Brand DNA semantic artifact.
+- The existing Playwright service remains the initial browser adapter. A
+  user-controlled authenticated session is required for private dashboard
+  inspection.
+- The generic worker is intentionally not Ravi-specific and can be called by
+  any authorized agent or lifecycle.
+- No deployment or Flagship enablement occurred.
+
+## Exact next action
+
+Implement the additive Core visual-intelligence run/stage executor and its
+focused tests, then run the Worker dry-run from
+`workers/visual-intelligence-lifecycle`.
+
+

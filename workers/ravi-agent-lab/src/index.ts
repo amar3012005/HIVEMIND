@@ -41,7 +41,7 @@ const ALLOWED_HOSTS = new Set([
   // Public company pages are permitted for the company-specific research lab.
   // Tenant onboarding and HIVEMIND recall remain unavailable until their signed
   // Core adapters are explicitly connected.
-  'singulancelabs.com', 'www.singulancelabs.com',
+  'singulancelabs.com', 'www.singulancelabs.com', 'next.singulancelabs.com',
 ]);
 
 function now() { return new Date().toISOString(); }

@@ -297,7 +297,10 @@ async function extractPage(page, response, discovery) {
 }
 
 async function captureBrandMark(page) {
-  for (const selector of ['header img', 'header svg', '[role="banner"] img', '[role="banner"] svg']) {
+  for (const selector of [
+    'header img', 'header svg', '[role="banner"] img', '[role="banner"] svg',
+    '[aria-label*="logo" i]', '[aria-label="Apple"]', 'header a[class*="logo" i]', 'header a[class*="brand" i]',
+  ]) {
     const node = page.locator(selector).first(); const box = await node.boundingBox().catch(() => null);
     if (!box || box.width < 12 || box.height < 12 || box.width > 360 || box.height > 180) continue;
     const image = await node.screenshot({ type: 'png', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => null);

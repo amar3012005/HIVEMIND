@@ -32,6 +32,22 @@ test('Day 1 selects the first pending research-tagged task, not a generic todo',
   assert.equal(selectDayOneResearchTask(tasks)?.id, 'research');
 });
 
+test('Day 1 prioritizes the website-onboarding competitor research task', () => {
+  const tasks = [
+    { id: 'generic-research', status: 'todo', room_tag: 'research' },
+    { id: 'competitor-research', status: 'todo', room_tag: 'research', day1_first_move: true },
+  ];
+  assert.equal(selectDayOneResearchTask(tasks)?.id, 'competitor-research');
+});
+
+test('Day 1 reuses an already-started research task so its sealed Day-0 room output is delivered', () => {
+  const tasks = [
+    { id: 'generic', status: 'todo', room_tag: 'marketing' },
+    { id: 'research-existing', status: 'active', room_tag: 'research', room_id: 'room-existing' },
+  ];
+  assert.equal(selectDayOneResearchTask(tasks)?.id, 'research-existing');
+});
+
 test('Day 1 backend master gate is fail-closed and accepts exact true only', () => {
   const previous = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
   try {
@@ -61,7 +77,7 @@ test('prepare starts the research task once and reuses its durable room turn on 
   const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
   process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
   const company = {
-    company: 'SOLVIS', mission: 'Efficient heating', team: [{ id: 'agent-1' }],
+    company: 'SOLVIS', mission: 'Efficient heating', profile: { location: 'Berlin, Germany' }, team: [{ id: 'agent-1' }],
     tasks: [
       { id: 'sales-1', title: 'Find leads', status: 'todo', room_tag: 'outreach' },
       { id: 'research-1', title: 'Validate market demand', detail: 'Use verified sources.', status: 'todo', room_tag: 'research' },
@@ -89,7 +105,11 @@ test('prepare starts the research task once and reuses its durable room turn on 
       create: async ({ data }) => { const turn = { id: '55555555-5555-5555-5555-555555555555', sealedAt: null, ...data }; turns.set(data.idempotencyKey, turn); return turn; },
     },
   };
-  const dispatchTurn = async () => { dispatches += 1; return { ok: true }; };
+  const dispatchTurn = async ({ user_message }) => {
+    dispatches += 1;
+    assert.match(user_message, /Company HQ \/ operating location: Berlin, Germany/);
+    return { ok: true };
+  };
   const args = { prisma, orgId: hq.org_id, hqRoomId: hq.id, workflowInstanceId: `d1-${hq.id}`, dispatchTurn };
   try {
     const first = await prepareDayOneFirstMove(args);
@@ -112,6 +132,39 @@ test('prepare starts the research task once and reuses its durable room turn on 
     assert.equal(hq.company.day1_first_move.workflow_instance_id, `d1-recovery-${hq.id}`);
     assert.equal(dispatches, 1);
     assert.equal(hq.company.tasks[1].status, 'done');
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+  }
+});
+
+test('prepare adopts an existing research room turn rather than dispatching duplicate work', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+  const company = {
+    company: 'Canary Co', mission: 'Evidence first', team: [{ id: 'agent-1' }],
+    tasks: [{ id: 'research-1', title: 'Validate demand', status: 'active', room_tag: 'research', room_id: '44444444-4444-4444-4444-444444444444' }],
+  };
+  const hq = { id: '22222222-2222-2222-2222-222222222222', org_id: '11111111-1111-1111-1111-111111111111', user_id: '33333333-3333-3333-3333-333333333333', company };
+  const room = { id: '44444444-4444-4444-4444-444444444444', participantIds: ['agent-1'], goal: 'existing', projectId: null };
+  const existingTurn = { id: '55555555-5555-5555-5555-555555555555', roomId: room.id, status: 'blocked', sealedAt: new Date() };
+  let dispatches = 0;
+  const prisma = {
+    async $queryRawUnsafe(sql, ...args) {
+      if (sql.includes('SELECT id, user_id')) return [hq];
+      if (sql.includes("jsonb_set(\"agent_connectors\", '{_company}'")) { hq.company = JSON.parse(args[0]); return []; }
+      return [];
+    },
+    async $executeRawUnsafe() { return 1; },
+    hyperRoom: { findFirst: async () => room, findUnique: async () => room, create: async () => { throw new Error('must_not_create_room'); } },
+    hyperTurn: { findFirst: async () => existingTurn, findUnique: async () => null, create: async () => { throw new Error('must_not_create_turn'); } },
+  };
+  try {
+    const result = await prepareDayOneFirstMove({ prisma, orgId: hq.org_id, hqRoomId: hq.id, workflowInstanceId: `d1-${hq.id}`, dispatchTurn: async () => { dispatches += 1; } });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.room_id, room.id);
+    assert.equal(result.turn_id, existingTurn.id);
+    assert.equal(dispatches, 0);
+    assert.equal(hq.company.tasks[0].status, 'done');
   } finally {
     if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
   }

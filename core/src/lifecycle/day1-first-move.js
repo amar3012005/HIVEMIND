@@ -4,7 +4,7 @@ import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
 import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../email/humation-avatar.js';
 
-export const DAY_ONE_VERSION = 'day-1-first-move-v1';
+export const DAY_ONE_VERSION = 'day-1-first-move-v2';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
 const DEFAULT_APP_URL = 'https://next.singulancelabs.com/hivemind/app/employees';
 const DELIVERABLE_ROOM_STATUSES = new Set(['complete', 'blocked']);
@@ -41,7 +41,19 @@ export function isResearchTask(task) {
 }
 
 export function selectDayOneResearchTask(tasks = []) {
-  return tasks.find((task) => task?.status === 'todo' && isResearchTask(task)) || null;
+  const researchTasks = tasks.filter((task) => isResearchTask(task));
+  // New website onboarding explicitly marks the research move intended for
+  // Day 1. Do not let an unrelated generic research task steal that slot.
+  const dayOneTasks = researchTasks.filter((task) => task?.day1_first_move === true);
+  // Prefer a never-started research move, but a company may already have had
+  // its Day-0 room dispatch the research task before the durable Day-1 clock
+  // reaches it. In that case Day 1 must deliver that room's sealed evidence,
+  // not fail or create a second complimentary research run.
+  return dayOneTasks.find((task) => task?.status === 'todo')
+    || dayOneTasks.find((task) => task?.room_id && ['active', 'done'].includes(String(task?.status || '').toLowerCase()))
+    || researchTasks.find((task) => task?.status === 'todo')
+    || researchTasks.find((task) => task?.room_id && ['active', 'done'].includes(String(task?.status || '').toLowerCase()))
+    || null;
 }
 
 export function extractSealedRoomOutput(lines = []) {
@@ -296,19 +308,36 @@ export async function prepareDayOneFirstMove({ prisma, orgId, hqRoomId, workflow
     JSON.stringify(company), hq.id, orgId,
   );
 
-  let room = prior.room_id ? await prisma.hyperRoom.findFirst({ where: { id: prior.room_id, orgId, archivedAt: null } }).catch(() => null) : null;
+  let room = prior.room_id
+    ? await prisma.hyperRoom.findFirst({ where: { id: prior.room_id, orgId, archivedAt: null } }).catch(() => null)
+    : task.room_id
+      ? await prisma.hyperRoom.findFirst({ where: { id: task.room_id, orgId, archivedAt: null } }).catch(() => null)
+      : null;
   if (!room) {
     const participantIds = (company.team || []).map((member) => member.id).filter(Boolean).slice(0, 5);
     room = await prisma.hyperRoom.create({ data: {
       userId: hq.user_id, orgId, name: clean(task.title, 120), participantIds, template: 'auto',
       roomMode: 'work', roomTag: 'research', permanentLeadId: participantIds.slice().sort()[0] || null,
     } });
-    const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company || 'Company'} — ${company.mission || ''}`.slice(0, 2000);
+    const companyLocation = clean(company.company_location || company.profile?.location || company.location || '', 240);
+    const locationContext = companyLocation
+      ? `\nCompany HQ / operating location: ${companyLocation}. Use this as the geographic anchor for market, competitor, regulatory, and buyer research.`
+      : '';
+    const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company || 'Company'} — ${company.mission || ''}${locationContext}`.slice(0, 2000);
     await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET goal = $1 WHERE id = $2::uuid', goal, room.id).catch(() => {});
   }
-  const kickoff = task.detail ? `${task.title}\n\n${task.detail}` : task.title;
+  const companyLocation = clean(company.company_location || company.profile?.location || company.location || '', 240);
+  const locationContext = companyLocation
+    ? `\n\nCompany HQ / operating location: ${companyLocation}. Use it as the required geographic anchor; do not substitute a different market without evidence.`
+    : '';
+  const kickoff = `${task.detail ? `${task.title}\n\n${task.detail}` : task.title}${locationContext}`;
   const idempotencyKey = `day1-${hq.id}-${task.id}`.slice(0, 64);
-  let turn = await prisma.hyperTurn.findUnique({ where: { idempotencyKey } }).catch(() => null);
+  // Reuse the real task turn when Day-0/first-life dispatch already started
+  // this research work. Its exact sealed output is the Day-1 deliverable.
+  let turn = prior.turn_id
+    ? await prisma.hyperTurn.findFirst({ where: { id: prior.turn_id, roomId: room.id } }).catch(() => null)
+    : await prisma.hyperTurn.findFirst({ where: { roomId: room.id }, orderBy: { seq: 'desc' } }).catch(() => null);
+  if (!turn) turn = await prisma.hyperTurn.findUnique({ where: { idempotencyKey } }).catch(() => null);
   let created = false;
   if (!turn) {
     const last = await prisma.hyperTurn.findFirst({ where: { roomId: room.id }, orderBy: { seq: 'desc' }, select: { seq: true } });

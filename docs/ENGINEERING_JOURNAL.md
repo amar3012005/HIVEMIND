@@ -1907,3 +1907,20 @@ slides that find no unique anchor get a page instead of `null`.
   absent from the live chunk.
 - Rollback: Cloudflare Worker version
   `6fd6b92c-90fd-408e-8844-498f4ed7b371`.
+
+## 2026-09-02 UTC — Day 2 Visual Intelligence callback and capture recovery
+
+- Committed release chain: `7bb6e1d28568a793436747729edf23d354c2e4b9`,
+  `3cc46b8acca2ecae663db3df3332a39b34867432`, and
+  `6b7979e297f41396f4d29aae8e85f3b319f20429`. The Worker is version
+  `06a498c5-8add-435e-b372-8ee0fffdfb57`; governed coupled services run
+  immutable `sha-6b7979e2` images.
+- The Worker now calls TLS-valid `core.singulancelabs.com` through its dedicated
+  service credential. It skips crawler rows lacking a screenshot receipt, but
+  fails retryably when no verified visual receipt remains. Failed Day 2 runs
+  release only their matching room scheduling claim.
+- Verification: focused Core tests passed 4/4; Worker tests passed 2/2; Wrangler
+  dry-run passed. The authorized E2E canary completed all eight persisted stages,
+  stored one protected rendered report, created a workspace notification, and
+  obtained a delivered Cloudflare Email Service receipt. Fresh Core fatal/panic/
+  uncaught/OOM/migration scan was empty.

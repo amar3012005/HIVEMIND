@@ -62,6 +62,7 @@ import {
   redeemPartnerReferral,
   resolvePartnerReferral,
 } from './billing/partner-referral-service.js';
+import { partnerReferralsEnabled } from './billing/partner-referral-feature.js';
 import {
   activateEnterpriseRunway,
   createEnterpriseInvitation,
@@ -3644,8 +3645,13 @@ const server = http.createServer(async (req, res) => {
     const operator = getPlatformAdminSession(req);
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const enabled = partnerReferralsEnabled();
     const baseUrl = resolveInvitationBaseUrl();
-    if (req.method === 'GET') return jsonResponse(res, { campaigns: await listPartnerReferralCampaigns({ prisma, baseUrl }) });
+    if (req.method === 'GET') return jsonResponse(res, {
+      enabled,
+      campaigns: enabled ? await listPartnerReferralCampaigns({ prisma, baseUrl }) : [],
+    });
+    if (!enabled) return jsonResponse(res, { error: 'Partner referrals are not enabled', code: 'feature_disabled' }, 404);
     try {
       const body = await parseBody(req).catch(() => ({}));
       let created = await createPartnerReferralCampaign({ prisma, input: body, baseUrl });
@@ -3678,6 +3684,7 @@ const server = http.createServer(async (req, res) => {
     const operator = getPlatformAdminSession(req);
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    if (!partnerReferralsEnabled()) return jsonResponse(res, { error: 'Partner referrals are not enabled', code: 'feature_disabled' }, 404);
     const [, campaignId, action] = adminPartnerReferralAction;
     const found = await getPartnerReferralCampaign({ prisma, campaignId, baseUrl: resolveInvitationBaseUrl() });
     if (!found) return jsonResponse(res, { error: 'Not found' }, 404);
@@ -4786,6 +4793,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/v1/referral-invitations/preview' && req.method === 'GET') {
+    if (!partnerReferralsEnabled()) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
     if (!prisma) return jsonResponse(res, { error: 'Invitation service unavailable' }, 503);
     const token = url.searchParams.get('token');
     const resolved = await resolvePartnerReferral({ prisma, token, recordVisit: url.searchParams.get('record_visit') === '1' }).catch(() => null);
@@ -4800,7 +4808,7 @@ const server = http.createServer(async (req, res) => {
     const body = await parseBody(req);
     let accountType = String(body.account_type || '').trim().toLowerCase();
     const partnerReferralToken = String(body.referral_token || '').trim();
-    const partnerReferral = partnerReferralToken
+    const partnerReferral = partnerReferralToken && partnerReferralsEnabled()
       ? await resolvePartnerReferral({ prisma, token: partnerReferralToken }).catch(() => null)
       : null;
     if (partnerReferralToken && !partnerReferral) {
@@ -5228,7 +5236,7 @@ const server = http.createServer(async (req, res) => {
     const signupUser = referralToken
       ? await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null)
       : null;
-    const partnerReferral = referralToken
+    const partnerReferral = referralToken && partnerReferralsEnabled()
       ? await resolvePartnerReferral({ prisma, token: referralToken, email: signupUser?.email || '', orgId: null }).catch(() => null)
       : null;
     if (referralToken && !partnerReferral) return jsonResponse(res, { error: 'referral invitation unavailable', code: 'invitation_unavailable' }, 403);

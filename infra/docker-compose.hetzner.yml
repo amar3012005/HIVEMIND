@@ -118,6 +118,9 @@ services:
       BYOD_BROKER_URL: http://byod-broker:8790
       BYOD_BROKER_INTERNAL_TOKEN: ${BYOD_BROKER_INTERNAL_TOKEN:?BYOD_BROKER_INTERNAL_TOKEN is required}
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
+      # Runtime kill switch for the named partner-referral lifecycle. Keep
+      # disabled unless the matching frontend has been released and verified.
+      PARTNER_REFERRALS_ENABLED: ${PARTNER_REFERRALS_ENABLED:-false}
       # Company onboarding is latency-sensitive and Groq is currently failing
       # over on this host. Prefer OpenRouter here; groqFetch still falls back.
       LLM_PRIMARY: ${CONTROL_LLM_PRIMARY:-openrouter}

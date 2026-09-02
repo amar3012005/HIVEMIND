@@ -1924,3 +1924,26 @@ slides that find no unique anchor get a page instead of `null`.
   stored one protected rendered report, created a workspace notification, and
   obtained a delivered Cloudflare Email Service receipt. Fresh Core fatal/panic/
   uncaught/OOM/migration scan was empty.
+
+## 2026-09-03 UTC — Day 2 evidence-quality gate and report recovery
+
+- Committed and released `05c9b3ba16db9cfe6a1b3b5fb192fd79e1ddae04` and
+  `04400290ecc8101beaecdbe658e89697e97648d2` from `singulance-main`. Core runs
+  immutable `hivemind/core-api:sha-04400290`; the coupled Playwright runtime runs
+  `hivemind/hm-playwright:sha-05c9b3ba`; the visual-intelligence Worker is version
+  `d7f14982-4ee2-4b44-8d0b-82768fe7f109`.
+- The capture policy now preserves a screenshot receipt for every accepted page,
+  requires at least three verified visual receipts, and allows only the root
+  hostname plus its subdomains. A shallow or invalid structured extraction no
+  longer publishes a customer report. Complete capture can use the bounded,
+  evidence-derived repair path when a model omits a non-semantic response field;
+  the path is marked in the artifact rather than treated as an unverified model
+  success.
+- Verification: `node --test core/tests/unit/playwright-service-runtime.test.js
+  core/tests/unit/durable-visual-intelligence.test.js` — **8 passed, 0 failed**;
+  Worker tests — **2 passed, 0 failed**; Worker Wrangler dry-run passed. A live
+  production crawl captured **16/16** screenshot receipts, including the approved
+  `next.singulancelabs.com` subdomain. The authorized Day 2 recovery run completed
+  all eight persisted stages, stored 16 source receipts and a protected rendered
+  report, created the workspace notification, and completed its idempotent
+  notification stage.

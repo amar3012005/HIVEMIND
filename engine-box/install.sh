@@ -16,6 +16,51 @@ REPAIR=false
 log(){ printf '[engine-box] %s\n' "$*"; }
 die(){ printf '[engine-box] error: %s\n' "$*" >&2; exit 1; }
 
+require_root(){ [ "${EUID:-$(id -u)}" -eq 0 ] || die 'run this command with sudo'; }
+
+supported_host(){
+  [ -r /etc/os-release ] || die 'cannot identify the Linux distribution'
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  case "${ID:-}:${VERSION_ID:-}" in
+    ubuntu:22.04|ubuntu:24.04|debian:12) ;;
+    *) die "unsupported host: ${PRETTY_NAME:-unknown}; supported: Ubuntu 22.04/24.04 and Debian 12" ;;
+  esac
+}
+
+ensure_docker(){
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then return; fi
+  command -v apt-get >/dev/null 2>&1 || die 'Docker is missing and this host has no supported apt package manager'
+  : "${ENGINE_BOX_DOCKER_VERSION:?signed bootstrap must provide ENGINE_BOX_DOCKER_VERSION when Docker is missing}"
+  log "installing pinned Docker Engine ${ENGINE_BOX_DOCKER_VERSION}"
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg
+  install -d -m 0755 /etc/apt/keyrings
+  if [ ! -s /etc/apt/keyrings/docker.gpg ]; then
+    curl --fail --silent --show-error https://download.docker.com/linux/"$(. /etc/os-release; printf '%s' "$ID")"/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  fi
+  . /etc/os-release
+  printf '%s\n' "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" \
+    > /etc/apt/sources.list.d/docker.list
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    "docker-ce=${ENGINE_BOX_DOCKER_VERSION}" \
+    "docker-ce-cli=${ENGINE_BOX_DOCKER_VERSION}" \
+    containerd.io docker-buildx-plugin docker-compose-plugin
+  docker compose version >/dev/null 2>&1 || die 'Docker Compose installation verification failed'
+}
+
+json_field(){ python3 - "$1" "$2" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding='utf-8'))
+for part in sys.argv[2].split('.'):
+    value = value[part]
+print(value)
+PY
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enroll) ENROLL_CODE="${2:-}"; shift 2 ;;
@@ -24,10 +69,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+require_root
 [ "$(uname -s)" = Linux ] || die 'Engine Box supports Linux only'
+supported_host
 case "$(uname -m)" in x86_64|aarch64|arm64) ;; *) die "unsupported architecture: $(uname -m)" ;; esac
-command -v docker >/dev/null 2>&1 || die 'Docker Engine is required'
-docker compose version >/dev/null 2>&1 || die 'Docker Compose v2 is required'
 command -v openssl >/dev/null 2>&1 || die 'openssl is required to verify releases'
 command -v curl >/dev/null 2>&1 || die 'curl is required'
 command -v python3 >/dev/null 2>&1 || die 'python3 is required'
@@ -41,6 +86,11 @@ if [ "$REPAIR" = true ]; then
   [ -x "$INSTALL_ROOT/hm-supervisor" ] || die 'no existing Engine Box supervisor exists to repair'
   [ -f "$INSTALL_ROOT/release.json" ] || die 'no verified local release exists to repair'
   [ -f "$INSTALL_ROOT/license.json" ] || die 'no signed local licence lease exists to repair'
+  if [ -f "$INSTALL_ROOT/host-requirements.json" ]; then
+    ENGINE_BOX_DOCKER_VERSION="$(json_field "$INSTALL_ROOT/host-requirements.json" docker_version)" || die 'local host requirements are invalid'
+    export ENGINE_BOX_DOCKER_VERSION
+  fi
+  ensure_docker
   log 'repairing from the verified local release; customer volumes and credentials are preserved'
   exec "$INSTALL_ROOT/hm-supervisor" install --root "$INSTALL_ROOT"
 fi
@@ -61,15 +111,6 @@ curl --fail --silent --show-error --retry 2 \
   --data "$bootstrap_payload" \
   "$MANAGEMENT_BASE/bootstrap" -o "$tmp_dir/bootstrap.json"
 
-json_field(){ python3 - "$1" "$2" <<'PY'
-import json, sys
-value = json.load(open(sys.argv[1], encoding='utf-8'))
-for part in sys.argv[2].split('.'):
-    value = value[part]
-print(value)
-PY
-}
-
 manifest_url="$(json_field "$tmp_dir/bootstrap.json" manifest_url)" || die 'bootstrap response is invalid'
 signature_url="$(json_field "$tmp_dir/bootstrap.json" signature_url)" || die 'bootstrap response is invalid'
 public_key_url="$(json_field "$tmp_dir/bootstrap.json" public_key_url)" || die 'bootstrap response is invalid'
@@ -80,6 +121,10 @@ curl --fail --silent --show-error "$signature_url" -o "$tmp_dir/release.sig"
 curl --fail --silent --show-error "$public_key_url" -o "$tmp_dir/release.pub"
 openssl pkeyutl -verify -pubin -inkey "$tmp_dir/release.pub" -rawin -in "$tmp_dir/release.json" -sigfile "$tmp_dir/release.sig" >/dev/null \
   || die 'release manifest signature verification failed'
+docker_version="$(json_field "$tmp_dir/release.json" host_requirements.docker_version)" || die 'signed release manifest lacks pinned Docker version'
+case "$docker_version" in *$'\n'*|*$'\r'*|'') die 'signed Docker version is invalid' ;; esac
+export ENGINE_BOX_DOCKER_VERSION="$docker_version"
+ensure_docker
 curl --fail --silent --show-error "$license_url" -o "$tmp_dir/license.json"
 curl --fail --silent --show-error "$license_signature_url" -o "$tmp_dir/license.sig"
 openssl pkeyutl -verify -pubin -inkey "$tmp_dir/release.pub" -rawin -in "$tmp_dir/license.json" -sigfile "$tmp_dir/license.sig" >/dev/null \
@@ -100,6 +145,16 @@ install -m 0600 "$tmp_dir/release.sig" "$INSTALL_ROOT/release.sig"
 install -m 0644 "$tmp_dir/release.pub" "$INSTALL_ROOT/release.pub"
 install -m 0600 "$tmp_dir/license.json" "$INSTALL_ROOT/license.json"
 install -m 0600 "$tmp_dir/license.sig" "$INSTALL_ROOT/license.sig"
+python3 - "$INSTALL_ROOT/host-requirements.json" "$docker_version" <<'PY'
+import json, os, sys, tempfile
+target, version = sys.argv[1:]
+fd, temporary = tempfile.mkstemp(dir=os.path.dirname(target), prefix='.host-requirements-', text=True)
+with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+    json.dump({'docker_version': version}, handle, sort_keys=True)
+    handle.write('\n')
+os.chmod(temporary, 0o600)
+os.replace(temporary, target)
+PY
 bundle_url="$(json_field "$tmp_dir/release.json" bundle.url)" || die 'release manifest lacks appliance bundle'
 bundle_sha="$(json_field "$tmp_dir/release.json" bundle.sha256)" || die 'release manifest lacks appliance bundle checksum'
 curl --fail --silent --show-error "$bundle_url" -o "$tmp_dir/engine-box.tar.gz"
@@ -125,5 +180,8 @@ if [ ! -f "$INSTALL_ROOT/secrets/oidc_cookie_secret" ]; then openssl rand -base6
 if [ ! -f "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" ]; then : > "$INSTALL_ROOT/secrets/cloudflare_tunnel_token"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/oidc_client_secret" ]; then : > "$INSTALL_ROOT/secrets/oidc_client_secret"; fi
 chmod 0600 "$INSTALL_ROOT/secrets/postgres_password" "$INSTALL_ROOT/secrets/oidc_cookie_secret" "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" "$INSTALL_ROOT/secrets/oidc_client_secret"
-log 'verified bootstrap installed; supervisor now owns configuration, image pulls, health checks and rollback'
-exec "$INSTALL_ROOT/hm-supervisor" install --root "$INSTALL_ROOT"
+log 'verified bootstrap installed; supervisor now owns image pulls and local service liveness'
+"$INSTALL_ROOT/hm-supervisor" install --root "$INSTALL_ROOT"
+setup_url="https://127.0.0.1:${ENGINE_BOX_CORE_PORT:-8787}/setup"
+log "local services are running; finish secure configuration at ${setup_url}"
+log 'Engine Box is not READY until the local setup wizard completes its authenticated canary'

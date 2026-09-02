@@ -11,6 +11,9 @@ if (!manifestPath || !outputDirectory || !privateKeyPath) throw new Error('usage
 const raw = fs.readFileSync(manifestPath);
 const manifest = JSON.parse(raw);
 if (!manifest.release || !Array.isArray(manifest.images) || manifest.images.length < 10) throw new Error('manifest lacks a complete Engine Box image set');
+if (typeof manifest.host_requirements?.docker_version !== 'string' || !manifest.host_requirements.docker_version.trim() || /[\r\n]/.test(manifest.host_requirements.docker_version)) {
+  throw new Error('manifest lacks a valid pinned Docker version');
+}
 for (const image of manifest.images) {
   if (!image.name || !/^sha256:[a-f0-9]{64}$/i.test(image.digest) || !String(image.image || '').endsWith(`@${image.digest}`)) {
     throw new Error(`untrusted image entry: ${image.name || 'unknown'}`);

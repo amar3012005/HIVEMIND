@@ -13,7 +13,7 @@ test('offline release signer produces a verifier-compatible immutable manifest',
     const keyPath = path.join(root, 'release.key'); const manifestPath = path.join(root, 'manifest.json'); const signed = path.join(root, 'signed');
     fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
     const digest = `sha256:${'a'.repeat(64)}`;
-    fs.writeFileSync(manifestPath, `${JSON.stringify({ release: 'engine-box-test', images: Array.from({ length: 10 }, (_, index) => ({ name: `image-${index}`, digest, image: `registry.example/image-${index}@${digest}` })) })}\n`);
+    fs.writeFileSync(manifestPath, `${JSON.stringify({ release: 'engine-box-test', host_requirements: { docker_version: '5:27.5.1-1~ubuntu.24.04~noble' }, images: Array.from({ length: 10 }, (_, index) => ({ name: `image-${index}`, digest, image: `registry.example/image-${index}@${digest}` })) })}\n`);
     execFileSync(process.execPath, ['engine-box/release/sign-release.mjs', manifestPath, signed], { cwd: process.cwd(), env: { ...process.env, ENGINE_BOX_RELEASE_PRIVATE_KEY: keyPath } });
     const output = execFileSync(process.execPath, ['engine-box/release/verify-release.mjs', signed], { cwd: process.cwd(), encoding: 'utf8' });
     assert.equal(JSON.parse(output).ok, true);

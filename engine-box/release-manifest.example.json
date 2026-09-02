@@ -1,6 +1,9 @@
 {
   "release": "engine-box-0.1.0-example",
   "channel": "canary",
+  "host_requirements": {
+    "docker_version": "5:27.5.1-1~ubuntu.24.04~noble"
+  },
   "supervisor": {
     "url": "https://get.singulancelabs.com/engine-box/releases/engine-box-0.1.0-example/hm-supervisor-linux-amd64",
     "sha256": "replace-with-real-sha256"

@@ -18,4 +18,14 @@ test('one-command bootstrap redeems through the versioned control-plane API', ()
   assert.match(installer, /ENGINE_BOX_MANAGEMENT_BASE:-https:\/\/api\.singulancelabs\.com\/v1\/engine-box/);
   assert.match(installer, /"\$MANAGEMENT_BASE\/bootstrap"/);
   assert.match(worker, /url\.pathname === '\/v1\/engine-box\/bootstrap'/);
+  assert.match(installer, /signed release manifest lacks pinned Docker version/);
+  assert.match(installer, /ENGINE_BOX_DOCKER_VERSION/);
+});
+
+test('bootstrap liveness precedes local configuration, while activation requires readiness', () => {
+  const supervisor = fs.readFileSync(path.join(root, 'supervisor/src/main.rs'), 'utf8');
+  const installer = fs.readFileSync(path.join(root, 'install.sh'), 'utf8');
+  assert.match(supervisor, /"install" => \{[\s\S]*wait_for_local_health/);
+  assert.match(supervisor, /"activate" => wait_for_local_ready/);
+  assert.match(installer, /not READY until the local setup wizard completes/);
 });

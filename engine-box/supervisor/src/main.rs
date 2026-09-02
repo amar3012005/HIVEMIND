@@ -13,7 +13,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
-    let command = args.get(1).map(String::as_str).ok_or("usage: hm-supervisor <install|validate-release|health>")?;
+    let command = args.get(1).map(String::as_str).ok_or("usage: hm-supervisor <install|activate|validate-release|health>")?;
     let root = arg_value(&args, "--root").unwrap_or_else(|| "/opt/hivemind-engine-box".to_string());
     match command {
         "validate-release" => validate_release(PathBuf::from(root).join("release.json")),
@@ -26,8 +26,12 @@ fn run() -> Result<(), String> {
             compose_command(&root, ["config"])?;
             compose_command(&root, ["pull"])?;
             compose_command(&root, ["up", "--detach", "--remove-orphans"])?;
-            wait_for_local_ready(&root)
+            wait_for_local_health(&root)
         }
+        // Activation runs only after the local configuration wizard has stored
+        // an OIDC configuration, a usable local model route, and its canary
+        // receipt. Unlike install, this must prove real readiness.
+        "activate" => wait_for_local_ready(&root),
         "health" => compose_command(&root, ["ps"]),
         _ => Err(format!("unsupported supervisor command: {command}")),
     }
@@ -104,22 +108,39 @@ fn compose_command<const N: usize>(root: &str, args: [&str; N]) -> Result<(), St
     run_checked(&mut command)
 }
 
-fn wait_for_local_ready(root: &str) -> Result<(), String> {
+fn local_url(root: &str, path: &str) -> String {
     let port = fs::read_to_string(format!("{root}/.env")).ok()
         .and_then(|env| env.lines().find_map(|line| line.strip_prefix("ENGINE_BOX_CORE_PORT=")).map(str::to_owned))
         .unwrap_or_else(|| "8787".to_string());
     // /health is liveness only. A successful install is not accepted until the
     // engine has tested its local data plane and selected model route.
-    let url = format!("http://127.0.0.1:{port}/ready");
+    format!("http://127.0.0.1:{port}{path}")
+}
+
+fn wait_for_local_health(root: &str) -> Result<(), String> {
+    let url = local_url(root, "/health");
     for _ in 0..30 {
         let status = Command::new("curl").args(["--fail", "--silent", "--max-time", "2", &url]).status();
         if matches!(status, Ok(status) if status.success()) {
-            println!("[hm-supervisor] local readiness verified");
+            println!("[hm-supervisor] local services are live; local configuration is required before activation");
             return Ok(());
         }
         thread::sleep(Duration::from_secs(2));
     }
-    Err("local Engine Box did not become ready; preserved services and data for repair".into())
+    Err("local Engine Box did not become live; preserved services and data for repair".into())
+}
+
+fn wait_for_local_ready(root: &str) -> Result<(), String> {
+    let url = local_url(root, "/ready");
+    for _ in 0..30 {
+        let status = Command::new("curl").args(["--fail", "--silent", "--max-time", "2", &url]).status();
+        if matches!(status, Ok(status) if status.success()) {
+            println!("[hm-supervisor] local readiness and functional configuration verified");
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+    Err("local Engine Box did not become ready; preserve services and correct configuration or run repair".into())
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> { args.iter().position(|arg| arg == name).and_then(|index| args.get(index + 1)).cloned() }

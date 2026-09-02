@@ -12,6 +12,7 @@ import { publishHqRuntimeTransient } from './event-bus.js';
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
 import { getHyperagentsRuntimeConnectorProvider, runtimeConnectorConnectPath } from '../connectors/runtime-provider-policy.js';
 import { bindPlaybookContext } from '../runtime-playbooks/director-selector.js';
+import { projectRuntimeLiveness } from './liveness.js';
 
 const DAY = 86400000;
 
@@ -1838,12 +1839,31 @@ export class NativeHqEngine {
       where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'READY' },
       orderBy: [{ priority: 'asc' }, { position: 'asc' }], select: { id: true },
     });
+    // Queue liveness is cross-cutting: a READY row is not the only retained
+    // operating work. A Room lease, capability wait, authority gate, or
+    // monitoring run prevents Runtime from truthfully claiming the queue is
+    // empty or sleeping until a distant growth checkpoint.
+    const [livenessWorkOrders, livenessPlaybookRuns] = await Promise.all([
+      prisma.hyperWorkOrder.findMany({
+        where: { orgId: runtime.orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null }, status: { in: ['queued', 'running', 'processing'] } },
+        select: { id: true, status: true }, take: 50,
+      }),
+      prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
+        where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY', 'NEEDS_INTERVENTION'] } },
+        select: { id: true, status: true, currentStageId: true, waitingFor: true }, take: 50,
+      }).catch(() => []) : Promise.resolve([]),
+    ]);
+    const liveness = projectRuntimeLiveness({
+      todos: capabilityState.todos,
+      playbookRuns: livenessPlaybookRuns,
+      workOrders: livenessWorkOrders,
+    });
     const stageCheckpoint = context.growth.active_stage?.checkpoint_at
       ? new Date(context.growth.active_stage.checkpoint_at) : null;
     const declaredDueAt = stageCheckpoint && Number.isFinite(stageCheckpoint.getTime()) ? stageCheckpoint : null;
     // A measurement date cannot outrank executable preparation. Measurement begins
     // only after launch or an explicit playbook monitoring checkpoint.
-    const queueExhausted = !finalReadyTodo && !queueContinuationScheduled;
+    const queueExhausted = liveness.queueEmpty && !queueContinuationScheduled;
     const dueAt = queueExhausted ? declaredDueAt : null;
     if (dueAt) await scheduleHqWake({
       prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,

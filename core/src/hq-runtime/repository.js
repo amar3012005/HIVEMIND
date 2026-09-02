@@ -218,7 +218,13 @@ export async function createHqCycle({ prisma, runtimeId, orgId, runtimeEpoch, id
   });
 }
 
-export async function scheduleHqWake({ prisma, runtimeId, orgId, runtimeEpoch = null, idempotencyKey, triggerType, dueAt, payload = {} }) {
+export function wakeIdempotencyKey({ runtimeId, runtimeEpoch, materialCauseId }) {
+  if (!runtimeId || !runtimeEpoch || !materialCauseId) throw new Error('hq_wake_material_cause_required');
+  const digest = crypto.createHash('sha256').update(`${runtimeId}:${runtimeEpoch}:${materialCauseId}`).digest('hex');
+  return `wake:${digest}`;
+}
+
+export async function scheduleHqWake({ prisma, runtimeId, orgId, runtimeEpoch = null, idempotencyKey = null, materialCauseId = null, triggerType, dueAt, payload = {} }) {
   return prisma.$transaction(async (tx) => {
     const current = await tx.hqRuntime.findFirst({
       where: { id: runtimeId, orgId, ...(runtimeEpoch ? { epoch: runtimeEpoch } : {}) },
@@ -226,9 +232,21 @@ export async function scheduleHqWake({ prisma, runtimeId, orgId, runtimeEpoch = 
     });
     if (!current) throw new Error('hq_runtime_epoch_obsolete');
     const effectiveEpoch = runtimeEpoch || current.epoch;
+    // Historical callers supplied an explicit idempotency key but predate the
+    // material-cause column. Treat that key as a named legacy cause during the
+    // rolling migration. Every newly inserted schedule therefore has a cause,
+    // while an already-persisted legacy row still upserts by its old key.
+    const effectiveMaterialCauseId = materialCauseId || (idempotencyKey ? `legacy:${idempotencyKey}` : null);
+    const effectiveIdempotencyKey = idempotencyKey || (effectiveMaterialCauseId
+      ? wakeIdempotencyKey({ runtimeId, runtimeEpoch: effectiveEpoch, materialCauseId: effectiveMaterialCauseId })
+      : null);
+    if (!effectiveIdempotencyKey) throw new Error('hq_wake_idempotency_required');
+    const effectivePayload = effectiveMaterialCauseId
+      ? { ...payload, wake_contract: { ...(payload?.wake_contract || {}), material_cause_id: effectiveMaterialCauseId } }
+      : payload;
     const schedule = await tx.hqSchedule.upsert({
-      where: { orgId_idempotencyKey: { orgId, idempotencyKey } },
-      create: { runtimeId, orgId, runtimeEpoch: effectiveEpoch, idempotencyKey, triggerType, dueAt, payload },
+      where: { orgId_idempotencyKey: { orgId, idempotencyKey: effectiveIdempotencyKey } },
+      create: { runtimeId, orgId, runtimeEpoch: effectiveEpoch, idempotencyKey: effectiveIdempotencyKey, materialCauseId: effectiveMaterialCauseId, triggerType, dueAt, payload: effectivePayload },
       update: {},
     });
     await tx.hqRuntime.updateMany({

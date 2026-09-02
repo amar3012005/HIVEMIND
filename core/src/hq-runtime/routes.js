@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   appendHqEvent,
   ensureHqRuntime,
@@ -8,6 +9,7 @@ import {
   transitionHqRuntime,
 } from './repository.js';
 import { reconcileTodoCapabilities } from './instruction-loop.js';
+import { projectRuntimeLiveness } from './liveness.js';
 import { getHyperagentsRuntimeConnectorProvider, toComposioToolkit } from '../connectors/runtime-provider-policy.js';
 import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot, terminalOutcomeSatisfied } from '../runtime-playbooks/snapshot.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
@@ -218,29 +220,34 @@ async function findDefaultObjective(prisma, orgId) {
   return company.goal || company.mission || '';
 }
 
-async function requestWake({ prisma, runtime, triggerType, payload = {}, key }) {
+async function requestWake({ prisma, runtime, triggerType, payload = {}, key, materialCauseId = null }) {
   const dueAt = new Date();
-  const idempotencyKey = key || `${triggerType}:${dueAt.toISOString().slice(0, 16)}`;
+  // `key` remains an explicit compatibility bridge for historical call sites.
+  // New callers name the persisted fact that changed; neither path may use time
+  // as identity because a repeated observation is not a new operating cause.
+  const fallbackFingerprint = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  const cause = materialCauseId || key || `legacy:${triggerType}:${fallbackFingerprint}`;
   return scheduleHqWake({
     prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-    idempotencyKey, triggerType, dueAt, payload,
+    materialCauseId: cause, triggerType, dueAt, payload,
   });
 }
 
 async function reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler }) {
   const result = await reconcileTodoCapabilities({ prisma, runtime });
-  if (!result.resolved.length) return result;
+  if (!result.changed) return result;
   for (const resolved of result.resolved) {
     await appendHqEvent({
       prisma, runtimeId: runtime.id, orgId: runtime.orgId,
       eventType: 'capability_resolved', title: 'A required capability is available',
       summary: `${resolved.platform_managed?.length ? `${resolved.platform_managed.join(', ')} is provided by Singulance.` : `I verified ${resolved.capabilities.join(', ')} against this organization.`} The blocked todo is ready again and has returned to the operating queue.`,
       details: resolved,
+      idempotencyKey: `capability-resolved:${resolved.todo_id}:${result.stateFingerprint}`,
     });
   }
-  await requestWake({
+  result.schedule = await requestWake({
     prisma, runtime, triggerType: 'connector_changed', payload: { resolved: result.resolved },
-    key: `capability-reconciled:${runtime.id}:${result.resolved.map((item) => item.todo_id).join(':')}`,
+    materialCauseId: `capability:${result.stateFingerprint}`,
   });
   Promise.resolve(wakeScheduler?.()).catch(() => {});
   return result;
@@ -996,6 +1003,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const firstLifeExperience = projectFirstLifeExperience({
           runtime, firstLife, growthBrief, tasks: agentRuntimeTasks, recognitionEvents, adminCheckin,
         });
+        const runtimeLiveness = projectRuntimeLiveness({ todos, playbookRuns, workOrders });
         return jsonResponse(res, {
           work_orders: workOrders, schedules, todos, capability_requests: projectedCapabilityRequests, instructions,
           agent_runtime_tasks: agentRuntimeTasks,
@@ -1009,6 +1017,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)),
           playbook_projection_warnings: playbookProjectionWarnings,
           first_life: firstLife, activation_sprint: activationSprint,
+          runtime_liveness: runtimeLiveness,
         });
       }
 
@@ -1544,15 +1553,12 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
         const result = await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
-        // No custom key here — a Date.now()-suffixed key was unique every call,
-        // defeating the orgId+idempotencyKey dedup and turning rapid /recheck
-        // polling into a full HQ wake-and-reprocess cycle on every single call
-        // (observed as a sub-second noise storm for a still-unresolved
-        // capability). requestWake's own default key (triggerType + minute
-        // bucket) coalesces repeated rechecks to at most one real wake/minute.
-        const schedule = result.resolved.length ? null : await requestWake({ prisma, runtime, triggerType: 'connector_changed' });
-        Promise.resolve(wakeScheduler?.()).catch(() => {});
-        return jsonResponse(res, { schedule, resolved: result.resolved, platform_managed: result.platform_managed }, 202);
+        return jsonResponse(res, {
+          schedule: result.schedule || null,
+          changed: result.changed,
+          resolved: result.resolved,
+          platform_managed: result.platform_managed,
+        }, 202);
       }
 
       if (pathname === '/v1/hq/resources' && req.method === 'GET') {

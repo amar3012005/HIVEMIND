@@ -1889,3 +1889,21 @@ slides that find no unique anchor get a page instead of `null`.
   through the Worker and remained `sent` on the idempotent Control Plane read;
   no duplicate room task or email occurred. All three coupled runtime services
   are healthy at `sha-69c46eae`; fresh fatal-error scan was empty.
+
+## 2026-09-02 UTC — Knowledge Base browser admission limits released
+
+- Frontend `main` SHA `0bac95492a2e6f3e8ea6b77e26c4902f19c9acbf`; parent
+  release declaration `c46ebeac65159318b62cf9f287ffdc32ea84f302`.
+- Cloudflare Worker `hivemind-web` version
+  `764cc740-78f2-4a64-b561-6c11087e9dab` was deployed with
+  `--keep-vars`; no backend service, flag, database, or Cloudflare binding was
+  changed.
+- Knowledge Base now accepts individual files only, rejects files above 10 MB
+  before the scope dialog, and rejects PDFs with unreadable page counts or more
+  than 100 pages. The final browser-side network boundary repeats the check.
+- Verification: JSX syntax parse, Cloudflare Worker asset/discovery tests,
+  guarded Wrangler dry-run/build, public Knowledge Base route HTTP 200, and
+  live lazy-bundle marker verification. The legacy folder picker marker is
+  absent from the live chunk.
+- Rollback: Cloudflare Worker version
+  `6fd6b92c-90fd-408e-8844-498f4ed7b371`.

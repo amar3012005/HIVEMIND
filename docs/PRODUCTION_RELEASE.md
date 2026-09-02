@@ -1356,3 +1356,18 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   fresh fatal-error scan clean.
 - Rollback: rollback Worker then set the backend gate false or disable the
   Flagship flag. No database migration; provider receipts prevent duplicates.
+
+## c46ebea — Knowledge Base browser admission limits
+
+- Parent SHA `c46ebeac65159318b62cf9f287ffdc32ea84f302`; frontend main SHA
+  `0bac95492a2e6f3e8ea6b77e26c4902f19c9acbf`; Cloudflare Worker version
+  `764cc740-78f2-4a64-b561-6c11087e9dab`.
+- User-facing change: folder selection removed; each selected file is limited
+  to 10 MB; PDF selection is limited to 100 verifiable pages. These checks run
+  before upload and again at the browser network boundary.
+- Acceptance: release guard passed on exact frontend main, guarded Worker build
+  completed, `https://next.singulancelabs.com/hivemind/app/knowledge` returned
+  200 from Cloudflare, and the public lazy chunk contained the new drop-zone
+  copy while omitting the folder-picker copy.
+- Rollback: Worker version `6fd6b92c-90fd-408e-8844-498f4ed7b371`. No backend
+  deploy, migration, flag, or stored data change.

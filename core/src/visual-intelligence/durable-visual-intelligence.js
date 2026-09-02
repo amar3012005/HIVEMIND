@@ -16,7 +16,7 @@ function compactPage(page) {
   return {
     url: safeUrl(page?.url), title: clean(page?.title, 300), description: clean(page?.description, 800),
     text: clean(page?.text || page?.markdown, 18_000), seo: page?.seo && typeof page.seo === 'object' ? page.seo : {},
-    captured_at: new Date().toISOString(),
+    captured_at: new Date().toISOString(), brand_logo: screenshotData(page?.brand_logo),
   };
 }
 function screenshotData(value) {

@@ -186,6 +186,16 @@ export function renderLifecycleCompletionEmail({ companyName, taskTitle, output,
 
 export function renderDayOneEmail(input) { return renderLifecycleCompletionEmail(input); }
 
+/** Day 2 deliberately reuses the proven lifecycle email shell and Humation
+ * character strip; only the episode copy and sealed artifact change. */
+export function renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters = [], publicApiUrl = '' } = {}) {
+  return renderLifecycleCompletionEmail({
+    companyName, taskTitle: 'Your Company Brand DNA', output, roomUrl, characters, publicApiUrl,
+    dayLabel: 'DAY 2', episodeLabel: 'YOUR AGENTS LEARNED YOUR BRAND',
+    headline: 'Your HyperAgents<br>mapped your visual language.',
+  });
+}
+
 /** Reusable portrait-report renderer paired with the lifecycle email renderer. */
 export function renderLifecycleCompletionPortraitReport({ companyName, taskTitle, output, roomUrl, completedAt, characters = [], dayLabel = 'DAY-1 / RESEARCH' }) {
   const readme = renderRoomReadme(output);
@@ -196,6 +206,80 @@ export function renderLifecycleCompletionPortraitReport({ companyName, taskTitle
 }
 
 export function renderDayOnePortraitReport(input) { return renderLifecycleCompletionPortraitReport(input); }
+export function renderDayTwoBrandDnaPortraitReport({ companyName, output, roomUrl, completedAt, characters = [] } = {}) {
+  return renderLifecycleCompletionPortraitReport({ companyName, taskTitle: 'Your Company Brand DNA', output, roomUrl, completedAt, characters, dayLabel: 'DAY-2 / BRAND DNA' });
+}
+
+function dayTwoBrandDnaSummary(artifact = {}) {
+  const analysis = artifact?.analysis || {};
+  const identity = analysis.identity || {};
+  const voice = analysis.voice || {};
+  const palette = analysis.palette || {};
+  const intelligence = analysis.company_intelligence || {};
+  const lines = [
+    `# ${clean(identity.name || 'Your company', 140)} — Brand DNA`,
+    identity.tagline ? `\n${clean(identity.tagline, 360)}` : '',
+    '\n## What your agents captured',
+    voice.tone ? `- **Voice:** ${clean(voice.tone, 360)}` : '',
+    voice.style ? `- **Expression:** ${clean(voice.style, 500)}` : '',
+    Object.values(palette).filter((value) => typeof value === 'string').slice(0, 5).length ? `- **Captured palette:** ${Object.values(palette).filter((value) => typeof value === 'string').slice(0, 5).map((value) => clean(value, 80)).join(', ')}` : '',
+    Array.isArray(intelligence.offers) && intelligence.offers.length ? `\n## Public offer signals\n${intelligence.offers.slice(0, 5).map((value) => `- ${clean(typeof value === 'string' ? value : value?.name || value?.description, 300)}`).join('\n')}` : '',
+    Array.isArray(intelligence.audiences) && intelligence.audiences.length ? `\n## Audiences\n${intelligence.audiences.slice(0, 5).map((value) => `- ${clean(typeof value === 'string' ? value : value?.name || value?.description, 300)}`).join('\n')}` : '',
+    intelligence.pricing_status ? `\n## Pricing\n${intelligence.pricing_status === 'not_publicly_listed_in_captured_pages' ? 'No public price was found in the captured first-party pages.' : clean((intelligence.public_prices || []).join(', '), 600)}` : '',
+    '\n## Evidence rule\nThis report is based on retained, first-party rendered-page evidence. Revalidate time-sensitive commercial claims before use.',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+/** Deliver a completed Day-2 report using the proven Day-1 transactional
+ * email + workspace-notification path. The room JSON claim is the idempotency
+ * fence, so Workflow retries cannot create duplicate email deliveries. */
+export async function deliverDayTwoBrandDna({ prisma, runId, renderPdf = renderDayZeroOnboardingPdf, sendEmail = sendRenderedSystemEmail } = {}) {
+  if (!prisma || !runId) throw new Error('day2_delivery_input_invalid');
+  const run = await prisma.visualIntelligenceRun.findUnique({ where: { id: runId } });
+  if (!run?.roomId || run.status !== 'completed' || !run.artifact?.rendered_report?.r2_key) throw new Error('day2_delivery_not_ready');
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id, user_id, "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms" WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid AND "agent_connectors" ? '_company' LIMIT 1`,
+    run.roomId, run.orgId, run.userId,
+  );
+  const row = rows?.[0];
+  const company = typeof row?.company === 'string' ? JSON.parse(row.company) : row?.company;
+  if (!company) throw new Error('day2_delivery_company_missing');
+  const state = company.day2_brand_dna || {};
+  if (state.status === 'sent') return { ok: true, accepted: false, status: 'sent', message_id: state.message_id || null };
+  if (state.job_id && state.job_id !== run.jobId) throw new Error('day2_delivery_job_mismatch');
+  const claim = { ...state, status: 'sending', job_id: run.jobId, run_id: run.id, delivery_claimed_at: new Date().toISOString() };
+  const changed = await prisma.$executeRawUnsafe(
+    `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors"=jsonb_set("agent_connectors", '{_company,day2_brand_dna}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid AND COALESCE("agent_connectors" #>> '{_company,day2_brand_dna,status}', '') NOT IN ('sending','sent')`,
+    JSON.stringify(claim), row.id, run.orgId, run.userId,
+  );
+  if (!changed) throw new Error('day2_delivery_in_progress');
+  try {
+    const owner = await prisma.user.findUnique({ where: { id: run.userId }, select: { email: true } });
+    if (!owner?.email) throw new Error('day2_recipient_missing');
+    const companyName = clean(company.company || company.profile?.company_name || 'Your company', 110);
+    const appBase = String(process.env.HIVEMIND_APP_URL || DEFAULT_APP_URL.replace(/\/employees$/, '')).replace(/\/$/, '');
+    const roomUrl = `${appBase}/employees/rooms/${run.roomId}`;
+    const characters = Array.isArray(company.team) ? company.team : [];
+    const output = dayTwoBrandDnaSummary(run.artifact);
+    const rendered = renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters });
+    const pdf = await renderPdf(renderDayTwoBrandDnaPortraitReport({ companyName, output, roomUrl, completedAt: run.finishedAt || new Date(), characters }));
+    const slug = companyName.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'company';
+    const delivery = await sendEmail({
+      templateId: 'day2_brand_dna', to: owner.email, rendered,
+      attachments: [{ filename: `${slug}-day-2-brand-dna.pdf`, type: 'application/pdf', content: pdf }],
+      notification: { orgId: run.orgId, userId: run.userId, type: 'lifecycle.email.sent', title: `${companyName} Day 2 Brand DNA is in your inbox`, body: 'Your reusable visual brief and evidence report are ready.', resourceType: 'visual_intelligence_run', resourceId: run.id, href: roomUrl, data: { lifecycle_day: 2, company: companyName, artifact_type: 'brand_dna' } },
+    });
+    if (!delivery.ok) throw new Error(`day2_delivery_${delivery.error || delivery.reason || 'failed'}`);
+    const sent = { ...claim, status: 'sent', sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null };
+    await prisma.$executeRawUnsafe(`UPDATE "hivemind"."hyper_rooms" SET "agent_connectors"=jsonb_set("agent_connectors", '{_company,day2_brand_dna}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid`, JSON.stringify(sent), row.id, run.orgId);
+    return { ok: true, accepted: true, status: 'sent', message_id: delivery.messageId || null };
+  } catch (error) {
+    const failed = { ...claim, status: 'failed', failed_at: new Date().toISOString(), failure_reason: clean(error?.message || 'delivery_failed', 240) };
+    await prisma.$executeRawUnsafe(`UPDATE "hivemind"."hyper_rooms" SET "agent_connectors"=jsonb_set("agent_connectors", '{_company,day2_brand_dna}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid`, JSON.stringify(failed), row.id, run.orgId).catch(() => {});
+    throw error;
+  }
+}
 
 function workflowUrl(pathname = '') {
   const base = String(process.env.HIVEMIND_D1_WORKFLOW_URL || '').replace(/\/$/, '');

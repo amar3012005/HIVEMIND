@@ -266,6 +266,18 @@ async function extractPage(page, response, discovery) {
       catch { return null; }
     }).filter(Boolean).slice(0, 30);
     const text = clean(root.innerText || root.textContent).slice(0, 120000);
+    const visualNodes = [...document.querySelectorAll('body, h1, h2, h3, p, a, button, [role="button"], *')].slice(0, 900);
+    const tally = (values) => [...values.reduce((counts, value) => {
+      if (value && value !== 'rgba(0, 0, 0, 0)' && value !== 'transparent') counts.set(value, (counts.get(value) || 0) + 1);
+      return counts;
+    }, new Map()).entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([value]) => value);
+    const styles = visualNodes.map((node) => getComputedStyle(node));
+    const rgb = (value) => { const match = String(value || '').match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/); return match ? match.slice(1, 4).map(Number) : null; };
+    const saturation = (value) => { const channels = rgb(value); if (!channels) return 0; const max = Math.max(...channels); const min = Math.min(...channels); return max ? (max - min) / max : 0; };
+    const candidates = styles.flatMap((style) => [style.color, style.backgroundColor, style.borderTopColor]).filter((value) => saturation(value) >= 0.18);
+    const accents = tally(candidates).sort((left, right) => saturation(right) - saturation(left)).slice(0, 6);
+    const fonts = [...new Set(styles.map((style) => style.fontFamily).filter(Boolean))].slice(0, 8);
+    const fontSizes = [...new Set(styles.map((style) => style.fontSize).filter(Boolean))].slice(0, 8);
     return {
       url: location.href,
       title: clean(document.title),
@@ -280,6 +292,13 @@ async function extractPage(page, response, discovery) {
       links,
       images,
       jsonLd: [...document.querySelectorAll('script[type="application/ld+json"]')].map((node) => clean(node.textContent)).filter(Boolean).slice(0, 5),
+      visual: {
+        colors: tally(styles.flatMap((style) => [style.color, style.backgroundColor, style.borderTopColor])),
+        accent_colors: accents,
+        fonts, fontSizes,
+        image_count: images.length,
+        image_alts: images.map((image) => image.alt).filter(Boolean).slice(0, 12),
+      },
     };
   });
   return {
@@ -294,6 +313,22 @@ async function extractPage(page, response, discovery) {
     },
     discovery,
   };
+}
+
+async function captureBrandMark(page) {
+  for (const selector of [
+    'header img', 'header svg', '[role="banner"] img', '[role="banner"] svg',
+    '[aria-label*="logo" i]', '[aria-label="Apple"]', 'header a[class*="logo" i]', 'header a[class*="brand" i]',
+  ]) {
+    const node = page.locator(selector).first();
+    // Missing selectors must not consume Playwright's default navigation wait.
+    if (!await node.count().catch(() => 0)) continue;
+    const box = await node.boundingBox().catch(() => null);
+    if (!box || box.width < 12 || box.height < 12 || box.width > 360 || box.height > 180) continue;
+    const image = await node.screenshot({ type: 'png', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => null);
+    if (image?.length && image.length <= 500 * 1024) return `data:image/png;base64,${image.toString('base64')}`;
+  }
+  return null;
 }
 
 // Reads whatever text/label/role identifies a click target BEFORE clicking
@@ -478,7 +513,10 @@ async function crawl(input) {
         const finalUrl = await publicUrl(page.url());
         if (!finalUrl || finalUrl.origin !== origin) throw new Error('cross_origin_redirect_blocked');
         const evidence = await extractPage(page, response, { source: current.source, depth: current.depth, discovered_from: current.from });
-        if (captureScreenshot && current.depth === 0 && !pages.length) {
+        if (current.depth === 0 && !pages.length) evidence.brand_logo = await captureBrandMark(page);
+        // Visual Intelligence requests a screenshot per captured page. The
+        // existing limits bound both page count and individual image size.
+        if (captureScreenshot) {
           const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false, timeout: NAVIGATION_TIMEOUT_MS });
           if (screenshot.length <= 5 * 1024 * 1024) evidence.screenshot = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
         }

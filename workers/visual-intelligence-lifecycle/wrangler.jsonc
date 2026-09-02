@@ -1,0 +1,9 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json", "name": "hivemind-visual-intelligence", "main": "src/index.ts", "compatibility_date": "2026-09-02", "compatibility_flags": ["nodejs_compat"],
+  "vars": { "HIVEMIND_VISUAL_API_URL": "https://api.singulancelabs.com", "HIVEMIND_VISUAL_INSTANCE_PREFIX": "visual" },
+  "flagship": [{ "binding": "FLAGS", "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9", "remote": true }],
+  "queues": { "producers": [{ "binding": "VISUAL_TRIGGER_QUEUE", "queue": "hivemind-visual-intelligence" }], "consumers": [{ "queue": "hivemind-visual-intelligence", "max_batch_size": 5, "max_batch_timeout": 5, "max_retries": 6, "dead_letter_queue": "hivemind-visual-intelligence-dlq" }] },
+  "workflows": [{ "name": "hivemind-visual-intelligence-workflow", "binding": "VISUAL_WORKFLOW", "class_name": "VisualIntelligenceWorkflow" }], "triggers": { "crons": ["17 * * * *"] },
+  "r2_buckets": [{ "binding": "VISUAL_ARTIFACTS", "bucket_name": "hivemind-visual-intelligence-artifacts" }],
+  "env": { "local": { "name": "hivemind-visual-intelligence-local", "vars": { "HIVEMIND_VISUAL_API_URL": "http://host.docker.internal:3000", "HIVEMIND_VISUAL_INSTANCE_PREFIX": "visual-local" }, "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }], "queues": { "producers": [{ "binding": "VISUAL_TRIGGER_QUEUE", "queue": "hivemind-visual-intelligence-local" }], "consumers": [{ "queue": "hivemind-visual-intelligence-local", "max_batch_size": 5, "max_batch_timeout": 5, "max_retries": 6, "dead_letter_queue": "hivemind-visual-intelligence-dlq-local" }] }, "workflows": [{ "name": "hivemind-visual-intelligence-workflow-local", "binding": "VISUAL_WORKFLOW", "class_name": "VisualIntelligenceWorkflow" }], "r2_buckets": [{ "binding": "VISUAL_ARTIFACTS", "bucket_name": "hivemind-visual-intelligence-artifacts-local" }] } }
+}

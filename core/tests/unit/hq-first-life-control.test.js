@@ -176,6 +176,25 @@ test('v12 Growth Plan initial_plan_ready promotes the ENTIRE first-life batch in
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'READY', 'READY']);
 });
 
+test('v15 Growth Plan initial_plan_ready promotes only the recommended task', async () => {
+  const rows = [
+    todo('growth-1', 'PROPOSED', 1, 'external', true),
+    todo('growth-2', 'PROPOSED', 2, 'external'),
+    todo('growth-3', 'PROPOSED', 3, 'internal'),
+  ];
+  rows.forEach((row) => {
+    row.context.first_life_policy_version = 15;
+    row.context.proposal_origin = 'growth_plan';
+    delete row.context.planned_playbook_id;
+    delete row.context.planned_playbook_version;
+    delete row.context.requested_action;
+    delete row.context.room_tag;
+  });
+  const result = await activateEligibleFirstLifeWork({ prisma: prismaFor(rows), runtime, expansionTrigger: 'initial_plan_ready' });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['growth-1']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED']);
+});
+
 test('post-burst work still advances strictly one-by-one — the parallel burst is a one-time exception, not the new steady state', async () => {
   // Simulates cadence-driven daily operation: new proposals arriving AFTER
   // the first-life burst already ran (different activation_sprint_id / no

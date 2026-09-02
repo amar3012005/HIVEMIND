@@ -1,0 +1,29 @@
+{
+  "policy_id": "runtime.first-life-policy",
+  "version": 15,
+  "proposal_target": 5,
+  "proposal_minimum": 3,
+  "runtime_selects_lifecycle": true,
+  "initial_execution_limit": 1,
+  "preparation_execution_limit": 1,
+  "external_execution_limit": 1,
+  "internal_execution_limit": 1,
+  "initial_status": "PROPOSED",
+  "require_initial_start_decision": false,
+  "optional_admin_checkin": true,
+  "admin_checkin_before_planning": true,
+  "auto_start_initial_plan": true,
+  "first_result_target_minutes": 5,
+  "task_style": {"language": "plain_natural_language", "title_max_words": 10, "one_bounded_outcome_per_task": true, "prefer_visible_preparation": true, "forbid_unsupported_revenue_or_conversion_promises": true},
+  "first_life_sequence": [
+    {"kind": "campaign", "required": true, "unique": true, "effect_class": "external", "requested_terminal_outcome": "launched", "workload_instruction": "Create one seven-day X organic awareness campaign with between four and seven standalone single-image posts. Prepare the complete captions, schedule, and visuals, then stop at the exact launch authority gate. Do not create a second campaign, carousel, multi-slide post, or thread."},
+    {"kind": "outreach", "required": true, "unique": true, "effect_class": "external", "workload_instruction": "Find qualified prospective customers near the company's retained location, persist source-backed customization notes, and prepare personalized email and sequential TARA call actions for exact review."},
+    {"kind": "research", "required": true, "unique": true, "effect_class": "internal", "workload_instruction": "Resolve one bounded competitor or market opportunity question that materially improves the prepared campaign or outreach motion."},
+    {"kind": "legal_finance", "required": false, "unique": true, "effect_class": "internal"},
+    {"kind": "fundraising", "required": false, "unique": true, "effect_class": "internal"}
+  ],
+  "execution_defaults": {"campaign": {"channels": ["x_organic"], "creative_format": "single_image_post", "duration_days": 7, "maximum_posts": 7}},
+  "first_life_outcome_preferences": ["Create one evidence-backed one-week X organic awareness campaign, render its standalone posts, and retain it at the governed launch decision.", "Find relevant prospective customers near the company's retained location and prepare personalized written and voice outreach using verified contact evidence.", "Research one bounded competitor or market opportunity after campaign and outreach preparation.", "Keep legal, finance, and fundraising work visible but dormant until the first customer-facing sequence advances."],
+  "ongoing_operation": {"growth_plan_enabled": true, "mode": "operate", "after": "first_life_outcomes"},
+  "expansion_triggers": ["initial_plan_ready", "user_start", "internal_bootstrap", "strategy_program_ready", "verified_preparation_checkpoint", "verified_result", "verified_monitoring_checkpoint", "user_instruction", "organization_policy", "capability_wait_release"]
+}

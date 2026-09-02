@@ -164,7 +164,7 @@ test('v6 retains one policy-selected program builder and leaves portfolio design
 
 test('current first-life policy orders one campaign, outreach, and research task before deferred work', async () => {
   const policy = await loadFirstLifePolicy();
-  assert.equal(policy.version, 14);
+  assert.equal(policy.version, 15);
   assert.equal(policy.initial_lifecycle, undefined);
   assert.equal(policy.runtime_selects_lifecycle, true);
   assert.equal(policy.auto_start_initial_plan, true);

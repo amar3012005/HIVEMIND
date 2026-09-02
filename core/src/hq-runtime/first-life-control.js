@@ -356,7 +356,7 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
         selected.push(todo); internalAvailable -= 1;
       }
     };
-    if (expansionTrigger === 'initial_plan_ready') {
+    if (expansionTrigger === 'initial_plan_ready' && Number(policy.version) < 15) {
       // The first-life "wow batch" burst: every evidenced proposal from THIS
       // cohort starts together, in parallel — deliberately bypassing the
       // external/internal execution-limit capacity checks select() enforces

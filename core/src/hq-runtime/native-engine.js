@@ -13,6 +13,7 @@ import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
 import { getHyperagentsRuntimeConnectorProvider, runtimeConnectorConnectPath } from '../connectors/runtime-provider-policy.js';
 import { bindPlaybookContext } from '../runtime-playbooks/director-selector.js';
 import { projectRuntimeLiveness } from './liveness.js';
+import { getRuntimeRollout, RUNTIME_WAKE_TRUTH_V1 } from './reliability-rollout.js';
 
 const DAY = 86400000;
 
@@ -806,7 +807,9 @@ export class NativeHqEngine {
 
     // First-life check-in follows the baseline and precedes diagnosis. Growth and
     // specialist work must not run ahead of the administrator's Talk/Skip decision.
-    const firstLifePolicy = await loadFirstLifePolicy();
+    const wakeTruthRollout = await getRuntimeRollout({ prisma, orgId: runtime.orgId, feature: RUNTIME_WAKE_TRUTH_V1 });
+    const firstLifePolicyVersion = wakeTruthRollout.effectiveMode === 'ENFORCE' ? 15 : 14;
+    const firstLifePolicy = await loadFirstLifePolicy(firstLifePolicyVersion);
     const initialPlanAbsent = !context.evidence.latest_growth_plan;
     if (shouldOfferFirstLifeAdminCheckin({
       initialPlanAbsent,
@@ -1363,7 +1366,8 @@ export class NativeHqEngine {
       // Burst/idle-crosslane are both scoped to the genuinely-idle case —
       // when a Room is already in flight, freeLaneTodo (computed once above)
       // is the only other admission path, and it is exactly one todo.
-      const burstSiblings = !roomInFlight && readyTodo.context?.activation_sprint_id
+      const strictSequentialFirstLife = Number(readyTodo.context?.first_life_policy_version || 0) >= 15;
+      const burstSiblings = !strictSequentialFirstLife && !roomInFlight && readyTodo.context?.activation_sprint_id
         ? capabilityState.todos.filter((todo) => todo.status === 'READY'
           && todo.context?.activation_sprint_id === readyTodo.context.activation_sprint_id)
         : [readyTodo];
@@ -1371,7 +1375,7 @@ export class NativeHqEngine {
       // nothing is running ANYWHERE, starting a second genuinely independent
       // lane is risk-free — it can never disturb an already-in-flight Room,
       // because there isn't one.
-      const crossLaneCandidate = !roomInFlight && burstSiblings.length <= 1
+      const crossLaneCandidate = !strictSequentialFirstLife && !roomInFlight && burstSiblings.length <= 1
         ? capabilityState.todos.find((todo) => todo.status === 'READY'
           && todo.id !== readyTodo.id
           && effectClass(todo) !== effectClass(readyTodo))
@@ -1380,7 +1384,8 @@ export class NativeHqEngine {
       // harder case — starting lane B while lane A is already running — see
       // freeLaneReadyTodo above. Only reachable when roomInFlight is true,
       // so it never competes with the idle-only burst/crossLane paths.
-      const todosToDispatchThisCycle = burstSiblings.length > 1 ? burstSiblings
+      const todosToDispatchThisCycle = strictSequentialFirstLife ? [readyTodo]
+        : burstSiblings.length > 1 ? burstSiblings
         : crossLaneCandidate ? [readyTodo, crossLaneCandidate]
         : freeLaneTodo ? [freeLaneTodo] : [readyTodo];
       if (todosToDispatchThisCycle.length > 1 || freeLaneTodo) await event(prisma, runtime, cycle, {
@@ -1693,7 +1698,7 @@ export class NativeHqEngine {
       try {
         result = await this.toolkits.invoke('growth_plan', 'run', {
           mode: growthPlanMode, objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
-          model: selectedModel, lifecycleCatalog,
+          model: selectedModel, lifecycleCatalog, first_life_policy_version: firstLifePolicyVersion,
           additionalEvidence: (currentStatus || recentDecisions.length) ? {
             ...(currentStatus ? { user_current_status: { artifact_id: currentStatus.artifactId, data: currentStatus.data || {}, source_refs: currentStatus.sourceRefs || [] } } : {}),
             ...(recentDecisions.length ? { recent_decisions: recentDecisions } : {}),

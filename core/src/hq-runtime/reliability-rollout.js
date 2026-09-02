@@ -1,6 +1,7 @@
 import { recordRuntimeMetric } from './runtime-metrics.js';
 
 export const RUNTIME_RELIABILITY_RELEASE_0 = 'runtime_reliability_release_0';
+export const RUNTIME_WAKE_TRUTH_V1 = 'runtime_wake_truth_v1';
 export const RUNTIME_ROLLOUT_MODES = Object.freeze(['OFF', 'SHADOW', 'ENFORCE', 'KILL_SWITCHED']);
 
 function truthy(value) {

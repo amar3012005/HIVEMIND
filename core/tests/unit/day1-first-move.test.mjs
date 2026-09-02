@@ -8,6 +8,7 @@ import {
   notifyDayOneWorkflowCompletion,
   renderDayOneEmail,
   renderDayOnePortraitReport,
+  renderDayTwoBrandDnaEmail,
   renderRoomReadme,
   prepareDayOneFirstMove,
   scheduleDayOneWorkflow,
@@ -21,6 +22,26 @@ test('shared lifecycle email shell owns the responsive rich-content contract', (
   assert.match(html, /\.data-table th,\.data-table td/);
   assert.match(html, /@media only screen and \(max-width:360px\)/);
   assert.match(html, /https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png/);
+});
+
+test('Day 2 email mirrors the report with a captured logo and secure snapshots', () => {
+  const previousUrl = process.env.HIVEMIND_VISUAL_ARTIFACT_URL;
+  const previousSecret = process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET;
+  process.env.HIVEMIND_VISUAL_ARTIFACT_URL = 'https://visual.example.test';
+  process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET = 'test-secret';
+  try {
+    const rendered = renderDayTwoBrandDnaEmail({
+      companyName: 'Example GmbH', roomUrl: 'https://next.example.test/room', output: 'Ready',
+      artifact: { evidence: [{ r2_key: 'org/o/runs/r/0.jpg', logo_r2_key: 'org/o/runs/r/logo.png', page_url: 'https://example.test' }], analysis: { palette: { primary: '#111111' }, typography: { headings: 'Inter' } } },
+    });
+    assert.match(rendered.html, /Example GmbH logo/);
+    assert.match(rendered.html, /Captured visual snapshots/);
+    assert.match(rendered.html, /\/public-artifact\?key=/);
+    assert.match(rendered.html, /sig=/);
+  } finally {
+    if (previousUrl === undefined) delete process.env.HIVEMIND_VISUAL_ARTIFACT_URL; else process.env.HIVEMIND_VISUAL_ARTIFACT_URL = previousUrl;
+    if (previousSecret === undefined) delete process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET; else process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET = previousSecret;
+  }
 });
 
 test('Day 1 selects the first pending research-tagged task, not a generic todo', () => {

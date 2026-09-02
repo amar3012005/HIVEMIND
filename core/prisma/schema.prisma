@@ -302,6 +302,29 @@ model WorkspaceNotification {
   @@map("workspace_notifications")
 }
 
+/// Durable, ordered projection log for the Cloudflare Platform Registry.
+/// PostgreSQL keeps this table even after D1 becomes the control-plane authority:
+/// it is the compatibility-projection repair ledger, never a memory-data outbox.
+model PlatformRegistryOutbox {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  revision    BigInt   @unique @default(autoincrement()) @db.BigInt
+  entityType  String   @map("entity_type") @db.VarChar(48)
+  entityId    String   @map("entity_id") @db.Uuid
+  operation   String   @db.VarChar(16)
+  payload     Json
+  status      String   @default("pending") @db.VarChar(24)
+  attempts    Int      @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
+  lastError   String?  @map("last_error") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, nextAttemptAt])
+  @@index([entityType, entityId, revision])
+  @@map("platform_registry_outbox")
+}
+
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
 /// Members can be granted team-scope memory access via TeamMember.
 model Team {

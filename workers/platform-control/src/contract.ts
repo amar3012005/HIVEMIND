@@ -5,7 +5,15 @@ export type RegistryEntity =
   | "invite"
   | "api_key"
   | "entitlement"
-  | "memory_box";
+  | "memory_box"
+  | "team"
+  | "project"
+  | "team_member"
+  | "project_member"
+  | "notification"
+  | "organization_profile"
+  | "billing_checkout"
+  | "plan_catalog";
 export type RegistryEvent = {
   event_id: string;
   entity_type: RegistryEntity;
@@ -30,6 +38,14 @@ export function validEvent(value: unknown): value is RegistryEvent {
       "api_key",
       "entitlement",
       "memory_box",
+      "team",
+      "project",
+      "team_member",
+      "project_member",
+      "notification",
+      "organization_profile",
+      "billing_checkout",
+      "plan_catalog",
     ].includes(String(e.entity_type)) &&
     Number.isInteger(e.revision) &&
     Number(e.revision) > 0 &&

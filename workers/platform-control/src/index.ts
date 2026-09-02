@@ -59,6 +59,67 @@ async function apply(db: D1Database, event: RegistryEvent) {
     .first();
   if (known) return { applied: false, duplicate: true };
   const p = event.payload;
+  const genericTypes = new Set([
+    "team",
+    "project",
+    "team_member",
+    "project_member",
+    "notification",
+    "organization_profile",
+    "billing_checkout",
+    "plan_catalog",
+  ]);
+  if (genericTypes.has(event.entity_type)) {
+    const existing = await db
+      .prepare(
+        "SELECT revision FROM registry_workspace_records WHERE entity_type=? AND entity_id=?",
+      )
+      .bind(event.entity_type, event.entity_id)
+      .first<{ revision: number }>();
+    if (existing && existing.revision >= event.revision) {
+      await db
+        .prepare(
+          "INSERT INTO registry_events(event_id,entity_type,entity_id,revision,operation,payload_json) VALUES(?,?,?,?,?,?)",
+        )
+        .bind(
+          event.event_id,
+          event.entity_type,
+          event.entity_id,
+          event.revision,
+          event.operation,
+          JSON.stringify(p),
+        )
+        .run();
+      return { applied: false, duplicate: false, stale: true };
+    }
+    await db.batch([
+      db
+        .prepare(
+          "INSERT INTO registry_workspace_records(entity_type,entity_id,org_id,payload_json,revision,deleted_at) VALUES(?,?,?,?,?,?) ON CONFLICT(entity_type,entity_id) DO UPDATE SET org_id=excluded.org_id,payload_json=excluded.payload_json,revision=excluded.revision,deleted_at=excluded.deleted_at",
+        )
+        .bind(
+          event.entity_type,
+          event.entity_id,
+          String(p.org_id || "") || null,
+          JSON.stringify(p),
+          event.revision,
+          event.operation === "delete" ? new Date().toISOString() : null,
+        ),
+      db
+        .prepare(
+          "INSERT INTO registry_events(event_id,entity_type,entity_id,revision,operation,payload_json) VALUES(?,?,?,?,?,?)",
+        )
+        .bind(
+          event.event_id,
+          event.entity_type,
+          event.entity_id,
+          event.revision,
+          event.operation,
+          JSON.stringify(p),
+        ),
+    ]);
+    return { applied: true, duplicate: false };
+  }
   const sql: Record<string, string> = {
     user: `INSERT INTO registry_users (id,zitadel_user_id,email_normalized,display_name,avatar_url,timezone,locale,encryption_key_id,encryption_key_version,created_at,updated_at,last_active_at,deleted_at,revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET zitadel_user_id=excluded.zitadel_user_id,email_normalized=excluded.email_normalized,display_name=excluded.display_name,avatar_url=excluded.avatar_url,timezone=excluded.timezone,locale=excluded.locale,encryption_key_id=excluded.encryption_key_id,encryption_key_version=excluded.encryption_key_version,updated_at=excluded.updated_at,last_active_at=excluded.last_active_at,deleted_at=excluded.deleted_at,revision=excluded.revision WHERE excluded.revision > registry_users.revision`,
     organization: `INSERT INTO registry_organizations (id,zitadel_org_id,name,slug,profile_json,commercial_json,billing_json,settings_json,hosting_mode,memory_storage_mode,created_at,updated_at,revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,profile_json=excluded.profile_json,commercial_json=excluded.commercial_json,billing_json=excluded.billing_json,settings_json=excluded.settings_json,hosting_mode=excluded.hosting_mode,memory_storage_mode=excluded.memory_storage_mode,updated_at=excluded.updated_at,revision=excluded.revision WHERE excluded.revision > registry_organizations.revision`,

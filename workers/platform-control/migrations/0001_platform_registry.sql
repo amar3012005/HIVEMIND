@@ -44,3 +44,9 @@ CREATE TABLE IF NOT EXISTS registry_memory_boxes (
   org_id TEXT PRIMARY KEY, box_id TEXT NOT NULL, endpoint TEXT, credential_hash TEXT, credential_version INTEGER,
   state TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', revision INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS registry_workspace_records (
+  entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, org_id TEXT, payload_json TEXT NOT NULL,
+  revision INTEGER NOT NULL, deleted_at TEXT,
+  PRIMARY KEY(entity_type, entity_id)
+);
+CREATE INDEX IF NOT EXISTS registry_workspace_records_org ON registry_workspace_records(org_id, entity_type);

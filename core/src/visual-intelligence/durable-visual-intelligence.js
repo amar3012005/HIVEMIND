@@ -148,7 +148,13 @@ export class DurableVisualIntelligenceLifecycle {
     validateVisualAdmission(input);
     const membership = await this.prisma.userOrganization.findFirst({ where: { orgId: input.org_id, userId: input.user_id, isActive: true }, select: { userId: true } });
     if (!membership) throw Object.assign(new Error('visual_tenant_access_denied'), { retryable: false });
-    const data = { orgId: input.org_id, userId: input.user_id, jobId: input.job_id, roomId: UUID.test(String(input.room_id || '')) ? input.room_id : null, workflowInstanceId: clean(input.workflow_instance_id, 140) || null, processingVersion: input.processing_version, mode: input.mode, browserSession: input.mode === 'user_takeover' ? String(input.browser_session) : null, deliverable: input.deliverable, status: 'running', currentStage: 'admit', progress: 0, urls: input.urls.map(safeUrl).filter(Boolean), latchedFlags: { ...(input.flags || {}), lifecycle_day: input.lifecycle_day === 2 ? 2 : null }, heartbeatAt: new Date() };
+    const roomId = UUID.test(String(input.room_id || '')) ? input.room_id : null;
+    if (roomId) {
+      const room = await this.prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: input.org_id, userId: input.user_id, archivedAt: null }, select: { id: true } });
+      if (!room) throw Object.assign(new Error('visual_room_access_denied'), { retryable: false });
+    }
+    if (input.lifecycle_day === 2 && !roomId) throw Object.assign(new Error('day2_lifecycle_context_required'), { retryable: false });
+    const data = { orgId: input.org_id, userId: input.user_id, jobId: input.job_id, roomId, workflowInstanceId: clean(input.workflow_instance_id, 140) || null, processingVersion: input.processing_version, mode: input.mode, browserSession: input.mode === 'user_takeover' ? String(input.browser_session) : null, deliverable: input.deliverable, status: 'running', currentStage: 'admit', progress: 0, urls: input.urls.map(safeUrl).filter(Boolean), latchedFlags: { ...(input.flags || {}), lifecycle_day: input.lifecycle_day === 2 ? 2 : null }, heartbeatAt: new Date() };
     let run = await this.prisma.visualIntelligenceRun.findUnique({ where: { orgId_jobId_processingVersion: { orgId: data.orgId, jobId: data.jobId, processingVersion: data.processingVersion } } });
     if (!run) run = await this.prisma.visualIntelligenceRun.create({ data });
     return this._receipt(run);

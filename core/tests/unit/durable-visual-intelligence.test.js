@@ -38,3 +38,11 @@ test('Day 2 delivery admission requires lifecycle context but never creates a Ro
   assert.equal(delivered.ok, true);
   process.env.VISUAL_INTELLIGENCE_WORKFLOW_ENABLED = previous.enabled; process.env.HIVEMIND_VISUAL_WORKFLOW_URL = previous.url; process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET = previous.secret;
 });
+
+test('visual admission rejects an optional Room outside the caller tenant', async () => {
+  const lifecycle = new DurableVisualIntelligenceLifecycle({ prisma: {
+    userOrganization: { findFirst: async () => ({ userId: ids.user_id }) },
+    hyperRoom: { findFirst: async () => null },
+  } });
+  await assert.rejects(() => lifecycle.admit({ ...ids, room_id: ids.job_id, urls: ['https://example.com'], mode: 'public', deliverable: 'brand_dna_v1', processing_version: 1 }), /visual_room_access_denied/);
+});

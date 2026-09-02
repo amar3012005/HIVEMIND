@@ -10,7 +10,7 @@
   },
   "vars": {
     "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com",
-    "HIVEMIND_D1_RECONCILE_LIMIT": "5"
+    "HIVEMIND_D1_RECONCILE_LIMIT": "500"
   },
   "flagship": [
     {
@@ -20,7 +20,22 @@
     }
   ],
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["*/5 * * * *"]
+  },
+  "queues": {
+    "producers": [
+      { "binding": "LIFECYCLE_ADMISSION", "queue": "hivemind-lifecycle-admission-v1" }
+    ],
+    "consumers": [
+      {
+        "queue": "hivemind-lifecycle-admission-v1",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 10,
+        "max_retries": 10,
+        "dead_letter_queue": "hivemind-lifecycle-admission-dlq-v1"
+      }
+    ]
   },
   "workflows": [
     {
@@ -35,7 +50,7 @@
       "vars": {
         "HIVEMIND_CONTROL_URL": "https://preview-api.singulancelabs.com",
         "HIVEMIND_D1_INSTANCE_PREFIX": "d1-local7",
-        "HIVEMIND_D1_RECONCILE_LIMIT": "100"
+        "HIVEMIND_D1_RECONCILE_LIMIT": "500"
       },
       "flagship": [
         {
@@ -44,6 +59,21 @@
           "remote": true
         }
       ],
+      "queues": {
+        "producers": [
+          { "binding": "LIFECYCLE_ADMISSION", "queue": "hivemind-lifecycle-admission-local-v1" }
+        ],
+        "consumers": [
+          {
+            "queue": "hivemind-lifecycle-admission-local-v1",
+            "max_batch_size": 1,
+            "max_batch_timeout": 1,
+            "max_concurrency": 10,
+            "max_retries": 10,
+            "dead_letter_queue": "hivemind-lifecycle-admission-local-dlq-v1"
+          }
+        ]
+      },
       "workflows": [
         {
           "name": "hivemind-day1-lifecycle-local",

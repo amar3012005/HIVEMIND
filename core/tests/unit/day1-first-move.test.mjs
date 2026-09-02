@@ -5,6 +5,7 @@ import {
   deliverDayOneFirstMove,
   isDayOneWorkflowEnabled,
   isResearchTask,
+  notifyDayOneWorkflowCompletion,
   renderDayOneEmail,
   renderDayOnePortraitReport,
   renderRoomReadme,
@@ -70,6 +71,40 @@ test('Day 1 scheduling is skipped while the backend master gate is off', async (
     assert.deepEqual(result, { ok: false, skipped: true, reason: 'feature_disabled' });
   } finally {
     if (previous === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previous;
+  }
+});
+
+test('Day 1 re-admits a sealed room through the durable queue when the Workflow event is unavailable', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  const previousUrl = process.env.HIVEMIND_D1_WORKFLOW_URL;
+  const previousSecret = process.env.HIVEMIND_D1_WORKFLOW_SECRET;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+  process.env.HIVEMIND_D1_WORKFLOW_URL = 'https://workflow.example.test';
+  process.env.HIVEMIND_D1_WORKFLOW_SECRET = 'test-secret';
+  const company = { day1_first_move: { workflow_instance_id: 'd1-hq', status: 'running' } };
+  const row = { id: 'hq', org_id: '11111111-1111-1111-1111-111111111111', company };
+  const calls = [];
+  const prisma = {
+    $queryRawUnsafe: async () => [row],
+    $executeRawUnsafe: async (_sql, state) => { company.day1_first_move = JSON.parse(state); return 1; },
+  };
+  const fetchImpl = async (url, request) => {
+    calls.push({ url, body: JSON.parse(request.body) });
+    const eventRequest = String(url).endsWith('/event');
+    return new Response(JSON.stringify(eventRequest ? { error: 'workflow_unavailable' } : { ok: true, admitted: true }), { status: eventRequest ? 401 : 202 });
+  };
+  try {
+    const result = await notifyDayOneWorkflowCompletion({ prisma, turnId: 'turn-1', status: 'complete', fetchImpl });
+    assert.equal(result.ok, true);
+    assert.equal(result.recovered_from_event_failure, true);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].url, /\/event$/);
+    assert.match(calls[1].url, /\/start$/);
+    assert.equal(calls[1].body.hq_room_id, 'hq');
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+    if (previousUrl === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_URL; else process.env.HIVEMIND_D1_WORKFLOW_URL = previousUrl;
+    if (previousSecret === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_SECRET; else process.env.HIVEMIND_D1_WORKFLOW_SECRET = previousSecret;
   }
 });
 

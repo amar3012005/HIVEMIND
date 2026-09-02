@@ -10,6 +10,14 @@ const enabled = async (env: Env, trigger: Trigger) => {
   catch { return false; }
 };
 const auth = (request: Request, env: Env) => request.headers.get('authorization') === `Bearer ${env.HIVEMIND_VISUAL_WORKFLOW_SECRET}`;
+async function publicArtifactAuthorized(url: URL, env: Env) {
+  const key = url.searchParams.get('key') || ''; const expires = Number(url.searchParams.get('expires') || 0); const signature = url.searchParams.get('sig') || '';
+  if (!key.startsWith('org/') || !Number.isSafeInteger(expires) || expires < Date.now() || expires > Date.now() + 8 * 24 * 60 * 60 * 1000) return false;
+  const cryptoKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.HIVEMIND_VISUAL_WORKFLOW_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signed = new Uint8Array(await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(`${key}:${expires}`)));
+  const expected = btoa(String.fromCharCode(...signed)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return signature.length === expected.length && signature === expected;
+}
 async function api(env: Env, path: string, body: unknown): Promise<any> {
   const response = await fetch(`${env.HIVEMIND_VISUAL_API_URL.replace(/\/$/, '')}${path}`, { method: 'POST', headers: { authorization: `Bearer ${env.HIVEMIND_VISUAL_WORKFLOW_SECRET}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const payload = await response.json().catch(() => ({})) as Receipt & { error?: string; retryable?: boolean };
@@ -129,7 +137,8 @@ export default {
     if (!auth(request, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
     const url = new URL(request.url);
     if (request.method === 'POST' && url.pathname === '/start') { const trigger = await request.json().catch(() => null); if (!validTrigger(trigger)) return Response.json({ error: 'invalid_trigger' }, { status: 400 }); await env.VISUAL_TRIGGER_QUEUE.send(trigger); return Response.json({ ok: true, queued: true, job_id: trigger.job_id }, { status: 202 }); }
-    if (request.method === 'GET' && url.pathname === '/artifact') {
+    if (request.method === 'GET' && (url.pathname === '/artifact' || url.pathname === '/public-artifact')) {
+      if (url.pathname === '/public-artifact' && !await publicArtifactAuthorized(url, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
       const key = url.searchParams.get('key') || ''; if (!key.startsWith('org/')) return Response.json({ error: 'invalid_artifact_key' }, { status: 400 });
       const object = await env.VISUAL_ARTIFACTS.get(key); if (!object) return Response.json({ error: 'artifact_not_found' }, { status: 404 });
       return new Response(object.body, { headers: { 'content-type': object.httpMetadata?.contentType || 'application/octet-stream', 'cache-control': 'private, no-store' } });

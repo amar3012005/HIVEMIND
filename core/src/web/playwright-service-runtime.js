@@ -43,7 +43,7 @@ export class PlaywrightServiceRuntime {
     this.fetch = fetchImpl || globalThis.fetch;
   }
 
-  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false, session = null } = {}) {
+  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false, session = null, orgId = null } = {}) {
     const seeds = (Array.isArray(urls) ? urls : []).map(normalizeUrl).filter(Boolean);
     if (!seeds.length) throw new Error('No valid URLs provided');
     const allowedOrigin = new URL(seeds[0]).origin;
@@ -69,7 +69,7 @@ export class PlaywrightServiceRuntime {
           // the name against its own allowlist before touching its filesystem;
           // an unknown/expired name degrades to an anonymous context there, so
           // no validation is duplicated here.
-          ...(session ? { session: String(session).slice(0, 40) } : {}),
+          ...(session ? { session: String(session).slice(0, 40), org_id: String(orgId || '') } : {}),
         }),
         signal: controller.signal,
       });

@@ -1340,3 +1340,19 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   accepted. Flag remains globally on: `day1_first_move_v1`.
 - Rollback: set `HIVEMIND_D1_WORKFLOW_ENABLED=false` or disable the Flagship
   flag. There is no migration and stored delivery receipts remain idempotent.
+
+## 69c46eae — reusable lifecycle Queue admission
+
+- Canonical parent SHA `69c46eaed2c35014c58aae2fb653f0487e3d5d82`; Worker
+  `hivemind-day1-lifecycle` version
+  `ed9b1a9e-fbe0-49da-b777-20141915ccb4`.
+- Provisioned Queue `hivemind-lifecycle-admission-v1` and DLQ
+  `hivemind-lifecycle-admission-dlq-v1`. Day 1 admissions are delayed until
+  due, bounded to ten concurrent launches, retried individually up to ten
+  times, and reconciled every five minutes for up to 500 receipts.
+- Acceptance: core suite 16/16, Worker typecheck and dry-run passed; the live
+  idempotent admission smoke returned accepted and retained its prior `sent`
+  receipt. Core, Control Plane, and Employees are healthy at `sha-69c46eae`;
+  fresh fatal-error scan clean.
+- Rollback: rollback Worker then set the backend gate false or disable the
+  Flagship flag. No database migration; provider receipts prevent duplicates.

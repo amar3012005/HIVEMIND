@@ -129,6 +129,23 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   `day1_first_move_v1` off. Existing sealed reports and provider receipts stay
   intact; no schema migration is involved.
 
+## feature-20260902T112400Z — Reusable lifecycle Queue admission
+
+- Production status: deployed and globally active for Day 1. Parent runtime
+  commit `69c46eaed2c35014c58aae2fb653f0487e3d5d82`; Worker version
+  `ed9b1a9e-fbe0-49da-b777-20141915ccb4`.
+- Capability: identifier-only lifecycle admission through Cloudflare Queue,
+  delayed due-time delivery, bounded ten-way launch concurrency, per-message
+  acknowledgement, ten retries, a DLQ, and a five-minute recovery scan of up
+  to 500 persisted receipts. The same envelope is the required foundation for
+  future lifecycle adapters.
+- Safety: PostgreSQL remains authoritative; Queue/Workflow payloads contain no
+  report body, email content, PDF, customer artifact, or secret. Receipt reads
+  prevent repeated room launch and repeated email delivery.
+- Rollback: Worker rollback followed by `HIVEMIND_D1_WORKFLOW_ENABLED=false`
+  or `day1_first_move_v1=off`; the existing provider-receipt idempotency still
+  protects any queued retry.
+
 ## feature-20260830T004500Z — Public AI discovery policy
 
 - Production status: deployed and verified. Public `singulancelabs.com` serves

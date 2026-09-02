@@ -1869,3 +1869,23 @@ slides that find no unique anchor get a page instead of `null`.
   turn, and the idempotent delivery endpoint accepted exactly one Cloudflare
   Email Service send. The queued Cloudflare retry may later observe the stored
   `sent` receipt but cannot duplicate delivery.
+
+## 2026-09-02 UTC — reusable lifecycle Queue admission released
+
+- Committed and released `69c46eaed2c35014c58aae2fb653f0487e3d5d82` from
+  `singulance-main`; Cloudflare Worker version
+  `ed9b1a9e-fbe0-49da-b777-20141915ccb4` provisioned
+  `hivemind-lifecycle-admission-v1` and its DLQ.
+- Verification: `node --test tests/unit/day1-first-move.test.mjs` — **16
+  passed, 0 failed**; Control Plane and lifecycle syntax checks clean;
+  Worker TypeScript check and `wrangler deploy --dry-run` passed.
+- Operational contract: due lifecycle work enters the Queue with identifiers
+  only, the consumer processes at most ten launch invocations concurrently,
+  each message has explicit ack/retry/DLQ behavior, and the five-minute
+  reconciliation admits up to 500 persisted receipts. A failed completion
+  event re-admits the receipt rather than assuming a Workflow restart is proof
+  of delivery.
+- Production smoke: an existing already-sent receipt returned `202 admitted`
+  through the Worker and remained `sent` on the idempotent Control Plane read;
+  no duplicate room task or email occurred. All three coupled runtime services
+  are healthy at `sha-69c46eae`; fresh fatal-error scan was empty.

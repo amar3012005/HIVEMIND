@@ -117,7 +117,10 @@ tar -xzf "$tmp_dir/engine-box.tar.gz" -C "$tmp_dir/bundle"
 cp "$tmp_dir/bundle/compose.yaml" "$INSTALL_ROOT/compose.yaml"
 cp "$tmp_dir/bundle/model-catalog.json" "$INSTALL_ROOT/model-catalog.json"
 cp "$tmp_dir/bundle/model-catalog.sig" "$INSTALL_ROOT/model-catalog.sig"
-if [ ! -f "$INSTALL_ROOT/secrets/postgres_password" ]; then openssl rand -base64 36 > "$INSTALL_ROOT/secrets/postgres_password"; fi
+# Hex deliberately avoids newline and URL-encoding edge cases in postgres,
+# while still providing 256 bits of entropy. Existing installations preserve
+# their secret and are handled safely by hm-engine-entrypoint's URL encoding.
+if [ ! -f "$INSTALL_ROOT/secrets/postgres_password" ]; then openssl rand -hex 32 > "$INSTALL_ROOT/secrets/postgres_password"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/oidc_cookie_secret" ]; then openssl rand -base64 32 > "$INSTALL_ROOT/secrets/oidc_cookie_secret"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" ]; then : > "$INSTALL_ROOT/secrets/cloudflare_tunnel_token"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/oidc_client_secret" ]; then : > "$INSTALL_ROOT/secrets/oidc_client_secret"; fi

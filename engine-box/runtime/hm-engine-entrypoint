@@ -11,8 +11,12 @@ if [ -n "${DATABASE_PASSWORD_FILE:-}" ]; then
   : "${DATABASE_HOST:=postgres}"
   : "${DATABASE_PORT:=5432}"
   : "${DATABASE_NAME:=hivemind}"
-  export DATABASE_URL="postgresql://${POSTGRES_USER}:${database_password}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}?schema=hivemind"
-  unset database_password
+  # Docker secrets are deliberately high-entropy and may contain URL-reserved
+  # bytes. Encode before constructing DATABASE_URL; otherwise a valid secret
+  # can become a malformed connection string on first boot.
+  database_password_encoded="$(node -p 'encodeURIComponent(process.argv[1])' "$database_password")"
+  export DATABASE_URL="postgresql://${POSTGRES_USER}:${database_password_encoded}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}?schema=hivemind"
+  unset database_password database_password_encoded
 fi
 
 exec "$@"

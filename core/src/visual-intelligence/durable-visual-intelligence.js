@@ -262,7 +262,12 @@ export class DurableVisualIntelligenceLifecycle {
     const extracted = await this._stageOutput(run.id, 'extract'); const sourceRefs = (await this._stageOutput(run.id, 'store'))?.source_refs || [];
     const room = run.roomId ? await this.prisma.hyperRoom.findFirst({ where: { id: run.roomId, orgId: run.orgId, userId: run.userId }, select: { agentConnectors: true } }).catch(() => null) : null;
     const company = room?.agentConnectors?._company || {};
-    const agent_roster = (Array.isArray(company.team) ? company.team : []).slice(0, 6).map((agent) => ({ name: clean(agent?.name, 72), role: clean(agent?.jobTitle || agent?.title || agent?.role, 96) })).filter((agent) => agent.name);
+    const agent_roster = (Array.isArray(company.team) ? company.team : []).slice(0, 6).map((agent) => ({
+      id: clean(agent?.id || agent?.employeeId || agent?.slug, 120),
+      name: clean(agent?.name, 72),
+      role: clean(agent?.jobTitle || agent?.title || agent?.role, 96),
+      role_archetype: clean(agent?.roleArchetype || agent?.archetype || agent?.role, 96),
+    })).filter((agent) => agent.name);
     const artifact = { artifact_type: 'brand_dna', version: `visual-intelligence-v${run.processingVersion}`, generated_at: new Date().toISOString(), evidence: sourceRefs, analysis: extracted?.extraction || {}, visual_generation_brief: extracted?.extraction?.visual_generation_brief || {}, agent_roster };
     if (!artifact.evidence.length || !Object.keys(artifact.visual_generation_brief).length) throw Object.assign(new Error('invalid_brand_dna_artifact'), { retryable: false });
     await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { artifact } }); return { ...this._receipt({ ...run, artifact }), artifact, counts: { evidence: artifact.evidence.length } };

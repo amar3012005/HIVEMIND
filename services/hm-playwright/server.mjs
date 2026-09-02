@@ -318,6 +318,7 @@ async function extractPage(page, response, discovery) {
 async function captureBrandMark(page) {
   for (const selector of [
     'header img', 'header svg', '[role="banner"] img', '[role="banner"] svg',
+    'img[alt*="logo" i]', 'img[src*="logo" i]', 'a[href="/"] img', 'a[href="/"] svg',
     '[aria-label*="logo" i]', '[aria-label="Apple"]', 'header a[class*="logo" i]', 'header a[class*="brand" i]',
   ]) {
     const node = page.locator(selector).first();

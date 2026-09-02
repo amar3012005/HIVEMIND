@@ -2,10 +2,14 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { NonRetryableError } from 'cloudflare:workflows';
 import { STAGES, type Trigger, validBrandDna, validTrigger, instanceId } from './contract';
 
-type Env = { VISUAL_WORKFLOW: Workflow<Trigger>; VISUAL_TRIGGER_QUEUE: Queue<Trigger>; VISUAL_ARTIFACTS: R2Bucket; FLAGS: Flagship; HIVEMIND_VISUAL_API_URL: string; HIVEMIND_VISUAL_WORKFLOW_SECRET: string; HIVEMIND_VISUAL_INSTANCE_PREFIX?: string };
+type Env = { VISUAL_WORKFLOW: Workflow<Trigger>; VISUAL_TRIGGER_QUEUE: Queue<Trigger>; VISUAL_ARTIFACTS: R2Bucket; FLAGS: Flagship; HIVEMIND_VISUAL_API_URL: string; HIVEMIND_VISUAL_WORKFLOW_SECRET: string; HIVEMIND_VISUAL_INSTANCE_PREFIX?: string; HIVEMIND_VISUAL_LOCAL_FLAG?: string };
 type Receipt = { run_id: string; status?: string; artifact?: unknown; [key: string]: unknown };
 type Capture = { page?: { url?: string; title?: string; [key: string]: unknown }; screenshot?: string | null };
 const enabled = async (env: Env, trigger: Trigger) => {
+  // Wrangler's local runtime currently reports Flagship bindings as unsupported.
+  // Permit an explicit emulator-only switch so queue/workflow recovery can be
+  // tested locally; deployed environments always evaluate Flagship below.
+  if (env.HIVEMIND_VISUAL_INSTANCE_PREFIX === 'visual-local' && env.HIVEMIND_VISUAL_LOCAL_FLAG === 'true') return true;
   try { return (await env.FLAGS.getBooleanDetails('visual_intelligence_workflow_v1', false, { targetingKey: trigger.user_id, org_id: trigger.org_id })).value === true; }
   catch { return false; }
 };

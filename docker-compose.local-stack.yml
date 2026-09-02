@@ -84,6 +84,11 @@ services:
       LITELLM_EMBED_MODEL: ${LITELLM_EMBED_MODEL:-}
       EMBEDDINGS_SERVICE_URL: ${EMBEDDINGS_SERVICE_URL:-}
       DOCLING_URL: ${DOCLING_URL:-http://docling:5001}
+      # The public-web browser sidecar remains separately scoped. Visual
+      # Intelligence uses this existing service rather than embedding a browser
+      # in Core, and local credentials never enter source control.
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:-}
+      HIVEMIND_PLAYWRIGHT_CRAWL_URL: ${HIVEMIND_PLAYWRIGHT_CRAWL_URL:-http://hm-playwright:8932/v1/crawl}
       KB_UNIFIED_EXTRACT: ${KB_UNIFIED_EXTRACT:-true}
       KB_UNIFIED_MODEL: ${KB_UNIFIED_MODEL:-}
       KB_UNIFIED_FALLBACK_MODELS: ${KB_UNIFIED_FALLBACK_MODELS:-}
@@ -143,6 +148,11 @@ services:
       HYPER_GROK_RUNTIME_ENVIRONMENT: local
       HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-https://hivemind-hyperagents-grok-local.amarsai2005.workers.dev}
       HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
+      # Visual Intelligence remains local-only and fail-closed unless the
+      # Worker, Core switch, shared secret, and Flagship decision all agree.
+      VISUAL_INTELLIGENCE_WORKFLOW_ENABLED: ${VISUAL_INTELLIGENCE_WORKFLOW_ENABLED:-false}
+      HIVEMIND_VISUAL_WORKFLOW_SECRET: ${HIVEMIND_VISUAL_WORKFLOW_SECRET:-}
+      HIVEMIND_VISUAL_ARTIFACT_URL: ${HIVEMIND_VISUAL_ARTIFACT_URL:-http://host.docker.internal:8792}
       ENABLE_DOCUMENT_FIRST_INGEST: ${ENABLE_DOCUMENT_FIRST_INGEST:-true}
       ENABLE_EVIDENCE_RECALL: ${ENABLE_EVIDENCE_RECALL:-true}
       ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}

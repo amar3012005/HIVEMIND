@@ -141,7 +141,7 @@ export class DurableVisualIntelligenceLifecycle {
     validateVisualAdmission(input);
     const membership = await this.prisma.userOrganization.findFirst({ where: { orgId: input.org_id, userId: input.user_id, isActive: true }, select: { userId: true } });
     if (!membership) throw Object.assign(new Error('visual_tenant_access_denied'), { retryable: false });
-    const data = { orgId: input.org_id, userId: input.user_id, jobId: input.job_id, roomId: UUID.test(String(input.room_id || '')) ? input.room_id : null, workflowInstanceId: clean(input.workflow_instance_id, 140) || null, processingVersion: input.processing_version, mode: input.mode, browserSession: input.mode === 'user_takeover' ? String(input.browser_session) : null, deliverable: input.deliverable, status: 'running', currentStage: 'admit', progress: 0, urls: input.urls.map(safeUrl).filter(Boolean), latchedFlags: input.flags || {}, heartbeatAt: new Date() };
+    const data = { orgId: input.org_id, userId: input.user_id, jobId: input.job_id, roomId: UUID.test(String(input.room_id || '')) ? input.room_id : null, workflowInstanceId: clean(input.workflow_instance_id, 140) || null, processingVersion: input.processing_version, mode: input.mode, browserSession: input.mode === 'user_takeover' ? String(input.browser_session) : null, deliverable: input.deliverable, status: 'running', currentStage: 'admit', progress: 0, urls: input.urls.map(safeUrl).filter(Boolean), latchedFlags: { ...(input.flags || {}), lifecycle_day: input.lifecycle_day === 2 ? 2 : null }, heartbeatAt: new Date() };
     let run = await this.prisma.visualIntelligenceRun.findUnique({ where: { orgId_jobId_processingVersion: { orgId: data.orgId, jobId: data.jobId, processingVersion: data.processingVersion } } });
     if (!run) run = await this.prisma.visualIntelligenceRun.create({ data });
     return this._receipt(run);
@@ -239,7 +239,17 @@ export class DurableVisualIntelligenceLifecycle {
     await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { artifact } });
     return { ...this._receipt({ ...fresh, artifact }), artifact, counts: { rendered_reports: 1 } };
   }
-  async _notify(run) { const fresh = await this.prisma.visualIntelligenceRun.findUnique({ where: { id: run.id } }); await createWorkspaceNotification(this.prisma, { orgId: run.orgId, userId: run.userId, type: 'visual_intelligence.brand_dna_ready', title: 'Your Brand DNA is ready', body: 'Your Agents captured, mapped and verified a reusable visual brief.', resourceType: 'visual_intelligence_run', resourceId: run.id, dedupeKey: `visual-intelligence:${run.id}:ready`, data: { run_id: run.id, artifact_type: 'brand_dna', rendered_report: fresh?.artifact?.rendered_report || null } }); const now = new Date(); return this._receipt(await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { status: 'completed', currentStage: 'notify', progress: 100, finishedAt: now, heartbeatAt: now, terminalReason: 'verified_and_published', artifact: fresh?.artifact || {} } })); }
+  async _notify(run) {
+    const fresh = await this.prisma.visualIntelligenceRun.findUnique({ where: { id: run.id } });
+    await createWorkspaceNotification(this.prisma, { orgId: run.orgId, userId: run.userId, type: 'visual_intelligence.brand_dna_ready', title: 'Your Brand DNA is ready', body: 'Your Agents captured, mapped and verified a reusable visual brief.', resourceType: 'visual_intelligence_run', resourceId: run.id, dedupeKey: `visual-intelligence:${run.id}:ready`, data: { run_id: run.id, artifact_type: 'brand_dna', rendered_report: fresh?.artifact?.rendered_report || null } });
+    const now = new Date();
+    const completed = await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { status: 'completed', currentStage: 'notify', progress: 100, finishedAt: now, heartbeatAt: now, terminalReason: 'verified_and_published', artifact: fresh?.artifact || {} } });
+    if (completed.latchedFlags?.lifecycle_day === 2 && process.env.HIVEMIND_D2_BRAND_DNA_WORKFLOW_ENABLED === 'true') {
+      const { deliverDayTwoBrandDna } = await import('../lifecycle/day1-first-move.js');
+      await deliverDayTwoBrandDna({ prisma: this.prisma, runId: completed.id });
+    }
+    return this._receipt(completed);
+  }
   async _stageOutput(runId, stageKey) { const step = await this.prisma.visualIntelligenceStep.findUnique({ where: { runId_stageKey_shardKey: { runId, stageKey, shardKey: 'root' } } }); return step?.outputReceipt || null; }
   async _loadArtifactImage(key) {
     const base = String(process.env.HIVEMIND_VISUAL_ARTIFACT_URL || '').replace(/\/$/, ''); const secret = String(process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');

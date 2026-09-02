@@ -266,6 +266,14 @@ async function extractPage(page, response, discovery) {
       catch { return null; }
     }).filter(Boolean).slice(0, 30);
     const text = clean(root.innerText || root.textContent).slice(0, 120000);
+    const visualNodes = [...document.querySelectorAll('body, h1, h2, h3, p, a, button, [role="button"]')].slice(0, 140);
+    const tally = (values) => [...values.reduce((counts, value) => {
+      if (value && value !== 'rgba(0, 0, 0, 0)' && value !== 'transparent') counts.set(value, (counts.get(value) || 0) + 1);
+      return counts;
+    }, new Map()).entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([value]) => value);
+    const styles = visualNodes.map((node) => getComputedStyle(node));
+    const fonts = [...new Set(styles.map((style) => style.fontFamily).filter(Boolean))].slice(0, 8);
+    const fontSizes = [...new Set(styles.map((style) => style.fontSize).filter(Boolean))].slice(0, 8);
     return {
       url: location.href,
       title: clean(document.title),
@@ -280,6 +288,12 @@ async function extractPage(page, response, discovery) {
       links,
       images,
       jsonLd: [...document.querySelectorAll('script[type="application/ld+json"]')].map((node) => clean(node.textContent)).filter(Boolean).slice(0, 5),
+      visual: {
+        colors: tally(styles.flatMap((style) => [style.color, style.backgroundColor, style.borderTopColor])),
+        fonts, fontSizes,
+        image_count: images.length,
+        image_alts: images.map((image) => image.alt).filter(Boolean).slice(0, 12),
+      },
     };
   });
   return {

@@ -8,6 +8,7 @@ import { createProductionRuntimePlaybookService } from '../runtime-playbooks/ser
 import { employeesSidecarUrl, warmRuntimeOrigin } from '../runtime-transport/client.js';
 import { recordRuntimeMetric } from './runtime-metrics.js';
 import { projectExternalActionEvent } from './external-action-marker.js';
+import { evaluateHqScheduleEligibility } from './wake-eligibility.js';
 
 // Which accepted-checkpoint artifact KEYS are worth a Runtime terminal
 // popup (vs. a plain trace bubble). Most Room checkpoints (campaign_status,
@@ -73,6 +74,12 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
     const runtime = await getHqRuntime({ prisma, orgId: schedule.org_id });
     if (!runtime || runtime.id !== schedule.runtime_id || String(runtime.epoch) !== String(schedule.runtime_epoch)) {
       throw new Error('hq_schedule_runtime_epoch_mismatch');
+    }
+    const eligibility = await evaluateHqScheduleEligibility({ prisma, schedule });
+    if (!eligibility.eligible) {
+      await store.complete(schedule.id);
+      await observed('NOOP', { no_op_reason: eligibility.reason });
+      return { scheduleId: schedule.id, cycleId: null, status: 'NOOP', reason: eligibility.reason };
     }
     if (schedule.trigger_type === 'runtime_playbook_event') {
       if (!runtimePlaybooks) throw new Error('runtime_playbook_service_unavailable');
@@ -190,6 +197,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           runtimeEpoch: trigger.runtime_epoch,
           cycleId: trigger.cycle_id || null,
           ...externalAction,
+          idempotencyKey: `external-action:${run.id}:${run.checkpointSequence}:${phase}`,
         });
       }
       await appendHqEvent({
@@ -221,6 +229,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           contract_rejections: verdict?.contract_rejections || [],
         },
         evidenceRefs: (artifacts || []).map((artifact) => artifact.id),
+        idempotencyKey: `room-checkpoint:${run.id}:${run.checkpointSequence}:${phase}`,
       });
     },
     onRunState: async ({ run }) => {
@@ -231,9 +240,13 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
         const correlation = (run.waitingFor.correlation_values || [run.waitingFor.correlation_value]).filter(Boolean)[0] || null;
         await scheduleHqWake({
           prisma, runtimeId: trigger.runtime_id, orgId: run.orgId, runtimeEpoch: trigger.runtime_epoch,
-          idempotencyKey: `runtime-playbook-timeout:${run.id}:${run.checkpointSequence}`,
+          materialCauseId: `deadline:${run.id}:${run.currentStageId}:${run.waitingFor.deadline}`,
           triggerType: 'runtime_playbook_event', dueAt: new Date(run.waitingFor.deadline),
-          payload: { run_id: run.id, event: { id: `wait-timeout:${run.id}:${run.checkpointSequence}`, type: 'wait.timeout', data: { correlation_ref: correlation, deadline: run.waitingFor.deadline } } },
+          payload: {
+            run_id: run.id,
+            wake_contract: { kind: 'deadline', run_id: run.id, checkpoint_sequence: run.checkpointSequence, deadline: run.waitingFor.deadline },
+            event: { id: `wait-timeout:${run.id}:${run.checkpointSequence}`, type: 'wait.timeout', data: { correlation_ref: correlation, deadline: run.waitingFor.deadline } },
+          },
         });
       }
       await scheduleHqWake({
@@ -241,18 +254,16 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
         runtimeId: trigger.runtime_id,
         orgId: run.orgId,
         runtimeEpoch: trigger.runtime_epoch,
-        // Coalesce on the MEANINGFUL transition, not on run.version. version increments on
-        // every update — each stage advance, artifact persist and checkpoint — so a single
-        // lifecycle walking 6 stages minted ~12 distinct keys and therefore ~12 wakes, each
-        // running a full HQ cycle that re-emitted the same narration block. That is the
-        // duplicated "wake / company in view / checked instructions / re-ranked queue"
-        // spam, and it is why a [Sleeping] line was immediately followed by another wake.
-        // Keying on (run, stage, status) collapses those into one wake per real transition;
-        // the wake still reads current state when it fires, so nothing is missed.
-        idempotencyKey: `runtime-playbook-result:${run.id}:${run.currentStageId || 'none'}:${run.status}`,
+        materialCauseId: `run:${run.id}:checkpoint:${run.checkpointSequence}:${run.status}`,
         triggerType: 'runtime_playbook_result',
         dueAt: new Date(),
-        payload: { run_id: run.id, status: run.status, todo_id: trigger.todo_id || null },
+        payload: {
+          run_id: run.id, status: run.status, todo_id: trigger.todo_id || null,
+          wake_contract: {
+            kind: 'playbook_transition', run_id: run.id,
+            checkpoint_sequence: run.checkpointSequence, status: run.status,
+          },
+        },
       });
     },
   }).catch((error) => {

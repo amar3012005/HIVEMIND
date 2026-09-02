@@ -1660,6 +1660,7 @@ model HqSchedule {
   orgId          String    @map("org_id") @db.Uuid
   runtimeEpoch   String    @map("runtime_epoch") @db.Uuid
   idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
+  materialCauseId String?  @map("material_cause_id") @db.VarChar(240)
   triggerType    String    @map("trigger_type") @db.VarChar(60)
   payload        Json      @default("{}") @db.JsonB
   dueAt          DateTime  @map("due_at") @db.Timestamptz(6)
@@ -1674,6 +1675,7 @@ model HqSchedule {
 
   @@unique([orgId, idempotencyKey])
   @@index([runtimeId, runtimeEpoch, dueAt])
+  @@index([runtimeId, runtimeEpoch, materialCauseId], map: "hq_schedules_material_cause_idx")
   @@index([status, dueAt])
   @@index([runtimeId, createdAt(sort: Desc)])
   @@map("hq_schedules")
@@ -1817,6 +1819,9 @@ model HqCapabilityRequest {
   status      String    @default("REQUIRED") @db.VarChar(24)
   reason      String
   connectPath String?   @map("connect_path")
+  correlationRef String? @map("correlation_ref") @db.VarChar(240)
+  resumeCondition Json @default("{}") @map("resume_condition") @db.JsonB
+  stateFingerprint String? @map("state_fingerprint") @db.VarChar(128)
   resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)

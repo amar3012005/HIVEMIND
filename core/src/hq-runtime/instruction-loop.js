@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { chatCompletionFetch, DEFAULT_HQ_DISPATCH_MODEL } from '../llm/chat-provider.js';
 import {
   getHyperagentsRuntimeConnectorProvider,
@@ -338,12 +339,14 @@ export async function reconcileTodoCapabilities({ prisma, runtime }) {
     orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 30,
   });
   const resolved = [];
+  const changes = [];
   for (const todo of todos) {
     const original = Array.isArray(todo.requiredCapabilities) ? todo.requiredCapabilities : [];
     const runtimeRequired = normalizeRuntimeCapabilities(todo.context?.runtime_required_capabilities);
     const required = [...new Set([...normalizePrepareCapabilities(original, todo.kind), ...runtimeRequired])];
     const capabilitiesChanged = JSON.stringify(original) !== JSON.stringify(required);
     if (capabilitiesChanged) {
+      changes.push(`requirements:${todo.id}`);
       await prisma.$transaction([
         prisma.hqTodo.update({ where: { id: todo.id }, data: {
           requiredCapabilities: required,
@@ -357,28 +360,44 @@ export async function reconcileTodoCapabilities({ prisma, runtime }) {
     }
     const missing = required.filter((item) => !connected.has(String(item).toLowerCase()));
     if (missing.length) {
-      await prisma.hqTodo.update({ where: { id: todo.id }, data: { status: 'WAITING_FOR_CONNECTOR', blockedReason: `Missing: ${missing.join(', ')}` } });
+      if (todo.status !== 'WAITING_FOR_CONNECTOR' || todo.blockedReason !== `Missing: ${missing.join(', ')}`) {
+        await prisma.hqTodo.update({ where: { id: todo.id }, data: { status: 'WAITING_FOR_CONNECTOR', blockedReason: `Missing: ${missing.join(', ')}` } });
+        changes.push(`waiting:${todo.id}:${missing.join(',')}`);
+      }
       for (const capability of missing) {
         const exists = await prisma.hqCapabilityRequest.findFirst({ where: { runtimeId: runtime.id, todoId: todo.id, capability, status: 'REQUIRED' } });
-        if (!exists) await prisma.hqCapabilityRequest.create({ data: {
-          runtimeId: runtime.id, orgId: runtime.orgId, todoId: todo.id, capability, provider: connectorProvider,
-          reason: `${todo.title} requires ${capability} before HQ can continue.`,
-          connectPath: runtimeConnectorConnectPath(capability),
-        } });
+        if (!exists) {
+          await prisma.hqCapabilityRequest.create({ data: {
+            runtimeId: runtime.id, orgId: runtime.orgId, todoId: todo.id, capability, provider: connectorProvider,
+            reason: `${todo.title} requires ${capability} before HQ can continue.`,
+            connectPath: runtimeConnectorConnectPath(capability),
+            correlationRef: `capability:${todo.id}:${capability}`,
+            resumeCondition: { type: 'capability.connected', capability, todo_id: todo.id },
+            stateFingerprint: crypto.createHash('sha256').update(`${runtime.id}:${todo.id}:${capability}:${connectorProvider}`).digest('hex'),
+          } });
+          changes.push(`request:${todo.id}:${capability}`);
+        }
       }
     } else if (todo.status === 'WAITING_FOR_CONNECTOR') {
       await prisma.$transaction([
         prisma.hqTodo.update({ where: { id: todo.id }, data: { status: 'READY', blockedReason: null } }),
         prisma.hqCapabilityRequest.updateMany({ where: { runtimeId: runtime.id, todoId: todo.id, status: 'REQUIRED' }, data: { status: 'RESOLVED', resolvedAt: new Date() } }),
       ]);
+      changes.push(`resolved:${todo.id}`);
       resolved.push({ todo_id: todo.id, capabilities: required, platform_managed: required.filter((capability) => platformManaged.has(String(capability).toLowerCase())), ignored_capabilities: capabilitiesChanged ? original.filter((item) => !required.includes(String(item || '').toLowerCase())) : [] });
     }
   }
+  const stateFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    connected: [...connected].sort(),
+    changes: [...changes].sort(),
+  })).digest('hex');
   return {
     connected: [...connected],
     platform_managed: [...platformManaged],
     todos: await prisma.hqTodo.findMany({ where: { runtimeId: runtime.id, orgId: runtime.orgId, status: { notIn: ['CANCELLED'] } }, orderBy: [{ priority: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }], take: 50 }),
     requests: await prisma.hqCapabilityRequest.findMany({ where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'REQUIRED' }, orderBy: { createdAt: 'asc' }, take: 20 }),
     resolved,
+    changed: changes.length > 0,
+    stateFingerprint,
   };
 }

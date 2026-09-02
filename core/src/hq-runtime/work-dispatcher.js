@@ -562,10 +562,11 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console, leaseO
       blockers: Array.isArray(packet.blockers) ? packet.blockers.slice(0, 10) : [],
       failures: Array.isArray(packet.failures) ? packet.failures.slice(0, 10) : [],
     }, workOrderId: order.id,
+    idempotencyKey: `room-result:${order.id}:${status}`,
   });
   await scheduleHqWake({
     prisma, runtimeId: order.runtime_id, orgId: order.org_id, runtimeEpoch: currentRuntime.epoch,
-    idempotencyKey: `work-result:${order.id}`,
+    materialCauseId: `work-order:${order.id}:result:${status}`,
     triggerType: 'work_result', dueAt: new Date(),
     payload: { work_order_id: order.id, status },
   });

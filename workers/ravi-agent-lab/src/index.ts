@@ -180,7 +180,13 @@ export class RaviResearchAgent extends Agent<Env, RaviState> {
   }
 
   async onRequest(request: Request): Promise<Response> {
-    if (!await authorized(request, this.env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
+    // The public Worker authenticates every request before it can be routed to
+    // an Agent. A top-level /run dispatch then carries this internal marker so
+    // a long-lived Agent never needs to compare a stale secret binding after a
+    // credential rotation.
+    if (request.headers.get('x-ravi-lab-internal') !== '1' && !await authorized(request, this.env)) {
+      return Response.json({ error: 'unauthorized' }, { status: 401 });
+    }
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname.endsWith('/state')) return Response.json(this.state);
     if (request.method !== 'POST' || !url.pathname.endsWith('/run')) return Response.json({ error: 'not_found' }, { status: 404 });
@@ -218,14 +224,22 @@ export class RaviResearchAgent extends Agent<Env, RaviState> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (!await authorized(request, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
+    // Authenticate before Agent routing as well. This prevents a caller from
+    // bypassing the outer Worker policy by addressing an Agent route directly.
     const routed = await routeAgentRequest(request, env);
     if (routed) return routed;
-    if (!await authorized(request, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ ok: true, runtime: 'cloudflare-agent-lab', persona: 'Ravi Patel' });
     if (url.pathname === '/run' || url.pathname === '/state') {
       const agent = await getAgentByName(env.RAVI_RESEARCH_AGENT, 'ravi-patel-singulance-lab');
-      return agent.fetch(new Request(`https://agent.internal${url.pathname}`, request));
+      const headers = new Headers(request.headers);
+      headers.set('x-ravi-lab-internal', '1');
+      return agent.fetch(new Request(`https://agent.internal${url.pathname}`, {
+        method: request.method,
+        headers,
+        body: request.body,
+      }));
     }
     return Response.json({ error: 'not_found' }, { status: 404 });
   },

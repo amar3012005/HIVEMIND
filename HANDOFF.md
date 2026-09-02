@@ -206,4 +206,3 @@ Implement the additive Core visual-intelligence run/stage executor and its
 focused tests, then run the Worker dry-run from
 `workers/visual-intelligence-lifecycle`.
 
-

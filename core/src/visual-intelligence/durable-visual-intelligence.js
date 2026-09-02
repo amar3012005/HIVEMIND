@@ -33,6 +33,17 @@ export function validateVisualAdmission(input) {
   if (!Number.isInteger(input?.processing_version) || input.processing_version < 1) throw Object.assign(new Error('invalid_visual_processing_version'), { retryable: false });
 }
 function parserJson(value) { try { return typeof value === 'object' ? value : JSON.parse(String(value).replace(/^```json\s*/i, '').replace(/\s*```$/i, '')); } catch { return null; } }
+export function normalizeBrandDnaExtraction(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const extraction = { ...value };
+  // Models occasionally return a valid brief as prose instead of the object
+  // requested by the contract. Normalize that one safe representation; never
+  // invent missing analysis or silently accept an empty brief.
+  if (typeof extraction.visual_generation_brief === 'string' && extraction.visual_generation_brief.trim()) {
+    extraction.visual_generation_brief = { style: clean(extraction.visual_generation_brief, 3000), elements: [] };
+  }
+  return extraction;
+}
 
 /**
  * The single admission path used by Rooms, lifecycle episodes, and future
@@ -159,7 +170,7 @@ export class DurableVisualIntelligenceLifecycle {
     const prompt = { company_name: 'Unknown organization', evidence: pages.map((page, index) => ({ source_index: index, url: page.url, title: page.title, description: page.description, text: page.text.slice(0, 9000), seo: page.seo })), required: ['identity', 'voice', 'palette', 'typography', 'layout', 'imagery', 'accessibility', 'visual_generation_brief'] };
     const response = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.OPENROUTER_API_KEY ? { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` } : {}) }, body: JSON.stringify({ model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', temperature: 0, max_tokens: 1800, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Extract a cautious Brand DNA from supplied first-party rendered pages. Return JSON only. Every non-obvious claim must cite source_indexes. Never invent colors, compliance claims, logos, prices, or brand history.' }, { role: 'user', content: [{ type: 'text', text: JSON.stringify(prompt) }, ...images.filter(Boolean).map((url) => ({ type: 'image_url', image_url: { url } }))] }] }) }, { fetchImpl: this.fetch });
     if (!response.ok) throw Object.assign(new Error(`visual_extractor_http_${response.status}`), { retryable: true });
-    const body = await response.json(); const extraction = parserJson(body?.choices?.[0]?.message?.content);
+    const body = await response.json(); const extraction = normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content));
     if (!extraction || typeof extraction !== 'object') throw Object.assign(new Error('visual_extractor_invalid_response'), { retryable: true });
     return { run_id: run.id, extraction, model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', counts: { extracted_pages: pages.length } };
   }

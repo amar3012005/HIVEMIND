@@ -10,6 +10,7 @@ import {
   validUuid,
   workflowInstanceId,
 } from './contract';
+import { admitQueuedProjection } from './queue-admission';
 
 export { evaluateProjectionMode } from './flags';
 export { signCoreRequest } from './security';
@@ -169,16 +170,11 @@ export default {
   async queue(batch: MessageBatch<ProjectionParams>, env: RuntimeEnv): Promise<void> {
     for (const message of batch.messages) {
       if (!validParams(message.body)) { message.ack(); continue; }
-      const id = workflowInstanceId(message.body);
       try {
-        await env.PROJECTION_WORKFLOW.create({
-          id, params: message.body,
-          retention: { successRetention: '30 days', errorRetention: '30 days' },
-        });
+        await admitQueuedProjection(env.PROJECTION_WORKFLOW, message.body);
       } catch {
-        const existing = await env.PROJECTION_WORKFLOW.get(id);
-        const status = await existing.status();
-        if (status.status === 'errored' || status.status === 'terminated') await existing.restart();
+        message.retry();
+        continue;
       }
       message.ack();
     }

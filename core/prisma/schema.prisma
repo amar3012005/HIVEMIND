@@ -1246,6 +1246,7 @@ model Memory {
   entityMentions                                              EntityMention[]
   claimEvidenceLinks                                          ClaimEvidenceLink[]
   projectionState                                             MemoryProjectionState?
+  projectionAttempts                                          MemoryProjectionAttempt[]
 
   // Phase 1 Cognition Loop: synthesis quality metadata
   // synthesisConfidence: LLM-scored confidence (0.0–1.0) for canonical-fact / synthesis-bridge outputs
@@ -4286,6 +4287,34 @@ model MemoryProjectionState {
 
   @@index([organizationId, claimsStatus])
   @@map("memory_projection_states")
+}
+
+/// Immutable-at-admission execution ledger for canonical projections. The
+/// summary above answers "what is the current memory state"; this table answers
+/// "what happened for this exact processing version".
+model MemoryProjectionAttempt {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  memoryId           String    @map("memory_id") @db.Uuid
+  organizationId     String    @map("organization_id") @db.Uuid
+  processingVersion  Int       @map("processing_version")
+  admittedMode       String    @map("admitted_mode") @db.VarChar(16)
+  executor           String    @map("executor") @db.VarChar(32)
+  workflowInstanceId String?   @map("workflow_instance_id") @db.VarChar(200)
+  status             String    @default("ADMISSION_PENDING") @db.VarChar(32)
+  currentStage       String?   @map("current_stage") @db.VarChar(32)
+  stageReceipts      Json      @default("{}") @map("stage_receipts")
+  retryCount         Int       @default(0) @map("retry_count")
+  lastError          String?   @map("last_error") @db.Text
+  startedAt          DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt        DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  memory             Memory    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@unique([memoryId, processingVersion], map: "memory_projection_attempt_memory_version_key")
+  @@unique([workflowInstanceId], map: "memory_projection_attempt_workflow_key")
+  @@index([organizationId, status, updatedAt], map: "memory_projection_attempt_org_status_idx")
+  @@map("memory_projection_attempts")
 }
 
 model CanonicalProjectionNonce {

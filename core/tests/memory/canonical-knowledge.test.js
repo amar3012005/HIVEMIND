@@ -63,6 +63,28 @@ test('claim reads are reserved for read/full modes in the server contract', () =
   assert.match(route, /Not found/);
 });
 
+test('projection status exposes operational attempt metadata without an artifact payload', () => {
+  const server = fs.readFileSync(new URL('../../src/server.js', import.meta.url), 'utf8');
+  const route = server.slice(server.indexOf('const projectionStatusMatch'), server.indexOf('// GET /api/memories/:id/relationships'));
+  assert.match(route, /\/projection-status/);
+  assert.match(route, /projectionAttemptStatus\(attempt\)/);
+  assert.doesNotMatch(route, /memory\.content|claims:|vectors:/);
+});
+
+test('only a deterministic Worker admission rejection is marked safe for Core fallback', async () => {
+  const prior = { enabled: process.env.CANONICAL_KNOWLEDGE_ENABLED, url: process.env.CANONICAL_PROJECTION_WORKFLOW_URL, secret: process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET };
+  process.env.CANONICAL_KNOWLEDGE_ENABLED = 'true'; process.env.CANONICAL_PROJECTION_WORKFLOW_URL = 'https://projection.test'; process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = 'secret';
+  const client = new CloudflareCanonicalProjectionClient({ fetchImpl: async () => new Response(JSON.stringify({ error: 'bad_request' }), { status: 400 }) });
+  try {
+    await assert.rejects(client.start({ memoryId: 'memory-1', orgId: 'org-1', userId: 'user-1' }), (error) => error.deterministic === true && error.status === 400);
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      const envKey = key === 'enabled' ? 'CANONICAL_KNOWLEDGE_ENABLED' : key === 'url' ? 'CANONICAL_PROJECTION_WORKFLOW_URL' : 'CANONICAL_PROJECTION_WORKFLOW_SECRET';
+      if (value === undefined) delete process.env[envKey]; else process.env[envKey] = value;
+    }
+  }
+});
+
 test('Uwe repair upgrades a generic taught object hint to technology', () => {
   const result = prepareCanonicalProjection({
     title: 'Uwe Egly teaching deep learning', content: 'He started teaching deep learning from tomorrow.',

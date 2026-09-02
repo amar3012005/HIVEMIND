@@ -32,7 +32,14 @@ export class CloudflareCanonicalProjectionClient {
       signal: AbortSignal.timeout(10000),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.error || `canonical workflow admission failed: HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(body?.error || `canonical workflow admission failed: HTTP ${response.status}`);
+      error.status = response.status;
+      // Only a request that the Worker definitely rejected is safe to fall
+      // back from. A timeout may still have queued the Workflow.
+      error.deterministic = [400, 401, 403, 404, 409, 422].includes(response.status);
+      throw error;
+    }
     return body;
   }
 }

@@ -152,8 +152,9 @@ function isPromotionActive(promotion, now = new Date()) {
     && (promotion.maxRedemptions == null || promotion.redemptionCount < promotion.maxRedemptions);
 }
 
-function eligibilityAllows(eligibilities, { email, orgId }) {
+function eligibilityAllows(eligibilities, { email, orgId, allowInviteOnly = false }) {
   const entries = eligibilities || [];
+  if (allowInviteOnly && entries.some((entry) => entry.eligibilityType === 'invite_only')) return true;
   if (entries.some((entry) => entry.eligibilityType === 'anyone')) return true;
   const normalizedEmail = String(email || '').trim().toLowerCase();
   const domain = normalizedEmail.includes('@') ? `@${normalizedEmail.split('@').pop()}` : '';
@@ -211,7 +212,7 @@ export async function findPromotionForCode({ prisma, code, email, orgId, now = n
   return { promotion, version, eligibilities, code: normalized };
 }
 
-export async function findPromotionById({ prisma, promotionId, email, orgId, now = new Date() }) {
+export async function findPromotionById({ prisma, promotionId, email, orgId, now = new Date(), allowInviteOnly = false }) {
   const promotion = await prisma.promotion.findUnique({ where: { id: promotionId } });
   if (!isPromotionActive(promotion, now)) return null;
   const [versions, eligibilities] = await Promise.all([
@@ -219,7 +220,7 @@ export async function findPromotionById({ prisma, promotionId, email, orgId, now
     prisma.promotionEligibility.findMany({ where: { promotionId } }),
   ]);
   const version = currentVersion(versions);
-  if (!version || !eligibilityAllows(eligibilities, { email, orgId })) return null;
+  if (!version || !eligibilityAllows(eligibilities, { email, orgId, allowInviteOnly })) return null;
   return { promotion, version, eligibilities, code: null };
 }
 
@@ -233,10 +234,10 @@ function promotionEnd(promotion, version, now) {
   return days ? new Date(now.getTime() + days * 24 * 60 * 60 * 1000) : null;
 }
 
-export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, userId, email, code = null, promotionId = null, partnerReferralCampaignId = null, requestId = null, now = new Date(), applyProfile = false }) {
+export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, userId, email, code = null, promotionId = null, partnerReferralCampaignId = null, requestId = null, now = new Date(), applyProfile = false, allowInviteOnly = false }) {
   const work = async (tx) => {
     const resolved = promotionId
-      ? await findPromotionById({ prisma: tx, promotionId, email, orgId, now })
+      ? await findPromotionById({ prisma: tx, promotionId, email, orgId, now, allowInviteOnly })
       : await findPromotionForCode({ prisma: tx, code, email, orgId, now });
     if (!resolved) throw new Error('promotion unavailable');
     const { promotion, version } = resolved;

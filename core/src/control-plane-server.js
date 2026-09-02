@@ -3654,26 +3654,10 @@ const server = http.createServer(async (req, res) => {
     if (!enabled) return jsonResponse(res, { error: 'Partner referrals are not enabled', code: 'feature_disabled' }, 404);
     try {
       const body = await parseBody(req).catch(() => ({}));
-      let created = await createPartnerReferralCampaign({ prisma, input: body, baseUrl });
-      if (created.campaign.offer.discount) {
-        try {
-          const billingMod = await import('./billing/stripe.js');
-          const stripeTerms = await billingMod.createManagedPromotionCode({ code: created.plaintextCode, name: created.campaign.internal_name, terms: created.campaign.offer.discount });
-          const promotionId = created.campaign.promotion_id;
-          const version = await prisma.promotionVersion.findFirst({ where: { promotionId }, orderBy: { version: 'desc' } });
-          await prisma.$transaction([
-            prisma.promotionVersion.update({ where: { id: version.id }, data: { commercialTerms: { ...version.commercialTerms, stripe_coupon_id: stripeTerms.couponId, stripe_promotion_code_id: stripeTerms.promotionCodeId } } }),
-            prisma.promotion.update({ where: { id: promotionId }, data: { status: 'active' } }),
-          ]);
-          const refreshed = await getPartnerReferralCampaign({ prisma, campaignId: created.campaign.campaign_id, baseUrl });
-          created = { campaign: refreshed.campaign, plaintextCode: created.plaintextCode };
-        } catch (stripeError) {
-          return jsonResponse(res, { error: 'Stripe promotion setup failed; the partner invitation remains a draft.' }, 502);
-        }
-      }
+      const created = await createPartnerReferralCampaign({ prisma, input: body, baseUrl });
       await audit({ eventType: 'commercial.partner_referral_created', eventCategory: 'billing', action: 'create', resourceType: 'partner_referral', resourceId: created.campaign.campaign_id,
         metadata: { operator: operator.operator, session_id: operator.sessionId, referrer: created.campaign.referrer_email_hint, offer: created.campaign.offer }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      return jsonResponse(res, { campaign: created.campaign, generated_code: created.plaintextCode }, 201);
+      return jsonResponse(res, { campaign: created.campaign }, 201);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }

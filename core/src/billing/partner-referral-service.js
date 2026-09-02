@@ -44,7 +44,11 @@ function publicOffer(row) {
       storage_mode: version?.storageMode,
       trial_days: Number(terms.trial_days || 0),
       monthly_credits: Number(version?.limits?.monthlyCredits || 0),
-      discount: ['percentage_discount', 'fixed_discount'].includes(terms.kind) ? terms : null,
+      max_redemptions: row.promotion?.maxRedemptions ?? null,
+      redemption_count: Number(row.promotion?.redemptionCount || 0),
+      remaining_activations: row.promotion?.maxRedemptions == null
+        ? null
+        : Math.max(0, Number(row.promotion.maxRedemptions) - Number(row.promotion.redemptionCount || 0)),
       fallback_action: version?.fallbackAction,
       expires_at: row.promotion?.endsAt,
     },
@@ -107,24 +111,15 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
   if (!Number.isInteger(trialDays) || trialDays < 1 || trialDays > 365) throw new Error('trial_days must be 1..365');
   const monthlyCredits = Number(input.monthly_credits);
   if (!Number.isSafeInteger(monthlyCredits) || monthlyCredits < 0 || monthlyCredits > 100_000_000) throw new Error('monthly_credits is invalid');
-  const discountKind = String(input.discount_kind || 'none').toLowerCase();
-  const terms = { kind: discountKind === 'none' ? 'trial' : `${discountKind}_discount`, trial_days: trialDays };
-  if (discountKind === 'percentage') terms.percent_off = Number(input.discount_percent);
-  if (discountKind === 'fixed') {
-    terms.amount_off_cents = Number(input.discount_amount_cents);
-    terms.currency = String(input.discount_currency || 'EUR').toUpperCase();
-  }
-  if (discountKind !== 'none') {
-    terms.discount_duration = input.discount_duration || 'once';
-    if (terms.discount_duration === 'repeating') terms.duration_in_months = Number(input.duration_in_months);
-  }
+  // A partner invitation is a reusable trial grant. It intentionally never
+  // creates a coupon, Checkout session, or payment-method requirement.
+  const terms = { kind: 'trial', trial_days: trialDays };
   const created = await prisma.$transaction(async (tx) => {
     const promotion = await createPromotion({ prisma, tx, input: {
       internal_name: input.internal_name || `${referrerDisplayName} partner invitation`,
-      code: input.code,
-      visibility: 'code',
-      status: discountKind === 'none' ? 'active' : 'draft',
-      billing_mode: discountKind === 'none' ? 'entitlement_only' : 'stripe_discount',
+      visibility: 'invite_only',
+      status: 'active',
+      billing_mode: 'entitlement_only',
       account_type: input.account_type || 'personal',
       base_plan: input.base_plan || 'free',
       limits: { monthlyCredits },
@@ -134,7 +129,7 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
       per_email_max: 1,
       starts_at: input.starts_at,
       ends_at: input.ends_at,
-      eligibilities: [{ type: 'anyone' }],
+      eligibilities: [{ type: 'invite_only' }],
       notes: input.notes,
     } });
     const id = crypto.randomUUID();
@@ -154,7 +149,7 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
   });
   const createdRow = await prisma.partnerReferralCampaign.findUnique({ where: { promotionId: created.promotion.id }, include: includePromotion });
   const row = await attachCurrentOffer(prisma, createdRow);
-  return { campaign: adminCampaign(row, baseUrl), plaintextCode: created.plaintextCode };
+  return { campaign: adminCampaign(row, baseUrl) };
 }
 
 export async function listPartnerReferralCampaigns({ prisma, baseUrl }) {
@@ -174,7 +169,7 @@ export async function resolvePartnerReferral({ prisma, token, email = '', orgId 
   const found = await prisma.partnerReferralCampaign.findUnique({ where: { id: parsed.id }, include: includePromotion });
   const row = await attachCurrentOffer(prisma, found);
   if (!row || row.shareTokenVersion !== parsed.version || !safeEqual(row.shareTokenHash, digestPromotionValue(token))) return null;
-  const promotion = await findPromotionById({ prisma, promotionId: row.promotionId, email, orgId, now });
+  const promotion = await findPromotionById({ prisma, promotionId: row.promotionId, email, orgId, now, allowInviteOnly: true });
   if (!promotion) return null;
   if (recordVisit) await prisma.partnerReferralCampaign.update({ where: { id: row.id }, data: { visitCount: { increment: 1 } } });
   return { row, promotion, preview: publicOffer(row) };
@@ -184,7 +179,7 @@ export async function redeemPartnerReferral({ prisma, tx, token, orgId, userId, 
   const resolved = await resolvePartnerReferral({ prisma: tx, token, email, orgId });
   if (!resolved) throw new Error('referral invitation unavailable');
   const result = await redeemPromotion({ prisma, tx, promotionId: resolved.row.promotionId, partnerReferralCampaignId: resolved.row.id,
-    orgId, userId, email, requestId, applyProfile: true });
+    orgId, userId, email, requestId, applyProfile: true, allowInviteOnly: true });
   await tx.partnerReferralCampaign.update({ where: { id: resolved.row.id }, data: { acceptedCount: { increment: 1 } } });
   return { ...result, referral: resolved.preview };
 }

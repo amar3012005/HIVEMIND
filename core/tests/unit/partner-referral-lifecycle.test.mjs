@@ -28,12 +28,15 @@ test('discount terms preserve trial and Stripe duration', () => {
   assert.equal(normalized.version.limits.monthlyCredits, 5000);
 });
 
-test('Day-0 referral email uses Singulance shell and exact Wolfgang offer', () => {
-  const rendered = renderPartnerReferralInvitation({ referrerName: 'Wolfgang', invitationUrl: 'https://next.singulancelabs.com/hivemind/app/invite?referral_token=safe', offer: { trial_days: 21, monthly_credits: 5000, discount: { kind: 'percentage_discount', percent_off: 100 } } });
+test('Day-0 referral email uses Singulance shell and a card-free Wolfgang trial', () => {
+  const rendered = renderPartnerReferralInvitation({ referrerName: 'Wolfgang', invitationUrl: 'https://next.singulancelabs.com/hivemind/app/invite?referral_token=safe', offer: { trial_days: 21, monthly_credits: 5000, plan: 'pro' } });
   assert.match(rendered.subject, /Wolfgang invited you/);
   assert.match(rendered.html, /SINGULANCE/);
   assert.match(rendered.html, /21 days/);
   assert.match(rendered.html, /5,000/);
+  assert.match(rendered.html, /TRIAL PLAN/);
+  assert.match(rendered.html, /No payment method is required/);
+  assert.doesNotMatch(rendered.html, /off after trial/i);
   assert.match(rendered.text, /referral_token=safe/);
 });
 
@@ -75,16 +78,21 @@ function inMemoryPrisma() {
   return { prisma, db };
 }
 
-test('Wolfgang URL resolves and atomically grants the exact offer once', async () => {
+test('Wolfgang URL creates a reusable card-free trial and atomically grants the exact offer', async () => {
   const { prisma, db } = inMemoryPrisma();
   const created = await createPartnerReferralCampaign({ prisma, baseUrl: 'https://next.singulancelabs.com', input: {
     referrer_display_name: 'Wolfgang', referrer_email: 'wolfgang@example.com', code: 'WOLFX2026', account_type: 'enterprise_managed', base_plan: 'scale', trial_days: 30,
-    monthly_credits: 10000, discount_kind: 'none', fallback_action: 'free', max_redemptions: 25,
+    monthly_credits: 10000, discount_kind: 'percentage', discount_percent: 100, fallback_action: 'free', max_redemptions: 25,
   } });
   const token = new URL(created.campaign.invitation_url).searchParams.get('referral_token');
   const preview = await resolvePartnerReferral({ prisma, token, recordVisit: true });
   assert.equal(preview.preview.referrer.display_name, 'Wolfgang');
   assert.equal(preview.preview.offer.monthly_credits, 10000);
+  assert.equal(preview.preview.offer.remaining_activations, 25);
+  assert.equal(db.promotions[0].billingMode, 'entitlement_only');
+  assert.equal(db.promotions[0].status, 'active');
+  assert.deepEqual(db.versions[0].commercialTerms, { kind: 'trial', trial_days: 30 });
+  assert.equal(db.promotions[0].codeHint, null);
   const redeemed = await redeemPartnerReferral({ prisma, tx: prisma, token, orgId: db.organizations[0].id, userId: '33333333-3333-4333-8333-333333333333', email: 'invitee@example.com' });
   assert.equal(redeemed.promotion.version.base_plan, 'scale');
   assert.equal(db.promotions[0].redemptionCount, 1);

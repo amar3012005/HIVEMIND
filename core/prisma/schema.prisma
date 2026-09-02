@@ -4664,6 +4664,66 @@ model CognitionStep {
   @@map("cognition_steps")
 }
 
+/// Durable, tenant-scoped lifecycle for browser-derived visual intelligence.
+/// Source bytes live in R2; this table retains only bounded evidence metadata,
+/// artifact references, and the authoritative stage/state receipt.
+model VisualIntelligenceRun {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  jobId              String   @map("job_id") @db.Uuid
+  roomId             String?  @map("room_id") @db.Uuid
+  workflowInstanceId String?  @unique @map("workflow_instance_id") @db.VarChar(140)
+  processingVersion  Int      @map("processing_version")
+  mode               String   @db.VarChar(32)
+  browserSession     String?  @map("browser_session") @db.VarChar(40)
+  deliverable        String   @db.VarChar(64)
+  status             String   @default("running") @db.VarChar(24)
+  currentStage       String?  @map("current_stage") @db.VarChar(48)
+  progress           Int      @default(0)
+  urls               Json     @default("[]")
+  latchedFlags       Json     @default("{}") @map("latched_flags")
+  sourceRefs         Json     @default("[]") @map("source_refs")
+  artifact           Json     @default("{}")
+  error              Json?
+  terminalReason     String?  @map("terminal_reason") @db.VarChar(180)
+  heartbeatAt        DateTime? @map("heartbeat_at") @db.Timestamptz(6)
+  startedAt          DateTime @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt         DateTime? @map("finished_at") @db.Timestamptz(6)
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  steps              VisualIntelligenceStep[]
+
+  @@unique([orgId, jobId, processingVersion])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@index([status, heartbeatAt])
+  @@map("visual_intelligence_runs")
+}
+
+/// Exactly-once checkpoint/lease record for every visual-intelligence stage.
+model VisualIntelligenceStep {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId           String   @map("run_id") @db.Uuid
+  stageKey        String   @map("stage_key") @db.VarChar(48)
+  shardKey        String   @default("root") @map("shard_key") @db.VarChar(160)
+  status          String   @default("pending") @db.VarChar(24)
+  attempt         Int      @default(0)
+  inputDigest     String   @map("input_digest") @db.VarChar(64)
+  outputReceipt   Json     @default("{}") @map("output_receipt")
+  counters        Json     @default("{}")
+  leaseExpiresAt  DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  error           Json?
+  startedAt       DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  run             VisualIntelligenceRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, stageKey, shardKey])
+  @@index([status, leaseExpiresAt])
+  @@map("visual_intelligence_steps")
+}
+
 model SubjectProfile {
   id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId             String    @map("org_id") @db.Uuid

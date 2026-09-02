@@ -6646,6 +6646,30 @@ exit \$RC
     return jsonResponse(res, { error: 'not_found' }, 404);
   }
 
+  // Visual Intelligence is a Worker-only lifecycle. Browser callers never see
+  // this route or its artifacts; the dedicated shared secret is intentionally
+  // separate from the Dream and general internal service credentials.
+  if (pathname.startsWith('/internal/visual-intelligence/')) {
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed', retryable: false }, 405);
+    if (process.env.VISUAL_INTELLIGENCE_WORKFLOW_ENABLED !== 'true') return jsonResponse(res, { error: 'visual_workflow_disabled', retryable: false }, 403);
+    const expected = String(process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const expectedBuf = Buffer.from(expected); const suppliedBuf = Buffer.from(supplied);
+    if (!expected || expectedBuf.length !== suppliedBuf.length || !crypto.timingSafeEqual(expectedBuf, suppliedBuf)) return jsonResponse(res, { error: 'unauthorized', retryable: false }, 401);
+    let visualBody;
+    try { visualBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body', retryable: false }, 400); }
+    try {
+      const { DurableVisualIntelligenceLifecycle } = await import('./visual-intelligence/durable-visual-intelligence.js');
+      const lifecycle = new DurableVisualIntelligenceLifecycle({ prisma, logger: console });
+      if (pathname === '/internal/visual-intelligence/admit') return jsonResponse(res, await lifecycle.admit(visualBody), 202);
+      if (pathname === '/internal/visual-intelligence/stage') return jsonResponse(res, await lifecycle.executeStage(visualBody));
+      if (pathname === '/internal/visual-intelligence/fail') return jsonResponse(res, await lifecycle.failRun(visualBody));
+      return jsonResponse(res, { error: 'not_found', retryable: false }, 404);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message, retryable: error.retryable !== false }, error.retryable === false ? 422 : 500);
+    }
+  }
+
   // Durable Dreaming v2 callbacks. This surface is never browser-authenticated:
   // it accepts only the dedicated Worker service credential and identifiers.
   if (pathname.startsWith('/internal/dream/')) {

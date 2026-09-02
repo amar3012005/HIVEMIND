@@ -2250,3 +2250,32 @@ git diff --check: passed (line-ending warnings only)
     `Compiled successfully`; Cloudflare artifact pruning completed.
 - This change is frontend-only. No shared Docker container or production
   service was rebuilt or modified.
+
+## 2026-09-02 UTC — Durable Visual Intelligence local candidate committed
+
+- Session branch `codex/visual-intelligence-workflow` pushed commit
+  `0f3aaee52470afcc89e73330ff56f41a1996fb18`; worktree:
+  `P:\HIVEMIND-worktrees\visual-intelligence-workflow`.
+- Added an inert-by-default Visual Intelligence lifecycle with PostgreSQL
+  run/step leases, Worker-authenticated internal Core routes, tenant-scoped R2
+  screenshot artifacts, Gemini 2.5 Flash Lite extraction through the existing
+  Cloudflare AI Gateway boundary, and a workspace Brand DNA notification.
+  User takeover is fail-closed unless a safe, pre-approved Playwright session
+  name is supplied.
+- Verification commands and outputs:
+  - `node --test core/tests/unit/durable-visual-intelligence.test.js` ->
+    `tests 3`, `pass 3`, `fail 0`.
+  - `node --check core/src/visual-intelligence/durable-visual-intelligence.js`
+    and `node --check core/src/server.js` -> exit 0.
+  - `npm run check` in `workers/visual-intelligence-lifecycle` -> TypeScript
+    exited 0.
+  - `npm test` in the Worker -> `Test Files 1 passed`, `Tests 2 passed`.
+  - `npm run dry-run` in the Worker -> isolated local Workflow, Queue, DLQ,
+    R2 and Flagship bindings resolved; `--dry-run: exiting now`.
+- `npx prisma validate` was not run successfully: this Windows host's temporary
+  npx cache has a missing `powershell-utils` dependency. This is an environment
+  defect, not a schema verdict; the permanent integration worktree must rerun
+  Prisma validation before applying the additive migration.
+- This is committed implementation work only. No Worker deployment, Flagship
+  mutation, migration application, shared Docker rebuild, `singulance-local`
+  merge, or production action occurred.

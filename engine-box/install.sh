@@ -4,7 +4,10 @@
 set -euo pipefail
 
 readonly INSTALL_ROOT="${ENGINE_BOX_ROOT:-/opt/hivemind-engine-box}"
-readonly RELEASE_BASE="${ENGINE_BOX_RELEASE_BASE:-https://get.singulancelabs.com/engine-box}"
+# Artifact delivery and management are separate. The bootstrap script can be
+# delivered from the public release host, but one-time enrolment is redeemed at
+# the versioned Engine Box control-plane API.
+readonly MANAGEMENT_BASE="${ENGINE_BOX_MANAGEMENT_BASE:-https://api.singulancelabs.com/v1/engine-box}"
 readonly MIN_DISK_GB="${ENGINE_BOX_MIN_DISK_GB:-80}"
 readonly MIN_MEMORY_MB="${ENGINE_BOX_MIN_MEMORY_MB:-16384}"
 ENROLL_CODE=""
@@ -56,7 +59,7 @@ PY
 curl --fail --silent --show-error --retry 2 \
   -H 'content-type: application/json' \
   --data "$bootstrap_payload" \
-  "$RELEASE_BASE/bootstrap" -o "$tmp_dir/bootstrap.json"
+  "$MANAGEMENT_BASE/bootstrap" -o "$tmp_dir/bootstrap.json"
 
 json_field(){ python3 - "$1" "$2" <<'PY'
 import json, sys

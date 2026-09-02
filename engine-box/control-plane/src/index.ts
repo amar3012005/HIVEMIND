@@ -98,7 +98,7 @@ export default {
       const id = env.INSTALLATION.idFromName(input.installation_id);
       return env.INSTALLATION.get(id).fetch('https://installation.internal/issue', { method: 'POST', body: JSON.stringify(input) });
     }
-    if (url.pathname === '/bootstrap' && request.method === 'POST') {
+    if (url.pathname === '/v1/engine-box/bootstrap' && request.method === 'POST') {
       const input = await request.json<{ enrollment_code: string }>();
       // The signed code starts with its opaque installation ID. Redemption is
       // still single-use because the Durable Object compares its stored hash.

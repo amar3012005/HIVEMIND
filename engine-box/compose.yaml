@@ -100,11 +100,14 @@ services:
     tmpfs: [/tmp]
     environment:
       OAUTH2_PROXY_PROVIDER: oidc
-      OAUTH2_PROXY_OIDC_ISSUER_URL: ${ENGINE_BOX_OIDC_ISSUER:?identity profile requires ENGINE_BOX_OIDC_ISSUER}
-      OAUTH2_PROXY_CLIENT_ID: ${ENGINE_BOX_OIDC_CLIENT_ID:?identity profile requires ENGINE_BOX_OIDC_CLIENT_ID}
+      # Compose evaluates interpolation for inactive profiles too. Keep the
+      # first local boot independent of optional OIDC configuration; the
+      # supervisor validates these fields before enabling this profile.
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${ENGINE_BOX_OIDC_ISSUER:-}
+      OAUTH2_PROXY_CLIENT_ID: ${ENGINE_BOX_OIDC_CLIENT_ID:-}
       OAUTH2_PROXY_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
       OAUTH2_PROXY_COOKIE_SECRET_FILE: /run/secrets/oidc_cookie_secret
-      OAUTH2_PROXY_REDIRECT_URL: ${ENGINE_BOX_OIDC_REDIRECT_URL:?identity profile requires ENGINE_BOX_OIDC_REDIRECT_URL}
+      OAUTH2_PROXY_REDIRECT_URL: ${ENGINE_BOX_OIDC_REDIRECT_URL:-}
       OAUTH2_PROXY_EMAIL_DOMAINS: '*'
       OAUTH2_PROXY_REVERSE_PROXY: 'true'
       OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180

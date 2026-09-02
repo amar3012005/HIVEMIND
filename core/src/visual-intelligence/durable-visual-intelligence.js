@@ -65,8 +65,11 @@ function evidenceOnlyBrandDna(pages) {
 function enrichBrandDnaFromRenderedSignals(extraction, pages) {
   const root = pages[0] || {}; const visual = root.visual || {};
   const colors = Array.isArray(visual.colors) ? visual.colors.filter((value) => /^rgb/.test(String(value))).slice(0, 6) : [];
+  const accents = Array.isArray(visual.accent_colors) ? visual.accent_colors.filter((value) => /^rgb/.test(String(value))).slice(0, 4) : [];
   const [primary, secondary, accent, background] = colors;
-  extraction.palette = { ...(extraction.palette || {}), ...(!clean(extraction?.palette?.primary) && primary ? { primary } : {}), ...(!clean(extraction?.palette?.secondary) && secondary ? { secondary } : {}), ...(!clean(extraction?.palette?.accent) && accent ? { accent } : {}), ...(!clean(extraction?.palette?.background) && background ? { background } : {}) };
+  const currentAccent = String(extraction?.palette?.accent || '');
+  const saturation = (value) => { const values = String(value).match(/\d+/g)?.slice(0, 3).map(Number); return values?.length === 3 ? (Math.max(...values) - Math.min(...values)) / Math.max(1, Math.max(...values)) : 0; };
+  extraction.palette = { ...(extraction.palette || {}), ...(!clean(extraction?.palette?.primary) && primary ? { primary } : {}), ...(!clean(extraction?.palette?.secondary) && secondary ? { secondary } : {}), ...((!currentAccent || saturation(currentAccent) < 0.18) && (accents[0] || accent) ? { accent: accents[0] || accent } : {}), ...(!clean(extraction?.palette?.background) && background ? { background } : {}), ...(accents.length ? { accents } : {}) };
   const font = Array.isArray(visual.fonts) ? visual.fonts[0] : '';
   extraction.typography = { ...(extraction.typography || {}), ...(!clean(extraction?.typography?.headings) && font ? { headings: font } : {}), ...(!clean(extraction?.typography?.body) && font ? { body: font } : {}) };
   extraction.layout = { ...(extraction.layout || {}), ...(!clean(extraction?.layout?.structure) ? { structure: 'Captured public-site hierarchy' } : {}) };

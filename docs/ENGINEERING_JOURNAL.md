@@ -1947,3 +1947,27 @@ slides that find no unique anchor get a page instead of `null`.
   all eight persisted stages, stored 16 source receipts and a protected rendered
   report, created the workspace notification, and completed its idempotent
   notification stage.
+
+## 2026-09-03 UTC — Day 2 editorial report and delivery alignment
+
+- Committed and released `f0bbbf260985d10bbbee98903e52a39385568f3b` and
+  `110bb69801c1bb96d005bafa83369aba76969ce3` from `singulance-main`; Core is
+  healthy on immutable `hivemind/core-api:sha-110bb698`, Playwright remains on
+  the compatible `hivemind/hm-playwright:sha-f0bbbf26`, and the Worker is version
+  `624c959c-4f37-453d-a081-825be58090e1`.
+- Day 2 now retains the existing Singulance/Day label and Humation header, then
+  uses the shared editorial Brand-DNA structure: visual screenshot reference,
+  palette and typography cards, composition and voice cards, one reusable
+  creative brief, and the source ledger. The report agent strip uses the public,
+  cache-versioned Humation avatar contract. Customer logo capture has broader
+  safe DOM selectors and falls back to a customer wordmark when a standalone
+  mark is not present.
+- The delivery email mirrors that editorial card order after the lifecycle
+  header. Its PDF attachment now renders the protected, evidence-rich Day 2
+  report (including the screenshot mosaic) rather than the legacy text-only
+  portrait; temporary artifact-read failure safely falls back to the proven
+  lifecycle PDF without failing delivery.
+- Verification: Day-1 lifecycle + visual intelligence focused unit suite —
+  **24 passed, 0 failed**; JavaScript syntax and `git diff --check` passed.
+  The governed Core-only release completed healthy, and a fresh fatal/panic/
+  uncaught/OOM/migration scan returned no findings.

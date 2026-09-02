@@ -1234,7 +1234,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
 }
 
 // Shadow, dual-write, and authoritative modes share the same fenced outbox
-// replay loop.  Registry mode is off by default, so existing deployments do
+// replay loop. Registry mode is off by default, so existing deployments do
 // not open a new network path until a governed rollout enables it.
 if (prisma && process.env.PLATFORM_REGISTRY_MODE && process.env.PLATFORM_REGISTRY_MODE !== 'off') {
   startPlatformRegistryOutboxDispatcher(prisma);

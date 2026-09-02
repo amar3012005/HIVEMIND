@@ -121,6 +121,8 @@ services:
       # Runtime kill switch for the named partner-referral lifecycle. Keep
       # disabled unless the matching frontend has been released and verified.
       PARTNER_REFERRALS_ENABLED: ${PARTNER_REFERRALS_ENABLED:-false}
+      CLOUDFLARE_FEATURE_FLAGS_URL: ${CLOUDFLARE_FEATURE_FLAGS_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/partner-referrals}
+      PARTNER_REFERRALS_FLAG_CACHE_MS: ${PARTNER_REFERRALS_FLAG_CACHE_MS:-5000}
       # Company onboarding is latency-sensitive and Groq is currently failing
       # over on this host. Prefer OpenRouter here; groqFetch still falls back.
       LLM_PRIMARY: ${CONTROL_LLM_PRIMARY:-openrouter}

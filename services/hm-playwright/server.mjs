@@ -12,7 +12,11 @@ const HOST = '0.0.0.0';
 const PORT = Number(process.env.PLAYWRIGHT_CRAWL_PORT || 8932);
 const TOKEN = String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '');
 const MAX_BODY_BYTES = 64 * 1024;
-const MAX_PDF_HTML_BYTES = 180 * 1024;
+// A verified Day-2 Brand DNA report carries a bounded five-image evidence
+// mosaic as data URIs. 180 KiB rejects that legitimate artifact before the
+// PDF renderer runs; this authenticated, dedicated endpoint still enforces a
+// conservative 1 MiB request and 4 MiB final-PDF ceiling.
+const MAX_PDF_HTML_BYTES = 1024 * 1024;
 const MAX_PDF_BYTES = 4 * 1024 * 1024;
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.PLAYWRIGHT_CRAWL_CONCURRENCY || 2));
 const IDLE_CLOSE_MS = Math.max(10_000, Number(process.env.PLAYWRIGHT_BROWSER_IDLE_MS || 60_000));

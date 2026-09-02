@@ -16,6 +16,13 @@ import { activateEligibleFirstLifeWork } from './first-life-control.js';
 import { normalizeAuthorityPolicy, resolveAuthorityPreference } from './contracts.js';
 import { subscribeHqRuntimeEvents } from './event-bus.js';
 import { recordRuntimeMetric } from './runtime-metrics.js';
+import {
+  RUNTIME_RELIABILITY_RELEASE_0,
+  collectRuntimeReliabilityBaseline,
+  getRuntimeRollout,
+  recordRuntimeReleaseEvidence,
+  setRuntimeRollout,
+} from './reliability-rollout.js';
 
 const ACTIVE_STATES = new Set(['OBSERVING', 'DIAGNOSING', 'DELEGATING', 'WAITING', 'REVIEWING', 'BLOCKED']);
 
@@ -453,6 +460,66 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
     const userId = current.session.userId;
 
     try {
+      if (pathname === '/v1/hq/reliability' && req.method === 'GET') {
+        const feature = String(url.searchParams.get('feature') || RUNTIME_RELIABILITY_RELEASE_0).slice(0, 120);
+        const [rollout, evidence] = await Promise.all([
+          getRuntimeRollout({ prisma, orgId, feature }),
+          prisma.runtimeReleaseEvidence.findMany({
+            where: { orgId, feature },
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+          }),
+        ]);
+        return jsonResponse(res, { rollout, evidence });
+      }
+
+      if (pathname === '/v1/hq/reliability/rollout' && req.method === 'PATCH') {
+        const body = await parseBody(req).catch(() => ({}));
+        const feature = String(body.feature || RUNTIME_RELIABILITY_RELEASE_0).slice(0, 120);
+        const requestedMode = String(body.mode || 'OFF').trim().toUpperCase();
+        if (!['OFF', 'SHADOW', 'ENFORCE'].includes(requestedMode)) {
+          return jsonResponse(res, { error: 'runtime_rollout_mode_invalid' }, 400);
+        }
+        const configured = await setRuntimeRollout({
+          prisma,
+          orgId,
+          feature,
+          requestedMode,
+          metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
+        });
+        const rollout = await getRuntimeRollout({ prisma, orgId, feature });
+        return jsonResponse(res, { configured, rollout });
+      }
+
+      if (pathname === '/v1/hq/reliability/baseline' && req.method === 'POST') {
+        const body = await parseBody(req).catch(() => ({}));
+        const feature = String(body.feature || RUNTIME_RELIABILITY_RELEASE_0).slice(0, 120);
+        const releaseSha = String(body.release_sha || '').trim();
+        if (!releaseSha) return jsonResponse(res, { error: 'runtime_release_sha_required' }, 400);
+        const windowHours = Math.min(168, Math.max(1, Number(body.window_hours || 24) || 24));
+        const configured = await setRuntimeRollout({ prisma, orgId, feature, requestedMode: 'OFF' });
+        const [rollout, baseline] = await Promise.all([
+          getRuntimeRollout({ prisma, orgId, feature }),
+          collectRuntimeReliabilityBaseline({ prisma, orgId, feature, windowHours }),
+        ]);
+        const evidence = await recordRuntimeReleaseEvidence({
+          prisma,
+          orgId,
+          userId,
+          feature,
+          releaseSha,
+          migrationIds: Array.isArray(body.migration_ids) ? body.migration_ids : [],
+          mode: rollout.effectiveMode,
+          tests: body.tests && typeof body.tests === 'object' ? body.tests : {},
+          metrics: baseline,
+          rollbackImages: body.rollback_images && typeof body.rollback_images === 'object' ? body.rollback_images : {},
+          operatorDecision: body.operator_decision || 'Release 0 baseline recorded with rollout OFF.',
+          observedFrom: baseline.observedFrom,
+          observedTo: baseline.observedTo,
+        });
+        return jsonResponse(res, { configured, rollout, baseline, evidence });
+      }
+
       if (pathname === '/v1/hq/runtime' && req.method === 'GET') {
         const runtime = await getHqRuntime({ prisma, orgId });
         const usage = await getHqUsage(prisma, orgId, runtime?.activatedAt || runtime?.createdAt || null);

@@ -77,3 +77,25 @@ test('GET /v1/hq/artifacts/:id never leaks another org\'s artifact — lookup is
   await handle({ method: 'GET' }, fakeRes(), fakeUrl('/v1/hq/artifacts/someone-elses-artifact'));
   assert.equal(queriedOrgId, 'org-1');
 });
+
+test('GET /v1/hq/reliability exposes only the current organization rollout and evidence', async () => {
+  const prisma = {
+    runtimeRolloutPolicy: {
+      findUnique: async ({ where }) => {
+        assert.deepEqual(where, { orgId_feature: { orgId: 'org-1', feature: 'runtime_reliability_release_0' } });
+        return { mode: 'OFF', metadata: {}, updatedAt: new Date() };
+      },
+    },
+    runtimeReleaseEvidence: {
+      findMany: async ({ where }) => {
+        assert.deepEqual(where, { orgId: 'org-1', feature: 'runtime_reliability_release_0' });
+        return [{ id: 'evidence-1', orgId: 'org-1' }];
+      },
+    },
+  };
+  const res = fakeRes();
+  await handler(prisma)({ method: 'GET' }, res, fakeUrl('/v1/hq/reliability'));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.rollout.effectiveMode, 'OFF');
+  assert.deepEqual(res.body.evidence, [{ id: 'evidence-1', orgId: 'org-1' }]);
+});

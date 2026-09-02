@@ -1488,6 +1488,43 @@ model HqRuntime {
   @@map("hq_runtimes")
 }
 
+/// Organization-scoped rollout control for Runtime reliability releases.
+/// Environment kill switches always override this policy.
+model RuntimeRolloutPolicy {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  feature   String   @db.VarChar(120)
+  mode      String   @default("OFF") @db.VarChar(24)
+  metadata  Json     @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, feature])
+  @@index([feature, mode])
+  @@map("runtime_rollout_policies")
+}
+
+/// Immutable release evidence for an organization-scoped Runtime canary.
+model RuntimeReleaseEvidence {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  feature          String    @db.VarChar(120)
+  releaseSha       String    @map("release_sha") @db.VarChar(64)
+  migrationIds     String[]  @default([]) @map("migration_ids")
+  mode             String    @db.VarChar(24)
+  tests            Json      @default("{}") @db.JsonB
+  metrics          Json      @default("{}") @db.JsonB
+  rollbackImages   Json      @default("{}") @map("rollback_images") @db.JsonB
+  operatorDecision String?   @map("operator_decision") @db.Text
+  observedFrom     DateTime? @map("observed_from") @db.Timestamptz(6)
+  observedTo       DateTime? @map("observed_to") @db.Timestamptz(6)
+  recordedByUserId String?   @map("recorded_by_user_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, feature, createdAt(sort: Desc)])
+  @@map("runtime_release_evidence")
+}
+
 /// One-click approval link embedded in a persona email (2026-08-17). GET
 /// preview + POST approve are BOTH public/token-gated (no session) — same
 /// established pattern as OrgInvite's `/v1/join/:token` preview+decline —

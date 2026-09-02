@@ -6,6 +6,10 @@ const catalogPath = process.env.MODEL_CATALOG_PATH || '/etc/hivemind/model-catal
 const signaturePath = process.env.MODEL_CATALOG_SIGNATURE_PATH || '/etc/hivemind/model-catalog.sig';
 const publicKeyPath = process.env.RELEASE_PUBLIC_KEY_PATH || '/etc/hivemind/release.pub';
 const port = Number(process.env.MODEL_ROUTER_PORT || 8090);
+// Request payloads are untrusted—even from another appliance container. Only
+// the supervisor may set this after verifying a signed entitlement and a
+// customer-local admin consent record.
+const remoteInferenceAllowed = process.env.ENGINE_BOX_REMOTE_INFERENCE_ALLOWED === 'true';
 
 function catalogState() {
   const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
@@ -30,7 +34,10 @@ http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/v1/select') {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const request = JSON.parse(raw || '{}');
-      const route = selectModelRoute(catalogState(), request.capability, { routeId: request.route_id, consent: request.consent === true });
+      const route = selectModelRoute(catalogState(), request.capability, {
+        routeId: request.route_id,
+        consent: remoteInferenceAllowed,
+      });
       return response(res, 200, { route });
     }
     return response(res, 404, { error: 'not found' });

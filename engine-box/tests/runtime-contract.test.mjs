@@ -29,6 +29,10 @@ test('Cloudflare routes require explicit consent while sovereign routes do not',
   assert.equal(selectModelRoute(catalog, 'embedding', { routeId: 'cloud-embed', consent: true }).egressConsent, true);
 });
 
+test('caller-provided request flags cannot substitute for local Cloudflare egress consent', () => {
+  assert.throws(() => selectModelRoute(catalog, 'embedding', { routeId: 'cloud-embed', consent: false }), /consent/);
+});
+
 test('signed catalog verification is deterministic', () => {
   const keys = crypto.generateKeyPairSync('ed25519');
   const signature = crypto.sign(null, Buffer.from(canonicalize(catalog)), keys.privateKey).toString('base64');

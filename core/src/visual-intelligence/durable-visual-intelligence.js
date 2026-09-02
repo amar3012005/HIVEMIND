@@ -93,6 +93,13 @@ export async function startVisualIntelligenceWorkflow({ orgId, userId, urls, roo
   const endpoint = String(process.env.HIVEMIND_VISUAL_WORKFLOW_URL || '').replace(/\/$/, '');
   const secret = String(process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');
   if (!endpoint || !secret) return { ok: false, skipped: true, reason: 'workflow_not_configured' };
+  // Day 2 is a lifecycle episode, not a Room turn. The room reference is only
+  // the tenant-scoped source of the company profile, recipient, and Humation
+  // roster needed for its email/report delivery. Requiring it here prevents a
+  // detached workflow from accidentally claiming a customer lifecycle send.
+  if (lifecycleDay === 2 && (!UUID.test(String(roomId || '')) || deliverable !== 'brand_dna_v1')) {
+    return { ok: false, skipped: true, reason: 'day2_lifecycle_context_required' };
+  }
   const trigger = { job_id: crypto.randomUUID(), org_id: orgId, user_id: userId, urls, mode, deliverable, processing_version: VISUAL_PIPELINE_VERSION, requested_at: new Date().toISOString(), ...(UUID.test(String(roomId || '')) ? { room_id: roomId } : {}), ...(lifecycleDay === 2 ? { lifecycle_day: 2 } : {}) };
   validateVisualAdmission(trigger);
   const response = await fetchImpl(`${endpoint}/start`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(trigger), signal: AbortSignal.timeout(15_000) });
@@ -268,7 +275,12 @@ export class DurableVisualIntelligenceLifecycle {
       role: clean(agent?.jobTitle || agent?.title || agent?.role, 96),
       role_archetype: clean(agent?.roleArchetype || agent?.archetype || agent?.role, 96),
     })).filter((agent) => agent.name);
-    const artifact = { artifact_type: 'brand_dna', version: `visual-intelligence-v${run.processingVersion}`, generated_at: new Date().toISOString(), evidence: sourceRefs, analysis: extracted?.extraction || {}, visual_generation_brief: extracted?.extraction?.visual_generation_brief || {}, agent_roster };
+    const artifact = {
+      artifact_type: 'brand_dna', version: `visual-intelligence-v${run.processingVersion}`,
+      generated_at: new Date().toISOString(), evidence: sourceRefs,
+      analysis: extracted?.extraction || {}, visual_generation_brief: extracted?.extraction?.visual_generation_brief || {}, agent_roster,
+      reusable: { kind: 'company_brand_dna', scope: 'organization', authority: 'captured_first_party_evidence', intended_uses: ['visual_artifacts', 'brand_intelligence', 'hyperagent_context'] },
+    };
     if (!artifact.evidence.length || !Object.keys(artifact.visual_generation_brief).length) throw Object.assign(new Error('invalid_brand_dna_artifact'), { retryable: false });
     await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { artifact } }); return { ...this._receipt({ ...run, artifact }), artifact, counts: { evidence: artifact.evidence.length } };
   }

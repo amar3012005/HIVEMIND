@@ -113,6 +113,29 @@ Control Plane re-reads sealed turn from PostgreSQL
 Persist provider receipt in company.day1_first_move
 ```
 
+### Scalable admission and recovery
+
+The lifecycle engine must never use a workflow instance as the only admission
+or recovery record. Every episode follows this reusable pattern:
+
+```text
+persisted PostgreSQL lifecycle receipt
+  -> identifier-only Cloudflare Queue admission (delayed until due)
+  -> bounded Queue consumer starts/claims work
+  -> Cloudflare Workflow owns waits, retries, and event correlation
+  -> Control Plane re-reads authoritative receipts before every side effect
+  -> explicit message acknowledgement or DLQ after bounded retries
+```
+
+Day 1 uses `hivemind-lifecycle-admission-v1` with a consumer maximum of ten
+concurrent launch invocations and ten delivery retries before
+`hivemind-lifecycle-admission-dlq-v1`. The five-minute reconciliation admits up
+to 500 eligible receipts per run. A room seal whose Workflow event cannot be
+delivered re-admits the same identifiers; the Queue handler re-reads state and
+either sends the single pending report or observes the existing provider
+receipt. Future lifecycle adapters must use this envelope and must not put
+customer content, reports, PDFs, or secrets in Queue/Workflow payloads.
+
 ### Cloudflare owns
 
 - the 24-hour durable sleep;

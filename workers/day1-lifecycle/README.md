@@ -1,13 +1,23 @@
 # HIVEMIND Day-1 lifecycle
 
-Cloudflare Workflow authority for the first autonomous company move:
+Cloudflare Queue + Workflow authority for the first autonomous company move.
+This is the reusable lifecycle-admission pattern for future episodes; adapters
+define their own control-plane endpoints, while this layer carries identifiers,
+due time, retries, bounded launch concurrency, and receipts.
 
-1. Sleep until Day 1.
-2. Ask the control plane to atomically claim and start a research-tagged task.
-3. Wait for the real HyperAgent room seal event.
-4. Ask the control plane to render the unchanged sealed output as a portrait report and send it through the existing Cloudflare Email Service path.
+1. Admit an identifier-only lifecycle message to `hivemind-lifecycle-admission-v1`.
+2. Let its Queue consumer launch at most ten room starts concurrently; delayed
+   messages keep future work out of a hot Worker.
+3. Atomically claim and start a research-tagged task through the Control Plane.
+4. Use a Workflow for the long wait for the real HyperAgent room seal event.
+5. Ask the Control Plane to render the unchanged sealed output as a portrait
+   report and send it through the existing Cloudflare Email Service path.
 
-The Workflow stores no tenant report body and uses no R2 bucket. PostgreSQL remains the lifecycle authority.
+The Queue and Workflow store no tenant report body and use no R2 bucket.
+PostgreSQL remains the lifecycle authority. The Queue has explicit individual
+acknowledgements, ten retries, and a DLQ (`hivemind-lifecycle-admission-dlq-v1`).
+The five-minute reconciliation scans up to 500 eligible lifecycle receipts;
+this is a recovery path, not the primary admission path.
 
 ## Release gates
 

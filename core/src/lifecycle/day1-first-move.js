@@ -233,7 +233,7 @@ export async function scheduleDayOneWorkflow({ orgId, hqRoomId, onboardedAt, fet
 }
 
 /** Reconciliation source for Cloudflare's cron trigger; no report body leaves Postgres. */
-export async function listEligibleDayOneCompanies({ prisma, limit = 100 } = {}) {
+export async function listEligibleDayOneCompanies({ prisma, limit = 500 } = {}) {
   requireDayOneWorkflowEnabled();
   const rows = await prisma.$queryRawUnsafe(
     `SELECT id, org_id, "agent_connectors"->'_company' AS company
@@ -242,7 +242,7 @@ export async function listEligibleDayOneCompanies({ prisma, limit = 100 } = {}) 
         AND "agent_connectors" #>> '{_company,day0_report_email,status}' = 'sent'
         AND COALESCE("agent_connectors" #>> '{_company,day1_first_move,status}', '') NOT IN ('running','completed','sending','sent')
       ORDER BY created_at ASC LIMIT $1`,
-    Math.max(1, Math.min(100, Number(limit) || 100)),
+    Math.max(1, Math.min(500, Number(limit) || 500)),
   ).catch(() => []);
   return (rows || []).map((row) => {
     const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
@@ -279,7 +279,18 @@ export async function notifyDayOneWorkflowCompletion({ prisma, turnId, status = 
     `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
     JSON.stringify(state), row.id,
   );
-  return workflowFetch('/event', { instance_id: state.workflow_instance_id, org_id: String(row.org_id), turn_id: turnId, status }, { fetchImpl, attempts: 5 });
+  const event = await workflowFetch('/event', { instance_id: state.workflow_instance_id, org_id: String(row.org_id), turn_id: turnId, status }, { fetchImpl, attempts: 5 });
+  if (event.ok) return event;
+  // A Cloudflare Workflow instance can be delayed or be recovering after an
+  // edge failure exactly when the Room emits its only completion event. Put an
+  // identifier-only admission back through the durable lifecycle Queue. The
+  // queue-side handler re-reads this receipt and delivers idempotently.
+  const recovery = await workflowFetch('/start', {
+    org_id: String(row.org_id),
+    hq_room_id: String(row.id),
+    target_at: new Date().toISOString(),
+  }, { fetchImpl, attempts: 5 });
+  return { ...recovery, recovered_from_event_failure: true, event_reason: event.reason || null };
 }
 
 export async function prepareDayOneFirstMove({ prisma, orgId, hqRoomId, workflowInstanceId, dispatchTurn } = {}) {

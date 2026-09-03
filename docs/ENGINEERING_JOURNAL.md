@@ -104,9 +104,9 @@ or uncommitted changes as completed work.
   pauses overall status (lone Gmail step no longer synthesizes as completed);
   `ctx.unifiedDag` test override; planner/orchestrator tests; features.md
 - Verification: `node --test` hosted-composio-planner 11 pass; compound-orchestrator 49 pass
-- Production: pending `ssh singulance` `/root/quick-deploy.sh singulance-main`
+- Production: RELEASE OK `04b2de60` manifest `/root/releases/manifests/04b2de60/20260903T192606Z/`; env `USE_TOOLS_UNIFIED_DAG=true`; Flagship `enabled:true` `source:cloudflare-flagship`
 - Rollback: Flagship off; unset `USE_TOOLS_UNIFIED_DAG`; previous Core SHA `64b37adb`
-- Next: deploy then Flagship JSON + env verify; authenticated Gmail canary if cookies exist
+- Next: authenticated Gmail Connect canary (session cookies) — not driven here
 
 ## 2026-09-03 UTC — use_tools unified DAG (Accepted release)
 

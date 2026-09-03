@@ -575,5 +575,5 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   tab; `__retry_connect__` resumes the same DAG. Writes remain `pendingWrite`.
 - Rollback: Flagship default `off` and/or unset Core env (not the string `true`).
   Redeploy previous canonical Core SHA only if code must revert.
-- 2026-09-03 production: Core `64b37adb` (env enable) plus connect-pause fix on
-  this follow-up SHA; Worker Connect `59cdd8cc` / Flagship endpoint `66edeaf8`.
+- 2026-09-03 production: Core `04b2de60` (connect-pause + status fail-close),
+  env enable, Worker Connect `59cdd8cc` / Flagship endpoint `66edeaf8`.

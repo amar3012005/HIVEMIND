@@ -10661,16 +10661,18 @@ Write the persona now.`;
               return { url: resolvedUrl, text: stripHtml(html), html, links: discoverHttpLinks(html, resolvedUrl) };
             } catch { return { url: pageUrl, text: '', html: '', links: [] }; } finally { clearTimeout(t); }
           };
+          // Start the customer-visible browser capture with the very first
+          // onboarding work.  It is deliberately independent: semantic
+          // discovery must never wait for a slow page render, and a failed
+          // capture still falls through to the existing Firecrawl/official
+          // image fallbacks below.
+          const screenshotCapturePromise = captureWebsiteScreenshotWithPlaywright(homepageUrl);
           const [homepage, firecrawlResearch, initialCoverage] = await Promise.all([
             fetchPage(homepageUrl),
             researchCompanyWebsite(homepageUrl, { maxPages: 5, includeCrawl: false, onProgress: say }),
             searchCompanyMarket(`"${host}" company official LinkedIn Instagram Facebook X YouTube contact competitors`, { limit: 10 }),
           ]);
           markTiming('source_collection');
-          // The shared Playwright renderer is the fastest path to the exact page
-          // customers recognize. It runs independently from semantic onboarding,
-          // with a short bounded timeout; Firecrawl remains a visual-only fallback.
-          const screenshotCapturePromise = captureWebsiteScreenshotWithPlaywright(homepageUrl);
           const directHomepage = {
             url: homepage.url || homepageUrl,
             content: homepage.text,

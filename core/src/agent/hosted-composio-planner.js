@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isUseToolsUnifiedDagEnabled } from './use-tools-unified-flag.js';
+import { canonicalNativeToolGroup } from './native-tool-groups.js';
 
 const TOOLKIT_TO_PROVIDER = Object.freeze({
   gmail: 'gmail',
@@ -56,10 +57,12 @@ function validateGroups(groups, allowedGroups, { allowCatalogDisconnected = fals
     .map((group) => String(group || '').trim().toLowerCase())
     .filter(Boolean))];
   if (normalized.length !== 1) throw new Error('planner_step_requires_exactly_one_tool_group');
-  const group = normalized[0];
-  if (allowedGroups.has(group)) return { groups: normalized, connection_required: false };
+  const native = canonicalNativeToolGroup(normalized[0]);
+  const group = native || normalized[0];
+  if (native) return { groups: [native], connection_required: false };
+  if (allowedGroups.has(group)) return { groups: [group], connection_required: false };
   if (allowCatalogDisconnected && (CATALOG_CONNECTOR_PROVIDERS.includes(group) || NATIVE_GROUPS.has(group))) {
-    return { groups: normalized, connection_required: !NATIVE_GROUPS.has(group) };
+    return { groups: [group], connection_required: !NATIVE_GROUPS.has(group) };
   }
   throw new Error(`planner_selected_unavailable_tool_group:${group}`);
 }

@@ -1052,6 +1052,38 @@ test('compound orchestrator: emits tool_call/tool_result SSE events', async () =
   assert.deepEqual(events.filter((e) => e.type === 'orchestration_step').map((e) => e.phase), ['started', 'completed']);
 });
 
+test('hivemind-context never opens a Composio connect link', async () => {
+  process.env.USE_TOOLS_UNIFIED_DAG = 'true';
+  let linked = 0;
+  const composio = {
+    async getToolkitStatus() { return 'available'; },
+    async createConnectLink(toolkit) {
+      if (String(toolkit).includes('hivemind')) {
+        linked += 1;
+        throw new Error('must not connect hivemind-context');
+      }
+      return { redirectUrl: 'https://connect.composio.dev/github' };
+    },
+    async getToolkitTools() { return []; },
+    async executeTool() { throw new Error('must not execute composio'); },
+  };
+  const result = await runCompoundOrchestrator({
+    subtasks: [
+      { operation: 'recall', tool_groups: ['hivemind-context'], depends_on: null, message: 'TARA' },
+      { operation: 'github', tool_groups: ['github'], depends_on: null, message: 'TARA on github' },
+    ],
+    ctx: {
+      userId: 'u1', orgId: 'o1', unifiedDag: true, _trace: { traceId: 'ctx-1' },
+      _tracedDispatch: async () => ({ memories: [{ id: 'm1', title: 'TARA', content: 'voice agent' }], evidence: [] }),
+    },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({ toolName: 'composio_github_search', args: {} })),
+  });
+  assert.equal(linked, 0);
+  assert.equal(result.steps[0].status, 'completed');
+  assert.equal(result.inputRequests[0]?.toolkit, 'github');
+});
+
 test('unified DAG pauses a required disconnected toolkit and still runs independent native recall', async () => {
   const previous = process.env.USE_TOOLS_UNIFIED_DAG;
   process.env.USE_TOOLS_UNIFIED_DAG = 'true';

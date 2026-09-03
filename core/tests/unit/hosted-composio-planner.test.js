@@ -68,6 +68,20 @@ test('flag-off still rejects a disconnected named catalog app', () => {
   }, { request: 'emails and notes', connectedProviders: [], unifiedDag: false }), /planner_selected_unavailable_tool_group:gmail/);
 });
 
+test('hivemind-context is native recall, never a Composio connect app', () => {
+  const steps = decisionToHostedPlan({
+    operation: 'compound',
+    subtasks: [
+      { operation: 'github', tool_groups: ['github'], message: 'TARA on github' },
+      { operation: 'context', tool_groups: ['hivemind-context'], message: 'TARA in memory' },
+      { operation: 'email', authority: 'write', tool_groups: ['gmail'], depends_on: [0, 1], message: 'email rama' },
+    ],
+  }, { request: 'github and hivemind then email', connectedProviders: ['github'], unifiedDag: true });
+  assert.deepEqual(steps.map((step) => step.tool_groups[0]), ['github', 'hivemind-recall', 'gmail']);
+  assert.equal(steps[1].connection_required, false);
+  assert.equal(steps[2].connection_required, true);
+});
+
 test('unified DAG keeps a disconnected catalog app beside native recall', () => {
   const steps = decisionToHostedPlan({
     operation: 'compound',

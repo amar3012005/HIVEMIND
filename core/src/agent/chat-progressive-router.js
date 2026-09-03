@@ -788,6 +788,10 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
       if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       const write = args?.intent === 'write';
       const provider = s(args?.provider, 128);
+      const nativeGroup = String(provider || '').toLowerCase().replace(/_/g, '-');
+      if (nativeGroup.startsWith('hivemind-') || nativeGroup === 'hivemind' || nativeGroup === 'hivemind-context') {
+        return { decision: { ...base, operation: 'recall', queries: [s(args?.request, 2000) || message], tool_groups: ['hivemind-recall'] }, usage: null };
+      }
       return { decision: {
         ...base,
         operation: write ? 'connector_write' : 'connector_read',

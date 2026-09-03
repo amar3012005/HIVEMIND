@@ -21,6 +21,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { isUseToolsUnifiedDagEnabled } from './use-tools-unified-flag.js';
+import { canonicalNativeToolGroup, isNativeHivemindGroup } from './native-tool-groups.js';
 
 async function chatCompletionFetch(...args) {
   const mod = await import('../llm/chat-provider.js');
@@ -102,11 +103,8 @@ function normalizeConnectorIds(groups) {
 
 function composioToolkitFor(groups) {
   for (const g of groups || []) {
-    // Known aliases preserve the public provider vocabulary. Unknown groups
-    // are already constrained by the tenant's ACTIVE Composio inventory in
-    // the hosted planner, so pass their toolkit slug through unchanged. This
-    // supports newly connected Composio toolkits without a code release.
     const normalized = String(g || '').trim().toLowerCase();
+    if (isNativeHivemindGroup(normalized)) continue;
     const tk = COMPOSIO_TOOLKIT_MAP[normalized] || normalized;
     if (tk) return tk;
   }
@@ -848,7 +846,7 @@ export function normalizeCompoundDependencies(subtasks) {
     // receive preceding governed read results so provider input generation can
     // produce complete content. This is language and toolkit independent.
     const isConnectorStep = step.tool_groups.length > 0
-      && !step.tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group));
+      && !step.tool_groups.some((group) => isNativeHivemindGroup(group));
     const contentProducingStep = step.authority === 'write'
       || step.output_kind === 'message'
       || step.output_kind === 'document'
@@ -863,7 +861,7 @@ export function normalizeCompoundDependencies(subtasks) {
       || isConnectorStep;
     if (!contentProducingStep || step.depends_on.length) continue;
     const priorReads = normalized.slice(0, index).flatMap((candidate, priorIndex) => {
-      const nativeRead = candidate.tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group));
+      const nativeRead = candidate.tool_groups.some((group) => isNativeHivemindGroup(group));
       return candidate.authority === 'read' || nativeRead ? [priorIndex] : [];
     });
     if (priorReads.length) step.depends_on = priorReads;
@@ -1128,8 +1126,12 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // engine. The connector runtime has no hivemind-* connectors. Checked BEFORE
   // getRuntime so a native step never touches (or lazily initializes) the
   // connector runtime.
-  if (toolGroups.some((g) => NATIVE_HIVEMIND_GROUPS.has(g))) {
-    return runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent });
+  if (toolGroups.some((g) => isNativeHivemindGroup(g))) {
+    const canonical = canonicalNativeToolGroup(toolGroups.find((g) => isNativeHivemindGroup(g)));
+    return runNativeHivemindStep({
+      subtask: { ...subtask, tool_groups: [canonical || 'hivemind-recall'] },
+      ctx, priorOutputs, onEvent,
+    });
   }
 
   // 1. Scope the model's tool choices to this subtask's connector group.
@@ -1837,13 +1839,13 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
   // that a final synthesis or client may rely on.
   const recallResults = results
     .filter((result, index) => Array.isArray(subtasks[index]?.tool_groups)
-      && subtasks[index].tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group))
+      && subtasks[index].tool_groups.some((group) => isNativeHivemindGroup(group))
       && result?.result)
     .map((result) => result.result);
   const readResults = results.flatMap((result, index) => {
     if (result?.status !== 'completed' || !result?.result) return [];
     const groups = Array.isArray(subtasks[index]?.tool_groups) ? subtasks[index].tool_groups : [];
-    if (groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group))) return [];
+    if (groups.some((group) => isNativeHivemindGroup(group))) return [];
     return [{
       index,
       operation: subtasks[index]?.operation || 'read',

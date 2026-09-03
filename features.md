@@ -567,3 +567,4 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   Required missing auth pauses dependents; Connect href opens Composio OAuth;
   resume retries the same DAG. Writes remain `pendingWrite` drafts.
 - Optional Flagship mapping uses the same name. Default **off**.
+- 2026-09-03 production: Core `9ae88e3e` (manifest `20260903T183836Z`); Worker `hivemind-web` `5108b2a5-76cc-4641-a1d9-9d17650c973e` from Da-vinci `59cdd8cc`. Flag not globally enabled.

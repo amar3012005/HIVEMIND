@@ -95,6 +95,18 @@ or uncommitted changes as completed work.
 - Rollback: unset `USE_TOOLS_UNIFIED_DAG` (fail-closed)
 - Next: unit tests, then hivemind-safe-deploy if tests pass
 
+## 2026-09-03 UTC — use_tools unified DAG (Accepted release)
+
+- State: Accepted release
+- Owner: Grok
+- Branch: `origin/singulance-main`
+- Base / commit: `b56fee72` -> `9ae88e3eba673f424564be5602caff9050bd410b`
+- Scope: fail-closed `USE_TOOLS_UNIFIED_DAG` Core orchestrator; Da-vinci Connect href `59cdd8cc`
+- Verification: 58 unit tests; `ssh singulance '/root/quick-deploy.sh singulance-main'` RELEASE OK; hm-core/control/employees healthy rev=9ae88e3eba67; `curl https://api.singulancelabs.com/health` ok; Worker `hivemind-web` version `5108b2a5-76cc-4641-a1d9-9d17650c973e`; login `https://next.singulancelabs.com/hivemind/login` HTTP 200
+- Production: manifest `/root/releases/manifests/9ae88e3e/20260903T183836Z/RELEASE_MANIFEST.json`. Flag remains **off** (fail-closed).
+- Rollback: redeploy previous canonical SHA; unset `USE_TOOLS_UNIFIED_DAG`
+- Next: org-scoped then full enable of `USE_TOOLS_UNIFIED_DAG` after authenticated canary
+
 ## Current Git Baseline
 
 ## 2026-07-19 UTC - SINGULANCE deployment governor started

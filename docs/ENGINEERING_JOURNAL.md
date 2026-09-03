@@ -2135,3 +2135,13 @@ slides that find no unique anchor get a page instead of `null`.
   artificial urgency or priority headers were added because they cannot
   guarantee inbox placement and can damage sender reputation; Gmail controls
   final Inbox/Promotions/Spam classification.
+
+## 2026-09-03 UTC — Root new-agent platform handoff
+
+- Added root [`HANDOFF.md`](../HANDOFF.md) as the first-read operational map
+  for future agents. It records platform ownership boundaries for the memory
+  engine, Control Plane, HyperAgents, TARA, frontend, and Cloudflare; the
+  mandatory tenant/provenance rules; isolated `singulance-main` worktree
+  creation; test/curl/commit/integration steps; and the governed production
+  deployment and rollback commands. This is documentation-only and has not
+  been deployed.

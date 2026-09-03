@@ -22,6 +22,8 @@ const input = {
     offer: 'Company memory, governed agents, and reusable workflows.',
     icp: 'European operations, strategy, research, and compliance teams.',
     open_questions: ['Confirm the primary buyer.', 'Approve the first operating priority.'],
+    contact_details: { emails: ['hello@canary.example'], phones: ['+49 30 000000'] },
+    social_profiles: [{ url: 'https://www.linkedin.com/company/canary-example' }],
   },
   source_pages: [
     { url: 'https://canary.example/' },
@@ -29,6 +31,11 @@ const input = {
     { url: 'https://canary.example/company' },
     { url: 'https://canary.example/legal/privacy' },
   ],
+  research: [
+    { title: 'Regulated teams need accountable AI', summary: 'European operators require source-backed decisions, explicit authority, and durable audit trails.', url: 'https://canary.example/research/accountable-ai' },
+    { title: 'Company memory is the operating context', summary: 'Reusable company knowledge reduces repeated discovery and keeps work grounded across teams.', url: 'https://canary.example/research/company-memory' },
+  ],
+  documents: ['Company profile', 'Market and audience brief', 'Operating priorities'],
   tasks: [
     { title: 'Validate the company narrative', room_name: 'Research', deliverable: 'A source-backed positioning brief.' },
     { title: 'Map the highest-value customer need', room_name: 'Market', deliverable: 'A ranked customer-needs report.' },

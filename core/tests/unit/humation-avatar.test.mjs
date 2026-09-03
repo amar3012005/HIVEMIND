@@ -51,14 +51,24 @@ test('Day 0 attachment is an A4 portrait lifecycle report, not a slide deck', ()
   const rendered = renderDayZeroOnboardingReportHtml({
     company: 'Canary Co',
     website: 'https://canary.example',
-    profile: { tagline: 'Useful work', icp: 'Operations teams' },
+    profile: { tagline: 'Useful work', icp: 'Operations teams', positioning: 'Evidence-first operations', offer: 'Company intelligence' },
+    mission: 'Make company work accountable.',
+    research: [{ title: 'Market signal', summary: 'A supported market finding.', url: 'https://canary.example/research' }],
+    documents: ['Company profile'],
     source_pages: [{ url: 'https://canary.example/products' }],
     tasks: [{ title: 'Review the first move', room_name: 'Research' }],
     team: [{ id: 'builder-1', name: 'Mina', roleArchetype: 'builder', jobTitle: 'Engineer' }],
   });
   assert.match(rendered.html, /@page\{size:A4 portrait/);
   assert.match(rendered.html, /DAY-0 \/ AWAKENING/);
-  assert.match(rendered.html, /EVIDENCE LEDGER/);
+  assert.match(rendered.html, /MARKET &amp; AUDIENCE · 03/);
+  assert.match(rendered.html, /MISSION &amp; POSITIONING · 04/);
+  assert.match(rendered.html, /COMPANY MEMORY · 07/);
+  assert.match(rendered.html, /SOURCE LANDSCAPE · 08/);
+  assert.match(rendered.html, /HUMAN CONFIRMATION · 09/);
+  assert.match(rendered.html, /YOUR COMPANY · 10/);
+  assert.match(rendered.html, /Market signal/);
+  assert.match(rendered.html, /Company profile/);
   assert.match(rendered.html, /SINGULANCE · YOUR COMPANY, IN MOTION/);
   assert.doesNotMatch(rendered.html, /deck-page/);
 });

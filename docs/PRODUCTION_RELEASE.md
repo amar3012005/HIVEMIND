@@ -1,5 +1,20 @@
 # Current SINGULANCE Production Release
 
+## 886338b6 — Day 0 portrait-report correction
+
+- Parent SHA `886338b6f6ca9cf09cd7a6d670e16c13647b4bfa`; frontend unchanged;
+  no migration. Control Plane is healthy on immutable
+  `hivemind/control-plane:sha-886338b6`; manifest
+  `/root/releases/manifests/886338b6/20260903T101642Z/RELEASE_MANIFEST.json`.
+- Restored the prior Day 0 email layout and changed only its attachment to the
+  verified two-page A4 portrait Awakening report. Version `day-0-v4` supersedes
+  v3 for future delivery and permits one receipt-preserving correction.
+- Acceptance: syntax and focused tests 7/7; local production-equivalent PDF
+  render visually passed; authorized Cloudflare delivery was queued; replay was
+  idempotent; internal health 200 and fresh error scan empty.
+- Rollback: `/root/quick-deploy.sh --rollback control-plane`; delivery receipts
+  remain immutable and are not removed by code rollback.
+
 ## b3f7ee2f — Day 0 lifecycle report parity
 
 - Parent SHA `b3f7ee2f4eeee6ee154b674e549f1cebdd7316da`; frontend unchanged at

@@ -2052,3 +2052,21 @@ slides that find no unique anchor get a page instead of `null`.
   immediate repeat returned the stored v3 receipt with `accepted:false`.
   Internal Control Plane health returned `200`; fresh fatal/panic/uncaught/
   unhandled/OOM and Day-0 failure scans were empty.
+
+## 2026-09-03 UTC — Day 0 portrait-report scope correction
+
+- Supersedes the v3 presentation decision, not its immutable delivery receipt.
+  The established Day 0 email body was restored unchanged; only its attached
+  Awakening report was redesigned. Release commit
+  `886338b6f6ca9cf09cd7a6d670e16c13647b4bfa` runs on Control Plane.
+- The `day-0-v4` attachment is a continuous A4 portrait lifecycle report with
+  Singulance header/footer, company signal, Humation roster, first moves, human
+  review, evidence ledger, and workspace action. The ten-page landscape pitch
+  deck is no longer the production report renderer.
+- Verification: focused syntax/unit suite **7 passed, 0 failed**. A synthetic
+  report rendered through the real local Playwright PDF service as exactly two
+  A4 pages; both pages were rendered to PNG and visually inspected with no blank
+  page, clipped card, split item, or footer overlap. Production Control Plane is
+  healthy on immutable `sha-886338b6`; the authorized v4 correction returned a
+  Cloudflare Email Service `queued` receipt, and immediate replay returned
+  `accepted:false`. Fresh critical/Day-0 failure logs were empty.

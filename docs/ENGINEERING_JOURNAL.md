@@ -2070,3 +2070,28 @@ slides that find no unique anchor get a page instead of `null`.
   healthy on immutable `sha-886338b6`; the authorized v4 correction returned a
   Cloudflare Email Service `queued` receipt, and immediate replay returned
   `accepted:false`. Fresh critical/Day-0 failure logs were empty.
+
+## 2026-09-03 UTC — Complete Day 0 content restored in portrait form
+
+- Committed feature `6e0df1d4` and integrated/released parent
+  `c09ff95b2641d5cfd5bb26159c19e0356c38a27f`. Only Control Plane was
+  rebuilt through the governor; it is healthy on immutable
+  `hivemind/control-plane:sha-c09ff95b` with manifest
+  `/root/releases/manifests/c09ff95b/20260903T104822Z/RELEASE_MANIFEST.json`.
+- `day-0-v5` preserves the established Day 0 transactional email and restores
+  all original Awakening-report sections in A4 portrait form: awakening,
+  company signal, market and audience, mission and positioning, HyperAgents,
+  first moves, company memory, source landscape, human confirmation, and the
+  workspace entry action. No slide-deck renderer is used.
+- Verification: syntax and focused lifecycle tests passed **7/7**. The complete
+  synthetic fixture rendered through the real Playwright service as six A4
+  portrait pages; every page was inspected after fixing a continuation-page
+  pagination defect. No cards, records, or sections are clipped or split. The
+  authorized owner reissue returned Cloudflare Email Service `delivered`;
+  immediate replay returned `accepted:false`; public API health returned `200`;
+  and fresh Control Plane logs contained the expected delivery receipt.
+- Deliverability audit: the stable transactional sender uses
+  `admin.singulancelabs.com`; Cloudflare Email Sending SPF, DKIM, bounce MX, and
+  the subdomain DMARC `p=reject` record resolve publicly. Messages contain both
+  HTML and plain text and do not set artificial priority headers. Inbox/tab
+  placement remains recipient-provider controlled and is not guaranteed.

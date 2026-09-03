@@ -1422,3 +1422,20 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   copy while omitting the folder-picker copy.
 - Rollback: Worker version `6fd6b92c-90fd-408e-8844-498f4ed7b371`. No backend
   deploy, migration, flag, or stored data change.
+
+## c09ff95b — complete Day 0 portrait Awakening report
+
+- Parent SHA `c09ff95b2641d5cfd5bb26159c19e0356c38a27f`; feature SHA
+  `6e0df1d4`. Control Plane alone was rebuilt through the governed path and is
+  healthy on immutable `hivemind/control-plane:sha-c09ff95b`.
+- The `day-0-v5` attachment carries all ten original Day 0 content sections in
+  a continuous six-page A4 portrait report. The established transactional
+  email body remains unchanged.
+- Acceptance: focused tests 7/7; all six rendered pages visually verified;
+  Cloudflare Email Service returned `delivered`; replay returned
+  `accepted:false`; public API health returned 200; fresh logs were clean.
+- Sender authentication was verified through the public Cloudflare Email
+  Sending SPF/DKIM/bounce records and DMARC `p=reject` for the transactional
+  subdomain. Recipient inbox/tab classification remains provider-controlled.
+- Rollback: governor rollback of Control Plane to `sha-886338b6`. Existing v5
+  receipts remain immutable and prevent duplicate delivery.

@@ -1,6 +1,11 @@
 import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../humation-avatar.js';
 import { CARTESIA, browserChrome, deckPage, escapeHtml, lifecycleDeckShell, lifecycleEmailShell, lifecycleSubject } from './cartesia-lifecycle.js';
 
+// Delivery version is deliberately part of the generated artefact contract.
+// A newer renderer can therefore be reissued once without treating a browser
+// refresh as permission to resend a lifecycle message.
+export const DAY_ZERO_REPORT_VERSION = 'day-0-v3';
+
 function clean(value, limit = 360) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 }
@@ -97,7 +102,7 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
     || null;
 
   return {
-    version: 'day-0-v2',
+    version: DAY_ZERO_REPORT_VERSION,
     companyName: name,
     website,
     websiteHost: hostname(website),
@@ -152,14 +157,26 @@ function emailRoster(report) {
   return rows || `<tr><td style="padding:12px 0;color:${CARTESIA.body};font-size:13px">Your workspace is ready for its first HyperAgent.</td></tr>`;
 }
 
+function emailCharacterStrip(report) {
+  const members = report.team.slice(0, 5);
+  if (!members.length) return '';
+  return `<table role="presentation" width="100%" class="character-strip"><tr>${members.map((member) => `<td class="character" width="${Math.floor(100 / members.length)}%"><div class="character-avatar" style="background:${member.background};border-color:${member.color}"><img src="${escapeHtml(member.avatarUrl)}" width="46" height="46" alt="${escapeHtml(member.name)}"></div><div class="character-name">${escapeHtml(member.name)}</div><div class="character-role" style="color:${member.color}">${escapeHtml(member.lane.toUpperCase())}</div></td>`).join('')}</tr></table>`;
+}
+
+function emailEvidenceLedger(report) {
+  const sources = report.sourceUrls.slice(0, 3);
+  if (!sources.length) return '';
+  return `<div style="margin-top:18px;padding-top:15px;border-top:1px solid ${CARTESIA.line}"><div style="font:700 8px/12px ${CARTESIA.mono};letter-spacing:1.2px;color:#999">EVIDENCE LEDGER</div><table role="presentation" width="100%" style="margin-top:7px">${sources.map((url, index) => `<tr><td width="24" valign="top" style="padding:5px 0;color:${CARTESIA.blue};font:700 9px/14px ${CARTESIA.mono}">${String(index + 1).padStart(2, '0')}</td><td style="padding:5px 0;color:${CARTESIA.body};font-size:11px;line-height:15px;word-break:break-word">${escapeHtml(hostname(url))}</td></tr>`).join('')}</table></div>`;
+}
+
 function emailBody(report) {
   const summary = report.whatItDoes || report.positioning || report.tagline || 'Your company model is ready for review.';
   const moves = report.firstMoves.slice(0, 3).map((move) => `<tr><td style="padding:10px 0;border-bottom:1px solid ${CARTESIA.line}"><div style="font:700 8px/12px ${CARTESIA.mono};letter-spacing:1.2px;color:${CARTESIA.blue}">${escapeHtml((move.room || 'FIRST MOVE').toUpperCase())}</div><div style="margin-top:4px;font-size:14px;line-height:19px;font-weight:700">${escapeHtml(move.title)}</div></td></tr>`).join('');
   return `
   <tr><td class="section" style="background:${CARTESIA.paper}"><div class="eyebrow">DAY 0 · THE RISE OF AWAKENING</div><h1 class="h1">${escapeHtml(report.companyName)}<br>has awakened.</h1><p class="copy">${report.leadAgent ? `<strong style="color:${CARTESIA.ink}">${escapeHtml(report.leadAgent.name)} here.</strong> ` : ''}HIVEMIND read your public company context, shaped an operating model, and prepared the people and first moves now waiting inside your workspace.</p>${emailStats(report)}${founderWelcome()}</td></tr>
   <tr><td class="section"><table role="presentation" width="100%" class="stack"><tr><td width="52%" valign="top" style="padding-right:24px"><div class="eyebrow">COMPANY SIGNAL · 02</div><h2 class="h2">${escapeHtml(report.tagline || report.companyName)}</h2><p class="copy">${escapeHtml(summary)}</p></td><td width="48%" valign="top" style="padding-left:24px;border-left:1px solid ${CARTESIA.line}"><div style="font:700 8px/12px ${CARTESIA.mono};letter-spacing:1.2px;color:#999">FIRST-PARTY CONTEXT</div><div style="margin-top:10px;font-size:16px;font-weight:700;color:${CARTESIA.blue}">${escapeHtml(report.websiteHost || report.companyName)}</div>${report.location ? `<div style="margin-top:9px;color:${CARTESIA.body};font-size:12px">${escapeHtml(report.location)}</div>` : ''}${report.icp ? `<div style="margin-top:13px;color:${CARTESIA.body};font-size:12px;line-height:18px"><strong style="color:${CARTESIA.ink}">Built for:</strong> ${escapeHtml(report.icp)}</div>` : ''}</td></tr></table></td></tr>
-  <tr><td class="section" style="background:${CARTESIA.paper}"><div class="eyebrow">HIVEMIND - HYPERAGENTS · 03</div><h2 class="h2">We have recruited ${report.teamCount} AI HyperAgent${report.teamCount === 1 ? '' : 's'} to run ${escapeHtml(report.companyName)}.</h2><table role="presentation" width="100%" style="margin-top:15px">${emailRoster(report)}</table></td></tr>
-  <tr><td class="section"><table role="presentation" width="100%" class="stack"><tr><td width="52%" valign="top" style="padding-right:24px"><div class="eyebrow">FIRST MOVES · 04</div><table role="presentation" width="100%" style="margin-top:10px">${moves || '<tr><td style="font-size:13px;color:#666">Your first company actions are ready.</td></tr>'}</table></td><td width="48%" valign="top" style="padding-left:24px"><h2 class="h2" style="margin-top:0">Your company is waiting.</h2><p class="copy">Review what HIVEMIND learned, correct anything that needs your judgement, and open the first task that matters.</p><a class="action" href="${escapeHtml(report.reportUrl)}">ENTER YOUR WORKSPACE →</a>${report.leadAgent ? `<div style="margin-top:16px;font:700 8px/12px ${CARTESIA.mono};letter-spacing:1.2px;color:#999">${escapeHtml(report.leadAgent.name.toUpperCase())} · ${escapeHtml(report.leadAgent.role.toUpperCase())}</div>` : ''}</td></tr></table></td></tr>`;
+  <tr><td class="section" style="background:${CARTESIA.paper}"><div class="eyebrow">HIVEMIND - HYPERAGENTS · 03</div><h2 class="h2">We have recruited ${report.teamCount} AI HyperAgent${report.teamCount === 1 ? '' : 's'} to run ${escapeHtml(report.companyName)}.</h2>${emailCharacterStrip(report)}<table role="presentation" width="100%" style="margin-top:15px">${emailRoster(report)}</table></td></tr>
+  <tr><td class="section"><table role="presentation" width="100%" class="stack"><tr><td width="52%" valign="top" style="padding-right:24px"><div class="eyebrow">FIRST MOVES · 04</div><table role="presentation" width="100%" style="margin-top:10px">${moves || '<tr><td style="font-size:13px;color:#666">Your first company actions are ready.</td></tr>'}</table>${emailEvidenceLedger(report)}</td><td width="48%" valign="top" style="padding-left:24px"><h2 class="h2" style="margin-top:0">Your company is waiting.</h2><p class="copy">Review what HIVEMIND learned, correct anything that needs your judgement, and open the first task that matters.</p><a class="action" href="${escapeHtml(report.reportUrl)}">ENTER YOUR WORKSPACE →</a>${report.leadAgent ? `<div style="margin-top:16px;font:700 8px/12px ${CARTESIA.mono};letter-spacing:1.2px;color:#999">${escapeHtml(report.leadAgent.name.toUpperCase())} · ${escapeHtml(report.leadAgent.role.toUpperCase())}</div>` : ''}</td></tr></table></td></tr>`;
 }
 
 function deckStats(report) {

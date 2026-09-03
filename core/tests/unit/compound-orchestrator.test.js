@@ -19,6 +19,8 @@ import {
   filterComposioToolsByAuthority,
   filterProviderDraftToolsForTerminalOperation,
   exactGroundedDependencyContent,
+  formatGroundedMessageBody,
+  looksLikeRecallDump,
   normalizeCompoundDependencies,
   normalizeEmailDestinationArgs,
   rankToolSelectionCards,
@@ -506,8 +508,8 @@ test('tool input policy requires complete grounded content instead of placeholde
   assert.match(prompt, /fields needed to answer the full instruction/i);
   assert.match(prompt, /largest safe bounded page/i);
   assert.match(prompt, /Do not add a content filter/i);
-  assert.match(prompt, /complete useful final content/);
-  assert.match(prompt, /never substitute a generic placeholder/);
+  assert.match(prompt, /readable final artifact/i);
+  assert.match(prompt, /Never paste memory IDs/);
   assert.match(prompt, /Do not execute/);
 });
 
@@ -573,6 +575,39 @@ test('grounded fallback payload keeps evidence visible ahead of a compact provid
   assert.equal(parsed.tool_schema.properties.body.type, 'string');
   assert.equal(Object.hasOwn(parsed.tool_schema.properties.body, 'description'), false);
   assert.ok(payload.indexOf('prior_outputs_data') < payload.indexOf('tool_schema'));
+});
+
+test('email body backfill drops memory ids and formats a readable briefing', () => {
+  const dump = [
+    '5f6742b8-0ab1-462c-a04e-d8292beb7598',
+    'COMPANY: Singulance',
+    'WEBSITE: https://singulancelabs.com',
+    'TAGLINE: AI Workforce That Runs Inside Memory',
+    'source:hyperagents-onboarding',
+    'platform:hyperagents-onboarding',
+    '0480eb42-9bd9-45dc-b324-04258d9c1679',
+    'Lecture_09.1_-_RKGs.pdf',
+  ].join('\n');
+  assert.equal(looksLikeRecallDump(dump), true);
+  const prior = {
+    recall: JSON.stringify({
+      memories: [
+        { id: '5f6742b8-0ab1-462c-a04e-d8292beb7598', content: 'COMPANY: Singulance\nWEBSITE: https://singulancelabs.com\nTAGLINE: AI Workforce That Runs Inside Memory' },
+        { id: '0480eb42-9bd9-45dc-b324-04258d9c1679', content: 'Lecture_09.1_-_RKGs.pdf' },
+      ],
+    }),
+  };
+  const filled = backfillMissingGroundedContentArgs('message', {
+    type: 'object',
+    required: ['body'],
+    properties: { body: { type: 'string' } },
+  }, { body: dump }, prior);
+  assert.equal(looksLikeRecallDump(filled.body), false);
+  assert.match(filled.body, /Hi,/);
+  assert.match(filled.body, /Singulance/);
+  assert.match(filled.body, /Best regards/);
+  assert.equal(filled.body.includes('5f6742b8-0ab1-462c-a04e-d8292beb7598'), false);
+  assert.equal(formatGroundedMessageBody([dump, 'COMPANY: Singulance']).includes('Hi,'), true);
 });
 
 test('exact dependency fallback extracts complete grounded content instead of a placeholder', () => {

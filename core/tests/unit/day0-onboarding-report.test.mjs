@@ -29,7 +29,7 @@ function fakePrisma(company) {
   };
 }
 
-test('Day 0 reissues an older renderer once, retains its receipt, and sends a v3 artifact', async () => {
+test('Day 0 reissues an older renderer once, retains its receipt, and sends the current artifact', async () => {
   const prisma = fakePrisma({
     company: 'Canary Co',
     website: 'https://canary.example',
@@ -55,7 +55,7 @@ test('Day 0 reissues an older renderer once, retains its receipt, and sends a v3
   assert.equal(prisma.writes.at(-1).message_id, 'new-message');
 });
 
-test('Day 0 does not resend the same renderer version', async () => {
+test('Day 0 does not resend the current renderer version', async () => {
   const prisma = fakePrisma({ company: 'Canary Co', day0_report_email: { version: DAY_ZERO_REPORT_VERSION, status: 'sent' } });
   const result = await startDayZeroOnboardingReport({ prisma, orgId: ORG_ID, hqRoomId: ROOM_ID, allowVersionedReissue: true });
   assert.deepEqual(result, { ok: true, accepted: false, status: 'sent', version: DAY_ZERO_REPORT_VERSION });

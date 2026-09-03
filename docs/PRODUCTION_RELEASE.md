@@ -1439,3 +1439,14 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   subdomain. Recipient inbox/tab classification remains provider-controlled.
 - Rollback: governor rollback of Control Plane to `sha-886338b6`. Existing v5
   receipts remain immutable and prevent duplicate delivery.
+
+## 35fd9c70 — Day 0 original-theme portrait report
+
+- Parent SHA `35fd9c705e29f6e768f5979095b353d6b7b773e1`; feature SHA
+  `e357a60d`; Control Plane healthy on immutable
+  `hivemind/control-plane:sha-35fd9c70`.
+- `day-0-v6` retains the original ten-page Cartesia/Singulance visual language
+  and content while reflowing each page to A4 portrait. The email is unchanged.
+- Acceptance: focused tests 7/7, ten-page Playwright render visually verified,
+  authenticated owner reissue queued, public API health 200.
+- Rollback: governor rollback of Control Plane to `sha-c09ff95b`.

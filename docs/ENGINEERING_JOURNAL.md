@@ -2095,3 +2095,18 @@ slides that find no unique anchor get a page instead of `null`.
   the subdomain DMARC `p=reject` record resolve publicly. Messages contain both
   HTML and plain text and do not set artificial priority headers. Inbox/tab
   placement remains recipient-provider controlled and is not guaranteed.
+
+## 2026-09-03 UTC — Day 0 original Cartesia theme transposed to portrait
+
+- Feature `e357a60d` was integrated and released as parent
+  `35fd9c705e29f6e768f5979095b353d6b7b773e1`. Only Control Plane was
+  rebuilt; it is healthy on immutable `hivemind/control-plane:sha-35fd9c70`.
+- `day-0-v6` uses the original ten-section Day 0 composition and content with
+  its split editorial hierarchy, browser-window evidence cards, Singulance
+  header, alternating visual rhythm, and oversized outlined footer words. The
+  only structural change is A4 portrait reflow; the transactional email stays
+  unchanged.
+- Focused tests passed 7/7. The real Playwright renderer produced ten A4 pages,
+  all visually inspected without clipping or overflow. A repeated-header issue
+  was corrected so the logo appears on every page. The authorized v6 reissue
+  returned Cloudflare Email Service `queued`; public API health returned 200.

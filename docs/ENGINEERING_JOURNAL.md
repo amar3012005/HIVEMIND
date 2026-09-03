@@ -1998,3 +1998,32 @@ slides that find no unique anchor get a page instead of `null`.
   Brand DNA run, then delivered its report email through Cloudflare Email
   Service with a `delivered` receipt. The prior failed delivery was retained in
   lifecycle state as historical diagnostic context.
+
+## 2026-09-03 UTC — Day 2 responsive visual parity and durable capture replay
+
+- Committed and released `d0eb188a7c2ea437a6d5d8167008b6534c98ba3b`,
+  `e03a6e80`, and `771bbfae01398c455e9b6804e2eff948e62ba558` from
+  `singulance-main`. Core is healthy on immutable
+  `hivemind/core-api:sha-771bbfae`, Playwright is healthy on immutable
+  `hivemind/hm-playwright:sha-d0eb188a`, and the visual-intelligence Worker is
+  version `cc22fde4-cde6-43cb-875d-4cc87fe14cde`.
+- A rendered text wordmark is now accepted as the real customer brand mark when
+  a site has no standalone image logo. Capture retries explicitly recapture the
+  transient screenshot payload when the Core checkpoint is already complete;
+  large image bytes remain out of PostgreSQL and duplicate durable stages remain
+  idempotent.
+- The protected report keeps the Singulance header and footer, customer mark,
+  Humation roster, five-page mosaic, palette, typography, composition, voice,
+  reusable brief, and full evidence ledger. Print rules keep visual-system cards
+  and every evidence receipt intact across A4 page boundaries. The email mirrors
+  the same hierarchy with the customer mark, three signed snapshots, a stable
+  3-by-2 palette, responsive cards, and a width-bounded Humation strip.
+- Verification: focused Core lifecycle suite passed **23/23**; Worker suite
+  passed **2/2**; Worker typecheck and `git diff --check` passed. A new no-email
+  production canary completed all stages with 16 retained screenshot receipts.
+  Its four-page A4 PDF was rendered back to PNG and inspected with no split card
+  or evidence row. A true 390 px Playwright email render had no horizontal
+  overflow. Signed customer images returned `200 image/png`; a tampered
+  signature returned `401`. The explicitly requested final delivery returned a
+  Cloudflare Email Service `delivered` receipt and created exactly one matching
+  workspace notification. Fresh Core and Playwright fatal scans were empty.

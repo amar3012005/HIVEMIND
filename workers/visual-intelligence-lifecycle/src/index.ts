@@ -27,7 +27,7 @@ async function api(env: Env, path: string, body: unknown): Promise<any> {
 }
 function decodeScreenshot(value: string) { const match = value.match(/^data:([^;]+);base64,(.+)$/); if (!match) throw new NonRetryableError('invalid_capture_screenshot'); return { contentType: match[1], bytes: Uint8Array.from(atob(match[2]), (c) => c.charCodeAt(0)) }; }
 async function captureAndStore(env: Env, trigger: Trigger, runId: string) {
-  const captured = await api(env, '/internal/visual-intelligence/stage', { run_id: runId, stage: 'capture', processing_version: trigger.processing_version });
+  const captured = await api(env, '/internal/visual-intelligence/stage', { run_id: runId, stage: 'capture', processing_version: trigger.processing_version, input: { recapture_missing_payload: true } });
   const rows: Capture[] = Array.isArray(captured.capture_payload) ? captured.capture_payload : [];
   if (!rows.length) throw new Error('visual_capture_payload_empty');
   const artifacts = [] as Array<Record<string, unknown>>;

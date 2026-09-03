@@ -167,7 +167,19 @@ export class DurableVisualIntelligenceLifecycle {
     if (TERMINAL.has(run.status)) return this._receipt(run);
     const inputDigest = hash({ runId, stage, shardKey, input, version: run.processingVersion });
     const existing = await this.prisma.visualIntelligenceStep.findUnique({ where: { runId_stageKey_shardKey: { runId, stageKey: stage, shardKey } } });
-    if (existing?.status === 'completed') return existing.outputReceipt;
+    if (existing?.status === 'completed') {
+      // Capture payloads contain large transient image bytes and are
+      // deliberately omitted from PostgreSQL receipts. If the Worker crashes
+      // or rejects a quality gate before storing those bytes in R2, permit an
+      // explicit bounded recapture instead of returning an unusable receipt.
+      if (stage !== 'capture' || input?.recapture_missing_payload !== true) return existing.outputReceipt;
+      await this.prisma.visualIntelligenceStep.update({
+        where: { id: existing.id },
+        data: { status: 'failed', error: { message: 'capture_payload_replay_requested', retryable: true }, completedAt: null, leaseExpiresAt: null },
+      });
+      existing.status = 'failed';
+      existing.leaseExpiresAt = null;
+    }
     if (existing?.status === 'running' && existing.leaseExpiresAt > new Date()) throw Object.assign(new Error('visual_stage_lease_busy'), { retryable: true });
     const leaseExpiresAt = new Date(Date.now() + 5 * 60_000);
     if (existing) {

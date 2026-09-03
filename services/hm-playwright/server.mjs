@@ -320,16 +320,24 @@ async function extractPage(page, response, discovery) {
 }
 
 async function captureBrandMark(page) {
-  for (const selector of [
+  const candidates = [
     'header img', 'header svg', '[role="banner"] img', '[role="banner"] svg',
     'img[alt*="logo" i]', 'img[src*="logo" i]', 'a[href="/"] img', 'a[href="/"] svg',
     '[aria-label*="logo" i]', '[aria-label="Apple"]', 'header a[class*="logo" i]', 'header a[class*="brand" i]',
-  ]) {
-    const node = page.locator(selector).first();
+  ].map((selector) => page.locator(selector).first());
+  // Some brands intentionally render a text wordmark rather than an image.
+  // Preserve that real rendered mark instead of inventing a logo or failing a
+  // high-quality Day-2 report. The bounded exact/near-exact locators avoid
+  // screenshotting an entire navigation bar.
+  candidates.push(
+    page.getByText(/^\s*SINGULANCE\s*$/i).first(),
+    page.locator('header a, header [role="link"], [role="banner"] a').filter({ hasText: /\S/ }).first(),
+  );
+  for (const node of candidates) {
     // Missing selectors must not consume Playwright's default navigation wait.
     if (!await node.count().catch(() => 0)) continue;
     const box = await node.boundingBox().catch(() => null);
-    if (!box || box.width < 12 || box.height < 12 || box.width > 360 || box.height > 180) continue;
+    if (!box || box.width < 12 || box.height < 12 || box.width > 520 || box.height > 180) continue;
     const image = await node.screenshot({ type: 'png', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => null);
     if (image?.length && image.length <= 500 * 1024) return `data:image/png;base64,${image.toString('base64')}`;
   }

@@ -95,6 +95,19 @@ or uncommitted changes as completed work.
 - Rollback: unset `USE_TOOLS_UNIFIED_DAG` (fail-closed)
 - Next: unit tests, then hivemind-safe-deploy if tests pass
 
+## 2026-09-03 UTC — use_tools unified DAG connect-pause e2e (Committed)
+
+- State: Committed
+- Owner: Grok
+- Branch: `singulance-main` worktree
+- Scope: fail-close `getToolkitStatus` before Composio I/O; any `connect_account`
+  pauses overall status (lone Gmail step no longer synthesizes as completed);
+  `ctx.unifiedDag` test override; planner/orchestrator tests; features.md
+- Verification: `node --test` hosted-composio-planner 11 pass; compound-orchestrator 49 pass
+- Production: pending `ssh singulance` `/root/quick-deploy.sh singulance-main`
+- Rollback: Flagship off; unset `USE_TOOLS_UNIFIED_DAG`; previous Core SHA `64b37adb`
+- Next: deploy then Flagship JSON + env verify; authenticated Gmail canary if cookies exist
+
 ## 2026-09-03 UTC — use_tools unified DAG (Accepted release)
 
 - State: Accepted release

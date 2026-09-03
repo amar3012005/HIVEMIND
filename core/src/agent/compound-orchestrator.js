@@ -1067,12 +1067,18 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   //    Nango toolkit or the connector runtime (both key off nangoConnection,
   //    which is empty for Composio-connected orgs).
   const composioToolkit = composioToolkitFor(toolGroups);
-  if (isUseToolsUnifiedDagEnabled() && composioToolkit && ctx?.orgId && typeof composioSvc.getToolkitStatus === 'function') {
-    let status = 'available';
-    try {
-      status = await composioSvc.getToolkitStatus(ctx.orgId, composioToolkit);
-    } catch {
-      status = 'available';
+  const unifiedDag = ctx && Object.prototype.hasOwnProperty.call(ctx, 'unifiedDag')
+    ? ctx.unifiedDag === true
+    : isUseToolsUnifiedDagEnabled();
+  if (unifiedDag && composioToolkit && ctx?.orgId) {
+    let status = 'error';
+    if (typeof composioSvc.getToolkitStatus === 'function') {
+      try {
+        status = await composioSvc.getToolkitStatus(ctx.orgId, composioToolkit);
+      } catch {
+        // Fail closed: a status error is not permission to search or execute.
+        status = 'error';
+      }
     }
     if (status !== 'connected') {
       const label = displayToolkitName(composioToolkit);
@@ -1698,14 +1704,12 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): draft created — awaiting your approval`);
       anyPending = true;
     } else if (r.status === 'needs_input') {
-      const blocking = subtasks.some((candidate, j) => j !== i && Array.isArray(candidate.depends_on) && candidate.depends_on.includes(i));
-      if (r.inputRequest) r.inputRequest.blocking = blocking;
-      lines.push(`Step ${i + 1} (${st.operation || 'tool'}): needs information — ${r.error || 'missing required fields'}`);
-      if (r.inputRequest?.kind === 'connect_account' && !blocking) {
-        // optional disconnected branch: do not pause the whole plan
-      } else {
-        anyNeedsInput = true;
+      const hasDependents = subtasks.some((candidate, j) => j !== i && Array.isArray(candidate.depends_on) && candidate.depends_on.includes(i));
+      if (r.inputRequest) {
+        r.inputRequest.blocking = r.inputRequest.kind === 'connect_account' || hasDependents;
       }
+      lines.push(`Step ${i + 1} (${st.operation || 'tool'}): needs information — ${r.error || 'missing required fields'}`);
+      anyNeedsInput = true;
     } else if (r.status === 'blocked_pending') {
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): waiting for approval of a prior step`);
       anyPending = true;

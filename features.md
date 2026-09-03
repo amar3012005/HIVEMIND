@@ -558,13 +558,22 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   parent `db4b06e32bb50efa80818f3928709671a1e69745`, Worker
   `e85c67ef-0f25-4a92-9bb3-a7f091894835`.
 
-## `USE_TOOLS_UNIFIED_DAG` (fail-closed, not globally enabled)
+## `USE_TOOLS_UNIFIED_DAG` (globally enabled; Core env + Cloudflare Flagship)
 
 - Core env `USE_TOOLS_UNIFIED_DAG`. Only the string `true` enables unified
   native + Composio DAG orchestration on `use_tools: true` chat. Unset keeps
-  the legacy connected-only path.
+  the legacy connected-only path (process kill switch).
+- Cloudflare Flagship boolean `USE_TOOLS_UNIFIED_DAG` on apps
+  `2e89fbd3-7496-459b-a507-f1017d444dd9` and `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`.
+  Public JSON: `GET /__hivemind/feature-flags/use-tools-unified-dag` →
+  `{"key":"USE_TOOLS_UNIFIED_DAG","enabled":true,"source":"cloudflare-flagship"}`.
 - Named catalog apps stay in the plan when disconnected (`connection_required`).
-  Required missing auth pauses dependents; Connect href opens Composio OAuth;
-  resume retries the same DAG. Writes remain `pendingWrite` drafts.
-- Optional Flagship mapping uses the same name. Default **off**.
-- 2026-09-03 production: Core `9ae88e3e` (manifest `20260903T183836Z`); Worker `hivemind-web` `5108b2a5-76cc-4641-a1d9-9d17650c973e` from Da-vinci `59cdd8cc`. Flag not globally enabled.
+  Toolkit status is resolved before Composio search, session discovery, or
+  execute; status throw fail-closes to Connect. A Gmail (or other named-app)
+  step with no dependents still pauses the plan (`needs_input` + Connect banner),
+  not a completed recall dump. Connect `href`/`open_url` opens OAuth in a new
+  tab; `__retry_connect__` resumes the same DAG. Writes remain `pendingWrite`.
+- Rollback: Flagship default `off` and/or unset Core env (not the string `true`).
+  Redeploy previous canonical Core SHA only if code must revert.
+- 2026-09-03 production: Core `64b37adb` (env enable) plus connect-pause fix on
+  this follow-up SHA; Worker Connect `59cdd8cc` / Flagship endpoint `66edeaf8`.

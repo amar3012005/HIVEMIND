@@ -978,9 +978,10 @@ test('unified DAG pauses a required disconnected toolkit and still runs independ
     }),
     async getToolkitStatus() { return 'available'; },
     async createConnectLink() { return { redirectUrl: 'https://connect.composio.dev/link/gmail-test' }; },
+    async discoverSessionTools() { throw new Error('must not discover session tools while disconnected'); },
   };
   const ctx = {
-    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    userId: 'u1', orgId: 'o1', unifiedDag: true, _trace: { traceId: 't1' },
     _tracedDispatch: async () => ({ memories: [{ id: 'm1', title: 'Notes', content: 'risk: delay' }], evidence: [] }),
   };
   try {
@@ -999,6 +1000,8 @@ test('unified DAG pauses a required disconnected toolkit and still runs independ
     assert.equal(result.inputRequests[0].kind, 'connect_account');
     assert.equal(result.inputRequests[0].blocking, true);
     assert.equal(result.inputRequests[0].options[0].href, 'https://connect.composio.dev/link/gmail-test');
+    assert.equal(result.inputRequests[0].options[0].open_url, true);
+    assert.equal(result.inputRequests[0].options[1].value, RETRY_CONNECT_VALUE);
     assert.equal(shouldOpenConnectHref(result.inputRequests[0].options[0]), true);
     assert.match(result.summary, /Connect Gmail/);
 
@@ -1012,6 +1015,46 @@ test('unified DAG pauses a required disconnected toolkit and still runs independ
     });
     assert.equal(executed, 1);
     assert.ok(['completed', 'needs_input', 'pending'].includes(resumed.status));
+  } finally {
+    if (previous === undefined) delete process.env.USE_TOOLS_UNIFIED_DAG;
+    else process.env.USE_TOOLS_UNIFIED_DAG = previous;
+  }
+});
+
+test('unified DAG fail-closes status throw with zero Composio search or execute', async () => {
+  const previous = process.env.USE_TOOLS_UNIFIED_DAG;
+  process.env.USE_TOOLS_UNIFIED_DAG = 'true';
+  let executed = 0;
+  let discovered = 0;
+  const composio = {
+    ...makeComposio({
+      tools: [{ name: 'composio_gmail_search', slug: 'GMAIL_SEARCH', description: 'search' }],
+      executeImpl: async () => {
+        executed += 1;
+        return { successful: true, data: {}, error: null };
+      },
+    }),
+    async getToolkitStatus() { throw new Error('status_unavailable'); },
+    async createConnectLink() { return { redirectUrl: 'https://connect.composio.dev/link/gmail-failclosed' }; },
+    async discoverSessionTools() {
+      discovered += 1;
+      throw new Error('must not discover after status throw');
+    },
+    async getToolkitTools() { throw new Error('must not load tools after status throw'); },
+  };
+  try {
+    const result = await runCompoundOrchestrator({
+      subtasks: [{ operation: 'gmail_search', tool_groups: ['gmail'], depends_on: null, message: 'emails' }],
+      ctx: { userId: 'u1', orgId: 'o1', unifiedDag: true, _trace: { traceId: 't1' } },
+      apiKey: 'k', signal: null, composio,
+      selectTool: makeSelector(() => ({ toolName: 'composio_gmail_search', args: {} })),
+    });
+    assert.equal(executed, 0);
+    assert.equal(discovered, 0);
+    assert.equal(result.status, 'needs_input');
+    assert.equal(result.inputRequests[0].kind, 'connect_account');
+    assert.equal(shouldOpenConnectHref(result.inputRequests[0].options[0]), true);
+    assert.equal(result.inputRequests[0].options[1].value, RETRY_CONNECT_VALUE);
   } finally {
     if (previous === undefined) delete process.env.USE_TOOLS_UNIFIED_DAG;
     else process.env.USE_TOOLS_UNIFIED_DAG = previous;
@@ -1036,7 +1079,7 @@ test('flag off does not invent a connect pause for disconnected toolkits', async
   try {
     const res = await runCompoundOrchestrator({
       subtasks: [{ operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search' }],
-      ctx: { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' } },
+      ctx: { userId: 'u1', orgId: 'o1', unifiedDag: false, _trace: { traceId: 't1' } },
       apiKey: 'k', signal: null, composio,
       selectTool: makeSelector(() => ({ toolName: 'composio_gmail_search', args: {} })),
     });

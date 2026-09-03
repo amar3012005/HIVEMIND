@@ -80,6 +80,43 @@ test('unified DAG keeps a disconnected catalog app beside native recall', () => 
   assert.deepEqual(steps.map((step) => step.tool_groups[0]), ['hivemind-recall', 'gmail', 'hivemind-recall']);
   assert.equal(steps[1].connection_required, true);
   assert.equal(steps[0].connection_required, false);
+  assert.ok(!steps.some((step) => step.tool_groups[0] === 'hivemind-recall' && step.operation === 'gmail_search'));
+});
+
+test('hosted planner lists accounts only and never searches Composio tools while disconnected', async () => {
+  const previous = process.env.USE_TOOLS_UNIFIED_DAG;
+  process.env.USE_TOOLS_UNIFIED_DAG = 'true';
+  let searched = 0;
+  let executed = 0;
+  try {
+    const result = await planHostedComposioWorkflow({
+      request: 'Go through HIVEMIND git repo and send important information about repo to rama via gmail',
+      orgId: 'org-1',
+      apiKey: 'test-key',
+      parseIntent: async () => ({
+        decision: {
+          operation: 'compound',
+          subtasks: [
+            { operation: 'recall', tool_groups: ['hivemind-recall'], message: 'repo notes' },
+            { operation: 'gmail_send', authority: 'write', tool_groups: ['gmail'], message: 'email rama' },
+          ],
+        },
+        usage: {},
+      }),
+      composio: {
+        async listConnectedAccounts() { return []; },
+        async discoverSessionTools() { searched += 1; throw new Error('planner must not search tools'); },
+        async executeTool() { executed += 1; throw new Error('planner must not execute'); },
+      },
+    });
+    assert.equal(searched, 0);
+    assert.equal(executed, 0);
+    assert.deepEqual(result.steps.map((step) => step.tool_groups[0]), ['hivemind-recall', 'gmail']);
+    assert.equal(result.steps[1].connection_required, true);
+  } finally {
+    if (previous === undefined) delete process.env.USE_TOOLS_UNIFIED_DAG;
+    else process.env.USE_TOOLS_UNIFIED_DAG = previous;
+  }
 });
 
 test('fail-closed flag is off unless USE_TOOLS_UNIFIED_DAG is the string true', () => {

@@ -40,9 +40,9 @@ or uncommitted changes as completed work.
 - State: Started
 - Owner: Grok
 - Branch: `singulance-main` worktree (flag-gated `USE_TOOLS_UNIFIED_DAG`)
-- Base / commit: `ad7125ab` -> pending
+- Base / commit: `ad7125ab` -> `801e6e30`
 - Scope: `core/src/agent/{use-tools-unified-flag,hosted-composio-planner,chat-progressive-router,compound-orchestrator}.js`, `core/src/connectors/composio/composio-service.js`, unit tests, `features.md`
-- Verification: `node --test` planner + orchestrator; production deploy pending governor
+- Verification: `node --test` hosted-composio-planner + compound-orchestrator (58 pass); production deploy not run from this sandbox
 - Production: not deployed
 - Rollback: unset `USE_TOOLS_UNIFIED_DAG` (fail-closed)
 - Next: unit tests, then hivemind-safe-deploy if tests pass

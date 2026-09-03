@@ -111,8 +111,9 @@ export class ResidentAgentScheduler {
    */
   async _maybeScheduledDream() {
     if (!this.scheduleEnabled || this.scheduleInFlight || this.tickInFlight) return;
+    const durableV2 = process.env.DREAM_WORKFLOW_V2_ENABLED === 'true';
     const loop = typeof this.cognitionLoopRef === 'function' ? this.cognitionLoopRef() : null;
-    if (!loop || typeof loop.runOnce !== 'function') return;
+    if (!durableV2 && (!loop || typeof loop.runOnce !== 'function')) return;
     this.scheduleInFlight = true;
     try {
       const scheds = await this._orgSchedules();
@@ -145,6 +146,10 @@ export class ResidentAgentScheduler {
               if (recent) return; // already dreamed today
               this._lastScheduledDreamDate.set(sched.id, date);
               this.logger?.log?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} mode=${sched.mode} hour=${hour} lookback=${this.scheduleLookbackHours}h`);
+              if (durableV2) {
+                await this._enqueueDurableDream(sched.id, 'scheduled', `scheduled:${date}`);
+                return;
+              }
               // skipCompaction:TRUE — never run destructive drift-compaction on the
               // auto scheduled path (§10 hazard). runOnce uses its own (pooled) prisma,
               // so the dream's writes don't block on the lock connection.

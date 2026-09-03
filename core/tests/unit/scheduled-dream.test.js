@@ -52,3 +52,49 @@ test('scheduled dream cross-replica once/day dedup: skips when a recent schedule
   await run(c);
   assert.equal(c.calls.runOnce.length, 0, 'no second dream when one already ran in the last 20h');
 });
+
+test('v2 enabled scheduled dream enqueues the Worker and never calls legacy runOnce', async () => {
+  const prev = process.env.DREAM_WORKFLOW_V2_ENABLED;
+  process.env.DREAM_WORKFLOW_V2_ENABLED = 'true';
+  const c = ctx(null);
+  c._enqueueDurableDream = async (orgId, trigger, triggerId) => {
+    c.calls.enqueue = { orgId, trigger, triggerId };
+    return { ok: true };
+  };
+  try {
+    await run(c);
+    assert.equal(c.calls.runOnce.length, 0, 'legacy cognition must not own the org when v2 is on');
+    assert.equal(c.calls.enqueue.trigger, 'scheduled');
+    assert.equal(c.calls.enqueue.triggerId, 'scheduled:2026-06-15');
+  } finally {
+    if (prev === undefined) delete process.env.DREAM_WORKFLOW_V2_ENABLED;
+    else process.env.DREAM_WORKFLOW_V2_ENABLED = prev;
+  }
+});
+
+test('v2 enabled early dream enqueues the Worker and never runs the legacy cycle', async () => {
+  const prev = process.env.DREAM_WORKFLOW_V2_ENABLED;
+  process.env.DREAM_WORKFLOW_V2_ENABLED = 'true';
+  const calls = { cycle: 0, enqueue: [] };
+  const scheduler = Object.assign(new ResidentAgentScheduler({ runManager: { runFullCycle: async () => { calls.cycle += 1; } } }), {
+    enabled: true,
+    earlyInFlight: false,
+    tickInFlight: false,
+    dirtyThreshold: 1,
+    earlyCooldownMs: 1,
+    _lastEarlyDream: new Map(),
+    clusterIndex: { getDirtyClusters: async () => [{ id: 'c1' }] },
+    _listActiveOrgs: async () => [{ id: '47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f' }],
+    _claimEarlyDream: async () => true,
+    _enqueueDurableDream: async (orgId, trigger) => { calls.enqueue.push({ orgId, trigger }); },
+    logger: { log() {}, warn() {} },
+  });
+  try {
+    await scheduler._maybeEarlyDream();
+    assert.equal(calls.cycle, 0);
+    assert.equal(calls.enqueue[0].trigger, 'dirty');
+  } finally {
+    if (prev === undefined) delete process.env.DREAM_WORKFLOW_V2_ENABLED;
+    else process.env.DREAM_WORKFLOW_V2_ENABLED = prev;
+  }
+});

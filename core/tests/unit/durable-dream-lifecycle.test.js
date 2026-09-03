@@ -68,6 +68,20 @@ test('workflow retry exhaustion closes the authoritative run without publishing'
   assert.equal(update.currentStage, 'generate-candidates');
 });
 
+test('embed stage retries when published memories lack synced vectors', async () => {
+  const lifecycle = new DurableDreamLifecycle({
+    prisma: {
+      dreamCandidate: { findMany: async () => [{ publishedMemoryId: 'm1' }, { publishedMemoryId: 'm2' }] },
+      vectorEmbedding: { count: async () => 1 },
+      cognitionRun: { update: async () => ({}) },
+    },
+  });
+  await assert.rejects(
+    lifecycle._embed({ id: 'run-1' }),
+    (error) => error.message === 'vector_coverage_incomplete' && error.retryable === true,
+  );
+});
+
 test('a delayed finalize retry cannot overwrite a terminal failed run', async () => {
   const run = { id: '11111111-1111-4111-8111-111111111111', status: 'error', currentStage: 'generate-candidates', pipelineVersion: 2, cancelledAt: null };
   let stepLookup = false;

@@ -60,15 +60,17 @@ test('Day 0 attachment is an A4 portrait lifecycle report, not a slide deck', ()
     team: [{ id: 'builder-1', name: 'Mina', roleArchetype: 'builder', jobTitle: 'Engineer' }],
   });
   assert.match(rendered.html, /@page\{size:A4 portrait/);
-  assert.match(rendered.html, /DAY-0 \/ AWAKENING/);
-  assert.match(rendered.html, /MARKET &amp; AUDIENCE · 03/);
-  assert.match(rendered.html, /MISSION &amp; POSITIONING · 04/);
+  assert.match(rendered.html, /DAY-0 \/ 01/);
+  assert.equal((rendered.html.match(/class="portrait-page"/g) || []).length, 10);
+  assert.match(rendered.html, /class="big-word">THE RISE OF AWAKENING/);
+  assert.match(rendered.html, /MARKET & AUDIENCE · 03/);
+  assert.match(rendered.html, /MISSION & POSITIONING · 04/);
   assert.match(rendered.html, /COMPANY MEMORY · 07/);
   assert.match(rendered.html, /SOURCE LANDSCAPE · 08/);
   assert.match(rendered.html, /HUMAN CONFIRMATION · 09/);
   assert.match(rendered.html, /YOUR COMPANY · 10/);
   assert.match(rendered.html, /Market signal/);
   assert.match(rendered.html, /Company profile/);
-  assert.match(rendered.html, /SINGULANCE · YOUR COMPANY, IN MOTION/);
+  assert.match(rendered.html, /ENTER THE OPERATING SYSTEM/);
   assert.doesNotMatch(rendered.html, /deck-page/);
 });

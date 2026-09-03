@@ -1001,6 +1001,8 @@ test('unified DAG pauses a required disconnected toolkit and still runs independ
     assert.equal(result.inputRequests[0].blocking, true);
     assert.equal(result.inputRequests[0].options[0].href, 'https://connect.composio.dev/link/gmail-test');
     assert.equal(result.inputRequests[0].options[0].open_url, true);
+    assert.equal(result.inputRequests[0].toolkit, 'gmail');
+    assert.match(result.inputRequests[0].logo_url, /gmail/);
     assert.equal(result.inputRequests[0].options[1].value, RETRY_CONNECT_VALUE);
     assert.equal(shouldOpenConnectHref(result.inputRequests[0].options[0]), true);
     assert.match(result.summary, /Connect Gmail/);

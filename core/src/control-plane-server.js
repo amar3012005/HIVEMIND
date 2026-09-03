@@ -1855,6 +1855,97 @@ async function enrichPlatformUsers(records) {
   return enriched;
 }
 
+function lifecycleEpisode(day, label, state, fallbackStatus = null) {
+  const status = String(state?.status || fallbackStatus || '').trim().toLowerCase();
+  if (!status) return null;
+  return {
+    day,
+    label,
+    status,
+    occurred_at: state?.sent_at || state?.completed_at || state?.started_at || state?.claimed_at || state?.delivery_claimed_at || null,
+  };
+}
+
+function platformLifecycleSummary(company, organization) {
+  const awakenedAt = company?.onboarded_at || null;
+  const awakenedAtMs = Date.parse(awakenedAt || '');
+  const daysSinceAwakening = Number.isFinite(awakenedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - awakenedAtMs) / 86_400_000))
+    : null;
+  const episodes = [
+    lifecycleEpisode(0, 'Day 0 · Awakening', company?.day0_report_email, awakenedAt ? 'awakened' : null),
+    lifecycleEpisode(1, 'Day 1 · First move', company?.day1_first_move),
+    lifecycleEpisode(2, 'Day 2 · Brand DNA', company?.day2_brand_dna),
+  ].filter(Boolean);
+  const counts = episodes.reduce((summary, episode) => {
+    summary.total += 1;
+    if (episode.status === 'sent' || episode.status === 'completed') summary.completed += 1;
+    else if (episode.status === 'failed') summary.failed += 1;
+    else summary.in_progress += 1;
+    return summary;
+  }, { total: 0, completed: 0, in_progress: 0, failed: 0 });
+  return {
+    organization_id: organization.id,
+    organization_name: organization.name || 'Unnamed organization',
+    awakened_at: awakenedAt,
+    days_since_awakening: daysSinceAwakening,
+    reached_day: episodes.length ? Math.max(...episodes.map((episode) => episode.day)) : null,
+    lifecycle_counts: counts,
+    episodes,
+  };
+}
+
+async function getPlatformUserLifecycle(userId) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+      organizations: {
+        where: { isActive: true },
+        select: { org: { select: { id: true, name: true } } },
+      },
+    },
+  });
+  if (!user) return null;
+  const organizations = user.organizations.map((membership) => membership.org).filter(Boolean);
+  if (!organizations.length) {
+    return { user: { id: user.id, email: user.email, display_name: user.displayName || null }, organizations: [], totals: { organizations: 0, awakened: 0, lifecycle_count: 0, completed: 0, in_progress: 0, failed: 0 } };
+  }
+  // An HQ room is the lifecycle authority.  Query only this selected user's
+  // active organizations, rather than adding a costly lifecycle N+1 query to
+  // the platform-wide list endpoint.
+  const orgIds = organizations.map((organization) => organization.id);
+  const rooms = await prisma.$queryRawUnsafe(
+    `SELECT DISTINCT ON (org_id) org_id, "agent_connectors"->'_company' AS company
+       FROM "hivemind"."hyper_rooms"
+      WHERE user_id = $1::uuid
+        AND org_id = ANY($2::uuid[])
+        AND archived_at IS NULL
+        AND "agent_connectors" ? '_company'
+      ORDER BY org_id, created_at DESC`,
+    user.id,
+    orgIds,
+  );
+  const companyByOrg = new Map((rooms || []).map((room) => [String(room.org_id), typeof room.company === 'string' ? JSON.parse(room.company) : room.company]));
+  const lifecycleOrganizations = organizations.map((organization) => platformLifecycleSummary(companyByOrg.get(organization.id) || null, organization));
+  const totals = lifecycleOrganizations.reduce((summary, organization) => {
+    summary.organizations += 1;
+    if (organization.awakened_at) summary.awakened += 1;
+    summary.lifecycle_count += organization.lifecycle_counts.total;
+    summary.completed += organization.lifecycle_counts.completed;
+    summary.in_progress += organization.lifecycle_counts.in_progress;
+    summary.failed += organization.lifecycle_counts.failed;
+    return summary;
+  }, { organizations: 0, awakened: 0, lifecycle_count: 0, completed: 0, in_progress: 0, failed: 0 });
+  return {
+    user: { id: user.id, email: user.email, display_name: user.displayName || null },
+    organizations: lifecycleOrganizations,
+    totals,
+  };
+}
+
 async function platformCoreMemoryCount(orgId, userId) {
   const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/profile`, {
     headers: {
@@ -3395,6 +3486,20 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, { b2b: 0, b2c: 0, active: 0, sleeping: 0 });
     return jsonResponse(res, { total, returned: users.length, summary, users });
+  }
+
+  const platformUserLifecycleMatch = pathname.match(/^\/admin\/api\/platform\/users\/([0-9a-f-]{36})\/lifecycle$/i);
+  if (platformUserLifecycleMatch && req.method === 'GET') {
+    if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const lifecycle = await getPlatformUserLifecycle(platformUserLifecycleMatch[1]);
+      if (!lifecycle) return jsonResponse(res, { error: 'User not found' }, 404);
+      return jsonResponse(res, { lifecycle, generated_at: new Date().toISOString() });
+    } catch (error) {
+      console.warn('[platform-admin] lifecycle read failed:', error.message);
+      return jsonResponse(res, { error: 'Lifecycle data unavailable' }, 503);
+    }
   }
 
   if (pathname === '/admin/api/platform/metrics' && req.method === 'GET') {

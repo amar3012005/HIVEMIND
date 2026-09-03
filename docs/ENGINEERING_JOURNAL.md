@@ -2033,3 +2033,22 @@ slides that find no unique anchor get a page instead of `null`.
 - Committed backend/UI release chain: HIVEMIND `88c8a6d5f218216d7d586348f3ad20f9cf228bce` and Da-vinci `e3f65bc29548b81289201fabb4ab4f70832fb1f5`.
 - Added a read-only, platform-admin-cookie-protected lifecycle detail endpoint and a per-user **Lifecycle** action in the platform user table. It reads only the selected user's active tenant HQ state, derives awakening age and normalized Day 0/1/2 statuses, and does not change lifecycle, email, report, or onboarding data.
 - Verification: `node --check core/src/control-plane-server.js`; `npx eslint src/components/hivemind/app/pages/PlatformAdmin.jsx src/components/hivemind/app/shared/api-client.js`; `npm run build`; Wrangler dry run; and production Worker deployment all passed. The protected production route returned `401` without a platform-admin cookie, the served admin bundle contains the Lifecycle view, and Control Plane is healthy on `sha-88c8a6d5` with zero fresh fatal/panic/uncaught/OOM/migration findings.
+
+## 2026-09-03 UTC — Day 0 report delivery parity and versioned reissue
+
+- Committed `d873692a87277080cb1ce3bc9dce8305e051e04c` and integrated/released
+  parent `b3f7ee2f4eeee6ee154b674e549f1cebdd7316da`. Only Control Plane was
+  rebuilt through the governor; it is healthy on immutable
+  `hivemind/control-plane:sha-b3f7ee2f` with the exact revision label.
+- Day 0 now uses the shared responsive Humation character strip and source
+  ledger while retaining the existing transactional HTML + PDF delivery path.
+  Delivery state is versioned as `day-0-v3`. A service-token-only internal
+  endpoint can reissue one prior renderer version while preserving its original
+  receipt; a v3 receipt is idempotent and cannot resend on replay.
+- Verification: syntax checks for Control Plane and the lifecycle service plus
+  focused unit tests **6 passed, 0 failed**. Production rejected an unauthenticated
+  reissue request with `401`; the authorized owner reissue returned `200`,
+  `sent`, `day-0-v3`, and a Cloudflare Email Service `queued` receipt. An
+  immediate repeat returned the stored v3 receipt with `accepted:false`.
+  Internal Control Plane health returned `200`; fresh fatal/panic/uncaught/
+  unhandled/OOM and Day-0 failure scans were empty.

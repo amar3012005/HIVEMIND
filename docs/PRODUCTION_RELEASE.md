@@ -1,5 +1,22 @@
 # Current SINGULANCE Production Release
 
+## b3f7ee2f — Day 0 lifecycle report parity
+
+- Parent SHA `b3f7ee2f4eeee6ee154b674e549f1cebdd7316da`; frontend unchanged at
+  `e3f65bc29548b81289201fabb4ab4f70832fb1f5`; no migration.
+- Control Plane only was rebuilt and is healthy as
+  `hivemind/control-plane:sha-b3f7ee2f`, revision
+  `b3f7ee2f4eeee6ee154b674e549f1cebdd7316da`; manifest
+  `/root/releases/manifests/b3f7ee2f/20260903T084630Z/RELEASE_MANIFEST.json`.
+- Day 0 v3 provides the shared mobile-safe Humation/evidence email structure
+  and a protected, receipt-preserving one-time renderer reissue. Production
+  checks: unauthorized reissue `401`; authorized reissue accepted by Cloudflare
+  Email Service as `queued`; replay returned `accepted:false` and the stored
+  v3 receipt. Control Plane local health returned 200 and fresh fatal logs were
+  empty.
+- Rollback: `/root/quick-deploy.sh --rollback control-plane`; original Day 0
+  receipts and the new v3 receipt remain durable and are not deleted by rollback.
+
 ## 2026-09-01T07:35Z - global runtime and organic campaign capability
 
 - Parent/runtime SHA `b42ea7a610e64b5bdb6faece6fabf77cc8b453ed`;

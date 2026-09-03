@@ -175,7 +175,8 @@ function workflowCharacters(characters = [], { email = false, publicApiUrl = '' 
 function characterStrip(characters, options = {}) {
   const people = workflowCharacters(characters, options);
   if (!people.length) return '';
-  return `<table role="presentation" class="character-strip"><tr>${people.map((person) => `<td class="character"><div class="character-avatar" style="background:${person.background};border-color:${person.color}">${person.portrait}</div><div class="character-name">${escapeHtml(person.name)}</div><div class="character-role" style="color:${person.color}">${escapeHtml(person.role)}</div></td>`).join('')}</tr></table>`;
+  const width = `${(100 / people.length).toFixed(2)}%`;
+  return `<table role="presentation" class="character-strip" width="100%" style="width:100%;max-width:100%;table-layout:fixed"><tr>${people.map((person) => `<td class="character" width="${width}" style="width:${width}"><div class="character-avatar" style="background:${person.background};border-color:${person.color}">${person.portrait}</div><div class="character-name">${escapeHtml(person.name)}</div><div class="character-role" style="color:${person.color}">${escapeHtml(person.role)}</div></td>`).join('')}</tr></table>`;
 }
 
 /** Reusable completion renderer for future lifecycle episodes. */
@@ -209,7 +210,7 @@ export function renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, charac
   const evidence = Array.isArray(artifact?.evidence) ? artifact.evidence.slice(0, 6) : [];
   const colors = [palette.primary, palette.secondary, palette.accent, palette.background, ...(Array.isArray(palette.accents) ? palette.accents : [])]
     .filter((value) => typeof value === 'string' && value).slice(0, 6);
-  const swatches = colors.map((color) => `<td style="width:16.66%;padding:0 3px 0 0"><div style="height:34px;background:${escapeHtml(color)};border:1px solid #deddd8"></div><div style="font:700 8px/12px Arial,sans-serif;color:#64635f;margin-top:4px">${escapeHtml(color)}</div></td>`).join('');
+  const swatches = colors.map((color, index) => `${index > 0 && index % 3 === 0 ? '</tr><tr>' : ''}<td class="day2-swatch" style="width:33.33%;padding:0 5px 8px 0;vertical-align:top"><div style="height:34px;background:${escapeHtml(color)};border:1px solid #deddd8"></div><div style="font:700 8px/12px Arial,sans-serif;color:#64635f;margin-top:4px;overflow-wrap:anywhere">${escapeHtml(color)}</div></td>`).join('');
   const evidenceRows = evidence.map((item, index) => `<tr><td style="width:26px;padding:7px 0;color:${CARTESIA.blue};font:700 9px/13px monospace">${String(index + 1).padStart(2, '0')}</td><td style="padding:7px 0;border-top:1px solid #deddd8"><strong style="font:700 12px/16px Arial,sans-serif">${escapeHtml(item?.page?.title || item?.page_url || 'Captured page')}</strong><br><span style="font:10px/14px Arial,sans-serif;color:#64635f">${escapeHtml(item?.page_url || item?.page?.url || '')}</span></td></tr>`).join('');
   const snapshotCells = evidence.slice(0, 3).map((item) => {
     const src = visualSnapshotUrl(item?.r2_key);

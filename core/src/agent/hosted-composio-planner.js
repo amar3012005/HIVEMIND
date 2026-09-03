@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { parseChatIntentProgressive } from './chat-progressive-router.js';
+import { isUseToolsUnifiedDagEnabled } from './use-tools-unified-flag.js';
 
 const TOOLKIT_TO_PROVIDER = Object.freeze({
   gmail: 'gmail',
@@ -16,6 +16,7 @@ const TOOLKIT_TO_PROVIDER = Object.freeze({
 });
 
 const NATIVE_GROUPS = new Set(['hivemind-recall', 'hivemind-memory-write', 'hivemind-projects']);
+export const CATALOG_CONNECTOR_PROVIDERS = Object.freeze([...new Set(Object.values(TOOLKIT_TO_PROVIDER))]);
 
 export const HIVEMIND_HOSTED_TOOL_CARDS = Object.freeze([
   {
@@ -50,16 +51,20 @@ function normalizeDependencies(dependsOn, index) {
     && dependency >= 0 && dependency < index))].slice(0, 4);
 }
 
-function validateGroups(groups, allowedGroups) {
+function validateGroups(groups, allowedGroups, { allowCatalogDisconnected = false } = {}) {
   const normalized = [...new Set((Array.isArray(groups) ? groups : [])
     .map((group) => String(group || '').trim().toLowerCase())
     .filter(Boolean))];
   if (normalized.length !== 1) throw new Error('planner_step_requires_exactly_one_tool_group');
-  if (!allowedGroups.has(normalized[0])) throw new Error(`planner_selected_unavailable_tool_group:${normalized[0]}`);
-  return normalized;
+  const group = normalized[0];
+  if (allowedGroups.has(group)) return { groups: normalized, connection_required: false };
+  if (allowCatalogDisconnected && (CATALOG_CONNECTOR_PROVIDERS.includes(group) || NATIVE_GROUPS.has(group))) {
+    return { groups: normalized, connection_required: !NATIVE_GROUPS.has(group) };
+  }
+  throw new Error(`planner_selected_unavailable_tool_group:${group}`);
 }
 
-export function decisionToHostedPlan(decision, { request, connectedProviders = [] } = {}) {
+export function decisionToHostedPlan(decision, { request, connectedProviders = [], unifiedDag = isUseToolsUnifiedDagEnabled() } = {}) {
   const allowedGroups = new Set([...NATIVE_GROUPS, ...connectedProviders]);
   let rawSteps = [];
   if (decision?.operation === 'compound') {
@@ -84,18 +89,22 @@ export function decisionToHostedPlan(decision, { request, connectedProviders = [
   }
   if (rawSteps.length === 0 || rawSteps.length > 8) throw new Error('planner_invalid_step_count');
 
-  const steps = rawSteps.map((step, index) => ({
-    index,
-    operation: String(step?.operation || `step_${index + 1}`).slice(0, 64),
-    authority: step?.authority === 'write' ? 'write' : 'read',
-    output_kind: ['knowledge', 'recipient', 'record', 'document', 'message', 'generic'].includes(step?.output_kind)
-      ? step.output_kind : 'generic',
-    tool_groups: validateGroups(step?.tool_groups, allowedGroups),
-    depends_on: normalizeDependencies(step?.depends_on, index),
-    instruction: String(step?.message || '').slice(0, 2000),
-    query: typeof step?.query === 'string' && step.query.trim() ? step.query.trim().slice(0, 500) : null,
-    retrieval: step?.retrieval || null,
-  }));
+  const steps = rawSteps.map((step, index) => {
+    const validated = validateGroups(step?.tool_groups, allowedGroups, { allowCatalogDisconnected: unifiedDag });
+    return {
+      index,
+      operation: String(step?.operation || `step_${index + 1}`).slice(0, 64),
+      authority: step?.authority === 'write' ? 'write' : 'read',
+      output_kind: ['knowledge', 'recipient', 'record', 'document', 'message', 'generic'].includes(step?.output_kind)
+        ? step.output_kind : 'generic',
+      tool_groups: validated.groups,
+      connection_required: validated.connection_required,
+      depends_on: normalizeDependencies(step?.depends_on, index),
+      instruction: String(step?.message || '').slice(0, 2000),
+      query: typeof step?.query === 'string' && step.query.trim() ? step.query.trim().slice(0, 500) : null,
+      retrieval: step?.retrieval || null,
+    };
+  });
 
   // A recipient needed by a connected action must be resolved by that live
   // connector, not by mining arbitrary addresses from memory evidence. Repair
@@ -120,8 +129,12 @@ export async function planHostedComposioWorkflow({
   signal,
   orgId,
   composio = null,
-  parseIntent = parseChatIntentProgressive,
+  parseIntent = null,
 } = {}) {
+  if (!parseIntent) {
+    const progressive = await import('./chat-progressive-router.js');
+    parseIntent = progressive.parseChatIntentProgressive;
+  }
   const message = String(request || '').trim();
   if (!message) throw new Error('request_required');
   if (!orgId) throw new Error('org_scope_required');
@@ -164,6 +177,7 @@ export async function planHostedComposioWorkflow({
       signal,
       useTools: true,
       connectedProviders,
+      unifiedDag: isUseToolsUnifiedDagEnabled(),
       workflowPlanner: true,
     });
     if (parsed?.decision?._router_error) {
@@ -171,7 +185,11 @@ export async function planHostedComposioWorkflow({
       continue;
     }
     try {
-      const candidateSteps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+      const candidateSteps = decisionToHostedPlan(parsed?.decision, {
+        request: message,
+        connectedProviders,
+        unifiedDag: isUseToolsUnifiedDagEnabled(),
+      });
       if (!bestCandidate || candidateSteps.length > bestCandidate.steps.length
         || (attempts > 1 && candidateSteps.length === bestCandidate.steps.length)) {
         bestCandidate = { steps: candidateSteps, parsed };

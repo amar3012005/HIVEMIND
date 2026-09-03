@@ -24,6 +24,8 @@ import {
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
+  RETRY_CONNECT_VALUE,
+  shouldOpenConnectHref,
   unresolvedGroundedWriteFields,
   validateSemanticStepOutput,
 } from '../../src/agent/compound-orchestrator.js';
@@ -417,6 +419,7 @@ test('compound orchestrator: composio read step executes and reports completed',
   assert.deepEqual(res.readResults, [{
     index: 0,
     operation: 'search',
+    instruction: 'search emails',
     tool: 'composio_gmail_search',
     data: { results: ['m1'] },
   }]);
@@ -959,4 +962,88 @@ test('compound orchestrator: emits tool_call/tool_result SSE events', async () =
   assert.equal(events.filter((e) => e.type === 'tool_result').length, 1);
   assert.equal(events.filter((e) => e.type === 'orchestration_plan').length, 1);
   assert.deepEqual(events.filter((e) => e.type === 'orchestration_step').map((e) => e.phase), ['started', 'completed']);
+});
+
+test('unified DAG pauses a required disconnected toolkit and still runs independent native recall', async () => {
+  const previous = process.env.USE_TOOLS_UNIFIED_DAG;
+  process.env.USE_TOOLS_UNIFIED_DAG = 'true';
+  let executed = 0;
+  const composio = {
+    ...makeComposio({
+      tools: [{ name: 'composio_gmail_fetch_emails', slug: 'GMAIL_FETCH_EMAILS', description: 'fetch' }],
+      executeImpl: async () => {
+        executed += 1;
+        return { successful: true, data: { messages: [{ id: '1' }] }, error: null };
+      },
+    }),
+    async getToolkitStatus() { return 'available'; },
+    async createConnectLink() { return { redirectUrl: 'https://connect.composio.dev/link/gmail-test' }; },
+  };
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    _tracedDispatch: async () => ({ memories: [{ id: 'm1', title: 'Notes', content: 'risk: delay' }], evidence: [] }),
+  };
+  try {
+    const result = await runCompoundOrchestrator({
+      subtasks: [
+        { operation: 'recall', tool_groups: ['hivemind-recall'], depends_on: null, message: 'project notes' },
+        { operation: 'gmail_search', tool_groups: ['gmail'], depends_on: null, message: 'important emails' },
+        { operation: 'compare', tool_groups: ['hivemind-recall'], depends_on: [0, 1], message: 'compare' },
+      ],
+      ctx, apiKey: 'k', signal: null, composio,
+      selectTool: makeSelector(() => ({ toolName: 'composio_gmail_fetch_emails', args: {} })),
+    });
+    assert.equal(executed, 0);
+    assert.equal(result.status, 'needs_input');
+    assert.equal(result.steps[0].status, 'completed');
+    assert.equal(result.inputRequests[0].kind, 'connect_account');
+    assert.equal(result.inputRequests[0].blocking, true);
+    assert.equal(result.inputRequests[0].options[0].href, 'https://connect.composio.dev/link/gmail-test');
+    assert.equal(shouldOpenConnectHref(result.inputRequests[0].options[0]), true);
+    assert.match(result.summary, /Connect Gmail/);
+
+    composio.getToolkitStatus = async () => 'connected';
+    const resumed = await runCompoundOrchestrator({
+      subtasks: result.resumeState.subtasks,
+      ctx: { ...ctx, _trace: { traceId: 't2' } },
+      apiKey: 'k', signal: null, composio,
+      resumeState: { ...result.resumeState, choice: { stepIndex: 1, value: RETRY_CONNECT_VALUE } },
+      selectTool: makeSelector(() => ({ toolName: 'composio_gmail_fetch_emails', args: {} })),
+    });
+    assert.equal(executed, 1);
+    assert.ok(['completed', 'needs_input', 'pending'].includes(resumed.status));
+  } finally {
+    if (previous === undefined) delete process.env.USE_TOOLS_UNIFIED_DAG;
+    else process.env.USE_TOOLS_UNIFIED_DAG = previous;
+  }
+});
+
+test('flag off does not invent a connect pause for disconnected toolkits', async () => {
+  const previous = process.env.USE_TOOLS_UNIFIED_DAG;
+  delete process.env.USE_TOOLS_UNIFIED_DAG;
+  let executed = 0;
+  const composio = {
+    ...makeComposio({
+      tools: [{ name: 'composio_gmail_search', slug: 'GMAIL_SEARCH', description: 'search' }],
+      executeImpl: async () => {
+        executed += 1;
+        return { successful: true, data: {}, error: null };
+      },
+    }),
+    async getToolkitStatus() { return 'available'; },
+    async createConnectLink() { throw new Error('must not create connect link when flag off'); },
+  };
+  try {
+    const res = await runCompoundOrchestrator({
+      subtasks: [{ operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search' }],
+      ctx: { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' } },
+      apiKey: 'k', signal: null, composio,
+      selectTool: makeSelector(() => ({ toolName: 'composio_gmail_search', args: {} })),
+    });
+    assert.equal(res.status, 'completed');
+    assert.equal(executed, 1);
+  } finally {
+    if (previous === undefined) delete process.env.USE_TOOLS_UNIFIED_DAG;
+    else process.env.USE_TOOLS_UNIFIED_DAG = previous;
+  }
 });

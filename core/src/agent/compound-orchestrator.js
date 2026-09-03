@@ -20,7 +20,36 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chatCompletionFetch } from '../llm/chat-provider.js';
+import { isUseToolsUnifiedDagEnabled } from './use-tools-unified-flag.js';
+
+async function chatCompletionFetch(...args) {
+  const mod = await import('../llm/chat-provider.js');
+  return mod.chatCompletionFetch(...args);
+}
+
+export const RETRY_CONNECT_VALUE = '__retry_connect__';
+
+export function shouldOpenConnectHref(option) {
+  return Boolean(option && (option.href || option.open_url));
+}
+
+function displayToolkitName(toolkit) {
+  const names = {
+    gmail: 'Gmail',
+    googledrive: 'Google Drive',
+    googledocs: 'Google Docs',
+    googlesheets: 'Google Sheets',
+    googlecalendar: 'Google Calendar',
+    googletasks: 'Google Tasks',
+    googlegemini: 'Gemini',
+    slack: 'Slack',
+    notion: 'Notion',
+    github: 'GitHub',
+    linear: 'Linear',
+  };
+  const key = String(toolkit || '').trim().toLowerCase();
+  return names[key] || key.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) || 'this application';
+}
 
 // Model used for the per-subtask tool-selection step. Reuses the hardened
 // synthesis path by default; env-overridable for A/B.
@@ -1018,6 +1047,8 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       generateToolInputs: m.generateToolInputs,
       discoverSessionTools: m.discoverSessionTools,
       executeSessionTool: m.executeSessionTool,
+      getToolkitStatus: m.getToolkitStatus,
+      createConnectLink: m.createConnectLink,
     };
   })();
 
@@ -1036,6 +1067,65 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   //    Nango toolkit or the connector runtime (both key off nangoConnection,
   //    which is empty for Composio-connected orgs).
   const composioToolkit = composioToolkitFor(toolGroups);
+  if (isUseToolsUnifiedDagEnabled() && composioToolkit && ctx?.orgId && typeof composioSvc.getToolkitStatus === 'function') {
+    let status = 'available';
+    try {
+      status = await composioSvc.getToolkitStatus(ctx.orgId, composioToolkit);
+    } catch {
+      status = 'available';
+    }
+    if (status !== 'connected') {
+      const label = displayToolkitName(composioToolkit);
+      let redirectUrl = null;
+      if (typeof composioSvc.createConnectLink === 'function') {
+        try {
+          const link = await composioSvc.createConnectLink(composioToolkit, ctx.orgId, {
+            callbackUrl: ctx.composioCallbackUrl || undefined,
+          });
+          redirectUrl = link?.redirectUrl || link?.redirect_url || null;
+        } catch (err) {
+          emit({ type: 'tool_result', name: composioToolkit, status: 'connect_link_failed', summary: err.message });
+        }
+      }
+      emit({
+        type: 'orchestration_connect_required',
+        toolkit: composioToolkit,
+        provider: toolGroups[0] || composioToolkit,
+        redirect_url: redirectUrl,
+      });
+      return {
+        status: 'needs_input',
+        error: `${label} is not connected`,
+        toolName: null,
+        args: {},
+        result: null,
+        draftId: null,
+        outputFields: {},
+        inputRequest: {
+          kind: 'connect_account',
+          field: 'connection',
+          toolkit: composioToolkit,
+          provider: toolGroups[0] || composioToolkit,
+          blocking: subtask?.blocking !== false,
+          prompt: `Connect ${label} to continue. Approve access in the window that opens, then come back and continue this request.`,
+          options: [
+            {
+              id: 'connect',
+              label: `Connect ${label}`,
+              href: redirectUrl,
+              open_url: true,
+              value: redirectUrl || 'connect',
+            },
+            {
+              id: 'connected',
+              label: `I've connected ${label} — continue`,
+              value: RETRY_CONNECT_VALUE,
+            },
+          ],
+        },
+      };
+    }
+  }
   let tools = [];
   let composioSlugByTool = new Map();
   let composioManifestByTool = new Map();
@@ -1497,7 +1587,9 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
           done[j] = false;
         }
       }
-      if (resumeState.choice.retryStep === true) {
+      if (resumeState.choice.retryStep === true
+          || resumeState.choice.value === RETRY_CONNECT_VALUE
+          || results[i]?.inputRequest?.kind === 'connect_account') {
         manualInputs[i] = { ...(manualInputs[i] || {}), ...(resumeState.choice.values || {}) };
         results[i] = undefined;
         outputs[i] = undefined;
@@ -1606,8 +1698,14 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): draft created — awaiting your approval`);
       anyPending = true;
     } else if (r.status === 'needs_input') {
+      const blocking = subtasks.some((candidate, j) => j !== i && Array.isArray(candidate.depends_on) && candidate.depends_on.includes(i));
+      if (r.inputRequest) r.inputRequest.blocking = blocking;
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): needs information — ${r.error || 'missing required fields'}`);
-      anyNeedsInput = true;
+      if (r.inputRequest?.kind === 'connect_account' && !blocking) {
+        // optional disconnected branch: do not pause the whole plan
+      } else {
+        anyNeedsInput = true;
+      }
     } else if (r.status === 'blocked_pending') {
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): waiting for approval of a prior step`);
       anyPending = true;
@@ -1679,8 +1777,12 @@ export function buildCompoundUserSummary({ subtasks = [], results = [], status, 
     return `${progress}I used the completed results to prepare ${count === 1 ? 'the requested action' : `${count} requested actions`} for your review. I paused before making any external change because your approval is required. Nothing has been sent, published, created, or changed yet. Review the exact details below, then approve to continue or cancel.`;
   }
   if (status === 'needs_input') {
-    const needed = results.find((result) => result?.status === 'needs_input')?.error;
-    return `${progress}I paused because continuing safely requires information or a choice from you. ${needed ? `What I still need: ${needed}. ` : ''}The work already completed is retained and will not be repeated. Choose one of the options below so I can resume the remaining steps.`;
+    const needed = results.find((result) => result?.status === 'needs_input');
+    if (needed?.inputRequest?.kind === 'connect_account') {
+      const label = displayToolkitName(needed.inputRequest.toolkit || needed.inputRequest.provider);
+      return `${progress}Connect ${label} to continue this request. I paused before calling ${label} because it is not connected yet. Approve access, then continue here — I will not repeat completed work.`;
+    }
+    return `${progress}I paused because continuing safely requires information or a choice from you. ${needed?.error ? `What I still need: ${needed.error}. ` : ''}The work already completed is retained and will not be repeated. Choose one of the options below so I can resume the remaining steps.`;
   }
   if (status === 'error') {
     return `${progress}I could not finish the remaining work. No unapproved external action was performed. ${fallbackLines.filter((line) => !/: done$/.test(line)).join(' ')}`.trim();

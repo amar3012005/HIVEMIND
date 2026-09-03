@@ -5,6 +5,7 @@ import {
   decisionToHostedPlan,
   planHostedComposioWorkflow,
 } from '../../src/agent/hosted-composio-planner.js';
+import { isUseToolsUnifiedDagEnabled } from '../../src/agent/use-tools-unified-flag.js';
 
 test('connected provider discovery uses active tenant accounts only', () => {
   assert.deepEqual(connectedProvidersFromAccounts([
@@ -54,8 +55,40 @@ test('hosted plan fails closed when the planner selects an unavailable connector
   assert.throws(() => decisionToHostedPlan({
     operation: 'compound',
     subtasks: [{ operation: 'post', tool_groups: ['slack'], message: 'Post it' }],
-  }, { request: 'Post it', connectedProviders: ['gmail'] }), /planner_selected_unavailable_tool_group:slack/);
+  }, { request: 'Post it', connectedProviders: ['gmail'], unifiedDag: false }), /planner_selected_unavailable_tool_group:slack/);
 });
+
+test('flag-off still rejects a disconnected named catalog app', () => {
+  assert.throws(() => decisionToHostedPlan({
+    operation: 'compound',
+    subtasks: [
+      { operation: 'recall', tool_groups: ['hivemind-recall'], message: 'notes' },
+      { operation: 'gmail_search', tool_groups: ['gmail'], message: 'emails' },
+    ],
+  }, { request: 'emails and notes', connectedProviders: [], unifiedDag: false }), /planner_selected_unavailable_tool_group:gmail/);
+});
+
+test('unified DAG keeps a disconnected catalog app beside native recall', () => {
+  const steps = decisionToHostedPlan({
+    operation: 'compound',
+    subtasks: [
+      { operation: 'recall', authority: 'read', tool_groups: ['hivemind-recall'], message: 'project notes' },
+      { operation: 'gmail_search', authority: 'read', tool_groups: ['gmail'], depends_on: [], message: 'important emails last month' },
+      { operation: 'compare', authority: 'read', tool_groups: ['hivemind-recall'], depends_on: [0, 1], message: 'compare risks' },
+    ],
+  }, { request: 'emails and project notes', connectedProviders: [], unifiedDag: true });
+  assert.deepEqual(steps.map((step) => step.tool_groups[0]), ['hivemind-recall', 'gmail', 'hivemind-recall']);
+  assert.equal(steps[1].connection_required, true);
+  assert.equal(steps[0].connection_required, false);
+});
+
+test('fail-closed flag is off unless USE_TOOLS_UNIFIED_DAG is the string true', () => {
+  assert.equal(isUseToolsUnifiedDagEnabled({}), false);
+  assert.equal(isUseToolsUnifiedDagEnabled({ USE_TOOLS_UNIFIED_DAG: 'false' }), false);
+  assert.equal(isUseToolsUnifiedDagEnabled({ USE_TOOLS_UNIFIED_DAG: 'true' }), true);
+});
+
+
 
 test('hosted planner gives the semantic router only tenant-active providers', async () => {
   let parserInput = null;

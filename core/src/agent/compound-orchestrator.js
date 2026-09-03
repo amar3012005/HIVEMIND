@@ -211,6 +211,46 @@ function collectEmailCandidates(value, found = new Set(), depth = 0) {
   return found;
 }
 
+export function contactLookupTool(rawTools) {
+  for (const tool of Array.isArray(rawTools) ? rawTools : []) {
+    const slug = String(tool?._composio?.slug || '');
+    const name = String(tool?.function?.name || tool?.name || '');
+    const hay = `${name} ${slug} ${tool?.function?.description || ''}`.toLowerCase();
+    if (!/(contact|people|person|directory)/.test(hay)) continue;
+    if (/(send|create|delete|update|draft|label)/.test(hay)) continue;
+    return { tool, slug: slug || name, name };
+  }
+  return null;
+}
+
+export function namedRecipientQuery(...values) {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    if (collectEmailCandidates(text).size > 0) continue;
+    if (text.length < 2 || text.length > 80) continue;
+    if (text.split(/\s+/).length > 6) continue;
+    return text.replace(/^to\s+/i, '').trim();
+  }
+  return '';
+}
+
+async function lookupRecipientEmails({ composioSvc, orgId, tools, query, slugByTool }) {
+  const found = contactLookupTool(tools);
+  const slug = slugByTool?.get?.(found?.name) || found?.slug;
+  if (!slug || !query || !orgId || typeof composioSvc?.executeTool !== 'function') {
+    return { emails: [] };
+  }
+  const properties = found.tool?.function?.parameters?.properties || {};
+  const args = {};
+  if (properties.query) args.query = query;
+  else if (properties.name) args.name = query;
+  else if (properties.q) args.q = query;
+  else args.query = query;
+  const result = await composioSvc.executeTool(orgId, slug, args);
+  return { emails: [...collectEmailCandidates(result)].slice(0, 20) };
+}
+
 function emailDestinationFields(outputKind, schema) {
   if (outputKind !== 'message') return [];
   const properties = schema?.properties || {};
@@ -1446,7 +1486,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   unresolvedContent = unresolvedGroundedWriteFields(
     subtask.output_kind, manifestSchema, args, priorOutputs,
   );
-  const recipientValidation = normalizeEmailDestinationArgs(
+  let recipientValidation = normalizeEmailDestinationArgs(
     subtask.output_kind,
     manifestSchema,
     args,
@@ -1454,6 +1494,43 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     [ctx?._originalUserMessage, message].filter(Boolean).join('\n'),
   );
   args = recipientValidation.args;
+  if (recipientValidation.invalidFields.includes('recipient_email')) {
+    const query = namedRecipientQuery(
+      args.recipient_email,
+      args.to,
+      subtask?.message,
+      ctx?._originalUserMessage,
+    );
+    if (query) {
+      try {
+        const lookup = await lookupRecipientEmails({
+          composioSvc, orgId, tools, query, slugByTool: composioSlugByTool,
+        });
+        if (lookup.emails.length === 1) {
+          args = { ...args, recipient_email: lookup.emails[0] };
+          recipientValidation = normalizeEmailDestinationArgs(
+            subtask.output_kind, manifestSchema, args, priorOutputs, lookup.emails[0],
+          );
+          args = recipientValidation.args;
+        } else if (lookup.emails.length > 1) {
+          emit({ type: 'tool_result', name: toolName, status: 'needs_input', summary: 'Choose one recipient' });
+          return {
+            status: 'needs_input',
+            error: 'Choose one recipient',
+            toolName, args, result: null, draftId: null, outputFields: {},
+            inputRequest: {
+              kind: 'single_choice',
+              field: 'recipient_email',
+              prompt: `Choose the email for ${query}.`,
+              options: lookup.emails.map((value) => ({ id: value, label: value, value })),
+            },
+          };
+        }
+      } catch (error) {
+        emit({ type: 'tool_result', name: toolName, status: 'recipient_lookup_failed', summary: error.message });
+      }
+    }
+  }
   const missing = missingRequiredArgs(manifestSchema, args);
   const semanticMissing = [
     ...missingSemanticWriteArgs(subtask.output_kind, manifestSchema, args),

@@ -25,6 +25,8 @@ import {
   resolveSelectedTool,
   runCompoundOrchestrator,
   RETRY_CONNECT_VALUE,
+  contactLookupTool,
+  namedRecipientQuery,
   shouldOpenConnectHref,
   unresolvedGroundedWriteFields,
   validateSemanticStepOutput,
@@ -681,6 +683,57 @@ test('missing write fields produce a resumable generalized field-input request',
   });
   assert.equal(resumed.status, 'pending');
   assert.equal(created[0].toolArgs.recipient_email, 'person@example.com');
+});
+
+test('namedRecipientQuery keeps a display name and skips long prose', () => {
+  assert.equal(namedRecipientQuery('rama'), 'rama');
+  assert.equal(namedRecipientQuery('rama@example.com'), '');
+  assert.equal(namedRecipientQuery('go through HIVEMIND git repo and send important information about repo to rama via gmail'), '');
+  assert.equal(contactLookupTool([
+    { function: { name: 'composio_gmail_send_email' }, _composio: { slug: 'GMAIL_SEND_EMAIL' } },
+    { function: { name: 'composio_gmail_get_contacts', description: 'search contacts' }, _composio: { slug: 'GMAIL_GET_CONTACTS' } },
+  ])?.slug, 'GMAIL_GET_CONTACTS');
+});
+
+test('gmail write resolves a named recipient through connected contact lookup', async () => {
+  const created = [];
+  const schema = {
+    type: 'object', required: ['recipient_email', 'subject', 'body'],
+    properties: {
+      recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' },
+    },
+  };
+  const composio = makeComposio({
+    tools: [
+      { name: 'composio_gmail_get_contacts', slug: 'GMAIL_GET_CONTACTS', description: 'search people contacts' },
+      { name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send' },
+    ],
+    executeImpl: async (slug) => {
+      if (slug === 'GMAIL_GET_CONTACTS') {
+        return { successful: true, data: { contacts: [{ email: 'rama@singulance.com', name: 'Rama' }] }, error: null };
+      }
+      throw new Error('must not execute send');
+    },
+  });
+  const result = await runCompoundOrchestrator({
+    subtasks: [{
+      operation: 'send_email', authority: 'write', output_kind: 'message',
+      tool_groups: ['gmail'], message: 'email rama',
+    }],
+    ctx: {
+      userId: 'u1', orgId: 'o1', _trace: { traceId: 'rama-lookup' },
+      _originalUserMessage: 'send important information about repo to rama via gmail',
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'RAMA-DRAFT' }; } } },
+    },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email',
+      args: { recipient_email: 'rama', subject: 'HIVEMIND repo', body: 'Important notes from recall.' },
+      schema,
+    })),
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(created[0].toolArgs.recipient_email, 'rama@singulance.com');
 });
 
 test('email write pauses before draft persistence when generated recipient is only a name', async () => {

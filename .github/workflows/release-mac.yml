@@ -56,25 +56,41 @@ jobs:
           rm -rf electron-app/react-build
           cp -r frontend/Da-vinci/build electron-app/react-build
 
-      - name: Build, sign, notarize & publish (signs only if Apple secrets present)
-        working-directory: electron-app
+      - name: Validate Apple release credentials
         env:
-          # Developer ID signing (base64 .p12 + password). If absent → unsigned build.
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          # Notarization (afterSign hook skips when these are empty).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            value="${!name:-}"
+            if [ -z "$value" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Missing required Apple release credentials:$missing" >&2
+            echo "Refusing to publish an ad-hoc-signed macOS update." >&2
+            exit 1
+          fi
+
+      - name: Build, sign, notarize & publish
+        working-directory: electron-app
+        env:
+          # Developer ID signing (base64 .p12 + password).
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # Notarization credentials.
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -n "$CSC_LINK" ]; then
-            echo "→ signing + notarizing build"
-            export CSC_IDENTITY_AUTO_DISCOVERY=true
-          else
-            echo "→ UNSIGNED build (no MAC_CSC_LINK secret) — set Apple secrets for robust auto-update"
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
-          fi
+          echo "→ signing + notarizing build"
+          export CSC_IDENTITY_AUTO_DISCOVERY=true
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             npx electron-builder build --mac --publish always
           else

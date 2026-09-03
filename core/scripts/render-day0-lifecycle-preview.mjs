@@ -3,55 +3,56 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../src/email/templates/day0-company-onboarding.js';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const outputDir = path.resolve(here, '../../output/day0-lifecycle');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const outputDir = path.join(root, 'output', 'pdf');
+const pdfUrl = process.env.HIVEMIND_PLAYWRIGHT_PDF_URL || 'http://127.0.0.1:8932/v1/pdf';
+const token = process.env.PLAYWRIGHT_SERVICE_TOKEN || '';
+if (!token) throw new Error('PLAYWRIGHT_SERVICE_TOKEN is required');
 
-const fixture = {
-  company: 'Singulance Labs',
-  website: 'https://singulancelabs.com',
-  company_location: 'Hannover, Germany',
-  mission: 'Empower regulated European enterprises with a sovereign, privacy-first AI workforce that lives inside their own company memory.',
-  onboarded_at: '2026-08-27T18:00:00Z',
+const input = {
+  company: 'Canary Company',
+  website: 'https://canary.example',
+  company_location: 'Berlin, Germany',
+  mission: 'Give teams an accountable operating system for company intelligence.',
+  onboarded_at: '2026-09-03T08:00:00.000Z',
   profile: {
-    tagline: 'AI Workforce That Runs Inside Memory',
-    what_it_does: 'A GDPR-native AI operating layer that gives companies durable memory, grounded recall, and digital employees able to turn context into action.',
-    positioning: 'A sovereign AI operating system for institutions that need private memory, evidence-grounded decisions, and accountable execution.',
-    offer: 'HIVEMIND, HyperAgents, Meeting Notes, Voice, and sovereign deployment.',
-    icp: 'Large enterprises and regulated institutions in Europe seeking compliant internal AI capabilities.',
-    evidence_gaps: ['Confirm the highest-priority buyer segment.', 'Approve the first operational use case.', 'Validate the public positioning statement.'],
-    contact_details: { emails: ['enterprise@singulancelabs.com'] },
+    tagline: 'Company intelligence, ready to act.',
+    what_it_does: 'Canary Company turns source-backed knowledge into practical work for operating teams.',
+    positioning: 'A durable, evidence-first operating layer for modern companies.',
+    offer: 'Company memory, governed agents, and reusable workflows.',
+    icp: 'European operations, strategy, research, and compliance teams.',
+    open_questions: ['Confirm the primary buyer.', 'Approve the first operating priority.'],
   },
-  team: [
-    { id: 'lena-kovacs', slug: 'lena-kovacs', name: 'Lena Kovács', roleArchetype: 'Product Risk & Quality Lead', focus: 'Protects product claims, reliability, privacy, and delivery quality.' },
-    { id: 'ravi-patel', slug: 'ravi-patel', name: 'Ravi Patel', roleArchetype: 'User & Market Researcher', focus: 'Finds user needs, competition, and evidence of market adoption.' },
-    { id: 'sofia-almeida', slug: 'sofia-almeida', name: 'Sofia Almeida', roleArchetype: 'Product Strategy Lead', focus: 'Owns product positioning, roadmap priorities, and differentiation.' },
+  source_pages: [
+    { url: 'https://canary.example/' },
+    { url: 'https://canary.example/products' },
+    { url: 'https://canary.example/company' },
+    { url: 'https://canary.example/legal/privacy' },
   ],
   tasks: [
-    { title: 'Audit and optimize core site keywords', room_name: 'SEO', deliverable: 'Keyword optimization report' },
-    { title: 'Design the regulated-market lead funnel', room_name: 'Marketing', deliverable: 'Lead-generation funnel blueprint' },
-    { title: 'Build a targeted outreach list of EU regulators', room_name: 'Outreach intelligence', deliverable: 'Verified prospect contact list' },
-    { title: 'Refine the sovereign AI positioning statement', room_name: 'Branding', deliverable: 'Updated brand positioning brief' },
-    { title: 'Prepare an investor deck highlighting the compliance edge', room_name: 'Fundraising', deliverable: 'Investor presentation deck' },
+    { title: 'Validate the company narrative', room_name: 'Research', deliverable: 'A source-backed positioning brief.' },
+    { title: 'Map the highest-value customer need', room_name: 'Market', deliverable: 'A ranked customer-needs report.' },
+    { title: 'Review the first operating risk', room_name: 'Risk', deliverable: 'A review-ready risk memo.' },
   ],
-  documents: ['Singulance Labs - Company profile', 'Singulance Labs - Market research', 'Singulance Labs - Mission'],
-  research: [
-    { title: 'Company website', summary: 'First-party product, positioning, and contact context.', url: 'https://singulancelabs.com' },
-    { title: 'HIVEMIND product', summary: 'Product capabilities and public operating-system narrative.', url: 'https://next.singulancelabs.com/hivemind/login' },
-    { title: 'Public social signal', summary: 'Recent brand language and company announcements.', url: 'https://instagram.com/singulancelabs' },
+  team: [
+    { id: 'ravi-research', name: 'Ravi Patel', roleArchetype: 'Researcher', jobTitle: 'User & Market Researcher' },
+    { id: 'lena-strategy', name: 'Lena', roleArchetype: 'Strategist', jobTitle: 'Company Strategist' },
+    { id: 'priya-risk', name: 'Priya', roleArchetype: 'Skeptic', jobTitle: 'Independent Reviewer' },
+    { id: 'omar-comms', name: 'Omar', roleArchetype: 'Communicator', jobTitle: 'Communicator' },
   ],
 };
 
+const email = renderDayZeroOnboardingEmail(input, { publicApiUrl: 'https://api.singulancelabs.com' });
+const report = renderDayZeroOnboardingReportHtml(input);
 await fs.mkdir(outputDir, { recursive: true });
-const options = {
-  appUrl: 'https://next.singulancelabs.com/hivemind/app/employees/mycompany',
-  publicApiUrl: 'https://api.singulancelabs.com',
-  embedEmailAvatars: true,
-};
-const email = renderDayZeroOnboardingEmail(fixture, options);
-const deck = renderDayZeroOnboardingReportHtml(fixture, options);
-await Promise.all([
-  fs.writeFile(path.join(outputDir, 'day0-email-preview.html'), email.html),
-  fs.writeFile(path.join(outputDir, 'day0-report-deck-preview.html'), deck.html),
-  fs.writeFile(path.join(outputDir, 'day0-report-view-model.json'), `${JSON.stringify(deck.report, null, 2)}\n`),
-]);
-console.log(JSON.stringify({ outputDir, emailBytes: Buffer.byteLength(email.html), deckBytes: Buffer.byteLength(deck.html), pages: 10, avatars: deck.report.team.length }));
+await fs.writeFile(path.join(outputDir, 'day0-lifecycle-email-preview.html'), email.html, 'utf8');
+await fs.writeFile(path.join(outputDir, 'day0-lifecycle-report-preview.html'), report.html, 'utf8');
+const response = await fetch(pdfUrl, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ html: report.html }),
+});
+if (!response.ok) throw new Error(`PDF render failed: ${response.status} ${await response.text()}`);
+const pdfPath = path.join(outputDir, 'day0-lifecycle-report-preview.pdf');
+await fs.writeFile(pdfPath, Buffer.from(await response.arrayBuffer()));
+console.log(pdfPath);

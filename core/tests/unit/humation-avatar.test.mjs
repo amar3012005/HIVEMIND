@@ -6,7 +6,7 @@ import {
   humationLaneVisual,
   renderHumationAvatarSvg,
 } from '../../src/email/humation-avatar.js';
-import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail } from '../../src/email/templates/day0-company-onboarding.js';
+import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../../src/email/templates/day0-company-onboarding.js';
 
 test('Humation email SVG bakes lane colors without CSS-variable fallbacks', () => {
   const svg = renderHumationAvatarSvg({ id: 'researcher-1', name: 'Léa', roleArchetype: 'Researcher' });
@@ -43,6 +43,22 @@ test('Day 0 uses the same lane-colored, cache-versioned email contract', () => {
   assert.match(rendered.html, /role=Builder&amp;v=2/);
   assert.match(rendered.html, /class="avatar" style="background:#eaf3ff;border-color:#117dff"/);
   assert.match(rendered.html, /class="person-role" style="color:#117dff"/);
-  assert.match(rendered.html, /class="character-strip"/);
+  assert.doesNotMatch(rendered.html, /class="character-strip"/);
+  assert.doesNotMatch(rendered.html, /EVIDENCE LEDGER/);
+});
+
+test('Day 0 attachment is an A4 portrait lifecycle report, not a slide deck', () => {
+  const rendered = renderDayZeroOnboardingReportHtml({
+    company: 'Canary Co',
+    website: 'https://canary.example',
+    profile: { tagline: 'Useful work', icp: 'Operations teams' },
+    source_pages: [{ url: 'https://canary.example/products' }],
+    tasks: [{ title: 'Review the first move', room_name: 'Research' }],
+    team: [{ id: 'builder-1', name: 'Mina', roleArchetype: 'builder', jobTitle: 'Engineer' }],
+  });
+  assert.match(rendered.html, /@page\{size:A4 portrait/);
+  assert.match(rendered.html, /DAY-0 \/ AWAKENING/);
   assert.match(rendered.html, /EVIDENCE LEDGER/);
+  assert.match(rendered.html, /SINGULANCE · YOUR COMPANY, IN MOTION/);
+  assert.doesNotMatch(rendered.html, /deck-page/);
 });

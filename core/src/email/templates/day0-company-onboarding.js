@@ -1,10 +1,10 @@
 import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../humation-avatar.js';
-import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEmailShell, lifecycleSubject } from './cartesia-lifecycle.js';
+import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEmailShell, lifecyclePortraitReportShell, lifecycleSubject } from './cartesia-lifecycle.js';
 
 // Delivery version is deliberately part of the generated artefact contract.
 // A newer renderer can therefore be reissued once without treating a browser
 // refresh as permission to resend a lifecycle message.
-export const DAY_ZERO_REPORT_VERSION = 'day-0-v6';
+export const DAY_ZERO_REPORT_VERSION = 'day-0-v7';
 
 function clean(value, limit = 360) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -252,7 +252,15 @@ function cartesiaPortraitDayZeroReport(report) {
   </style></head><body><div class="global-brand">${brandLockup({ compact: true })}</div>${pages}</body></html>`;
 }
 
+function lifecyclePortraitDayZeroReport(report) {
+  return lifecyclePortraitReportShell({
+    title: `Day 0 - ${report.companyName}`,
+    reportLabel: 'DAY 0 · AWAKENING REPORT',
+    pages: reportPages(report).join(''),
+  });
+}
+
 export function renderDayZeroOnboardingReportHtml(input, options = {}) {
   const report = buildDayZeroOnboardingReport(input, options);
-  return { report, html: cartesiaPortraitDayZeroReport(report) };
+  return { report, html: lifecyclePortraitDayZeroReport(report) };
 }

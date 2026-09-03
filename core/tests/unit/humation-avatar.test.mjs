@@ -61,8 +61,12 @@ test('Day 0 attachment is an A4 portrait lifecycle report, not a slide deck', ()
   });
   assert.match(rendered.html, /@page\{size:A4 portrait/);
   assert.match(rendered.html, /DAY-0 \/ 01/);
-  assert.equal((rendered.html.match(/class="portrait-page"/g) || []).length, 10);
-  assert.match(rendered.html, /class="big-word">THE RISE OF AWAKENING/);
+  assert.equal((rendered.html.match(/class="portrait-page"/g) || []).length, 5);
+  assert.equal((rendered.html.match(/class="report-section"/g) || []).length, 10);
+  assert.doesNotMatch(rendered.html, /class="big-word"/);
+  assert.doesNotMatch(rendered.html, /AGENTS THAT ACT/);
+  assert.match(rendered.html, /SINGULANCE · HIVEMIND OPERATING SYSTEM/);
+  assert.match(rendered.html, /DAY 0 · AWAKENING REPORT/);
   assert.match(rendered.html, /MARKET & AUDIENCE · 03/);
   assert.match(rendered.html, /MISSION & POSITIONING · 04/);
   assert.match(rendered.html, /COMPANY MEMORY · 07/);
@@ -71,6 +75,5 @@ test('Day 0 attachment is an A4 portrait lifecycle report, not a slide deck', ()
   assert.match(rendered.html, /YOUR COMPANY · 10/);
   assert.match(rendered.html, /Market signal/);
   assert.match(rendered.html, /Company profile/);
-  assert.match(rendered.html, /ENTER THE OPERATING SYSTEM/);
   assert.doesNotMatch(rendered.html, /deck-page/);
 });

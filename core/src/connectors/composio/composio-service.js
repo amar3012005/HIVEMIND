@@ -364,9 +364,14 @@ export async function getToolRouterSession(orgId, toolkits) {
 
   const accounts = await listConnectedAccounts(orgId);
   const connectedAccounts = {};
+  const { isUseToolsUnifiedDagEnabled } = await import('../../agent/use-tools-unified-flag.js');
+  const unified = isUseToolsUnifiedDagEnabled();
   for (const toolkit of enabled) {
     const account = accounts.find((row) => row.toolkit === toolkit && row.status === 'ACTIVE');
-    if (!account) throw new Error(`No active Composio account for ${toolkit}`);
+    if (!account) {
+      if (unified) continue;
+      throw new Error(`No active Composio account for ${toolkit}`);
+    }
     connectedAccounts[toolkit] = account.id;
   }
   const data = await _composioRequest('POST', '/api/v3/tool_router/session', {

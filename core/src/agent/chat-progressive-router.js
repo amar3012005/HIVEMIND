@@ -196,7 +196,7 @@ const NATIVE_PROFILE_TOOL = {
 // The initial router prompt stays small: native HIVE-MIND capabilities are
 // always available, while connected apps and compound execution are disclosed
 // only after the caller explicitly opts in for this turn.
-export function getProgressiveTools({ useTools = false, connectedProviders = null } = {}) {
+export function getProgressiveTools({ useTools = false, connectedProviders = null, unifiedDag = false } = {}) {
   if (!useTools) return [
     NATIVE_PROFILE_TOOL,
     NATIVE_CONTEXT_TOOL,
@@ -213,6 +213,21 @@ export function getProgressiveTools({ useTools = false, connectedProviders = nul
   const allowed = [...new Set(connectedProviders
     .map((provider) => String(provider || '').trim().toLowerCase())
     .filter(Boolean))];
+  if (unifiedDag) {
+    const connectedNote = allowed.length
+      ? `Currently connected: ${allowed.join(', ')}.`
+      : 'No external applications are connected yet.';
+    return connectedTools.map((tool) => {
+      if (tool.function?.name !== 'use_connector') return tool;
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description: `Select the named application the user asked for. ${connectedNote} If it is not connected, still select it — the runtime will pause for OAuth. Never substitute HIVE-MIND recall for a named application.`,
+        },
+      };
+    });
+  }
   return connectedTools.flatMap((tool) => {
     if (tool.function?.name !== 'use_connector') return [tool];
     if (allowed.length === 0) return [];
@@ -430,7 +445,7 @@ export function extractMessageDates(text, now = new Date()) {
 // stays recall. "What is my name" already contains the literal "my name".
 const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me|what am i called|my name)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|wie hei(ß|ss)e ich|mein name|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|comment je m'appelle|mon (nom|rôle|objectif|entreprise)|sobre mí|cómo me llamo|mi (nombre|rol|empresa|objetivo)/i;
 
-async function callRouter({ message, history, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false }) {
+async function callRouter({ message, history, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false, unifiedDag = false }) {
   const histMsgs = Array.isArray(history)
     ? history.slice(-3).filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
@@ -442,7 +457,9 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     build: () => useTools ? SYSTEM : NATIVE_POLICY,
   });
   const connectedPolicy = useTools && Array.isArray(connectedProviders)
-    ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
+    ? (unifiedDag
+      ? `Currently connected applications: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available and may run in the same plan as connected apps. If the user names an application that is not connected, still plan that application — do not substitute recall. The runtime will pause for OAuth. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
+      : `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`)
     : '';
   const temporalPolicy = `CURRENT_UTC_DATE=${new Date().toISOString().slice(0, 10)}. Resolve relative dates semantically in the user's language and emit the required ISO temporal fields. A last-N-days inclusive window contains exactly N UTC dates: subtract N-1 days for range_start and use CURRENT_UTC_DATE for range_end.`;
   const dynamicPolicy = `${useTools
@@ -458,7 +475,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
   ];
   const requestBody = {
     messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
-    tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders }),
+    tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders, unifiedDag }),
     tool_choice: workflowPlanner
       ? { type: 'function', function: { name: 'compound_plan' } }
       : 'required',
@@ -928,9 +945,9 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
  * Main entry — mirrors parseChatIntent's { decision, usage } contract so the
  * caller is a drop-in swap under the flag.
  */
-export async function parseChatIntentProgressive({ message, history, language, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false }) {
+export async function parseChatIntentProgressive({ message, history, language, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false, unifiedDag = false }) {
   try {
-    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal, useTools, connectedProviders, workflowPlanner });
+    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal, useTools, connectedProviders, workflowPlanner, unifiedDag });
     const { decision } = adaptToDecision(tool, args, message, language, { useTools });
     // Diagnostics for the A/B gate (read via trace.intent; harmless downstream).
     decision._router = 'progressive';

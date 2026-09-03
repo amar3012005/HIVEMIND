@@ -83,6 +83,18 @@ or uncommitted changes as completed work.
 - Next: one concrete next action
 ```
 
+## 2026-09-03 UTC — use_tools unified DAG (Started)
+
+- State: Started
+- Owner: Grok
+- Branch: `singulance-main` worktree (flag-gated `USE_TOOLS_UNIFIED_DAG`)
+- Base / commit: `ad7125ab` -> pending
+- Scope: `core/src/agent/{use-tools-unified-flag,hosted-composio-planner,chat-progressive-router,compound-orchestrator}.js`, `core/src/connectors/composio/composio-service.js`, unit tests, `features.md`
+- Verification: `node --test` planner + orchestrator; production deploy pending governor
+- Production: not deployed
+- Rollback: unset `USE_TOOLS_UNIFIED_DAG` (fail-closed)
+- Next: unit tests, then hivemind-safe-deploy if tests pass
+
 ## Current Git Baseline
 
 ## 2026-07-19 UTC - SINGULANCE deployment governor started

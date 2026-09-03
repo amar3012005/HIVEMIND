@@ -557,3 +557,13 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Release: Da-vinci `40c7747bfb3db5106609ab1a4d5a961e1d9378ef`,
   parent `db4b06e32bb50efa80818f3928709671a1e69745`, Worker
   `e85c67ef-0f25-4a92-9bb3-a7f091894835`.
+
+## `USE_TOOLS_UNIFIED_DAG` (fail-closed, not globally enabled)
+
+- Core env `USE_TOOLS_UNIFIED_DAG`. Only the string `true` enables unified
+  native + Composio DAG orchestration on `use_tools: true` chat. Unset keeps
+  the legacy connected-only path.
+- Named catalog apps stay in the plan when disconnected (`connection_required`).
+  Required missing auth pauses dependents; Connect href opens Composio OAuth;
+  resume retries the same DAG. Writes remain `pendingWrite` drafts.
+- Optional Flagship mapping uses the same name. Default **off**.

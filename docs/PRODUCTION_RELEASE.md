@@ -1357,6 +1357,25 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: rollback Worker then set the backend gate false or disable the
   Flagship flag. No database migration; provider receipts prevent duplicates.
 
+## 88c8a6d5 — platform-admin lifecycle visibility
+
+- Parent SHA `88c8a6d5f218216d7d586348f3ad20f9cf228bce`; Da-vinci main SHA
+  `e3f65bc29548b81289201fabb4ab4f70832fb1f5`; Cloudflare Worker
+  `hivemind-web` version `8c37fed9-1206-47cf-8ebf-70fe7f2df724`.
+- Control Plane alone was rebuilt through the governed service-scoped release;
+  it runs immutable `hivemind/control-plane:sha-88c8a6d5`. No migration or data
+  service restart occurred.
+- The platform admin user table now exposes a read-only Lifecycle panel. It
+  reports per-active-organization days since awakening and Day 0/1/2 lifecycle
+  counts/statuses from tenant-owned HQ state. The endpoint requires the existing
+  platform-admin cookie and makes no writes.
+- Acceptance: frontend lint, optimized build, Wrangler dry run, and Worker
+  deploy passed; `admin.hivemind.singulancelabs.com` returned 200; the new
+  lifecycle bundle marker is served; the unauthenticated API route returned
+  401; and Control Plane health plus the fresh critical-log scan were clean.
+- Rollback: Cloudflare Worker rollback to its preceding version and governor
+  rollback of the Control Plane service to its preserved stable image.
+
 ## c46ebea — Knowledge Base browser admission limits
 
 - Parent SHA `c46ebeac65159318b62cf9f287ffdc32ea84f302`; frontend main SHA

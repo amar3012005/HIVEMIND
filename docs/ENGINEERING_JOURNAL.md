@@ -2027,3 +2027,9 @@ slides that find no unique anchor get a page instead of `null`.
   signature returned `401`. The explicitly requested final delivery returned a
   Cloudflare Email Service `delivered` receipt and created exactly one matching
   workspace notification. Fresh Core and Playwright fatal scans were empty.
+
+## 2026-09-03 UTC — Platform-admin user lifecycle visibility
+
+- Committed backend/UI release chain: HIVEMIND `88c8a6d5f218216d7d586348f3ad20f9cf228bce` and Da-vinci `e3f65bc29548b81289201fabb4ab4f70832fb1f5`.
+- Added a read-only, platform-admin-cookie-protected lifecycle detail endpoint and a per-user **Lifecycle** action in the platform user table. It reads only the selected user's active tenant HQ state, derives awakening age and normalized Day 0/1/2 statuses, and does not change lifecycle, email, report, or onboarding data.
+- Verification: `node --check core/src/control-plane-server.js`; `npx eslint src/components/hivemind/app/pages/PlatformAdmin.jsx src/components/hivemind/app/shared/api-client.js`; `npm run build`; Wrangler dry run; and production Worker deployment all passed. The protected production route returned `401` without a platform-admin cookie, the served admin bundle contains the Lifecycle view, and Control Plane is healthy on `sha-88c8a6d5` with zero fresh fatal/panic/uncaught/OOM/migration findings.

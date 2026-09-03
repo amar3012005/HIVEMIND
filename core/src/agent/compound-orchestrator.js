@@ -1087,6 +1087,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         try {
           const link = await composioSvc.createConnectLink(composioToolkit, ctx.orgId, {
             callbackUrl: ctx.composioCallbackUrl || undefined,
+            toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
           });
           redirectUrl = link?.redirectUrl || link?.redirect_url || null;
         } catch (err) {

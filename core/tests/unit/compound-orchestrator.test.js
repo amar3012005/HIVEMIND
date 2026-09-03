@@ -977,7 +977,10 @@ test('unified DAG pauses a required disconnected toolkit and still runs independ
       },
     }),
     async getToolkitStatus() { return 'available'; },
-    async createConnectLink() { return { redirectUrl: 'https://connect.composio.dev/link/gmail-test' }; },
+    async createConnectLink(_toolkit, _orgId, opts = {}) {
+      assert.deepEqual(opts.toolkitMeta?.composioManagedAuthSchemes, ['OAUTH2']);
+      return { redirectUrl: 'https://connect.composio.dev/link/gmail-test' };
+    },
     async discoverSessionTools() { throw new Error('must not discover session tools while disconnected'); },
   };
   const ctx = {

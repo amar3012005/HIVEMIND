@@ -141,14 +141,17 @@ export async function listConnectedAccounts(orgId) {
  * available|connected|reauth|error vocabulary the Connectors.jsx state
  * machine already uses for Nango connectors.
  */
+export function toolkitStatusFromAccounts(toolkitSlug, accounts = []) {
+  const rows = (Array.isArray(accounts) ? accounts : [])
+    .filter((account) => account?.toolkit === toolkitSlug);
+  if (rows.some((row) => row.status === 'ACTIVE')) return 'connected';
+  if (rows.some((row) => row.status === 'EXPIRED' || row.status === 'FAILED')) return 'reauth';
+  return 'available';
+}
+
 export async function getToolkitStatus(orgId, toolkitSlug) {
-  if (!getAuthConfigId(toolkitSlug)) return 'unavailable';
   const accounts = await listConnectedAccounts(orgId);
-  const rows = accounts.filter((a) => a.toolkit === toolkitSlug);
-  if (rows.length === 0) return 'available';
-  if (rows.some((r) => r.status === 'ACTIVE')) return 'connected';
-  if (rows.some((r) => r.status === 'EXPIRED' || r.status === 'FAILED')) return 'reauth';
-  return 'available'; // only INITIATED (never-completed) rows — treat as not yet connected
+  return toolkitStatusFromAccounts(toolkitSlug, accounts);
 }
 
 /**

@@ -2110,3 +2110,28 @@ slides that find no unique anchor get a page instead of `null`.
   all visually inspected without clipping or overflow. A repeated-header issue
   was corrected so the logo appears on every page. The authorized v6 reissue
   returned Cloudflare Email Service `queued`; public API health returned 200.
+
+## 2026-09-03 UTC — Reusable compact lifecycle portrait shell
+
+- Committed feature `15415dbf` and integrated/released parent
+  `20f5af2261a34b6b4fbaa18e3f55adc97bc23312`. Only Control Plane was rebuilt
+  through the governed service-scoped path; it is healthy on immutable
+  `hivemind/control-plane:sha-20f5af22` with manifest
+  `/root/releases/manifests/20f5af22/20260903T114107Z/RELEASE_MANIFEST.json`.
+- Added a reusable A4 lifecycle-report shell that groups complete source
+  sections into compact portrait pages, repeats the standard Singulance
+  header/footer, prevents section splitting, and removes presentation-only
+  outlined slogans such as `AGENTS THAT ACT`. Day 0 is versioned as
+  `day-0-v7`; its established transactional email body remains unchanged.
+- Verification: syntax and focused lifecycle tests passed **7/7**. The full
+  ten-section synthetic fixture rendered through local Playwright as five A4
+  pages; all five were visually inspected without clipping, overlap, broken
+  sections, or footer collisions. The authorized production reissue returned
+  `200`, Cloudflare Email Service `delivered`, and `day-0-v7`; immediate replay
+  returned `accepted:false`. Public API health returned `200`, and fresh logs
+  contain the expected Cloudflare delivery receipt.
+- Deliverability remains standards-based: recognizable transactional sender,
+  authenticated sending domain, honest subject, and multipart text/HTML. No
+  artificial urgency or priority headers were added because they cannot
+  guarantee inbox placement and can damage sender reputation; Gmail controls
+  final Inbox/Promotions/Spam classification.

@@ -1450,3 +1450,19 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Acceptance: focused tests 7/7, ten-page Playwright render visually verified,
   authenticated owner reissue queued, public API health 200.
 - Rollback: governor rollback of Control Plane to `sha-c09ff95b`.
+
+## 20f5af22 — reusable compact lifecycle portrait reports
+
+- Parent SHA `20f5af2261a34b6b4fbaa18e3f55adc97bc23312`; feature SHA
+  `15415dbf`; Control Plane healthy on immutable
+  `hivemind/control-plane:sha-20f5af22`; manifest
+  `/root/releases/manifests/20f5af22/20260903T114107Z/RELEASE_MANIFEST.json`.
+- `day-0-v7` retains all ten original report sections but composes them into
+  five compact A4 portrait pages using the reusable lifecycle shell. Every
+  page has the standard Singulance header/footer; oversized per-page slogan
+  footers are removed. The transactional email body and provider stay intact.
+- Acceptance: focused tests 7/7; five-page Playwright PDF visually verified;
+  authorized production send returned Cloudflare `delivered`; replay returned
+  `accepted:false`; public API health returned 200; fresh delivery log present.
+- Rollback: governor rollback of Control Plane to `sha-35fd9c70`. Existing v7
+  receipts remain immutable and prevent duplicate delivery.

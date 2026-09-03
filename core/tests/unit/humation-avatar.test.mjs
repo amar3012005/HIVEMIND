@@ -6,7 +6,7 @@ import {
   humationLaneVisual,
   renderHumationAvatarSvg,
 } from '../../src/email/humation-avatar.js';
-import { renderDayZeroOnboardingEmail } from '../../src/email/templates/day0-company-onboarding.js';
+import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail } from '../../src/email/templates/day0-company-onboarding.js';
 
 test('Humation email SVG bakes lane colors without CSS-variable fallbacks', () => {
   const svg = renderHumationAvatarSvg({ id: 'researcher-1', name: 'Léa', roleArchetype: 'Researcher' });
@@ -35,9 +35,14 @@ test('public avatar URLs carry the immutable asset version', () => {
 test('Day 0 uses the same lane-colored, cache-versioned email contract', () => {
   const rendered = renderDayZeroOnboardingEmail({
     company: 'Canary Co',
+    website: 'https://canary.example',
+    source_pages: [{ url: 'https://canary.example/products' }],
     team: [{ id: 'builder-1', name: 'Mina', roleArchetype: 'builder', jobTitle: 'Engineer' }],
   }, { publicApiUrl: 'https://api.example.test' });
+  assert.equal(rendered.report.version, DAY_ZERO_REPORT_VERSION);
   assert.match(rendered.html, /role=Builder&amp;v=2/);
   assert.match(rendered.html, /class="avatar" style="background:#eaf3ff;border-color:#117dff"/);
   assert.match(rendered.html, /class="person-role" style="color:#117dff"/);
+  assert.match(rendered.html, /class="character-strip"/);
+  assert.match(rendered.html, /EVIDENCE LEDGER/);
 });

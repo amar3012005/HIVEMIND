@@ -100,9 +100,7 @@ import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
-import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
-import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
@@ -145,6 +143,8 @@ import {
   prepareDayOneFirstMove,
   scheduleDayOneWorkflow,
 } from './lifecycle/day1-first-move.js';
+import { startDayZeroOnboardingReport } from './lifecycle/day0-onboarding-report.js';
+import { DAY_ZERO_REPORT_VERSION } from './email/templates/day0-company-onboarding.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -3359,6 +3359,29 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  // A lifecycle worker may reissue exactly one newer Day-0 renderer for an
+  // existing owner. This is not a browser API: it requires the same service
+  // token used by the durable lifecycle worker, preserves the original
+  // receipt, and refuses a second v3 send.
+  if (pathname === '/internal/lifecycle/day0/reissue') {
+    if (!isAuthorizedDayOneRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(body.org_id || '');
+    const hqRoomId = String(body.hq_room_id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(hqRoomId)) {
+      return jsonResponse(res, { error: 'org_id and hq_room_id are required' }, 400);
+    }
+    try {
+      const started = await startDayZeroOnboardingReport({ prisma, orgId, hqRoomId, allowVersionedReissue: true });
+      if (!started.accepted) return jsonResponse(res, started);
+      return jsonResponse(res, await started.completion);
+    } catch (error) {
+      console.warn('[hyper-company] day-0 report reissue failed:', error.message);
+      return jsonResponse(res, { error: 'day0_report_delivery_failed', retryable: true }, 502);
+    }
+  }
 
   // Cloudflare Workflows is the durable clock for Day 1. These endpoints are
   // deliberately service-token-only; browser sessions and generic API keys
@@ -11309,118 +11332,32 @@ Write the persona now.`;
       if (!current) return;
       try {
         const rows = await prisma.$queryRawUnsafe(
-          `SELECT id, "agent_connectors"->'_company' AS company
+          `SELECT id
              FROM "hivemind"."hyper_rooms"
             WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
             ORDER BY created_at DESC LIMIT 1`,
           current.session.orgId,
         );
         const row = rows?.[0];
-        if (!row?.company) return jsonResponse(res, { error: 'not_onboarded' }, 404);
-        const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
-        const deliveryState = company?.day0_report_email || {};
-        const already = deliveryState.status;
-        const claimedMs = Date.parse(deliveryState.claimed_at || '');
-        const sendingLeaseActive = already === 'sending'
-          && Number.isFinite(claimedMs)
-          && Date.now() - claimedMs < 10 * 60 * 1000;
-        if (already === 'sent' || sendingLeaseActive) {
-          return jsonResponse(res, { ok: true, accepted: false, status: already });
-        }
-
-        const claimedAt = new Date().toISOString();
-        const claimState = { version: 'day-0-v2', status: 'sending', claimed_at: claimedAt };
-        const claimed = await prisma.$queryRawUnsafe(
-          `UPDATE "hivemind"."hyper_rooms"
-              SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
-            WHERE id = $2::uuid
-              AND (
-                COALESCE("agent_connectors" #>> '{_company,day0_report_email,status}', '') NOT IN ('sending', 'sent')
-                OR (
-                  "agent_connectors" #>> '{_company,day0_report_email,status}' = 'sending'
-                  AND COALESCE(("agent_connectors" #>> '{_company,day0_report_email,claimed_at}')::timestamptz, to_timestamp(0)) < now() - interval '10 minutes'
-                )
-              )
-          RETURNING id`,
-          JSON.stringify(claimState), row.id,
-        );
-        if (!claimed?.length) return jsonResponse(res, { ok: true, accepted: false, status: 'sending' });
-
-        const employees = await prisma.digitalEmployee.findMany({
-          where: { orgId: current.session.orgId, archivedAt: null },
-          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, persona: true },
-          take: 12,
-        }).catch(() => []);
-        const dashboardCompany = {
-          ...company,
-          // The report receives the same live employee list that the page
-          // renders, instead of the earlier onboarding-only team snapshot.
-          team: employees.map((employee) => ({
-            id: employee.id,
-            slug: employee.slug,
-            name: employee.name,
-            avatarUrl: employee.avatarUrl,
-            roleArchetype: employee.roleArchetype || 'Communicator',
-            persona: employee.persona,
-          })),
-        };
-        const ownerId = current.session.userId;
-        const orgId = current.session.orgId;
-        const roomId = row.id;
-        void (async () => {
-          try {
-            const recipient = await prisma.user.findUnique({ where: { id: ownerId }, select: { email: true } });
-            if (!recipient?.email) throw new Error('day0_report_recipient_missing');
-            const appUrl = `${String(process.env.HIVEMIND_APP_URL || 'https://next.singulancelabs.com/hivemind/app').replace(/\/$/, '')}/employees/mycompany`;
-            const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl });
-            const print = renderDayZeroOnboardingReportHtml(dashboardCompany, { appUrl });
-            const pdf = await renderDayZeroOnboardingPdf(print.html);
-            const delivery = await sendRenderedSystemEmail({
-              templateId: 'day0_company_onboarding', to: recipient.email, rendered,
-              attachments: [{ filename: `${dashboardCompany.company.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 72) || 'company'}-day-0-onboarding-report.pdf`, type: 'application/pdf', content: pdf }],
-              notification: {
-                orgId,
-                userId: ownerId,
-                type: 'lifecycle.email.sent',
-                title: `Your ${dashboardCompany.company} Day-0 report is in your inbox`,
-                body: 'Your onboarding report and new AI HyperAgents are ready.',
-                resourceType: 'hyper_company',
-                resourceId: roomId,
-                href: appUrl,
-                data: { lifecycle_day: 0, company: dashboardCompany.company },
-              },
-            });
-            if (!delivery.ok) throw new Error(`day0_report_delivery_${delivery.reason || 'failed'}`);
-            const sentAt = new Date().toISOString();
-            await prisma.$executeRawUnsafe(
-              `UPDATE "hivemind"."hyper_rooms"
-                  SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
-                WHERE id = $2::uuid AND org_id = $3::uuid`,
-              JSON.stringify({ version: 'day-0-v2', status: 'sent', claimed_at: claimedAt, sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null }),
-              roomId, orgId,
-            );
-            // The email receipt is the Day-0 lifecycle boundary. Hand Day 1 to
-            // Cloudflare's durable clock only after that receipt exists. A
-            // transient workflow handoff does not rewrite a delivered Day-0
-            // email; the handoff is independently observable and retryable.
-            const dayOne = await scheduleDayOneWorkflow({
-              orgId, hqRoomId: roomId, onboardedAt: dashboardCompany.onboarded_at,
-            });
-            if (!dayOne.ok && !dayOne.skipped) {
-              console.warn('[hyper-company] day-1 workflow scheduling failed:', dayOne.reason);
-            }
-          } catch (error) {
-            console.warn('[hyper-company] day-0 report failed:', error.message);
-            await prisma.$executeRawUnsafe(
-              `UPDATE "hivemind"."hyper_rooms"
-                  SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
-                WHERE id = $2::uuid AND org_id = $3::uuid`,
-              JSON.stringify({ version: 'day-0-v2', status: 'failed', claimed_at: claimedAt, failed_at: new Date().toISOString(), failure_reason: String(error.message || 'delivery_failed').slice(0, 240) }),
-              roomId, orgId,
-            ).catch((persistError) => console.warn('[hyper-company] day-0 report state failed:', persistError.message));
-          }
-        })();
-        return jsonResponse(res, { ok: true, accepted: true, status: 'sending' }, 202);
+        if (!row?.id) return jsonResponse(res, { error: 'not_onboarded' }, 404);
+        const started = await startDayZeroOnboardingReport({
+          prisma,
+          orgId: current.session.orgId,
+          hqRoomId: row.id,
+          userId: current.session.userId,
+        });
+        if (!started.accepted) return jsonResponse(res, started);
+        // Day 1 is scheduled only after the first Day-0 receipt. A versioned
+        // report reissue never starts a second complimentary lifecycle.
+        void started.completion.then(async (result) => {
+          if (started.reissue) return;
+          const dayOne = await scheduleDayOneWorkflow({
+            orgId: started.orgId, hqRoomId: started.hqRoomId, onboardedAt: started.company.onboarded_at,
+          });
+          if (!dayOne.ok && !dayOne.skipped) console.warn('[hyper-company] day-1 workflow scheduling failed:', dayOne.reason);
+          return result;
+        }).catch((error) => console.warn('[hyper-company] day-0 report failed:', error.message));
+        return jsonResponse(res, { ok: true, accepted: true, status: 'sending', version: DAY_ZERO_REPORT_VERSION }, 202);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

@@ -59,11 +59,15 @@ export function slugRequiresOwnerRepo(slug) {
 }
 
 export function isRecipientLookupSlug(slug) {
-  // Generic mailbox reads are valid user-requested reads; only message/contact
-  // lookups that exist to resolve a recipient are deferred until a name is
-  // present. Treating GMAIL_FETCH_EMAILS as recipient-only made “show my
-  // important emails” complete without reading any email.
-  return /GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES|LIST_DRAFTS|GET_DRAFT|FETCH_MESSAGE/i.test(String(slug || ''));
+  return /GET_CONTACT|SEARCH_PEOPLE|FETCH_EMAILS/i.test(String(slug || ''));
+}
+
+export function isMailboxInventorySlug(slug) {
+  return /LIST_DRAFTS|GET_DRAFT|UPDATE_DRAFT|LIST_LABELS|LIST_SEND_AS/i.test(String(slug || ''));
+}
+
+export function isPersonResolveSlug(slug) {
+  return /SEARCH_PEOPLE|GET_CONTACT|FETCH_EMAILS/i.test(String(slug || ''));
 }
 
 export function governReadSlugs(slugs = [], { readApps = [], person = '', writeApps = [] } = {}) {
@@ -120,7 +124,9 @@ export function selectWriteSlug(slugs = [], connected = []) {
 }
 
 export function sessionToolkitsFor(connected = [], candidates = []) {
-  return [...new Set([...connected, ...candidates].map((item) => String(item || '').toLowerCase()).filter(Boolean))]
+  const named = [...new Set((candidates || []).map((item) => String(item || '').toLowerCase()).filter(Boolean))];
+  const source = named.length ? named : (connected || []);
+  return [...new Set(source)]
     .filter((toolkit) => toolkit !== 'hivemind' && toolkit !== 'local' && toolkit !== 'composio')
     .slice(0, 8);
 }
@@ -898,6 +904,7 @@ export async function runDurableComposioAgent({
       && ['completed', 'draft_created', 'skipped'].includes(step.status));
     if (already) continue;
     if (tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x))) continue;
+    if (isMailboxInventorySlug(slug)) continue;
     if (isNativeHivemindSlug(slug)) {
       if (recallText && !/GET_MEMORY/i.test(slug)) continue;
       await runOneNative(slug);
@@ -941,8 +948,12 @@ export async function runDurableComposioAgent({
   }
 
   if (writeSlug && person && !(run.scratch.emails || []).length) {
-    const lookup = [...plan, ...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || [])]
-      .find((slug) => isRecipientLookupSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses));
+    const lookup = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
+      .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
+      .sort((left, right) => {
+        const rank = (slug) => (/SEARCH_PEOPLE|GET_CONTACT/i.test(slug) ? 0 : 1);
+        return rank(left) - rank(right);
+      })[0];
     if (lookup && !readResults.some((row) => row.slug === lookup)) {
       await runOneRead({ slug: lookup, arguments: argumentsForReadSlug(lookup, { person }) });
     }

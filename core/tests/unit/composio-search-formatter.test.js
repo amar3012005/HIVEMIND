@@ -16,12 +16,8 @@ test('Composio search formatter matches the legal COMPOSIO_SEARCH_TOOLS schema',
   assert.equal(payload.search_strategy, 'auto');
   assert.equal(payload.queries[0].search_strategy, undefined);
   assert.equal(payload.queries[0].destination_app, undefined);
-  assert.equal(typeof payload.queries[0].known_fields, 'string');
-  assert.match(payload.queries[0].known_fields, /recipient_name:rama/i);
-  assert.match(payload.queries[0].known_fields, /destination_apps:gmail/);
-  assert.match(payload.queries[0].known_fields, /HIVEMIND is the company brain/);
-  assert.match(payload.queries[0].use_case, /company brain/i);
-  assert.match(payload.queries[0].use_case, /Draft only/i);
+  assert.equal(payload.queries[0].known_fields, 'recipient_name:rama');
+  assert.equal(payload.queries[0].use_case, 'The user wants to send the company information to a person called rama');
   assert.equal(Object.keys(payload.queries[0]).sort().join(','), 'known_fields,use_case');
 });
 

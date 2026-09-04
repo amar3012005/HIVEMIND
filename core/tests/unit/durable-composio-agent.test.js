@@ -383,7 +383,8 @@ test('does not execute or draft slugs that search did not return', async () => {
   });
   assert.equal(executed.includes('GMAIL_FETCH_EMAILS'), false);
   assert.equal(executed.includes('GMAIL_SEND_EMAIL'), false);
-  assert.deepEqual(executed, ['GMAIL_LIST_LABELS']);
+  assert.equal(executed.includes('GMAIL_LIST_LABELS'), false);
+  assert.deepEqual(executed, []);
   assert.equal(created.length, 0);
   assert.equal(result.status, 'completed');
 });
@@ -449,7 +450,7 @@ test('durable production path uses Session search and Session execution, never c
   assert.equal(searchPayload.search_strategy, 'auto');
   assert.equal(searchPayload.session.generate_id, true);
   assert.equal(typeof searchPayload.queries[0].known_fields, 'string');
-  assert.match(searchPayload.queries[0].known_fields, /gmail/);
+  assert.equal(searchPayload.queries[0].known_fields.includes('product_context'), false);
   assert.equal(searchPayload.queries[0].search_strategy, undefined);
   assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
   assert.deepEqual(result.run.scratch.recommended_plan_steps, [{ tool_slug: 'GMAIL_FETCH_EMAILS' }]);
@@ -596,6 +597,67 @@ test('company email uses recall and does not execute unrelated connected apps', 
   assert.equal(created[0].toolName, 'GMAIL_CREATE_EMAIL_DRAFT');
   assert.match(created[0].toolArgs.body, /AI workforce inside memory/);
   assert.equal(created[0].toolArgs.body.includes('I could not retrieve'), false);
+});
+
+test('precise Composio search uses related people lookup then drafts, never list-drafts', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  let searchPayload = null;
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession(_org, toolkits) {
+      assert.deepEqual(toolkits, ['gmail']);
+      return { id: 'trs_precise' };
+    },
+    async discoverSessionTools(_org, input) {
+      searchPayload = input.searchPayload;
+      return {
+        sessionId: 'trs_precise',
+        primaryToolSlugs: ['GMAIL_SEND_EMAIL'],
+        relatedToolSlugs: [
+          'GMAIL_CREATE_EMAIL_DRAFT',
+          'GMAIL_SEND_DRAFT',
+          'GMAIL_SEARCH_PEOPLE',
+          'GMAIL_FETCH_EMAILS',
+          'GMAIL_LIST_DRAFTS',
+        ],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [{ _composio: { slug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail' } }],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_SEARCH_PEOPLE') {
+          return { successful: true, data: { people: [{ email: 'ramasantoshi1206@gmail.com', name: 'Rama' }] } };
+        }
+        if (tool.slug === 'GMAIL_FETCH_EMAILS') {
+          return { successful: true, data: { messages: [{ from: 'Rama <ramasantoshi1206@gmail.com>' }] } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send rama, about information about the company',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-precise',
+      polishBriefing: async ({ body }) => body,
+      _tracedDispatch: async () => ({ memories: [{ title: 'Singulance', content: 'AI workforce inside memory' }] }),
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DRAFT-P' }; } } },
+    },
+    composio,
+  });
+  assert.equal(searchPayload.queries[0].use_case, 'The user wants to send the company information to a person called rama');
+  assert.equal(searchPayload.queries[0].known_fields, 'recipient_name:rama');
+  assert.equal(result.status, 'pending');
+  assert.equal(executed.includes('GMAIL_LIST_DRAFTS'), false);
+  assert.equal(executed.includes('GMAIL_SEND_EMAIL'), false);
+  assert.ok(executed.includes('GMAIL_SEARCH_PEOPLE'));
+  assert.equal(created[0].toolName, 'GMAIL_CREATE_EMAIL_DRAFT');
+  assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
+  assert.match(created[0].toolArgs.body, /AI workforce inside memory/);
 });
 
 test('instagram DM searches first then pauses to connect when disconnected', async () => {

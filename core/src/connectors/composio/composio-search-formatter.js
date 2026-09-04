@@ -26,27 +26,20 @@ export function namedRecipient(message) {
   return null;
 }
 
-export function formatKnownFields({ recipient, destinationApps = [] } = {}) {
-  const parts = [
-    'product_context:HIVEMIND is the company brain. Native memory and profile tools execute locally; Composio is only for connected app capabilities.',
-  ];
-  if (recipient) parts.push(`recipient_name:${compact(recipient, 60)}`);
-  const apps = [...new Set((destinationApps || []).map((app) => compact(app, 60).toLowerCase()).filter(Boolean))];
-  if (apps.length) parts.push(`destination_apps:${apps.join(',')}`);
-  return parts.join('; ');
+export function formatKnownFields({ recipient } = {}) {
+  return recipient ? `recipient_name:${compact(recipient, 60)}` : '';
 }
 
-export function formatUseCase({ message, destinationApps = [] } = {}) {
+export function formatUseCase({ message } = {}) {
   const raw = compact(message, 800);
   const recipient = namedRecipient(raw);
-  const dest = [...new Set((destinationApps || []).map((app) => compact(app, 60).toLowerCase()).filter(Boolean))];
-  return [
-    'HIVEMIND is the company brain and memory engine.',
-    raw,
-    recipient ? `The named recipient is ${recipient}. Draft only — do not send.` : 'Draft any outbound message; do not send.',
-    dest.length ? `Preferred destination app(s): ${dest.join(', ')}.` : '',
-    'Use HIVEMIND recall/profile for company facts before any app write.',
-  ].filter(Boolean).join(' ').slice(0, 1_500);
+  if (recipient && /\b(company|hivemind|singulance)\b/i.test(raw)) {
+    return `The user wants to send the company information to a person called ${recipient}`;
+  }
+  if (recipient) {
+    return `The user wants to send a message to a person called ${recipient}. ${raw}`.slice(0, 1_500);
+  }
+  return raw;
 }
 
 export function isToolRouterSessionId(value) {

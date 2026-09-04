@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { HIVEMIND_TOOL_GROUPS } from '../../src/agent/connector-toolkits/hivemind-tool-groups.js';
 import {
   buildHivemindCustomToolkit,
+  composioSafeInputSchema,
   composioSessionExperimentalFromToolkit,
   composioSlugFromNativeName,
   nativeNameFromComposioSlug,
@@ -49,6 +50,17 @@ test('group filter matches use_tools:false selectedGroups', () => {
   assert.ok(toolkit.tools.every((tool) => tool.group === 'hivemind-recall'));
   assert.ok(toolkit.tools.some((tool) => tool.original_slug === 'hivemind_recall'));
   assert.equal(toolkit.tools.some((tool) => tool.original_slug === 'hivemind_save_memory'), false);
+});
+
+test('Composio schema sanitizer fills object fields that have no properties', () => {
+  const schema = composioSafeInputSchema({
+    type: 'object',
+    properties: {
+      fields: { type: 'object', description: 'Any of: name, role, company' },
+    },
+  });
+  assert.equal(schema.properties.fields.type, 'object');
+  assert.deepEqual(schema.properties.fields.additionalProperties, { type: 'string' });
 });
 
 test('session experimental payload uses Composio custom toolkit shape', () => {

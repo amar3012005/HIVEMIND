@@ -34,6 +34,30 @@ const COMPOSIO_TOOL_HINTS = {
     'List HIVEMIND projects (sub-brains) the user can access. Use when company information may live in a named project.',
 };
 
+/** Composio rejects object fields that have no properties/additionalProperties. */
+export function composioSafeInputSchema(schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return { type: 'object', properties: {} };
+  }
+  const out = { ...schema };
+  if (out.items && typeof out.items === 'object') out.items = composioSafeInputSchema(out.items);
+  const isObject = out.type === 'object' || (!out.type && (out.properties || out.additionalProperties || out.description));
+  if (isObject) {
+    if (!out.type) out.type = 'object';
+    if (!out.properties && !out.additionalProperties) {
+      out.additionalProperties = { type: 'string' };
+    }
+    if (out.properties && typeof out.properties === 'object') {
+      const props = {};
+      for (const [key, value] of Object.entries(out.properties)) {
+        props[key] = composioSafeInputSchema(value);
+      }
+      out.properties = props;
+    }
+  }
+  return out;
+}
+
 export function composioFacingDescription(native, schemaDescription) {
   const hint = COMPOSIO_TOOL_HINTS[native];
   const body = String(schemaDescription || native).trim();
@@ -72,7 +96,7 @@ export function buildHivemindCustomToolkit({ selectedGroups = null, schemas = []
       group,
       read_only: !WRITE_TOOLS.has(native),
       preload: PRELOAD_NATIVE.has(native),
-      input_schema: schema.function.parameters || { type: 'object', properties: {} },
+      input_schema: composioSafeInputSchema(schema.function.parameters || { type: 'object', properties: {} }),
       output_schema: { type: 'object', additionalProperties: true },
     });
   }

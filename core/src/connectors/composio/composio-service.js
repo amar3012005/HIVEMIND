@@ -510,25 +510,29 @@ export async function executeToolsParallel(orgId, tools = [], { sessionId } = {}
     arguments: tool.arguments || tool.args || {},
   })).filter((tool) => tool.slug);
   if (sessionId) {
-    const result = await executeSessionMeta(sessionId, 'COMPOSIO_MULTI_EXECUTE_TOOL', {
-      tools: calls.map((tool) => ({ tool_slug: tool.slug, arguments: tool.arguments })),
-      thought: 'Execute independent read tools in parallel.',
-      sync_response_to_workbench: false,
-      current_step: 'EXECUTING_READS',
-      current_step_metric: `0/${calls.length} tools`,
-    });
-    const rows = result?.data?.results || [];
-    return calls.map((tool, index) => {
-      const row = rows.find((item) => item?.index === index) || rows[index] || {};
-      const response = row.response || {};
-      return {
-        successful: Boolean(response.successful ?? result?.successful),
-        data: response.data ?? null,
-        error: response.error || row.error || result?.error || null,
-        slug: tool.slug,
-        session_log_id: result?.log_id || null,
-      };
-    });
+    try {
+      const result = await executeSessionMeta(sessionId, 'COMPOSIO_MULTI_EXECUTE_TOOL', {
+        tools: calls.map((tool) => ({ tool_slug: tool.slug, arguments: tool.arguments })),
+        thought: 'Execute independent read tools in parallel.',
+        sync_response_to_workbench: false,
+        current_step: 'EXECUTING_READS',
+        current_step_metric: `0/${calls.length} tools`,
+      });
+      const rows = result?.data?.results || [];
+      return calls.map((tool, index) => {
+        const row = rows.find((item) => item?.index === index) || rows[index] || {};
+        const response = row.response || {};
+        return {
+          successful: Boolean(response.successful ?? result?.successful),
+          data: response.data ?? null,
+          error: response.error || row.error || result?.error || null,
+          slug: tool.slug,
+          session_log_id: result?.log_id || null,
+        };
+      });
+    } catch {
+      // Direct execute is the reliable path when session multi-execute rejects a mixed batch.
+    }
   }
   return Promise.all(calls.map(async (tool) => {
     try {

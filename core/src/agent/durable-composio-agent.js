@@ -242,7 +242,12 @@ export async function runDurableComposioAgent({
 
   const writeSlug = selectWriteSlug(searchedSlugs, connected);
   const person = namedPersonQuery(message);
-  const readSlugs = [...new Set(selectReadSlugs(searchedSlugs, connected))].slice(0, 4);
+  const readSlugs = [...new Set(selectReadSlugs(searchedSlugs, connected))]
+    .sort((left, right) => {
+      const rank = (slug) => (/FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE/i.test(slug) ? 0 : 1);
+      return rank(left) - rank(right);
+    })
+    .slice(0, 3);
 
   const readCalls = readSlugs.map((slug) => {
     const args = /FETCH_EMAIL|SEARCH|CONTACT/i.test(slug) && person

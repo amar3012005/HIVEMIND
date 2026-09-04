@@ -24499,6 +24499,71 @@ exit \$RC
               }
 
               const execute = async (emit) => {
+                if (stored.resumeState?.kind === 'enable_tools') {
+                  const { isEnableToolsHitlEnabled } = await import('./agent/enable-tools-hitl-flag.js');
+                  if (!(await isEnableToolsHitlEnabled())) {
+                    const rolledBack = 'Tools-for-this-request is off. Use the Use tools toggle, or ask again — native chat is unchanged.';
+                    emit?.({ type: 'finish', text: rolledBack });
+                    return {
+                      response: rolledBack, answer_mode: 'compound', sources: [], citations: [],
+                      steps: [], grounded: true, confidence: 0.5, gaps: [], scopes_found: [],
+                      draft_ids: [], compound_status: 'completed', pending_actions: [], continuation: null,
+                    };
+                  }
+                  const enabled = allowed?.id === 'enable' || allowed?.value === 'enable';
+                  if (!enabled) {
+                    const declined = 'I can answer from HIVEMIND here. Enable tools when you want this sent through Gmail or another app — nothing was sent.';
+                    emit?.({ type: 'finish', text: declined });
+                    return {
+                      response: declined, answer_mode: 'compound', sources: [], citations: [],
+                      steps: [], grounded: true, confidence: 0.6, gaps: [], scopes_found: [],
+                      draft_ids: [], compound_status: 'completed', pending_actions: [], continuation: null,
+                    };
+                  }
+                  const { runDurableComposioAgent } = await import('./agent/durable-composio-agent.js');
+                  const durable = await runDurableComposioAgent({
+                    message: stored.message,
+                    ctx: {
+                      userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
+                      prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
+                      threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
+                      composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
+                        ? String(req.headers.origin)
+                        : process.env.HIVEMIND_FRONTEND_URL) || undefined,
+                      _trace: { traceId: crypto.randomUUID() },
+                    },
+                    onEvent: emit,
+                    prisma,
+                  });
+                  let continuation = null;
+                  if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
+                    const next = await createChatContinuation({
+                      userId, orgId, message: stored.message, language: stored.language,
+                      resumeState: durable.resumeState,
+                    }, {
+                      prisma,
+                      durable: ['session', 'workflow', 'full'].includes(continuationMode),
+                      parentTurnId: continuationTurn?.id || null,
+                    });
+                    continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: durable.inputRequests };
+                    emit?.({ type: 'orchestration_input_required', ...continuation });
+                  }
+                  emit?.({ type: 'finish', text: durable.summary });
+                  return {
+                    response: durable.summary, answer_mode: 'compound', sources: [], citations: [],
+                    steps: durable.steps, grounded: durable.status === 'completed',
+                    confidence: durable.status === 'completed' ? 1 : 0.5,
+                    gaps: durable.status === 'error' ? ['durable_agent_failed'] : [], scopes_found: [],
+                    draft_ids: durable.draftIds, compound_status: durable.status,
+                    pending_actions: durable.pendingActions || [],
+                    execution: {
+                      status: durable.status, steps: durable.steps, draft_ids: durable.draftIds,
+                      pending_actions: durable.pendingActions || [],
+                      run_id: durable.run?.id || null, session_id: durable.run?.composioSessionId || null,
+                    },
+                    continuation,
+                  };
+                }
                 if (stored.resumeState?.kind === 'durable_agent') {
                   const { runDurableComposioAgent } = await import('./agent/durable-composio-agent.js');
                   const durable = await runDurableComposioAgent({

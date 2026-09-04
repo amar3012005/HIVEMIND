@@ -3526,6 +3526,73 @@ export async function runReactAgentV2({
     });
     onEvent?.({ type: 'turn_accepted', schema_version: 1, trace_id: trace.traceId });
 
+    if (useTools !== true) {
+      const { isEnableToolsHitlEnabled } = await import('./enable-tools-hitl-flag.js');
+      if (await isEnableToolsHitlEnabled()) {
+      const { destinationAppsForEnableTools, enableToolsRequest } = await import('./chat-enable-tools-gate.js');
+      const apps = destinationAppsForEnableTools(message);
+      if (apps.length) {
+        const request = {
+          ...enableToolsRequest(apps),
+          step_index: 0,
+          step_id: 'step-1',
+        };
+        const { createChatContinuation } = await import('./chat-continuation-store.js');
+        const stored = await createChatContinuation({
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          message,
+          language,
+          threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
+          resumeState: {
+            kind: 'enable_tools',
+            results: [{ inputRequest: request }],
+          },
+        }, {
+          prisma: ctx.prisma,
+          durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+          parentTurnId: ctx.durableChatTurnId || null,
+        });
+        const continuation = {
+          schema_version: 1,
+          token: stored.token,
+          expires_at: stored.expires_at,
+          requests: [request],
+        };
+        onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
+        onEvent?.({ type: 'finish', text: request.prompt });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'enable_tools', success: true });
+        return {
+          response: request.prompt,
+          answer_mode: 'compound',
+          sources: [],
+          citations: [],
+          relationships: [],
+          synthesis_chains: [],
+          evidence_packets: [],
+          steps: [],
+          evidence_used: [],
+          claims: [],
+          rejected_claims: [],
+          grounded: false,
+          confidence: 0.5,
+          gaps: [],
+          scopes_found: [],
+          project_choice: null,
+          aggregate: null,
+          action_result: null,
+          assistant_name: assistantName || null,
+          usage: sumUsage(usages),
+          trace: finalizeTrace(trace, usages),
+          draft_ids: [],
+          pending_actions: [],
+          compound_status: 'needs_input',
+          continuation,
+        };
+      }
+      }
+    }
+
     // Build one per-turn toolkit before intent parsing. The parser sees only
     // capability names/descriptions available to this user and organization;
     // the same instance executes any selected connector/native tools later.

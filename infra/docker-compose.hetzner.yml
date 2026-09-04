@@ -84,6 +84,8 @@ services:
       # supplies it today, but Core must retain this dependency if env loading
       # is narrowed in a later production compose change.
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+      ENABLE_TOOLS_HITL: ${ENABLE_TOOLS_HITL:-false}
+      ENABLE_TOOLS_HITL_FLAG_URL: ${ENABLE_TOOLS_HITL_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/enable-tools-hitl}
     volumes:
       - hivemind-data:/app/data        # ← .amr files live here; BACK UP
       - hivemind-logs:/app/logs

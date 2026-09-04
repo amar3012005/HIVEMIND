@@ -425,10 +425,16 @@ export async function runDurableComposioAgent({
   const fillGithubReads = mentioned.includes('github') || searchedSlugs.some((slug) => /^GITHUB_/i.test(slug));
   if (fillGithubReads && !selectReadSlugs(searchedSlugs, ['github']).length
       && typeof composioSvc.searchToolsByIntent === 'function') {
-    const extra = await composioSvc.searchToolsByIntent(orgId, 'list repositories get readme', { toolkits: ['github'] }).catch(() => null);
+    const extra = await composioSvc.searchToolsByIntent(
+      orgId,
+      'list repositories for the authenticated user',
+      { toolkits: ['github'] },
+    ).catch(() => null);
     for (const tool of extra?.tools || []) {
       const slug = tool?._composio?.slug;
-      if (slug && !searchedSlugs.includes(slug)) searchedSlugs.push(slug);
+      if (!slug || !/^GITHUB_/i.test(slug)) continue;
+      if (!selectReadSlugs([slug], ['github']).length) continue;
+      searchedSlugs = [slug, ...searchedSlugs.filter((item) => item !== slug)];
     }
   }
   const appHints = (discovered.apps || []).map((app) => app.slug).filter(Boolean);
@@ -440,7 +446,7 @@ export async function runDurableComposioAgent({
     candidates = [run.scratch.chosen_toolkit];
     searchedSlugs = searchedSlugs.filter((slug) => slugMatchesConnected(slug, [run.scratch.chosen_toolkit]));
   }
-  run.scratch.searched_slugs = searchedSlugs.slice(0, 24);
+  run.scratch.searched_slugs = searchedSlugs.slice(0, 40);
   run.scratch.candidate_apps = candidates;
   finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
     kind: 'search',

@@ -19,6 +19,7 @@ import {
   filterComposioToolsByAuthority,
   filterToolsForSubtaskContract,
   classifyComposioWriteKind,
+  toolMatchesMessageWrite,
   filterProviderDraftToolsForTerminalOperation,
   exactGroundedDependencyContent,
   formatGroundedMessageBody,
@@ -223,10 +224,15 @@ test('message writes exclude destructive slugs even when the planner pins them',
     function: { name: 'composio_gmail_batch_delete_messages', parameters: { properties: { message_ids: {} } } },
     _composio: { toolkit: 'gmail', slug: 'GMAIL_BATCH_DELETE_MESSAGES' },
   };
+  const label = {
+    function: { name: 'composio_gmail_create_label', parameters: { properties: { label_name: {} } } },
+    _composio: { toolkit: 'gmail', slug: 'GMAIL_CREATE_LABEL' },
+  };
   assert.equal(classifyComposioWriteKind(destroy), 'delete');
   assert.equal(classifyComposioWriteKind(send), 'create');
+  assert.equal(toolMatchesMessageWrite(label), false);
   assert.deepEqual(
-    filterToolsForSubtaskContract([destroy, send], {
+    filterToolsForSubtaskContract([destroy, label, send], {
       authority: 'write', output_kind: 'message', operation: 'email',
     }).map((tool) => tool._composio.slug),
     ['GMAIL_SEND_EMAIL'],
@@ -243,6 +249,7 @@ test('pinned destructive gmail slug is not drafted for a message write', async (
   const composio = makeComposio({
     tools: [
       { name: 'composio_gmail_batch_delete_messages', slug: 'GMAIL_BATCH_DELETE_MESSAGES', description: 'delete mail' },
+      { name: 'composio_gmail_create_label', slug: 'GMAIL_CREATE_LABEL', description: 'create label' },
       { name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send mail' },
     ],
     executeImpl: async () => ({ successful: false, error: 'must not execute' }),
@@ -250,7 +257,7 @@ test('pinned destructive gmail slug is not drafted for a message write', async (
   const result = await runCompoundOrchestrator({
     subtasks: [{
       operation: 'email', authority: 'write', output_kind: 'message',
-      tool_groups: ['gmail'], tool_slug: 'GMAIL_BATCH_DELETE_MESSAGES',
+      tool_groups: ['gmail'], tool_slug: 'GMAIL_CREATE_LABEL',
       message: 'send important information about repo to rama via gmail',
     }],
     ctx: {

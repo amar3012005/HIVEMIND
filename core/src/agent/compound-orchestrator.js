@@ -354,7 +354,7 @@ const COMPOSIO_DESTRUCTIVE_ACTIONS = new Set([
   'delete', 'destroy', 'drop', 'purge', 'remove', 'revoke', 'trash',
 ]);
 const COMPOSIO_DELIVER_ACTIONS = new Set([
-  'create', 'forward', 'insert', 'post', 'reply', 'send',
+  'forward', 'reply', 'send',
 ]);
 
 function composioActionTokens(tool) {
@@ -417,10 +417,11 @@ function toolSchemaPropertyKeys(tool) {
 
 export function toolMatchesMessageWrite(tool) {
   if (classifyComposioWriteKind(tool) === 'delete') return false;
+  const tokens = composioActionTokens(tool);
+  if (tokens.some((token) => token === 'label' || token === 'filter' || token === 'settings')) return false;
+  if (tokens.some((token) => COMPOSIO_DELIVER_ACTIONS.has(token))) return true;
   const keys = toolSchemaPropertyKeys(tool);
-  if (!keys.length) {
-    return composioActionTokens(tool).some((token) => COMPOSIO_DELIVER_ACTIONS.has(token));
-  }
+  if (!keys.length) return false;
   const hasDestination = keys.some((key) => (
     key === 'to'
     || key.includes('recipient')
@@ -430,7 +431,7 @@ export function toolMatchesMessageWrite(tool) {
     || key.includes('conversation')
   ));
   const hasBody = keys.some((key) => (
-    key === 'body' || key === 'message' || key === 'text' || key === 'content' || key === 'html'
+    key === 'body' || key === 'message' || key === 'html'
     || key.includes('body') || key.includes('message_text')
   ));
   return hasDestination && hasBody;
@@ -444,8 +445,7 @@ export function filterToolsForSubtaskContract(rawTools, subtask = {}) {
   const wantsDelete = operationTokens.some((token) => COMPOSIO_DESTRUCTIVE_ACTIONS.has(token));
   if (authority === 'write' && !wantsDelete) {
     if (subtask.output_kind === 'message') {
-      const delivery = tools.filter((tool) => toolMatchesMessageWrite(tool));
-      tools = delivery.length ? delivery : tools.filter((tool) => classifyComposioWriteKind(tool) !== 'delete');
+      tools = tools.filter((tool) => toolMatchesMessageWrite(tool));
     } else {
       const kept = tools.filter((tool) => classifyComposioWriteKind(tool) !== 'delete');
       if (kept.length) tools = kept;
@@ -1285,9 +1285,12 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         composioSlugByTool = new Map();
         composioManifestByTool = new Map();
         let raw;
+        const messageWrite = subtask?.output_kind === 'message'
+          && (subtask?.authority === 'write' || authorityForOperation(subtask?.operation) === 'write');
         const sessionPrimary = process.env.COMPOSIO_SESSION_PRIMARY_ENABLED !== 'false'
           && selectTool === defaultSelectTool
-          && typeof composioSvc.discoverSessionTools === 'function';
+          && typeof composioSvc.discoverSessionTools === 'function'
+          && !messageWrite;
         if (sessionPrimary) {
           try {
             const discovery = await composioSvc.discoverSessionTools(ctx?.orgId, {
@@ -1320,23 +1323,41 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         } else {
           raw = await composioSvc.getToolkitTools(composioToolkit);
         }
-      // PROGRESSIVE LOADING: Session discovery is primary when available; its
-      // compact result and schemas are cached. The established toolkit list is
-      // the rapid fallback. In both cases, narrow the result to the single tool
-      // relevant to THIS subtask before any schema reaches the selector.
-      // The production path selects semantically from compact cards, then
-      // supplies exactly one full schema to argument generation. Test
-      // selectors retain the complete local list for deterministic fixtures.
       const canonicalAuthority = ['read', 'write'].includes(subtask?.authority)
         ? subtask.authority : subtask.operation;
+      let contractTools = filterToolsForSubtaskContract(raw, {
+        ...subtask,
+        authority: canonicalAuthority,
+      });
+      if (subtask?.output_kind === 'message'
+        && (subtask?.authority === 'write' || authorityForOperation(subtask?.operation) === 'write')
+        && !contractTools.length
+        && typeof composioSvc.getToolkitTools === 'function') {
+        raw = await composioSvc.getToolkitTools(composioToolkit);
+        contractTools = filterToolsForSubtaskContract(raw, {
+          ...subtask,
+          authority: canonicalAuthority,
+        });
+      }
+      if (subtask?.output_kind === 'message'
+        && (subtask?.authority === 'write' || authorityForOperation(subtask?.operation) === 'write')
+        && !contractTools.length) {
+        emit({
+          type: 'tool_result',
+          name: 'composio_capability_discovery',
+          status: 'error',
+          summary: 'no message-delivery tool in this connected app',
+        });
+        return {
+          status: 'error',
+          error: 'no message-delivery tool in this connected app',
+          toolName: null, args: null, result: null, draftId: null, outputFields: {},
+        };
+      }
       const pinnedSlug = typeof subtask.tool_slug === 'string' ? subtask.tool_slug.trim() : '';
       const pinnedCandidate = pinnedSlug
         ? (Array.isArray(raw) ? raw : []).find((tool) => tool?._composio?.slug === pinnedSlug)
         : null;
-      const contractTools = filterToolsForSubtaskContract(raw, {
-        ...subtask,
-        authority: canonicalAuthority,
-      });
       const pinned = pinnedCandidate
         && contractTools.some((tool) => tool?._composio?.slug === pinnedCandidate?._composio?.slug)
         ? pinnedCandidate

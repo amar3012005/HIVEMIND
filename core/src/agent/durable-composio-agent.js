@@ -80,7 +80,8 @@ export function governReadSlugs(slugs = [], { readApps = [], person = '', writeA
     byToolkit.set(toolkit, slug);
   }
   const mail = person
-    ? scoped.find((slug) => /FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT/i.test(slug))
+    ? scoped.find((slug) => /FETCH_EMAILS/i.test(slug))
+      || scoped.find((slug) => /SEARCH_PEOPLE/i.test(slug))
       || scoped.find((slug) => isRecipientLookupSlug(slug))
     : null;
   return [...byToolkit.values(), ...(mail ? [mail] : [])].slice(0, 5);
@@ -687,7 +688,7 @@ export async function runDurableComposioAgent({
       if (generated && typeof generated === 'object' && !Array.isArray(generated)) {
         const clean = { ...generated };
         for (const key of Object.keys(clean)) {
-          if (/^(user_id|userid|org_id|connected_account_id|entity_id|session_id)$/i.test(key)) delete clean[key];
+          if (/^(user_id|userid|org_id|connected_account_id|entity_id|session_id|metadata)$/i.test(key)) delete clean[key];
         }
         if (Object.keys(clean).length) args = { ...args, ...clean };
       }

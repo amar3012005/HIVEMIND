@@ -440,8 +440,10 @@ function isCatalogReadTool(slug) {
 
 function isStrongCatalogRead(slug) {
   const value = String(slug || '');
-  if (/PLAYLIST_ITEMS/i.test(value)) return true;
-  return /LIST_/i.test(value) && /AUTHENTICATED|LIST_USER_|_MY_|_MINE_/i.test(value);
+  if (/PLAYLIST_ITEMS|LIST_USER_PLAYLISTS/i.test(value)) return true;
+  return /LIST_/i.test(value)
+    && /(REPOSITOR|PLAYLIST|VIDEO|DOCUMENT|FILE|PAGE)/i.test(value)
+    && /(AUTHENTICATED|LIST_USER_|_MY_|_MINE_)/i.test(value);
 }
 
 async function listCatalogReadTools(toolkitSlug, { maxReads = 12, maxPages = 16 } = {}) {

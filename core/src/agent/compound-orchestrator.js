@@ -350,6 +350,12 @@ const COMPOSIO_WRITE_ACTIONS = new Set([
   'post', 'remove', 'replace', 'reply', 'restore', 'send', 'stop', 'trash',
   'unmerge', 'untrash', 'update', 'watch',
 ]);
+const COMPOSIO_DESTRUCTIVE_ACTIONS = new Set([
+  'delete', 'destroy', 'drop', 'purge', 'remove', 'revoke', 'trash',
+]);
+const COMPOSIO_DELIVER_ACTIONS = new Set([
+  'create', 'forward', 'insert', 'post', 'reply', 'send',
+]);
 
 function composioActionTokens(tool) {
   const toolkit = String(tool?._composio?.toolkit || '').toLocaleLowerCase();
@@ -390,6 +396,62 @@ export function filterComposioToolsByAuthority(rawTools, canonicalOperation = ''
   const required = authorityForOperation(canonicalOperation);
   return (Array.isArray(rawTools) ? rawTools : [])
     .filter((tool) => classifyComposioToolAuthority(tool) === required);
+}
+
+export function classifyComposioWriteKind(tool) {
+  const tokens = composioActionTokens(tool);
+  if (tokens.some((token) => COMPOSIO_DESTRUCTIVE_ACTIONS.has(token))) return 'delete';
+  if (tokens.some((token) => COMPOSIO_DELIVER_ACTIONS.has(token))) return 'create';
+  if (tokens.some((token) => token === 'update' || token === 'patch' || token === 'modify' || token === 'replace')) {
+    return 'update';
+  }
+  return 'other';
+}
+
+function toolSchemaPropertyKeys(tool) {
+  const props = tool?.function?.parameters?.properties
+    || tool?.parameters?.properties
+    || {};
+  return Object.keys(props).map((key) => key.toLowerCase());
+}
+
+export function toolMatchesMessageWrite(tool) {
+  if (classifyComposioWriteKind(tool) === 'delete') return false;
+  const keys = toolSchemaPropertyKeys(tool);
+  if (!keys.length) {
+    return composioActionTokens(tool).some((token) => COMPOSIO_DELIVER_ACTIONS.has(token));
+  }
+  const hasDestination = keys.some((key) => (
+    key === 'to'
+    || key.includes('recipient')
+    || key.includes('to_email')
+    || key.includes('email_address')
+    || key.includes('channel')
+    || key.includes('conversation')
+  ));
+  const hasBody = keys.some((key) => (
+    key === 'body' || key === 'message' || key === 'text' || key === 'content' || key === 'html'
+    || key.includes('body') || key.includes('message_text')
+  ));
+  return hasDestination && hasBody;
+}
+
+export function filterToolsForSubtaskContract(rawTools, subtask = {}) {
+  const authority = subtask.authority === 'write' || authorityForOperation(subtask.operation) === 'write'
+    ? 'write' : 'read';
+  let tools = filterComposioToolsByAuthority(rawTools, authority === 'write' ? 'write' : 'read');
+  const operationTokens = String(subtask.operation || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const wantsDelete = operationTokens.some((token) => COMPOSIO_DESTRUCTIVE_ACTIONS.has(token));
+  if (authority === 'write' && !wantsDelete) {
+    if (subtask.output_kind === 'message') {
+      const delivery = tools.filter((tool) => toolMatchesMessageWrite(tool));
+      tools = delivery.length ? delivery : tools.filter((tool) => classifyComposioWriteKind(tool) !== 'delete');
+    } else {
+      const kept = tools.filter((tool) => classifyComposioWriteKind(tool) !== 'delete');
+      if (kept.length) tools = kept;
+    }
+  }
+  return filterProviderDraftToolsForTerminalOperation(tools, subtask.operation);
 }
 
 export function filterProviderDraftToolsForTerminalOperation(tools, canonicalOperation = '') {
@@ -455,11 +517,12 @@ export function resolveSelectedTool(rawTools, selectedName) {
   }) || null;
 }
 
-async function selectToolCard({ rawTools, message, canonicalOperation, requiredAuthority, apiKey, signal }) {
-  const authorityTools = filterProviderDraftToolsForTerminalOperation(
-    filterComposioToolsByAuthority(rawTools, requiredAuthority || canonicalOperation),
-    canonicalOperation,
-  );
+async function selectToolCard({ rawTools, message, canonicalOperation, requiredAuthority, apiKey, signal, subtask }) {
+  const authorityTools = filterToolsForSubtaskContract(rawTools, {
+    ...(subtask || {}),
+    operation: canonicalOperation || subtask?.operation,
+    authority: requiredAuthority || subtask?.authority,
+  });
   const cards = rankToolSelectionCards(buildToolSelectionCards(authorityTools), canonicalOperation);
   const eligibleNames = new Set(cards.map((card) => card.name));
   const eligibleTools = authorityTools.filter((tool) => eligibleNames.has(String(tool?.function?.name || tool?.name || '')));
@@ -1211,6 +1274,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     ? ctx.unifiedDag === true
     : isUseToolsUnifiedDagEnabled();
   let tools = [];
+  let lookupTools = [];
   let composioSlugByTool = new Map();
   let composioManifestByTool = new Map();
   let discoveryError = null;
@@ -1266,25 +1330,39 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       const canonicalAuthority = ['read', 'write'].includes(subtask?.authority)
         ? subtask.authority : subtask.operation;
       const pinnedSlug = typeof subtask.tool_slug === 'string' ? subtask.tool_slug.trim() : '';
-      const pinned = pinnedSlug
+      const pinnedCandidate = pinnedSlug
         ? (Array.isArray(raw) ? raw : []).find((tool) => tool?._composio?.slug === pinnedSlug)
+        : null;
+      const contractTools = filterToolsForSubtaskContract(raw, {
+        ...subtask,
+        authority: canonicalAuthority,
+      });
+      const pinned = pinnedCandidate
+        && contractTools.some((tool) => tool?._composio?.slug === pinnedCandidate?._composio?.slug)
+        ? pinnedCandidate
         : null;
       const relevant = pinned
         ? [pinned]
         : (selectTool === defaultSelectTool
           ? [await selectToolCard({
-              rawTools: raw,
+              rawTools: contractTools.length ? contractTools : raw,
               message,
               canonicalOperation: subtask.operation,
               requiredAuthority: canonicalAuthority,
               apiKey, signal,
+              subtask,
             })]
           : raw);
         tools = relevant.map((t) => ({
           type: 'function',
           function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
         }));
-        for (const t of relevant) {
+        lookupTools = (Array.isArray(raw) ? raw : relevant).map((t) => ({
+          type: 'function',
+          function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
+        }));
+        for (const t of [...(Array.isArray(raw) ? raw : []), ...relevant]) {
+          if (!t?.function?.name) continue;
           composioSlugByTool.set(t.function.name, t._composio?.slug);
           composioManifestByTool.set(t.function.name, t);
         }
@@ -1625,7 +1703,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     if (query) {
       try {
         const lookup = await lookupRecipientEmails({
-          composioSvc, orgId, tools, query, slugByTool: composioSlugByTool,
+          composioSvc, orgId, tools: lookupTools.length ? lookupTools : tools, query, slugByTool: composioSlugByTool,
         });
         if (lookup.emails.length === 1) {
           args = { ...args, recipient_email: lookup.emails[0] };

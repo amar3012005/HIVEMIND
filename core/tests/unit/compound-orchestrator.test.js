@@ -17,6 +17,8 @@ import {
   backfillMissingGroundedContentArgs,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
+  filterToolsForSubtaskContract,
+  classifyComposioWriteKind,
   filterProviderDraftToolsForTerminalOperation,
   exactGroundedDependencyContent,
   formatGroundedMessageBody,
@@ -207,6 +209,67 @@ test('Composio authority comes from controlled manifest actions, not user-langua
   assert.equal(classifyComposioToolAuthority(read), 'read');
   assert.equal(classifyComposioToolAuthority(labelRead), 'read', 'resource noun label must not turn GET into a write');
   assert.equal(classifyComposioToolAuthority(labelWrite), 'write');
+});
+
+test('message writes exclude destructive slugs even when the planner pins them', () => {
+  const send = {
+    function: {
+      name: 'composio_gmail_send_email',
+      parameters: { properties: { recipient_email: {}, subject: {}, body: {} } },
+    },
+    _composio: { toolkit: 'gmail', slug: 'GMAIL_SEND_EMAIL' },
+  };
+  const destroy = {
+    function: { name: 'composio_gmail_batch_delete_messages', parameters: { properties: { message_ids: {} } } },
+    _composio: { toolkit: 'gmail', slug: 'GMAIL_BATCH_DELETE_MESSAGES' },
+  };
+  assert.equal(classifyComposioWriteKind(destroy), 'delete');
+  assert.equal(classifyComposioWriteKind(send), 'create');
+  assert.deepEqual(
+    filterToolsForSubtaskContract([destroy, send], {
+      authority: 'write', output_kind: 'message', operation: 'email',
+    }).map((tool) => tool._composio.slug),
+    ['GMAIL_SEND_EMAIL'],
+  );
+});
+
+test('pinned destructive gmail slug is not drafted for a message write', async () => {
+  const created = [];
+  const schema = {
+    type: 'object',
+    required: ['recipient_email', 'subject', 'body'],
+    properties: { recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } },
+  };
+  const composio = makeComposio({
+    tools: [
+      { name: 'composio_gmail_batch_delete_messages', slug: 'GMAIL_BATCH_DELETE_MESSAGES', description: 'delete mail' },
+      { name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send mail' },
+    ],
+    executeImpl: async () => ({ successful: false, error: 'must not execute' }),
+  });
+  const result = await runCompoundOrchestrator({
+    subtasks: [{
+      operation: 'email', authority: 'write', output_kind: 'message',
+      tool_groups: ['gmail'], tool_slug: 'GMAIL_BATCH_DELETE_MESSAGES',
+      message: 'send important information about repo to rama via gmail',
+    }],
+    ctx: {
+      userId: 'u1', orgId: 'o1', _trace: { traceId: 'no-delete' },
+      _originalUserMessage: 'go through HIVEMIND git repo and send important information about repo to rama@singulance.com via gmail',
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'SEND-DRAFT' }; } } },
+    },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email',
+      args: { recipient_email: 'rama@singulance.com', subject: 'HIVEMIND repo', body: 'Important notes.' },
+      schema,
+    })),
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
+  assert.equal(created[0].toolArgs.recipient_email, 'rama@singulance.com');
+  assert.equal(created[0].toolArgs.subject, 'HIVEMIND repo');
+  assert.equal(created[0].toolArgs.body, 'Important notes.');
 });
 
 test('generic read operation exposes Gmail fetch but excludes modifying capabilities in any request language', () => {

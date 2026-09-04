@@ -190,7 +190,15 @@ export function parseIntentPlanJson(text) {
   return plan;
 }
 
-export function intentPlanToSubtasks(plan) {
+function stepInstruction(step, fallback = '') {
+  const text = String(
+    step?.subtask || step?.purpose || step?.instruction || step?.message || step?.query || fallback || '',
+  ).trim();
+  return text.slice(0, 2000);
+}
+
+export function intentPlanToSubtasks(plan, { request } = {}) {
+  const fallback = String(request || '').trim();
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   const ids = steps.map((step, index) => String(step.id || `step_${index + 1}`));
   return steps.map((step, index) => {
@@ -201,6 +209,7 @@ export function intentPlanToSubtasks(plan) {
     const executor = String(step.executor || '').toLowerCase();
     const native = executor === 'hivemind' || executor === 'reasoning'
       || canonicalNativeToolGroup(step.toolkit) || canonicalNativeToolGroup(step.tool);
+    const message = stepInstruction(step, fallback);
     if (native) {
       return {
         operation: id,
@@ -209,7 +218,8 @@ export function intentPlanToSubtasks(plan) {
         tool_groups: ['hivemind-recall'],
         executor: executor === 'reasoning' ? 'reasoning' : 'hivemind',
         tool_slug: null,
-        message: String(step.subtask || step.purpose || '').slice(0, 2000),
+        message,
+        query: message,
         depends_on: dependsOn,
       };
     }
@@ -222,7 +232,7 @@ export function intentPlanToSubtasks(plan) {
       tool_groups: toolkit ? [toolkit] : [],
       executor: 'composio',
       tool_slug: step.tool_slug || step.tool || null,
-      message: String(step.subtask || step.purpose || '').slice(0, 2000),
+      message,
       depends_on: dependsOn,
     };
   }).filter((step) => step.tool_groups.length > 0);
@@ -275,7 +285,7 @@ export async function planComposioIntentWorkflow({
   }
   const steps = decisionToHostedPlan({
     operation: 'compound',
-    subtasks: intentPlanToSubtasks(plan),
+    subtasks: intentPlanToSubtasks(plan, { request: message }),
   }, {
     request: message,
     connectedProviders: discovered.connectedToolkits || [],

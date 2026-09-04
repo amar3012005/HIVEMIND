@@ -96,6 +96,18 @@ test('intent DAG maps Composio slugs and HIVEMIND recall without a 1000-app cata
   assert.deepEqual(subtasks[1].depends_on, [0]);
 });
 
+test('native intent steps inherit the user request when the planner omits subtask text', () => {
+  const subtasks = intentPlanToSubtasks({
+    steps: [
+      { id: 'recall', executor: 'hivemind', tool: 'hivemind_recall' },
+      { id: 'mail', executor: 'composio', toolkit: 'gmail', tool_slug: 'GMAIL_SEND_EMAIL', operation_type: 'write' },
+    ],
+  }, { request: 'go through HIVEMIND git repo and send important information about repo to rama via gmail' });
+  assert.equal(subtasks[0].query, 'go through HIVEMIND git repo and send important information about repo to rama via gmail');
+  assert.equal(subtasks[0].message, subtasks[0].query);
+  assert.equal(subtasks[1].message, subtasks[0].query);
+});
+
 test('intent planner searches Composio then returns a compound DAG', async () => {
   const result = await planComposioIntentWorkflow({
     request: 'Find emails from Rama and check HIVEMIND notes',

@@ -1077,10 +1077,26 @@ async function rewriteCompoundRecallQuery({ message, canonicalOperation, origina
  * runtime has no hivemind-* connectors, so these must NOT go through
  * runtime.listTools/executeTool. Returns the same shape as runSubtask.
  */
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
-  const message = subtask.message || '';
-  const retrievalQuery = typeof subtask.query === 'string' && subtask.query.trim()
-    ? subtask.query.trim() : message;
+  const message = firstNonEmptyString(
+    subtask.message,
+    subtask.instruction,
+    subtask.query,
+    ctx?._originalUserMessage,
+  );
+  const retrievalQuery = firstNonEmptyString(
+    subtask.query,
+    subtask.message,
+    subtask.instruction,
+    ctx?._originalUserMessage,
+  );
   const toolName = 'hivemind_recall';
   const args = {
     query: retrievalQuery,

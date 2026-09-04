@@ -363,6 +363,25 @@ test('connector-only synthesis does not imply a recall rank count', () => {
   );
 });
 
+test('native recall uses the original user request when the step has no query', async () => {
+  const dispatched = [];
+  const request = 'go through HIVEMIND git repo and send important information about repo to rama via gmail';
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _originalUserMessage: request,
+    _tracedDispatch: async (name, args) => {
+      dispatched.push({ name, args });
+      return { memories: [{ id: 'm1', content: 'repo notes' }], evidence: [] };
+    },
+  };
+  const res = await runCompoundOrchestrator({
+    subtasks: [{ operation: '1', tool_groups: ['hivemind-recall'], depends_on: null, message: '' }],
+    ctx, apiKey: 'k', signal: null,
+  });
+  assert.equal(res.status, 'completed');
+  assert.equal(dispatched[0].name, 'hivemind_recall');
+  assert.equal(dispatched[0].args.query, request);
+});
+
 test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {
   const dispatched = [];
   const recallPacket = { content: 'Amar leads HIVEMIND', recall_packet: { citations: [{ id: 'C1' }], sourceSections: [{ segment_id: 'S1', content: 'full evidence' }] } };

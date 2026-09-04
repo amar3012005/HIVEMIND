@@ -675,10 +675,19 @@ export async function runDurableComposioAgent({
   }
   const person = namedPersonQuery(message);
   const repoHint = namedRepoQuery(message);
-  const readSlugs = governReadSlugs(searchedSlugs, {
+  let readSlugs = governReadSlugs(searchedSlugs, {
     readApps: readConnected.length ? readConnected : connected,
     person,
   });
+  if (person && connected.includes('gmail') && !readSlugs.some((slug) => isRecipientLookupSlug(slug))) {
+    let mail = searchedSlugs.find((slug) => /GMAIL_FETCH_EMAILS/i.test(slug));
+    if (!mail && typeof composioSvc.searchToolsByIntent === 'function') {
+      const extraMailRead = await composioSvc.searchToolsByIntent(orgId, 'gmail fetch emails', { toolkits: ['gmail'] }).catch(() => null);
+      mail = (extraMailRead?.tools || []).map((tool) => tool?._composio?.slug).find((slug) => /GMAIL_FETCH_EMAILS/i.test(slug || ''));
+      if (mail && !searchedSlugs.includes(mail)) searchedSlugs.push(mail);
+    }
+    if (mail) readSlugs.push(mail);
+  }
 
   const readCalls = readSlugs.map((slug) => ({
     slug,

@@ -10,6 +10,7 @@ import {
   emailsFromProviderData,
   getOrCreateAgentRun,
   namedPersonQuery,
+  pickRecipientEmail,
   resetDurableAgentMemory,
   runDurableComposioAgent,
   saveAgentRun,
@@ -47,6 +48,7 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
   assert.deepEqual(selectReadSlugs(['AGILITY_CMS_GET_LOGS', 'GMAIL_FETCH_EMAILS'], ['gmail']), ['GMAIL_FETCH_EMAILS']);
   assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');
   assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
+  assert.equal(pickRecipientEmail(['amarsai2005@gmail.com', 'ramasantoshi1206@gmail.com'], 'rama'), 'ramasantoshi1206@gmail.com');
 });
 
 test('same conversation reuses the agent run id', async () => {

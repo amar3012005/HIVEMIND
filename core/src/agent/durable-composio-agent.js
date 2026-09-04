@@ -77,6 +77,16 @@ export function emailsFromProviderData(data) {
   return [...found];
 }
 
+export function pickRecipientEmail(emails = [], person = '') {
+  const list = [...new Set((emails || []).map((email) => String(email).toLowerCase()))];
+  const needle = String(person || '').toLowerCase();
+  if (needle) {
+    const hit = list.find((email) => email.includes(needle));
+    if (hit) return hit;
+  }
+  return list[0] || null;
+}
+
 export function namedPersonQuery(text) {
   const raw = String(text || '');
   const emails = emailsFromProviderData(raw);
@@ -242,12 +252,16 @@ export async function runDurableComposioAgent({
 
   const writeSlug = selectWriteSlug(searchedSlugs, connected);
   const person = namedPersonQuery(message);
-  const readSlugs = [...new Set(selectReadSlugs(searchedSlugs, connected))]
+  let readSlugs = [...new Set(selectReadSlugs(searchedSlugs, connected))]
     .sort((left, right) => {
       const rank = (slug) => (/FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE/i.test(slug) ? 0 : 1);
       return rank(left) - rank(right);
-    })
-    .slice(0, 3);
+    });
+  if (person) {
+    const focused = readSlugs.filter((slug) => /FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES/i.test(slug));
+    if (focused.length) readSlugs = focused;
+  }
+  readSlugs = readSlugs.slice(0, 2);
 
   const readCalls = readSlugs.map((slug) => {
     const args = /FETCH_EMAIL|SEARCH|CONTACT/i.test(slug) && person
@@ -298,7 +312,7 @@ export async function runDurableComposioAgent({
         pendingActions,
       };
     }
-    const to = (run.scratch.emails || [])[0] || null;
+    const to = pickRecipientEmail(run.scratch.emails || [], person);
     const body = `Briefing from HIVEMIND for: ${String(message).slice(0, 400)}`;
     const args = {
       recipient_email: to,

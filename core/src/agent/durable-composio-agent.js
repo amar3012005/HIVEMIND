@@ -203,6 +203,15 @@ export function namedRepoQuery(text) {
   return match ? String(match[1]).replace(/\s+/g, '-') : '';
 }
 
+function localizedText(value) {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (value && typeof value === 'object' && value.localized && typeof value.localized === 'object') {
+    const first = Object.values(value.localized).find((item) => typeof item === 'string' && item.trim());
+    if (first) return String(first).trim();
+  }
+  return '';
+}
+
 export function summarizeToolData(data, limit = 1800) {
   if (data == null) return '';
   if (data.encoding === 'base64' && typeof data.content === 'string') {
@@ -211,19 +220,33 @@ export function summarizeToolData(data, limit = 1800) {
       if (decoded) return decoded.slice(0, limit);
     } catch { /* fall through */ }
   }
-  const rows = data.items || data.repositories || data.repos || data.messages || data.videos || data.playlists || [];
+  const name = [
+    data.localizedFirstName || localizedText(data.firstName),
+    data.localizedLastName || localizedText(data.lastName),
+  ].filter(Boolean).join(' ');
+  const headline = data.localizedHeadline || localizedText(data.headline);
+  const profileUrl = data.profileUrl
+    || (data.vanityName ? `https://www.linkedin.com/in/${data.vanityName}` : '')
+    || data.html_url || data.url || '';
+  if (name || headline) {
+    return [name, headline, profileUrl].filter(Boolean).join('\n').slice(0, limit);
+  }
+  const rows = data.items || data.repositories || data.repos || data.messages || data.videos || data.playlists || data.elements || [];
   if (Array.isArray(rows) && rows.length) {
-    return rows.slice(0, 10).map((item) => {
+    const lines = rows.slice(0, 10).map((item) => {
       if (item == null || typeof item !== 'object') return String(item);
       const nested = item.snippet && typeof item.snippet === 'object' ? item.snippet : {};
       const nestedText = typeof item.snippet === 'string' ? item.snippet : '';
       return [
-        item.full_name || item.name || item.title || item.subject || nested.title,
+        item.full_name || item.name || item.title || item.subject || nested.title || item.facetName,
         item.id || item.playlistId || nested.playlistId || '',
         item.description || item.body || nestedText || nested.description || nested.channelTitle,
         item.html_url || item.url || nested.url,
       ].filter(Boolean).join(' — ');
-    }).filter(Boolean).join('\n').slice(0, limit);
+    }).filter(Boolean);
+    if (lines.length && !lines.every((line) => /adTargetingFacet|urn:li:ad/i.test(line))) {
+      return lines.join('\n').slice(0, limit);
+    }
   }
   const blob = data.content || data.readme || data.body || data.text;
   if (typeof blob === 'string' && blob.trim()) return blob.trim().slice(0, limit);
@@ -247,7 +270,22 @@ export function humanRecallText(data) {
 }
 
 function isNoiseText(text) {
-  return /recall_plan|"mode":"fact"|persistentMemoryStore|_failure_mode|Missing required fields|status_code/i.test(String(text || ''));
+  return /recall_plan|"mode":"fact"|persistentMemoryStore|_failure_mode|Missing required fields|status_code|adTargetingFacet|urn:li:adTargeting|downloadUrlExpiresAt/i.test(String(text || ''));
+}
+
+export function isFollowUpReadSlug(slug) {
+  const value = String(slug || '');
+  if (/ADS_|AUDIENCE|TARGETING|FACET|ADMIN|ORGANIZATION_ACL/i.test(value)) return false;
+  return /_ITEMS|README|_BY_|MESSAGE_ID/i.test(value);
+}
+
+export function toolkitHasUsableFacts(reads, toolkit) {
+  return (reads || []).some((read) => {
+    if (!read?.successful || toolkitFromSlug(read.slug) !== toolkit) return false;
+    if (isRecipientLookupSlug(read.slug)) return false;
+    const text = summarizeToolData(read.data, 400);
+    return Boolean(text) && !isNoiseText(text) && !/^\s*\{/.test(text);
+  });
 }
 
 export function composeBriefing({ message, reads = [], recallText = '', person = '', recallData = null, factToolkits = null } = {}) {
@@ -259,7 +297,8 @@ export function composeBriefing({ message, reads = [], recallText = '', person =
     }
     return true;
   });
-  const facts = relevant.map((read) => summarizeToolData(read.data, 1200)).filter((text) => text && !isNoiseText(text));
+  const facts = relevant.map((read) => summarizeToolData(read.data, 1200))
+    .filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text));
   const lines = [];
   const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
   lines.push(`Hi ${who},`);
@@ -304,7 +343,7 @@ export async function polishBriefing({ message, body, person, polishImpl } = {})
     }, { useCase: 'briefing_polish' });
     const payload = await response.json();
     const text = payload?.choices?.[0]?.message?.content;
-    if (typeof text === 'string' && text.trim().length > 40 && !/GITHUB_|GMAIL_|tool_result/i.test(text)) {
+    if (typeof text === 'string' && text.trim().length > 40 && !/GITHUB_|GMAIL_|tool_result|adTargetingFacet|"localized"/i.test(text)) {
       return text.trim().slice(0, 7000);
     }
   } catch {
@@ -764,25 +803,32 @@ export async function runDurableComposioAgent({
 
   const unused = selectReadSlugs(searchedSlugs, (readApps.length ? readApps : readConnected.length ? readConnected : connected))
     .filter((slug) => !readResults.some((row) => row.slug === slug))
-    .filter((slug) => !writeApps.includes(toolkitFromSlug(slug)));
+    .filter((slug) => !writeApps.includes(toolkitFromSlug(slug)))
+    .filter((slug) => {
+      if (!isFollowUpReadSlug(slug)) return false;
+      if (/_ITEMS|README/i.test(slug)) return true;
+      return !toolkitHasUsableFacts(readResults, toolkitFromSlug(slug));
+    });
   for (const slug of unused.slice(0, 2)) {
     await runOneRead({ slug, arguments: {} });
   }
 
   if (typeof composioSvc.searchToolsByIntent === 'function') {
     const seen = new Set(readResults.map((row) => row.slug));
-    const followToolkits = (readConnected.length ? readConnected : connected).filter((toolkit) => !writeApps.includes(toolkit));
+    const followToolkits = (readConnected.length ? readConnected : connected)
+      .filter((toolkit) => !writeApps.includes(toolkit) && !toolkitHasUsableFacts(readResults, toolkit));
     for (const toolkit of followToolkits.slice(0, 3)) {
-      const extra = await composioSvc.searchToolsByIntent(orgId, evidenceText().slice(0, 1500), { toolkits: [toolkit] }).catch(() => null);
+      const extra = await composioSvc.searchToolsByIntent(orgId, evidenceText(toolkit ? `${toolkit}_` : '').slice(0, 1500), { toolkits: [toolkit] }).catch(() => null);
       let added = 0;
       for (const tool of extra?.tools || []) {
         const slug = tool?._composio?.slug;
         if (!slug || seen.has(slug)) continue;
+        if (!isFollowUpReadSlug(slug)) continue;
         if (!selectReadSlugs([slug], [toolkit]).length) continue;
         seen.add(slug);
         await runOneRead({ slug, arguments: {} });
         added += 1;
-        if (added >= 2) break;
+        if (added >= 1) break;
       }
     }
   }

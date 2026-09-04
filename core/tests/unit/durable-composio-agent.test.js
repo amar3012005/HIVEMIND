@@ -463,6 +463,34 @@ test('summarizeToolData decodes GitHub README base64', () => {
   assert.equal(text.includes('IyB'), false);
 });
 
+test('summarizeToolData uses profile fields instead of raw LinkedIn JSON', () => {
+  const text = summarizeToolData({
+    localizedFirstName: 'Amar',
+    localizedLastName: 'Sai',
+    localizedHeadline: 'Founder @SINGULANCE',
+    vanityName: 'amar-sai-3067aa1aa',
+    profileUrl: 'https://www.linkedin.com/in/amar-sai-3067aa1aa',
+  });
+  assert.match(text, /Amar Sai/);
+  assert.match(text, /Founder @SINGULANCE/);
+  assert.equal(text.includes('preferredLocale'), false);
+});
+
+test('composeBriefing drops ad-targeting JSON from the email body', () => {
+  const body = composeBriefing({
+    message: 'send Rama about my linkedin profile',
+    person: 'rama',
+    factToolkits: ['linkedin'],
+    reads: [
+      { slug: 'LINKEDIN_GET_MY_INFO', successful: true, data: { localizedFirstName: 'Amar', localizedLastName: 'Sai', localizedHeadline: 'Founder @SINGULANCE', vanityName: 'amar-sai-3067aa1aa' } },
+      { slug: 'LINKEDIN_GET_AD_TARGETING_FACETS', successful: true, data: { elements: [{ adTargetingFacetUrn: 'urn:li:adTargetingFacet:industries' }] } },
+    ],
+  });
+  assert.match(body, /Amar Sai/);
+  assert.equal(body.includes('adTargetingFacet'), false);
+  assert.equal(body.includes('preferredLocale'), false);
+});
+
 test('emailsFromProviderData ignores example.com placeholders', () => {
   assert.deepEqual(
     emailsFromProviderData({ from: 'Rama <rama@x.dev>', extra: 'x@example.com' }),

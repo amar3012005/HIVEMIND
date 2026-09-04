@@ -192,10 +192,10 @@ export async function runDurableComposioAgent({
   const connected = [...new Set(accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit).filter(Boolean))];
   run.scratch.connected_toolkits = connected;
 
-  if (typeof composioSvc.getToolRouterSession === 'function' && connected.length) {
+  if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function' && connected.length) {
     try {
       const session = await composioSvc.getToolRouterSession(orgId, connected.slice(0, 8));
-      run.composioSessionId = session.id || run.composioSessionId;
+      run.composioSessionId = session.id || null;
     } catch (error) {
       run.scratch.session_error = String(error.message || error).slice(0, 240);
     }
@@ -232,17 +232,9 @@ export async function runDurableComposioAgent({
     recordStep(run, { kind: 'native', slug: 'HIVEMIND_RECALL', status: 'error', error: error.message });
   }
 
-  let writeSlug = selectWriteSlug(searchedSlugs, connected);
-  if (!writeSlug && namedPersonQuery(message) && connected.includes('gmail')
-    && searchedSlugs.some((slug) => /^GMAIL_/i.test(slug))) {
-    writeSlug = 'GMAIL_SEND_EMAIL';
-  }
-  let readSlugs = selectReadSlugs(searchedSlugs);
+  const writeSlug = selectWriteSlug(searchedSlugs, connected);
   const person = namedPersonQuery(message);
-  if (writeSlug && person && !readSlugs.some((slug) => /FETCH_EMAIL|GET_CONTACT|SEARCH/i.test(slug))) {
-    if (searchedSlugs.some((slug) => /^GMAIL_/i.test(slug))) readSlugs = ['GMAIL_FETCH_EMAILS', ...readSlugs];
-  }
-  readSlugs = [...new Set(readSlugs)].slice(0, 4);
+  const readSlugs = [...new Set(selectReadSlugs(searchedSlugs))].slice(0, 4);
 
   const readCalls = readSlugs.map((slug) => {
     const args = /FETCH_EMAIL|SEARCH|CONTACT/i.test(slug) && person

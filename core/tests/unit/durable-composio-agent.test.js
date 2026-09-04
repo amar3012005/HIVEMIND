@@ -117,6 +117,65 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
   assert.equal(result.run.composioSessionId, 'sess_1');
 });
 
+test('later turns reuse persisted Composio session id and never recreate', async () => {
+  resetDurableAgentMemory();
+  let sessionCalls = 0;
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() {
+      sessionCalls += 1;
+      return { id: `sess_live_${sessionCalls}` };
+    },
+    async searchToolsByIntent() {
+      return { tools: [{ _composio: { slug: 'GMAIL_FETCH_EMAILS' } }] };
+    },
+    async executeToolsParallel() {
+      return [{ successful: true, data: { messages: [] } }];
+    },
+  };
+  const ctx = {
+    orgId: 'o1', userId: 'u1', threadId: 'reuse-session',
+    _tracedDispatch: async () => ({ memories: [] }),
+  };
+  const first = await runDurableComposioAgent({ message: 'fetch recent mail', ctx, composio });
+  const second = await runDurableComposioAgent({ message: 'fetch again', ctx, composio });
+  assert.equal(sessionCalls, 1);
+  assert.equal(first.run.composioSessionId, 'sess_live_1');
+  assert.equal(second.run.composioSessionId, first.run.composioSessionId);
+});
+
+test('does not execute or draft slugs that search did not return', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'sess_x' }; },
+    async searchToolsByIntent() {
+      return { tools: [{ _composio: { slug: 'GMAIL_LIST_LABELS', toolkit: 'gmail' } }] };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map(() => ({ successful: true, data: {} }));
+    },
+  };
+  const ctx = {
+    orgId: 'o1', userId: 'u1', threadId: 'no-inject',
+    _tracedDispatch: async () => ({ memories: [] }),
+    prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'NO' }; } } },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send important information about repo to rama via gmail',
+    ctx,
+    composio,
+  });
+  assert.equal(executed.includes('GMAIL_FETCH_EMAILS'), false);
+  assert.equal(executed.includes('GMAIL_SEND_EMAIL'), false);
+  assert.deepEqual(executed, ['GMAIL_LIST_LABELS']);
+  assert.equal(created.length, 0);
+  assert.equal(result.status, 'completed');
+});
+
 test('emailsFromProviderData ignores example.com placeholders', () => {
   assert.deepEqual(
     emailsFromProviderData({ from: 'Rama <rama@x.dev>', extra: 'x@example.com' }),

@@ -17,6 +17,8 @@ function tokens(slug) {
   return String(slug || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
+export const RETRY_CONNECT_VALUE = '__retry_connect__';
+
 export function conversationKey(ctx = {}) {
   return String(ctx.threadId || ctx.conversationId || ctx._conversationId || '').trim()
     || `user:${ctx.userId || 'anon'}`;
@@ -85,6 +87,62 @@ export function pickRecipientEmail(emails = [], person = '') {
     if (hit) return hit;
   }
   return list[0] || null;
+}
+
+export function toolkitFromSlug(slug) {
+  return String(slug || '').split('_')[0].toLowerCase() || null;
+}
+
+export function uniqueToolkitsFromSlugs(slugs = []) {
+  return [...new Set((slugs || []).map(toolkitFromSlug).filter(Boolean))]
+    .filter((toolkit) => toolkit !== 'hivemind' && toolkit !== 'local' && toolkit !== 'composio');
+}
+
+export function displayAppName(toolkit) {
+  const key = String(toolkit || '').trim().toLowerCase();
+  if (!key) return 'this app';
+  return key.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function appsMatchingRequest(message, toolkits = []) {
+  const text = ` ${String(message || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  return (toolkits || []).filter((toolkit) => {
+    const token = String(toolkit || '').toLowerCase().replace(/[-_]/g, ' ');
+    return text.includes(` ${toolkit} `) || text.includes(` ${token} `);
+  });
+}
+
+export function connectAccountRequest(toolkit, redirectUrl = null) {
+  const label = displayAppName(toolkit);
+  return {
+    kind: 'connect_account',
+    field: 'connection',
+    toolkit,
+    provider: toolkit,
+    app_label: label,
+    logo_url: `https://logos.composio.dev/api/${encodeURIComponent(toolkit)}`,
+    blocking: true,
+    prompt: `Connect ${label} to continue. Approve access in the new tab, then come back and continue this request.`,
+    options: [
+      { id: 'connect', label: `Connect ${label}`, href: redirectUrl, open_url: Boolean(redirectUrl), value: redirectUrl || 'connect' },
+      { id: 'connected', label: `I've connected ${label} — continue`, value: RETRY_CONNECT_VALUE },
+    ],
+  };
+}
+
+export function clarifyAppsRequest(toolkits = []) {
+  const options = toolkits.slice(0, 6).map((toolkit) => ({
+    id: toolkit,
+    label: displayAppName(toolkit),
+    value: toolkit,
+    toolkit,
+  }));
+  return {
+    kind: 'single_choice',
+    field: 'toolkit',
+    prompt: `Do you mean ${options.map((option) => option.label).join(', ').replace(/, ([^,]*)$/, ' or $1')}? Choose one and I will continue this request.`,
+    options,
+  };
 }
 
 export function namedPersonQuery(text) {
@@ -176,16 +234,49 @@ function recordStep(run, step) {
   });
 }
 
+function pause(run, inputRequest, summary) {
+  return {
+    status: 'needs_input',
+    run,
+    summary,
+    steps: run.steps,
+    draftIds: [],
+    pendingActions: [],
+    inputRequests: [inputRequest],
+    resumeState: {
+      kind: 'durable_agent',
+      run_id: run.id,
+      results: [{ inputRequest }],
+    },
+  };
+}
+
 export async function runDurableComposioAgent({
   message,
   ctx,
   onEvent,
   composio = null,
   prisma = null,
+  choice = null,
 } = {}) {
   const emit = onEvent || (() => {});
   const db = prisma || ctx?.prisma || null;
   const run = await getOrCreateAgentRun({ prisma: db, ctx, message });
+  const picked = choice || ctx?.durableChoice || null;
+  if (picked?.value === RETRY_CONNECT_VALUE || picked?.option_id === 'connected') {
+    run.status = 'running';
+  }
+  if (picked?.values && typeof picked.values === 'object') {
+    run.scratch.field_values = { ...(run.scratch.field_values || {}), ...picked.values };
+    if (picked.values.app) {
+      run.scratch.chosen_toolkit = String(picked.values.app).toLowerCase().replace(/[^a-z0-9]/g, '');
+      run.status = 'running';
+    }
+  }
+  if (picked?.value && picked.option_id && picked.option_id !== 'connect' && picked.option_id !== 'connected') {
+    run.scratch.chosen_toolkit = String(picked.value || picked.toolkit || '').toLowerCase();
+    run.status = 'running';
+  }
   if (run.status === 'waiting_approval' && run.scratch?.draft_id) {
     return {
       status: 'pending',
@@ -222,10 +313,60 @@ export async function runDurableComposioAgent({
   const discovered = typeof composioSvc.searchToolsByIntent === 'function'
     ? await composioSvc.searchToolsByIntent(orgId, message)
     : { tools: [], connectedToolkits: connected };
-  const searchedSlugs = (discovered.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
+  let searchedSlugs = (discovered.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
+  const discoveredToolkits = uniqueToolkitsFromSlugs(searchedSlugs);
+  const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected]);
+  const appHints = (discovered.apps || []).map((app) => app.slug).filter(Boolean);
+  let candidates = mentioned.length
+    ? [...new Set(mentioned)]
+    : connected.filter((toolkit) => discoveredToolkits.includes(toolkit));
+  if (!candidates.length) candidates = appHints.slice(0, 4);
+  if (run.scratch.chosen_toolkit) {
+    candidates = [run.scratch.chosen_toolkit];
+    searchedSlugs = searchedSlugs.filter((slug) => slugMatchesConnected(slug, [run.scratch.chosen_toolkit]));
+  }
   run.scratch.searched_slugs = searchedSlugs.slice(0, 24);
+  run.scratch.candidate_apps = candidates;
   recordStep(run, { kind: 'search', slugs: searchedSlugs.slice(0, 12), executor: 'composio' });
   emit({ type: 'tool_result', name: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', summary: searchedSlugs.slice(0, 8).join(',') });
+
+  if (!run.scratch.chosen_toolkit && candidates.length > 1) {
+    run.status = 'waiting_user';
+    recordStep(run, { kind: 'clarify', toolkits: candidates, status: 'waiting_user' });
+    await saveAgentRun({ prisma: db, run });
+    return pause(run, clarifyAppsRequest(candidates), `Do you mean ${candidates.map(displayAppName).join(' or ')}?`);
+  }
+
+  const needed = candidates.filter((toolkit) => toolkit && !connected.includes(toolkit));
+  if (needed.length === 1) {
+    const toolkit = needed[0];
+    let redirectUrl = null;
+    if (typeof composioSvc.createConnectLink === 'function') {
+      try {
+        const link = await composioSvc.createConnectLink(toolkit, orgId, {
+          callbackUrl: ctx.composioCallbackUrl || undefined,
+          toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
+        });
+        redirectUrl = link?.redirectUrl || link?.redirect_url || null;
+      } catch (error) {
+        emit({ type: 'tool_result', name: toolkit, status: 'connect_link_failed', summary: error.message });
+      }
+    }
+    run.status = 'waiting_connection';
+    run.scratch.needs_toolkit = toolkit;
+    recordStep(run, { kind: 'connect', toolkit, status: 'waiting_connection' });
+    await saveAgentRun({ prisma: db, run });
+    return pause(run, connectAccountRequest(toolkit, redirectUrl), `Connect ${displayAppName(toolkit)} to continue.`);
+  }
+  if (!candidates.length && !connected.length) {
+    run.status = 'waiting_user';
+    await saveAgentRun({ prisma: db, run });
+    return pause(run, {
+      kind: 'field_input',
+      prompt: 'Which app should I use for this? Name it (for example Gmail, Slack, GitHub, Notion) and I will connect or run it.',
+      fields: [{ id: 'app', name: 'app', label: 'App', type: 'text', required: true }],
+    }, 'Which app should I use?');
+  }
 
   try {
     const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
@@ -250,9 +391,12 @@ export async function runDurableComposioAgent({
     recordStep(run, { kind: 'native', slug: 'HIVEMIND_RECALL', status: 'error', error: error.message });
   }
 
-  const writeSlug = selectWriteSlug(searchedSlugs, connected);
+  const scopedConnected = run.scratch.chosen_toolkit
+    ? connected.filter((toolkit) => toolkit === run.scratch.chosen_toolkit)
+    : connected;
+  const writeSlug = selectWriteSlug(searchedSlugs, scopedConnected.length ? scopedConnected : connected);
   const person = namedPersonQuery(message);
-  let readSlugs = [...new Set(selectReadSlugs(searchedSlugs, connected))]
+  let readSlugs = [...new Set(selectReadSlugs(searchedSlugs, scopedConnected.length ? scopedConnected : connected))]
     .sort((left, right) => {
       const rank = (slug) => (/FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE/i.test(slug) ? 0 : 1);
       return rank(left) - rank(right);
@@ -297,22 +441,28 @@ export async function runDurableComposioAgent({
   const draftIds = [];
   const pendingActions = [];
   if (writeSlug) {
-    const toolkit = String(writeSlug.split('_')[0] || 'gmail').toLowerCase();
-    if (connected.length && !connected.includes(toolkit) && !connected.includes(writeSlug.split('_')[0]?.toLowerCase())) {
+    const toolkit = toolkitFromSlug(writeSlug);
+    if (toolkit && !connected.includes(toolkit)) {
+      let redirectUrl = null;
+      if (typeof composioSvc.createConnectLink === 'function') {
+        try {
+          const link = await composioSvc.createConnectLink(toolkit, orgId, {
+            callbackUrl: ctx.composioCallbackUrl || undefined,
+            toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
+          });
+          redirectUrl = link?.redirectUrl || link?.redirect_url || null;
+        } catch { /* Connect banner still renders */ }
+      }
       run.status = 'waiting_connection';
       run.scratch.needs_toolkit = toolkit;
       recordStep(run, { kind: 'connect', toolkit, status: 'waiting_connection' });
       await saveAgentRun({ prisma: db, run });
-      return {
-        status: 'needs_connection',
-        run,
-        summary: `Connect ${toolkit} to continue.`,
-        steps: run.steps,
-        draftIds,
-        pendingActions,
-      };
+      return pause(run, connectAccountRequest(toolkit, redirectUrl), `Connect ${displayAppName(toolkit)} to continue.`);
     }
-    const to = pickRecipientEmail(run.scratch.emails || [], person);
+    const to = pickRecipientEmail(run.scratch.emails || [], person)
+      || run.scratch.field_values?.recipient_email
+      || run.scratch.field_values?.to
+      || null;
     const body = `Briefing from HIVEMIND for: ${String(message).slice(0, 400)}`;
     const args = {
       recipient_email: to,
@@ -325,15 +475,11 @@ export async function runDurableComposioAgent({
       run.status = 'waiting_user';
       recordStep(run, { kind: 'write', slug: writeSlug, status: 'waiting_user', error: 'recipient unresolved' });
       await saveAgentRun({ prisma: db, run });
-      return {
-        status: 'needs_input',
-        run,
-        summary: 'Need a recipient email to draft the message.',
-        steps: run.steps,
-        draftIds,
-        pendingActions,
-        inputRequests: [{ kind: 'field_input', field: 'recipient_email', prompt: 'Recipient email' }],
-      };
+      return pause(run, {
+        kind: 'field_input',
+        prompt: 'Who should receive this? Add the address and I will prepare a draft for your approval.',
+        fields: [{ id: 'recipient_email', name: 'recipient_email', label: 'To', type: 'email', required: true }],
+      }, 'Need a recipient to draft the message.');
     }
     const drafted = await createDraft(ctx, writeSlug, args);
     if (drafted?.id) {

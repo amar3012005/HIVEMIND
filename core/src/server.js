@@ -24497,6 +24497,51 @@ exit \$RC
               }
 
               const execute = async (emit) => {
+                if (stored.resumeState?.kind === 'durable_agent') {
+                  const { runDurableComposioAgent } = await import('./agent/durable-composio-agent.js');
+                  const durable = await runDurableComposioAgent({
+                    message: stored.message,
+                    ctx: {
+                      userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
+                      prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
+                      threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
+                      durableChoice: allowed
+                        ? { option_id: allowed.id, value: allowed.value, toolkit: allowed.toolkit || pending.toolkit }
+                        : { option_id: 'field-input', values: fieldValues },
+                      _trace: { traceId: crypto.randomUUID() },
+                    },
+                    onEvent: emit,
+                    prisma,
+                  });
+                  let continuation = null;
+                  if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
+                    const next = await createChatContinuation({
+                      userId, orgId, message: stored.message, language: stored.language,
+                      resumeState: durable.resumeState,
+                    }, {
+                      prisma,
+                      durable: ['session', 'workflow', 'full'].includes(continuationMode),
+                      parentTurnId: continuationTurn?.id || null,
+                    });
+                    continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: durable.inputRequests };
+                    emit?.({ type: 'orchestration_input_required', ...continuation });
+                  }
+                  emit?.({ type: 'finish', text: durable.summary });
+                  return {
+                    response: durable.summary, answer_mode: 'compound', sources: [], citations: [],
+                    steps: durable.steps, grounded: durable.status === 'completed',
+                    confidence: durable.status === 'completed' ? 1 : 0.5,
+                    gaps: durable.status === 'error' ? ['durable_agent_failed'] : [], scopes_found: [],
+                    draft_ids: durable.draftIds, compound_status: durable.status,
+                    pending_actions: durable.pendingActions || [],
+                    execution: {
+                      status: durable.status, steps: durable.steps, draft_ids: durable.draftIds,
+                      pending_actions: durable.pendingActions || [],
+                      run_id: durable.run?.id || null, session_id: durable.run?.composioSessionId || null,
+                    },
+                    continuation,
+                  };
+                }
                 const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
                 const resumeState = {
                   ...stored.resumeState,

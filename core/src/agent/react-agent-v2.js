@@ -3798,6 +3798,25 @@ export async function runReactAgentV2({
         const durable = await runDurableComposioAgent({
           message, ctx, onEvent, prisma: ctx.prisma,
         });
+        let continuation = null;
+        if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
+          const { createChatContinuation } = await import('./chat-continuation-store.js');
+          const stored = await createChatContinuation({
+            userId: ctx.userId, orgId: ctx.orgId, message, language,
+            resumeState: durable.resumeState,
+          }, {
+            prisma: ctx.prisma,
+            durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+            parentTurnId: ctx.durableChatTurnId || null,
+          });
+          continuation = {
+            schema_version: 1,
+            token: stored.token,
+            expires_at: stored.expires_at,
+            requests: durable.inputRequests,
+          };
+          onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
+        }
         let finalText = durable.summary;
         onEvent?.({ type: 'finish', text: finalText });
         onEvent?.({ type: 'turn_completed', grounded: false, operation: 'durable_agent', success: durable.status !== 'error' });
@@ -3826,6 +3845,7 @@ export async function runReactAgentV2({
           draft_ids: durable.draftIds || [],
           pending_actions: durable.pendingActions || [],
           compound_status: durable.status,
+          continuation,
           execution: {
             status: durable.status,
             steps: durable.steps,

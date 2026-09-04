@@ -456,7 +456,12 @@ export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
       if (!bySlug.has(tool._composio.slug)) bySlug.set(tool._composio.slug, tool);
     }
   }
-  return { tools: [...bySlug.values()].slice(0, 32), connectedToolkits, accounts };
+  return {
+    tools: [...bySlug.values()].slice(0, 32),
+    connectedToolkits,
+    accounts,
+    apps: searchedApps.items || [],
+  };
 }
 
 export async function discoverSessionTools(orgId, { toolkits, useCases }) {

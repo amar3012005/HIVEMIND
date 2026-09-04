@@ -179,6 +179,52 @@ test('does not execute or draft slugs that search did not return', async () => {
   assert.equal(result.status, 'completed');
 });
 
+test('disconnected named app pauses with a Connect continuation', async () => {
+  resetDurableAgentMemory();
+  const composio = {
+    async listConnectedAccounts() { return []; },
+    async searchToolsByIntent() {
+      return { tools: [{ _composio: { slug: 'SLACK_SEND_MESSAGE', toolkit: 'slack' } }], apps: [{ slug: 'slack' }] };
+    },
+    async createConnectLink() { return { redirectUrl: 'https://connect.example/slack' }; },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'post a summary to slack',
+    ctx: { orgId: 'o1', userId: 'u1', threadId: 'connect-slack', _tracedDispatch: async () => ({}) },
+    composio,
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.equal(result.inputRequests[0].kind, 'connect_account');
+  assert.equal(result.inputRequests[0].toolkit, 'slack');
+  assert.equal(result.resumeState.kind, 'durable_agent');
+});
+
+test('ambiguous apps ask do you mean this', async () => {
+  resetDurableAgentMemory();
+  const composio = {
+    async listConnectedAccounts() {
+      return [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'slack', status: 'ACTIVE' }];
+    },
+    async searchToolsByIntent() {
+      return {
+        tools: [
+          { _composio: { slug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail' } },
+          { _composio: { slug: 'SLACK_SEND_MESSAGE', toolkit: 'slack' } },
+        ],
+      };
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send this on gmail and slack',
+    ctx: { orgId: 'o1', userId: 'u1', threadId: 'clarify-apps', _tracedDispatch: async () => ({}) },
+    composio,
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.equal(result.inputRequests[0].kind, 'single_choice');
+  assert.ok(result.inputRequests[0].options.some((option) => option.value === 'gmail'));
+  assert.ok(result.inputRequests[0].options.some((option) => option.value === 'slack'));
+});
+
 test('emailsFromProviderData ignores example.com placeholders', () => {
   assert.deepEqual(
     emailsFromProviderData({ from: 'Rama <rama@x.dev>', extra: 'x@example.com' }),

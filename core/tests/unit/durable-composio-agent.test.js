@@ -67,6 +67,10 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
     appsMatchingRequest('send the list of my last 10 watch histories from youtube and send a mail to rama about it', ['gmail', 'youtube', 'github']),
     ['gmail', 'youtube'],
   );
+  assert.deepEqual(
+    appsMatchingRequest('what are my important emails from the last month?', ['gmail', 'github']),
+    ['gmail'],
+  );
   assert.equal(namedRepoQuery('go through HIVEMIND git repo'), 'HIVEMIND');
   assert.equal(
     isReadThenWrite('go through HIVEMIND git repo and send important information about repo to rama via gmail', ['gmail', 'github']),

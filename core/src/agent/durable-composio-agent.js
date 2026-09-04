@@ -161,7 +161,10 @@ export function displayAppName(toolkit) {
 
 export const TOOLKIT_ALIASES = Object.freeze({
   github: ['github', 'git', 'repo', 'repos', 'repository', 'repositories'],
-  gmail: ['gmail', 'email', 'mail'],
+  // Treat ordinary inbox language as Gmail when it is the connected mail
+  // provider. Requiring the literal provider name made "important emails"
+  // fail before Session discovery.
+  gmail: ['gmail', 'email', 'emails', 'mail', 'inbox', 'mailbox'],
   slack: ['slack'],
   notion: ['notion'],
   googledrive: ['googledrive', 'google drive', 'gdrive', 'drive'],

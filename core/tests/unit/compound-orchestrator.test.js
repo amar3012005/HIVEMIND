@@ -21,6 +21,7 @@ import {
   exactGroundedDependencyContent,
   formatGroundedMessageBody,
   looksLikeRecallDump,
+  isUnverifiedPlaceholderEmail,
   collapseAdjacentNativeRecalls,
   normalizeCompoundDependencies,
   normalizeEmailDestinationArgs,
@@ -766,6 +767,19 @@ test('missing write fields produce a resumable generalized field-input request',
   });
   assert.equal(resumed.status, 'pending');
   assert.equal(created[0].toolArgs.recipient_email, 'person@example.com');
+});
+
+test('placeholder emails are never trusted destinations', () => {
+  assert.equal(isUnverifiedPlaceholderEmail('rama@example.com', 'send a detailed email to rama'), true);
+  assert.equal(isUnverifiedPlaceholderEmail('amar@example.com', 'Send this to amar@example.com'), false);
+  const unresolved = normalizeEmailDestinationArgs(
+    'message',
+    { type: 'object', required: ['recipient_email'], properties: { recipient_email: { type: 'string' } } },
+    { recipient_email: 'rama@example.com' },
+    {},
+    'send a detailed email to rama',
+  );
+  assert.deepEqual(unresolved.invalidFields, ['recipient_email']);
 });
 
 test('namedRecipientQuery keeps a display name and skips long prose', () => {

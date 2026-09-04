@@ -121,7 +121,42 @@ export function decisionToHostedPlan(decision, { request, connectedProviders = [
       .filter((group) => !NATIVE_GROUPS.has(group) && connectedProviders.includes(group)))];
     if (dependentGroups.length === 1) step.tool_groups = dependentGroups;
   }
-  return steps;
+  return ensureMentionedCatalogSteps(steps, request, connectedProviders, unifiedDag);
+}
+
+export function mentionedCatalogProviders(request) {
+  const text = ` ${String(request || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  return CATALOG_CONNECTOR_PROVIDERS.filter((provider) => {
+    const token = provider.replace(/-/g, ' ');
+    return text.includes(` ${provider} `) || text.includes(` ${token} `);
+  });
+}
+
+export function ensureMentionedCatalogSteps(steps, request, connectedProviders = [], unifiedDag = false) {
+  const mentioned = mentionedCatalogProviders(request);
+  const have = new Set((Array.isArray(steps) ? steps : []).flatMap((step) => step.tool_groups || []));
+  const extras = mentioned.filter((provider) => !have.has(provider)
+    && (unifiedDag || connectedProviders.includes(provider)));
+  if (extras.length === 0) return steps;
+  const inserted = extras.map((provider, offset) => ({
+    index: offset,
+    operation: 'read',
+    authority: 'read',
+    output_kind: 'record',
+    tool_groups: [provider],
+    connection_required: !connectedProviders.includes(provider),
+    depends_on: [],
+    instruction: `Search ${provider} for the requested information.`,
+    query: null,
+    retrieval: null,
+    message: `Search ${provider} for the requested information.`,
+  }));
+  const shifted = steps.map((step) => ({
+    ...step,
+    index: step.index + inserted.length,
+    depends_on: (step.depends_on || []).map((d) => d + inserted.length),
+  }));
+  return [...inserted, ...shifted];
 }
 
 export async function planHostedComposioWorkflow({

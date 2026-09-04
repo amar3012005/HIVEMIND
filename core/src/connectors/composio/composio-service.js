@@ -131,6 +131,7 @@ export async function listConnectedAccounts(orgId) {
     id: it.id,
     toolkit: it.toolkit?.slug,
     status: it.status, // ACTIVE | INITIATED | EXPIRED | FAILED
+    email: it.data?.email || it.email || it.member?.email || it.metadata?.email || null,
     createdAt: it.created_at,
     updatedAt: it.updated_at,
   }));

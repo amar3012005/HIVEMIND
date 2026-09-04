@@ -10288,6 +10288,24 @@ exit \$RC
         // ── Pending writes: approve / cancel / get-by-id ──────────────
         // Agent draft-approval workflow. Owner check enforces user_id
         // matches the session principal; cross-user approval is forbidden.
+        const pwEdit = pathname.match(/^\/api\/pending-writes\/([0-9a-f-]{36})$/i);
+        if (pwEdit && req.method === 'PATCH') {
+          if (!prisma) return jsonResponse(res, { error: 'db unavailable' }, 503);
+          const draftId = pwEdit[1];
+          const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId, status: 'draft' } });
+          if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
+          const incoming = body?.tool_args && typeof body.tool_args === 'object' ? body.tool_args : {};
+          const nextArgs = { ...(row.toolArgs || {}) };
+          for (const key of ['to', 'recipient_email', 'recipient', 'subject', 'body', 'message', 'text', 'content', 'from_email']) {
+            if (Object.hasOwn(incoming, key) && incoming[key] != null) nextArgs[key] = incoming[key];
+          }
+          if (nextArgs.to && !nextArgs.recipient_email) nextArgs.recipient_email = nextArgs.to;
+          const updated = await prisma.pendingWrite.update({
+            where: { id: draftId },
+            data: { toolArgs: nextArgs, preview: `${row.toolName}(${JSON.stringify(nextArgs).slice(0, 400)})` },
+          });
+          return jsonResponse(res, { ok: true, draft: updated });
+        }
         const pwMatch = pathname.match(/^\/api\/pending-writes\/([0-9a-f-]{36})\/(approve|cancel)$/i);
         if (pwMatch && req.method === 'POST') {
           if (!prisma) return jsonResponse(res, { error: 'db unavailable' }, 503);
@@ -10337,10 +10355,17 @@ exit \$RC
               // NOT the legacy toolkit. Execute via the Composio service
               // directly; the toolkit has no composio group/tool.
               if (row.provider === 'composio') {
-                const { executeTool: composioExecute } = await import('./connectors/composio/composio-service.js');
+                const { executeTool: composioExecute, listConnectedAccounts } = await import('./connectors/composio/composio-service.js');
                 const slug = row.toolName || row.toolArgs?._composio_slug;
                 const args = { ...(row.toolArgs || {}) };
                 delete args._composio_slug;
+                if (!args.from_email && typeof listConnectedAccounts === 'function') {
+                  try {
+                    const accounts = await listConnectedAccounts(orgId);
+                    const mailbox = (accounts || []).find((account) => account?.status === 'ACTIVE' && account.email);
+                    if (mailbox?.email) args.from_email = mailbox.email;
+                  } catch { /* execute with stored args */ }
+                }
                 const result = await composioExecute(orgId, slug, args);
                 if (creditService && !approvalCredit?.duplicate) await creditService.settle({ orgId, idempotencyKey: approvalCreditKey });
                 const ok = Boolean(result?.successful);

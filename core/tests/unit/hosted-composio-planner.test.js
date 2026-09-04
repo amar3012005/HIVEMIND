@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   connectedProvidersFromAccounts,
   decisionToHostedPlan,
+  mentionedCatalogProviders,
   planHostedComposioWorkflow,
 } from '../../src/agent/hosted-composio-planner.js';
 import { isUseToolsUnifiedDagEnabled } from '../../src/agent/use-tools-unified-flag.js';
@@ -66,6 +67,20 @@ test('flag-off still rejects a disconnected named catalog app', () => {
       { operation: 'gmail_search', tool_groups: ['gmail'], message: 'emails' },
     ],
   }, { request: 'emails and notes', connectedProviders: [], unifiedDag: false }), /planner_selected_unavailable_tool_group:gmail/);
+});
+
+test('named github stays in the hosted plan even when the model omitted it', () => {
+  assert.deepEqual(mentionedCatalogProviders('from my github and hivemind find TARA and email rama'), ['github']);
+  const steps = decisionToHostedPlan({
+    operation: 'compound',
+    subtasks: [
+      { operation: 'recall', tool_groups: ['hivemind-recall'], message: 'TARA' },
+      { operation: 'email', authority: 'write', tool_groups: ['gmail'], depends_on: [0], message: 'email rama' },
+    ],
+  }, { request: 'from my github and hivemind find information about TARA and send email to rama', connectedProviders: ['github', 'gmail'], unifiedDag: true });
+  assert.equal(steps[0].tool_groups[0], 'github');
+  assert.ok(steps.some((step) => step.tool_groups[0] === 'hivemind-recall'));
+  assert.ok(steps.some((step) => step.tool_groups[0] === 'gmail'));
 });
 
 test('hivemind-context is native recall, never a Composio connect app', () => {

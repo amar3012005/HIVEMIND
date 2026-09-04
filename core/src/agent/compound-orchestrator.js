@@ -214,8 +214,8 @@ export function contactLookupTool(rawTools) {
     const slug = String(tool?._composio?.slug || '');
     const name = String(tool?.function?.name || tool?.name || '');
     const hay = `${name} ${slug} ${tool?.function?.description || ''}`.toLowerCase();
-    if (!/(contact|people|person|directory)/.test(hay)) continue;
-    if (/(send|create|delete|update|draft|label)/.test(hay)) continue;
+    if (!/(contact|people|person|directory|search)/.test(hay)) continue;
+    if (/(send|create|delete|update|draft|label|create_email)/.test(hay)) continue;
     return { tool, slug: slug || name, name };
   }
   return null;
@@ -282,7 +282,9 @@ export function normalizeEmailDestinationArgs(outputKind, schema, args, priorOut
   const invalidFields = [];
   for (const field of emailDestinationFields(outputKind, schema)) {
     const property = schema?.properties?.[field] || {};
-    const candidates = [...collectEmailCandidates(next[field])].slice(0, 20);
+    const candidates = [...collectEmailCandidates(next[field])]
+      .filter((email) => trustedCandidates.includes(email) || !isUnverifiedPlaceholderEmail(email, explicitRecipientSource))
+      .slice(0, 20);
     if (candidates.length === 1 && trustedCandidates.includes(candidates[0])) {
       next[field] = property.type === 'array' ? candidates : candidates[0];
       continue;
@@ -743,7 +745,17 @@ export function looksLikeRecallDump(value) {
   const ids = text.match(new RegExp(MEMORY_ID_RE.source, 'gi')) || [];
   if (ids.length >= 2) return true;
   if (/^source\s*:/im.test(text) && /^platform\s*:/im.test(text)) return true;
+  if (/assistant-onboarding-shown/i.test(text)) return true;
+  if (/Error 404 \(Not Found\)/i.test(text) || /<!DOCTYPE html>/i.test(text)) return true;
   return false;
+}
+
+export function isUnverifiedPlaceholderEmail(email, explicitSource = '') {
+  const value = String(email || '').trim().toLowerCase();
+  const host = value.split('@')[1] || '';
+  if (!/^(example\.(com|net|org)|test\.com|email\.com|placeholder\.local)$/.test(host)) return false;
+  const source = String(explicitSource || '').toLowerCase();
+  return !source.includes(value);
 }
 
 export function formatGroundedMessageBody(facts) {
@@ -1143,6 +1155,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       executeSessionTool: m.executeSessionTool,
       getToolkitStatus: m.getToolkitStatus,
       createConnectLink: m.createConnectLink,
+      listConnectedAccounts: m.listConnectedAccounts,
     };
   })();
 
@@ -1615,6 +1628,18 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         })),
       },
     };
+  }
+
+  if (typeof composioSvc.listConnectedAccounts === 'function' && orgId) {
+    try {
+      const accounts = await composioSvc.listConnectedAccounts(orgId);
+      const mailbox = (accounts || []).find((account) => account?.toolkit === composioToolkit
+        && account.status === 'ACTIVE'
+        && account.email);
+      if (mailbox?.email && !String(args.from_email || args.sender_email || '').trim()) {
+        args = { ...args, from_email: mailbox.email };
+      }
+    } catch { /* keep draft; approval can still inject from_email */ }
   }
 
   // Write — create a pendingWrite draft for approval. The draft stores the

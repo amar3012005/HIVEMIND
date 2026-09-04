@@ -8,6 +8,7 @@ import {
 import {
   appsMatchingRequest,
   composeBriefing,
+  composeWriteToolArgs,
   conversationKey,
   draftSubject,
   emailsFromProviderData,
@@ -26,6 +27,52 @@ import {
   selectReadSlugs,
   selectWriteSlug,
 } from '../../src/agent/durable-composio-agent.js';
+
+test('write-tool args follow the schema and do not paste the user command', async () => {
+  const args = await composeWriteToolArgs({
+    slug: 'GMAIL_CREATE_EMAIL_DRAFT',
+    schema: {
+      properties: {
+        recipient_email: { type: 'string' },
+        subject: { type: 'string' },
+        body: { type: 'string' },
+      },
+    },
+    message: 'send rama, about information about the company',
+    person: 'rama',
+    to: 'rama@x.dev',
+    facts: ['Singulance is a sovereign AI operating layer that runs inside an organization\'s memory.'],
+    generateImpl: async () => ({
+      recipient_email: 'wrong@x.dev',
+      subject: 'Introducing Singulance',
+      body: 'Hi Rama,\n\nSingulance is a sovereign AI operating layer that runs inside memory.\n\nBest regards',
+    }),
+  });
+  assert.equal(args.recipient_email, 'rama@x.dev');
+  assert.equal(args.subject, 'Introducing Singulance');
+  assert.equal(args.subject.includes('send rama'), false);
+  assert.equal(args.body.includes('Here is what I found'), false);
+  assert.match(args.body, /Singulance is a sovereign AI operating layer/);
+});
+
+test('write-tool subject is rewritten when the model copies the user request', async () => {
+  const args = await composeWriteToolArgs({
+    slug: 'GMAIL_SEND_EMAIL',
+    schema: { properties: { to: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } } },
+    message: 'send rama, about information about the company',
+    person: 'rama',
+    to: 'rama@x.dev',
+    facts: ['Singulance: AI workforce that runs inside memory'],
+    generateImpl: async () => ({
+      to: 'rama@x.dev',
+      subject: 'send rama, about information about the company',
+      body: 'Here is what I found:\n{json}',
+    }),
+  });
+  assert.equal(args.to, 'rama@x.dev');
+  assert.equal(args.subject.includes('send rama'), false);
+  assert.equal(args.body.includes('Here is what I found'), false);
+});
 
 test('durable agent env gate is fail-closed', () => {
   assert.equal(isUseToolsDurableAgentEnvEnabled({}), false);
@@ -211,7 +258,8 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
   assert.equal(created[0].toolArgs.body.includes('GMAIL_FETCH_EMAILS'), false);
   assert.equal(created[0].toolArgs.body.includes('Hi'), true);
   assert.equal(created[0].toolArgs.body.includes('recall_plan'), false);
-  assert.equal(created[0].toolArgs.subject, draftSubject('go through HIVEMIND git repo and send important information about repo to rama via gmail'));
+  assert.ok(created[0].toolArgs.subject);
+  assert.equal(created[0].toolArgs.subject.toLowerCase().includes('send important'), false);
   assert.equal(created[0].status, 'draft');
   assert.equal(result.run.composioSessionId, 'sess_1');
   assert.ok(events.some((event) => event.type === 'tool_started' && event.name === 'GITHUB_LIST_REPOS'));

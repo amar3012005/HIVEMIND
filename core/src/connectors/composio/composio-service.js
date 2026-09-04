@@ -666,11 +666,19 @@ export async function discoverSessionTools(orgId, { toolkits, useCases, searchPa
     nextStepsGuidance: searched?.data?.next_steps_guidance || null,
     searchedLogId: searched?.log_id || null,
     schemaLogId: schemaResult?.log_id || null,
+    toolSchemas: schemas,
     customToolkitAttached: Boolean(session.customToolkitAttached),
     searchStrategy: legalPayload.search_strategy,
   };
   TOOL_ROUTER_DISCOVERY_CACHE.set(cacheKey, { at: Date.now(), value });
   return { ...value, sessionCacheHit: session.cacheHit, discoveryCacheHit: false };
+}
+
+export async function getSessionToolSchemas(sessionId, slugs = []) {
+  const list = [...new Set((slugs || []).map((slug) => String(slug || '').trim()).filter(Boolean))].slice(0, 12);
+  if (!sessionId || !list.length) return {};
+  const schemaResult = await executeSessionMeta(sessionId, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: list }, { timeoutMs: 10_000 });
+  return schemaResult?.data?.tool_schemas || {};
 }
 
 /** Execute one already-discovered READ through the same Session. */

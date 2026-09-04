@@ -350,7 +350,7 @@ export function toolkitHasUsableFacts(reads, toolkit) {
   });
 }
 
-export function composeBriefing({ message, reads = [], recallText = '', person = '', recallData = null, factToolkits = null } = {}) {
+export function collectWriteFacts({ reads = [], recallText = '', recallData = null, factToolkits = null } = {}) {
   const relevant = (reads || []).filter((read) => {
     if (!read?.successful) return false;
     if (isRecipientLookupSlug(read.slug)) return false;
@@ -364,7 +364,11 @@ export function composeBriefing({ message, reads = [], recallText = '', person =
     .filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text));
   const recallFacts = humanRecallText(recallData)
     || (recallText && !isNoiseText(recallText) && !/^\s*\{/.test(recallText) ? String(recallText).trim() : '');
-  const facts = providerFacts.length ? providerFacts : (recallFacts ? [recallFacts] : []);
+  return providerFacts.length ? providerFacts : (recallFacts ? [recallFacts] : []);
+}
+
+export function composeBriefing({ message, reads = [], recallText = '', person = '', recallData = null, factToolkits = null } = {}) {
+  const facts = collectWriteFacts({ reads, recallText, recallData, factToolkits });
   const lines = [];
   const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
   lines.push(`Hi ${who},`);
@@ -428,6 +432,138 @@ export function argumentsForReadSlug(slug, { person = '' } = {}) {
 export function draftSubject(message) {
   const text = String(message || '').replace(/\s+/g, ' ').trim();
   return text.slice(0, 90) || 'Draft';
+}
+
+export function schemaProperties(schema) {
+  return schema?.input_schema?.properties
+    || schema?.properties
+    || schema?.function?.parameters?.properties
+    || {};
+}
+
+export function recipientSchemaKeys(schema) {
+  return Object.keys(schemaProperties(schema)).filter((key) => (
+    /^(to|recipient|email)$/i.test(key)
+    || /recipient_email|to_email|email_address/i.test(key)
+  ));
+}
+
+export function copySchemaKeys(schema) {
+  const keys = Object.keys(schemaProperties(schema));
+  return {
+    subject: keys.find((key) => /^(subject|title|headline)$/i.test(key)) || null,
+    body: keys.find((key) => /^(body|content|text|message|html_body|body_html)$/i.test(key))
+      || keys.find((key) => /body|content|message/i.test(key))
+      || null,
+  };
+}
+
+export function subjectFromFacts(facts = [], person = '') {
+  const line = String(facts[0] || '').replace(/\s+/g, ' ').trim();
+  const title = line.split(/[:—-]/)[0].trim().slice(0, 70);
+  if (title && title.length > 3 && !/^\b(send|email|mail|draft)\b/i.test(title)) return title;
+  return person ? `Update for ${person}` : 'Update';
+}
+
+function parseJsonObject(text) {
+  const raw = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) return {};
+  try {
+    const value = JSON.parse(raw.slice(start, end + 1));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function composeWriteToolArgs({
+  slug,
+  schema,
+  message,
+  person,
+  to,
+  facts = [],
+  generateImpl,
+} = {}) {
+  const properties = schemaProperties(schema);
+  const keys = Object.keys(properties);
+  const copy = copySchemaKeys({ properties });
+  let generated = {};
+  if (typeof generateImpl === 'function') {
+    generated = await generateImpl({ slug, schema: { properties }, message, person, to, facts }) || {};
+  } else {
+    try {
+      const { chatCompletionFetch } = await import('../llm/chat-provider.js');
+      const response = await chatCompletionFetch(process.env.HIVEMIND_BRIEFING_MODEL || 'openai/gpt-oss-20b:nitro', {
+        body: JSON.stringify({
+          temperature: 0.3,
+          max_tokens: 900,
+          messages: [
+            {
+              role: 'system',
+              content: `You write arguments for one Composio write tool. Return JSON only, keys limited to the schema. Rewrite facts into natural copy for that app (email, chat, doc, issue). Never paste JSON, tool names, or the raw user command. Never use the user request as the subject. Do not send — this is a draft. Use only provided facts.`,
+            },
+            {
+              role: 'user',
+              content: [
+                `Tool: ${slug}`,
+                `App: ${toolkitFromSlug(slug) || ''}`,
+                `Schema keys: ${JSON.stringify(keys)}`,
+                `Schema: ${JSON.stringify({ properties, required: schema?.required || schema?.input_schema?.required || [] }).slice(0, 3500)}`,
+                `User request: ${String(message || '').slice(0, 500)}`,
+                `Recipient name: ${person || ''}`,
+                `Recipient address if known: ${to || ''}`,
+                `Facts:\n${facts.join('\n\n').slice(0, 4000)}`,
+              ].join('\n'),
+            },
+          ],
+        }),
+      }, { useCase: 'write_tool_args' });
+      const payload = await response.json();
+      generated = parseJsonObject(payload?.choices?.[0]?.message?.content);
+    } catch {
+      generated = {};
+    }
+  }
+  const args = {};
+  for (const key of keys) {
+    if (generated[key] != null && generated[key] !== '') args[key] = generated[key];
+  }
+  for (const key of recipientSchemaKeys({ properties })) {
+    if (!to) continue;
+    args[key] = properties[key]?.type === 'array' ? [to] : to;
+  }
+  if (copy.subject) {
+    const subject = String(args[copy.subject] || '').replace(/\s+/g, ' ').trim();
+    const raw = String(message || '').replace(/\s+/g, ' ').trim();
+    if (!subject || subject.toLowerCase() === raw.toLowerCase() || /^(send|email|mail)\b/i.test(subject)) {
+      args[copy.subject] = subjectFromFacts(facts, person);
+    }
+  }
+  if (copy.body) {
+    const body = String(args[copy.body] || '');
+    if (!body.trim() || /here is what i found/i.test(body) || /^\s*\{/.test(body) || isNoiseText(body)) {
+      const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
+      args[copy.body] = facts.length
+        ? `Hi ${who},\n\n${facts.join('\n\n')}\n\nBest regards`
+        : `Hi ${who},\n\nI wanted to share an update.\n\nBest regards`;
+    }
+  }
+  if (to) {
+    args.to = args.to || to;
+    args.recipient_email = args.recipient_email || to;
+  }
+  if (!copy.subject && !args.subject) args.subject = subjectFromFacts(facts, person);
+  if (!copy.body && !args.body) {
+    const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
+    args.body = facts.length
+      ? `Hi ${who},\n\n${facts.join('\n\n')}\n\nBest regards`
+      : `Hi ${who},\n\nI wanted to share an update.\n\nBest regards`;
+  }
+  args._composio_slug = slug;
+  return args;
 }
 
 function beginTool(emit, _run, name, args) {
@@ -775,6 +911,15 @@ export async function runDurableComposioAgent({
     run.scratch.recommended_plan_steps = discovery.recommendedPlanSteps || [];
     run.scratch.next_steps_guidance = discovery.nextStepsGuidance || null;
     run.scratch.from_session = Boolean(discovery.fromSession);
+    run.scratch.tool_schemas = discovery.toolSchemas
+      || Object.fromEntries((discovery.tools || []).map((tool) => [
+        tool?._composio?.slug,
+        {
+          description: tool.function?.description,
+          properties: tool.function?.parameters?.properties || {},
+          required: tool.function?.parameters?.required || [],
+        },
+      ]).filter((row) => row[0]));
     const scoped = discovery.fromSession
       ? primary
       : primary.filter((slug) => isNativeHivemindSlug(slug) || candidates.includes(toolkitFromSlug(slug)));
@@ -1001,27 +1146,6 @@ export async function runDurableComposioAgent({
       || run.scratch.field_values?.recipient_email
       || run.scratch.field_values?.to
       || null;
-    const draftedFacts = composeBriefing({
-      message,
-      reads: readResults,
-      recallText,
-      person,
-      recallData,
-      factToolkits: readApps,
-    });
-    const body = await polishBriefing({
-      message,
-      body: draftedFacts,
-      person,
-      polishImpl: ctx.polishBriefing,
-    });
-    const args = {
-      recipient_email: to,
-      to,
-      subject: draftSubject(message),
-      body,
-      _composio_slug: writeSlug,
-    };
     if (!to) {
       run.status = 'waiting_user';
       recordStep(run, { kind: 'write', slug: writeSlug, status: 'waiting_user', error: 'recipient unresolved' });
@@ -1032,7 +1156,28 @@ export async function runDurableComposioAgent({
         fields: [{ id: 'recipient_email', name: 'recipient_email', label: 'To', type: 'email', required: true }],
       }, 'Need a recipient to draft the message.');
     }
-    beginTool(emit, run, writeSlug, { to, subject: args.subject });
+    let schema = run.scratch.tool_schemas?.[writeSlug] || null;
+    if (!schema && run.composioSessionId && typeof composioSvc.getSessionToolSchemas === 'function') {
+      const fetched = await composioSvc.getSessionToolSchemas(run.composioSessionId, [writeSlug]).catch(() => ({}));
+      schema = fetched?.[writeSlug] || null;
+      if (schema) run.scratch.tool_schemas = { ...(run.scratch.tool_schemas || {}), [writeSlug]: schema };
+    }
+    const facts = collectWriteFacts({
+      reads: readResults,
+      recallText,
+      recallData,
+      factToolkits: readApps,
+    });
+    const args = await composeWriteToolArgs({
+      slug: writeSlug,
+      schema,
+      message,
+      person,
+      to,
+      facts,
+      generateImpl: ctx.composeWriteToolArgs,
+    });
+    beginTool(emit, run, writeSlug, { to, subject: args.subject || args.title });
     const drafted = await createDraft(ctx, writeSlug, args);
     if (drafted?.id) {
       draftIds.push(drafted.id);

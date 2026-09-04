@@ -22,8 +22,15 @@ export function conversationKey(ctx = {}) {
     || `user:${ctx.userId || 'anon'}`;
 }
 
-export function selectReadSlugs(slugs = []) {
+export function slugMatchesConnected(slug, connected = []) {
+  if (!connected.length) return false;
+  const head = String(slug || '').split('_')[0].toLowerCase();
+  return connected.some((toolkit) => String(toolkit).toLowerCase().replace(/[^a-z0-9]/g, '') === head);
+}
+
+export function selectReadSlugs(slugs = [], connected = []) {
   return [...new Set((slugs || []).filter((slug) => {
+    if (connected.length && !slugMatchesConnected(slug, connected)) return false;
     const t = tokens(slug);
     if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
     if (t.some((x) => WRITE_SEND_TOKENS.has(x))) return false;
@@ -32,17 +39,13 @@ export function selectReadSlugs(slugs = []) {
 }
 
 export function selectWriteSlug(slugs = [], connected = []) {
-  const connectedSet = new Set((connected || []).map((item) => String(item).toLowerCase()));
   const candidates = (slugs || []).filter((slug) => {
+    if (connected.length && !slugMatchesConnected(slug, connected)) return false;
     const t = tokens(slug);
     if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
     return t.some((x) => WRITE_SEND_TOKENS.has(x));
   });
-  const preferred = candidates.find((slug) => {
-    const toolkit = String(slug).split('_')[0].toLowerCase();
-    return !connectedSet.size || connectedSet.has(toolkit);
-  });
-  return preferred || candidates[0] || null;
+  return candidates[0] || null;
 }
 
 export function emailsFromProviderData(data) {
@@ -234,7 +237,7 @@ export async function runDurableComposioAgent({
 
   const writeSlug = selectWriteSlug(searchedSlugs, connected);
   const person = namedPersonQuery(message);
-  const readSlugs = [...new Set(selectReadSlugs(searchedSlugs))].slice(0, 4);
+  const readSlugs = [...new Set(selectReadSlugs(searchedSlugs, connected))].slice(0, 4);
 
   const readCalls = readSlugs.map((slug) => {
     const args = /FETCH_EMAIL|SEARCH|CONTACT/i.test(slug) && person

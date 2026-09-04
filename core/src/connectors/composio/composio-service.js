@@ -522,8 +522,12 @@ export async function executeToolsParallel(orgId, tools = [], { sessionId } = {}
     });
   }
   return Promise.all(calls.map(async (tool) => {
-    const output = await executeTool(orgId, tool.slug, tool.arguments);
-    return { ...output, slug: tool.slug };
+    try {
+      const output = await executeTool(orgId, tool.slug, tool.arguments);
+      return { ...output, slug: tool.slug };
+    } catch (error) {
+      return { successful: false, data: null, error: String(error.message || error).slice(0, 300), slug: tool.slug };
+    }
   }));
 }
 

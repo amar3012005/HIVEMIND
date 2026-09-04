@@ -450,6 +450,7 @@ export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
   const bySlug = new Map();
   if (fillToolkits.length) {
     const extras = await Promise.all(fillToolkits.flatMap((toolkit) => [
+      listCatalogTools({ toolkitSlug: toolkit, limit: 24 }).catch(() => []),
       listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 12 }).catch(() => []),
       query ? listCatalogTools({ toolkitSlug: toolkit, search: query, limit: 12 }).catch(() => []) : Promise.resolve([]),
     ]));

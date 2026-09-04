@@ -58,10 +58,10 @@ export function slugRequiresOwnerRepo(slug) {
 }
 
 export function isRecipientLookupSlug(slug) {
-  return /FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES/i.test(String(slug || ''));
+  return /FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES|LIST_DRAFTS|GET_DRAFT|FETCH_MESSAGE/i.test(String(slug || ''));
 }
 
-export function governReadSlugs(slugs = [], { readApps = [], person = '' } = {}) {
+export function governReadSlugs(slugs = [], { readApps = [], person = '', writeApps = [] } = {}) {
   const scoped = selectReadSlugs(slugs, readApps.length ? readApps : undefined)
     .sort((left, right) => {
       const rank = (slug) => {
@@ -71,11 +71,12 @@ export function governReadSlugs(slugs = [], { readApps = [], person = '' } = {})
       };
       return rank(left) - rank(right);
     });
+  const skip = new Set((writeApps || []).map((toolkit) => String(toolkit).toLowerCase()));
   const byToolkit = new Map();
   for (const slug of scoped) {
     if (isRecipientLookupSlug(slug)) continue;
     const toolkit = toolkitFromSlug(slug);
-    if (!toolkit || byToolkit.has(toolkit)) continue;
+    if (!toolkit || skip.has(toolkit) || byToolkit.has(toolkit)) continue;
     byToolkit.set(toolkit, slug);
   }
   const mail = person ? scoped.find((slug) => isRecipientLookupSlug(slug)) : null;
@@ -671,6 +672,7 @@ export async function runDurableComposioAgent({
   const readSlugs = governReadSlugs(searchedSlugs, {
     readApps: readConnected.length ? readConnected : connected,
     person,
+    writeApps,
   });
   const readResults = [];
 
@@ -719,8 +721,9 @@ export async function runDurableComposioAgent({
     await runOneRead({ slug, arguments: argumentsForReadSlug(slug, { person }) });
   }
 
-  const unused = selectReadSlugs(searchedSlugs, readConnected.length ? readConnected : connected)
-    .filter((slug) => !readResults.some((row) => row.slug === slug));
+  const unused = selectReadSlugs(searchedSlugs, (readApps.length ? readApps : readConnected.length ? readConnected : connected))
+    .filter((slug) => !readResults.some((row) => row.slug === slug))
+    .filter((slug) => !writeApps.includes(toolkitFromSlug(slug)));
   for (const slug of unused.slice(0, 2)) {
     await runOneRead({ slug, arguments: {} });
   }

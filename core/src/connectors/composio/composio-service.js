@@ -339,7 +339,10 @@ function collectPrimaryToolSlugs(value, prefixes, output = new Set()) {
       if (key === 'primary_tool_slugs' && Array.isArray(item)) {
         for (const slug of item) {
           if (typeof slug === 'string'
-            && (!prefixes.length || prefixes.some((prefix) => slug.startsWith(`${prefix}_`)))) output.add(slug);
+            && (slug.startsWith('LOCAL_HIVEMIND_')
+              || slug.startsWith('HIVEMIND_')
+              || !prefixes.length
+              || prefixes.some((prefix) => slug.startsWith(`${prefix}_`)))) output.add(slug);
         }
       } else {
         collectPrimaryToolSlugs(item, prefixes, output);
@@ -359,7 +362,7 @@ async function executeSessionMeta(sessionId, slug, args) {
 }
 
 /** Create or reuse a tenant-scoped Tool Router Session. */
-export async function getToolRouterSession(orgId, toolkits) {
+export async function getToolRouterSession(orgId, toolkits, { allowDisconnected = false } = {}) {
   const enabled = [...new Set((toolkits || []).map((toolkit) => String(toolkit).toLowerCase()).filter(Boolean))].sort();
   if (!orgId || !enabled.length) throw new Error('Composio Session requires an org and at least one toolkit');
   const key = normalizedSessionKey(orgId, enabled);
@@ -373,7 +376,7 @@ export async function getToolRouterSession(orgId, toolkits) {
   for (const toolkit of enabled) {
     const account = accounts.find((row) => row.toolkit === toolkit && row.status === 'ACTIVE');
     if (!account) {
-      if (unified) continue;
+      if (unified || allowDisconnected) continue;
       throw new Error(`No active Composio account for ${toolkit}`);
     }
     connectedAccounts[toolkit] = account.id;
@@ -524,8 +527,8 @@ export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
   };
 }
 
-export async function discoverSessionTools(orgId, { toolkits, useCases }) {
-  const session = await getToolRouterSession(orgId, toolkits);
+export async function discoverSessionTools(orgId, { toolkits, useCases, searchPayload = null, allowDisconnected = false }) {
+  const session = await getToolRouterSession(orgId, toolkits, { allowDisconnected });
   const normalizedCases = (useCases || []).map((item) => String(item || '').trim()).filter(Boolean);
   if (!normalizedCases.length) throw new Error('Composio Session discovery requires a use-case');
   const cacheKey = `${session.id}:${JSON.stringify(normalizedCases.map((item) => item.toLowerCase()))}`;
@@ -534,9 +537,9 @@ export async function discoverSessionTools(orgId, { toolkits, useCases }) {
     return { ...cached.value, sessionCacheHit: session.cacheHit, discoveryCacheHit: true };
   }
 
-  const searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', {
-    queries: normalizedCases.map((use_case) => ({ use_case })),
-    session: { id: session.id },
+  const searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', searchPayload || {
+    queries: normalizedCases.map((use_case) => ({ use_case, search_strategy: 'auto' })),
+    session: { id: session.id, generate_id: session.id },
     model: process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'openai/gpt-oss-20b',
   });
   const prefixes = session.toolkits.map((toolkit) => toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase());
@@ -558,7 +561,20 @@ export async function discoverSessionTools(orgId, { toolkits, useCases }) {
       sessionId: session.id,
     },
   }));
-  const value = { sessionId: session.id, tools, searchedLogId: searched?.log_id || null, schemaLogId: schemaResult?.log_id || null };
+  const statuses = searched?.data?.toolkit_connection_statuses
+    || searched?.data?.connection_statuses
+    || searched?.toolkit_connection_statuses
+    || {};
+  const value = {
+    sessionId: session.id,
+    tools,
+    primaryToolSlugs: [...primary],
+    toolkitConnectionStatuses: statuses,
+    recommendedPlanSteps: searched?.data?.recommended_plan_steps || [],
+    nextStepsGuidance: searched?.data?.next_steps_guidance || null,
+    searchedLogId: searched?.log_id || null,
+    schemaLogId: schemaResult?.log_id || null,
+  };
   TOOL_ROUTER_DISCOVERY_CACHE.set(cacheKey, { at: Date.now(), value });
   return { ...value, sessionCacheHit: session.cacheHit, discoveryCacheHit: false };
 }
@@ -569,7 +585,7 @@ export async function executeSessionTool(sessionId, toolSlug, args = {}) {
   return batch[0] || { successful: false, data: null, error: 'no result', session_log_id: null };
 }
 
-export async function executeToolsParallel(orgId, tools = [], { sessionId } = {}) {
+export async function executeToolsParallel(orgId, tools = [], { sessionId, allowDirectFallback = true } = {}) {
   const calls = (Array.isArray(tools) ? tools : []).map((tool) => ({
     slug: tool.slug || tool.tool_slug,
     arguments: tool.arguments || tool.args || {},
@@ -595,8 +611,11 @@ export async function executeToolsParallel(orgId, tools = [], { sessionId } = {}
           session_log_id: result?.log_id || null,
         };
       });
-    } catch {
+    } catch (error) {
       // Direct execute is the reliable path when session multi-execute rejects a mixed batch.
+      if (!allowDirectFallback) {
+        return calls.map((tool) => ({ successful: false, data: null, error: String(error.message || error).slice(0, 300), slug: tool.slug }));
+      }
     }
   }
   return Promise.all(calls.map(async (tool) => {

@@ -218,6 +218,7 @@ test('composeBriefing uses provider reads instead of the raw user prompt', () =>
     message: 'go through HIVEMIND git repo and send to rama via gmail',
     person: 'rama',
     repoHint: 'HIVEMIND',
+    factToolkits: ['github'],
     reads: [
       { slug: 'GITHUB_LIST_REPOS', successful: true, data: { items: [{ full_name: 'amar/HIVEMIND', name: 'HIVEMIND', owner: { login: 'amar' }, description: 'core', html_url: 'https://github.com/amar/HIVEMIND' }] } },
       { slug: 'GMAIL_FETCH_EMAILS', successful: true, data: { messages: [{ subject: 'Missing You' }] } },
@@ -400,6 +401,49 @@ test('disconnected named app pauses with a Connect continuation', async () => {
   assert.equal(result.inputRequests[0].toolkit, 'slack');
   assert.equal(result.inputRequests[0].step_index, 0);
   assert.equal(result.resumeState.kind, 'durable_agent');
+});
+
+test('durable production path uses Session search and Session execution, never catalog or direct execute', async () => {
+  resetDurableAgentMemory();
+  let searchPayload = null;
+  let sessionExecutions = 0;
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession(_org, toolkits, options) {
+      assert.deepEqual(toolkits, ['gmail']);
+      assert.equal(options.allowDisconnected, true);
+      return { id: 'trs_session' };
+    },
+    async discoverSessionTools(_org, input) {
+      searchPayload = input.searchPayload;
+      return {
+        sessionId: 'trs_session',
+        primaryToolSlugs: ['GMAIL_FETCH_EMAILS'],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        recommendedPlanSteps: [{ tool_slug: 'GMAIL_FETCH_EMAILS' }],
+        tools: [{ _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } }],
+      };
+    },
+    async searchToolsByIntent() { throw new Error('catalog must not run'); },
+    async executeTool() { throw new Error('direct execute must not run'); },
+    async executeToolsParallel(_org, calls, options) {
+      sessionExecutions += 1;
+      assert.equal(options.sessionId, 'trs_session');
+      assert.equal(options.allowDirectFallback, false);
+      return calls.map((call) => ({ successful: true, slug: call.slug, data: { messages: [] } }));
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'Show my important Gmail emails from the last month.',
+    ctx: { orgId: 'o1', userId: 'u1', threadId: 'session-only', _tracedDispatch: async () => ({ memories: [] }) },
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(sessionExecutions, 1);
+  assert.equal(searchPayload.queries[0].search_strategy, 'auto');
+  assert.deepEqual(searchPayload.queries[0].known_fields.destination_apps, ['gmail']);
+  assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
+  assert.deepEqual(result.run.scratch.recommended_plan_steps, [{ tool_slug: 'GMAIL_FETCH_EMAILS' }]);
 });
 
 test('connect link uses the HIVEMIND callback origin so OAuth returns to chat', async () => {

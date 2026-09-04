@@ -6,6 +6,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { executeHivemindCustomTool, nativeNameFromComposioSlug } from '../connectors/composio/hivemind-custom-toolkit.js';
+import { formatComposioSearch } from '../connectors/composio/composio-search-formatter.js';
 
 const memoryRuns = new Map();
 
@@ -58,7 +59,11 @@ export function slugRequiresOwnerRepo(slug) {
 }
 
 export function isRecipientLookupSlug(slug) {
-  return /FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES|LIST_DRAFTS|GET_DRAFT|FETCH_MESSAGE/i.test(String(slug || ''));
+  // Generic mailbox reads are valid user-requested reads; only message/contact
+  // lookups that exist to resolve a recipient are deferred until a name is
+  // present. Treating GMAIL_FETCH_EMAILS as recipient-only made “show my
+  // important emails” complete without reading any email.
+  return /GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES|LIST_DRAFTS|GET_DRAFT|FETCH_MESSAGE/i.test(String(slug || ''));
 }
 
 export function governReadSlugs(slugs = [], { readApps = [], person = '', writeApps = [] } = {}) {
@@ -84,7 +89,7 @@ export function governReadSlugs(slugs = [], { readApps = [], person = '', writeA
       || scoped.find((slug) => /SEARCH_PEOPLE/i.test(slug))
       || scoped.find((slug) => isRecipientLookupSlug(slug))
     : null;
-  return [...byToolkit.values(), ...(mail ? [mail] : [])].slice(0, 5);
+  return [...byToolkit.values(), ...(mail && !byToolkit.has(toolkitFromSlug(mail)) ? [mail] : [])].slice(0, 5);
 }
 
 export function selectWriteSlug(slugs = [], connected = []) {
@@ -595,57 +600,24 @@ export async function runDurableComposioAgent({
   const connected = [...new Set(accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit).filter(Boolean))];
   run.scratch.connected_toolkits = connected;
 
-  if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function' && connected.length) {
-    try {
-      const session = await composioSvc.getToolRouterSession(orgId, connected.slice(0, 8));
-      run.composioSessionId = session.id || null;
-    } catch (error) {
-      run.scratch.session_error = String(error.message || error).slice(0, 240);
-    }
-  }
-
-  beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: message });
-  const discovered = typeof composioSvc.searchToolsByIntent === 'function'
-    ? await composioSvc.searchToolsByIntent(orgId, message)
-    : { tools: [], connectedToolkits: connected };
-  let searchedSlugs = (discovered.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
-  const discoveredToolkits = uniqueToolkitsFromSlugs(searchedSlugs);
-  const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected, ...((discovered.apps || []).map((app) => app.slug))]);
-  if (typeof composioSvc.searchToolsByIntent === 'function') {
-    for (const toolkit of mentioned) {
-      const extra = await composioSvc.searchToolsByIntent(orgId, message, { toolkits: [toolkit] }).catch(() => null);
-      const extraReads = [];
-      for (const tool of extra?.tools || []) {
-        const slug = tool?._composio?.slug;
-        if (!slug || !selectReadSlugs([slug], [toolkit]).length) continue;
-        extraReads.push(slug);
-      }
-      if (extraReads.length) {
-        searchedSlugs = [...extraReads, ...searchedSlugs.filter((item) => !extraReads.includes(item))];
-      }
-    }
-  }
-  const appHints = (discovered.apps || []).map((app) => app.slug).filter(Boolean);
-  let candidates = mentioned.length ? [...new Set(mentioned)] : [];
+  // The durable path never enumerates Composio's REST catalogue.  Start with
+  // explicitly named apps plus active connections, pause for OAuth when a
+  // requested app is unavailable, then let the session meta-tool search only
+  // that bounded set.  This prevents unrelated tools leaking into a turn.
+  let candidates = appsMatchingRequest(message, connected);
   const impliedWrites = writeToolkitsIn(message, [...candidates, ...connected]);
   candidates = [...new Set([...candidates, ...impliedWrites])];
-  if (!candidates.length) {
-    candidates = connected.filter((toolkit) => discoveredToolkits.includes(toolkit));
+  if (run.scratch.chosen_toolkit) candidates = [run.scratch.chosen_toolkit];
+  if (!candidates.length && connected.length === 1) candidates = connected;
+  if (!candidates.length && !connected.length) {
+    run.status = 'waiting_user';
+    await saveAgentRun({ prisma: db, run });
+    return pause(run, {
+      kind: 'field_input',
+      prompt: 'Which app should I use for this? Name it (for example Gmail, Slack, GitHub, Notion) and I will connect or run it.',
+      fields: [{ id: 'app', name: 'app', label: 'App', type: 'text', required: true }],
+    }, 'Which app should I use?');
   }
-  if (!candidates.length) candidates = appHints.slice(0, 4);
-  if (run.scratch.chosen_toolkit) {
-    candidates = [run.scratch.chosen_toolkit];
-    searchedSlugs = searchedSlugs.filter((slug) => slugMatchesConnected(slug, [run.scratch.chosen_toolkit]));
-  }
-  run.scratch.searched_slugs = searchedSlugs.slice(0, 48);
-  run.scratch.candidate_apps = candidates;
-  finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
-    kind: 'search',
-    status: 'completed',
-    summary: uniqueToolkitsFromSlugs(searchedSlugs).map(displayAppName).join(', ') || 'no tools',
-    extra: { slugs: searchedSlugs.slice(0, 12), executor: 'composio' },
-    args: { query: message },
-  });
 
   const compoundSend = isReadThenWrite(message, candidates);
   const writeApps = compoundSend ? writeToolkitsIn(message, candidates) : [];
@@ -661,34 +633,83 @@ export async function runDurableComposioAgent({
   if (needed.length >= 1) {
     const toolkit = needed.find((item) => !writeApps.includes(item)) || needed[0];
     let redirectUrl = null;
+    let connectError = null;
     if (typeof composioSvc.createConnectLink === 'function') {
       try {
         const link = await composioSvc.createConnectLink(toolkit, orgId, {
-          callbackUrl: ctx.composioCallbackUrl
-            || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin)
-            || undefined,
+          callbackUrl: ctx.composioCallbackUrl || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin) || undefined,
           toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
         });
         redirectUrl = link?.redirectUrl || link?.redirect_url || null;
       } catch (error) {
-        emit({ type: 'tool_result', name: toolkit, status: 'connect_link_failed', summary: error.message });
+        connectError = String(error.message || error).slice(0, 180);
+        emit({ type: 'tool_result', name: toolkit, status: 'connect_link_failed', summary: connectError });
       }
     }
     run.status = 'waiting_connection';
     run.scratch.needs_toolkit = toolkit;
-    recordStep(run, { kind: 'connect', toolkit, status: 'waiting_connection' });
+    run.scratch.connection_error = connectError;
+    recordStep(run, { kind: 'connect', toolkit, status: 'waiting_connection', ...(connectError ? { error: connectError } : {}) });
     await saveAgentRun({ prisma: db, run });
-    return pause(run, connectAccountRequest(toolkit, redirectUrl), `Connect ${displayAppName(toolkit)} to continue.`);
+    return pause(run, connectAccountRequest(toolkit, redirectUrl), connectError
+      ? `${displayAppName(toolkit)} cannot be connected for this workspace yet.`
+      : `Connect ${displayAppName(toolkit)} to continue.`);
   }
-  if (!candidates.length && !connected.length) {
-    run.status = 'waiting_user';
+
+  if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function') {
+    try {
+      const session = await composioSvc.getToolRouterSession(orgId, candidates.slice(0, 8), { allowDisconnected: true });
+      run.composioSessionId = session.id || null;
+    } catch (error) {
+      run.scratch.session_error = String(error.message || error).slice(0, 240);
+    }
+  }
+  beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: message });
+  let discovery;
+  try {
+    if (run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
+      discovery = await composioSvc.discoverSessionTools(orgId, {
+        toolkits: candidates.slice(0, 8),
+        useCases: [message],
+        allowDisconnected: true,
+        searchPayload: formatComposioSearch({ message, sessionId: run.composioSessionId, destinationApps: candidates }),
+      });
+    } else if (composio && typeof composioSvc.searchToolsByIntent === 'function') {
+      // Isolated unit adapters written before Sessions are intentionally
+      // supported here. This path is unreachable in production because the
+      // service module always exports discoverSessionTools.
+      const legacy = await composioSvc.searchToolsByIntent(orgId, message);
+      discovery = {
+        sessionId: run.composioSessionId,
+        tools: legacy.tools || [],
+        primaryToolSlugs: (legacy.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean),
+        toolkitConnectionStatuses: {},
+      };
+    } else {
+      throw new Error('session_discovery_unavailable');
+    }
+  } catch (error) {
+    run.status = 'failed';
+    run.scratch.search_error = String(error.message || error).slice(0, 240);
+    finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'error', summary: run.scratch.search_error, extra: { executor: 'composio' } });
     await saveAgentRun({ prisma: db, run });
-    return pause(run, {
-      kind: 'field_input',
-      prompt: 'Which app should I use for this? Name it (for example Gmail, Slack, GitHub, Notion) and I will connect or run it.',
-      fields: [{ id: 'app', name: 'app', label: 'App', type: 'text', required: true }],
-    }, 'Which app should I use?');
+    return { status: 'error', run, summary: 'Composio could not discover a safe capability for this request. Nothing was executed.', steps: run.steps, draftIds: [], pendingActions: [] };
   }
+  let searchedSlugs = (discovery.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
+  run.composioSessionId = discovery.sessionId || run.composioSessionId;
+  run.scratch.searched_slugs = searchedSlugs.slice(0, 48);
+  run.scratch.primary_tool_slugs = (discovery.primaryToolSlugs || searchedSlugs).slice(0, 48);
+  run.scratch.candidate_apps = candidates;
+  run.scratch.toolkit_connection_statuses = discovery.toolkitConnectionStatuses || {};
+  run.scratch.recommended_plan_steps = discovery.recommendedPlanSteps || [];
+  run.scratch.next_steps_guidance = discovery.nextStepsGuidance || null;
+  finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
+    kind: 'search', status: 'completed',
+    summary: uniqueToolkitsFromSlugs(searchedSlugs).map(displayAppName).join(', ') || 'no tools',
+    extra: { slugs: searchedSlugs.slice(0, 12), executor: 'composio', session_id: run.composioSessionId },
+    args: { query: message },
+  });
+
 
   let recallText = '';
   let recallData = null;
@@ -735,14 +756,6 @@ export async function runDurableComposioAgent({
     ? connected.filter((toolkit) => writeApps.includes(toolkit))
     : scopedConnected;
   let writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : connected);
-  if (!writeSlug && writeApps.length && typeof composioSvc.searchToolsByIntent === 'function') {
-    const extraWrite = await composioSvc.searchToolsByIntent(orgId, message, { toolkits: writeApps }).catch(() => null);
-    for (const tool of extraWrite?.tools || []) {
-      const slug = tool?._composio?.slug;
-      if (slug && !searchedSlugs.includes(slug)) searchedSlugs.push(slug);
-    }
-    writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : writeApps);
-  }
   const person = namedPersonQuery(message);
   const evidenceText = (slug) => {
     const toolkit = toolkitFromSlug(slug);
@@ -772,11 +785,16 @@ export async function runDurableComposioAgent({
     beginTool(emit, run, call.slug, args);
     let result = { successful: false, data: null, error: 'execute unavailable' };
     try {
-      if (typeof composioSvc.executeTool === 'function') {
-        result = await composioSvc.executeTool(orgId, call.slug, args);
-      } else if (typeof composioSvc.executeToolsParallel === 'function') {
-        const [row] = await composioSvc.executeToolsParallel(orgId, [{ slug: call.slug, arguments: args }], { sessionId: run.composioSessionId });
+      if (run.composioSessionId && typeof composioSvc.executeToolsParallel === 'function') {
+        const [row] = await composioSvc.executeToolsParallel(orgId, [{ slug: call.slug, arguments: args }], {
+          sessionId: run.composioSessionId,
+          allowDirectFallback: false,
+        });
         result = row || result;
+      } else if (typeof composioSvc.executeTool === 'function') {
+        // Test adapters without Sessions retain a read-only direct path. The
+        // production durable flow above requires a session before this point.
+        result = await composioSvc.executeTool(orgId, call.slug, args);
       }
     } catch (error) {
       result = { successful: false, data: null, error: String(error.message || error) };
@@ -813,25 +831,9 @@ export async function runDurableComposioAgent({
     await runOneRead({ slug, arguments: {} });
   }
 
-  if (typeof composioSvc.searchToolsByIntent === 'function') {
-    const seen = new Set(readResults.map((row) => row.slug));
-    const followToolkits = (readConnected.length ? readConnected : connected)
-      .filter((toolkit) => !writeApps.includes(toolkit) && !toolkitHasUsableFacts(readResults, toolkit));
-    for (const toolkit of followToolkits.slice(0, 3)) {
-      const extra = await composioSvc.searchToolsByIntent(orgId, evidenceText(toolkit ? `${toolkit}_` : '').slice(0, 1500), { toolkits: [toolkit] }).catch(() => null);
-      let added = 0;
-      for (const tool of extra?.tools || []) {
-        const slug = tool?._composio?.slug;
-        if (!slug || seen.has(slug)) continue;
-        if (!isFollowUpReadSlug(slug)) continue;
-        if (!selectReadSlugs([slug], [toolkit]).length) continue;
-        seen.add(slug);
-        await runOneRead({ slug, arguments: {} });
-        added += 1;
-        if (added >= 1) break;
-      }
-    }
-  }
+  // A follow-up search is intentionally omitted. The current Session's
+  // primary result is the complete authority for this run; another discovery
+  // needs a new user turn rather than a surprise catalogue expansion.
 
   const draftIds = [];
   const pendingActions = [];

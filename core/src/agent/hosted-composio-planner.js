@@ -250,8 +250,8 @@ export async function planComposioIntentWorkflow({
   if (proposePlan) {
     plan = await proposePlan({ request: message, catalog });
   } else {
-    const { chatCompletionFetch } = await import('../llm/chat-provider.js');
-    const model = process.env.COMPOUND_SUBTASK_MODEL || process.env.HIVEMIND_AGENT_MODEL || 'openai/gpt-oss-20b:nitro';
+    const { chatCompletionFetch, DEFAULT_CHAT_PLANNER_MODEL } = await import('../llm/chat-provider.js');
+    const model = process.env.HIVEMIND_CHAT_PLANNER_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
     const resp = await chatCompletionFetch(model, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -262,13 +262,13 @@ export async function planComposioIntentWorkflow({
         messages: [
           {
             role: 'system',
-            content: 'Plan a DAG. Use only HIVEMIND tools from catalog.hivemind and Composio tools from catalog.composio. Never invent a toolkit that is not needed. Prefer connected Composio toolkits when they match the request, but you MAY include a disconnected toolkit from catalog.composio. Return JSON only: {goal, steps:[{id, executor, toolkit, tool_slug, subtask, depends_on, operation_type}]}. executor is composio, hivemind, or reasoning. operation_type is read, write, or reasoning. Max 8 steps.',
+            content: 'Plan a DAG from the compact catalog only. Use HIVEMIND tools from catalog.hivemind and Composio tools from catalog.composio. Never invent a toolkit or tool_slug that is not in the catalog. Prefer connected Composio toolkits when they match the request, but you MAY include a disconnected toolkit from catalog.composio (connection is a later step). Return JSON only: {goal, steps:[{id, executor, toolkit, tool_slug, subtask, depends_on, operation_type}]}. executor is composio, hivemind, or reasoning. operation_type is read, write, or reasoning. Max 8 steps.',
           },
           { role: 'user', content: JSON.stringify({ request: message, catalog }) },
         ],
       }),
       signal,
-    }, { fallbackApiKey: apiKey, useCase: 'composio_intent_plan' });
+    }, { fallbackApiKey: apiKey, useCase: 'chat_planner' });
     if (!resp.ok) throw new Error(`intent_planner_${resp.status}`);
     const data = await resp.json();
     plan = parseIntentPlanJson(data?.choices?.[0]?.message?.content || '');
@@ -337,9 +337,11 @@ export async function planHostedComposioWorkflow({
   let parsed = null;
   let steps = null;
   let bestCandidate = null;
+  const unified = isUseToolsUnifiedDagEnabled();
+  const maxAttempts = unified ? 1 : 2;
   let attempts = 0;
   let lastError = null;
-  while (attempts < 2 && !steps) {
+  while (attempts < maxAttempts && !steps) {
     attempts += 1;
     const auditHistory = attempts === 1 || !bestCandidate
       ? history
@@ -369,7 +371,7 @@ export async function planHostedComposioWorkflow({
       signal,
       useTools: true,
       connectedProviders,
-      unifiedDag: isUseToolsUnifiedDagEnabled(),
+      unifiedDag: unified,
       workflowPlanner: true,
     });
     if (parsed?.decision?._router_error) {
@@ -380,7 +382,7 @@ export async function planHostedComposioWorkflow({
       const candidateSteps = decisionToHostedPlan(parsed?.decision, {
         request: message,
         connectedProviders,
-        unifiedDag: isUseToolsUnifiedDagEnabled(),
+        unifiedDag: unified,
       });
       if (!bestCandidate || candidateSteps.length > bestCandidate.steps.length
         || (attempts > 1 && candidateSteps.length === bestCandidate.steps.length)) {
@@ -393,7 +395,7 @@ export async function planHostedComposioWorkflow({
       // candidate if the audit accidentally drops a step. This remains
       // language- and toolkit-general: the model compares semantic contracts
       // against the exact request rather than code matching provider words.
-      if (attempts >= 2) {
+      if (attempts >= maxAttempts) {
         steps = bestCandidate.steps;
         parsed = bestCandidate.parsed;
       }

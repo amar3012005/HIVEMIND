@@ -391,45 +391,60 @@ export async function getToolRouterSession(orgId, toolkits) {
   return { ...value, cacheHit: false };
 }
 
+function mapCatalogTool(tool, toolkitFallback = '') {
+  const toolkit = String(tool?.toolkit?.slug || tool?.toolkit || toolkitFallback || '').toLowerCase();
+  return {
+    type: 'function',
+    function: {
+      name: `composio_${tool.slug}`.toLowerCase(),
+      description: String(tool.description || tool.slug).slice(0, 1024),
+      parameters: tool.input_parameters || tool.inputParameters || { type: 'object', properties: {} },
+    },
+    _composio: { toolkit, slug: tool.slug },
+  };
+}
+
+async function listCatalogTools({ search, toolkitSlug, important = false, limit = 24 } = {}) {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (search) qs.set('search', String(search).slice(0, 200));
+  if (toolkitSlug) qs.set('toolkit_slug', toolkitSlug);
+  if (important) qs.set('important', 'true');
+  const data = await composioGet(`/api/v3.1/tools?${qs.toString()}`);
+  return (data?.items || []).map((tool) => mapCatalogTool(tool, toolkitSlug)).filter((tool) => tool._composio.slug);
+}
+
 /**
- * Discover a compact, schema-complete tool set for one or more natural
- * language use-cases. Search and schemas are cached with the Session so a
- * repeated chat turn goes directly to provider execution.
+ * Compact catalog for the HIVEMIND planner: Composio REST search on the
+ * user intent (any app), plus this org's connected accounts, plus featured
+ * tools for those apps. No session LLM — COMPOSIO_SEARCH_TOOLS is too slow
+ * for first-action planning. Flash Lite only sees this catalog, not 1000 apps.
  */
 export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
-  const accounts = await listConnectedAccounts(orgId);
-  const connectedToolkits = [...new Set(accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit))];
-  const enabled = [...new Set([...(toolkits || []), ...connectedToolkits].filter(Boolean))];
-  let tools = [];
-  if (orgId && enabled.length) {
-    try {
-      const discovered = await discoverSessionTools(orgId, { toolkits: enabled, useCases: [useCase] });
-      tools = discovered.tools || [];
-    } catch {
-      tools = [];
+  const query = String(useCase || '').trim().slice(0, 200);
+  const [accounts, searchedTools, searchedApps] = await Promise.all([
+    orgId ? listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
+    query ? listCatalogTools({ search: query, limit: 24 }).catch(() => []) : Promise.resolve([]),
+    query ? listToolkits({ search: query, limit: 12 }).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+  ]);
+  const connectedToolkits = [...new Set(
+    accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit).filter(Boolean),
+  )];
+  const bySlug = new Map();
+  for (const tool of searchedTools) bySlug.set(tool._composio.slug, tool);
+  const represented = new Set([...bySlug.values()].map((tool) => tool._composio.toolkit).filter(Boolean));
+  const fillToolkits = [...new Set([
+    ...connectedToolkits,
+    ...(searchedApps.items || []).map((item) => item.slug).filter(Boolean),
+    ...(toolkits || []),
+  ])].filter((toolkit) => !represented.has(toolkit)).slice(0, 8);
+  if (fillToolkits.length) {
+    const extras = await Promise.all(fillToolkits.map((toolkit) =>
+      listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 6 }).catch(() => [])));
+    for (const tool of extras.flat()) {
+      if (!bySlug.has(tool._composio.slug)) bySlug.set(tool._composio.slug, tool);
     }
   }
-  if (!tools.length) {
-    try {
-      const qs = new URLSearchParams({ search: String(useCase || '').slice(0, 200), limit: '24' });
-      const data = await composioGet(`/api/v3.1/tools?${qs.toString()}`);
-      tools = (data?.items || []).slice(0, 24).map((tool) => ({
-        type: 'function',
-        function: {
-          name: `composio_${tool.slug}`.toLowerCase(),
-          description: String(tool.description || tool.slug).slice(0, 1024),
-          parameters: tool.input_parameters || tool.inputParameters || { type: 'object', properties: {} },
-        },
-        _composio: {
-          toolkit: String(tool.toolkit?.slug || tool.toolkit || '').toLowerCase(),
-          slug: tool.slug,
-        },
-      }));
-    } catch {
-      tools = [];
-    }
-  }
-  return { tools, connectedToolkits, accounts };
+  return { tools: [...bySlug.values()].slice(0, 32), connectedToolkits, accounts };
 }
 
 export async function discoverSessionTools(orgId, { toolkits, useCases }) {

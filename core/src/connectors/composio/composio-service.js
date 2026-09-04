@@ -432,33 +432,37 @@ const TOOLKIT_READ_CACHE = new Map();
 const TOOLKIT_READ_TTL_MS = Number(process.env.COMPOSIO_TOOLKIT_READ_TTL_MS || 10 * 60 * 1000);
 const CATALOG_READ_RE = /_(LIST|GET|SEARCH|FETCH|FIND|READ|RETRIEVE)_|^[A-Z0-9]+_(LIST|GET|SEARCH|FETCH|FIND|READ|RETRIEVE)/i;
 const CATALOG_WRITE_RE = /_(DELETE|CREATE|ADD|UPDATE|SEND|REMOVE|TRASH|CLOSE|ABORT|ACCEPT|ENABLE|DISABLE|COMMIT|UPLOAD|POST|SET)_/;
-const CATALOG_PREFERRED_RE = /LIST_USER_|FIND_|SEARCH_|AUTHENTICATED|_MY_|_MINE_|PLAYLIST_ITEMS/i;
-
 function isCatalogReadTool(slug) {
   const value = String(slug || '');
   if (CATALOG_WRITE_RE.test(value) && !CATALOG_READ_RE.test(value)) return false;
   return CATALOG_READ_RE.test(value);
 }
 
+function isStrongCatalogRead(slug) {
+  const value = String(slug || '');
+  if (/PLAYLIST_ITEMS/i.test(value)) return true;
+  return /LIST_/i.test(value) && /AUTHENTICATED|LIST_USER_|_MY_|_MINE_/i.test(value);
+}
+
 async function listCatalogReadTools(toolkitSlug, { maxReads = 12, maxPages = 16 } = {}) {
   const key = String(toolkitSlug || '').toLowerCase();
   const cached = TOOLKIT_READ_CACHE.get(key);
   if (cached && Date.now() - cached.at < TOOLKIT_READ_TTL_MS) return cached.tools;
-  const preferred = [];
+  const strong = [];
   const rest = [];
   let cursor = null;
-  for (let page = 0; page < maxPages && preferred.length < 6; page += 1) {
+  for (let page = 0; page < maxPages && strong.length < 2; page += 1) {
     const { tools, nextCursor } = await listCatalogTools({ toolkitSlug: key, limit: 50, cursor }).catch(() => ({ tools: [], nextCursor: null }));
     for (const tool of tools) {
       const slug = tool._composio.slug;
       if (!isCatalogReadTool(slug)) continue;
-      if (CATALOG_PREFERRED_RE.test(slug)) preferred.push(tool);
+      if (isStrongCatalogRead(slug)) strong.push(tool);
       else rest.push(tool);
     }
     cursor = nextCursor;
     if (!cursor) break;
   }
-  const tools = [...preferred, ...rest].slice(0, maxReads);
+  const tools = [...strong, ...rest].slice(0, maxReads);
   TOOLKIT_READ_CACHE.set(key, { at: Date.now(), tools });
   return tools;
 }

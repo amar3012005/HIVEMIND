@@ -79,7 +79,10 @@ export function governReadSlugs(slugs = [], { readApps = [], person = '', writeA
     if (!toolkit || skip.has(toolkit) || byToolkit.has(toolkit)) continue;
     byToolkit.set(toolkit, slug);
   }
-  const mail = person ? scoped.find((slug) => isRecipientLookupSlug(slug)) : null;
+  const mail = person
+    ? scoped.find((slug) => /FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT/i.test(slug))
+      || scoped.find((slug) => isRecipientLookupSlug(slug))
+    : null;
   return [...byToolkit.values(), ...(mail ? [mail] : [])].slice(0, 5);
 }
 
@@ -207,6 +210,7 @@ export function summarizeToolData(data, limit = 1800) {
       const nestedText = typeof item.snippet === 'string' ? item.snippet : '';
       return [
         item.full_name || item.name || item.title || item.subject || nested.title,
+        item.id || item.playlistId || nested.playlistId || '',
         item.description || item.body || nestedText || nested.description || nested.channelTitle,
         item.html_url || item.url || nested.url,
       ].filter(Boolean).join(' — ');

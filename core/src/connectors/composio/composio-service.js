@@ -415,13 +415,52 @@ function mapCatalogTool(tool, toolkitFallback = '') {
   };
 }
 
-async function listCatalogTools({ search, toolkitSlug, important = false, limit = 24 } = {}) {
+async function listCatalogTools({ search, toolkitSlug, important = false, limit = 24, cursor = null } = {}) {
   const qs = new URLSearchParams({ limit: String(limit) });
   if (search) qs.set('search', String(search).slice(0, 200));
   if (toolkitSlug) qs.set('toolkit_slug', toolkitSlug);
   if (important) qs.set('important', 'true');
+  if (cursor) qs.set('cursor', String(cursor));
   const data = await composioGet(`/api/v3.1/tools?${qs.toString()}`);
-  return (data?.items || []).map((tool) => mapCatalogTool(tool, toolkitSlug)).filter((tool) => tool._composio.slug);
+  return {
+    tools: (data?.items || []).map((tool) => mapCatalogTool(tool, toolkitSlug)).filter((tool) => tool._composio.slug),
+    nextCursor: data?.next_cursor || null,
+  };
+}
+
+const TOOLKIT_READ_CACHE = new Map();
+const TOOLKIT_READ_TTL_MS = Number(process.env.COMPOSIO_TOOLKIT_READ_TTL_MS || 10 * 60 * 1000);
+const CATALOG_READ_RE = /_(LIST|GET|SEARCH|FETCH|FIND|READ|RETRIEVE)_|^[A-Z0-9]+_(LIST|GET|SEARCH|FETCH|FIND|READ|RETRIEVE)/i;
+const CATALOG_WRITE_RE = /_(DELETE|CREATE|ADD|UPDATE|SEND|REMOVE|TRASH|CLOSE|ABORT|ACCEPT|ENABLE|DISABLE|COMMIT|UPLOAD|POST|SET)_/;
+const CATALOG_PREFERRED_RE = /LIST_USER_|FIND_|SEARCH_|AUTHENTICATED|_MY_|_MINE_|PLAYLIST_ITEMS/i;
+
+function isCatalogReadTool(slug) {
+  const value = String(slug || '');
+  if (CATALOG_WRITE_RE.test(value) && !CATALOG_READ_RE.test(value)) return false;
+  return CATALOG_READ_RE.test(value);
+}
+
+async function listCatalogReadTools(toolkitSlug, { maxReads = 12, maxPages = 16 } = {}) {
+  const key = String(toolkitSlug || '').toLowerCase();
+  const cached = TOOLKIT_READ_CACHE.get(key);
+  if (cached && Date.now() - cached.at < TOOLKIT_READ_TTL_MS) return cached.tools;
+  const preferred = [];
+  const rest = [];
+  let cursor = null;
+  for (let page = 0; page < maxPages && preferred.length < 6; page += 1) {
+    const { tools, nextCursor } = await listCatalogTools({ toolkitSlug: key, limit: 50, cursor }).catch(() => ({ tools: [], nextCursor: null }));
+    for (const tool of tools) {
+      const slug = tool._composio.slug;
+      if (!isCatalogReadTool(slug)) continue;
+      if (CATALOG_PREFERRED_RE.test(slug)) preferred.push(tool);
+      else rest.push(tool);
+    }
+    cursor = nextCursor;
+    if (!cursor) break;
+  }
+  const tools = [...preferred, ...rest].slice(0, maxReads);
+  TOOLKIT_READ_CACHE.set(key, { at: Date.now(), tools });
+  return tools;
 }
 
 /**
@@ -433,11 +472,12 @@ async function listCatalogTools({ search, toolkitSlug, important = false, limit 
 export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
   const query = String(useCase || '').trim().slice(0, 200);
   const scoped = [...new Set((toolkits || []).map((toolkit) => String(toolkit || '').toLowerCase()).filter(Boolean))];
-  const [accounts, searchedApps, globalTools] = await Promise.all([
+  const [accounts, searchedApps, globalPage] = await Promise.all([
     orgId ? listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
     query && !scoped.length ? listToolkits({ search: query, limit: 12 }).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
-    query && !scoped.length ? listCatalogTools({ search: query, limit: 24 }).catch(() => []) : Promise.resolve([]),
+    query && !scoped.length ? listCatalogTools({ search: query, limit: 24 }).catch(() => ({ tools: [] })) : Promise.resolve({ tools: [] }),
   ]);
+  const globalTools = globalPage.tools || [];
   const connectedToolkits = [...new Set(
     accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit).filter(Boolean),
   )];
@@ -449,11 +489,14 @@ export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
     ])].slice(0, 8);
   const bySlug = new Map();
   if (fillToolkits.length) {
-    const extras = await Promise.all(fillToolkits.flatMap((toolkit) => [
-      listCatalogTools({ toolkitSlug: toolkit, limit: 24 }).catch(() => []),
-      listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 12 }).catch(() => []),
-      query ? listCatalogTools({ toolkitSlug: toolkit, search: query, limit: 12 }).catch(() => []) : Promise.resolve([]),
-    ]));
+    const extras = await Promise.all(fillToolkits.flatMap((toolkit) => {
+      const jobs = [
+        listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 12 }).then((row) => row.tools).catch(() => []),
+        query ? listCatalogTools({ toolkitSlug: toolkit, search: query, limit: 12 }).then((row) => row.tools).catch(() => []) : Promise.resolve([]),
+      ];
+      if (scoped.length) jobs.unshift(listCatalogReadTools(toolkit).catch(() => []));
+      return jobs;
+    }));
     for (const tool of extras.flat()) {
       if (tool?._composio?.slug) bySlug.set(tool._composio.slug, tool);
     }

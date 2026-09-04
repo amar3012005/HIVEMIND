@@ -24,6 +24,12 @@ export function conversationKey(ctx = {}) {
     || `user:${ctx.userId || 'anon'}`;
 }
 
+export function shouldStartFreshRun(existing, message, choice) {
+  if (!existing) return false;
+  if (choice) return false;
+  return ['waiting_approval', 'done', 'failed', 'cancelled'].includes(existing.status);
+}
+
 export function slugMatchesConnected(slug, connected = []) {
   if (!connected.length) return false;
   const head = String(slug || '').split('_')[0].toLowerCase();
@@ -37,10 +43,7 @@ export function selectReadSlugs(slugs = [], connected = []) {
     if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
     if (t.some((x) => WRITE_SEND_TOKENS.has(x))) return false;
     if (t.includes('attachment') || t.some((x) => x.startsWith('collaborator')) || t.includes('assignee')) return false;
-    if (t.includes('starred') || t.includes('watched') || t.includes('invitation')) return false;
-    if (t.includes('message') && t.includes('id')) return false;
-    if (t.includes('secret') || t.includes('codespace') || t.includes('watcher')) return false;
-    if (t.includes('notification') || t.includes('event')) return false;
+    if (t.includes('secret') || t.includes('codespace')) return false;
     return t.some((x) => READ_TOKENS.has(x));
   }))].slice(0, 6);
 }
@@ -58,20 +61,25 @@ export function isRecipientLookupSlug(slug) {
   return /FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES/i.test(String(slug || ''));
 }
 
-export function governReadSlugs(slugs = [], { readApps = [], person = '', owner = '', repo = '' } = {}) {
-  const scoped = selectReadSlugs(slugs, readApps.length ? readApps : undefined);
-  const usable = scoped.filter((slug) => {
-    if (slugRequiresOwnerRepo(slug) && !(owner && repo)) return false;
-    if (isRecipientLookupSlug(slug) && !person) return false;
-    return true;
-  });
-  const githubList = usable.filter((slug) => /GITHUB_.*LIST_REPOSITORIES/i.test(slug));
-  const preferredList = githubList.find((slug) => /FOR_THE_AUTHENTICATED_USER/i.test(slug)) || githubList[0];
-  const rest = usable.filter((slug) => !githubList.includes(slug) || slug === preferredList);
-  const githubReads = rest.filter((slug) => /^GITHUB_/i.test(slug) && !isRecipientLookupSlug(slug)).slice(0, 2);
-  const otherReads = rest.filter((slug) => !/^GITHUB_/i.test(slug) && !isRecipientLookupSlug(slug)).slice(0, 2);
-  const mail = person ? rest.find((slug) => isRecipientLookupSlug(slug)) : null;
-  return [...githubReads, ...otherReads, ...(mail ? [mail] : [])];
+export function governReadSlugs(slugs = [], { readApps = [], person = '' } = {}) {
+  const scoped = selectReadSlugs(slugs, readApps.length ? readApps : undefined)
+    .sort((left, right) => {
+      const rank = (slug) => {
+        if (/AUTHENTICATED|_MY_|_MINE_/i.test(slug)) return 0;
+        if (/_BY_|MESSAGE_ID|_ID$/i.test(slug)) return 2;
+        return 1;
+      };
+      return rank(left) - rank(right);
+    });
+  const byToolkit = new Map();
+  for (const slug of scoped) {
+    if (isRecipientLookupSlug(slug)) continue;
+    const toolkit = toolkitFromSlug(slug);
+    if (!toolkit || byToolkit.has(toolkit)) continue;
+    byToolkit.set(toolkit, slug);
+  }
+  const mail = person ? scoped.find((slug) => isRecipientLookupSlug(slug)) : null;
+  return [...byToolkit.values(), ...(mail ? [mail] : [])].slice(0, 5);
 }
 
 export function selectWriteSlug(slugs = [], connected = []) {
@@ -144,11 +152,13 @@ export const TOOLKIT_ALIASES = Object.freeze({
   slack: ['slack'],
   notion: ['notion'],
   googledrive: ['googledrive', 'google drive', 'gdrive', 'drive'],
+  youtube: ['youtube', 'yt', 'youtubedata'],
 });
 
 export function appsMatchingRequest(message, toolkits = []) {
   const text = ` ${String(message || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
-  return (toolkits || []).filter((toolkit) => {
+  const list = [...new Set([...(toolkits || []), ...Object.keys(TOOLKIT_ALIASES)])];
+  return list.filter((toolkit) => {
     const key = String(toolkit || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const aliases = TOOLKIT_ALIASES[key] || [key, String(toolkit || '').toLowerCase().replace(/[-_]/g, ' ')];
     return aliases.some((alias) => text.includes(` ${String(alias).replace(/[-_]/g, ' ')} `));
@@ -185,14 +195,16 @@ export function summarizeToolData(data, limit = 1800) {
       if (decoded) return decoded.slice(0, limit);
     } catch { /* fall through */ }
   }
-  const rows = data.items || data.repositories || data.repos || data.messages || [];
+  const rows = data.items || data.repositories || data.repos || data.messages || data.videos || data.playlists || [];
   if (Array.isArray(rows) && rows.length) {
-    return rows.slice(0, 8).map((item) => {
+    return rows.slice(0, 10).map((item) => {
       if (item == null || typeof item !== 'object') return String(item);
+      const nested = item.snippet && typeof item.snippet === 'object' ? item.snippet : {};
+      const nestedText = typeof item.snippet === 'string' ? item.snippet : '';
       return [
-        item.full_name || item.name || item.title || item.subject,
-        item.description || item.body || item.snippet,
-        item.html_url || item.url,
+        item.full_name || item.name || item.title || item.subject || nested.title,
+        item.description || item.body || nestedText || nested.description || nested.channelTitle,
+        item.html_url || item.url || nested.url,
       ].filter(Boolean).join(' — ');
     }).filter(Boolean).join('\n').slice(0, limit);
   }
@@ -205,68 +217,48 @@ export function summarizeToolData(data, limit = 1800) {
   }
 }
 
-export function extractRepos(data) {
-  const rows = data?.items || data?.repositories || data?.repos || [];
-  const list = Array.isArray(rows) ? rows : [];
-  return list.map((item) => {
-    if (!item || typeof item !== 'object') return null;
-    const full = String(item.full_name || '');
-    const owner = item.owner?.login || (full.includes('/') ? full.split('/')[0] : '');
-    const name = item.name || (full.includes('/') ? full.split('/')[1] : '');
-    if (!name && !full) return null;
-    return {
-      full_name: full || (owner && name ? `${owner}/${name}` : name),
-      owner,
-      name,
-      description: item.description || '',
-      html_url: item.html_url || item.url || (owner && name ? `https://github.com/${owner}/${name}` : ''),
-    };
-  }).filter(Boolean);
+export function humanRecallText(data) {
+  if (!data || data.error) return '';
+  const memories = data.memories || data.data?.memories || [];
+  if (!Array.isArray(memories) || !memories.length) return '';
+  return memories.slice(0, 5).map((memory) => {
+    const title = String(memory.title || '').trim();
+    const content = String(memory.content || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    if (!title && !content) return '';
+    return title ? `${title}: ${content}` : content;
+  }).filter(Boolean).join('\n\n');
 }
 
-export function pickMatchingRepos(repos = [], hint = '') {
-  const needle = String(hint || '').toLowerCase().replace(/-/g, '');
-  if (!needle) return repos.slice(0, 8);
-  const hits = repos.filter((repo) => `${repo.full_name} ${repo.name} ${repo.description}`.toLowerCase().replace(/-/g, '').includes(needle));
-  return hits.length ? hits : repos.slice(0, 8);
+function isNoiseText(text) {
+  return /recall_plan|"mode":"fact"|persistentMemoryStore|_failure_mode|Missing required fields|status_code/i.test(String(text || ''));
 }
 
-export function composeBriefing({ message, reads = [], recallText = '', person = '', repoHint = '' } = {}) {
-  const relevant = (reads || []).filter((read) => read?.successful && !isRecipientLookupSlug(read.slug));
-  const repos = pickMatchingRepos(relevant.flatMap((read) => extractRepos(read.data)), repoHint);
-  const readme = relevant.find((read) => /README/i.test(read.slug) && read.successful);
-  const memory = String(recallText || '').trim();
-  const looksLikeError = /_failure_mode|persistentMemoryStore|Cannot read properties/i.test(memory);
+export function composeBriefing({ message, reads = [], recallText = '', person = '', recallData = null, factToolkits = null } = {}) {
+  const relevant = (reads || []).filter((read) => {
+    if (!read?.successful) return false;
+    if (isRecipientLookupSlug(read.slug)) return false;
+    if (Array.isArray(factToolkits) && factToolkits.length) {
+      return factToolkits.includes(toolkitFromSlug(read.slug));
+    }
+    return true;
+  });
+  const facts = relevant.map((read) => summarizeToolData(read.data, 1200)).filter((text) => text && !isNoiseText(text));
+  const memory = humanRecallText(recallData) || (isNoiseText(recallText) || /^\s*\{/.test(String(recallText || ''))
+    ? humanRecallText((() => { try { return JSON.parse(recallText); } catch { return null; } })())
+    : String(recallText || '').trim());
   const lines = [];
   const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
   lines.push(`Hi ${who},`);
   lines.push('');
-  if (repos.length && repoHint && repos.some((repo) => repo.name.toLowerCase().replace(/-/g, '').includes(String(repoHint).toLowerCase().replace(/-/g, '')))) {
-    lines.push(`Here is a short briefing on the ${repoHint} GitHub repository:`);
+  if (facts.length) {
+    lines.push('Here is what I found:');
     lines.push('');
-    for (const repo of repos.slice(0, 6)) {
-      lines.push(`- ${repo.full_name}${repo.description ? ` — ${repo.description}` : ''}${repo.html_url ? ` (${repo.html_url})` : ''}`);
-    }
-  } else if (repos.length) {
-    lines.push(`I looked through the authenticated GitHub account for ${repoHint || 'the requested'} repository. I did not find an exact name match on the first page. Current repositories include:`);
-    lines.push('');
-    for (const repo of repos.slice(0, 8)) {
-      lines.push(`- ${repo.full_name}${repo.description ? ` — ${repo.description}` : ''}${repo.html_url ? ` (${repo.html_url})` : ''}`);
-    }
+    lines.push(facts.join('\n\n'));
   } else {
-    lines.push('I could not retrieve repository details from GitHub yet.');
+    lines.push('I could not retrieve the requested records yet.');
   }
-  if (readme) {
-    const text = summarizeToolData(readme.data, 900);
-    if (text && !/_failure_mode|status_code/i.test(text)) {
-      lines.push('');
-      lines.push('README excerpt:');
-      lines.push(text);
-    }
-  }
-  if (memory && !looksLikeError) {
+  if (memory && !isNoiseText(memory) && !/^\s*\{/.test(memory)) {
     lines.push('');
-    lines.push('From HIVEMIND memory:');
     lines.push(memory.slice(0, 800));
   }
   lines.push('');
@@ -311,17 +303,16 @@ export async function polishBriefing({ message, body, person, polishImpl } = {})
   return source;
 }
 
-export function argumentsForReadSlug(slug, { person = '', repoHint = '' } = {}) {
+export function argumentsForReadSlug(slug, { person = '' } = {}) {
   if (/FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT|LIST_MESSAGES/i.test(slug) && person) {
     return { query: person, max_results: 5 };
   }
-  if (/GITHUB_SEARCH|SEARCH_REPOS/i.test(slug)) {
-    return { q: repoHint || 'HIVEMIND', query: repoHint || 'HIVEMIND' };
-  }
-  if (/LIST_REPOS|LIST_REPOSITORIES/i.test(slug)) {
-    return { per_page: 15, affiliation: 'owner,collaborator,organization_member' };
-  }
   return {};
+}
+
+export function draftSubject(message) {
+  const text = String(message || '').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 90) || 'Draft';
 }
 
 function beginTool(emit, _run, name, args) {
@@ -385,8 +376,8 @@ export function namedPersonQuery(text) {
   const raw = String(text || '');
   const emails = emailsFromProviderData(raw);
   if (emails.length) return '';
-  const via = raw.match(/\bto\s+([A-Za-z][A-Za-z0-9._-]{1,40})(?:\s+via|\s*$)/i);
-  if (via?.[1] && !/^(me|him|her|them|us)$/i.test(via[1])) return via[1];
+  const named = raw.match(/\bto\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
+  if (named?.[1] && !/^(me|him|her|them|us|the|a|an|my|this|that)$/i.test(named[1])) return named[1];
   return '';
 }
 
@@ -439,23 +430,26 @@ export async function saveAgentRun({ prisma, run }) {
   return stored;
 }
 
-export async function getOrCreateAgentRun({ prisma, ctx, message }) {
-  const conversationId = conversationKey(ctx);
-  const existing = await loadAgentRun({ prisma, orgId: ctx.orgId, conversationId });
-  if (existing) {
+export async function getOrCreateAgentRun({ prisma, ctx, message, choice = null } = {}) {
+  const baseKey = conversationKey(ctx);
+  const existing = await loadAgentRun({ prisma, orgId: ctx.orgId, conversationId: baseKey });
+  if (existing && !shouldStartFreshRun(existing, message, choice)) {
     if (message && existing.goal !== message) {
       existing.goal = `${existing.goal}\n${message}`.slice(0, 4000);
     }
     if (existing.status === 'waiting_connection') existing.status = 'running';
     return existing;
   }
+  const conversationId = existing && shouldStartFreshRun(existing, message, choice)
+    ? `${baseKey}:${randomUUID()}`
+    : baseKey;
   return {
     id: randomUUID(),
     orgId: ctx.orgId,
     userId: ctx.userId,
     conversationId,
     goal: String(message || '').slice(0, 4000),
-    composioSessionId: null,
+    composioSessionId: existing?.composioSessionId || null,
     status: 'running',
     steps: [],
     scratch: {},
@@ -497,7 +491,7 @@ export async function runDurableComposioAgent({
 } = {}) {
   const emit = onEvent || (() => {});
   const db = prisma || ctx?.prisma || null;
-  const run = await getOrCreateAgentRun({ prisma: db, ctx, message });
+  const run = await getOrCreateAgentRun({ prisma: db, ctx, message, choice });
   const picked = choice || ctx?.durableChoice || null;
   if (picked?.value === RETRY_CONNECT_VALUE || picked?.option_id === 'connected') {
     run.status = 'running';
@@ -553,19 +547,15 @@ export async function runDurableComposioAgent({
   let searchedSlugs = (discovered.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
   const discoveredToolkits = uniqueToolkitsFromSlugs(searchedSlugs);
   const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected, ...((discovered.apps || []).map((app) => app.slug))]);
-  const fillGithubReads = mentioned.includes('github') || searchedSlugs.some((slug) => /^GITHUB_/i.test(slug));
-  if (fillGithubReads && !selectReadSlugs(searchedSlugs, ['github']).length
-      && typeof composioSvc.searchToolsByIntent === 'function') {
-    const extra = await composioSvc.searchToolsByIntent(
-      orgId,
-      'list repositories for the authenticated user',
-      { toolkits: ['github'] },
-    ).catch(() => null);
-    for (const tool of extra?.tools || []) {
-      const slug = tool?._composio?.slug;
-      if (!slug || !/^GITHUB_/i.test(slug)) continue;
-      if (!selectReadSlugs([slug], ['github']).length) continue;
-      searchedSlugs = [slug, ...searchedSlugs.filter((item) => item !== slug)];
+  if (typeof composioSvc.searchToolsByIntent === 'function') {
+    for (const toolkit of mentioned) {
+      if (selectReadSlugs(searchedSlugs, [toolkit]).length) continue;
+      const extra = await composioSvc.searchToolsByIntent(orgId, message, { toolkits: [toolkit] }).catch(() => null);
+      for (const tool of extra?.tools || []) {
+        const slug = tool?._composio?.slug;
+        if (!slug || !selectReadSlugs([slug], [toolkit]).length) continue;
+        searchedSlugs = [slug, ...searchedSlugs.filter((item) => item !== slug)];
+      }
     }
   }
   const appHints = (discovered.apps || []).map((app) => app.slug).filter(Boolean);
@@ -629,11 +619,12 @@ export async function runDurableComposioAgent({
   }
 
   let recallText = '';
+  let recallData = null;
   try {
-    beginTool(emit, run, 'hivemind_recall', { query: namedRepoQuery(message) || message });
+    const recallQuery = message;
+    beginTool(emit, run, 'hivemind_recall', { query: recallQuery });
     const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
     let recall;
-    const recallQuery = namedRepoQuery(message) || message;
     if (typeof dispatch === 'function') {
       const data = await dispatch('hivemind_recall', { query: recallQuery, query_original: message }, ctx);
       recall = { successful: !data?.error, data, error: data?.error || null };
@@ -644,11 +635,12 @@ export async function runDurableComposioAgent({
         _structured_intent: true,
       }, ctx);
     }
-    recallText = summarizeToolData(recall?.data);
+    recallData = recall?.data || null;
+    recallText = humanRecallText(recallData) || '';
     finishTool(emit, run, 'hivemind_recall', {
       kind: 'native',
       status: recall.successful ? 'completed' : 'error',
-      summary: recall.successful ? (recallText.slice(0, 160) || 'recall ok') : String(recall.error || 'error'),
+      summary: recall.successful ? (recallText.slice(0, 160) || 'recall ok') : String(recall.error || 'error').slice(0, 160),
       extra: { executor: 'hivemind', slug: 'HIVEMIND_RECALL' },
     });
     if (recall.successful) run.scratch.recall = true;
@@ -671,60 +663,52 @@ export async function runDurableComposioAgent({
     ? connected.filter((toolkit) => writeApps.includes(toolkit))
     : scopedConnected;
   let writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : connected);
-  if (!writeSlug && writeApps.includes('gmail') && typeof composioSvc.searchToolsByIntent === 'function') {
-    const extraMail = await composioSvc.searchToolsByIntent(orgId, 'gmail create email draft', { toolkits: ['gmail'] }).catch(() => null);
-    for (const tool of extraMail?.tools || []) {
+  if (!writeSlug && writeApps.length && typeof composioSvc.searchToolsByIntent === 'function') {
+    const extraWrite = await composioSvc.searchToolsByIntent(orgId, message, { toolkits: writeApps }).catch(() => null);
+    for (const tool of extraWrite?.tools || []) {
       const slug = tool?._composio?.slug;
       if (slug && !searchedSlugs.includes(slug)) searchedSlugs.push(slug);
     }
-    writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : ['gmail']);
+    writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : writeApps);
   }
   const person = namedPersonQuery(message);
-  const repoHint = namedRepoQuery(message);
-  let readSlugs = governReadSlugs(searchedSlugs, {
+  const evidenceText = () => [message, ...readResults.filter((row) => row.successful).map((row) => summarizeToolData(row.data, 800))].join('\n\n');
+  const readSlugs = governReadSlugs(searchedSlugs, {
     readApps: readConnected.length ? readConnected : connected,
     person,
   });
-  if (person && connected.includes('gmail') && !readSlugs.some((slug) => isRecipientLookupSlug(slug))) {
-    let mail = searchedSlugs.find((slug) => /GMAIL_FETCH_EMAILS/i.test(slug));
-    if (!mail && typeof composioSvc.searchToolsByIntent === 'function') {
-      const extraMailRead = await composioSvc.searchToolsByIntent(orgId, 'gmail fetch emails', { toolkits: ['gmail'] }).catch(() => null);
-      mail = (extraMailRead?.tools || []).map((tool) => tool?._composio?.slug).find((slug) => /GMAIL_FETCH_EMAILS/i.test(slug || ''));
-      if (mail && !searchedSlugs.includes(mail)) searchedSlugs.push(mail);
-    }
-    if (mail) readSlugs.push(mail);
-  }
-
-  const readCalls = readSlugs.map((slug) => ({
-    slug,
-    arguments: argumentsForReadSlug(slug, { person, repoHint }),
-  }));
   const readResults = [];
 
   const runOneRead = async (call) => {
-    if (slugRequiresOwnerRepo(call.slug) && !(call.arguments?.owner && call.arguments?.repo)) {
-      return { successful: false, data: null, error: 'skipped_missing_owner_repo', skipped: true };
+    let args = { ...(call.arguments || {}) };
+    if (typeof composioSvc.generateToolInputs === 'function') {
+      const generated = await composioSvc.generateToolInputs(call.slug, evidenceText()).catch(() => null);
+      if (generated && typeof generated === 'object' && Object.keys(generated).length) {
+        args = { ...args, ...generated };
+      }
     }
-    beginTool(emit, run, call.slug, call.arguments);
+    if (!Object.keys(args).length) args = argumentsForReadSlug(call.slug, { person });
+    beginTool(emit, run, call.slug, args);
     let result = { successful: false, data: null, error: 'execute unavailable' };
     try {
       if (typeof composioSvc.executeTool === 'function') {
-        result = await composioSvc.executeTool(orgId, call.slug, call.arguments);
+        result = await composioSvc.executeTool(orgId, call.slug, args);
       } else if (typeof composioSvc.executeToolsParallel === 'function') {
-        const [row] = await composioSvc.executeToolsParallel(orgId, [call], { sessionId: run.composioSessionId });
+        const [row] = await composioSvc.executeToolsParallel(orgId, [{ slug: call.slug, arguments: args }], { sessionId: run.composioSessionId });
         result = row || result;
       }
     } catch (error) {
       result = { successful: false, data: null, error: String(error.message || error) };
     }
+    const missing = /missing required|invalid request data/i.test(String(result?.error || ''));
     finishTool(emit, run, call.slug, {
       kind: 'read',
-      status: result?.successful ? 'completed' : 'error',
+      status: result?.successful ? 'completed' : (missing ? 'skipped' : 'error'),
       summary: result?.successful
         ? (summarizeToolData(result.data, 160) || 'ok')
-        : String(result?.error || 'error').slice(0, 180),
+        : (missing ? 'needs more context' : String(result?.error || 'error').slice(0, 180)),
       extra: { executor: 'composio' },
-      args: call.arguments,
+      args,
     });
     readResults.push({ slug: call.slug, ...result });
     const emails = emailsFromProviderData(result?.data);
@@ -732,44 +716,31 @@ export async function runDurableComposioAgent({
     return result;
   };
 
-  for (const call of readCalls) {
-    await runOneRead(call);
+  for (const slug of readSlugs) {
+    await runOneRead({ slug, arguments: argumentsForReadSlug(slug, { person }) });
   }
 
-  let listedRepos = readResults.flatMap((row) => (row.successful ? extractRepos(row.data) : []));
-  let focused = pickMatchingRepos(listedRepos, repoHint);
-  const exactHit = repoHint
-    ? focused.find((repo) => repo.name.toLowerCase().replace(/-/g, '').includes(String(repoHint).toLowerCase().replace(/-/g, '')))
-    : focused[0];
-  if (!exactHit && repoHint && typeof composioSvc.executeTool === 'function') {
-    let searchSlug = searchedSlugs.find((slug) => /GITHUB_SEARCH|SEARCH_REPOS/i.test(slug));
-    if (!searchSlug && typeof composioSvc.searchToolsByIntent === 'function') {
-      const extraSearch = await composioSvc.searchToolsByIntent(
-        orgId,
-        `${repoHint} search repositories`,
-        { toolkits: ['github'] },
-      ).catch(() => null);
-      searchSlug = (extraSearch?.tools || []).map((tool) => tool?._composio?.slug)
-        .find((slug) => /GITHUB_SEARCH|SEARCH_REPOS/i.test(slug || ''));
-    }
-    if (searchSlug) {
-      await runOneRead({
-        slug: searchSlug,
-        arguments: { q: `${repoHint} in:name`, query: repoHint },
-      });
-      listedRepos = readResults.flatMap((row) => (row.successful ? extractRepos(row.data) : []));
-      focused = pickMatchingRepos(listedRepos, repoHint);
-    }
+  const unused = selectReadSlugs(searchedSlugs, readConnected.length ? readConnected : connected)
+    .filter((slug) => !readResults.some((row) => row.slug === slug));
+  for (const slug of unused.slice(0, 2)) {
+    await runOneRead({ slug, arguments: {} });
   }
-  const hit = pickMatchingRepos(listedRepos, repoHint).find((repo) => repo.owner && repo.name);
-  if (hit && typeof composioSvc.executeTool === 'function') {
-    let follow = searchedSlugs.find((slug) => /GITHUB_.*(GET_A_REPOSITORY_README|GET_README)/i.test(slug));
-    if (!follow && typeof composioSvc.searchToolsByIntent === 'function') {
-      const extraReadme = await composioSvc.searchToolsByIntent(orgId, 'get repository readme', { toolkits: ['github'] }).catch(() => null);
-      follow = (extraReadme?.tools || []).map((tool) => tool?._composio?.slug).find((slug) => /README/i.test(slug || ''));
-    }
-    if (follow) {
-      await runOneRead({ slug: follow, arguments: { owner: hit.owner, repo: hit.name } });
+
+  if (typeof composioSvc.searchToolsByIntent === 'function') {
+    const seen = new Set(readResults.map((row) => row.slug));
+    const followToolkits = (readConnected.length ? readConnected : connected).filter((toolkit) => !writeApps.includes(toolkit));
+    for (const toolkit of followToolkits.slice(0, 3)) {
+      const extra = await composioSvc.searchToolsByIntent(orgId, evidenceText().slice(0, 1500), { toolkits: [toolkit] }).catch(() => null);
+      let added = 0;
+      for (const tool of extra?.tools || []) {
+        const slug = tool?._composio?.slug;
+        if (!slug || seen.has(slug)) continue;
+        if (!selectReadSlugs([slug], [toolkit]).length) continue;
+        seen.add(slug);
+        await runOneRead({ slug, arguments: {} });
+        added += 1;
+        if (added >= 2) break;
+      }
     }
   }
 
@@ -803,7 +774,8 @@ export async function runDurableComposioAgent({
       reads: readResults,
       recallText,
       person,
-      repoHint,
+      recallData,
+      factToolkits: readApps,
     });
     const body = await polishBriefing({
       message,
@@ -814,7 +786,7 @@ export async function runDurableComposioAgent({
     const args = {
       recipient_email: to,
       to,
-      subject: repoHint ? `${repoHint} repository briefing` : 'HIVEMIND repository briefing',
+      subject: draftSubject(message),
       body,
       _composio_slug: writeSlug,
     };

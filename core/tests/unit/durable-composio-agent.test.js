@@ -9,6 +9,7 @@ import {
   appsMatchingRequest,
   composeBriefing,
   conversationKey,
+  draftSubject,
   emailsFromProviderData,
   getOrCreateAgentRun,
   governReadSlugs,
@@ -16,13 +17,13 @@ import {
   namedPersonQuery,
   namedRepoQuery,
   pickRecipientEmail,
+  shouldStartFreshRun,
   summarizeToolData,
   resetDurableAgentMemory,
   runDurableComposioAgent,
   saveAgentRun,
   selectReadSlugs,
   selectWriteSlug,
-  slugRequiresOwnerRepo,
 } from '../../src/agent/durable-composio-agent.js';
 
 test('durable agent env gate is fail-closed', () => {
@@ -51,32 +52,46 @@ test('durable agent requires Flagship enabled:true from cloudflare-flagship', as
 
 test('search slugs pick fetch reads and send writes, never label or delete', () => {
   const slugs = ['GMAIL_CREATE_LABEL', 'GMAIL_BATCH_DELETE_MESSAGES', 'GMAIL_FETCH_EMAILS', 'GMAIL_SEND_EMAIL', 'GITHUB_LIST_REPOS', 'GMAIL_GET_ATTACHMENT', 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID'];
-  assert.deepEqual(selectReadSlugs(slugs, ['gmail', 'github']), ['GMAIL_FETCH_EMAILS', 'GITHUB_LIST_REPOS']);
+  assert.deepEqual(selectReadSlugs(slugs, ['gmail', 'github']), ['GMAIL_FETCH_EMAILS', 'GITHUB_LIST_REPOS', 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID']);
   assert.deepEqual(selectReadSlugs(['AGILITY_CMS_GET_LOGS', 'GMAIL_FETCH_EMAILS'], ['gmail']), ['GMAIL_FETCH_EMAILS']);
   assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');
   assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
+  assert.equal(namedPersonQuery('send a mail to rama about it'), 'rama');
   assert.equal(pickRecipientEmail(['amarsai2005@gmail.com', 'ramasantoshi1206@gmail.com'], 'rama'), 'ramasantoshi1206@gmail.com');
   assert.deepEqual(
     appsMatchingRequest('go through HIVEMIND git repo and send to rama via gmail', ['gmail', 'github', 'slack']),
     ['gmail', 'github'],
+  );
+  assert.deepEqual(
+    appsMatchingRequest('send the list of my last 10 watch histories from youtube and send a mail to rama about it', ['gmail', 'youtube', 'github']),
+    ['gmail', 'youtube'],
   );
   assert.equal(namedRepoQuery('go through HIVEMIND git repo'), 'HIVEMIND');
   assert.equal(
     isReadThenWrite('go through HIVEMIND git repo and send important information about repo to rama via gmail', ['gmail', 'github']),
     true,
   );
+  assert.equal(
+    isReadThenWrite('send the list of my last 10 watch histories from youtube and send a mail to rama about it', ['gmail', 'youtube']),
+    true,
+  );
   assert.equal(isReadThenWrite('send this on gmail and slack', ['gmail', 'slack']), false);
-  assert.equal(slugRequiresOwnerRepo('GITHUB_LIST_REPO_NOTIFICATIONS_FOR_AUTH_USER'), true);
-  assert.equal(slugRequiresOwnerRepo('GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER'), false);
   assert.deepEqual(
     governReadSlugs([
       'GITHUB_LIST_REPOSITORIES',
       'GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER',
-      'GITHUB_LIST_REPO_NOTIFICATIONS_FOR_AUTH_USER',
-      'GITHUB_LIST_WATCHERS',
+      'GITHUB_GET_README',
       'GMAIL_FETCH_EMAILS',
     ], { readApps: ['github', 'gmail'], person: 'rama' }),
     ['GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER', 'GMAIL_FETCH_EMAILS'],
+  );
+  assert.equal(
+    shouldStartFreshRun({ status: 'waiting_approval' }, 'new request', null),
+    true,
+  );
+  assert.equal(
+    shouldStartFreshRun({ status: 'waiting_approval' }, 'new request', { option_id: 'approve' }),
+    false,
   );
 });
 
@@ -110,6 +125,7 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
         ],
       };
     },
+    async generateToolInputs() { return {}; },
     async executeToolsParallel(_org, tools) {
       executed.push(...tools.map((tool) => tool.slug));
       return tools.map((tool) => {
@@ -151,7 +167,8 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
     onEvent: (event) => events.push(event),
   });
   assert.equal(result.status, 'pending');
-  assert.equal(result.run.id, (await getOrCreateAgentRun({ ctx, message: 'again' })).id);
+  assert.notEqual(result.run.id, (await getOrCreateAgentRun({ ctx, message: 'again' })).id);
+  assert.equal(result.run.id, (await getOrCreateAgentRun({ ctx, message: 'again', choice: { option_id: 'approve' } })).id);
   assert.ok(!executed.includes('GMAIL_SEND_EMAIL'));
   assert.ok(!executed.includes('GMAIL_CREATE_LABEL'));
   assert.ok(executed.includes('GMAIL_FETCH_EMAILS'));
@@ -162,7 +179,8 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
   assert.match(created[0].toolArgs.body, /Hi Rama/);
   assert.equal(created[0].toolArgs.body.includes('GMAIL_FETCH_EMAILS'), false);
   assert.equal(created[0].toolArgs.body.includes('Hi'), true);
-  assert.match(created[0].toolArgs.subject, /HIVEMIND repository briefing/i);
+  assert.equal(created[0].toolArgs.body.includes('recall_plan'), false);
+  assert.equal(created[0].toolArgs.subject, draftSubject('go through HIVEMIND git repo and send important information about repo to rama via gmail'));
   assert.equal(created[0].status, 'draft');
   assert.equal(result.run.composioSessionId, 'sess_1');
   assert.ok(events.some((event) => event.type === 'tool_started' && event.name === 'GITHUB_LIST_REPOS'));
@@ -180,14 +198,103 @@ test('composeBriefing uses provider reads instead of the raw user prompt', () =>
       { slug: 'GMAIL_FETCH_EMAILS', successful: true, data: { messages: [{ subject: 'Missing You' }] } },
       { slug: 'hivemind_recall', successful: false, data: { error: 'Cannot read properties of undefined (reading \'persistentMemoryStore\')' } },
     ],
-    recallText: '{"error":"Cannot read properties of undefined (reading \'persistentMemoryStore\')"}',
+    recallText: '{"mode":"fact","recall_plan":[],"memories":[]}',
+    recallData: { memories: [{ title: 'Repo note', content: 'HIVEMIND is the memory OS' }] },
   });
   assert.match(body, /amar\/HIVEMIND/);
   assert.match(body, /Hi Rama/);
+  assert.match(body, /HIVEMIND is the memory OS/);
   assert.equal(body.includes('Missing You'), false);
   assert.equal(body.includes('GMAIL_FETCH_EMAILS'), false);
   assert.equal(body.includes('persistentMemoryStore'), false);
+  assert.equal(body.includes('recall_plan'), false);
   assert.equal(body.includes('Briefing from HIVEMIND for:'), false);
+});
+
+test('intent search plus a second-wave read drafts YouTube facts without live send', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const generatedFor = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() {
+      return [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'youtube', status: 'ACTIVE' }];
+    },
+    async getToolRouterSession() { return { id: 'sess_yt' }; },
+    async searchToolsByIntent(_org, _message, opts = {}) {
+      const tools = [
+        { _composio: { slug: 'YOUTUBE_LIST_USER_PLAYLISTS', toolkit: 'youtube' } },
+        { _composio: { slug: 'YOUTUBE_LIST_PLAYLIST_ITEMS', toolkit: 'youtube' } },
+        { _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
+        { _composio: { slug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail' } },
+      ];
+      if (opts.toolkits) {
+        return { tools: tools.filter((tool) => opts.toolkits.includes(tool._composio.toolkit)) };
+      }
+      return { connectedToolkits: ['gmail', 'youtube'], tools };
+    },
+    async generateToolInputs(slug, text) {
+      generatedFor.push(slug);
+      if (slug === 'YOUTUBE_LIST_PLAYLIST_ITEMS') {
+        assert.match(String(text), /History|Watch later|PL123/i);
+        return { playlistId: 'PL123', maxResults: 10 };
+      }
+      return {};
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'YOUTUBE_LIST_USER_PLAYLISTS') {
+          return {
+            successful: true,
+            data: { items: [{ id: 'PL123', snippet: { title: 'History' } }, { id: 'PL999', snippet: { title: 'Watch later' } }] },
+          };
+        }
+        if (tool.slug === 'YOUTUBE_LIST_PLAYLIST_ITEMS') {
+          return {
+            successful: true,
+            data: {
+              items: [
+                { snippet: { title: 'HIVEMIND walkthrough', channelTitle: 'Amar' } },
+                { snippet: { title: 'Composio tools', channelTitle: 'Amar' } },
+              ],
+            },
+          };
+        }
+        if (tool.slug === 'GMAIL_FETCH_EMAILS') {
+          return {
+            successful: true,
+            data: { messages: [{ from: 'Rama Santhoshi <ramasantoshi1206@gmail.com>', subject: 'love note' }] },
+          };
+        }
+        return { successful: true, data: { items: [] } };
+      });
+    },
+  };
+  const ctx = {
+    orgId: 'o1', userId: 'u1', threadId: 't-youtube',
+    polishBriefing: async ({ body }) => body,
+    _tracedDispatch: async () => ({ memories: [] }),
+    prisma: {
+      pendingWrite: {
+        create: async ({ data }) => { created.push(data); return { id: 'DRAFT-YT' }; },
+      },
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send the list of my last 10 watch histories from youtube and send a mail to rama about it',
+    ctx,
+    composio,
+  });
+  assert.equal(result.status, 'pending');
+  assert.ok(executed.includes('YOUTUBE_LIST_USER_PLAYLISTS'));
+  assert.ok(executed.includes('YOUTUBE_LIST_PLAYLIST_ITEMS'));
+  assert.ok(generatedFor.includes('YOUTUBE_LIST_PLAYLIST_ITEMS'));
+  assert.ok(!executed.includes('GMAIL_SEND_EMAIL'));
+  assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
+  assert.match(created[0].toolArgs.body, /HIVEMIND walkthrough/);
+  assert.equal(created[0].toolArgs.body.includes('love note'), false);
+  assert.equal(created[0].status, 'draft');
 });
 
 test('later turns reuse persisted Composio session id and never recreate', async () => {
@@ -238,7 +345,7 @@ test('does not execute or draft slugs that search did not return', async () => {
     prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'NO' }; } } },
   };
   const result = await runDurableComposioAgent({
-    message: 'send important information about repo to rama via gmail',
+    message: 'send a summary to rama via gmail',
     ctx,
     composio,
   });

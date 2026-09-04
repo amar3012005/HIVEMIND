@@ -11,6 +11,7 @@ import {
   conversationKey,
   emailsFromProviderData,
   getOrCreateAgentRun,
+  governReadSlugs,
   isReadThenWrite,
   namedPersonQuery,
   namedRepoQuery,
@@ -20,6 +21,7 @@ import {
   saveAgentRun,
   selectReadSlugs,
   selectWriteSlug,
+  slugRequiresOwnerRepo,
 } from '../../src/agent/durable-composio-agent.js';
 
 test('durable agent env gate is fail-closed', () => {
@@ -63,6 +65,18 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
     true,
   );
   assert.equal(isReadThenWrite('send this on gmail and slack', ['gmail', 'slack']), false);
+  assert.equal(slugRequiresOwnerRepo('GITHUB_LIST_REPO_NOTIFICATIONS_FOR_AUTH_USER'), true);
+  assert.equal(slugRequiresOwnerRepo('GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER'), false);
+  assert.deepEqual(
+    governReadSlugs([
+      'GITHUB_LIST_REPOSITORIES',
+      'GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER',
+      'GITHUB_LIST_REPO_NOTIFICATIONS_FOR_AUTH_USER',
+      'GITHUB_LIST_WATCHERS',
+      'GMAIL_FETCH_EMAILS',
+    ], { readApps: ['github', 'gmail'], person: 'rama' }),
+    ['GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER', 'GMAIL_FETCH_EMAILS'],
+  );
 });
 
 test('same conversation reuses the agent run id', async () => {
@@ -117,7 +131,11 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
   const ctx = {
     orgId: 'o1', userId: 'u1', threadId: 't-durable',
     _trace: { traceId: 'tr1' },
-    _tracedDispatch: async () => ({ memories: [{ content: 'repo notes' }] }),
+    _tracedDispatch: async (_name, _args, passedCtx) => {
+      assert.equal(passedCtx.orgId, 'o1');
+      return { memories: [{ content: 'repo notes' }] };
+    },
+    polishBriefing: async ({ body }) => body,
     prisma: {
       pendingWrite: {
         create: async ({ data }) => { created.push(data); return { id: 'DRAFT-1' }; },
@@ -139,7 +157,10 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
   assert.ok(executed.includes('GITHUB_LIST_REPOS'));
   assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
   assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
-  assert.match(created[0].toolArgs.body, /amar\/HIVEMIND/);
+  assert.match(created[0].toolArgs.body, /HIVEMIND/);
+  assert.match(created[0].toolArgs.body, /Hi Rama/);
+  assert.equal(created[0].toolArgs.body.includes('GMAIL_FETCH_EMAILS'), false);
+  assert.equal(created[0].toolArgs.body.includes('Hi'), true);
   assert.match(created[0].toolArgs.subject, /HIVEMIND repository briefing/i);
   assert.equal(created[0].status, 'draft');
   assert.equal(result.run.composioSessionId, 'sess_1');
@@ -150,10 +171,21 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
 
 test('composeBriefing uses provider reads instead of the raw user prompt', () => {
   const body = composeBriefing({
-    message: 'go through HIVEMIND git repo',
-    reads: [{ slug: 'GITHUB_LIST_REPOS', data: { items: [{ full_name: 'amar/HIVEMIND', description: 'core' }] } }],
+    message: 'go through HIVEMIND git repo and send to rama via gmail',
+    person: 'rama',
+    repoHint: 'HIVEMIND',
+    reads: [
+      { slug: 'GITHUB_LIST_REPOS', successful: true, data: { items: [{ full_name: 'amar/HIVEMIND', name: 'HIVEMIND', owner: { login: 'amar' }, description: 'core', html_url: 'https://github.com/amar/HIVEMIND' }] } },
+      { slug: 'GMAIL_FETCH_EMAILS', successful: true, data: { messages: [{ subject: 'Missing You' }] } },
+      { slug: 'hivemind_recall', successful: false, data: { error: 'Cannot read properties of undefined (reading \'persistentMemoryStore\')' } },
+    ],
+    recallText: '{"error":"Cannot read properties of undefined (reading \'persistentMemoryStore\')"}',
   });
   assert.match(body, /amar\/HIVEMIND/);
+  assert.match(body, /Hi Rama/);
+  assert.equal(body.includes('Missing You'), false);
+  assert.equal(body.includes('GMAIL_FETCH_EMAILS'), false);
+  assert.equal(body.includes('persistentMemoryStore'), false);
   assert.equal(body.includes('Briefing from HIVEMIND for:'), false);
 });
 

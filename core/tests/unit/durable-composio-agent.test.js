@@ -710,6 +710,55 @@ test('when search omits people tools, still resolves named recipient via Gmail l
   assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
 });
 
+test('GMAIL_GET_PROFILE does not steal the recipient or skip Rama lookup', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_prof' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_prof',
+        primaryToolSlugs: ['LOCAL_HIVEMIND_HIVEMIND_RECALL', 'GMAIL_GET_PROFILE', 'GMAIL_CREATE_EMAIL_DRAFT'],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'GMAIL_GET_PROFILE' } },
+          { _composio: { slug: 'GMAIL_CREATE_EMAIL_DRAFT' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_GET_PROFILE') {
+          return { successful: true, data: { emailAddress: 'amarsai2005@gmail.com' } };
+        }
+        if (tool.slug === 'GMAIL_SEARCH_PEOPLE') {
+          return { successful: true, data: { people: [{ email: 'ramasantoshi1206@gmail.com' }] } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send rama, about information about the company',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-profile',
+      polishBriefing: async ({ body }) => body,
+      _tracedDispatch: async () => ({ memories: [{ title: 'Singulance', content: 'AI workforce inside memory' }] }),
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DRAFT-PR' }; } } },
+    },
+    composio,
+  });
+  assert.equal(executed.includes('GMAIL_GET_PROFILE'), false);
+  assert.ok(executed.includes('GMAIL_SEARCH_PEOPLE'));
+  assert.equal(result.status, 'pending');
+  assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
+  assert.equal(created[0].toolArgs.recipient_email.includes('amarsai2005'), false);
+});
+
 test('instagram DM searches first then pauses to connect when disconnected', async () => {
   resetDurableAgentMemory();
   let searched = false;

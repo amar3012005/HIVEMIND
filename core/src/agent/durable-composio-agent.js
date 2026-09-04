@@ -63,7 +63,7 @@ export function isRecipientLookupSlug(slug) {
 }
 
 export function isMailboxInventorySlug(slug) {
-  return /LIST_DRAFTS|GET_DRAFT|UPDATE_DRAFT|LIST_LABELS|LIST_SEND_AS/i.test(String(slug || ''));
+  return /LIST_DRAFTS|GET_DRAFT|UPDATE_DRAFT|LIST_LABELS|LIST_SEND_AS|GET_PROFILE|GET_CURRENT_TIME|LIST_SEND_AS/i.test(String(slug || ''));
 }
 
 export function isPersonResolveSlug(slug) {
@@ -896,8 +896,10 @@ export async function runDurableComposioAgent({
       args,
     });
     readResults.push({ slug: call.slug, ...result });
-    const emails = emailsFromProviderData(result?.data);
-    if (emails.length) run.scratch.emails = [...new Set([...(run.scratch.emails || []), ...emails])];
+    if (isPersonResolveSlug(call.slug) || /FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT/i.test(call.slug)) {
+      const emails = emailsFromProviderData(result?.data);
+      if (emails.length) run.scratch.emails = [...new Set([...(run.scratch.emails || []), ...emails])];
+    }
     return result;
   };
 
@@ -912,6 +914,7 @@ export async function runDurableComposioAgent({
     if (isMailboxInventorySlug(slug)) continue;
     if (isNativeHivemindSlug(slug)) {
       if (recallText && !/GET_MEMORY/i.test(slug)) continue;
+      if (/GET_MEMORY/i.test(slug) && !recallData?.memories?.[0]?.id) continue;
       await runOneNative(slug);
       await persistProgress();
       continue;
@@ -952,7 +955,7 @@ export async function runDurableComposioAgent({
     if (/could not retrieve/i.test(preview)) await runOneNative('HIVEMIND_RECALL');
   }
 
-  if (writeSlug && person && !(run.scratch.emails || []).length) {
+  if (writeSlug && person && !pickRecipientEmail(run.scratch.emails || [], person)) {
     const fromSearch = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
       .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
       .sort((left, right) => {

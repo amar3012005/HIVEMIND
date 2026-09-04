@@ -3796,7 +3796,13 @@ export async function runReactAgentV2({
       if (await isUseToolsDurableAgentEnabled()) {
         const { runDurableComposioAgent } = await import('./durable-composio-agent.js');
         const durable = await runDurableComposioAgent({
-          message, ctx, onEvent, prisma: ctx.prisma,
+          message,
+          ctx: {
+            ...ctx,
+            composioCallbackOrigin: ctx.composioCallbackOrigin || process.env.HIVEMIND_FRONTEND_URL || undefined,
+          },
+          onEvent,
+          prisma: ctx.prisma,
         });
         let continuation = null;
         if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {

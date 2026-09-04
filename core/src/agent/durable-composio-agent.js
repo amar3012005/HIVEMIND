@@ -476,7 +476,20 @@ function recordStep(run, step) {
   });
 }
 
+export function connectCallbackUrl(toolkit, origin) {
+  const base = String(origin || '').trim();
+  if (!base) return null;
+  try {
+    const url = new URL('/hivemind/app/connect/composio/callback', base);
+    if (toolkit) url.searchParams.set('composio_toolkit', String(toolkit));
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function pause(run, inputRequest, summary) {
+  const request = { ...inputRequest, step_index: 0, step_id: 'step-1' };
   return {
     status: 'needs_input',
     run,
@@ -484,11 +497,11 @@ function pause(run, inputRequest, summary) {
     steps: run.steps,
     draftIds: [],
     pendingActions: [],
-    inputRequests: [inputRequest],
+    inputRequests: [request],
     resumeState: {
       kind: 'durable_agent',
       run_id: run.id,
-      results: [{ inputRequest }],
+      results: [{ inputRequest: request }],
     },
   };
 }
@@ -606,13 +619,15 @@ export async function runDurableComposioAgent({
   }
 
   const needed = candidates.filter((toolkit) => toolkit && !connected.includes(toolkit));
-  if (needed.length === 1) {
-    const toolkit = needed[0];
+  if (needed.length >= 1) {
+    const toolkit = needed.find((item) => !writeApps.includes(item)) || needed[0];
     let redirectUrl = null;
     if (typeof composioSvc.createConnectLink === 'function') {
       try {
         const link = await composioSvc.createConnectLink(toolkit, orgId, {
-          callbackUrl: ctx.composioCallbackUrl || undefined,
+          callbackUrl: ctx.composioCallbackUrl
+            || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin)
+            || undefined,
           toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
         });
         redirectUrl = link?.redirectUrl || link?.redirect_url || null;
@@ -781,7 +796,9 @@ export async function runDurableComposioAgent({
       if (typeof composioSvc.createConnectLink === 'function') {
         try {
           const link = await composioSvc.createConnectLink(toolkit, orgId, {
-            callbackUrl: ctx.composioCallbackUrl || undefined,
+            callbackUrl: ctx.composioCallbackUrl
+              || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin)
+              || undefined,
             toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
           });
           redirectUrl = link?.redirectUrl || link?.redirect_url || null;

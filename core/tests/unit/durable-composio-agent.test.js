@@ -398,7 +398,34 @@ test('disconnected named app pauses with a Connect continuation', async () => {
   assert.equal(result.status, 'needs_input');
   assert.equal(result.inputRequests[0].kind, 'connect_account');
   assert.equal(result.inputRequests[0].toolkit, 'slack');
+  assert.equal(result.inputRequests[0].step_index, 0);
   assert.equal(result.resumeState.kind, 'durable_agent');
+});
+
+test('connect link uses the HIVEMIND callback origin so OAuth returns to chat', async () => {
+  resetDurableAgentMemory();
+  let captured = null;
+  const composio = {
+    async listConnectedAccounts() { return []; },
+    async searchToolsByIntent() {
+      return { tools: [{ _composio: { slug: 'LINKEDIN_GET_MY_INFO', toolkit: 'linkedin' } }], apps: [{ slug: 'linkedin' }] };
+    },
+    async createConnectLink(_toolkit, _org, opts = {}) {
+      captured = opts;
+      return { redirectUrl: 'https://connect.example/linkedin' };
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send Rama about my linkedin profile',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 'connect-li',
+      composioCallbackOrigin: 'https://next.singulancelabs.com',
+      _tracedDispatch: async () => ({}),
+    },
+    composio,
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.match(captured.callbackUrl, /\/hivemind\/app\/connect\/composio\/callback\?composio_toolkit=linkedin/);
 });
 
 test('ambiguous apps ask do you mean this', async () => {

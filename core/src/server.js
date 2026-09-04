@@ -24472,8 +24472,10 @@ exit \$RC
                 await releaseChatCredit(); return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409);
               }
               const choice = body?.continuation_response || {};
-              const stepIndex = Number(choice.step_index);
-              const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
+              const parsedIndex = Number(choice.step_index);
+              const stepIndex = Number.isInteger(parsedIndex) && parsedIndex >= 0 ? parsedIndex : 0;
+              const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest
+                || stored.resumeState?.results?.[0]?.inputRequest;
               if (!pending) {
                 if (continuationClaim) await releaseDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
                 if (continuationTurn) await continuationStore.fail(continuationTurn.id, new Error('invalid_continuation_choice')).catch(() => {});
@@ -24505,6 +24507,9 @@ exit \$RC
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
+                      composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
+                        ? String(req.headers.origin)
+                        : process.env.HIVEMIND_FRONTEND_URL) || undefined,
                       durableChoice: allowed
                         ? { option_id: allowed.id, value: allowed.value, toolkit: allowed.toolkit || pending.toolkit }
                         : { option_id: 'field-input', values: fieldValues },
@@ -24923,6 +24928,9 @@ exit \$RC
                     durableChatMode,
                     durableChatTurnId: durableChatTurn?.id || null,
                     threadId: body?.thread_id || body?.conversation_id || null,
+                    composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
+                      ? String(req.headers.origin)
+                      : process.env.HIVEMIND_FRONTEND_URL) || undefined,
                     projectId: requestProjectId,
                     scopeFilter: requestScopeFilter,
                     prisma,

@@ -1,0 +1,125 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  isUseToolsDurableAgentEnvEnabled,
+  isUseToolsDurableAgentEnabled,
+  USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY,
+} from '../../src/agent/use-tools-durable-agent-flag.js';
+import {
+  conversationKey,
+  emailsFromProviderData,
+  getOrCreateAgentRun,
+  namedPersonQuery,
+  resetDurableAgentMemory,
+  runDurableComposioAgent,
+  saveAgentRun,
+  selectReadSlugs,
+  selectWriteSlug,
+} from '../../src/agent/durable-composio-agent.js';
+
+test('durable agent env gate is fail-closed', () => {
+  assert.equal(isUseToolsDurableAgentEnvEnabled({}), false);
+  assert.equal(isUseToolsDurableAgentEnvEnabled({ USE_TOOLS_DURABLE_AGENT: 'false' }), false);
+  assert.equal(isUseToolsDurableAgentEnvEnabled({ USE_TOOLS_DURABLE_AGENT: 'true' }), true);
+});
+
+test('durable agent requires Flagship enabled:true from cloudflare-flagship', async () => {
+  const env = { USE_TOOLS_DURABLE_AGENT: 'true', USE_TOOLS_DURABLE_AGENT_FLAG_URL: 'https://flags.test/use-tools-durable-agent' };
+  assert.equal(await isUseToolsDurableAgentEnabled(env, { flagshipEnabled: false }), false);
+  assert.equal(await isUseToolsDurableAgentEnabled(env, { flagshipEnabled: true }), true);
+  const off = await isUseToolsDurableAgentEnabled(env, {
+    fetchImpl: async () => ({ ok: true, json: async () => ({ key: USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY, enabled: false, source: 'cloudflare-flagship' }) }),
+  });
+  assert.equal(off, false);
+  const on = await isUseToolsDurableAgentEnabled(env, {
+    fetchImpl: async () => ({ ok: true, json: async () => ({ key: USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY, enabled: true, source: 'cloudflare-flagship' }) }),
+  });
+  assert.equal(on, true);
+  const missing = await isUseToolsDurableAgentEnabled({ USE_TOOLS_DURABLE_AGENT: 'true' }, {
+    fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
+  });
+  assert.equal(missing, false);
+});
+
+test('search slugs pick fetch reads and send writes, never label or delete', () => {
+  const slugs = ['GMAIL_CREATE_LABEL', 'GMAIL_BATCH_DELETE_MESSAGES', 'GMAIL_FETCH_EMAILS', 'GMAIL_SEND_EMAIL', 'GITHUB_LIST_REPOS'];
+  assert.deepEqual(selectReadSlugs(slugs), ['GMAIL_FETCH_EMAILS', 'GITHUB_LIST_REPOS']);
+  assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');
+  assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
+});
+
+test('same conversation reuses the agent run id', async () => {
+  resetDurableAgentMemory();
+  const ctx = { orgId: 'o1', userId: 'u1', threadId: 'thread-a' };
+  const first = await getOrCreateAgentRun({ prisma: null, ctx, message: 'first' });
+  await saveAgentRun({ prisma: null, run: first });
+  const second = await getOrCreateAgentRun({ prisma: null, ctx, message: 'continue' });
+  assert.equal(second.id, first.id);
+  assert.equal(conversationKey(ctx), 'thread-a');
+});
+
+test('durable agent executes Composio reads from search slugs and drafts send, never live send', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() {
+      return [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'github', status: 'ACTIVE' }];
+    },
+    async getToolRouterSession() { return { id: 'sess_1' }; },
+    async searchToolsByIntent() {
+      return {
+        connectedToolkits: ['gmail', 'github'],
+        tools: [
+          { _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
+          { _composio: { slug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail' } },
+          { _composio: { slug: 'GMAIL_CREATE_LABEL', toolkit: 'gmail' } },
+          { _composio: { slug: 'GITHUB_LIST_REPOS', toolkit: 'github' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_FETCH_EMAILS') {
+          return {
+            successful: true,
+            data: { messages: [{ from: 'Rama Santhoshi <ramasantoshi1206@gmail.com>', subject: 'Hi' }] },
+          };
+        }
+        return { successful: true, data: { items: [] } };
+      });
+    },
+  };
+  const ctx = {
+    orgId: 'o1', userId: 'u1', threadId: 't-durable',
+    _trace: { traceId: 'tr1' },
+    _tracedDispatch: async () => ({ memories: [{ content: 'repo notes' }] }),
+    prisma: {
+      pendingWrite: {
+        create: async ({ data }) => { created.push(data); return { id: 'DRAFT-1' }; },
+      },
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'go through HIVEMIND git repo and send important information about repo to rama via gmail',
+    ctx,
+    composio,
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(result.run.id, (await getOrCreateAgentRun({ ctx, message: 'again' })).id);
+  assert.ok(!executed.includes('GMAIL_SEND_EMAIL'));
+  assert.ok(!executed.includes('GMAIL_CREATE_LABEL'));
+  assert.ok(executed.includes('GMAIL_FETCH_EMAILS'));
+  assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
+  assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
+  assert.equal(created[0].status, 'draft');
+  assert.equal(result.run.composioSessionId, 'sess_1');
+});
+
+test('emailsFromProviderData ignores example.com placeholders', () => {
+  assert.deepEqual(
+    emailsFromProviderData({ from: 'Rama <rama@x.dev>', extra: 'x@example.com' }),
+    ['rama@x.dev'],
+  );
+});

@@ -491,19 +491,40 @@ export async function discoverSessionTools(orgId, { toolkits, useCases }) {
 
 /** Execute one already-discovered READ through the same Session. */
 export async function executeSessionTool(sessionId, toolSlug, args = {}) {
-  const result = await executeSessionMeta(sessionId, 'COMPOSIO_MULTI_EXECUTE_TOOL', {
-    tools: [{ tool_slug: toolSlug, arguments: args || {} }],
-    thought: 'Execute the selected read-only capability for the current workflow step.',
-    current_step: 'EXECUTING_TOOL',
-    current_step_metric: '0/1 tools',
-  });
-  const response = result?.data?.results?.[0]?.response;
-  return {
-    successful: Boolean(response?.successful),
-    data: response?.data ?? null,
-    error: response?.error ?? result?.error ?? null,
-    session_log_id: result?.log_id || null,
-  };
+  const batch = await executeToolsParallel(null, [{ slug: toolSlug, arguments: args }], { sessionId });
+  return batch[0] || { successful: false, data: null, error: 'no result', session_log_id: null };
+}
+
+export async function executeToolsParallel(orgId, tools = [], { sessionId } = {}) {
+  const calls = (Array.isArray(tools) ? tools : []).map((tool) => ({
+    slug: tool.slug || tool.tool_slug,
+    arguments: tool.arguments || tool.args || {},
+  })).filter((tool) => tool.slug);
+  if (sessionId) {
+    const result = await executeSessionMeta(sessionId, 'COMPOSIO_MULTI_EXECUTE_TOOL', {
+      tools: calls.map((tool) => ({ tool_slug: tool.slug, arguments: tool.arguments })),
+      thought: 'Execute independent read tools in parallel.',
+      sync_response_to_workbench: false,
+      current_step: 'EXECUTING_READS',
+      current_step_metric: `0/${calls.length} tools`,
+    });
+    const rows = result?.data?.results || [];
+    return calls.map((tool, index) => {
+      const row = rows.find((item) => item?.index === index) || rows[index] || {};
+      const response = row.response || {};
+      return {
+        successful: Boolean(response.successful ?? result?.successful),
+        data: response.data ?? null,
+        error: response.error || row.error || result?.error || null,
+        slug: tool.slug,
+        session_log_id: result?.log_id || null,
+      };
+    });
+  }
+  return Promise.all(calls.map(async (tool) => {
+    const output = await executeTool(orgId, tool.slug, tool.arguments);
+    return { ...output, slug: tool.slug };
+  }));
 }
 
 export function getToolRouterCacheStats() {

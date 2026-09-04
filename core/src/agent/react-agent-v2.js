@@ -3791,6 +3791,52 @@ export async function runReactAgentV2({
     // through ConnectorRuntime.executeTool; writes go through the legacy
     // pendingWrite draft flow. A draft_created result is reported as pending,
     // never as done.
+    if (useTools === true) {
+      const { isUseToolsDurableAgentEnabled } = await import('./use-tools-durable-agent-flag.js');
+      if (await isUseToolsDurableAgentEnabled()) {
+        const { runDurableComposioAgent } = await import('./durable-composio-agent.js');
+        const durable = await runDurableComposioAgent({
+          message, ctx, onEvent, prisma: ctx.prisma,
+        });
+        let finalText = durable.summary;
+        onEvent?.({ type: 'finish', text: finalText });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'durable_agent', success: durable.status !== 'error' });
+        return {
+          response: finalText,
+          answer_mode: 'compound',
+          sources: [],
+          citations: [],
+          relationships: [],
+          synthesis_chains: [],
+          evidence_packets: [],
+          steps: durable.steps || [],
+          evidence_used: [],
+          claims: [],
+          rejected_claims: [],
+          grounded: durable.status === 'completed',
+          confidence: durable.status === 'completed' ? 1.0 : 0.5,
+          gaps: durable.status === 'error' ? ['durable_agent_failed'] : [],
+          scopes_found: [],
+          project_choice: null,
+          aggregate: null,
+          action_result: null,
+          assistant_name: assistantName || null,
+          usage: sumUsage(usages),
+          trace: finalizeTrace(trace, usages),
+          draft_ids: durable.draftIds || [],
+          pending_actions: durable.pendingActions || [],
+          compound_status: durable.status,
+          execution: {
+            status: durable.status,
+            steps: durable.steps,
+            draft_ids: durable.draftIds || [],
+            pending_actions: durable.pendingActions || [],
+            run_id: durable.run?.id || null,
+            session_id: durable.run?.composioSessionId || null,
+          },
+        };
+      }
+    }
     if (intentDecision.operation === 'compound'
         && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
         && useTools === true

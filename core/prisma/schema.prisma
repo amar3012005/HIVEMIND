@@ -539,6 +539,25 @@ model SeoSearchConsoleSnapshot {
   @@map("seo_search_console_snapshots")
 }
 
+/// Durable Composio-session chat agent run (one per conversation).
+model AgentRun {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  conversationId     String   @map("conversation_id") @db.VarChar(160)
+  goal               String   @db.Text
+  composioSessionId  String?  @map("composio_session_id") @db.VarChar(160)
+  status             String   @default("running") @db.VarChar(32)
+  steps              Json     @default("[]") @db.JsonB
+  scratch            Json     @default("{}") @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, conversationId], map: "agent_runs_org_conversation_key")
+  @@index([orgId, userId, updatedAt(sort: Desc)], map: "agent_runs_org_user_updated_idx")
+  @@map("agent_runs")
+}
+
 /// Pending writes from agent — held for explicit user approval before
 /// the write tool actually executes. Created by draft-approval middleware
 /// whenever the agent tries to call a non-readOnly tool

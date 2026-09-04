@@ -1249,15 +1249,21 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       // selectors retain the complete local list for deterministic fixtures.
       const canonicalAuthority = ['read', 'write'].includes(subtask?.authority)
         ? subtask.authority : subtask.operation;
-      const relevant = selectTool === defaultSelectTool
-        ? [await selectToolCard({
-            rawTools: raw,
-            message,
-            canonicalOperation: subtask.operation,
-            requiredAuthority: canonicalAuthority,
-            apiKey, signal,
-          })]
-        : raw;
+      const pinnedSlug = typeof subtask.tool_slug === 'string' ? subtask.tool_slug.trim() : '';
+      const pinned = pinnedSlug
+        ? (Array.isArray(raw) ? raw : []).find((tool) => tool?._composio?.slug === pinnedSlug)
+        : null;
+      const relevant = pinned
+        ? [pinned]
+        : (selectTool === defaultSelectTool
+          ? [await selectToolCard({
+              rawTools: raw,
+              message,
+              canonicalOperation: subtask.operation,
+              requiredAuthority: canonicalAuthority,
+              apiKey, signal,
+            })]
+          : raw);
         tools = relevant.map((t) => ({
           type: 'function',
           function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },

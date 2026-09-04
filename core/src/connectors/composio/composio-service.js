@@ -396,6 +396,42 @@ export async function getToolRouterSession(orgId, toolkits) {
  * language use-cases. Search and schemas are cached with the Session so a
  * repeated chat turn goes directly to provider execution.
  */
+export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
+  const accounts = await listConnectedAccounts(orgId);
+  const connectedToolkits = [...new Set(accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit))];
+  const enabled = [...new Set([...(toolkits || []), ...connectedToolkits].filter(Boolean))];
+  let tools = [];
+  if (orgId && enabled.length) {
+    try {
+      const discovered = await discoverSessionTools(orgId, { toolkits: enabled, useCases: [useCase] });
+      tools = discovered.tools || [];
+    } catch {
+      tools = [];
+    }
+  }
+  if (!tools.length) {
+    try {
+      const qs = new URLSearchParams({ search: String(useCase || '').slice(0, 200), limit: '24' });
+      const data = await composioGet(`/api/v3.1/tools?${qs.toString()}`);
+      tools = (data?.items || []).slice(0, 24).map((tool) => ({
+        type: 'function',
+        function: {
+          name: `composio_${tool.slug}`.toLowerCase(),
+          description: String(tool.description || tool.slug).slice(0, 1024),
+          parameters: tool.input_parameters || tool.inputParameters || { type: 'object', properties: {} },
+        },
+        _composio: {
+          toolkit: String(tool.toolkit?.slug || tool.toolkit || '').toLowerCase(),
+          slug: tool.slug,
+        },
+      }));
+    } catch {
+      tools = [];
+    }
+  }
+  return { tools, connectedToolkits, accounts };
+}
+
 export async function discoverSessionTools(orgId, { toolkits, useCases }) {
   const session = await getToolRouterSession(orgId, toolkits);
   const normalizedCases = (useCases || []).map((item) => String(item || '').trim()).filter(Boolean);

@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  catalogFromDiscovery,
   connectedProvidersFromAccounts,
   decisionToHostedPlan,
+  intentPlanToSubtasks,
+  parseIntentPlanJson,
+  planComposioIntentWorkflow,
   planHostedComposioWorkflow,
 } from '../../src/agent/hosted-composio-planner.js';
 import { isUseToolsUnifiedDagEnabled } from '../../src/agent/use-tools-unified-flag.js';
@@ -66,6 +70,59 @@ test('flag-off still rejects a disconnected named catalog app', () => {
       { operation: 'gmail_search', tool_groups: ['gmail'], message: 'emails' },
     ],
   }, { request: 'emails and notes', connectedProviders: [], unifiedDag: false }), /planner_selected_unavailable_tool_group:gmail/);
+});
+
+test('intent DAG maps Composio slugs and HIVEMIND recall without a 1000-app catalog', () => {
+  const catalog = catalogFromDiscovery({
+    tools: [{
+      function: { description: 'Search Gmail' },
+      _composio: { toolkit: 'gmail', slug: 'GMAIL_FETCH_EMAILS' },
+    }],
+    connectedToolkits: ['gmail'],
+  });
+  assert.equal(catalog.hivemind[0].tool, 'hivemind_recall');
+  assert.equal(catalog.composio[0].tool_slug, 'GMAIL_FETCH_EMAILS');
+  const plan = parseIntentPlanJson(JSON.stringify({
+    goal: 'Find Rama email and recall notes',
+    steps: [
+      { id: 'find_rama', executor: 'composio', toolkit: 'gmail', tool_slug: 'GMAIL_FETCH_EMAILS', subtask: 'Find Rama', depends_on: [], operation_type: 'read' },
+      { id: 'notes', executor: 'hivemind', tool: 'hivemind_recall', subtask: 'Project notes', depends_on: ['find_rama'], operation_type: 'read' },
+    ],
+  }));
+  const subtasks = intentPlanToSubtasks(plan);
+  assert.equal(subtasks[0].tool_slug, 'GMAIL_FETCH_EMAILS');
+  assert.deepEqual(subtasks[0].tool_groups, ['gmail']);
+  assert.deepEqual(subtasks[1].tool_groups, ['hivemind-recall']);
+  assert.deepEqual(subtasks[1].depends_on, [0]);
+});
+
+test('intent planner searches Composio then returns a compound DAG', async () => {
+  const result = await planComposioIntentWorkflow({
+    request: 'Find emails from Rama and check HIVEMIND notes',
+    orgId: 'org-1',
+    apiKey: 'k',
+    composio: {
+      async searchToolsByIntent() {
+        return {
+          connectedToolkits: ['gmail'],
+          tools: [{
+            function: { name: 'composio_gmail_fetch_emails', description: 'search mail', parameters: {} },
+            _composio: { toolkit: 'gmail', slug: 'GMAIL_FETCH_EMAILS' },
+          }],
+        };
+      },
+    },
+    proposePlan: async () => ({
+      steps: [
+        { id: 'gmail', executor: 'composio', toolkit: 'gmail', tool_slug: 'GMAIL_FETCH_EMAILS', subtask: 'Find Rama', depends_on: [] },
+        { id: 'recall', executor: 'hivemind', subtask: 'notes', depends_on: ['gmail'] },
+      ],
+    }),
+  });
+  assert.equal(result.version, 'hivemind-composio-intent-planner.v1');
+  assert.equal(result._decision.operation, 'compound');
+  assert.equal(result.steps[0].tool_slug, 'GMAIL_FETCH_EMAILS');
+  assert.equal(result.steps[1].tool_groups[0], 'hivemind-recall');
 });
 
 test('unified DAG keeps any named external toolkit without a catalog whitelist', () => {

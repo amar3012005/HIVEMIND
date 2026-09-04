@@ -106,6 +106,8 @@ export function decisionToHostedPlan(decision, { request, connectedProviders = [
       instruction: String(step?.message || '').slice(0, 2000),
       query: typeof step?.query === 'string' && step.query.trim() ? step.query.trim().slice(0, 500) : null,
       retrieval: step?.retrieval || null,
+      tool_slug: typeof step?.tool_slug === 'string' && step.tool_slug.trim() ? step.tool_slug.trim() : null,
+      executor: step?.executor || null,
     };
   });
 
@@ -159,6 +161,148 @@ export function ensureMentionedCatalogSteps(steps, request, connectedProviders =
   return [...inserted, ...shifted];
 }
 
+export function catalogFromDiscovery({ tools = [], connectedToolkits = [] } = {}) {
+  const composio = (Array.isArray(tools) ? tools : []).map((tool) => ({
+    tool_slug: tool?._composio?.slug || null,
+    toolkit: String(tool?._composio?.toolkit || '').toLowerCase() || null,
+    connected: connectedToolkits.includes(String(tool?._composio?.toolkit || '').toLowerCase()),
+    description: String(tool?.function?.description || '').slice(0, 240),
+  })).filter((tool) => tool.tool_slug);
+  return {
+    hivemind: [
+      { executor: 'hivemind', tool: 'hivemind_recall', description: 'Search organization memory and evidence.' },
+      { executor: 'reasoning', tool: 'native_reasoning', description: 'Summarize or compare prior step results without an external API.' },
+    ],
+    composio,
+    connected_toolkits: connectedToolkits,
+  };
+}
+
+export function parseIntentPlanJson(text) {
+  const raw = String(text || '');
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('intent_plan_invalid_json');
+  const plan = JSON.parse(raw.slice(start, end + 1));
+  if (!Array.isArray(plan.steps) || plan.steps.length === 0 || plan.steps.length > 8) {
+    throw new Error('intent_plan_invalid_step_count');
+  }
+  return plan;
+}
+
+export function intentPlanToSubtasks(plan) {
+  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+  const ids = steps.map((step, index) => String(step.id || `step_${index + 1}`));
+  return steps.map((step, index) => {
+    const id = ids[index];
+    const dependsOn = [...new Set((Array.isArray(step.depends_on) ? step.depends_on : [])
+      .map((dep) => ids.indexOf(String(dep)))
+      .filter((dep) => dep >= 0 && dep < index))];
+    const executor = String(step.executor || '').toLowerCase();
+    const native = executor === 'hivemind' || executor === 'reasoning'
+      || canonicalNativeToolGroup(step.toolkit) || canonicalNativeToolGroup(step.tool);
+    if (native) {
+      return {
+        operation: id,
+        authority: 'read',
+        output_kind: 'knowledge',
+        tool_groups: ['hivemind-recall'],
+        executor: executor === 'reasoning' ? 'reasoning' : 'hivemind',
+        tool_slug: null,
+        message: String(step.subtask || step.purpose || '').slice(0, 2000),
+        depends_on: dependsOn,
+      };
+    }
+    const toolkit = String(step.toolkit || '').trim().toLowerCase();
+    const write = step.operation_type === 'write' || step.requires_approval === true;
+    return {
+      operation: id,
+      authority: write ? 'write' : 'read',
+      output_kind: write ? 'message' : 'record',
+      tool_groups: toolkit ? [toolkit] : [],
+      executor: 'composio',
+      tool_slug: step.tool_slug || step.tool || null,
+      message: String(step.subtask || step.purpose || '').slice(0, 2000),
+      depends_on: dependsOn,
+    };
+  }).filter((step) => step.tool_groups.length > 0);
+}
+
+export async function planComposioIntentWorkflow({
+  request,
+  orgId,
+  apiKey,
+  signal,
+  composio = null,
+  proposePlan = null,
+} = {}) {
+  const message = String(request || '').trim();
+  if (!message) throw new Error('request_required');
+  if (!orgId) throw new Error('org_scope_required');
+  const composioSvc = composio || await import('../connectors/composio/composio-service.js');
+  if (typeof composioSvc.searchToolsByIntent !== 'function') throw new Error('composio_intent_search_unavailable');
+  const discovered = await composioSvc.searchToolsByIntent(orgId, message);
+  const catalog = catalogFromDiscovery({
+    tools: discovered.tools,
+    connectedToolkits: discovered.connectedToolkits,
+  });
+  let plan;
+  if (proposePlan) {
+    plan = await proposePlan({ request: message, catalog });
+  } else {
+    const { chatCompletionFetch } = await import('../llm/chat-provider.js');
+    const model = process.env.COMPOUND_SUBTASK_MODEL || process.env.HIVEMIND_AGENT_MODEL || 'openai/gpt-oss-20b:nitro';
+    const resp = await chatCompletionFetch(model, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 1200,
+        messages: [
+          {
+            role: 'system',
+            content: 'Plan a DAG. Use only HIVEMIND tools from catalog.hivemind and Composio tools from catalog.composio. Never invent a toolkit that is not needed. Prefer connected Composio toolkits when they match the request, but you MAY include a disconnected toolkit from catalog.composio. Return JSON only: {goal, steps:[{id, executor, toolkit, tool_slug, subtask, depends_on, operation_type}]}. executor is composio, hivemind, or reasoning. operation_type is read, write, or reasoning. Max 8 steps.',
+          },
+          { role: 'user', content: JSON.stringify({ request: message, catalog }) },
+        ],
+      }),
+      signal,
+    }, { fallbackApiKey: apiKey, useCase: 'composio_intent_plan' });
+    if (!resp.ok) throw new Error(`intent_planner_${resp.status}`);
+    const data = await resp.json();
+    plan = parseIntentPlanJson(data?.choices?.[0]?.message?.content || '');
+  }
+  const steps = decisionToHostedPlan({
+    operation: 'compound',
+    subtasks: intentPlanToSubtasks(plan),
+  }, {
+    request: message,
+    connectedProviders: discovered.connectedToolkits || [],
+    unifiedDag: true,
+  });
+  if (!steps.length) throw new Error('intent_plan_empty');
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify({ orgId, message, steps }))
+    .digest('hex');
+  return {
+    version: 'hivemind-composio-intent-planner.v1',
+    plan_id: `cip_${fingerprint.slice(0, 24)}`,
+    request: message,
+    connected_providers: discovered.connectedToolkits || [],
+    native_tools: HIVEMIND_HOSTED_TOOL_CARDS.map((tool) => tool.slug),
+    steps,
+    execution: {
+      mode: 'sequential_dag',
+      side_effects_executed: false,
+      writes_require_approval: true,
+    },
+    usage: null,
+    planner_attempts: 1,
+    _decision: { operation: 'compound', subtasks: steps },
+  };
+}
+
 export async function planHostedComposioWorkflow({
   request,
   history = [],
@@ -176,6 +320,16 @@ export async function planHostedComposioWorkflow({
   const message = String(request || '').trim();
   if (!message) throw new Error('request_required');
   if (!orgId) throw new Error('org_scope_required');
+
+  if (isUseToolsUnifiedDagEnabled()) {
+    try {
+      return await planComposioIntentWorkflow({
+        request: message, orgId, apiKey, signal, composio,
+      });
+    } catch {
+      // Fall through to the progressive hosted planner if intent search/plan fails.
+    }
+  }
 
   const composioSvc = composio || await import('../connectors/composio/composio-service.js');
   const accounts = await composioSvc.listConnectedAccounts(orgId);

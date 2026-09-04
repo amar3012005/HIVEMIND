@@ -548,7 +548,10 @@ test('durable production path uses Session search and Session execution, never c
   assert.equal(searchPayload.search_strategy, 'auto');
   assert.equal(searchPayload.session.generate_id, true);
   assert.equal(typeof searchPayload.queries[0].known_fields, 'string');
+  assert.match(searchPayload.queries[0].known_fields, /destination_apps:gmail/);
+  assert.match(searchPayload.queries[0].known_fields, /intent:read_existing/);
   assert.equal(searchPayload.queries[0].known_fields.includes('product_context'), false);
+  assert.match(searchPayload.queries[0].use_case, /list, get-my, or recent/i);
   assert.equal(searchPayload.queries[0].search_strategy, undefined);
   assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
   assert.deepEqual(result.run.scratch.recommended_plan_steps, [{ tool_slug: 'GMAIL_FETCH_EMAILS' }]);
@@ -692,10 +695,12 @@ test('OAuth resume still finds a pre-cutover agent_runs row keyed by thread id',
 test('LinkedIn last-post adapts after GET-without-id instead of creating a post', async () => {
   resetDurableAgentMemory();
   const executed = [];
+  let searchPayload = null;
   const composio = {
     async listConnectedAccounts() { return [{ toolkit: 'linkedin', status: 'ACTIVE' }]; },
     async getToolRouterSession() { return { id: 'trs_adapt' }; },
-    async discoverSessionTools() {
+    async discoverSessionTools(_org, input) {
+      searchPayload = input.searchPayload;
       return {
         sessionId: 'trs_adapt',
         primaryToolSlugs: ['LINKEDIN_CREATE_LINKED_IN_POST', 'LINKEDIN_GET_POST_CONTENT', 'LINKEDIN_GET_MY_POSTS'],
@@ -732,6 +737,8 @@ test('LinkedIn last-post adapts after GET-without-id instead of creating a post'
   assert.match(result.summary, /synth:/);
   assert.equal(result.status, 'completed');
   assert.ok(result.run.scratch.cursor);
+  assert.match(searchPayload.queries[0].known_fields, /destination_apps:linkedin/);
+  assert.match(searchPayload.queries[0].use_case, /list, get-my, or recent/i);
 });
 
 
@@ -876,7 +883,8 @@ test('precise Composio search uses related people lookup then drafts, never list
     composio,
   });
   assert.equal(searchPayload.queries[0].use_case, 'The user wants to send the company information to a person called rama');
-  assert.equal(searchPayload.queries[0].known_fields, 'recipient_name:rama');
+  assert.match(searchPayload.queries[0].known_fields, /destination_apps:gmail/);
+  assert.match(searchPayload.queries[0].known_fields, /recipient_name:rama/);
   assert.equal(result.status, 'pending');
   assert.equal(executed.includes('GMAIL_LIST_DRAFTS'), false);
   assert.equal(executed.includes('GMAIL_SEND_EMAIL'), false);

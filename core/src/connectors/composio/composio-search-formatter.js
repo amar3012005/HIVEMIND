@@ -26,19 +26,43 @@ export function namedRecipient(message) {
   return null;
 }
 
-export function formatKnownFields({ recipient } = {}) {
-  return recipient ? `recipient_name:${compact(recipient, 60)}` : '';
+export function isReadLookupUseCase(message) {
+  const text = String(message || '');
+  if (/\b(send|email|mail to|draft|publish|create|post this|share this|write a|reply to)\b/i.test(text)) return false;
+  return /\b(what|think|last|show|get|read|about my|did i|have i|was my|latest|recent|list)\b/i.test(text);
 }
 
-export function formatUseCase({ message } = {}) {
+export function formatKnownFields({ recipient, destinationApps = [], message } = {}) {
+  const parts = [];
+  const apps = [...new Set((destinationApps || [])
+    .map((item) => String(item || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+    .filter((item) => item && item !== 'hivemind' && item !== 'local' && item !== 'composio'))];
+  if (apps.length) parts.push(`destination_apps:${apps.join(',')}`);
+  if (recipient) parts.push(`recipient_name:${compact(recipient, 60)}`);
+  if (isReadLookupUseCase(message)) parts.push('intent:read_existing', 'scope:authenticated_user');
+  else if (recipient) parts.push('intent:send_message');
+  return parts.join(';');
+}
+
+export function formatUseCase({ message, destinationApps = [] } = {}) {
   const raw = compact(message, 800);
   const recipient = namedRecipient(raw);
+  const apps = [...new Set((destinationApps || [])
+    .map((item) => String(item || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+    .filter((item) => item && item !== 'hivemind' && item !== 'local' && item !== 'composio'))];
+  const appLabel = apps.join(', ');
   if (recipient && /\b(company|hivemind|singulance)\b/i.test(raw)) {
     return `The user wants to send the company information to a person called ${recipient}`;
   }
-  if (recipient) {
-    return `The user wants to send a message to a person called ${recipient}. ${raw}`.slice(0, 1_500);
+  if (isReadLookupUseCase(raw)) {
+    const where = appLabel ? ` from ${appLabel}` : '';
+    return `The user wants to retrieve existing records${where}: ${raw}. Prefer list, get-my, or recent tools for the authenticated user. Do not create, send, or publish.`.slice(0, 1_500);
   }
+  if (recipient) {
+    const via = appLabel ? ` via ${appLabel}` : '';
+    return `The user wants to send a message to a person called ${recipient}${via}. ${raw}`.slice(0, 1_500);
+  }
+  if (appLabel) return `The user wants to use ${appLabel}. ${raw}`.slice(0, 1_500);
   return raw;
 }
 
@@ -62,7 +86,7 @@ export function formatComposioSearch({
   return {
     queries: [{
       use_case: formatUseCase({ message, destinationApps }),
-      known_fields: formatKnownFields({ recipient, destinationApps }),
+      known_fields: formatKnownFields({ recipient, destinationApps, message }),
     }],
     session,
     model: model || process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'gemini-2.5-flash-lite',

@@ -848,6 +848,7 @@ export function compactDurableObservation(run, {
       statuses: run.scratch.toolkit_connection_statuses || {},
       facts_toolkits: factsToolkits.slice(0, 8),
       people_search: Boolean(run.scratch.people_search),
+      list_search: Boolean(run.scratch.list_search),
       recall_attempted: Boolean(run.scratch.recall_attempted),
     },
   };
@@ -921,6 +922,15 @@ export function fallbackNextDurableAction(obs) {
       .filter((slug) => /LIST_|GET_MY|RECENT|_USER_/i.test(slug))
       .sort((left, right) => rankDurableReadSlug(left) - rankDurableReadSlug(right));
     if (listFirst[0]) return { action: 'execute', slug: listFirst[0], reason: 'list before get-by-id' };
+    if (!obs.known?.list_search) {
+      const toolkit = toolkitFromSlug(last.slug);
+      const app = toolkit || (obs.known?.candidates || []).find((item) => item && item !== 'gmail') || 'app';
+      return {
+        action: 'search',
+        query: `The user wants to list the authenticated user's most recent ${app} records. Prefer list, get-my, or recent tools. Do not create, send, or publish.`,
+        reason: 'search list tools after get-by-id miss',
+      };
+    }
   }
 
   const follow = slugs.find((slug) => isFollowUpReadSlug(slug) && !done(slug) && !isWriteSlug(slug) && !failedMissing(slug));
@@ -1236,7 +1246,7 @@ export async function runDurableComposioAgent({
     return result;
   };
 
-  const mergeDiscovery = (discovery, { peopleSearch = false } = {}) => {
+  const mergeDiscovery = (discovery, { peopleSearch = false, listSearch = false } = {}) => {
     const searchedSlugs = (discovery.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
     const primary = (discovery.primaryToolSlugs?.length ? discovery.primaryToolSlugs : searchedSlugs).filter(Boolean);
     run.composioSessionId = discovery.sessionId || run.composioSessionId;
@@ -1272,6 +1282,7 @@ export async function runDurableComposioAgent({
     run.scratch.tool_schemas = { ...(run.scratch.tool_schemas || {}), ...(incomingSchemas || {}) };
     run.scratch.plan = run.scratch.primary_tool_slugs.slice(0, 16);
     if (peopleSearch) run.scratch.people_search = true;
+    if (listSearch) run.scratch.list_search = true;
   };
 
   const performSearch = async (queryMessage) => {
@@ -1322,7 +1333,8 @@ export async function runDurableComposioAgent({
       return { ok: false, error: run.scratch.search_error };
     }
     const peopleSearch = /email address of a person called/i.test(String(queryMessage || ''));
-    mergeDiscovery(discovery, { peopleSearch });
+    const listSearch = /list the authenticated user's most recent/i.test(String(queryMessage || ''));
+    mergeDiscovery(discovery, { peopleSearch, listSearch });
     finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
       kind: 'search', status: 'completed',
       summary: uniqueToolkitsFromSlugs(run.scratch.primary_tool_slugs).map(displayAppName).join(', ') || 'no tools',

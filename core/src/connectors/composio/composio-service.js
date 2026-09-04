@@ -432,32 +432,38 @@ async function listCatalogTools({ search, toolkitSlug, important = false, limit 
  */
 export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
   const query = String(useCase || '').trim().slice(0, 200);
-  const [accounts, searchedTools, searchedApps] = await Promise.all([
+  const scoped = [...new Set((toolkits || []).map((toolkit) => String(toolkit || '').toLowerCase()).filter(Boolean))];
+  const [accounts, searchedApps, globalTools] = await Promise.all([
     orgId ? listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
-    query ? listCatalogTools({ search: query, limit: 24 }).catch(() => []) : Promise.resolve([]),
-    query ? listToolkits({ search: query, limit: 12 }).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+    query && !scoped.length ? listToolkits({ search: query, limit: 12 }).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+    query && !scoped.length ? listCatalogTools({ search: query, limit: 24 }).catch(() => []) : Promise.resolve([]),
   ]);
   const connectedToolkits = [...new Set(
     accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit).filter(Boolean),
   )];
+  const fillToolkits = scoped.length
+    ? scoped
+    : [...new Set([
+      ...connectedToolkits,
+      ...(searchedApps.items || []).map((item) => item.slug).filter(Boolean),
+    ])].slice(0, 8);
   const bySlug = new Map();
-  for (const tool of searchedTools) bySlug.set(tool._composio.slug, tool);
-  const fillToolkits = [...new Set([
-    ...connectedToolkits,
-    ...(searchedApps.items || []).map((item) => item.slug).filter(Boolean),
-    ...(toolkits || []),
-  ])].slice(0, 8);
   if (fillToolkits.length) {
     const extras = await Promise.all(fillToolkits.flatMap((toolkit) => [
-      listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 8 }).catch(() => []),
-      query ? listCatalogTools({ toolkitSlug: toolkit, search: query, limit: 8 }).catch(() => []) : Promise.resolve([]),
+      listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 12 }).catch(() => []),
+      query ? listCatalogTools({ toolkitSlug: toolkit, search: query, limit: 12 }).catch(() => []) : Promise.resolve([]),
     ]));
     for (const tool of extras.flat()) {
-      if (!bySlug.has(tool._composio.slug)) bySlug.set(tool._composio.slug, tool);
+      if (tool?._composio?.slug) bySlug.set(tool._composio.slug, tool);
+    }
+  }
+  if (!scoped.length) {
+    for (const tool of globalTools) {
+      if (tool?._composio?.slug && !bySlug.has(tool._composio.slug)) bySlug.set(tool._composio.slug, tool);
     }
   }
   return {
-    tools: [...bySlug.values()].slice(0, 32),
+    tools: [...bySlug.values()].slice(0, 48),
     connectedToolkits,
     accounts,
     apps: searchedApps.items || [],

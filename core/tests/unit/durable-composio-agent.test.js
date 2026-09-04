@@ -203,7 +203,7 @@ test('composeBriefing uses provider reads instead of the raw user prompt', () =>
   });
   assert.match(body, /amar\/HIVEMIND/);
   assert.match(body, /Hi Rama/);
-  assert.match(body, /HIVEMIND is the memory OS/);
+  assert.equal(body.includes('HIVEMIND is the memory OS'), false);
   assert.equal(body.includes('Missing You'), false);
   assert.equal(body.includes('GMAIL_FETCH_EMAILS'), false);
   assert.equal(body.includes('persistentMemoryStore'), false);

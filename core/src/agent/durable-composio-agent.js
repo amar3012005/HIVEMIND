@@ -104,6 +104,9 @@ export function emailsFromProviderData(data) {
         const host = lower.split('@')[1] || '';
         if (/example\.(com|net|org)$/.test(host)) continue;
         if (host.endsWith('mail.gmail.com') || host.endsWith('google.com')) continue;
+        if (host.endsWith('amazonses.com') || host.endsWith('sendgrid.net')) continue;
+        if (/no-?reply|mailer-daemon|bounce@|notifications?@/i.test(lower)) continue;
+        if (/^[0-9a-f-]{16,}@/i.test(lower)) continue;
         if (host.split('.').length > 3) continue;
         found.add(lower);
       }
@@ -126,7 +129,7 @@ export function pickRecipientEmail(emails = [], person = '') {
   const needle = String(person || '').toLowerCase();
   if (needle) {
     const hit = list.find((email) => email.includes(needle));
-    if (hit) return hit;
+    return hit || null;
   }
   return list[0] || null;
 }
@@ -243,9 +246,6 @@ export function composeBriefing({ message, reads = [], recallText = '', person =
     return true;
   });
   const facts = relevant.map((read) => summarizeToolData(read.data, 1200)).filter((text) => text && !isNoiseText(text));
-  const memory = humanRecallText(recallData) || (isNoiseText(recallText) || /^\s*\{/.test(String(recallText || ''))
-    ? humanRecallText((() => { try { return JSON.parse(recallText); } catch { return null; } })())
-    : String(recallText || '').trim());
   const lines = [];
   const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
   lines.push(`Hi ${who},`);
@@ -256,10 +256,6 @@ export function composeBriefing({ message, reads = [], recallText = '', person =
     lines.push(facts.join('\n\n'));
   } else {
     lines.push('I could not retrieve the requested records yet.');
-  }
-  if (memory && !isNoiseText(memory) && !/^\s*\{/.test(memory)) {
-    lines.push('');
-    lines.push(memory.slice(0, 800));
   }
   lines.push('');
   lines.push('Nothing in this message was sent automatically; it is a draft for review.');
@@ -549,7 +545,6 @@ export async function runDurableComposioAgent({
   const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected, ...((discovered.apps || []).map((app) => app.slug))]);
   if (typeof composioSvc.searchToolsByIntent === 'function') {
     for (const toolkit of mentioned) {
-      if (selectReadSlugs(searchedSlugs, [toolkit]).length) continue;
       const extra = await composioSvc.searchToolsByIntent(orgId, message, { toolkits: [toolkit] }).catch(() => null);
       for (const tool of extra?.tools || []) {
         const slug = tool?._composio?.slug;
@@ -567,7 +562,7 @@ export async function runDurableComposioAgent({
     candidates = [run.scratch.chosen_toolkit];
     searchedSlugs = searchedSlugs.filter((slug) => slugMatchesConnected(slug, [run.scratch.chosen_toolkit]));
   }
-  run.scratch.searched_slugs = searchedSlugs.slice(0, 40);
+  run.scratch.searched_slugs = searchedSlugs.slice(0, 48);
   run.scratch.candidate_apps = candidates;
   finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
     kind: 'search',
@@ -683,8 +678,12 @@ export async function runDurableComposioAgent({
     let args = { ...(call.arguments || {}) };
     if (typeof composioSvc.generateToolInputs === 'function') {
       const generated = await composioSvc.generateToolInputs(call.slug, evidenceText()).catch(() => null);
-      if (generated && typeof generated === 'object' && Object.keys(generated).length) {
-        args = { ...args, ...generated };
+      if (generated && typeof generated === 'object' && !Array.isArray(generated)) {
+        const clean = { ...generated };
+        for (const key of Object.keys(clean)) {
+          if (/^(user_id|userid|org_id|connected_account_id|entity_id|session_id)$/i.test(key)) delete clean[key];
+        }
+        if (Object.keys(clean).length) args = { ...args, ...clean };
       }
     }
     if (!Object.keys(args).length) args = argumentsForReadSlug(call.slug, { person });

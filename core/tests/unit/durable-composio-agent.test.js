@@ -660,6 +660,56 @@ test('precise Composio search uses related people lookup then drafts, never list
   assert.match(created[0].toolArgs.body, /AI workforce inside memory/);
 });
 
+test('when search omits people tools, still resolves named recipient via Gmail lookup', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_hm2' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_hm2',
+        primaryToolSlugs: [
+          'LOCAL_HIVEMIND_HIVEMIND_RECALL',
+          'GMAIL_SEND_EMAIL',
+          'GMAIL_SEND_DRAFT',
+        ],
+        relatedToolSlugs: ['GMAIL_LIST_DRAFTS', 'GMAIL_REPLY_TO_THREAD'],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'LOCAL_HIVEMIND_HIVEMIND_RECALL' } },
+          { _composio: { slug: 'GMAIL_SEND_EMAIL' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_SEARCH_PEOPLE') {
+          return { successful: true, data: { people: [{ email: 'ramasantoshi1206@gmail.com' }] } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send rama, about information about the company',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-rama-lookup',
+      polishBriefing: async ({ body }) => body,
+      _tracedDispatch: async () => ({ memories: [{ title: 'Singulance', content: 'AI workforce inside memory' }] }),
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DRAFT-R' }; } } },
+    },
+    composio,
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(executed.includes('GMAIL_LIST_DRAFTS'), false);
+  assert.ok(executed.includes('GMAIL_SEARCH_PEOPLE'));
+  assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
+  assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
+});
+
 test('instagram DM searches first then pauses to connect when disconnected', async () => {
   resetDurableAgentMemory();
   let searched = false;
@@ -744,7 +794,8 @@ test('walks primary HIVEMIND recall once then drafts, skipping extra hivemind sl
   });
   assert.equal(native.includes('hivemind_recall'), true);
   assert.equal(native.filter((name) => name === 'hivemind_recall').length, 1);
-  assert.equal(executed.length, 0);
+  assert.equal(executed.includes('LOCAL_HIVEMIND_LIST_MEMORIES'), false);
+  assert.equal(executed.includes('LOCAL_HIVEMIND_LIST_PROJECTS'), false);
   assert.equal(result.status, 'needs_input');
   assert.equal(result.inputRequests[0].kind, 'field_input');
   assert.ok(result.run.scratch.recall_text.includes('AI workforce inside memory'));

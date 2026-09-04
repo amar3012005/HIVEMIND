@@ -120,7 +120,12 @@ export function selectWriteSlug(slugs = [], connected = []) {
     const t = tokens(slug);
     return t.includes('draft') && t.includes('create');
   });
-  return drafts[0] || candidates[0] || null;
+  if (drafts[0]) return drafts[0];
+  const sends = candidates.filter((slug) => {
+    const t = tokens(slug);
+    return t.includes('send') && !t.includes('draft') && !t.includes('reply');
+  });
+  return sends[0] || candidates[0] || null;
 }
 
 export function sessionToolkitsFor(connected = [], candidates = []) {
@@ -948,14 +953,20 @@ export async function runDurableComposioAgent({
   }
 
   if (writeSlug && person && !(run.scratch.emails || []).length) {
-    const lookup = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
+    const fromSearch = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
       .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
       .sort((left, right) => {
         const rank = (slug) => (/SEARCH_PEOPLE|GET_CONTACT/i.test(slug) ? 0 : 1);
         return rank(left) - rank(right);
-      })[0];
-    if (lookup && !readResults.some((row) => row.slug === lookup)) {
+      });
+    const gmailWrite = /gmail|outlook/i.test(toolkitFromSlug(writeSlug) || '');
+    const fallback = gmailWrite && toolkitHasActiveConnection('gmail', connected, statuses)
+      ? ['GMAIL_SEARCH_PEOPLE', 'GMAIL_FETCH_EMAILS']
+      : [];
+    for (const lookup of [...fromSearch, ...fallback]) {
+      if (!lookup || readResults.some((row) => row.slug === lookup)) continue;
       await runOneRead({ slug: lookup, arguments: argumentsForReadSlug(lookup, { person }) });
+      if ((run.scratch.emails || []).length) break;
     }
   }
 

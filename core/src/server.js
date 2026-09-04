@@ -24617,7 +24617,12 @@ exit \$RC
               };
               if (wantStream) {
                 res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-                const rawEmit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
+                const rawEmit = (evt) => {
+                  try {
+                    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+                    if (typeof res.flush === 'function') res.flush();
+                  } catch {}
+                };
                 const sink = continuationTurn
                   ? createDurableEventSink({ store: continuationStore, turnId: continuationTurn.id, emit: rawEmit })
                   : null;
@@ -24798,7 +24803,10 @@ exit \$RC
                     'X-Accel-Buffering': 'no',
                   });
                   const rawEmit = (evt) => {
-                    try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {}
+                    try {
+                      res.write(`data: ${JSON.stringify(evt)}\n\n`);
+                      if (typeof res.flush === 'function') res.flush();
+                    } catch {}
                   };
                   const durableSink = durableChatTurn
                     ? createDurableEventSink({ store: durableChatStore, turnId: durableChatTurn.id, emit: rawEmit })

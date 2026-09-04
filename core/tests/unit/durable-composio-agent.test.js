@@ -6,10 +6,14 @@ import {
   USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY,
 } from '../../src/agent/use-tools-durable-agent-flag.js';
 import {
+  appsMatchingRequest,
+  composeBriefing,
   conversationKey,
   emailsFromProviderData,
   getOrCreateAgentRun,
+  isReadThenWrite,
   namedPersonQuery,
+  namedRepoQuery,
   pickRecipientEmail,
   resetDurableAgentMemory,
   runDurableComposioAgent,
@@ -49,6 +53,16 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
   assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');
   assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
   assert.equal(pickRecipientEmail(['amarsai2005@gmail.com', 'ramasantoshi1206@gmail.com'], 'rama'), 'ramasantoshi1206@gmail.com');
+  assert.deepEqual(
+    appsMatchingRequest('go through HIVEMIND git repo and send to rama via gmail', ['gmail', 'github', 'slack']),
+    ['gmail', 'github'],
+  );
+  assert.equal(namedRepoQuery('go through HIVEMIND git repo'), 'HIVEMIND');
+  assert.equal(
+    isReadThenWrite('go through HIVEMIND git repo and send important information about repo to rama via gmail', ['gmail', 'github']),
+    true,
+  );
+  assert.equal(isReadThenWrite('send this on gmail and slack', ['gmail', 'slack']), false);
 });
 
 test('same conversation reuses the agent run id', async () => {
@@ -90,6 +104,12 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
             data: { messages: [{ from: 'Rama Santhoshi <ramasantoshi1206@gmail.com>', subject: 'Hi' }] },
           };
         }
+        if (tool.slug === 'GITHUB_LIST_REPOS') {
+          return {
+            successful: true,
+            data: { items: [{ full_name: 'amar/HIVEMIND', description: 'Memory OS for organizations', html_url: 'https://github.com/amar/HIVEMIND' }] },
+          };
+        }
         return { successful: true, data: { items: [] } };
       });
     },
@@ -104,20 +124,37 @@ test('durable agent executes Composio reads from search slugs and drafts send, n
       },
     },
   };
+  const events = [];
   const result = await runDurableComposioAgent({
     message: 'go through HIVEMIND git repo and send important information about repo to rama via gmail',
     ctx,
     composio,
+    onEvent: (event) => events.push(event),
   });
   assert.equal(result.status, 'pending');
   assert.equal(result.run.id, (await getOrCreateAgentRun({ ctx, message: 'again' })).id);
   assert.ok(!executed.includes('GMAIL_SEND_EMAIL'));
   assert.ok(!executed.includes('GMAIL_CREATE_LABEL'));
   assert.ok(executed.includes('GMAIL_FETCH_EMAILS'));
+  assert.ok(executed.includes('GITHUB_LIST_REPOS'));
   assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
   assert.equal(created[0].toolArgs.recipient_email, 'ramasantoshi1206@gmail.com');
+  assert.match(created[0].toolArgs.body, /amar\/HIVEMIND/);
+  assert.match(created[0].toolArgs.subject, /HIVEMIND repository briefing/i);
   assert.equal(created[0].status, 'draft');
   assert.equal(result.run.composioSessionId, 'sess_1');
+  assert.ok(events.some((event) => event.type === 'tool_started' && event.name === 'GITHUB_LIST_REPOS'));
+  assert.ok(events.some((event) => event.type === 'tool_result' && event.name === 'GITHUB_LIST_REPOS' && event.status === 'completed'));
+  assert.ok(result.steps.every((step) => step.tool || step.slug));
+});
+
+test('composeBriefing uses provider reads instead of the raw user prompt', () => {
+  const body = composeBriefing({
+    message: 'go through HIVEMIND git repo',
+    reads: [{ slug: 'GITHUB_LIST_REPOS', data: { items: [{ full_name: 'amar/HIVEMIND', description: 'core' }] } }],
+  });
+  assert.match(body, /amar\/HIVEMIND/);
+  assert.equal(body.includes('Briefing from HIVEMIND for:'), false);
 });
 
 test('later turns reuse persisted Composio session id and never recreate', async () => {

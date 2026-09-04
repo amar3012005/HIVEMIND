@@ -104,11 +104,114 @@ export function displayAppName(toolkit) {
   return key.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+export const TOOLKIT_ALIASES = Object.freeze({
+  github: ['github', 'git', 'repo', 'repos', 'repository', 'repositories'],
+  gmail: ['gmail', 'email', 'mail'],
+  slack: ['slack'],
+  notion: ['notion'],
+  googledrive: ['googledrive', 'google drive', 'gdrive', 'drive'],
+});
+
 export function appsMatchingRequest(message, toolkits = []) {
   const text = ` ${String(message || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
   return (toolkits || []).filter((toolkit) => {
-    const token = String(toolkit || '').toLowerCase().replace(/[-_]/g, ' ');
-    return text.includes(` ${toolkit} `) || text.includes(` ${token} `);
+    const key = String(toolkit || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const aliases = TOOLKIT_ALIASES[key] || [key, String(toolkit || '').toLowerCase().replace(/[-_]/g, ' ')];
+    return aliases.some((alias) => text.includes(` ${String(alias).replace(/[-_]/g, ' ')} `));
+  });
+}
+
+export function writeToolkitsIn(message, toolkits = []) {
+  const text = String(message || '').toLowerCase();
+  if (!/\b(send|email|mail|via|draft|share|forward)\b/.test(text)) return [];
+  return (toolkits || []).filter((toolkit) => {
+    const key = String(toolkit || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (key === 'gmail' || key === 'outlook') return /\b(gmail|email|mail|outlook)\b/.test(text);
+    if (key === 'slack') return /\bslack\b/.test(text);
+    return false;
+  });
+}
+
+export function isReadThenWrite(message, toolkits = []) {
+  const writes = writeToolkitsIn(message, toolkits);
+  const reads = (toolkits || []).filter((toolkit) => !writes.includes(toolkit));
+  return writes.length >= 1 && reads.length >= 1;
+}
+
+export function namedRepoQuery(text) {
+  const match = String(text || '').match(/\b(hivemind|hive-mind|hive mind)\b/i);
+  return match ? String(match[1]).replace(/\s+/g, '-') : '';
+}
+
+export function summarizeToolData(data, limit = 1800) {
+  if (data == null) return '';
+  const rows = data.items || data.repositories || data.repos || data.messages || [];
+  if (Array.isArray(rows) && rows.length) {
+    return rows.slice(0, 8).map((item) => {
+      if (item == null || typeof item !== 'object') return String(item);
+      return [
+        item.full_name || item.name || item.title || item.subject,
+        item.description || item.body || item.snippet,
+        item.html_url || item.url,
+      ].filter(Boolean).join(' — ');
+    }).filter(Boolean).join('\n').slice(0, limit);
+  }
+  const blob = data.content || data.readme || data.body || data.text;
+  if (typeof blob === 'string' && blob.trim()) return blob.trim().slice(0, limit);
+  try {
+    return JSON.stringify(data).slice(0, limit);
+  } catch {
+    return String(data).slice(0, limit);
+  }
+}
+
+export function composeBriefing({ message, reads = [], recallText = '' } = {}) {
+  const sections = [];
+  for (const read of reads) {
+    const summary = summarizeToolData(read?.data);
+    if (!summary) continue;
+    sections.push(`${read.slug}\n${summary}`);
+  }
+  if (recallText) sections.push(`HIVEMIND memory\n${String(recallText).slice(0, 1200)}`);
+  const body = sections.join('\n\n').trim();
+  if (body) return body.slice(0, 7000);
+  return `Could not retrieve repository details yet.\n\nRequest: ${String(message || '').slice(0, 400)}`;
+}
+
+export function argumentsForReadSlug(slug, { person = '', repoHint = '' } = {}) {
+  if (/FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT|LIST_MESSAGES/i.test(slug) && person) {
+    return { query: person, max_results: 5 };
+  }
+  if (/GITHUB_SEARCH|SEARCH_REPOS/i.test(slug)) {
+    return { q: repoHint || 'HIVEMIND', query: repoHint || 'HIVEMIND' };
+  }
+  if (/LIST_REPOS|LIST_REPOSITORIES/i.test(slug)) {
+    return { per_page: 15, affiliation: 'owner,collaborator,organization_member' };
+  }
+  return {};
+}
+
+function beginTool(emit, _run, name, args) {
+  emit({ type: 'tool_started', name, tool: name, arguments: args || {} });
+}
+
+function finishTool(emit, run, name, { kind, status, summary, extra = {}, args } = {}) {
+  recordStep(run, {
+    kind,
+    slug: name,
+    tool: name,
+    operation: name,
+    status,
+    summary,
+    ...extra,
+  });
+  emit({
+    type: 'tool_result',
+    name,
+    tool: name,
+    status,
+    result_summary: summary || status,
+    arguments: args || {},
   });
 }
 
@@ -310,12 +413,21 @@ export async function runDurableComposioAgent({
     }
   }
 
+  beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: message });
   const discovered = typeof composioSvc.searchToolsByIntent === 'function'
     ? await composioSvc.searchToolsByIntent(orgId, message)
     : { tools: [], connectedToolkits: connected };
   let searchedSlugs = (discovered.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
   const discoveredToolkits = uniqueToolkitsFromSlugs(searchedSlugs);
-  const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected]);
+  const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected, ...((discovered.apps || []).map((app) => app.slug))]);
+  if (mentioned.includes('github') && !searchedSlugs.some((slug) => /^GITHUB_/i.test(slug))
+      && typeof composioSvc.searchToolsByIntent === 'function') {
+    const extra = await composioSvc.searchToolsByIntent(orgId, 'github repository', { toolkits: ['github'] }).catch(() => null);
+    for (const tool of extra?.tools || []) {
+      const slug = tool?._composio?.slug;
+      if (slug && !searchedSlugs.includes(slug)) searchedSlugs.push(slug);
+    }
+  }
   const appHints = (discovered.apps || []).map((app) => app.slug).filter(Boolean);
   let candidates = mentioned.length
     ? [...new Set(mentioned)]
@@ -327,12 +439,19 @@ export async function runDurableComposioAgent({
   }
   run.scratch.searched_slugs = searchedSlugs.slice(0, 24);
   run.scratch.candidate_apps = candidates;
-  recordStep(run, { kind: 'search', slugs: searchedSlugs.slice(0, 12), executor: 'composio' });
-  emit({ type: 'tool_result', name: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', summary: searchedSlugs.slice(0, 8).join(',') });
+  finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
+    kind: 'search',
+    status: 'completed',
+    summary: searchedSlugs.slice(0, 8).join(',') || 'no tools',
+    extra: { slugs: searchedSlugs.slice(0, 12), executor: 'composio' },
+  });
 
-  if (!run.scratch.chosen_toolkit && candidates.length > 1) {
+  const compoundSend = isReadThenWrite(message, candidates);
+  const writeApps = compoundSend ? writeToolkitsIn(message, candidates) : [];
+  const readApps = compoundSend ? candidates.filter((toolkit) => !writeApps.includes(toolkit)) : candidates;
+  if (!run.scratch.chosen_toolkit && candidates.length > 1 && !compoundSend) {
     run.status = 'waiting_user';
-    recordStep(run, { kind: 'clarify', toolkits: candidates, status: 'waiting_user' });
+    recordStep(run, { kind: 'clarify', toolkits: candidates, tool: 'clarify_apps', status: 'waiting_user' });
     await saveAgentRun({ prisma: db, run });
     return pause(run, clarifyAppsRequest(candidates), `Do you mean ${candidates.map(displayAppName).join(' or ')}?`);
   }
@@ -368,73 +487,126 @@ export async function runDurableComposioAgent({
     }, 'Which app should I use?');
   }
 
+  let recallText = '';
   try {
+    beginTool(emit, run, 'hivemind_recall', { query: namedRepoQuery(message) || message });
     const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
     let recall;
+    const recallQuery = namedRepoQuery(message) || message;
     if (typeof dispatch === 'function') {
-      const data = await dispatch('hivemind_recall', { query: message, query_original: message });
+      const data = await dispatch('hivemind_recall', { query: recallQuery, query_original: message });
       recall = { successful: !data?.error, data, error: data?.error || null };
     } else {
       recall = await executeHivemindCustomTool('HIVEMIND_RECALL', {
-        query: message,
+        query: recallQuery,
         query_original: message,
         _structured_intent: true,
       }, ctx);
     }
-    recordStep(run, {
-      kind: 'native', slug: 'HIVEMIND_RECALL', executor: 'hivemind',
+    recallText = summarizeToolData(recall?.data);
+    finishTool(emit, run, 'hivemind_recall', {
+      kind: 'native',
       status: recall.successful ? 'completed' : 'error',
+      summary: recall.successful ? (recallText.slice(0, 160) || 'recall ok') : String(recall.error || 'error'),
+      extra: { executor: 'hivemind', slug: 'HIVEMIND_RECALL' },
     });
-    emit({ type: 'tool_result', name: 'hivemind_recall', status: recall.successful ? 'completed' : 'error' });
     if (recall.successful) run.scratch.recall = true;
   } catch (error) {
-    recordStep(run, { kind: 'native', slug: 'HIVEMIND_RECALL', status: 'error', error: error.message });
+    finishTool(emit, run, 'hivemind_recall', {
+      kind: 'native',
+      status: 'error',
+      summary: String(error.message || error).slice(0, 200),
+      extra: { slug: 'HIVEMIND_RECALL', error: error.message },
+    });
   }
 
   const scopedConnected = run.scratch.chosen_toolkit
     ? connected.filter((toolkit) => toolkit === run.scratch.chosen_toolkit)
     : connected;
-  const writeSlug = selectWriteSlug(searchedSlugs, scopedConnected.length ? scopedConnected : connected);
+  const readConnected = compoundSend
+    ? connected.filter((toolkit) => readApps.includes(toolkit) || toolkit === 'gmail')
+    : scopedConnected;
+  const writeConnected = compoundSend
+    ? connected.filter((toolkit) => writeApps.includes(toolkit))
+    : scopedConnected;
+  let writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : connected);
+  if (!writeSlug && writeApps.includes('gmail') && typeof composioSvc.searchToolsByIntent === 'function') {
+    const extraMail = await composioSvc.searchToolsByIntent(orgId, 'gmail create email draft', { toolkits: ['gmail'] }).catch(() => null);
+    for (const tool of extraMail?.tools || []) {
+      const slug = tool?._composio?.slug;
+      if (slug && !searchedSlugs.includes(slug)) searchedSlugs.push(slug);
+    }
+    writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : ['gmail']);
+  }
   const person = namedPersonQuery(message);
-  let readSlugs = [...new Set(selectReadSlugs(searchedSlugs, scopedConnected.length ? scopedConnected : connected))]
+  const repoHint = namedRepoQuery(message);
+  let readSlugs = [...new Set(selectReadSlugs(searchedSlugs, readConnected.length ? readConnected : connected))]
     .sort((left, right) => {
-      const rank = (slug) => (/FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE/i.test(slug) ? 0 : 1);
+      const rank = (slug) => {
+        if (/GITHUB_.*(LIST_REPO|SEARCH_REPO|GET_A_REPOSITORY|README)/i.test(slug)) return 0;
+        if (/FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE/i.test(slug)) return person ? 1 : 2;
+        return 3;
+      };
       return rank(left) - rank(right);
     });
   if (person) {
-    const focused = readSlugs.filter((slug) => /FETCH_EMAIL|GET_CONTACT|SEARCH_PEOPLE|LIST_MESSAGES/i.test(slug));
-    if (focused.length) readSlugs = focused;
+    const mail = searchedSlugs.find((slug) => /GMAIL_FETCH_EMAILS/i.test(slug) && slugMatchesConnected(slug, connected));
+    if (mail && !readSlugs.includes(mail)) readSlugs.push(mail);
   }
-  readSlugs = readSlugs.slice(0, 2);
+  readSlugs = readSlugs.slice(0, 4);
 
-  const readCalls = readSlugs.map((slug) => {
-    const args = /FETCH_EMAIL|SEARCH|CONTACT/i.test(slug) && person
-      ? { query: person, max_results: 5 }
-      : {};
-    return { slug, arguments: args };
-  });
+  const readCalls = readSlugs.map((slug) => ({
+    slug,
+    arguments: argumentsForReadSlug(slug, { person, repoHint }),
+  }));
+  const readResults = [];
 
-  if (readCalls.length && typeof composioSvc.executeToolsParallel === 'function') {
-    const results = await composioSvc.executeToolsParallel(orgId, readCalls, { sessionId: run.composioSessionId });
-    results.forEach((result, index) => {
-      const slug = readCalls[index].slug;
-      recordStep(run, {
-        kind: 'read', slug, executor: 'composio',
-        status: result?.successful ? 'completed' : 'error',
-      });
-      emit({ type: 'tool_result', name: slug, status: result?.successful ? 'completed' : 'error' });
-      const emails = emailsFromProviderData(result?.data);
-      if (emails.length) run.scratch.emails = [...new Set([...(run.scratch.emails || []), ...emails])];
+  const runOneRead = async (call) => {
+    beginTool(emit, run, call.slug, call.arguments);
+    let result = { successful: false, data: null, error: 'execute unavailable' };
+    try {
+      if (typeof composioSvc.executeTool === 'function') {
+        result = await composioSvc.executeTool(orgId, call.slug, call.arguments);
+      } else if (typeof composioSvc.executeToolsParallel === 'function') {
+        const [row] = await composioSvc.executeToolsParallel(orgId, [call], { sessionId: run.composioSessionId });
+        result = row || result;
+      }
+    } catch (error) {
+      result = { successful: false, data: null, error: String(error.message || error) };
+    }
+    finishTool(emit, run, call.slug, {
+      kind: 'read',
+      status: result?.successful ? 'completed' : 'error',
+      summary: result?.successful
+        ? (summarizeToolData(result.data, 160) || 'ok')
+        : String(result?.error || 'error').slice(0, 180),
+      extra: { executor: 'composio' },
+      args: call.arguments,
     });
-  } else if (readCalls.length && typeof composioSvc.executeTool === 'function') {
-    for (const call of readCalls) {
-      const result = await composioSvc.executeTool(orgId, call.slug, call.arguments);
-      recordStep(run, {
-        kind: 'read', slug: call.slug, executor: 'composio',
-        status: result?.successful ? 'completed' : 'error',
-      });
-      const emails = emailsFromProviderData(result?.data);
-      if (emails.length) run.scratch.emails = [...new Set([...(run.scratch.emails || []), ...emails])];
+    readResults.push({ slug: call.slug, ...result });
+    const emails = emailsFromProviderData(result?.data);
+    if (emails.length) run.scratch.emails = [...new Set([...(run.scratch.emails || []), ...emails])];
+    return result;
+  };
+
+  for (const call of readCalls) {
+    await runOneRead(call);
+  }
+
+  const listed = readResults.find((row) => row.successful && /GITHUB_.*(LIST|SEARCH).*REPO/i.test(row.slug));
+  if (listed?.data && typeof composioSvc.executeTool === 'function') {
+    const needle = (repoHint || 'hivemind').toLowerCase();
+    const rows = listed.data.items || listed.data.repositories || listed.data.repos || [];
+    const hit = (Array.isArray(rows) ? rows : []).find((item) => {
+      const name = `${item.full_name || ''} ${item.name || ''}`.toLowerCase();
+      return name.includes(needle);
+    });
+    const follow = searchedSlugs.find((slug) => /GITHUB_.*(GET_A_REPOSITORY_README|GET_README|GET_A_REPOSITORY$)/i.test(slug)
+      && slugMatchesConnected(slug, connected));
+    if (hit && follow && (hit.owner?.login || String(hit.full_name || '').includes('/'))) {
+      const owner = hit.owner?.login || String(hit.full_name).split('/')[0];
+      const repo = hit.name || String(hit.full_name).split('/')[1];
+      await runOneRead({ slug: follow, arguments: { owner, repo } });
     }
   }
 
@@ -463,11 +635,11 @@ export async function runDurableComposioAgent({
       || run.scratch.field_values?.recipient_email
       || run.scratch.field_values?.to
       || null;
-    const body = `Briefing from HIVEMIND for: ${String(message).slice(0, 400)}`;
+    const body = composeBriefing({ message, reads: readResults, recallText });
     const args = {
       recipient_email: to,
       to,
-      subject: 'HIVEMIND update',
+      subject: repoHint ? `${repoHint} repository briefing` : 'HIVEMIND repository briefing',
       body,
       _composio_slug: writeSlug,
     };
@@ -481,17 +653,27 @@ export async function runDurableComposioAgent({
         fields: [{ id: 'recipient_email', name: 'recipient_email', label: 'To', type: 'email', required: true }],
       }, 'Need a recipient to draft the message.');
     }
+    beginTool(emit, run, writeSlug, { to, subject: args.subject });
     const drafted = await createDraft(ctx, writeSlug, args);
     if (drafted?.id) {
       draftIds.push(drafted.id);
       pendingActions.push({ id: drafted.id, tool: writeSlug, args });
       run.status = 'waiting_approval';
       run.scratch.draft_id = drafted.id;
-      recordStep(run, { kind: 'write', slug: writeSlug, status: 'draft_created', draft_id: drafted.id, executor: 'composio' });
-      emit({ type: 'tool_result', name: writeSlug, status: 'draft_created' });
+      finishTool(emit, run, writeSlug, {
+        kind: 'write',
+        status: 'draft_created',
+        summary: `draft to ${to} — not sent`,
+        extra: { draft_id: drafted.id, executor: 'composio' },
+        args,
+      });
     } else {
       run.status = 'failed';
-      recordStep(run, { kind: 'write', slug: writeSlug, status: 'error', error: drafted?.error || 'draft failed' });
+      finishTool(emit, run, writeSlug, {
+        kind: 'write',
+        status: 'error',
+        summary: drafted?.error || 'draft failed',
+      });
     }
     await saveAgentRun({ prisma: db, run });
     return {

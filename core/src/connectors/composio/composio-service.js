@@ -352,11 +352,11 @@ function collectPrimaryToolSlugs(value, prefixes, output = new Set()) {
   return output;
 }
 
-async function executeSessionMeta(sessionId, slug, args) {
+async function executeSessionMeta(sessionId, slug, args, { timeoutMs = 6_500 } = {}) {
   const result = await _composioRequest('POST', `/api/v3/tool_router/session/${encodeURIComponent(sessionId)}/execute_meta`, {
     slug,
     arguments: { ...(args || {}), session_id: sessionId },
-  }, { retries: 0, timeoutMs: 6_500 });
+  }, { retries: 0, timeoutMs });
   if (result?.error) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error));
   return result;
 }
@@ -389,17 +389,21 @@ export async function getToolRouterSession(orgId, toolkits, { allowDisconnected 
     workbench: { enable: false },
   };
   let data;
+  let customToolkitAttached = false;
+  let customToolkitError = null;
   try {
     const { loadHivemindCustomToolkit, composioSessionExperimentalFromToolkit } = await import('./hivemind-custom-toolkit.js');
     const hivemindToolkit = await loadHivemindCustomToolkit();
     data = await _composioRequest('POST', '/api/v3/tool_router/session', {
       ...body,
       experimental: composioSessionExperimentalFromToolkit(hivemindToolkit),
-    }, { retries: 0, timeoutMs: 5_000 });
-  } catch {
+    }, { retries: 0, timeoutMs: 8_000 });
+    customToolkitAttached = true;
+  } catch (error) {
+    customToolkitError = String(error.message || error).slice(0, 240);
     data = await _composioRequest('POST', '/api/v3/tool_router/session', body, { retries: 0, timeoutMs: 5_000 });
   }
-  const value = { id: data?.session_id, toolkits: enabled, connectedAccounts };
+  const value = { id: data?.session_id, toolkits: enabled, connectedAccounts, customToolkitAttached, customToolkitError };
   if (!value.id) throw new Error('Composio Session did not return a session_id');
   TOOL_ROUTER_SESSION_CACHE.set(key, { at: Date.now(), value });
   return { ...value, cacheHit: false };
@@ -527,53 +531,143 @@ export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
   };
 }
 
+function searchMissesNamedToolkit(slugs, toolkits) {
+  const prefixes = (toolkits || [])
+    .map((toolkit) => String(toolkit || '').replace(/[^a-z0-9]/gi, '').toUpperCase())
+    .filter((prefix) => prefix && prefix !== 'HIVEMIND' && prefix !== 'LOCAL');
+  if (!prefixes.length) return false;
+  return prefixes.some((prefix) => !(slugs || []).some((slug) => String(slug).startsWith(`${prefix}_`)));
+}
+
+function collectRelatedToolSlugs(value, output = new Set()) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectRelatedToolSlugs(item, output);
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'related_tool_slugs' && Array.isArray(item)) {
+        for (const slug of item) {
+          if (typeof slug === 'string' && slug.trim()) output.add(slug);
+        }
+      } else {
+        collectRelatedToolSlugs(item, output);
+      }
+    }
+  }
+  return output;
+}
+
+function normalizeToolkitConnectionStatuses(raw) {
+  const out = {};
+  if (!raw) return out;
+  if (Array.isArray(raw)) {
+    for (const row of raw) {
+      const slug = String(row?.toolkit || row?.slug || row?.app || '').toLowerCase();
+      if (slug) out[slug] = row;
+    }
+    return out;
+  }
+  if (typeof raw === 'object') {
+    for (const [key, val] of Object.entries(raw)) {
+      out[String(key).toLowerCase()] = val;
+    }
+  }
+  return out;
+}
+
 export async function discoverSessionTools(orgId, { toolkits, useCases, searchPayload = null, allowDisconnected = false }) {
+  const { formatComposioSearch, extractWorkflowSessionId } = await import('./composio-search-formatter.js');
   const session = await getToolRouterSession(orgId, toolkits, { allowDisconnected });
   const normalizedCases = (useCases || []).map((item) => String(item || '').trim()).filter(Boolean);
-  if (!normalizedCases.length) throw new Error('Composio Session discovery requires a use-case');
-  const cacheKey = `${session.id}:${JSON.stringify(normalizedCases.map((item) => item.toLowerCase()))}`;
+  if (!normalizedCases.length && !searchPayload?.queries?.length) {
+    throw new Error('Composio Session discovery requires a use-case');
+  }
+  const legalPayload = searchPayload && Array.isArray(searchPayload.queries)
+    ? {
+      ...searchPayload,
+      search_strategy: searchPayload.search_strategy === 'tool_search' ? 'tool_search' : 'auto',
+      session: searchPayload.session?.generate_id === true || !searchPayload.session?.id
+        || /^trs_/i.test(String(searchPayload.session.id || searchPayload.session.generate_id || ''))
+        ? { generate_id: true }
+        : { id: String(searchPayload.session.id) },
+      queries: searchPayload.queries.map((query) => ({
+        use_case: String(query.use_case || '').trim(),
+        known_fields: typeof query.known_fields === 'string'
+          ? query.known_fields
+          : formatComposioSearch({
+            message: query.use_case,
+            destinationApps: toolkits,
+          }).queries[0].known_fields,
+      })),
+    }
+    : formatComposioSearch({
+      message: normalizedCases.join(' '),
+      destinationApps: toolkits,
+      generateId: true,
+    });
+  const cacheKey = `${session.id}:${JSON.stringify({
+    cases: normalizedCases.map((item) => item.toLowerCase()),
+    strategy: legalPayload.search_strategy,
+    fields: legalPayload.queries,
+  })}`;
   const cached = TOOL_ROUTER_DISCOVERY_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.at < SESSION_DISCOVERY_TTL_MS) {
     return { ...cached.value, sessionCacheHit: session.cacheHit, discoveryCacheHit: true };
   }
 
-  const searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', searchPayload || {
-    queries: normalizedCases.map((use_case) => ({ use_case, search_strategy: 'auto' })),
-    session: { id: session.id, generate_id: session.id },
-    model: process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'openai/gpt-oss-20b',
-  });
   const prefixes = session.toolkits.map((toolkit) => toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase());
-  const primary = collectPrimaryToolSlugs(searched?.data, prefixes);
-  const slugs = [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))].slice(0, 24);
+  let searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', legalPayload, { timeoutMs: 20_000 });
+  let primary = collectPrimaryToolSlugs(searched?.data, prefixes);
+  let slugs = [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))];
+  const workflowId = extractWorkflowSessionId(searched);
+  if (searchMissesNamedToolkit(slugs, session.toolkits) && legalPayload.search_strategy !== 'tool_search') {
+    const retryPayload = {
+      ...legalPayload,
+      search_strategy: 'tool_search',
+      session: workflowId ? { id: workflowId } : { generate_id: true },
+    };
+    searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', retryPayload, { timeoutMs: 20_000 });
+    primary = collectPrimaryToolSlugs(searched?.data, prefixes);
+    slugs = [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))];
+  }
+  slugs = slugs.slice(0, 24);
   if (!slugs.length) throw new Error('Composio Session found no matching tools');
-  const schemaResult = await executeSessionMeta(session.id, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: slugs });
-  const schemas = schemaResult?.data?.tool_schemas || {};
-  const tools = Object.entries(schemas).map(([slug, schema]) => ({
-    type: 'function',
-    function: {
-      name: `composio_${slug}`.toLowerCase(),
-      description: String(schema?.description || slug).slice(0, 1024),
-      parameters: schema?.input_schema || { type: 'object', properties: {} },
-    },
-    _composio: {
-      toolkit: String(schema?.toolkit || slug.split('_')[0]).toLowerCase(),
-      slug,
-      sessionId: session.id,
-    },
-  }));
-  const statuses = searched?.data?.toolkit_connection_statuses
+  const schemaResult = await executeSessionMeta(session.id, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: slugs }, { timeoutMs: 10_000 });
+  const schemas = schemaResult?.data?.tool_schemas || searched?.data?.tool_schemas || {};
+  const tools = slugs.map((slug) => {
+    const schema = schemas[slug] || {};
+    return {
+      type: 'function',
+      function: {
+        name: `composio_${slug}`.toLowerCase(),
+        description: String(schema?.description || slug).slice(0, 1024),
+        parameters: schema?.input_schema || { type: 'object', properties: {} },
+      },
+      _composio: {
+        toolkit: String(schema?.toolkit || slug.split('_')[0]).toLowerCase(),
+        slug,
+        sessionId: session.id,
+      },
+    };
+  });
+  const statuses = normalizeToolkitConnectionStatuses(
+    searched?.data?.toolkit_connection_statuses
     || searched?.data?.connection_statuses
     || searched?.toolkit_connection_statuses
-    || {};
+    || {},
+  );
   const value = {
     sessionId: session.id,
+    workflowSessionId: workflowId,
     tools,
     primaryToolSlugs: [...primary],
+    relatedToolSlugs: [...collectRelatedToolSlugs(searched?.data)],
     toolkitConnectionStatuses: statuses,
     recommendedPlanSteps: searched?.data?.recommended_plan_steps || [],
     nextStepsGuidance: searched?.data?.next_steps_guidance || null,
     searchedLogId: searched?.log_id || null,
     schemaLogId: schemaResult?.log_id || null,
+    customToolkitAttached: Boolean(session.customToolkitAttached),
+    searchStrategy: legalPayload.search_strategy,
   };
   TOOL_ROUTER_DISCOVERY_CACHE.set(cacheKey, { at: Date.now(), value });
   return { ...value, sessionCacheHit: session.cacheHit, discoveryCacheHit: false };

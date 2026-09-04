@@ -20,6 +20,7 @@ import {
   shouldStartFreshRun,
   summarizeToolData,
   resetDurableAgentMemory,
+  RETRY_CONNECT_VALUE,
   runDurableComposioAgent,
   saveAgentRun,
   selectReadSlugs,
@@ -55,6 +56,7 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
   assert.deepEqual(selectReadSlugs(slugs, ['gmail', 'github']), ['GMAIL_FETCH_EMAILS', 'GITHUB_LIST_REPOS', 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID']);
   assert.deepEqual(selectReadSlugs(['AGILITY_CMS_GET_LOGS', 'GMAIL_FETCH_EMAILS'], ['gmail']), ['GMAIL_FETCH_EMAILS']);
   assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');
+  assert.equal(selectWriteSlug(['YOUTUBE_CREATE_COMMENT_REPLY', 'GMAIL_CREATE_EMAIL_DRAFT'], ['youtube', 'gmail']), 'GMAIL_CREATE_EMAIL_DRAFT');
   assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
   assert.equal(namedPersonQuery('send a mail to rama about it'), 'rama');
   assert.equal(namedPersonQuery('send Rama about my linkedin profile'), 'Rama');
@@ -444,10 +446,14 @@ test('durable production path uses Session search and Session execution, never c
   });
   assert.equal(result.status, 'completed');
   assert.equal(sessionExecutions, 1);
-  assert.equal(searchPayload.queries[0].search_strategy, 'auto');
-  assert.deepEqual(searchPayload.queries[0].known_fields.destination_apps, ['gmail']);
+  assert.equal(searchPayload.search_strategy, 'auto');
+  assert.equal(searchPayload.session.generate_id, true);
+  assert.equal(typeof searchPayload.queries[0].known_fields, 'string');
+  assert.match(searchPayload.queries[0].known_fields, /gmail/);
+  assert.equal(searchPayload.queries[0].search_strategy, undefined);
   assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
   assert.deepEqual(result.run.scratch.recommended_plan_steps, [{ tool_slug: 'GMAIL_FETCH_EMAILS' }]);
+  assert.deepEqual(result.run.scratch.plan, ['GMAIL_FETCH_EMAILS']);
 });
 
 test('connect link uses the HIVEMIND callback origin so OAuth returns to chat', async () => {
@@ -537,6 +543,211 @@ test('composeBriefing drops ad-targeting JSON from the email body', () => {
   assert.match(body, /Amar Sai/);
   assert.equal(body.includes('adTargetingFacet'), false);
   assert.equal(body.includes('preferredLocale'), false);
+});
+
+test('company email uses recall and does not execute unrelated connected apps', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() {
+      return [
+        { toolkit: 'gmail', status: 'ACTIVE' },
+        { toolkit: 'youtube', status: 'ACTIVE' },
+        { toolkit: 'linkedin', status: 'ACTIVE' },
+      ];
+    },
+    async getToolRouterSession() { return { id: 'sess_co' }; },
+    async searchToolsByIntent(_org, _message, opts = {}) {
+      const tools = [
+        { _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
+        { _composio: { slug: 'GMAIL_CREATE_EMAIL_DRAFT', toolkit: 'gmail' } },
+        { _composio: { slug: 'YOUTUBE_LIST_CAPTION_TRACK', toolkit: 'youtube' } },
+        { _composio: { slug: 'YOUTUBE_CREATE_COMMENT_REPLY', toolkit: 'youtube' } },
+      ];
+      if (opts.toolkits) return { tools: tools.filter((tool) => opts.toolkits.includes(tool._composio.toolkit)) };
+      return { tools };
+    },
+    async generateToolInputs() { return {}; },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_FETCH_EMAILS') {
+          return { successful: true, data: { messages: [{ from: 'Rama <ramasantoshi1206@gmail.com>' }] } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send rama, about information about the company',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-company',
+      polishBriefing: async ({ body }) => body,
+      _tracedDispatch: async () => ({ memories: [{ title: 'Singulance', content: 'AI workforce inside memory' }] }),
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DRAFT-CO' }; } } },
+    },
+    composio,
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(executed.includes('YOUTUBE_LIST_CAPTION_TRACK'), false);
+  assert.equal(executed.includes('YOUTUBE_CREATE_COMMENT_REPLY'), false);
+  assert.ok(executed.includes('GMAIL_FETCH_EMAILS'));
+  assert.equal(created[0].toolName, 'GMAIL_CREATE_EMAIL_DRAFT');
+  assert.match(created[0].toolArgs.body, /AI workforce inside memory/);
+  assert.equal(created[0].toolArgs.body.includes('I could not retrieve'), false);
+});
+
+test('instagram DM searches first then pauses to connect when disconnected', async () => {
+  resetDurableAgentMemory();
+  let searched = false;
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession(_org, toolkits) {
+      assert.ok(toolkits.includes('instagram'));
+      return { id: 'trs_ig' };
+    },
+    async discoverSessionTools(_org, input) {
+      searched = true;
+      assert.equal(input.searchPayload.session.generate_id, true);
+      assert.equal(typeof input.searchPayload.queries[0].known_fields, 'string');
+      return {
+        sessionId: 'trs_ig',
+        primaryToolSlugs: ['INSTAGRAM_SEND_DIRECT_MESSAGE'],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { instagram: { has_active_connection: false } },
+        tools: [{ _composio: { slug: 'INSTAGRAM_SEND_DIRECT_MESSAGE', toolkit: 'instagram' } }],
+      };
+    },
+    async createConnectLink() { return { redirectUrl: 'https://connect.example/instagram' }; },
+    async executeToolsParallel() { throw new Error('must not execute disconnected instagram'); },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send an instagram dm to rama',
+    ctx: { orgId: 'o1', userId: 'u1', threadId: 'ig-connect' },
+    composio,
+  });
+  assert.equal(searched, true);
+  assert.equal(result.status, 'needs_input');
+  assert.equal(result.inputRequests[0].kind, 'connect_account');
+  assert.equal(result.inputRequests[0].toolkit, 'instagram');
+  assert.deepEqual(result.run.scratch.plan, ['INSTAGRAM_SEND_DIRECT_MESSAGE']);
+});
+
+test('walks primary HIVEMIND recall once then drafts, skipping extra hivemind slugs', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const native = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_hm' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_hm',
+        primaryToolSlugs: [
+          'LOCAL_HIVEMIND_RECALL',
+          'LOCAL_HIVEMIND_LIST_MEMORIES',
+          'LOCAL_HIVEMIND_LIST_PROJECTS',
+          'GMAIL_CREATE_EMAIL_DRAFT',
+        ],
+        relatedToolSlugs: ['GMAIL_SEND_DRAFT'],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'LOCAL_HIVEMIND_RECALL' } },
+          { _composio: { slug: 'LOCAL_HIVEMIND_LIST_MEMORIES' } },
+          { _composio: { slug: 'LOCAL_HIVEMIND_LIST_PROJECTS' } },
+          { _composio: { slug: 'GMAIL_CREATE_EMAIL_DRAFT' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map(() => ({ successful: true, data: {} }));
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'send rama, about information about the company',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-primary',
+      polishBriefing: async ({ body }) => body,
+      _tracedDispatch: async (name, args) => {
+        native.push(name);
+        assert.match(String(args.query || ''), /company/i);
+        return { memories: [{ title: 'Singulance', content: 'AI workforce inside memory' }] };
+      },
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'D1' }; } } },
+    },
+    composio,
+  });
+  assert.equal(native.includes('hivemind_recall'), true);
+  assert.equal(native.filter((name) => name === 'hivemind_recall').length, 1);
+  assert.equal(executed.length, 0);
+  assert.equal(result.status, 'needs_input');
+  assert.equal(result.inputRequests[0].kind, 'field_input');
+  assert.ok(result.run.scratch.recall_text.includes('AI workforce inside memory'));
+});
+
+test('resume after connect reuses plan and recall without searching again', async () => {
+  resetDurableAgentMemory();
+  let searches = 0;
+  let linkedinConnected = false;
+  const composio = {
+    async listConnectedAccounts() {
+      return linkedinConnected
+        ? [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'linkedin', status: 'ACTIVE' }]
+        : [{ toolkit: 'gmail', status: 'ACTIVE' }];
+    },
+    async getToolRouterSession() { return { id: 'trs_li' }; },
+    async discoverSessionTools() {
+      searches += 1;
+      return {
+        sessionId: 'trs_li',
+        primaryToolSlugs: ['LINKEDIN_GET_MY_INFO', 'GMAIL_CREATE_EMAIL_DRAFT'],
+        toolkitConnectionStatuses: {
+          linkedin: { has_active_connection: linkedinConnected },
+          gmail: { has_active_connection: true },
+        },
+        tools: [
+          { _composio: { slug: 'LINKEDIN_GET_MY_INFO', toolkit: 'linkedin' } },
+          { _composio: { slug: 'GMAIL_CREATE_EMAIL_DRAFT', toolkit: 'gmail' } },
+        ],
+      };
+    },
+    async createConnectLink() { return { redirectUrl: 'https://connect.example/li' }; },
+    async executeToolsParallel(_org, tools) {
+      return tools.map((tool) => {
+        if (tool.slug === 'LINKEDIN_GET_MY_INFO') {
+          return { successful: true, data: { localizedFirstName: 'Amar', localizedLastName: 'Sai', localizedHeadline: 'Founder' } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const ctx = {
+    orgId: 'o1', userId: 'u1', threadId: 'resume-li',
+    polishBriefing: async ({ body }) => body,
+    _tracedDispatch: async () => ({ memories: [] }),
+    prisma: { pendingWrite: { create: async () => ({ id: 'D' }) } },
+  };
+  const first = await runDurableComposioAgent({
+    message: 'send Rama about my linkedin profile',
+    ctx,
+    composio,
+  });
+  assert.equal(first.status, 'needs_input');
+  assert.equal(first.inputRequests[0].toolkit, 'linkedin');
+  assert.equal(searches, 1);
+  linkedinConnected = true;
+  const second = await runDurableComposioAgent({
+    message: 'send Rama about my linkedin profile',
+    ctx,
+    composio,
+    choice: { option_id: 'connected', value: RETRY_CONNECT_VALUE },
+  });
+  assert.equal(searches, 1);
+  assert.deepEqual(second.run.scratch.plan, ['LINKEDIN_GET_MY_INFO', 'GMAIL_CREATE_EMAIL_DRAFT']);
+  assert.notEqual(second.status, 'error');
 });
 
 test('emailsFromProviderData ignores example.com placeholders', () => {

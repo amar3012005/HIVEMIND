@@ -60,8 +60,9 @@ test('Tool Router caches session discovery and executes the selected provider re
     const request = {
       toolkits: ['gmail'], useCases: ['Fetch my latest email'],
       searchPayload: {
-        queries: [{ use_case: 'Fetch my latest email', known_fields: { destination_apps: ['gmail'] }, search_strategy: 'auto' }],
-        session: { id: 'trs_test', generate_id: 'trs_test' },
+        queries: [{ use_case: 'Fetch my latest email', known_fields: 'destination_apps:gmail' }],
+        session: { generate_id: true },
+        search_strategy: 'auto',
         model: 'test-model',
       },
     };
@@ -81,8 +82,11 @@ test('Tool Router caches session discovery and executes the selected provider re
     assert.equal(calls.filter((call) => call.body?.slug === 'COMPOSIO_GET_TOOL_SCHEMAS').length, 1);
     assert.equal(calls.filter((call) => call.body?.slug === 'COMPOSIO_MULTI_EXECUTE_TOOL').length, 1);
     const searchCall = calls.find((call) => call.body?.slug === 'COMPOSIO_SEARCH_TOOLS');
-    assert.equal(searchCall.body.arguments.queries[0].search_strategy, 'auto');
-    assert.deepEqual(searchCall.body.arguments.queries[0].known_fields.destination_apps, ['gmail']);
+    assert.equal(searchCall.body.arguments.search_strategy, 'auto');
+    assert.equal(searchCall.body.arguments.session.generate_id, true);
+    assert.equal(typeof searchCall.body.arguments.queries[0].known_fields, 'string');
+    assert.match(searchCall.body.arguments.queries[0].known_fields, /gmail/);
+    assert.equal(searchCall.body.arguments.queries[0].search_strategy, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;

@@ -1,35 +1,90 @@
 /**
- * Small, deterministic input contract for COMPOSIO_SEARCH_TOOLS.
+ * Legal COMPOSIO_SEARCH_TOOLS argument contract (Composio v3 meta-tool).
  *
- * This deliberately carries facts already known by the planner instead of
- * sending the provider a raw chat transcript.  It is data only: it cannot
- * select or execute a tool.
+ * queries[] additionalProperties: false — only `use_case` + `known_fields`.
+ * `known_fields` is a "k:v" string, never an object.
+ * `search_strategy` is top-level (`auto`, then `tool_search` on retry).
+ * `session.generate_id` is boolean true on first search; later calls use the
+ * workflow *word* returned by Composio, never a Tool Router `trs_*` id.
  */
 function compact(value, limit = 240) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
 }
 
-function namedRecipient(message) {
-  const match = compact(message).match(/\b(?:to|send|reply to|email)\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
-  return match?.[1] || null;
+const RECIPIENT_STOP = new Set([
+  'me', 'him', 'her', 'them', 'us', 'the', 'a', 'an', 'my', 'this', 'that', 'about',
+  'send', 'share', 'draft', 'mail', 'email', 'gmail', 'person', 'people', 'user',
+  'company', 'information', 'info', 'called',
+]);
+
+export function namedRecipient(message) {
+  const text = compact(message);
+  const called = text.match(/\bcalled\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
+  if (called?.[1] && !RECIPIENT_STOP.has(called[1].toLowerCase())) return called[1];
+  const match = text.match(/\b(?:to|send|reply to|email)\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
+  if (match?.[1] && !RECIPIENT_STOP.has(match[1].toLowerCase())) return match[1];
+  return null;
 }
 
-export function formatComposioSearch({ message, sessionId, destinationApps = [], model } = {}) {
-  const useCase = compact(message, 1_500);
-  const recipient = namedRecipient(useCase);
-  const known_fields = {
-    product_context: 'HIVEMIND is the company brain. Native memory and profile tools execute locally; Composio is only for connected app capabilities.',
-    ...(recipient ? { recipient_name: recipient } : {}),
-    ...(destinationApps.length ? { destination_apps: [...new Set(destinationApps.map((app) => compact(app, 60).toLowerCase()).filter(Boolean))] } : {}),
-  };
+export function formatKnownFields({ recipient, destinationApps = [] } = {}) {
+  const parts = [
+    'product_context:HIVEMIND is the company brain. Native memory and profile tools execute locally; Composio is only for connected app capabilities.',
+  ];
+  if (recipient) parts.push(`recipient_name:${compact(recipient, 60)}`);
+  const apps = [...new Set((destinationApps || []).map((app) => compact(app, 60).toLowerCase()).filter(Boolean))];
+  if (apps.length) parts.push(`destination_apps:${apps.join(',')}`);
+  return parts.join('; ');
+}
+
+export function formatUseCase({ message, destinationApps = [] } = {}) {
+  const raw = compact(message, 800);
+  const recipient = namedRecipient(raw);
+  const dest = [...new Set((destinationApps || []).map((app) => compact(app, 60).toLowerCase()).filter(Boolean))];
+  return [
+    'HIVEMIND is the company brain and memory engine.',
+    raw,
+    recipient ? `The named recipient is ${recipient}. Draft only — do not send.` : 'Draft any outbound message; do not send.',
+    dest.length ? `Preferred destination app(s): ${dest.join(', ')}.` : '',
+    'Use HIVEMIND recall/profile for company facts before any app write.',
+  ].filter(Boolean).join(' ').slice(0, 1_500);
+}
+
+export function isToolRouterSessionId(value) {
+  return /^trs_/i.test(String(value || '').trim());
+}
+
+export function formatComposioSearch({
+  message,
+  sessionId,
+  destinationApps = [],
+  model,
+  generateId = true,
+  searchStrategy = 'auto',
+} = {}) {
+  const recipient = namedRecipient(message);
+  const workflowId = String(sessionId || '').trim();
+  const session = (!generateId && workflowId && !isToolRouterSessionId(workflowId))
+    ? { id: workflowId }
+    : { generate_id: true };
   return {
     queries: [{
-      use_case: useCase,
-      known_fields,
-      search_strategy: 'auto',
-      ...(destinationApps.length === 1 ? { destination_app: known_fields.destination_apps[0] } : {}),
+      use_case: formatUseCase({ message, destinationApps }),
+      known_fields: formatKnownFields({ recipient, destinationApps }),
     }],
-    session: { id: sessionId, generate_id: sessionId },
+    session,
     model: model || process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'openai/gpt-oss-20b',
+    search_strategy: searchStrategy === 'tool_search' ? 'tool_search' : 'auto',
   };
+}
+
+export function extractWorkflowSessionId(searched) {
+  const id = searched?.data?.session?.id
+    || searched?.data?.session_id
+    || searched?.session?.id
+    || searched?.data?.results?.[0]?.session_id
+    || null;
+  if (!id) return null;
+  const value = String(id).trim();
+  if (!value || isToolRouterSessionId(value)) return null;
+  return value;
 }

@@ -92,15 +92,57 @@ export function governReadSlugs(slugs = [], { readApps = [], person = '', writeA
   return [...byToolkit.values(), ...(mail && !byToolkit.has(toolkitFromSlug(mail)) ? [mail] : [])].slice(0, 5);
 }
 
+export function isNativeHivemindSlug(slug) {
+  const value = String(slug || '');
+  if (/^(LOCAL_)?HIVEMIND_/i.test(value)) return true;
+  const native = nativeNameFromComposioSlug(value);
+  return native.startsWith('hivemind_') || native === 'get_user_profile';
+}
+
+export function isWriteSlug(slug) {
+  const t = tokens(slug);
+  if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
+  if (t.includes('draft') && t.includes('create')) return true;
+  if (t.includes('reply') || t.includes('comment')) return false;
+  return t.some((x) => WRITE_SEND_TOKENS.has(x));
+}
+
 export function selectWriteSlug(slugs = [], connected = []) {
   const candidates = (slugs || []).filter((slug) => {
-    if (connected.length && !slugMatchesConnected(slug, connected)) return false;
+    if (connected.length && !slugMatchesConnected(slug, connected) && !isNativeHivemindSlug(slug)) return false;
+    return isWriteSlug(slug);
+  });
+  const drafts = candidates.filter((slug) => {
     const t = tokens(slug);
-    if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
-    if (t.some((x) => WRITE_SEND_TOKENS.has(x))) return true;
     return t.includes('draft') && t.includes('create');
   });
-  return candidates[0] || null;
+  return drafts[0] || candidates[0] || null;
+}
+
+export function sessionToolkitsFor(connected = [], candidates = []) {
+  return [...new Set([...connected, ...candidates].map((item) => String(item || '').toLowerCase()).filter(Boolean))]
+    .filter((toolkit) => toolkit !== 'hivemind' && toolkit !== 'local' && toolkit !== 'composio')
+    .slice(0, 8);
+}
+
+export function toolkitHasActiveConnection(toolkit, connected = [], statuses = {}) {
+  const key = String(toolkit || '').toLowerCase();
+  if (!key || key === 'local' || key === 'hivemind' || key === 'composio') return true;
+  if ((connected || []).some((item) => String(item).toLowerCase() === key)) return true;
+  const row = statuses[key];
+  if (row == null) return false;
+  if (typeof row === 'boolean') return row;
+  return row.has_active_connection === true
+    || row.connected === true
+    || String(row.status || '').toUpperCase() === 'ACTIVE';
+}
+
+export function recallQueryFrom(message) {
+  const text = String(message || '');
+  if (/\b(company|hivemind|singulance)\b/i.test(text) && /\b(send|email|mail|share|draft|about)\b/i.test(text)) {
+    return 'company information';
+  }
+  return text;
 }
 
 export function emailsFromProviderData(data) {
@@ -170,6 +212,7 @@ export const TOOLKIT_ALIASES = Object.freeze({
   googledrive: ['googledrive', 'google drive', 'gdrive', 'drive'],
   youtube: ['youtube', 'yt', 'youtubedata'],
   linkedin: ['linkedin', 'linked in'],
+  instagram: ['instagram', 'insta', 'ig'],
 });
 
 export function appsMatchingRequest(message, toolkits = []) {
@@ -300,13 +343,17 @@ export function composeBriefing({ message, reads = [], recallText = '', person =
   const relevant = (reads || []).filter((read) => {
     if (!read?.successful) return false;
     if (isRecipientLookupSlug(read.slug)) return false;
+    if (isNativeHivemindSlug(read.slug)) return false;
     if (Array.isArray(factToolkits) && factToolkits.length) {
       return factToolkits.includes(toolkitFromSlug(read.slug));
     }
     return true;
   });
-  const facts = relevant.map((read) => summarizeToolData(read.data, 1200))
+  const providerFacts = relevant.map((read) => summarizeToolData(read.data, 1200))
     .filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text));
+  const recallFacts = humanRecallText(recallData)
+    || (recallText && !isNoiseText(recallText) && !/^\s*\{/.test(recallText) ? String(recallText).trim() : '');
+  const facts = providerFacts.length ? providerFacts : (recallFacts ? [recallFacts] : []);
   const lines = [];
   const who = person ? person[0].toUpperCase() + person.slice(1) : 'there';
   lines.push(`Hi ${who},`);
@@ -536,7 +583,8 @@ export function connectCallbackUrl(toolkit, origin) {
 }
 
 function pause(run, inputRequest, summary) {
-  const request = { ...inputRequest, step_index: 0, step_id: 'step-1' };
+  const stepIndex = Number.isFinite(Number(run.scratch?.step_index)) ? Number(run.scratch.step_index) : 0;
+  const request = { ...inputRequest, step_index: stepIndex, step_id: `step-${stepIndex + 1}` };
   return {
     status: 'needs_input',
     run,
@@ -603,15 +651,11 @@ export async function runDurableComposioAgent({
   const connected = [...new Set(accounts.filter((row) => row.status === 'ACTIVE').map((row) => row.toolkit).filter(Boolean))];
   run.scratch.connected_toolkits = connected;
 
-  // The durable path never enumerates Composio's REST catalogue.  Start with
-  // explicitly named apps plus active connections, pause for OAuth when a
-  // requested app is unavailable, then let the session meta-tool search only
-  // that bounded set.  This prevents unrelated tools leaking into a turn.
-  let candidates = appsMatchingRequest(message, connected);
-  const impliedWrites = writeToolkitsIn(message, [...candidates, ...connected]);
-  candidates = [...new Set([...candidates, ...impliedWrites])];
-  if (run.scratch.chosen_toolkit) candidates = [run.scratch.chosen_toolkit];
-  if (!candidates.length && connected.length === 1) candidates = connected;
+  let namedApps = appsMatchingRequest(message, [...connected, ...Object.keys(TOOLKIT_ALIASES)]);
+  const impliedWrites = writeToolkitsIn(message, [...namedApps, ...connected]);
+  namedApps = [...new Set([...namedApps, ...impliedWrites])];
+  if (run.scratch.chosen_toolkit) namedApps = [run.scratch.chosen_toolkit];
+  let candidates = namedApps.length ? namedApps : connected.slice();
   if (!candidates.length && !connected.length) {
     run.status = 'waiting_user';
     await saveAgentRun({ prisma: db, run });
@@ -625,16 +669,18 @@ export async function runDurableComposioAgent({
   const compoundSend = isReadThenWrite(message, candidates);
   const writeApps = compoundSend ? writeToolkitsIn(message, candidates) : [];
   const readApps = compoundSend ? candidates.filter((toolkit) => !writeApps.includes(toolkit)) : candidates;
-  if (!run.scratch.chosen_toolkit && candidates.length > 1 && !compoundSend) {
+  if (!run.scratch.chosen_toolkit && namedApps.length > 1 && !compoundSend) {
     run.status = 'waiting_user';
-    recordStep(run, { kind: 'clarify', toolkits: candidates, tool: 'clarify_apps', status: 'waiting_user' });
+    recordStep(run, { kind: 'clarify', toolkits: namedApps, tool: 'clarify_apps', status: 'waiting_user' });
     await saveAgentRun({ prisma: db, run });
-    return pause(run, clarifyAppsRequest(candidates), `Do you mean ${candidates.map(displayAppName).join(' or ')}?`);
+    return pause(run, clarifyAppsRequest(namedApps), `Do you mean ${namedApps.map(displayAppName).join(' or ')}?`);
   }
 
-  const needed = candidates.filter((toolkit) => toolkit && !connected.includes(toolkit));
-  if (needed.length >= 1) {
-    const toolkit = needed.find((item) => !writeApps.includes(item)) || needed[0];
+  const sessionToolkits = sessionToolkitsFor(connected, candidates);
+  const resumingPlan = Boolean(picked) && Array.isArray(run.scratch.plan) && run.scratch.plan.length;
+  const person = namedPersonQuery(message);
+
+  const pauseForAppConnect = async (toolkit) => {
     let redirectUrl = null;
     let connectError = null;
     if (typeof composioSvc.createConnectLink === 'function') {
@@ -657,120 +703,148 @@ export async function runDurableComposioAgent({
     return pause(run, connectAccountRequest(toolkit, redirectUrl), connectError
       ? `${displayAppName(toolkit)} cannot be connected for this workspace yet.`
       : `Connect ${displayAppName(toolkit)} to continue.`);
-  }
+  };
 
-  if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function') {
+  if (!resumingPlan) {
+    if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function') {
+      try {
+        const session = await composioSvc.getToolRouterSession(orgId, sessionToolkits, { allowDisconnected: true });
+        run.composioSessionId = session.id || null;
+        run.scratch.custom_toolkit_attached = session.customToolkitAttached;
+        if (session.customToolkitError) run.scratch.custom_toolkit_error = session.customToolkitError;
+      } catch (error) {
+        run.scratch.session_error = String(error.message || error).slice(0, 240);
+      }
+    }
+    beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: message });
+    let discovery;
     try {
-      const session = await composioSvc.getToolRouterSession(orgId, candidates.slice(0, 8), { allowDisconnected: true });
-      run.composioSessionId = session.id || null;
+      if (run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
+        discovery = await composioSvc.discoverSessionTools(orgId, {
+          toolkits: sessionToolkits,
+          useCases: [message],
+          allowDisconnected: true,
+          searchPayload: formatComposioSearch({
+            message,
+            sessionId: run.scratch.workflow_session_id,
+            destinationApps: sessionToolkits,
+            generateId: !run.scratch.workflow_session_id,
+          }),
+        });
+        discovery.fromSession = true;
+      } else if (composio && typeof composioSvc.searchToolsByIntent === 'function') {
+        const legacy = await composioSvc.searchToolsByIntent(orgId, message);
+        discovery = {
+          sessionId: run.composioSessionId,
+          tools: legacy.tools || [],
+          primaryToolSlugs: (legacy.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean),
+          relatedToolSlugs: [],
+          toolkitConnectionStatuses: {},
+          fromSession: false,
+        };
+      } else {
+        throw new Error('session_discovery_unavailable');
+      }
     } catch (error) {
-      run.scratch.session_error = String(error.message || error).slice(0, 240);
+      run.status = 'failed';
+      run.scratch.search_error = String(error.message || error).slice(0, 240);
+      finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'error', summary: run.scratch.search_error, extra: { executor: 'composio' } });
+      await saveAgentRun({ prisma: db, run });
+      return { status: 'error', run, summary: 'Composio could not discover a safe capability for this request. Nothing was executed.', steps: run.steps, draftIds: [], pendingActions: [] };
     }
-  }
-  beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: message });
-  let discovery;
-  try {
-    if (run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
-      discovery = await composioSvc.discoverSessionTools(orgId, {
-        toolkits: candidates.slice(0, 8),
-        useCases: [message],
-        allowDisconnected: true,
-        searchPayload: formatComposioSearch({ message, sessionId: run.composioSessionId, destinationApps: candidates }),
-      });
-    } else if (composio && typeof composioSvc.searchToolsByIntent === 'function') {
-      // Isolated unit adapters written before Sessions are intentionally
-      // supported here. This path is unreachable in production because the
-      // service module always exports discoverSessionTools.
-      const legacy = await composioSvc.searchToolsByIntent(orgId, message);
-      discovery = {
-        sessionId: run.composioSessionId,
-        tools: legacy.tools || [],
-        primaryToolSlugs: (legacy.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean),
-        toolkitConnectionStatuses: {},
-      };
-    } else {
-      throw new Error('session_discovery_unavailable');
-    }
-  } catch (error) {
-    run.status = 'failed';
-    run.scratch.search_error = String(error.message || error).slice(0, 240);
-    finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'error', summary: run.scratch.search_error, extra: { executor: 'composio' } });
-    await saveAgentRun({ prisma: db, run });
-    return { status: 'error', run, summary: 'Composio could not discover a safe capability for this request. Nothing was executed.', steps: run.steps, draftIds: [], pendingActions: [] };
-  }
-  let searchedSlugs = (discovery.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
-  run.composioSessionId = discovery.sessionId || run.composioSessionId;
-  run.scratch.searched_slugs = searchedSlugs.slice(0, 48);
-  run.scratch.primary_tool_slugs = (discovery.primaryToolSlugs || searchedSlugs).slice(0, 48);
-  run.scratch.candidate_apps = candidates;
-  run.scratch.toolkit_connection_statuses = discovery.toolkitConnectionStatuses || {};
-  run.scratch.recommended_plan_steps = discovery.recommendedPlanSteps || [];
-  run.scratch.next_steps_guidance = discovery.nextStepsGuidance || null;
-  finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
-    kind: 'search', status: 'completed',
-    summary: uniqueToolkitsFromSlugs(searchedSlugs).map(displayAppName).join(', ') || 'no tools',
-    extra: { slugs: searchedSlugs.slice(0, 12), executor: 'composio', session_id: run.composioSessionId },
-    args: { query: message },
-  });
-
-
-  let recallText = '';
-  let recallData = null;
-  try {
-    const recallQuery = message;
-    beginTool(emit, run, 'hivemind_recall', { query: recallQuery });
-    const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
-    let recall;
-    if (typeof dispatch === 'function') {
-      const data = await dispatch('hivemind_recall', { query: recallQuery, query_original: message }, ctx);
-      recall = { successful: !data?.error, data, error: data?.error || null };
-    } else {
-      recall = await executeHivemindCustomTool('HIVEMIND_RECALL', {
-        query: recallQuery,
-        query_original: message,
-        _structured_intent: true,
-      }, ctx);
-    }
-    recallData = recall?.data || null;
-    recallText = humanRecallText(recallData) || '';
-    finishTool(emit, run, 'hivemind_recall', {
-      kind: 'native',
-      status: recall.successful ? 'completed' : 'error',
-      summary: recall.successful ? (recallText.slice(0, 160) || 'recall ok') : String(recall.error || 'error').slice(0, 160),
-      extra: { executor: 'hivemind', slug: 'HIVEMIND_RECALL' },
-    });
-    if (recall.successful) run.scratch.recall = true;
-  } catch (error) {
-    finishTool(emit, run, 'hivemind_recall', {
-      kind: 'native',
-      status: 'error',
-      summary: String(error.message || error).slice(0, 200),
-      extra: { slug: 'HIVEMIND_RECALL', error: error.message },
+    let searchedSlugs = (discovery.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
+    const primary = (discovery.primaryToolSlugs?.length ? discovery.primaryToolSlugs : searchedSlugs).filter(Boolean);
+    run.composioSessionId = discovery.sessionId || run.composioSessionId;
+    if (discovery.workflowSessionId) run.scratch.workflow_session_id = discovery.workflowSessionId;
+    run.scratch.searched_slugs = searchedSlugs.slice(0, 48);
+    run.scratch.primary_tool_slugs = primary.slice(0, 48);
+    run.scratch.related_tool_slugs = (discovery.relatedToolSlugs || []).slice(0, 24);
+    run.scratch.candidate_apps = candidates;
+    run.scratch.toolkit_connection_statuses = discovery.toolkitConnectionStatuses || {};
+    run.scratch.recommended_plan_steps = discovery.recommendedPlanSteps || [];
+    run.scratch.next_steps_guidance = discovery.nextStepsGuidance || null;
+    run.scratch.from_session = Boolean(discovery.fromSession);
+    const scoped = discovery.fromSession
+      ? primary
+      : primary.filter((slug) => isNativeHivemindSlug(slug) || candidates.includes(toolkitFromSlug(slug)));
+    run.scratch.plan = (scoped.length ? scoped : primary).slice(0, 16);
+    run.scratch.step_index = 0;
+    finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
+      kind: 'search', status: 'completed',
+      summary: uniqueToolkitsFromSlugs(run.scratch.plan).map(displayAppName).join(', ') || 'no tools',
+      extra: { slugs: run.scratch.plan.slice(0, 12), executor: 'composio', session_id: run.composioSessionId },
+      args: { query: message },
     });
   }
 
-  const scopedConnected = run.scratch.chosen_toolkit
-    ? connected.filter((toolkit) => toolkit === run.scratch.chosen_toolkit)
-    : connected;
-  const readConnected = compoundSend
-    ? connected.filter((toolkit) => readApps.includes(toolkit) || toolkit === 'gmail')
-    : scopedConnected;
-  const writeConnected = compoundSend
+  const statuses = run.scratch.toolkit_connection_statuses || {};
+  const plan = Array.isArray(run.scratch.plan) ? run.scratch.plan : [];
+  const writeConnected = writeApps.length
     ? connected.filter((toolkit) => writeApps.includes(toolkit))
-    : scopedConnected;
-  let writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : connected);
-  const person = namedPersonQuery(message);
+    : connected;
+  let writeSlug = selectWriteSlug(
+    [...plan, ...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || [])],
+    writeConnected.length ? writeConnected : connected,
+  );
+  let recallText = run.scratch.recall_text || '';
+  let recallData = run.scratch.recall_data || null;
+  const readResults = Array.isArray(run.scratch.read_results) ? [...run.scratch.read_results] : [];
   const evidenceText = (slug) => {
     const toolkit = toolkitFromSlug(slug);
-    const rows = readResults.filter((row) => row.successful && (!toolkit || toolkitFromSlug(row.slug) === toolkit));
-    return [message, ...rows.map((row) => summarizeToolData(row.data, 800))].join('\n\n');
+    const rows = readResults.filter((row) => row.successful && (!toolkit || toolkitFromSlug(row.slug) === toolkit || isNativeHivemindSlug(row.slug)));
+    return [message, recallText, ...rows.map((row) => summarizeToolData(row.data, 800))].filter(Boolean).join('\n\n');
   };
-  const readSlugs = governReadSlugs(searchedSlugs, {
-    readApps: readConnected.length ? readConnected : connected,
-    person,
-    writeApps,
-  });
-  const readResults = [];
+
+  const persistProgress = async () => {
+    run.scratch.recall_text = String(recallText || '').slice(0, 4000);
+    if (recallData && typeof recallData === 'object') {
+      run.scratch.recall_data = {
+        memories: Array.isArray(recallData.memories) ? recallData.memories.slice(0, 5) : [],
+      };
+    }
+    run.scratch.read_results = readResults.slice(-12).map((row) => ({
+      slug: row.slug,
+      successful: row.successful,
+      data: row.data,
+      error: row.error || null,
+    }));
+    await saveAgentRun({ prisma: db, run });
+  };
+
+  const runOneNative = async (slug) => {
+    const native = nativeNameFromComposioSlug(slug);
+    const args = native === 'hivemind_recall' || native === 'hivemind_list_memories'
+      ? { query: recallQueryFrom(message), query_original: message }
+      : {};
+    beginTool(emit, run, slug, args);
+    let result = { successful: false, data: null, error: 'native unavailable' };
+    try {
+      const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
+      if (native === 'hivemind_recall' && typeof dispatch === 'function') {
+        const data = await dispatch('hivemind_recall', args, ctx);
+        result = { successful: !data?.error, data, error: data?.error || null };
+      } else {
+        result = await executeHivemindCustomTool(slug, args, ctx);
+      }
+    } catch (error) {
+      result = { successful: false, data: null, error: String(error.message || error) };
+    }
+    const text = humanRecallText(result.data) || (result.successful ? summarizeToolData(result.data, 400) : '');
+    if (text && !isNoiseText(text)) {
+      recallText = recallText || text;
+      recallData = result.data || recallData;
+      run.scratch.recall = true;
+    }
+    finishTool(emit, run, slug, {
+      kind: 'native',
+      status: result.successful ? 'completed' : 'error',
+      summary: result.successful ? (text.slice(0, 160) || 'ok') : String(result.error || 'error').slice(0, 160),
+      extra: { executor: 'hivemind', slug },
+      args,
+    });
+    readResults.push({ slug, ...result });
+    return result;
+  };
 
   const runOneRead = async (call) => {
     let args = { ...(call.arguments || {}) };
@@ -795,8 +869,6 @@ export async function runDurableComposioAgent({
         });
         result = row || result;
       } else if (typeof composioSvc.executeTool === 'function') {
-        // Test adapters without Sessions retain a read-only direct path. The
-        // production durable flow above requires a session before this point.
         result = await composioSvc.executeTool(orgId, call.slug, args);
       }
     } catch (error) {
@@ -818,48 +890,71 @@ export async function runDurableComposioAgent({
     return result;
   };
 
-  for (const slug of readSlugs) {
+  const startAt = Number.isFinite(Number(run.scratch.step_index)) ? Number(run.scratch.step_index) : 0;
+  for (let index = startAt; index < plan.length; index += 1) {
+    const slug = plan[index];
+    run.scratch.step_index = index;
+    const already = (run.steps || []).some((step) => (step.slug === slug || step.tool === slug)
+      && ['completed', 'draft_created', 'skipped'].includes(step.status));
+    if (already) continue;
+    if (tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x))) continue;
+    if (isNativeHivemindSlug(slug)) {
+      if (recallText && !/GET_MEMORY/i.test(slug)) continue;
+      await runOneNative(slug);
+      await persistProgress();
+      continue;
+    }
+    if (isWriteSlug(slug)) {
+      writeSlug = selectWriteSlug([slug, writeSlug].filter(Boolean), writeConnected.length ? writeConnected : connected) || writeSlug || slug;
+      continue;
+    }
+    const toolkit = toolkitFromSlug(slug);
+    if (toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses)) {
+      await persistProgress();
+      return pauseForAppConnect(toolkit);
+    }
+    if (isRecipientLookupSlug(slug) && (run.scratch.emails || []).length) continue;
     await runOneRead({ slug, arguments: argumentsForReadSlug(slug, { person }) });
+    await persistProgress();
   }
 
-  const unused = selectReadSlugs(searchedSlugs, (readApps.length ? readApps : readConnected.length ? readConnected : connected))
+  const followUps = (plan || [])
+    .filter((slug) => isFollowUpReadSlug(slug))
     .filter((slug) => !readResults.some((row) => row.slug === slug))
-    .filter((slug) => !writeApps.includes(toolkitFromSlug(slug)))
-    .filter((slug) => {
-      if (!isFollowUpReadSlug(slug)) return false;
-      if (/_ITEMS|README/i.test(slug)) return true;
-      return !toolkitHasUsableFacts(readResults, toolkitFromSlug(slug));
-    });
-  for (const slug of unused.slice(0, 2)) {
+    .filter((slug) => !isWriteSlug(slug));
+  for (const slug of followUps.slice(0, 2)) {
+    const toolkit = toolkitFromSlug(slug);
+    if (toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses)) continue;
     await runOneRead({ slug, arguments: {} });
   }
 
-  // A follow-up search is intentionally omitted. The current Session's
-  // primary result is the complete authority for this run; another discovery
-  // needs a new user turn rather than a surprise catalogue expansion.
+  if (writeSlug && !recallText) {
+    const preview = composeBriefing({
+      message,
+      reads: readResults,
+      recallText,
+      person,
+      recallData,
+      factToolkits: readApps,
+    });
+    if (/could not retrieve/i.test(preview)) await runOneNative('HIVEMIND_RECALL');
+  }
+
+  if (writeSlug && person && !(run.scratch.emails || []).length) {
+    const lookup = [...plan, ...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || [])]
+      .find((slug) => isRecipientLookupSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses));
+    if (lookup && !readResults.some((row) => row.slug === lookup)) {
+      await runOneRead({ slug: lookup, arguments: argumentsForReadSlug(lookup, { person }) });
+    }
+  }
 
   const draftIds = [];
   const pendingActions = [];
   if (writeSlug) {
     const toolkit = toolkitFromSlug(writeSlug);
-    if (toolkit && !connected.includes(toolkit)) {
-      let redirectUrl = null;
-      if (typeof composioSvc.createConnectLink === 'function') {
-        try {
-          const link = await composioSvc.createConnectLink(toolkit, orgId, {
-            callbackUrl: ctx.composioCallbackUrl
-              || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin)
-              || undefined,
-            toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
-          });
-          redirectUrl = link?.redirectUrl || link?.redirect_url || null;
-        } catch { /* Connect banner still renders */ }
-      }
-      run.status = 'waiting_connection';
-      run.scratch.needs_toolkit = toolkit;
-      recordStep(run, { kind: 'connect', toolkit, status: 'waiting_connection' });
-      await saveAgentRun({ prisma: db, run });
-      return pause(run, connectAccountRequest(toolkit, redirectUrl), `Connect ${displayAppName(toolkit)} to continue.`);
+    if (toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses)) {
+      await persistProgress();
+      return pauseForAppConnect(toolkit);
     }
     const to = pickRecipientEmail(run.scratch.emails || [], person)
       || run.scratch.field_values?.recipient_email

@@ -36,6 +36,9 @@ test('custom toolkit registers every grouped HIVEMIND chat tool with native sche
   assert.ok(recall.input_schema.required.includes('query'));
   assert.equal(recall.preload, true);
   assert.equal(toolkit.tools.length, grouped.size);
+  assert.match(toolkit.description, /company brain/i);
+  assert.match(recall.description, /PRIMARY company-brain retrieval/i);
+  assert.match(recall.description, /hivemind_recall native HIVEMIND tool/);
 });
 
 test('group filter matches use_tools:false selectedGroups', () => {

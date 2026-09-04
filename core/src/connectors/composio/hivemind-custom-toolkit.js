@@ -9,6 +9,9 @@ import { HIVEMIND_TOOL_GROUPS, WRITE_TOOLS, hivemindGroupFor } from '../../agent
 
 export const HIVEMIND_COMPOSIO_TOOLKIT_SLUG = 'HIVEMIND';
 
+export const HIVEMIND_COMPOSIO_TOOLKIT_DESCRIPTION =
+  'HIVEMIND is the tenant company brain and memory engine. Use it to recall company facts, org/user profile, stored memories, and projects BEFORE drafting or sending email or sharing in other apps. No OAuth. These tools run in-process on HIVEMIND, not on Composio cloud. Prefer HIVEMIND recall/profile for company information instead of YouTube, LinkedIn, GitHub, or Gmail search unless the user named those apps.';
+
 const PRELOAD_NATIVE = new Set([
   'hivemind_recall',
   'hivemind_list_projects',
@@ -16,6 +19,27 @@ const PRELOAD_NATIVE = new Set([
   'hivemind_get_memory',
   'hivemind_list_memories',
 ]);
+
+/** Composio search-planner hints prepended to native TOOL_SCHEMAS descriptions. */
+const COMPOSIO_TOOL_HINTS = {
+  hivemind_recall:
+    'PRIMARY company-brain retrieval. Call this FIRST when the user wants to send, share, draft, or brief someone about the company, products, mission, org facts, or anything stored in HIVEMIND memory. The query is the information need (for example "company information"), not the email send itself.',
+  get_user_profile:
+    'Return the current user and organization profile: company name, mission, role, ICP, location. Use when drafting a message about the company or the sender.',
+  hivemind_get_memory:
+    'Fetch the full text of one HIVEMIND memory after recall returned an id. Use to expand a company-fact snippet before putting it in an email draft.',
+  hivemind_list_memories:
+    'List stored HIVEMIND memories about a topic (company, project, person). Use when recall needs a broader inventory of company facts.',
+  hivemind_list_projects:
+    'List HIVEMIND projects (sub-brains) the user can access. Use when company information may live in a named project.',
+};
+
+export function composioFacingDescription(native, schemaDescription) {
+  const hint = COMPOSIO_TOOL_HINTS[native];
+  const body = String(schemaDescription || native).trim();
+  if (!hint) return body.slice(0, 4096);
+  return `${hint}\n\n${body}`.slice(0, 4096);
+}
 
 async function loadToolSchemas() {
   const { TOOL_SCHEMAS } = await import('../../agent/tool-registry.js');
@@ -44,7 +68,7 @@ export function buildHivemindCustomToolkit({ selectedGroups = null, schemas = []
       slug: composioSlugFromNativeName(native),
       original_slug: native,
       name: native.replace(/_/g, ' '),
-      description: String(schema.function.description || native).slice(0, 4096),
+      description: composioFacingDescription(native, schema.function.description),
       group,
       read_only: !WRITE_TOOLS.has(native),
       preload: PRELOAD_NATIVE.has(native),
@@ -55,7 +79,7 @@ export function buildHivemindCustomToolkit({ selectedGroups = null, schemas = []
   return {
     slug: HIVEMIND_COMPOSIO_TOOLKIT_SLUG,
     name: 'HIVEMIND',
-    description: 'Native HIVEMIND memory, projects, web, and engineering tools. Same filters as use_tools:false chat.',
+    description: HIVEMIND_COMPOSIO_TOOLKIT_DESCRIPTION,
     preload: true,
     no_auth: true,
     tools,

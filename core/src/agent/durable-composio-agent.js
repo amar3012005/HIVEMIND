@@ -1,8 +1,9 @@
 /**
- * Durable Composio-session supervisor. Our model does not execute remote
- * tools. Reads go through Composio (search → MULTI_EXECUTE / executeTool)
- * with slugs from search. Native HIVEMIND tools dispatch in-process.
- * Writes become pendingWrite drafts.
+ * Durable observe–act runtime for use_tools:true.
+ * Deterministic host: persistence, tenant scope, OAuth pause, write approval,
+ * idempotency, leases, Composio session reuse. One Gemini Flash Lite agent
+ * picks the safest next action from compact receipts. Writes are pendingWrite
+ * only — never live send.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { executeHivemindCustomTool, nativeNameFromComposioSlug } from '../connectors/composio/hivemind-custom-toolkit.js';
@@ -19,8 +20,27 @@ function tokens(slug) {
 }
 
 export const RETRY_CONNECT_VALUE = '__retry_connect__';
+export const MAX_DURABLE_LOOP_STEPS = 12;
+export const DURABLE_LEASE_MS = 120_000;
+export const DURABLE_NEXT_ACTION_SYSTEM = `You pick the single safest next action for a durable multi-tenant tool agent.
+Return JSON only: {"action":"search|execute|native|connect|draft|ask_user|done","slug":"","toolkit":"","arguments":{},"query":"","reason":""}
+Rules:
+- One step. Prefer LIST/GET_MY/RECENT before GET-by-id or *_CONTENT.
+- If a GET failed for missing id, LIST or GET_MY next. Never retry the same GET with empty args.
+- HIVEMIND_* / LOCAL_HIVEMIND_* use action native.
+- Never send, publish, or create live. The only write is action draft after facts (and a recipient when emailing a named person).
+- Do not repeat a completed slug. execute/draft slug must be in known.slugs or known.related.
+- If a named app is disconnected, connect.
+- If the question is already answered by receipts, done.
+- Search once unless query is a new person-email lookup.`;
 
 export function conversationKey(ctx = {}) {
+  const user = String(ctx.userId || 'anon').trim() || 'anon';
+  const thread = String(ctx.threadId || ctx.conversationId || ctx._conversationId || '').trim();
+  return thread ? `user:${user}:${thread}` : `user:${user}`;
+}
+
+export function legacyConversationKey(ctx = {}) {
   return String(ctx.threadId || ctx.conversationId || ctx._conversationId || '').trim()
     || `user:${ctx.userId || 'anon'}`;
 }
@@ -693,7 +713,14 @@ export async function saveAgentRun({ prisma, run }) {
 
 export async function getOrCreateAgentRun({ prisma, ctx, message, choice = null } = {}) {
   const baseKey = conversationKey(ctx);
-  const existing = await loadAgentRun({ prisma, orgId: ctx.orgId, conversationId: baseKey });
+  const legacyKey = legacyConversationKey(ctx);
+  let existing = await loadAgentRun({ prisma, orgId: ctx.orgId, conversationId: baseKey });
+  if (!existing && legacyKey && legacyKey !== baseKey) {
+    existing = await loadAgentRun({ prisma, orgId: ctx.orgId, conversationId: legacyKey });
+  }
+  if (existing && ctx.userId && existing.userId && existing.userId !== ctx.userId) {
+    existing = null;
+  }
   if (existing && !shouldStartFreshRun(existing, message, choice)) {
     if (message && existing.goal !== message) {
       existing.goal = `${existing.goal}\n${message}`.slice(0, 4000);
@@ -702,8 +729,8 @@ export async function getOrCreateAgentRun({ prisma, ctx, message, choice = null 
     return existing;
   }
   const conversationId = existing && shouldStartFreshRun(existing, message, choice)
-    ? `${baseKey}:${randomUUID()}`
-    : baseKey;
+    ? `${baseKey}:${randomUUID()}`.slice(0, 160)
+    : String(existing?.conversationId || baseKey).slice(0, 160);
   return {
     id: randomUUID(),
     orgId: ctx.orgId,
@@ -713,8 +740,19 @@ export async function getOrCreateAgentRun({ prisma, ctx, message, choice = null 
     composioSessionId: existing?.composioSessionId || null,
     status: 'running',
     steps: [],
-    scratch: {},
+    scratch: {
+      workflow_session_id: existing?.scratch?.workflow_session_id || null,
+      custom_toolkit_attached: existing?.scratch?.custom_toolkit_attached || null,
+    },
   };
+}
+
+export function acquireRunLease(run, { owner, now = Date.now(), ttlMs = DURABLE_LEASE_MS } = {}) {
+  const lease = run?.scratch?.lease;
+  if (lease?.until && lease.until > now && lease.owner && owner && lease.owner !== owner) return false;
+  run.scratch = run.scratch || {};
+  run.scratch.lease = { owner: owner || randomUUID(), until: now + ttlMs };
+  return true;
 }
 
 function recordStep(run, step) {
@@ -738,7 +776,9 @@ export function connectCallbackUrl(toolkit, origin) {
 }
 
 function pause(run, inputRequest, summary) {
-  const stepIndex = Number.isFinite(Number(run.scratch?.step_index)) ? Number(run.scratch.step_index) : 0;
+  const stepIndex = Number.isFinite(Number(run.scratch?.loop_steps))
+    ? Number(run.scratch.loop_steps)
+    : (Number.isFinite(Number(run.scratch?.step_index)) ? Number(run.scratch.step_index) : 0);
   const request = { ...inputRequest, step_index: stepIndex, step_id: `step-${stepIndex + 1}` };
   return {
     status: 'needs_input',
@@ -756,6 +796,228 @@ function pause(run, inputRequest, summary) {
   };
 }
 
+function catalogSlugsFromObservation(obs) {
+  return [...new Set([...(obs?.known?.slugs || []), ...(obs?.known?.related || [])])].filter(Boolean);
+}
+
+export function rankDurableReadSlug(slug) {
+  if (isNativeHivemindSlug(slug) && /RECALL/i.test(slug)) return 0;
+  if (isNativeHivemindSlug(slug) && /GET_MEMORY/i.test(slug)) return 20;
+  if (isNativeHivemindSlug(slug)) return 1;
+  if (isWriteSlug(slug)) return 90;
+  if (isMailboxInventorySlug(slug)) return 80;
+  if (tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x))) return 85;
+  if (/LIST_|GET_MY|RECENT|_USER_/i.test(slug)) return 2;
+  if (isFollowUpReadSlug(slug)) return 4;
+  if (/_CONTENT|_BY_|_ID$/i.test(slug)) return 6;
+  return 3;
+}
+
+export function compactDurableObservation(run, {
+  message,
+  connected = [],
+  person = '',
+  readOnly = false,
+  candidates = [],
+} = {}) {
+  const receipts = (run.steps || []).slice(-8).map((step) => ({
+    slug: step.slug || step.tool,
+    status: step.status,
+    summary: String(step.summary || step.error || '').slice(0, 160),
+  }));
+  const successful = (run.scratch.read_results || []).filter((row) => row?.successful);
+  const factsToolkits = [...new Set(successful
+    .filter((row) => !isRecipientLookupSlug(row.slug) && !isNativeHivemindSlug(row.slug))
+    .map((row) => toolkitFromSlug(row.slug))
+    .filter(Boolean))];
+  return {
+    goal: String(run.goal || message || '').slice(0, 400),
+    person: person || '',
+    read_only: Boolean(readOnly),
+    searched: Boolean((run.scratch.searched_slugs || []).length || (run.scratch.primary_tool_slugs || []).length),
+    receipts,
+    known: {
+      emails: (run.scratch.emails || []).slice(0, 5),
+      recall: Boolean(run.scratch.recall),
+      session: run.composioSessionId || null,
+      workflow: run.scratch.workflow_session_id || null,
+      connected: (connected || run.scratch.connected_toolkits || []).slice(0, 8),
+      candidates: (candidates || run.scratch.candidate_apps || []).slice(0, 8),
+      slugs: (run.scratch.primary_tool_slugs || run.scratch.plan || []).slice(0, 16),
+      related: (run.scratch.related_tool_slugs || []).slice(0, 8),
+      statuses: run.scratch.toolkit_connection_statuses || {},
+      facts_toolkits: factsToolkits.slice(0, 8),
+      people_search: Boolean(run.scratch.people_search),
+      recall_attempted: Boolean(run.scratch.recall_attempted),
+    },
+  };
+}
+
+export function parseNextAction(raw) {
+  const obj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : parseJsonObject(raw);
+  const action = String(obj.action || '').toLowerCase().trim();
+  const allowed = new Set(['search', 'execute', 'native', 'connect', 'draft', 'ask_user', 'done']);
+  if (!allowed.has(action)) return null;
+  return {
+    action,
+    slug: obj.slug ? String(obj.slug) : '',
+    toolkit: obj.toolkit ? String(obj.toolkit).toLowerCase().replace(/[^a-z0-9]/g, '') : '',
+    arguments: obj.arguments && typeof obj.arguments === 'object' && !Array.isArray(obj.arguments) ? obj.arguments : {},
+    query: obj.query ? String(obj.query).slice(0, 400) : '',
+    reason: obj.reason ? String(obj.reason).slice(0, 200) : '',
+  };
+}
+
+export function fallbackNextDurableAction(obs) {
+  if (!obs?.searched) return { action: 'search', reason: 'discover session tools' };
+  const slugs = catalogSlugsFromObservation(obs);
+  const receipts = new Map();
+  for (const row of obs.receipts || []) {
+    if (row?.slug) receipts.set(row.slug, row);
+  }
+  const last = (obs.receipts || []).slice(-1)[0] || null;
+  const connected = obs.known?.connected || [];
+  const statuses = obs.known?.statuses || {};
+  const emails = obs.known?.emails || [];
+  const candidates = obs.known?.candidates || [];
+  const writeSlug = obs.read_only ? null : selectWriteSlug(slugs, connected.length ? connected : undefined);
+  const done = (slug) => {
+    const row = receipts.get(slug);
+    return Boolean(row && ['completed', 'draft_created', 'skipped'].includes(row.status));
+  };
+  const failedMissing = (slug) => {
+    const row = receipts.get(slug);
+    return Boolean(row && (row.status === 'error' || row.status === 'skipped')
+      && /missing required|needs more context|invalid request|1 out of 1 tools failed/i.test(String(row.summary || '')));
+  };
+  const pendingReads = slugs
+    .filter((slug) => !isWriteSlug(slug) && !isMailboxInventorySlug(slug) && !isNativeHivemindSlug(slug))
+    .filter((slug) => !tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x)))
+    .filter((slug) => !done(slug) && !failedMissing(slug))
+    .filter((slug) => toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
+    .sort((left, right) => rankDurableReadSlug(left) - rankDurableReadSlug(right));
+
+  const disconnected = [...new Set([
+    ...(candidates || []),
+    ...(writeSlug ? [toolkitFromSlug(writeSlug)] : []),
+  ])].filter((toolkit) => toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses));
+  if (disconnected[0]) {
+    const hasConnectedRead = pendingReads.length > 0;
+    if (!hasConnectedRead || (writeSlug && toolkitFromSlug(writeSlug) === disconnected[0] && !pendingReads.length)) {
+      return { action: 'connect', toolkit: disconnected[0], reason: 'oauth required' };
+    }
+  }
+
+  const natives = slugs.filter((slug) => isNativeHivemindSlug(slug) && !done(slug) && !failedMissing(slug) && !/GET_MEMORY/i.test(slug));
+  if (natives.length && !obs.known?.recall) {
+    const recall = natives.find((slug) => /RECALL/i.test(slug)) || natives[0];
+    return { action: 'native', slug: recall, reason: 'hivemind recall' };
+  }
+
+  if (last && failedMissing(last.slug)) {
+    const listFirst = slugs
+      .filter((slug) => !isWriteSlug(slug) && !isNativeHivemindSlug(slug) && !isMailboxInventorySlug(slug))
+      .filter((slug) => !done(slug) && slug !== last.slug && !failedMissing(slug))
+      .filter((slug) => /LIST_|GET_MY|RECENT|_USER_/i.test(slug))
+      .sort((left, right) => rankDurableReadSlug(left) - rankDurableReadSlug(right));
+    if (listFirst[0]) return { action: 'execute', slug: listFirst[0], reason: 'list before get-by-id' };
+  }
+
+  const follow = slugs.find((slug) => isFollowUpReadSlug(slug) && !done(slug) && !isWriteSlug(slug) && !failedMissing(slug));
+  if (follow && last?.status === 'completed' && last.slug && !isFollowUpReadSlug(last.slug)
+    && toolkitFromSlug(follow) === toolkitFromSlug(last.slug)) {
+    return { action: 'execute', slug: follow, reason: 'follow-up with ids from prior read' };
+  }
+
+  if (writeSlug && obs.person && !emails.length) {
+    const people = pendingReads.find((slug) => isPersonResolveSlug(slug) || isRecipientLookupSlug(slug));
+    if (people) return { action: 'execute', slug: people, reason: 'resolve recipient' };
+    if (!obs.known?.people_search) {
+      return { action: 'search', query: `find the email address of a person called ${obs.person}`, reason: 'recipient lookup search' };
+    }
+    return { action: 'ask_user', reason: 'recipient unresolved' };
+  }
+
+  if (writeSlug) {
+    const writeApp = toolkitFromSlug(writeSlug);
+    const readApps = (candidates || []).filter((toolkit) => toolkit && toolkit !== writeApp);
+    const factToolkits = obs.known?.facts_toolkits || [];
+    const missingFacts = readApps.filter((toolkit) => !factToolkits.includes(toolkit));
+    if (missingFacts.length && pendingReads.length) {
+      const scoped = pendingReads.find((slug) => missingFacts.includes(toolkitFromSlug(slug))) || pendingReads[0];
+      return { action: 'execute', slug: scoped, reason: 'gather write facts' };
+    }
+    if (!factToolkits.length && pendingReads.length) {
+      return { action: 'execute', slug: pendingReads[0], reason: 'gather write facts' };
+    }
+    if (!factToolkits.length && !obs.known?.recall && !obs.known?.recall_attempted) {
+      return { action: 'native', slug: 'HIVEMIND_RECALL', reason: 'memory facts for the draft' };
+    }
+    return { action: 'draft', slug: writeSlug, reason: 'pending write, never live send' };
+  }
+
+  if (pendingReads.length) return { action: 'execute', slug: pendingReads[0], reason: 'read next catalog slug' };
+  return { action: 'done', reason: 'no remaining safe actions' };
+}
+
+export function governNextAction(next, obs) {
+  const parsed = parseNextAction(next) || fallbackNextDurableAction(obs);
+  const slugs = catalogSlugsFromObservation(obs);
+  if (parsed.action === 'search' && obs.searched && !parsed.query) {
+    const again = fallbackNextDurableAction(obs);
+    return again.action === 'search' && !again.query ? { action: 'done', reason: 'already searched' } : again;
+  }
+  if ((parsed.action === 'execute' || parsed.action === 'draft') && parsed.slug) {
+    if (!slugs.includes(parsed.slug) && !isNativeHivemindSlug(parsed.slug)) {
+      return fallbackNextDurableAction(obs);
+    }
+  }
+  if (parsed.action === 'execute' && parsed.slug && isWriteSlug(parsed.slug)) {
+    return obs.read_only
+      ? { action: 'done', reason: 'read-only, skip write' }
+      : { ...parsed, action: 'draft', reason: parsed.reason || 'writes are drafts' };
+  }
+  if (parsed.action === 'draft' && obs.read_only) return { action: 'done', reason: 'read-only' };
+  if (parsed.action === 'execute' && parsed.slug && (isMailboxInventorySlug(parsed.slug) || tokens(parsed.slug).some((x) => BLOCKED_WRITE_TOKENS.has(x)))) {
+    return fallbackNextDurableAction(obs);
+  }
+  if (parsed.action === 'native' && parsed.slug && /GET_MEMORY/i.test(parsed.slug)) {
+    return fallbackNextDurableAction(obs);
+  }
+  return parsed;
+}
+
+export async function chooseNextDurableAction({ observation, generateImpl } = {}) {
+  if (typeof generateImpl === 'function') {
+    try {
+      const raw = await generateImpl(observation);
+      const parsed = parseNextAction(raw);
+      if (parsed) return governNextAction(parsed, observation);
+    } catch { /* fallback */ }
+  }
+  const inNodeTest = Boolean(process.env.NODE_TEST_CONTEXT);
+  if (!inNodeTest && process.env.DURABLE_NEXT_ACTION_LLM !== 'false') {
+    try {
+      const { chatCompletionFetch, DEFAULT_CHAT_PLANNER_MODEL } = await import('../llm/chat-provider.js');
+      const model = process.env.DURABLE_NEXT_ACTION_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
+      const response = await chatCompletionFetch(model, {
+        body: JSON.stringify({
+          temperature: 0,
+          max_tokens: 220,
+          messages: [
+            { role: 'system', content: DURABLE_NEXT_ACTION_SYSTEM },
+            { role: 'user', content: JSON.stringify(observation).slice(0, 3500) },
+          ],
+        }),
+      }, { useCase: 'chat_planner' });
+      const payload = await response.json();
+      const parsed = parseNextAction(payload?.choices?.[0]?.message?.content);
+      if (parsed) return governNextAction(parsed, observation);
+    } catch { /* fallback */ }
+  }
+  return governNextAction(fallbackNextDurableAction(observation), observation);
+}
+
 export async function runDurableComposioAgent({
   message,
   ctx,
@@ -766,16 +1028,16 @@ export async function runDurableComposioAgent({
 } = {}) {
   const emit = onEvent || (() => {});
   const db = prisma || ctx?.prisma || null;
-  const run = await getOrCreateAgentRun({ prisma: db, ctx, message, choice });
   const picked = choice || ctx?.durableChoice || null;
+  const run = await getOrCreateAgentRun({ prisma: db, ctx, message, choice: picked });
   if (picked?.value === RETRY_CONNECT_VALUE || picked?.option_id === 'connected') {
     run.status = 'running';
   }
   if (picked?.values && typeof picked.values === 'object') {
     run.scratch.field_values = { ...(run.scratch.field_values || {}), ...picked.values };
+    run.status = 'running';
     if (picked.values.app) {
       run.scratch.chosen_toolkit = String(picked.values.app).toLowerCase().replace(/[^a-z0-9]/g, '');
-      run.status = 'running';
     }
   }
   if (picked?.value && picked.option_id && picked.option_id !== 'connect' && picked.option_id !== 'connected') {
@@ -832,8 +1094,12 @@ export async function runDurableComposioAgent({
   }
 
   const sessionToolkits = sessionToolkitsFor(connected, candidates);
-  const resumingPlan = Boolean(picked) && Array.isArray(run.scratch.plan) && run.scratch.plan.length;
   const person = namedPersonQuery(message);
+  const readOnly = isReadOnlyRequest(message);
+  const leaseOwner = run.scratch.lease?.owner || randomUUID();
+  if (!acquireRunLease(run, { owner: leaseOwner })) {
+    return { status: 'error', run, summary: 'run_busy', steps: run.steps, draftIds: [], pendingActions: [] };
+  }
 
   const pauseForAppConnect = async (toolkit) => {
     let redirectUrl = null;
@@ -853,6 +1119,7 @@ export async function runDurableComposioAgent({
     run.status = 'waiting_connection';
     run.scratch.needs_toolkit = toolkit;
     run.scratch.connection_error = connectError;
+    run.scratch.lease = null;
     recordStep(run, { kind: 'connect', toolkit, status: 'waiting_connection', ...(connectError ? { error: connectError } : {}) });
     await saveAgentRun({ prisma: db, run });
     return pause(run, connectAccountRequest(toolkit, redirectUrl), connectError
@@ -860,96 +1127,6 @@ export async function runDurableComposioAgent({
       : `Connect ${displayAppName(toolkit)} to continue.`);
   };
 
-  if (!resumingPlan) {
-    if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function') {
-      try {
-        const session = await composioSvc.getToolRouterSession(orgId, sessionToolkits, { allowDisconnected: true });
-        run.composioSessionId = session.id || null;
-        run.scratch.custom_toolkit_attached = session.customToolkitAttached;
-        if (session.customToolkitError) run.scratch.custom_toolkit_error = session.customToolkitError;
-      } catch (error) {
-        run.scratch.session_error = String(error.message || error).slice(0, 240);
-      }
-    }
-    beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: message });
-    let discovery;
-    try {
-      if (run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
-        discovery = await composioSvc.discoverSessionTools(orgId, {
-          toolkits: sessionToolkits,
-          useCases: [message],
-          allowDisconnected: true,
-          searchPayload: formatComposioSearch({
-            message,
-            sessionId: run.scratch.workflow_session_id,
-            destinationApps: sessionToolkits,
-            generateId: !run.scratch.workflow_session_id,
-          }),
-        });
-        discovery.fromSession = true;
-      } else if (composio && typeof composioSvc.searchToolsByIntent === 'function') {
-        const legacy = await composioSvc.searchToolsByIntent(orgId, message);
-        discovery = {
-          sessionId: run.composioSessionId,
-          tools: legacy.tools || [],
-          primaryToolSlugs: (legacy.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean),
-          relatedToolSlugs: [],
-          toolkitConnectionStatuses: {},
-          fromSession: false,
-        };
-      } else {
-        throw new Error('session_discovery_unavailable');
-      }
-    } catch (error) {
-      run.status = 'failed';
-      run.scratch.search_error = String(error.message || error).slice(0, 240);
-      finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'error', summary: run.scratch.search_error, extra: { executor: 'composio' } });
-      await saveAgentRun({ prisma: db, run });
-      return { status: 'error', run, summary: 'Composio could not discover a safe capability for this request. Nothing was executed.', steps: run.steps, draftIds: [], pendingActions: [] };
-    }
-    let searchedSlugs = (discovery.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
-    const primary = (discovery.primaryToolSlugs?.length ? discovery.primaryToolSlugs : searchedSlugs).filter(Boolean);
-    run.composioSessionId = discovery.sessionId || run.composioSessionId;
-    if (discovery.workflowSessionId) run.scratch.workflow_session_id = discovery.workflowSessionId;
-    run.scratch.searched_slugs = searchedSlugs.slice(0, 48);
-    run.scratch.primary_tool_slugs = primary.slice(0, 48);
-    run.scratch.related_tool_slugs = (discovery.relatedToolSlugs || []).slice(0, 24);
-    run.scratch.candidate_apps = candidates;
-    run.scratch.toolkit_connection_statuses = discovery.toolkitConnectionStatuses || {};
-    run.scratch.recommended_plan_steps = discovery.recommendedPlanSteps || [];
-    run.scratch.next_steps_guidance = discovery.nextStepsGuidance || null;
-    run.scratch.from_session = Boolean(discovery.fromSession);
-    run.scratch.tool_schemas = discovery.toolSchemas
-      || Object.fromEntries((discovery.tools || []).map((tool) => [
-        tool?._composio?.slug,
-        {
-          description: tool.function?.description,
-          properties: tool.function?.parameters?.properties || {},
-          required: tool.function?.parameters?.required || [],
-        },
-      ]).filter((row) => row[0]));
-    const scoped = discovery.fromSession
-      ? primary
-      : primary.filter((slug) => isNativeHivemindSlug(slug) || candidates.includes(toolkitFromSlug(slug)));
-    run.scratch.plan = (scoped.length ? scoped : primary).slice(0, 16);
-    run.scratch.step_index = 0;
-    finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
-      kind: 'search', status: 'completed',
-      summary: uniqueToolkitsFromSlugs(run.scratch.plan).map(displayAppName).join(', ') || 'no tools',
-      extra: { slugs: run.scratch.plan.slice(0, 12), executor: 'composio', session_id: run.composioSessionId },
-      args: { query: message },
-    });
-  }
-
-  const statuses = run.scratch.toolkit_connection_statuses || {};
-  const plan = Array.isArray(run.scratch.plan) ? run.scratch.plan : [];
-  const writeConnected = writeApps.length
-    ? connected.filter((toolkit) => writeApps.includes(toolkit))
-    : connected;
-  let writeSlug = selectWriteSlug(
-    [...plan, ...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || [])],
-    writeConnected.length ? writeConnected : connected,
-  );
   let recallText = run.scratch.recall_text || '';
   let recallData = run.scratch.recall_data || null;
   const readResults = Array.isArray(run.scratch.read_results) ? [...run.scratch.read_results] : [];
@@ -972,6 +1149,8 @@ export async function runDurableComposioAgent({
       data: row.data,
       error: row.error || null,
     }));
+    run.scratch.candidate_apps = candidates;
+    acquireRunLease(run, { owner: leaseOwner });
     await saveAgentRun({ prisma: db, run });
   };
 
@@ -1007,6 +1186,7 @@ export async function runDurableComposioAgent({
       args,
     });
     readResults.push({ slug, ...result });
+    run.scratch.recall_attempted = true;
     return result;
   };
 
@@ -1056,112 +1236,108 @@ export async function runDurableComposioAgent({
     return result;
   };
 
-  const startAt = Number.isFinite(Number(run.scratch.step_index)) ? Number(run.scratch.step_index) : 0;
-  if (startAt === 0 && plan.length > 1) {
-    plan.sort((left, right) => {
-      const rank = (slug) => {
-        if (isNativeHivemindSlug(slug) && /RECALL/i.test(slug)) return 0;
-        if (isNativeHivemindSlug(slug)) return 1;
-        if (isWriteSlug(slug)) return 6;
-        if (/LIST_|GET_MY|RECENT/i.test(slug)) return 2;
-        if (/_CONTENT|_BY_|_ID$/i.test(slug)) return 5;
-        return 3;
-      };
-      return rank(left) - rank(right);
-    });
-    run.scratch.plan = plan;
-  }
-  if (isReadOnlyRequest(message)) writeSlug = null;
-  for (let index = startAt; index < plan.length; index += 1) {
-    const slug = plan[index];
-    run.scratch.step_index = index;
-    const already = (run.steps || []).some((step) => (step.slug === slug || step.tool === slug)
-      && ['completed', 'draft_created', 'skipped'].includes(step.status));
-    if (already) continue;
-    if (tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x))) continue;
-    if (isMailboxInventorySlug(slug)) continue;
-    if (isNativeHivemindSlug(slug)) {
-      if (recallText && !/GET_MEMORY/i.test(slug)) continue;
-      if (/GET_MEMORY/i.test(slug) && !recallData?.memories?.[0]?.id) continue;
-      await runOneNative(slug);
-      await persistProgress();
-      continue;
-    }
-    if (isWriteSlug(slug)) {
-      if (!isReadOnlyRequest(message)) {
-        writeSlug = selectWriteSlug([slug, writeSlug].filter(Boolean), writeConnected.length ? writeConnected : connected) || writeSlug || slug;
-      }
-      continue;
-    }
-    const toolkit = toolkitFromSlug(slug);
-    if (toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses)) {
-      await persistProgress();
-      return pauseForAppConnect(toolkit);
-    }
-    if (isRecipientLookupSlug(slug) && (run.scratch.emails || []).length) continue;
-    await runOneRead({ slug, arguments: argumentsForReadSlug(slug, { person }) });
-    await persistProgress();
-  }
+  const mergeDiscovery = (discovery, { peopleSearch = false } = {}) => {
+    const searchedSlugs = (discovery.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
+    const primary = (discovery.primaryToolSlugs?.length ? discovery.primaryToolSlugs : searchedSlugs).filter(Boolean);
+    run.composioSessionId = discovery.sessionId || run.composioSessionId;
+    if (discovery.workflowSessionId) run.scratch.workflow_session_id = discovery.workflowSessionId;
+    const prior = run.scratch.searched_slugs || [];
+    const priorPrimary = run.scratch.primary_tool_slugs || [];
+    run.scratch.searched_slugs = [...new Set([...prior, ...searchedSlugs])].slice(0, 48);
+    const scoped = discovery.fromSession
+      ? primary
+      : primary.filter((slug) => isNativeHivemindSlug(slug) || candidates.includes(toolkitFromSlug(slug)));
+    run.scratch.primary_tool_slugs = [...new Set([...priorPrimary, ...(scoped.length ? scoped : primary)])].slice(0, 48);
+    run.scratch.related_tool_slugs = [...new Set([
+      ...(run.scratch.related_tool_slugs || []),
+      ...(discovery.relatedToolSlugs || []),
+    ])].slice(0, 24);
+    run.scratch.candidate_apps = candidates;
+    run.scratch.toolkit_connection_statuses = {
+      ...(run.scratch.toolkit_connection_statuses || {}),
+      ...(discovery.toolkitConnectionStatuses || {}),
+    };
+    run.scratch.recommended_plan_steps = discovery.recommendedPlanSteps || run.scratch.recommended_plan_steps || [];
+    run.scratch.next_steps_guidance = discovery.nextStepsGuidance || run.scratch.next_steps_guidance || null;
+    run.scratch.from_session = Boolean(discovery.fromSession) || Boolean(run.scratch.from_session);
+    const incomingSchemas = discovery.toolSchemas
+      || Object.fromEntries((discovery.tools || []).map((tool) => [
+        tool?._composio?.slug,
+        {
+          description: tool.function?.description,
+          properties: tool.function?.parameters?.properties || {},
+          required: tool.function?.parameters?.required || [],
+        },
+      ]).filter((row) => row[0]));
+    run.scratch.tool_schemas = { ...(run.scratch.tool_schemas || {}), ...(incomingSchemas || {}) };
+    run.scratch.plan = run.scratch.primary_tool_slugs.slice(0, 16);
+    if (peopleSearch) run.scratch.people_search = true;
+  };
 
-  const followUps = (plan || [])
-    .filter((slug) => isFollowUpReadSlug(slug))
-    .filter((slug) => !readResults.some((row) => row.slug === slug))
-    .filter((slug) => !isWriteSlug(slug));
-  for (const slug of followUps.slice(0, 2)) {
-    const toolkit = toolkitFromSlug(slug);
-    if (toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses)) continue;
-    await runOneRead({ slug, arguments: {} });
-  }
-
-  if (writeSlug && !recallText) {
-    const preview = composeBriefing({
-      message,
-      reads: readResults,
-      recallText,
-      person,
-      recallData,
-      factToolkits: readApps,
-    });
-    if (/could not retrieve/i.test(preview)) await runOneNative('HIVEMIND_RECALL');
-  }
-
-  if (writeSlug && person && !pickRecipientEmail(run.scratch.emails || [], person)) {
-    let fromSearch = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
-      .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses));
-    if (!fromSearch.length && run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
+  const performSearch = async (queryMessage) => {
+    if (!run.composioSessionId && typeof composioSvc.getToolRouterSession === 'function') {
       try {
-        const lookupMessage = `find the email address of a person called ${person}`;
-        const extra = await composioSvc.discoverSessionTools(orgId, {
+        const session = await composioSvc.getToolRouterSession(orgId, sessionToolkits, { allowDisconnected: true });
+        run.composioSessionId = session.id || null;
+        run.scratch.custom_toolkit_attached = session.customToolkitAttached;
+        if (session.customToolkitError) run.scratch.custom_toolkit_error = session.customToolkitError;
+      } catch (error) {
+        run.scratch.session_error = String(error.message || error).slice(0, 240);
+      }
+    }
+    beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: queryMessage });
+    let discovery;
+    try {
+      if (run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
+        discovery = await composioSvc.discoverSessionTools(orgId, {
           toolkits: sessionToolkits,
-          useCases: [lookupMessage],
+          useCases: [queryMessage],
           allowDisconnected: true,
           searchPayload: formatComposioSearch({
-            message: lookupMessage,
+            message: queryMessage,
             sessionId: run.scratch.workflow_session_id,
             destinationApps: sessionToolkits,
             generateId: !run.scratch.workflow_session_id,
           }),
         });
-        fromSearch = [...(extra.primaryToolSlugs || []), ...(extra.relatedToolSlugs || [])]
-          .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, extra.toolkitConnectionStatuses || statuses));
-      } catch {
-        fromSearch = [];
+        discovery.fromSession = true;
+      } else if (composio && typeof composioSvc.searchToolsByIntent === 'function') {
+        const legacy = await composioSvc.searchToolsByIntent(orgId, queryMessage);
+        discovery = {
+          sessionId: run.composioSessionId,
+          tools: legacy.tools || [],
+          primaryToolSlugs: (legacy.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean),
+          relatedToolSlugs: [],
+          toolkitConnectionStatuses: {},
+          fromSession: false,
+        };
+      } else {
+        throw new Error('session_discovery_unavailable');
       }
+    } catch (error) {
+      run.scratch.search_error = String(error.message || error).slice(0, 240);
+      finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
+        kind: 'search', status: 'error', summary: run.scratch.search_error, extra: { executor: 'composio' },
+      });
+      return { ok: false, error: run.scratch.search_error };
     }
-    fromSearch.sort((left, right) => {
-      const rank = (slug) => (/SEARCH_PEOPLE|GET_CONTACT/i.test(slug) ? 0 : 1);
-      return rank(left) - rank(right);
+    const peopleSearch = /email address of a person called/i.test(String(queryMessage || ''));
+    mergeDiscovery(discovery, { peopleSearch });
+    finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
+      kind: 'search', status: 'completed',
+      summary: uniqueToolkitsFromSlugs(run.scratch.primary_tool_slugs).map(displayAppName).join(', ') || 'no tools',
+      extra: {
+        slugs: (run.scratch.primary_tool_slugs || []).slice(0, 12),
+        executor: 'composio',
+        session_id: run.composioSessionId,
+      },
+      args: { query: queryMessage },
     });
-    for (const lookup of fromSearch) {
-      if (!lookup || readResults.some((row) => row.slug === lookup)) continue;
-      await runOneRead({ slug: lookup, arguments: argumentsForReadSlug(lookup, { person }) });
-      if (pickRecipientEmail(run.scratch.emails || [], person)) break;
-    }
-  }
+    return { ok: true };
+  };
 
-  const draftIds = [];
-  const pendingActions = [];
-  if (writeSlug) {
+  const performDraft = async (writeSlug) => {
+    const statuses = run.scratch.toolkit_connection_statuses || {};
     const toolkit = toolkitFromSlug(writeSlug);
     if (toolkit && !toolkitHasActiveConnection(toolkit, connected, statuses)) {
       await persistProgress();
@@ -1173,6 +1349,7 @@ export async function runDurableComposioAgent({
       || null;
     if (!to) {
       run.status = 'waiting_user';
+      run.scratch.lease = null;
       recordStep(run, { kind: 'write', slug: writeSlug, status: 'waiting_user', error: 'recipient unresolved' });
       await saveAgentRun({ prisma: db, run });
       return pause(run, {
@@ -1204,11 +1381,14 @@ export async function runDurableComposioAgent({
     });
     beginTool(emit, run, writeSlug, { to, subject: args.subject || args.title });
     const drafted = await createDraft(ctx, writeSlug, args);
+    const draftIds = [];
+    const pendingActions = [];
     if (drafted?.id) {
       draftIds.push(drafted.id);
       pendingActions.push({ id: drafted.id, tool: writeSlug, args });
       run.status = 'waiting_approval';
       run.scratch.draft_id = drafted.id;
+      run.scratch.lease = null;
       finishTool(emit, run, writeSlug, {
         kind: 'write',
         status: 'draft_created',
@@ -1218,6 +1398,7 @@ export async function runDurableComposioAgent({
       });
     } else {
       run.status = 'failed';
+      run.scratch.lease = null;
       finishTool(emit, run, writeSlug, {
         kind: 'write',
         status: 'error',
@@ -1235,6 +1416,94 @@ export async function runDurableComposioAgent({
       draftIds,
       pendingActions,
     };
+  };
+
+  const alreadyTerminal = (slug) => (run.steps || []).some((step) => (step.slug === slug || step.tool === slug)
+    && ['completed', 'draft_created', 'skipped', 'error'].includes(step.status));
+
+  for (let index = 0; index < MAX_DURABLE_LOOP_STEPS; index += 1) {
+    run.scratch.loop_steps = index;
+    run.scratch.step_index = index;
+    await persistProgress();
+    const observation = compactDurableObservation(run, {
+      message, connected, person, readOnly, candidates,
+    });
+    const next = await chooseNextDurableAction({
+      observation,
+      generateImpl: ctx.chooseNextAction,
+    });
+    run.scratch.cursor = {
+      action: next.action,
+      slug: next.slug || null,
+      toolkit: next.toolkit || null,
+      reason: next.reason || null,
+      at: new Date().toISOString(),
+    };
+
+    if (next.action === 'search') {
+      const searched = await performSearch(next.query || message);
+      if (!searched.ok && !(run.scratch.primary_tool_slugs || []).length) {
+        run.status = 'failed';
+        run.scratch.lease = null;
+        await saveAgentRun({ prisma: db, run });
+        return {
+          status: 'error',
+          run,
+          summary: 'Composio could not discover a safe capability for this request. Nothing was executed.',
+          steps: run.steps,
+          draftIds: [],
+          pendingActions: [],
+        };
+      }
+      continue;
+    }
+
+    if (next.action === 'connect') {
+      const toolkit = next.toolkit || run.scratch.needs_toolkit || candidates.find((item) => !toolkitHasActiveConnection(item, connected, run.scratch.toolkit_connection_statuses || {}));
+      if (!toolkit) continue;
+      return pauseForAppConnect(toolkit);
+    }
+
+    if (next.action === 'native') {
+      const slug = next.slug || (run.scratch.primary_tool_slugs || []).find((item) => isNativeHivemindSlug(item)) || 'HIVEMIND_RECALL';
+      if (/GET_MEMORY/i.test(slug) && !recallData?.memories?.[0]?.id) continue;
+      if (run.scratch.recall && /RECALL/i.test(slug)) continue;
+      if (alreadyTerminal(slug)) continue;
+      await runOneNative(slug);
+      continue;
+    }
+
+    if (next.action === 'execute') {
+      const slug = next.slug;
+      if (!slug || alreadyTerminal(slug) || isWriteSlug(slug) || isMailboxInventorySlug(slug)) continue;
+      const toolkit = toolkitFromSlug(slug);
+      if (toolkit && !toolkitHasActiveConnection(toolkit, connected, run.scratch.toolkit_connection_statuses || {})) {
+        return pauseForAppConnect(toolkit);
+      }
+      await runOneRead({ slug, arguments: next.arguments || argumentsForReadSlug(slug, { person }) });
+      continue;
+    }
+
+    if (next.action === 'ask_user') {
+      run.status = 'waiting_user';
+      run.scratch.lease = null;
+      recordStep(run, { kind: 'write', slug: next.slug || 'recipient', status: 'waiting_user', error: 'recipient unresolved' });
+      await saveAgentRun({ prisma: db, run });
+      return pause(run, {
+        kind: 'field_input',
+        prompt: 'Who should receive this? Add the address and I will prepare a draft for your approval.',
+        fields: [{ id: 'recipient_email', name: 'recipient_email', label: 'To', type: 'email', required: true }],
+      }, 'Need a recipient to draft the message.');
+    }
+
+    if (next.action === 'draft') {
+      const catalog = [...(run.scratch.primary_tool_slugs || []), ...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || [])];
+      const writeSlug = selectWriteSlug([next.slug, ...catalog].filter(Boolean), connected) || next.slug;
+      if (!writeSlug || readOnly) break;
+      return performDraft(writeSlug);
+    }
+
+    break;
   }
 
   const summary = await synthesizeDurableAnswer({
@@ -1245,16 +1514,18 @@ export async function runDurableComposioAgent({
     generateImpl: ctx.synthesizeDurableAnswer,
   });
   run.status = 'done';
+  run.scratch.lease = null;
   await saveAgentRun({ prisma: db, run });
   return {
     status: 'completed',
     run,
     summary,
     steps: run.steps,
-    draftIds,
-    pendingActions,
+    draftIds: [],
+    pendingActions: [],
   };
 }
+
 
 export async function synthesizeDurableAnswer({
   message,

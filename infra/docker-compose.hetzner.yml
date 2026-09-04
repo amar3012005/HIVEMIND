@@ -86,6 +86,8 @@ services:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
       ENABLE_TOOLS_HITL: ${ENABLE_TOOLS_HITL:-false}
       ENABLE_TOOLS_HITL_FLAG_URL: ${ENABLE_TOOLS_HITL_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/enable-tools-hitl}
+      USE_TOOLS_DURABLE_AGENT: ${USE_TOOLS_DURABLE_AGENT:-false}
+      USE_TOOLS_DURABLE_AGENT_FLAG_URL: ${USE_TOOLS_DURABLE_AGENT_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/use-tools-durable-agent}
     volumes:
       - hivemind-data:/app/data        # ← .amr files live here; BACK UP
       - hivemind-logs:/app/logs

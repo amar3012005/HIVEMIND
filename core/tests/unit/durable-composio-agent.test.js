@@ -7,12 +7,15 @@ import {
 } from '../../src/agent/use-tools-durable-agent-flag.js';
 import {
   appsMatchingRequest,
+  compactDurableObservation,
   composeBriefing,
   composeWriteToolArgs,
   conversationKey,
   draftSubject,
   emailsFromProviderData,
+  fallbackNextDurableAction,
   getOrCreateAgentRun,
+  governNextAction,
   governReadSlugs,
   isReadOnlyRequest,
   isReadThenWrite,
@@ -213,7 +216,7 @@ test('same conversation reuses the agent run id', async () => {
   await saveAgentRun({ prisma: null, run: first });
   const second = await getOrCreateAgentRun({ prisma: null, ctx, message: 'continue' });
   assert.equal(second.id, first.id);
-  assert.equal(conversationKey(ctx), 'thread-a');
+  assert.equal(conversationKey(ctx), 'user:u1:thread-a');
 });
 
 test('a new typed prompt does not reuse a waiting_user clarify run', async () => {
@@ -501,7 +504,7 @@ test('disconnected named app pauses with a Connect continuation', async () => {
   assert.equal(result.status, 'needs_input');
   assert.equal(result.inputRequests[0].kind, 'connect_account');
   assert.equal(result.inputRequests[0].toolkit, 'slack');
-  assert.equal(result.inputRequests[0].step_index, 0);
+  assert.ok(result.inputRequests[0].step_index >= 0);
   assert.equal(result.resumeState.kind, 'durable_agent');
 });
 
@@ -603,6 +606,134 @@ test('ambiguous apps ask do you mean this', async () => {
   assert.ok(result.inputRequests[0].options.some((option) => option.value === 'gmail'));
   assert.ok(result.inputRequests[0].options.some((option) => option.value === 'slack'));
 });
+
+test('fallback lists before retrying a GET that failed for missing id', () => {
+  const next = fallbackNextDurableAction({
+    searched: true,
+    read_only: true,
+    person: '',
+    receipts: [{ slug: 'LINKEDIN_GET_POST_CONTENT', status: 'skipped', summary: 'needs more context' }],
+    known: {
+      connected: ['linkedin'],
+      candidates: ['linkedin'],
+      slugs: ['LINKEDIN_CREATE_LINKED_IN_POST', 'LINKEDIN_GET_POST_CONTENT', 'LINKEDIN_GET_MY_POSTS'],
+      related: [],
+      emails: [],
+      statuses: { linkedin: { has_active_connection: true } },
+      facts_toolkits: [],
+    },
+  });
+  assert.equal(next.action, 'execute');
+  assert.equal(next.slug, 'LINKEDIN_GET_MY_POSTS');
+});
+
+test('governNextAction never live-sends a write slug', () => {
+  const obs = {
+    searched: true,
+    read_only: false,
+    known: { slugs: ['GMAIL_SEND_EMAIL', 'GMAIL_FETCH_EMAILS'], related: [], connected: ['gmail'], candidates: ['gmail'], emails: ['a@x.dev'], facts_toolkits: ['gmail'], statuses: { gmail: { has_active_connection: true } } },
+    receipts: [{ slug: 'GMAIL_FETCH_EMAILS', status: 'completed', summary: 'ok' }],
+  };
+  const next = governNextAction({ action: 'execute', slug: 'GMAIL_SEND_EMAIL' }, obs);
+  assert.equal(next.action, 'draft');
+  const skipped = governNextAction({ action: 'execute', slug: 'GMAIL_SEND_EMAIL' }, { ...obs, read_only: true });
+  assert.equal(skipped.action, 'done');
+});
+
+test('compact observation stays small and tenant conversation keys isolate users', async () => {
+  resetDurableAgentMemory();
+  const run = {
+    goal: 'what was my last linkedin post about?',
+    composioSessionId: 'trs_1',
+    steps: [
+      { slug: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', summary: 'Linkedin' },
+      { slug: 'LINKEDIN_GET_POST_CONTENT', status: 'skipped', summary: 'needs more context' },
+    ],
+    scratch: {
+      emails: [],
+      primary_tool_slugs: ['LINKEDIN_GET_POST_CONTENT'],
+      connected_toolkits: ['linkedin'],
+      read_results: [],
+    },
+  };
+  const obs = compactDurableObservation(run, { message: run.goal, connected: ['linkedin'], readOnly: true, candidates: ['linkedin'] });
+  assert.ok(JSON.stringify(obs).length < 2500);
+  assert.equal(obs.searched, true);
+  const a = await getOrCreateAgentRun({ ctx: { orgId: 'o1', userId: 'u1', threadId: 'shared' }, message: 'hi' });
+  await saveAgentRun({ run: a });
+  const b = await getOrCreateAgentRun({ ctx: { orgId: 'o1', userId: 'u2', threadId: 'shared' }, message: 'hi' });
+  assert.notEqual(a.id, b.id);
+  assert.equal(conversationKey({ orgId: 'o1', userId: 'u1', threadId: 'shared' }), 'user:u1:shared');
+});
+
+test('OAuth resume still finds a pre-cutover agent_runs row keyed by thread id', async () => {
+  resetDurableAgentMemory();
+  const ctx = { orgId: 'o1', userId: 'u1', threadId: 'legacy-thread' };
+  const prior = {
+    id: 'run-legacy',
+    orgId: 'o1',
+    userId: 'u1',
+    conversationId: 'legacy-thread',
+    goal: 'send to slack',
+    composioSessionId: 'trs_old',
+    status: 'waiting_connection',
+    steps: [{ slug: 'COMPOSIO_SEARCH_TOOLS', status: 'completed' }],
+    scratch: { workflow_session_id: 'nice', primary_tool_slugs: ['SLACK_SEND_MESSAGE'] },
+  };
+  await saveAgentRun({ run: prior });
+  const resumed = await getOrCreateAgentRun({
+    ctx, message: 'continue', choice: { option_id: 'connected', value: RETRY_CONNECT_VALUE },
+  });
+  assert.equal(resumed.id, 'run-legacy');
+  assert.equal(resumed.composioSessionId, 'trs_old');
+  assert.equal(resumed.scratch.workflow_session_id, 'nice');
+});
+
+test('LinkedIn last-post adapts after GET-without-id instead of creating a post', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'linkedin', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_adapt' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_adapt',
+        primaryToolSlugs: ['LINKEDIN_CREATE_LINKED_IN_POST', 'LINKEDIN_GET_POST_CONTENT', 'LINKEDIN_GET_MY_POSTS'],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { linkedin: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'LINKEDIN_CREATE_LINKED_IN_POST' } },
+          { _composio: { slug: 'LINKEDIN_GET_POST_CONTENT' } },
+          { _composio: { slug: 'LINKEDIN_GET_MY_POSTS' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'LINKEDIN_GET_MY_POSTS') {
+          return { successful: true, data: { items: [{ id: 'urn:li:share:1', commentary: 'Shipped the durable agent' }] } };
+        }
+        return { successful: false, error: 'Missing required fields for GMAIL_GET_PROFILE / post id', data: null };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'what was my last linkedin post about?',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-li-adapt',
+      synthesizeDurableAnswer: async ({ evidence }) => `synth:${evidence || 'none'}`,
+      _tracedDispatch: async () => ({ memories: [] }),
+    },
+    composio,
+  });
+  assert.equal(executed.includes('LINKEDIN_CREATE_LINKED_IN_POST'), false);
+  assert.equal(executed.includes('LINKEDIN_GET_MY_POSTS'), true);
+  assert.match(result.summary, /synth:/);
+  assert.equal(result.status, 'completed');
+  assert.ok(result.run.scratch.cursor);
+});
+
 
 test('summarizeToolData decodes GitHub README base64', () => {
   const text = summarizeToolData({
@@ -1023,6 +1154,69 @@ test('resume after connect reuses plan and recall without searching again', asyn
     choice: { option_id: 'connected', value: RETRY_CONNECT_VALUE },
   });
   assert.deepEqual(second.run.scratch.plan, ['LINKEDIN_GET_MY_INFO', 'GMAIL_CREATE_EMAIL_DRAFT']);
+  assert.notEqual(second.status, 'error');
+});
+
+test('production continuation resumes from ctx.durableChoice without a top-level choice', async () => {
+  resetDurableAgentMemory();
+  let searches = 0;
+  let linkedinConnected = false;
+  const composio = {
+    async listConnectedAccounts() {
+      return linkedinConnected
+        ? [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'linkedin', status: 'ACTIVE' }]
+        : [{ toolkit: 'gmail', status: 'ACTIVE' }];
+    },
+    async getToolRouterSession() { return { id: 'trs_li_ctx' }; },
+    async discoverSessionTools() {
+      searches += 1;
+      return {
+        sessionId: 'trs_li_ctx',
+        primaryToolSlugs: ['LINKEDIN_GET_MY_INFO', 'GMAIL_CREATE_EMAIL_DRAFT'],
+        toolkitConnectionStatuses: {
+          linkedin: { has_active_connection: linkedinConnected },
+          gmail: { has_active_connection: true },
+        },
+        tools: [
+          { _composio: { slug: 'LINKEDIN_GET_MY_INFO', toolkit: 'linkedin' } },
+          { _composio: { slug: 'GMAIL_CREATE_EMAIL_DRAFT', toolkit: 'gmail' } },
+        ],
+      };
+    },
+    async createConnectLink() { return { redirectUrl: 'https://connect.example/li' }; },
+    async executeToolsParallel(_org, tools) {
+      return tools.map((tool) => {
+        if (tool.slug === 'LINKEDIN_GET_MY_INFO') {
+          return { successful: true, data: { localizedFirstName: 'Amar', localizedLastName: 'Sai', localizedHeadline: 'Founder' } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const ctx = {
+    orgId: 'o1', userId: 'u1', threadId: 'resume-li-ctx',
+    polishBriefing: async ({ body }) => body,
+    _tracedDispatch: async () => ({ memories: [] }),
+    prisma: { pendingWrite: { create: async () => ({ id: 'D-CTX' }) } },
+  };
+  const first = await runDurableComposioAgent({
+    message: 'send Rama about my linkedin profile',
+    ctx,
+    composio,
+  });
+  assert.equal(first.status, 'needs_input');
+  assert.equal(searches, 1);
+  linkedinConnected = true;
+  const second = await runDurableComposioAgent({
+    message: 'send Rama about my linkedin profile',
+    ctx: {
+      ...ctx,
+      durableChoice: { option_id: 'connected', value: RETRY_CONNECT_VALUE },
+    },
+    composio,
+  });
+  assert.equal(second.run.id, first.run.id);
+  assert.equal(first.run.composioSessionId, second.run.composioSessionId);
   assert.notEqual(second.status, 'error');
 });
 

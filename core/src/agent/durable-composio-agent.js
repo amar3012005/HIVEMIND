@@ -27,7 +27,7 @@ export function conversationKey(ctx = {}) {
 export function shouldStartFreshRun(existing, message, choice) {
   if (!existing) return false;
   if (choice) return false;
-  return ['waiting_approval', 'done', 'failed', 'cancelled'].includes(existing.status);
+  return ['waiting_approval', 'waiting_user', 'waiting_connection', 'done', 'failed', 'cancelled'].includes(existing.status);
 }
 
 export function slugMatchesConnected(slug, connected = []) {
@@ -161,6 +161,7 @@ export const TOOLKIT_ALIASES = Object.freeze({
   notion: ['notion'],
   googledrive: ['googledrive', 'google drive', 'gdrive', 'drive'],
   youtube: ['youtube', 'yt', 'youtubedata'],
+  linkedin: ['linkedin', 'linked in'],
 });
 
 export function appsMatchingRequest(message, toolkits = []) {
@@ -173,12 +174,19 @@ export function appsMatchingRequest(message, toolkits = []) {
   });
 }
 
+const PERSON_STOP = new Set(['me', 'him', 'her', 'them', 'us', 'the', 'a', 'an', 'my', 'this', 'that', 'about', 'important', 'information', 'list', 'last', 'it', 'on', 'via', 'mail', 'email', 'gmail', 'slack', 'linkedin']);
+
 export function writeToolkitsIn(message, toolkits = []) {
   const text = String(message || '').toLowerCase();
   if (!/\b(send|email|mail|via|draft|share|forward)\b/.test(text)) return [];
-  return (toolkits || []).filter((toolkit) => {
+  const named = Boolean(namedPersonQuery(message));
+  const list = [...new Set([...(toolkits || [])])];
+  if (named && !list.some((toolkit) => /gmail|outlook/i.test(String(toolkit)))) list.push('gmail');
+  return list.filter((toolkit) => {
     const key = String(toolkit || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (key === 'gmail' || key === 'outlook') return /\b(gmail|email|mail|outlook)\b/.test(text);
+    if (key === 'gmail' || key === 'outlook') {
+      return named || /\b(gmail|email|mail|outlook)\b/.test(text);
+    }
     if (key === 'slack') return /\bslack\b/.test(text);
     return false;
   });
@@ -378,8 +386,10 @@ export function namedPersonQuery(text) {
   const raw = String(text || '');
   const emails = emailsFromProviderData(raw);
   if (emails.length) return '';
-  const named = raw.match(/\bto\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
-  if (named?.[1] && !/^(me|him|her|them|us|the|a|an|my|this|that)$/i.test(named[1])) return named[1];
+  const toNamed = raw.match(/\bto\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
+  if (toNamed?.[1] && !PERSON_STOP.has(toNamed[1].toLowerCase())) return toNamed[1];
+  const sendNamed = raw.match(/\bsend\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
+  if (sendNamed?.[1] && !PERSON_STOP.has(sendNamed[1].toLowerCase())) return sendNamed[1];
   return '';
 }
 
@@ -564,9 +574,12 @@ export async function runDurableComposioAgent({
     }
   }
   const appHints = (discovered.apps || []).map((app) => app.slug).filter(Boolean);
-  let candidates = mentioned.length
-    ? [...new Set(mentioned)]
-    : connected.filter((toolkit) => discoveredToolkits.includes(toolkit));
+  let candidates = mentioned.length ? [...new Set(mentioned)] : [];
+  const impliedWrites = writeToolkitsIn(message, [...candidates, ...connected]);
+  candidates = [...new Set([...candidates, ...impliedWrites])];
+  if (!candidates.length) {
+    candidates = connected.filter((toolkit) => discoveredToolkits.includes(toolkit));
+  }
   if (!candidates.length) candidates = appHints.slice(0, 4);
   if (run.scratch.chosen_toolkit) {
     candidates = [run.scratch.chosen_toolkit];

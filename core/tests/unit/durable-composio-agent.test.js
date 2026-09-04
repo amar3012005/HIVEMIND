@@ -57,6 +57,7 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
   assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');
   assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
   assert.equal(namedPersonQuery('send a mail to rama about it'), 'rama');
+  assert.equal(namedPersonQuery('send Rama about my linkedin profile'), 'Rama');
   assert.equal(pickRecipientEmail(['amarsai2005@gmail.com', 'ramasantoshi1206@gmail.com'], 'rama'), 'ramasantoshi1206@gmail.com');
   assert.deepEqual(
     appsMatchingRequest('go through HIVEMIND git repo and send to rama via gmail', ['gmail', 'github', 'slack']),
@@ -73,6 +74,14 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
   );
   assert.equal(
     isReadThenWrite('send the list of my last 10 watch histories from youtube and send a mail to rama about it', ['gmail', 'youtube']),
+    true,
+  );
+  assert.deepEqual(
+    appsMatchingRequest('send Rama about my linkedin profile', ['gmail', 'youtube', 'github', 'notion']),
+    ['linkedin'],
+  );
+  assert.equal(
+    isReadThenWrite('send Rama about my linkedin profile', ['linkedin']),
     true,
   );
   assert.equal(isReadThenWrite('send this on gmail and slack', ['gmail', 'slack']), false);
@@ -93,6 +102,8 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
     shouldStartFreshRun({ status: 'waiting_approval' }, 'new request', { option_id: 'approve' }),
     false,
   );
+  assert.equal(shouldStartFreshRun({ status: 'waiting_user' }, 'send Rama about my linkedin profile', null), true);
+  assert.equal(shouldStartFreshRun({ status: 'waiting_user' }, 'Gmail', { option_id: 'gmail', value: 'gmail' }), false);
 });
 
 test('same conversation reuses the agent run id', async () => {
@@ -103,6 +114,20 @@ test('same conversation reuses the agent run id', async () => {
   const second = await getOrCreateAgentRun({ prisma: null, ctx, message: 'continue' });
   assert.equal(second.id, first.id);
   assert.equal(conversationKey(ctx), 'thread-a');
+});
+
+test('a new typed prompt does not reuse a waiting_user clarify run', async () => {
+  resetDurableAgentMemory();
+  const ctx = { orgId: 'o1', userId: 'u1', threadId: 'thread-clarify' };
+  const first = await getOrCreateAgentRun({ prisma: null, ctx, message: 'do something' });
+  first.status = 'waiting_user';
+  await saveAgentRun({ prisma: null, run: first });
+  const next = await getOrCreateAgentRun({ prisma: null, ctx, message: 'send Rama about my linkedin profile' });
+  assert.notEqual(next.id, first.id);
+  const resume = await getOrCreateAgentRun({
+    prisma: null, ctx, message: 'Gmail', choice: { option_id: 'gmail', value: 'gmail' },
+  });
+  assert.equal(resume.id, first.id);
 });
 
 test('durable agent executes Composio reads from search slugs and drafts send, never live send', async () => {

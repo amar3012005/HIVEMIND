@@ -21,6 +21,7 @@ import {
   exactGroundedDependencyContent,
   formatGroundedMessageBody,
   looksLikeRecallDump,
+  collapseAdjacentNativeRecalls,
   normalizeCompoundDependencies,
   normalizeEmailDestinationArgs,
   rankToolSelectionCards,
@@ -678,6 +679,53 @@ test('plan validation retains native recall for a generic connector step with ma
     },
   ]);
   assert.deepEqual(normalized[1].depends_on, [0]);
+});
+
+test('adjacent native recall steps collapse to one DAG node', () => {
+  const collapsed = collapseAdjacentNativeRecalls([
+    { operation: 'recall', tool_groups: ['hivemind-recall'], message: 'TARA in memory' },
+    { operation: 'recall', tool_groups: ['hivemind-context'], message: 'TARA again' },
+    { operation: 'send_email', authority: 'write', tool_groups: ['gmail'], depends_on: [0, 1], message: 'email rama' },
+  ]);
+  assert.equal(collapsed.length, 2);
+  assert.equal(collapsed[0].tool_groups[0], 'hivemind-recall');
+  assert.deepEqual(collapsed[1].depends_on, [0]);
+});
+
+test('composio write reuses a draft when idempotency collides', async () => {
+  const schema = {
+    type: 'object', required: ['recipient_email', 'body'],
+    properties: { recipient_email: { type: 'string' }, body: { type: 'string' } },
+  };
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send' }],
+    executeImpl: async () => ({ successful: false, error: 'must remain approval gated' }),
+  });
+  const err = Object.assign(new Error('Unique constraint failed on the fields: (`idempotency_key`)'), { code: 'P2002' });
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 'draft-1' },
+    prisma: {
+      pendingWrite: {
+        create: async () => { throw err; },
+        findUnique: async () => ({ id: 'EXISTING-DRAFT' }),
+      },
+    },
+  };
+  const result = await runCompoundOrchestrator({
+    subtasks: [{
+      operation: 'send_email', authority: 'write', output_kind: 'message',
+      tool_groups: ['gmail'], message: 'email rama',
+    }],
+    ctx: { ...ctx, _originalUserMessage: 'send a detailed email to rama@example.com' },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email',
+      args: { recipient_email: 'rama@example.com', body: 'Hi Rama, here is TARA.' },
+      schema,
+    })),
+  });
+  assert.equal(result.status, 'pending');
+  assert.deepEqual(result.draftIds, ['EXISTING-DRAFT']);
 });
 
 test('missing write fields produce a resumable generalized field-input request', async () => {

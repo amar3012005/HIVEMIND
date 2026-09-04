@@ -833,8 +833,33 @@ export function backfillMissingGroundedContentArgs(outputKind, schema, args, pri
   return next;
 }
 
+export function collapseAdjacentNativeRecalls(subtasks) {
+  const raw = Array.isArray(subtasks) ? subtasks : [];
+  const keep = [];
+  const remap = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const step = raw[i] || {};
+    const last = keep[keep.length - 1];
+    const native = isNativeHivemindGroup(step.tool_groups?.[0]);
+    const lastNative = last && isNativeHivemindGroup(last.tool_groups?.[0]);
+    if (native && lastNative && step.authority !== 'write' && last.authority !== 'write') {
+      last.message = [last.message, step.message].filter(Boolean).join('\n').slice(0, 2000);
+      remap[i] = keep.length - 1;
+      continue;
+    }
+    remap[i] = keep.length;
+    keep.push({
+      ...step,
+      depends_on: Array.isArray(step.depends_on)
+        ? [...new Set(step.depends_on.map((d) => remap[d]).filter((d) => Number.isInteger(d) && d < keep.length))]
+        : [],
+    });
+  }
+  return keep;
+}
+
 export function normalizeCompoundDependencies(subtasks) {
-  const normalized = (Array.isArray(subtasks) ? subtasks : []).map((step) => ({
+  const normalized = collapseAdjacentNativeRecalls(subtasks).map((step) => ({
     ...step,
     tool_groups: Array.isArray(step?.tool_groups) ? [...step.tool_groups] : [],
     depends_on: Array.isArray(step?.depends_on) ? [...new Set(step.depends_on.filter(Number.isInteger))] : [],
@@ -1594,10 +1619,12 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
 
   // Write — create a pendingWrite draft for approval. The draft stores the
   // Composio slug + args; on approval the write executes via Composio.
-  const draftId = await createComposioDraft(ctx, composioSlug, args, toolName);
+  const drafted = await createComposioDraft(ctx, composioSlug, args, toolName);
+  const draftId = drafted?.id || null;
   if (!draftId) {
-    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'draft creation failed' });
-    return { status: 'error', error: 'write draft creation failed', toolName, args, result: null, draftId: null, outputFields: {} };
+    const detail = drafted?.error || 'write draft creation failed';
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: detail });
+    return { status: 'error', error: detail, toolName, args, result: null, draftId: null, outputFields: {} };
   }
   emit({ type: 'tool_result', name: toolName, status: 'draft_created', summary: 'draft created — awaiting approval' });
   return {
@@ -1617,38 +1644,48 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
  * draft id, or null on failure.
  */
 async function createComposioDraft(ctx, composioSlug, args, toolName) {
-  if (!ctx?.prisma) return null;
+  if (!ctx?.prisma?.pendingWrite) {
+    return { id: null, error: 'write draft creation failed: approval store unavailable' };
+  }
+  const slug = String(composioSlug || toolName || 'composio_write').slice(0, 120);
+  let toolArgs;
   try {
-    const preview = `${toolName}(${JSON.stringify(args).slice(0, 200)})`;
-    const row = await ctx.prisma.pendingWrite.create({
-      data: {
-        userId: ctx.userId,
-        orgId: ctx.orgId || null,
-        provider: 'composio',
-        toolGroup: 'composio',
-        toolName: composioSlug,
-        toolArgs: { ...(args || {}), _composio_slug: composioSlug },
-        argsHash: createHash('sha256').update(JSON.stringify(args || {})).digest('hex'),
-        projectId: ctx.projectId || null,
-        connectionId: null,
-        traceId: ctx._trace?.traceId || null,
-        // Include the traceId so each turn creates a distinct draft (the
-        // idempotency_key column is UNIQUE — a deterministic key collides on a
-        // second identical request). The traceId scopes retries within one turn.
-        // Hashed to a fixed 64-char hex so it never exceeds the VarChar(160)
-        // column limit (the raw concatenation with full args was too long).
-        idempotencyKey: createHash('sha256')
-          .update(`composio:${ctx.orgId}:${ctx.userId}:${composioSlug}:${ctx._trace?.traceId || Date.now()}:${JSON.stringify(args || {})}`)
-          .digest('hex'),
-        expiresAt: new Date(Date.now() + Number(process.env.CHAT_DRAFT_TTL_MS || 15 * 60_000)),
-        preview,
-        status: 'draft',
-      },
-    });
-    return row?.id || null;
+    toolArgs = JSON.parse(JSON.stringify({ ...(args || {}), _composio_slug: slug }));
+  } catch {
+    toolArgs = { _composio_slug: slug };
+  }
+  const preview = `${String(toolName || slug).slice(0, 80)}(${JSON.stringify(toolArgs).slice(0, 400)})`;
+  const idempotencyKey = createHash('sha256')
+    .update(`composio:${ctx.orgId}:${ctx.userId}:${slug}:${ctx._trace?.traceId || Date.now()}:${JSON.stringify(toolArgs)}`)
+    .digest('hex');
+  const data = {
+    userId: ctx.userId,
+    orgId: ctx.orgId || null,
+    provider: 'composio',
+    toolGroup: 'composio',
+    toolName: slug,
+    toolArgs,
+    argsHash: createHash('sha256').update(JSON.stringify(toolArgs)).digest('hex'),
+    projectId: ctx.projectId || null,
+    connectionId: null,
+    traceId: ctx._trace?.traceId ? String(ctx._trace.traceId).slice(0, 160) : null,
+    idempotencyKey,
+    expiresAt: new Date(Date.now() + Number(process.env.CHAT_DRAFT_TTL_MS || 15 * 60_000)),
+    preview,
+    status: 'draft',
+  };
+  try {
+    const row = await ctx.prisma.pendingWrite.create({ data });
+    return { id: row?.id || null, error: null };
   } catch (err) {
+    if (err?.code === 'P2002' && typeof ctx.prisma.pendingWrite.findUnique === 'function') {
+      try {
+        const existing = await ctx.prisma.pendingWrite.findUnique({ where: { idempotencyKey } });
+        if (existing?.id) return { id: existing.id, error: null };
+      } catch { /* fall through */ }
+    }
     console.warn(`[compound] composio draft create failed: ${err.message}`);
-    return null;
+    return { id: null, error: `write draft creation failed: ${String(err.message || 'unknown').slice(0, 240)}` };
   }
 }
 

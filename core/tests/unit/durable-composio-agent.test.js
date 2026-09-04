@@ -47,7 +47,7 @@ test('durable agent requires Flagship enabled:true from cloudflare-flagship', as
 });
 
 test('search slugs pick fetch reads and send writes, never label or delete', () => {
-  const slugs = ['GMAIL_CREATE_LABEL', 'GMAIL_BATCH_DELETE_MESSAGES', 'GMAIL_FETCH_EMAILS', 'GMAIL_SEND_EMAIL', 'GITHUB_LIST_REPOS'];
+  const slugs = ['GMAIL_CREATE_LABEL', 'GMAIL_BATCH_DELETE_MESSAGES', 'GMAIL_FETCH_EMAILS', 'GMAIL_SEND_EMAIL', 'GITHUB_LIST_REPOS', 'GMAIL_GET_ATTACHMENT', 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID'];
   assert.deepEqual(selectReadSlugs(slugs, ['gmail', 'github']), ['GMAIL_FETCH_EMAILS', 'GITHUB_LIST_REPOS']);
   assert.deepEqual(selectReadSlugs(['AGILITY_CMS_GET_LOGS', 'GMAIL_FETCH_EMAILS'], ['gmail']), ['GMAIL_FETCH_EMAILS']);
   assert.equal(selectWriteSlug(slugs, ['gmail']), 'GMAIL_SEND_EMAIL');

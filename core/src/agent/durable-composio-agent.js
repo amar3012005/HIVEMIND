@@ -36,6 +36,8 @@ export function selectReadSlugs(slugs = [], connected = []) {
     const t = tokens(slug);
     if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
     if (t.some((x) => WRITE_SEND_TOKENS.has(x))) return false;
+    if (t.includes('attachment') || t.includes('collaborator') || t.includes('assignee')) return false;
+    if (t.includes('message') && t.includes('id')) return false;
     return t.some((x) => READ_TOKENS.has(x));
   }))].slice(0, 6);
 }
@@ -420,9 +422,10 @@ export async function runDurableComposioAgent({
   let searchedSlugs = (discovered.tools || []).map((tool) => tool?._composio?.slug).filter(Boolean);
   const discoveredToolkits = uniqueToolkitsFromSlugs(searchedSlugs);
   const mentioned = appsMatchingRequest(message, [...discoveredToolkits, ...connected, ...((discovered.apps || []).map((app) => app.slug))]);
-  if (mentioned.includes('github') && !searchedSlugs.some((slug) => /^GITHUB_/i.test(slug))
+  const fillGithubReads = mentioned.includes('github') || searchedSlugs.some((slug) => /^GITHUB_/i.test(slug));
+  if (fillGithubReads && !selectReadSlugs(searchedSlugs, ['github']).length
       && typeof composioSvc.searchToolsByIntent === 'function') {
-    const extra = await composioSvc.searchToolsByIntent(orgId, 'github repository', { toolkits: ['github'] }).catch(() => null);
+    const extra = await composioSvc.searchToolsByIntent(orgId, 'list repositories get readme', { toolkits: ['github'] }).catch(() => null);
     for (const tool of extra?.tools || []) {
       const slug = tool?._composio?.slug;
       if (slug && !searchedSlugs.includes(slug)) searchedSlugs.push(slug);

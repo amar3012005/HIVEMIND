@@ -378,12 +378,15 @@ export async function getToolRouterSession(orgId, toolkits) {
     }
     connectedAccounts[toolkit] = account.id;
   }
+  const { loadHivemindCustomToolkit, composioSessionExperimentalFromToolkit } = await import('./hivemind-custom-toolkit.js');
+  const hivemindToolkit = await loadHivemindCustomToolkit();
   const data = await _composioRequest('POST', '/api/v3/tool_router/session', {
     user_id: orgId,
     toolkits: { enable: enabled },
     connected_accounts: connectedAccounts,
     manage_connections: { enable: false },
     workbench: { enable: false },
+    experimental: composioSessionExperimentalFromToolkit(hivemindToolkit),
   }, { retries: 0, timeoutMs: 5_000 });
   const value = { id: data?.session_id, toolkits: enabled, connectedAccounts };
   if (!value.id) throw new Error('Composio Session did not return a session_id');

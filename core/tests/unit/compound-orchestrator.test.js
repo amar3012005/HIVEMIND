@@ -29,6 +29,7 @@ import {
   resolveSelectedTool,
   runCompoundOrchestrator,
   RETRY_CONNECT_VALUE,
+  interpretComposioStepDiscovery,
   contactLookupTool,
   namedRecipientQuery,
   shouldOpenConnectHref,
@@ -769,6 +770,18 @@ test('missing write fields produce a resumable generalized field-input request',
   assert.equal(created[0].toolArgs.recipient_email, 'person@example.com');
 });
 
+test('Composio step discovery searches before connection and classifies pause vs ready', () => {
+  assert.equal(interpretComposioStepDiscovery({
+    tools: [{ name: 'gmail_search' }], connectionStatus: 'available', toolkit: 'gmail',
+  }).status, 'needs_connection');
+  assert.equal(interpretComposioStepDiscovery({
+    tools: [{ name: 'gmail_search' }], connectionStatus: 'connected', toolkit: 'gmail',
+  }).status, 'ready');
+  assert.equal(interpretComposioStepDiscovery({
+    tools: [], connectionStatus: 'connected', toolkit: 'gmail',
+  }).status, 'needs_tool_resolution');
+});
+
 test('placeholder emails are never trusted destinations', () => {
   assert.equal(isUnverifiedPlaceholderEmail('rama@example.com', 'send a detailed email to rama'), true);
   assert.equal(isUnverifiedPlaceholderEmail('amar@example.com', 'Send this to amar@example.com'), false);
@@ -1126,7 +1139,13 @@ test('hivemind-context never opens a Composio connect link', async () => {
       }
       return { redirectUrl: 'https://connect.composio.dev/github' };
     },
-    async getToolkitTools() { return []; },
+    async getToolkitTools() {
+      return [{
+        type: 'function',
+        function: { name: 'composio_github_search', description: 'search', parameters: { type: 'object', properties: {} } },
+        _composio: { toolkit: 'github', slug: 'GITHUB_SEARCH' },
+      }];
+    },
     async executeTool() { throw new Error('must not execute composio'); },
   };
   const result = await runCompoundOrchestrator({
@@ -1208,7 +1227,7 @@ test('unified DAG pauses a required disconnected toolkit and still runs independ
   }
 });
 
-test('unified DAG fail-closes status throw with zero Composio search or execute', async () => {
+test('unified DAG searches then pauses when status throws, without executing', async () => {
   const previous = process.env.USE_TOOLS_UNIFIED_DAG;
   process.env.USE_TOOLS_UNIFIED_DAG = 'true';
   let executed = 0;
@@ -1225,9 +1244,15 @@ test('unified DAG fail-closes status throw with zero Composio search or execute'
     async createConnectLink() { return { redirectUrl: 'https://connect.composio.dev/link/gmail-failclosed' }; },
     async discoverSessionTools() {
       discovered += 1;
-      throw new Error('must not discover after status throw');
+      throw new Error('session search unavailable');
     },
-    async getToolkitTools() { throw new Error('must not load tools after status throw'); },
+    async getToolkitTools() {
+      return [{
+        type: 'function',
+        function: { name: 'composio_gmail_search', description: 'search', parameters: { type: 'object', properties: {} } },
+        _composio: { toolkit: 'gmail', slug: 'GMAIL_SEARCH' },
+      }];
+    },
   };
   try {
     const result = await runCompoundOrchestrator({
@@ -1237,7 +1262,6 @@ test('unified DAG fail-closes status throw with zero Composio search or execute'
       selectTool: makeSelector(() => ({ toolName: 'composio_gmail_search', args: {} })),
     });
     assert.equal(executed, 0);
-    assert.equal(discovered, 0);
     assert.equal(result.status, 'needs_input');
     assert.equal(result.inputRequests[0].kind, 'connect_account');
     assert.equal(shouldOpenConnectHref(result.inputRequests[0].options[0]), true);

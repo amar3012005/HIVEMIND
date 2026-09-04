@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   connectedProvidersFromAccounts,
   decisionToHostedPlan,
-  mentionedCatalogProviders,
   planHostedComposioWorkflow,
 } from '../../src/agent/hosted-composio-planner.js';
 import { isUseToolsUnifiedDagEnabled } from '../../src/agent/use-tools-unified-flag.js';
@@ -69,18 +68,19 @@ test('flag-off still rejects a disconnected named catalog app', () => {
   }, { request: 'emails and notes', connectedProviders: [], unifiedDag: false }), /planner_selected_unavailable_tool_group:gmail/);
 });
 
-test('named github stays in the hosted plan even when the model omitted it', () => {
-  assert.deepEqual(mentionedCatalogProviders('from my github and hivemind find TARA and email rama'), ['github']);
+test('unified DAG keeps any named external toolkit without a catalog whitelist', () => {
   const steps = decisionToHostedPlan({
     operation: 'compound',
     subtasks: [
-      { operation: 'recall', tool_groups: ['hivemind-recall'], message: 'TARA' },
-      { operation: 'email', authority: 'write', tool_groups: ['gmail'], depends_on: [0], message: 'email rama' },
+      { operation: 'github', tool_groups: ['github'], message: 'TARA on github' },
+      { operation: 'recall', tool_groups: ['hivemind-recall'], message: 'TARA in memory' },
+      { operation: 'email', authority: 'write', tool_groups: ['gmail'], depends_on: [0, 1], message: 'email rama' },
     ],
-  }, { request: 'from my github and hivemind find information about TARA and send email to rama', connectedProviders: ['github', 'gmail'], unifiedDag: true });
-  assert.equal(steps[0].tool_groups[0], 'github');
-  assert.ok(steps.some((step) => step.tool_groups[0] === 'hivemind-recall'));
-  assert.ok(steps.some((step) => step.tool_groups[0] === 'gmail'));
+  }, { request: 'github hivemind gmail', connectedProviders: [], unifiedDag: true });
+  assert.deepEqual(steps.map((step) => step.tool_groups[0]), ['github', 'hivemind-recall', 'gmail']);
+  assert.equal(steps[0].connection_required, true);
+  assert.equal(steps[1].connection_required, false);
+  assert.equal(steps[2].connection_required, true);
 });
 
 test('hivemind-context is native recall, never a Composio connect app', () => {

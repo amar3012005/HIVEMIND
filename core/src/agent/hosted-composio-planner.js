@@ -61,8 +61,8 @@ function validateGroups(groups, allowedGroups, { allowCatalogDisconnected = fals
   const group = native || normalized[0];
   if (native) return { groups: [native], connection_required: false };
   if (allowedGroups.has(group)) return { groups: [group], connection_required: false };
-  if (allowCatalogDisconnected && (CATALOG_CONNECTOR_PROVIDERS.includes(group) || NATIVE_GROUPS.has(group))) {
-    return { groups: [group], connection_required: !NATIVE_GROUPS.has(group) };
+  if (allowCatalogDisconnected) {
+    return { groups: [group], connection_required: true };
   }
   throw new Error(`planner_selected_unavailable_tool_group:${group}`);
 }
@@ -121,7 +121,7 @@ export function decisionToHostedPlan(decision, { request, connectedProviders = [
       .filter((group) => !NATIVE_GROUPS.has(group) && connectedProviders.includes(group)))];
     if (dependentGroups.length === 1) step.tool_groups = dependentGroups;
   }
-  return ensureMentionedCatalogSteps(steps, request, connectedProviders, unifiedDag);
+  return steps;
 }
 
 export function mentionedCatalogProviders(request) {

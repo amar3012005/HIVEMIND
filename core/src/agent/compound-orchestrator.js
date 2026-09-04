@@ -30,6 +30,19 @@ async function chatCompletionFetch(...args) {
 
 export const RETRY_CONNECT_VALUE = '__retry_connect__';
 
+export function interpretComposioStepDiscovery({
+  tools, connectionStatus, toolkit, searchFailed = false,
+} = {}) {
+  const found = Array.isArray(tools) && tools.length > 0;
+  if (!toolkit) return { status: 'needs_tool_resolution', found: false };
+  if (connectionStatus !== 'connected') {
+    if (found || searchFailed) return { status: 'needs_connection', toolkit, found };
+    return { status: 'needs_tool_resolution', toolkit, found: false };
+  }
+  if (!found) return { status: 'needs_tool_resolution', toolkit, found: false };
+  return { status: 'ready', toolkit, found: true };
+}
+
 export function shouldOpenConnectHref(option) {
   return Boolean(option && (option.href || option.open_url));
 }
@@ -1181,76 +1194,11 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   const unifiedDag = ctx && Object.prototype.hasOwnProperty.call(ctx, 'unifiedDag')
     ? ctx.unifiedDag === true
     : isUseToolsUnifiedDagEnabled();
-  if (unifiedDag && composioToolkit && ctx?.orgId) {
-    let status = 'error';
-    if (typeof composioSvc.getToolkitStatus === 'function') {
-      try {
-        status = await composioSvc.getToolkitStatus(ctx.orgId, composioToolkit);
-      } catch {
-        // Fail closed: a status error is not permission to search or execute.
-        status = 'error';
-      }
-    }
-    if (status !== 'connected') {
-      const label = displayToolkitName(composioToolkit);
-      let redirectUrl = null;
-      if (typeof composioSvc.createConnectLink === 'function') {
-        try {
-          const link = await composioSvc.createConnectLink(composioToolkit, ctx.orgId, {
-            callbackUrl: ctx.composioCallbackUrl || undefined,
-            toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
-          });
-          redirectUrl = link?.redirectUrl || link?.redirect_url || null;
-        } catch (err) {
-          emit({ type: 'tool_result', name: composioToolkit, status: 'connect_link_failed', summary: err.message });
-        }
-      }
-      emit({
-        type: 'orchestration_connect_required',
-        toolkit: composioToolkit,
-        provider: toolGroups[0] || composioToolkit,
-        redirect_url: redirectUrl,
-      });
-      return {
-        status: 'needs_input',
-        error: `${label} is not connected`,
-        toolName: null,
-        args: {},
-        result: null,
-        draftId: null,
-        outputFields: {},
-        inputRequest: {
-          kind: 'connect_account',
-          field: 'connection',
-          toolkit: composioToolkit,
-          provider: toolGroups[0] || composioToolkit,
-          app_label: label,
-          logo_url: `https://logos.composio.dev/api/${encodeURIComponent(composioToolkit)}`,
-          blocking: subtask?.blocking !== false,
-          prompt: `Connect ${label} to continue. Approve access in the window that opens, then come back and continue this request.`,
-          options: [
-            {
-              id: 'connect',
-              label: `Connect ${label}`,
-              href: redirectUrl,
-              open_url: Boolean(redirectUrl),
-              value: redirectUrl || 'connect',
-            },
-            {
-              id: 'connected',
-              label: `I've connected ${label} — continue`,
-              value: RETRY_CONNECT_VALUE,
-            },
-          ],
-        },
-      };
-    }
-  }
   let tools = [];
   let composioSlugByTool = new Map();
   let composioManifestByTool = new Map();
+  let discoveryError = null;
   if (composioToolkit) {
-    let discoveryError = null;
     for (let discoveryAttempt = 0; discoveryAttempt < 2; discoveryAttempt += 1) {
       try {
         tools = [];
@@ -1328,8 +1276,86 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         });
       }
     }
-    if (discoveryError) {
+    if (discoveryError && !unifiedDag) {
       return { status: 'error', error: `composio tools failed: ${discoveryError.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
+    }
+  }
+  if (unifiedDag && composioToolkit && ctx?.orgId) {
+    let status = 'error';
+    if (typeof composioSvc.getToolkitStatus === 'function') {
+      try {
+        status = await composioSvc.getToolkitStatus(ctx.orgId, composioToolkit);
+      } catch {
+        status = 'error';
+      }
+    }
+    const verdict = interpretComposioStepDiscovery({
+      tools,
+      connectionStatus: status,
+      toolkit: composioToolkit,
+      searchFailed: Boolean(discoveryError) && tools.length === 0,
+    });
+    if (verdict.status === 'needs_connection') {
+      const label = displayToolkitName(composioToolkit);
+      let redirectUrl = null;
+      if (typeof composioSvc.createConnectLink === 'function') {
+        try {
+          const link = await composioSvc.createConnectLink(composioToolkit, ctx.orgId, {
+            callbackUrl: ctx.composioCallbackUrl || undefined,
+            toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
+          });
+          redirectUrl = link?.redirectUrl || link?.redirect_url || null;
+        } catch (err) {
+          emit({ type: 'tool_result', name: composioToolkit, status: 'connect_link_failed', summary: err.message });
+        }
+      }
+      emit({
+        type: 'orchestration_connect_required',
+        toolkit: composioToolkit,
+        provider: toolGroups[0] || composioToolkit,
+        redirect_url: redirectUrl,
+        tools_found: verdict.found,
+      });
+      return {
+        status: 'needs_input',
+        error: `${label} is not connected`,
+        toolName: null,
+        args: {},
+        result: null,
+        draftId: null,
+        outputFields: {},
+        inputRequest: {
+          kind: 'connect_account',
+          field: 'connection',
+          toolkit: composioToolkit,
+          provider: toolGroups[0] || composioToolkit,
+          app_label: label,
+          logo_url: `https://logos.composio.dev/api/${encodeURIComponent(composioToolkit)}`,
+          blocking: subtask?.blocking !== false,
+          prompt: `Connect ${label} to continue. Approve access in the window that opens, then come back and continue this request.`,
+          options: [
+            {
+              id: 'connect',
+              label: `Connect ${label}`,
+              href: redirectUrl,
+              open_url: Boolean(redirectUrl),
+              value: redirectUrl || 'connect',
+            },
+            {
+              id: 'connected',
+              label: `I've connected ${label} — continue`,
+              value: RETRY_CONNECT_VALUE,
+            },
+          ],
+        },
+      };
+    }
+    if (verdict.status === 'needs_tool_resolution') {
+      return {
+        status: 'error',
+        error: `needs_tool_resolution:${composioToolkit}`,
+        toolName: null, args: {}, result: null, draftId: null, outputFields: {},
+      };
     }
   }
   if (tools.length === 0) {

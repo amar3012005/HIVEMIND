@@ -43,7 +43,8 @@ export function selectWriteSlug(slugs = [], connected = []) {
     if (connected.length && !slugMatchesConnected(slug, connected)) return false;
     const t = tokens(slug);
     if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
-    return t.some((x) => WRITE_SEND_TOKENS.has(x));
+    if (t.some((x) => WRITE_SEND_TOKENS.has(x))) return true;
+    return t.includes('draft') && t.includes('create');
   });
   return candidates[0] || null;
 }
@@ -56,7 +57,11 @@ export function emailsFromProviderData(data) {
       const matches = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
       for (const email of matches) {
         const lower = email.toLowerCase();
-        if (!/example\.(com|net|org)$/.test(lower.split('@')[1] || '')) found.add(lower);
+        const host = lower.split('@')[1] || '';
+        if (/example\.(com|net|org)$/.test(host)) continue;
+        if (host.endsWith('mail.gmail.com') || host.endsWith('google.com')) continue;
+        if (host.split('.').length > 3) continue;
+        found.add(lower);
       }
       return;
     }

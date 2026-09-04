@@ -378,16 +378,24 @@ export async function getToolRouterSession(orgId, toolkits) {
     }
     connectedAccounts[toolkit] = account.id;
   }
-  const { loadHivemindCustomToolkit, composioSessionExperimentalFromToolkit } = await import('./hivemind-custom-toolkit.js');
-  const hivemindToolkit = await loadHivemindCustomToolkit();
-  const data = await _composioRequest('POST', '/api/v3/tool_router/session', {
+  const body = {
     user_id: orgId,
     toolkits: { enable: enabled },
     connected_accounts: connectedAccounts,
     manage_connections: { enable: false },
     workbench: { enable: false },
-    experimental: composioSessionExperimentalFromToolkit(hivemindToolkit),
-  }, { retries: 0, timeoutMs: 5_000 });
+  };
+  let data;
+  try {
+    const { loadHivemindCustomToolkit, composioSessionExperimentalFromToolkit } = await import('./hivemind-custom-toolkit.js');
+    const hivemindToolkit = await loadHivemindCustomToolkit();
+    data = await _composioRequest('POST', '/api/v3/tool_router/session', {
+      ...body,
+      experimental: composioSessionExperimentalFromToolkit(hivemindToolkit),
+    }, { retries: 0, timeoutMs: 5_000 });
+  } catch {
+    data = await _composioRequest('POST', '/api/v3/tool_router/session', body, { retries: 0, timeoutMs: 5_000 });
+  }
   const value = { id: data?.session_id, toolkits: enabled, connectedAccounts };
   if (!value.id) throw new Error('Composio Session did not return a session_id');
   TOOL_ROUTER_SESSION_CACHE.set(key, { at: Date.now(), value });
@@ -434,15 +442,16 @@ export async function searchToolsByIntent(orgId, useCase, { toolkits } = {}) {
   )];
   const bySlug = new Map();
   for (const tool of searchedTools) bySlug.set(tool._composio.slug, tool);
-  const represented = new Set([...bySlug.values()].map((tool) => tool._composio.toolkit).filter(Boolean));
   const fillToolkits = [...new Set([
     ...connectedToolkits,
     ...(searchedApps.items || []).map((item) => item.slug).filter(Boolean),
     ...(toolkits || []),
-  ])].filter((toolkit) => !represented.has(toolkit)).slice(0, 8);
+  ])].slice(0, 8);
   if (fillToolkits.length) {
-    const extras = await Promise.all(fillToolkits.map((toolkit) =>
-      listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 6 }).catch(() => [])));
+    const extras = await Promise.all(fillToolkits.flatMap((toolkit) => [
+      listCatalogTools({ toolkitSlug: toolkit, important: true, limit: 8 }).catch(() => []),
+      query ? listCatalogTools({ toolkitSlug: toolkit, search: query, limit: 8 }).catch(() => []) : Promise.resolve([]),
+    ]));
     for (const tool of extras.flat()) {
       if (!bySlug.has(tool._composio.slug)) bySlug.set(tool._composio.slug, tool);
     }

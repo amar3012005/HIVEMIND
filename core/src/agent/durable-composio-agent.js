@@ -36,7 +36,8 @@ export function selectReadSlugs(slugs = [], connected = []) {
     const t = tokens(slug);
     if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
     if (t.some((x) => WRITE_SEND_TOKENS.has(x))) return false;
-    if (t.includes('attachment') || t.includes('collaborator') || t.includes('assignee')) return false;
+    if (t.includes('attachment') || t.some((x) => x.startsWith('collaborator')) || t.includes('assignee')) return false;
+    if (t.includes('starred') || t.includes('watched') || t.includes('invitation')) return false;
     if (t.includes('message') && t.includes('id')) return false;
     return t.some((x) => READ_TOKENS.has(x));
   }))].slice(0, 6);
@@ -558,11 +559,11 @@ export async function runDurableComposioAgent({
       };
       return rank(left) - rank(right);
     });
+  readSlugs = readSlugs.filter((slug) => !/STARRED|WATCHED|INVITATION|COLLABORATOR/i.test(slug)).slice(0, 3);
   if (person) {
     const mail = searchedSlugs.find((slug) => /GMAIL_FETCH_EMAILS/i.test(slug) && slugMatchesConnected(slug, connected));
     if (mail && !readSlugs.includes(mail)) readSlugs.push(mail);
   }
-  readSlugs = readSlugs.slice(0, 4);
 
   const readCalls = readSlugs.map((slug) => ({
     slug,

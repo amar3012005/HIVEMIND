@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { executeHivemindCustomTool, nativeNameFromComposioSlug } from '../connectors/composio/hivemind-custom-toolkit.js';
-import { formatComposioSearch } from '../connectors/composio/composio-search-formatter.js';
+import { formatComposioSearch, isReadLookupUseCase } from '../connectors/composio/composio-search-formatter.js';
 
 const memoryRuns = new Map();
 
@@ -1309,6 +1309,10 @@ export async function runDurableComposioAgent({
             sessionId: run.scratch.workflow_session_id,
             destinationApps: sessionToolkits,
             generateId: !run.scratch.workflow_session_id,
+            searchStrategy: (
+              (isReadLookupUseCase(queryMessage) && /\b(post|posts)\b/i.test(String(queryMessage || '')))
+              || /list the authenticated user's latest|find a person email address|email address of a person called/i.test(String(queryMessage || ''))
+            ) ? 'tool_search' : 'auto',
           }),
         });
         discovery.fromSession = true;

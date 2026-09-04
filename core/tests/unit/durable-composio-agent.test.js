@@ -737,6 +737,7 @@ test('LinkedIn last-post adapts after GET-without-id instead of creating a post'
   assert.ok(result.run.scratch.cursor);
   assert.equal(searchPayload.queries[0].known_fields, '');
   assert.equal(searchPayload.queries[0].use_case, "list the authenticated user's latest linkedin posts");
+  assert.equal(searchPayload.search_strategy, 'tool_search');
 });
 
 

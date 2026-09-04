@@ -926,6 +926,38 @@ async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTo
   }
 }
 
+async function execMappedNativeTool(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
+  const tool = plan.native_tool;
+  if (!tool || remaining() <= 0) return;
+  const args = {
+    query: plan.queries?.[0] || plan.user_message,
+    query_original: plan.user_message,
+    title: plan.save_intent?.title,
+    content: plan.save_intent?.content,
+  };
+  try {
+    startTool(tool, args);
+    const result = await beforeDeadline(() => dispatchTool(tool, args, ctx));
+    if (Array.isArray(result?.memories)) bus.mergeMemories(result.memories);
+    const snippet = String(result?.content || result?.answer || JSON.stringify(result || {})).replace(/\s+/g, ' ').slice(0, 1200);
+    if (snippet && snippet !== '{}') {
+      bus.addPacket({
+        citations: [{
+          id: 'NATIVE1',
+          source_type: 'hivemind_tool',
+          source_label: tool,
+          title: tool,
+          snippet,
+        }],
+      });
+    }
+    recordTool(tool, args, result?.error ? `error: ${result.error}` : 'ok', result);
+    return { mappedNative: result };
+  } catch (error) {
+    recordTool(tool, args, `error: ${error.message}`, null);
+  }
+}
+
 async function execConnectorRead(bus, plan, ctx, { beforeDeadline, recordTool, onEvent }) {
   const selectedLiveGroups = Array.isArray(plan.tool_groups) ? plan.tool_groups : [];
   if (!(plan.operation === 'connector_read' && selectedLiveGroups.length > 0 && ctx._readToolkit)) return;
@@ -1040,7 +1072,7 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
           : (plan.query_original || plan.user_message || q),
         query_canonical_en: plan.query_canonical_en || q,
         entities: plan.named_entities || [],
-        answer_type: plan.answer_type || null,
+        ...(plan.answer_scope === 'exhaustive' && plan.answer_type ? { answer_type: plan.answer_type } : {}),
         mode: recallMode,
         limit: recallLimit,
         _explicit_mode: !!plan.explicit_recall_mode,
@@ -1136,6 +1168,11 @@ const OP_STAGE = [
   { name: 'timeline', predicate: (p) => p.operation === 'timeline' || p.needs_time_travel, exec: execTimeline, scalar: 'temporalCoverage' },
   { name: 'profile', predicate: (p) => p.operation === 'profile', exec: execProfile, scalar: 'profileContext' },
   { name: 'projects', predicate: (p) => p.operation === 'projects', exec: execProjects, scalar: 'projectsResult' },
+  { name: 'mapped_native', predicate: (p) => Boolean(p.native_tool) && ![
+    'hivemind_recall', 'get_user_profile', 'hivemind_list_projects',
+    'hivemind_at', 'hivemind_diff', 'hivemind_timeline',
+    'hivemind_relation_between', 'hivemind_aggregate_entities',
+  ].includes(p.native_tool), exec: execMappedNativeTool, scalar: 'mappedNative' },
 ];
 
 // Exported for the characterization test (gather-evidence-characterization.test.js),

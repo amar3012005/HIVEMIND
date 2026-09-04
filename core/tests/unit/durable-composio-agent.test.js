@@ -14,7 +14,9 @@ import {
   emailsFromProviderData,
   getOrCreateAgentRun,
   governReadSlugs,
+  isReadOnlyRequest,
   isReadThenWrite,
+  isWriteSlug,
   namedPersonQuery,
   namedRepoQuery,
   pickRecipientEmail,
@@ -27,6 +29,51 @@ import {
   selectReadSlugs,
   selectWriteSlug,
 } from '../../src/agent/durable-composio-agent.js';
+
+test('LinkedIn create-post is a write and last-post questions are read-only', () => {
+  assert.equal(isWriteSlug('LINKEDIN_CREATE_LINKED_IN_POST'), true);
+  assert.equal(isWriteSlug('LINKEDIN_GET_POST_CONTENT'), false);
+  assert.equal(isReadOnlyRequest('what do u think about my last linkedin post'), true);
+  assert.equal(isReadOnlyRequest('what was my last linkedin post about?'), true);
+  assert.equal(isReadOnlyRequest('send rama, about information about the company'), false);
+});
+
+test('read-only LinkedIn questions do not execute create-post', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'linkedin', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_li_read' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_li_read',
+        primaryToolSlugs: ['LINKEDIN_CREATE_LINKED_IN_POST', 'LINKEDIN_GET_POST_CONTENT', 'LOCAL_HIVEMIND_HIVEMIND_RECALL'],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { linkedin: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'LINKEDIN_CREATE_LINKED_IN_POST' } },
+          { _composio: { slug: 'LINKEDIN_GET_POST_CONTENT' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map(() => ({ successful: false, error: '1 out of 1 tools failed', data: null }));
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'what was my last linkedin post about?',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-li-read',
+      synthesizeDurableAnswer: async ({ evidence, failures }) => `synth:${failures || evidence || 'none'}`,
+      _tracedDispatch: async () => ({ memories: [{ title: 'Note', content: 'not a linkedin post' }] }),
+    },
+    composio,
+  });
+  assert.equal(executed.includes('LINKEDIN_CREATE_LINKED_IN_POST'), false);
+  assert.notEqual(result.summary, 'Completed durable agent steps.');
+  assert.match(result.summary, /synth:/);
+});
 
 test('write-tool args follow the schema and do not paste the user command', async () => {
   const args = await composeWriteToolArgs({

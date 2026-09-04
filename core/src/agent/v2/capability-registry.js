@@ -1,9 +1,11 @@
 export const NATIVE_CAPABILITY_FAMILIES = Object.freeze({
   profile: ['profile', 'update_profile'],
-  memory_write: ['save'],
+  memory_write: ['save', 'log_decision', 'set_assistant_name'],
   workspace_read: [
     'recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline',
     'relation_between', 'aggregate', 'projects',
+    'list_memories', 'get_memory', 'traverse', 'query_with_ai', 'count_where', 'query_table',
+    'web_search', 'recall_bugs', 'why_code', 'code_at',
   ],
   direct: ['direct'],
 });
@@ -21,6 +23,18 @@ export const NATIVE_OPERATION_TO_TOOL = Object.freeze({
   relation_between: 'hivemind_relation_between',
   aggregate: 'hivemind_aggregate_entities',
   projects: 'hivemind_list_projects',
+  list_memories: 'hivemind_list_memories',
+  get_memory: 'hivemind_get_memory',
+  traverse: 'hivemind_traverse_graph',
+  query_with_ai: 'hivemind_query_with_ai',
+  count_where: 'hivemind_count_where',
+  query_table: 'hivemind_query_table',
+  web_search: 'hivemind_web_search',
+  recall_bugs: 'hivemind_recall_bugs',
+  why_code: 'hivemind_why_code',
+  code_at: 'hivemind_code_at',
+  log_decision: 'hivemind_log_decision',
+  set_assistant_name: 'hivemind_set_assistant_name',
   direct: null,
 });
 

@@ -74,4 +74,5 @@ test('session experimental payload uses Composio custom toolkit shape', () => {
   assert.equal(nativeNameFromComposioSlug('HIVEMIND_RECALL'), 'hivemind_recall');
   assert.equal(nativeNameFromComposioSlug('LOCAL_HIVEMIND_HIVEMIND_RECALL'), 'hivemind_recall');
   assert.equal(nativeNameFromComposioSlug('LOCAL_HIVEMIND_RECALL'), 'hivemind_recall');
+  assert.equal(nativeNameFromComposioSlug('LOCAL_HIVEMIND_GET_USER_PROFILE'), 'get_user_profile');
 });

@@ -136,7 +136,14 @@ const NATIVE_CONTEXT_TOOL = (() => {
         properties: {
           native_tool: {
             type: 'string',
-            enum: ['hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_aggregate_entities', 'hivemind_relation_between'],
+            enum: [
+              'hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline',
+              'hivemind_aggregate_entities', 'hivemind_relation_between',
+              'hivemind_list_memories', 'hivemind_get_memory', 'hivemind_traverse_graph',
+              'hivemind_query_with_ai', 'hivemind_count_where', 'hivemind_query_table',
+              'hivemind_list_projects', 'hivemind_web_search', 'hivemind_recall_bugs',
+              'hivemind_why_code', 'hivemind_code_at',
+            ],
             description: `Choose exactly one capability by semantic intent in any language:\n${NATIVE_TOOL_CATALOG}`,
           },
           temporal_axis: {

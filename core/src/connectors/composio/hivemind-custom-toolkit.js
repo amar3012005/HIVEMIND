@@ -73,7 +73,11 @@ async function loadToolSchemas() {
 export function nativeNameFromComposioSlug(slug) {
   let raw = String(slug || '').trim().replace(/^LOCAL_/, '');
   if (raw.startsWith('HIVEMIND_HIVEMIND_')) raw = raw.slice('HIVEMIND_'.length);
-  return raw.toLowerCase();
+  let native = raw.toLowerCase();
+  if (native === 'hivemind_get_user_profile' || native === 'get_user_profile') return 'get_user_profile';
+  if (native === 'hivemind_update_user_profile' || native === 'update_user_profile') return 'update_user_profile';
+  if (native === 'recall') return 'hivemind_recall';
+  return native;
 }
 
 export function composioSlugFromNativeName(name) {

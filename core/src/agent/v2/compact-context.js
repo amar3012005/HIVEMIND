@@ -90,8 +90,9 @@ export async function warmCompactContextCheckpoint() {
 }
 
 export function compactThreadKey({ orgId, userId, threadId } = {}) {
-  if (!orgId || !userId || !threadId) return null;
-  const digest = crypto.createHash('sha256').update(String(threadId)).digest('hex').slice(0, 32);
+  if (!orgId || !userId) return null;
+  const tid = String(threadId || `user:${userId}`).trim() || `user:${userId}`;
+  const digest = crypto.createHash('sha256').update(tid).digest('hex').slice(0, 32);
   return `chat:${orgId}:${userId}:${digest}:v2`;
 }
 

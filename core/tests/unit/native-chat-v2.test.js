@@ -70,6 +70,20 @@ test('person overview preserves entity and compiles one canonical recall', () =>
   const decision = compileNativePlan(validateNativePlan(makePlan()), 'What do you know about Kruti?');
   assert.equal(decision.operation, 'recall'); assert.deepEqual(decision.queries, ['Kruti']);
   assert.deepEqual(decision.named_entities, ['Kruti']); assert.equal(decision.planned_steps.length, 1);
+  assert.ok(decision.tool_groups.includes('hivemind-recall'));
+  assert.ok(decision.tool_groups.includes('hivemind-web'));
+  assert.ok(decision.tool_groups.includes('hivemind-engineering'));
+  assert.ok(decision.tool_groups.includes('hivemind-memory-write'));
+  assert.ok(decision.tool_groups.includes('hivemind-projects'));
+});
+
+test('list_memories maps onto the native list tool', () => {
+  const compiled = compileNativePlan(
+    validateNativePlan(makePlan({ operation: 'list_memories', query: 'company facts' })),
+    'list my memories about the company',
+  );
+  assert.equal(compiled.native_tool, 'hivemind_list_memories');
+  assert.ok(compiled.tool_groups.includes('hivemind-recall'));
 });
 
 test('named source and latest upload preserve source/time semantics', () => {

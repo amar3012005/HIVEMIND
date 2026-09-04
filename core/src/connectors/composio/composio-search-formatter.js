@@ -65,7 +65,7 @@ export function formatComposioSearch({
       known_fields: formatKnownFields({ recipient, destinationApps }),
     }],
     session,
-    model: model || process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'openai/gpt-oss-20b',
+    model: model || process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'gemini-2.5-flash-lite',
     search_strategy: searchStrategy === 'tool_search' ? 'tool_search' : 'auto',
   };
 }

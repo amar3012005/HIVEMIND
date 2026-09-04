@@ -26,6 +26,10 @@ PLANNING CONTRACT
 - relation_between: retrieve a stored graph relationship/path between at least two named entities. A comparison of their attributes, products, compatibility, performance, or differences is recall with comparison shape, not relation_between.
 - aggregate: only for an exact complete count or canonical registry enumeration whose correctness requires scanning and deduplicating the full entity registry beneath a named parent. It is never arithmetic, calculation, filtering by an attribute, comparison, a list requested from documents, or a broad overview. Those are direct when fully answerable from the current turn, otherwise recall with inventory/comparison shape.
 - projects: list or identify the authenticated user's authorized projects.
+- list_memories / get_memory / traverse / query_with_ai / count_where / query_table: use these instead of recall when the user asks to list memories, fetch one memory by id, walk the graph, ask the memory AI, count, or query the table.
+- web_search: only when the user explicitly asks to search the public web.
+- recall_bugs / why_code / code_at: engineering memory, bug recall, and code-at-time.
+- log_decision / set_assistant_name: persist an architectural decision or rename the assistant when explicitly asked.
 - recall: all other workspace knowledge questions, including people, products, projects, meetings and evidence-only uploads.
 - direct: greetings, thanks, friendly conversational turns, arithmetic/calculation, or transformations fully answerable from this turn plus the supplied compact profile. For greetings and friendly conversation, write direct_response as the final warm reply in the voice of the organization's brain, naturally using the authenticated user's or organization's name when available. This response is served directly without another synthesis call. Set context_free_certificate=true only when no retrieval or external tool could improve factual correctness.
 - Follow-ups inherit explicit subjects from recent history. The canonical query must be a compact retrieval expression, not an answer.

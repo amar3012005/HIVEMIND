@@ -105,10 +105,18 @@ export function isNativeHivemindSlug(slug) {
 
 export function isWriteSlug(slug) {
   const t = tokens(slug);
+  if (t.some((x) => READ_TOKENS.has(x))) return false;
   if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
   if (t.includes('draft') && t.includes('create')) return true;
+  if (t.includes('create') || t.includes('publish') || t.includes('upload')) return true;
   if (t.includes('reply') || t.includes('comment')) return false;
   return t.some((x) => WRITE_SEND_TOKENS.has(x));
+}
+
+export function isReadOnlyRequest(message) {
+  const text = String(message || '');
+  if (/\b(send|email|mail to|draft|publish|create|post this|share this|write a|reply to)\b/i.test(text)) return false;
+  return /\b(what|think|last|show|get|read|about my|did i|have i|was my)\b/i.test(text);
 }
 
 export function selectWriteSlug(slugs = [], connected = []) {
@@ -1049,6 +1057,21 @@ export async function runDurableComposioAgent({
   };
 
   const startAt = Number.isFinite(Number(run.scratch.step_index)) ? Number(run.scratch.step_index) : 0;
+  if (startAt === 0 && plan.length > 1) {
+    plan.sort((left, right) => {
+      const rank = (slug) => {
+        if (isNativeHivemindSlug(slug) && /RECALL/i.test(slug)) return 0;
+        if (isNativeHivemindSlug(slug)) return 1;
+        if (isWriteSlug(slug)) return 6;
+        if (/LIST_|GET_MY|RECENT/i.test(slug)) return 2;
+        if (/_CONTENT|_BY_|_ID$/i.test(slug)) return 5;
+        return 3;
+      };
+      return rank(left) - rank(right);
+    });
+    run.scratch.plan = plan;
+  }
+  if (isReadOnlyRequest(message)) writeSlug = null;
   for (let index = startAt; index < plan.length; index += 1) {
     const slug = plan[index];
     run.scratch.step_index = index;
@@ -1065,7 +1088,9 @@ export async function runDurableComposioAgent({
       continue;
     }
     if (isWriteSlug(slug)) {
-      writeSlug = selectWriteSlug([slug, writeSlug].filter(Boolean), writeConnected.length ? writeConnected : connected) || writeSlug || slug;
+      if (!isReadOnlyRequest(message)) {
+        writeSlug = selectWriteSlug([slug, writeSlug].filter(Boolean), writeConnected.length ? writeConnected : connected) || writeSlug || slug;
+      }
       continue;
     }
     const toolkit = toolkitFromSlug(slug);
@@ -1212,16 +1237,72 @@ export async function runDurableComposioAgent({
     };
   }
 
+  const summary = await synthesizeDurableAnswer({
+    message,
+    reads: readResults,
+    recallText,
+    writeSlug: null,
+    generateImpl: ctx.synthesizeDurableAnswer,
+  });
   run.status = 'done';
   await saveAgentRun({ prisma: db, run });
   return {
     status: 'completed',
     run,
-    summary: 'Completed durable agent steps.',
+    summary,
     steps: run.steps,
     draftIds,
     pendingActions,
   };
+}
+
+export async function synthesizeDurableAnswer({
+  message,
+  reads = [],
+  recallText = '',
+  writeSlug = null,
+  draftTo = null,
+  generateImpl,
+} = {}) {
+  const ok = (reads || []).filter((row) => row.successful);
+  const fail = (reads || []).filter((row) => !row.successful);
+  const evidence = [
+    recallText,
+    ...ok.map((row) => summarizeToolData(row.data, 500)).filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text)),
+  ].filter(Boolean).join('\n\n').slice(0, 4000);
+  const failures = fail.map((row) => `${row.slug}: ${row.error || 'failed'}`).slice(0, 8).join('; ');
+  if (typeof generateImpl === 'function') {
+    const text = await generateImpl({ message, evidence, failures, writeSlug, draftTo });
+    if (text) return String(text).slice(0, 4000);
+  }
+  try {
+    const { chatCompletionFetch } = await import('../llm/chat-provider.js');
+    const response = await chatCompletionFetch(process.env.HIVEMIND_BRIEFING_MODEL || 'gemini-2.5-flash-lite', {
+      body: JSON.stringify({
+        temperature: 0.2,
+        max_tokens: 500,
+        messages: [
+          {
+            role: 'system',
+            content: 'Answer the user from tool evidence. Say what you retrieved and what failed. Do not invent posts or emails. Do not say Completed durable agent steps. Plain text.',
+          },
+          {
+            role: 'user',
+            content: `Request: ${String(message || '').slice(0, 500)}\nEvidence:\n${evidence || '(none)'}\nFailures: ${failures || '(none)'}`,
+          },
+        ],
+      }),
+    }, { useCase: 'durable_synth' });
+    const payload = await response.json();
+    const text = payload?.choices?.[0]?.message?.content;
+    if (typeof text === 'string' && text.trim().length > 20 && !/Completed durable agent steps/i.test(text)) {
+      return text.trim().slice(0, 4000);
+    }
+  } catch { /* template below */ }
+  if (writeSlug && draftTo) return `Draft ready for ${draftTo}. Nothing has been sent.`;
+  if (evidence) return evidence.slice(0, 1500);
+  if (failures) return `I looked at the connected app tools but did not get the record you asked for (${failures}).`;
+  return 'I could not complete that request from the tools that ran.';
 }
 
 async function createDraft(ctx, composioSlug, args) {

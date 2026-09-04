@@ -1888,7 +1888,9 @@ const TOOL_HANDLERS = {
       limit: Math.min(args.limit || 20, 100),
       since: args.since ? new Date(args.since) : undefined,
     });
-    return { count: list.length, memories: list.map((m) => ({ id: m.id, title: m.title, tags: m.tags, created_at: m.created_at })) };
+    const rows = Array.isArray(list) ? list
+      : (Array.isArray(list?.memories) ? list.memories : []);
+    return { count: rows.length, memories: rows.map((m) => ({ id: m.id, title: m.title, tags: m.tags, created_at: m.created_at })) };
   },
 
   async hivemind_delete_memory(args, ctx) {

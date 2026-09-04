@@ -1,4 +1,5 @@
 import { NATIVE_OPERATION_TO_TOOL } from './capability-registry.js';
+import { HIVEMIND_TOOL_GROUPS } from '../connector-toolkits/hivemind-tool-groups.js';
 
 function temporalDecision(plan) {
   const t = plan.time;
@@ -29,8 +30,7 @@ export function compileNativePlan(plan, message, context = {}) {
     response_depth: plan.response.depth, retrieval_shape: plan.response.shape,
     answer_objective: plan.response.objective,
     recall_mode: plan.response.scope === 'bounded' ? 'fact' : 'explain',
-    tool_groups: ['save', 'update_profile'].includes(operation) ? ['hivemind-memory-write']
-      : operation === 'projects' ? ['hivemind-projects'] : ['hivemind-recall'],
+    tool_groups: Object.keys(HIVEMIND_TOOL_GROUPS),
     side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',
     source: descriptiveSourceHint ? null : plan.references.source,
     time: temporalDecision(plan), aggregate: plan.aggregate,

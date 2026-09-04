@@ -23,6 +23,11 @@ test('named Instagram or Slack is detected', () => {
   assert.ok(destinationAppsForEnableTools('post a summary to slack').includes('slack'));
 });
 
+test('LinkedIn read questions still require enabling tools', () => {
+  assert.ok(destinationAppsForEnableTools('what was my last linkedin post about?').includes('linkedin'));
+  assert.ok(destinationAppsForEnableTools('what do u think about my last linkedin post').includes('linkedin'));
+});
+
 test('enable_tools request is HITL with enable and decline', () => {
   const request = enableToolsRequest(['gmail', 'instagram']);
   assert.equal(request.kind, 'enable_tools');

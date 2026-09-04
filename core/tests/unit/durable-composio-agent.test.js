@@ -548,10 +548,8 @@ test('durable production path uses Session search and Session execution, never c
   assert.equal(searchPayload.search_strategy, 'auto');
   assert.equal(searchPayload.session.generate_id, true);
   assert.equal(typeof searchPayload.queries[0].known_fields, 'string');
-  assert.match(searchPayload.queries[0].known_fields, /destination_apps:gmail/);
-  assert.match(searchPayload.queries[0].known_fields, /intent:read_existing/);
   assert.equal(searchPayload.queries[0].known_fields.includes('product_context'), false);
-  assert.match(searchPayload.queries[0].use_case, /list, get-my, or recent/i);
+  assert.equal(searchPayload.queries[0].use_case, "fetch the authenticated user's latest gmail emails");
   assert.equal(searchPayload.queries[0].search_strategy, undefined);
   assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
   assert.deepEqual(result.run.scratch.recommended_plan_steps, [{ tool_slug: 'GMAIL_FETCH_EMAILS' }]);
@@ -737,8 +735,8 @@ test('LinkedIn last-post adapts after GET-without-id instead of creating a post'
   assert.match(result.summary, /synth:/);
   assert.equal(result.status, 'completed');
   assert.ok(result.run.scratch.cursor);
-  assert.match(searchPayload.queries[0].known_fields, /destination_apps:linkedin/);
-  assert.match(searchPayload.queries[0].use_case, /list, get-my, or recent/i);
+  assert.equal(searchPayload.queries[0].known_fields, '');
+  assert.equal(searchPayload.queries[0].use_case, "list the authenticated user's latest linkedin posts");
 });
 
 
@@ -882,9 +880,8 @@ test('precise Composio search uses related people lookup then drafts, never list
     },
     composio,
   });
-  assert.equal(searchPayload.queries[0].use_case, 'The user wants to send the company information to a person called rama');
-  assert.match(searchPayload.queries[0].known_fields, /destination_apps:gmail/);
-  assert.match(searchPayload.queries[0].known_fields, /recipient_name:rama/);
+  assert.equal(searchPayload.queries[0].use_case, 'send an email with company information');
+  assert.equal(searchPayload.queries[0].known_fields, 'recipient_name:rama');
   assert.equal(result.status, 'pending');
   assert.equal(executed.includes('GMAIL_LIST_DRAFTS'), false);
   assert.equal(executed.includes('GMAIL_SEND_EMAIL'), false);
@@ -903,7 +900,7 @@ test('when search omits people tools, still resolves named recipient via Gmail l
     async getToolRouterSession() { return { id: 'trs_hm2' }; },
     async discoverSessionTools(_org, input) {
       const useCase = String(input.searchPayload?.queries?.[0]?.use_case || input.useCases?.[0] || '');
-      if (/email address of a person called/i.test(useCase)) {
+      if (/find a person email address|email address of a person called/i.test(useCase)) {
         return {
           sessionId: 'trs_hm2',
           primaryToolSlugs: ['GMAIL_SEARCH_PEOPLE'],
@@ -963,7 +960,7 @@ test('GMAIL_GET_PROFILE does not steal the recipient or skip Rama lookup', async
     async getToolRouterSession() { return { id: 'trs_prof' }; },
     async discoverSessionTools(_org, input) {
       const useCase = String(input.searchPayload?.queries?.[0]?.use_case || input.useCases?.[0] || '');
-      if (/email address of a person called/i.test(useCase)) {
+      if (/find a person email address|email address of a person called/i.test(useCase)) {
         return {
           sessionId: 'trs_prof',
           primaryToolSlugs: ['GMAIL_SEARCH_PEOPLE'],

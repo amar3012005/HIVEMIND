@@ -927,7 +927,7 @@ export function fallbackNextDurableAction(obs) {
       const app = toolkit || (obs.known?.candidates || []).find((item) => item && item !== 'gmail') || 'app';
       return {
         action: 'search',
-        query: `The user wants to list the authenticated user's most recent ${app} records. Prefer list, get-my, or recent tools. Do not create, send, or publish.`,
+        query: `list the authenticated user's latest ${app} posts`,
         reason: 'search list tools after get-by-id miss',
       };
     }
@@ -1333,7 +1333,7 @@ export async function runDurableComposioAgent({
       return { ok: false, error: run.scratch.search_error };
     }
     const peopleSearch = /email address of a person called/i.test(String(queryMessage || ''));
-    const listSearch = /list the authenticated user's most recent/i.test(String(queryMessage || ''));
+    const listSearch = /list the authenticated user's latest/i.test(String(queryMessage || ''));
     mergeDiscovery(discovery, { peopleSearch, listSearch });
     finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
       kind: 'search', status: 'completed',

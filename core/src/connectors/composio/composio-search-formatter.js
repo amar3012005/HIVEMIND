@@ -32,38 +32,48 @@ export function isReadLookupUseCase(message) {
   return /\b(what|think|last|show|get|read|about my|did i|have i|was my|latest|recent|list)\b/i.test(text);
 }
 
-export function formatKnownFields({ recipient, destinationApps = [], message } = {}) {
-  const parts = [];
-  const apps = [...new Set((destinationApps || [])
+function destinationAppsList(destinationApps = []) {
+  return [...new Set((destinationApps || [])
     .map((item) => String(item || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
     .filter((item) => item && item !== 'hivemind' && item !== 'local' && item !== 'composio'))];
-  if (apps.length) parts.push(`destination_apps:${apps.join(',')}`);
-  if (recipient) parts.push(`recipient_name:${compact(recipient, 60)}`);
-  if (isReadLookupUseCase(message)) parts.push('intent:read_existing', 'scope:authenticated_user');
-  else if (recipient) parts.push('intent:send_message');
-  return parts.join(';');
+}
+
+export function formatKnownFields({ recipient } = {}) {
+  if (!recipient) return '';
+  return `recipient_name:${compact(recipient, 60)}`;
 }
 
 export function formatUseCase({ message, destinationApps = [] } = {}) {
   const raw = compact(message, 800);
   const recipient = namedRecipient(raw);
-  const apps = [...new Set((destinationApps || [])
-    .map((item) => String(item || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
-    .filter((item) => item && item !== 'hivemind' && item !== 'local' && item !== 'composio'))];
-  const appLabel = apps.join(', ');
+  const apps = destinationAppsList(destinationApps);
+  const app = apps[0] || '';
   if (recipient && /\b(company|hivemind|singulance)\b/i.test(raw)) {
-    return `The user wants to send the company information to a person called ${recipient}`;
+    return 'send an email with company information';
+  }
+  if (/email address of a person|find the email/i.test(raw)) {
+    return 'find a person email address in gmail contacts';
   }
   if (isReadLookupUseCase(raw)) {
-    const where = appLabel ? ` from ${appLabel}` : '';
-    return `The user wants to retrieve existing records${where}: ${raw}. Prefer list, get-my, or recent tools for the authenticated user. Do not create, send, or publish.`.slice(0, 1_500);
+    if (/\b(post|posts)\b/i.test(raw) || app === 'linkedin') {
+      return `list the authenticated user's latest ${app || 'linkedin'} posts`;
+    }
+    if (app === 'gmail' || /\b(email|emails|inbox|mail)\b/i.test(raw)) {
+      return "fetch the authenticated user's latest gmail emails";
+    }
+    if (app === 'youtube' || /\b(watch|video|history)\b/i.test(raw)) {
+      return "list the authenticated user's latest youtube watch history";
+    }
+    if (app === 'github' || /\b(repo|repos|repository)\b/i.test(raw)) {
+      return "list the authenticated user's github repositories";
+    }
+    return app
+      ? `retrieve the authenticated user's latest ${app} records`
+      : compact(raw, 400);
   }
-  if (recipient) {
-    const via = appLabel ? ` via ${appLabel}` : '';
-    return `The user wants to send a message to a person called ${recipient}${via}. ${raw}`.slice(0, 1_500);
-  }
-  if (appLabel) return `The user wants to use ${appLabel}. ${raw}`.slice(0, 1_500);
-  return raw;
+  if (recipient) return app && app !== 'gmail' ? `send a message via ${app}` : 'send an email to someone';
+  if (app) return `use ${app} for the requested action`;
+  return compact(raw, 400);
 }
 
 export function isToolRouterSessionId(value) {

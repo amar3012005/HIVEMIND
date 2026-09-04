@@ -45,7 +45,7 @@ export function selectReadSlugs(slugs = [], connected = []) {
     if (t.includes('attachment') || t.some((x) => x.startsWith('collaborator')) || t.includes('assignee')) return false;
     if (t.includes('secret') || t.includes('codespace')) return false;
     return t.some((x) => READ_TOKENS.has(x));
-  }))].slice(0, 6);
+  }))].slice(0, 24);
 }
 
 export function slugRequiresOwnerRepo(slug) {
@@ -552,10 +552,14 @@ export async function runDurableComposioAgent({
   if (typeof composioSvc.searchToolsByIntent === 'function') {
     for (const toolkit of mentioned) {
       const extra = await composioSvc.searchToolsByIntent(orgId, message, { toolkits: [toolkit] }).catch(() => null);
+      const extraReads = [];
       for (const tool of extra?.tools || []) {
         const slug = tool?._composio?.slug;
         if (!slug || !selectReadSlugs([slug], [toolkit]).length) continue;
-        searchedSlugs = [slug, ...searchedSlugs.filter((item) => item !== slug)];
+        extraReads.push(slug);
+      }
+      if (extraReads.length) {
+        searchedSlugs = [...extraReads, ...searchedSlugs.filter((item) => !extraReads.includes(item))];
       }
     }
   }
@@ -673,7 +677,11 @@ export async function runDurableComposioAgent({
     writeSlug = selectWriteSlug(searchedSlugs, writeConnected.length ? writeConnected : writeApps);
   }
   const person = namedPersonQuery(message);
-  const evidenceText = () => [message, ...readResults.filter((row) => row.successful).map((row) => summarizeToolData(row.data, 800))].join('\n\n');
+  const evidenceText = (slug) => {
+    const toolkit = toolkitFromSlug(slug);
+    const rows = readResults.filter((row) => row.successful && (!toolkit || toolkitFromSlug(row.slug) === toolkit));
+    return [message, ...rows.map((row) => summarizeToolData(row.data, 800))].join('\n\n');
+  };
   const readSlugs = governReadSlugs(searchedSlugs, {
     readApps: readConnected.length ? readConnected : connected,
     person,
@@ -684,7 +692,7 @@ export async function runDurableComposioAgent({
   const runOneRead = async (call) => {
     let args = { ...(call.arguments || {}) };
     if (typeof composioSvc.generateToolInputs === 'function') {
-      const generated = await composioSvc.generateToolInputs(call.slug, evidenceText()).catch(() => null);
+      const generated = await composioSvc.generateToolInputs(call.slug, evidenceText(call.slug)).catch(() => null);
       if (generated && typeof generated === 'object' && !Array.isArray(generated)) {
         const clean = { ...generated };
         for (const key of Object.keys(clean)) {

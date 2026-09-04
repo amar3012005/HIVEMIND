@@ -179,6 +179,12 @@ export function namedRepoQuery(text) {
 
 export function summarizeToolData(data, limit = 1800) {
   if (data == null) return '';
+  if (data.encoding === 'base64' && typeof data.content === 'string') {
+    try {
+      const decoded = Buffer.from(data.content.replace(/\s/g, ''), 'base64').toString('utf8').trim();
+      if (decoded) return decoded.slice(0, limit);
+    } catch { /* fall through */ }
+  }
   const rows = data.items || data.repositories || data.repos || data.messages || [];
   if (Array.isArray(rows) && rows.length) {
     return rows.slice(0, 8).map((item) => {

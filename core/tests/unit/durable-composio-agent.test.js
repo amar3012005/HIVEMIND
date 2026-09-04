@@ -16,6 +16,7 @@ import {
   namedPersonQuery,
   namedRepoQuery,
   pickRecipientEmail,
+  summarizeToolData,
   resetDurableAgentMemory,
   runDurableComposioAgent,
   saveAgentRun,
@@ -292,6 +293,15 @@ test('ambiguous apps ask do you mean this', async () => {
   assert.equal(result.inputRequests[0].kind, 'single_choice');
   assert.ok(result.inputRequests[0].options.some((option) => option.value === 'gmail'));
   assert.ok(result.inputRequests[0].options.some((option) => option.value === 'slack'));
+});
+
+test('summarizeToolData decodes GitHub README base64', () => {
+  const text = summarizeToolData({
+    encoding: 'base64',
+    content: Buffer.from('# HIVEMIND\nPersistent memory OS').toString('base64'),
+  });
+  assert.match(text, /# HIVEMIND/);
+  assert.equal(text.includes('IyB'), false);
 });
 
 test('emailsFromProviderData ignores example.com placeholders', () => {

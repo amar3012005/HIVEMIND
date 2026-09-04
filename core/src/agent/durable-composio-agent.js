@@ -691,7 +691,7 @@ export async function runDurableComposioAgent({
 
   const runOneRead = async (call) => {
     let args = { ...(call.arguments || {}) };
-    if (typeof composioSvc.generateToolInputs === 'function') {
+    if (typeof composioSvc.generateToolInputs === 'function' && !isRecipientLookupSlug(call.slug)) {
       const generated = await composioSvc.generateToolInputs(call.slug, evidenceText(call.slug)).catch(() => null);
       if (generated && typeof generated === 'object' && !Array.isArray(generated)) {
         const clean = { ...generated };

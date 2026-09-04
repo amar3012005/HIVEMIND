@@ -464,6 +464,10 @@ async function listCatalogReadTools(toolkitSlug, { maxReads = 12, maxPages = 16 
     cursor = nextCursor;
     if (!cursor) break;
   }
+  strong.sort((left, right) => {
+    const rank = (slug) => (/LIST_USER_|AUTHENTICATED|_MY_|_MINE_/i.test(slug) ? 0 : 1);
+    return rank(left._composio.slug) - rank(right._composio.slug);
+  });
   const tools = [...strong, ...rest].slice(0, maxReads);
   TOOLKIT_READ_CACHE.set(key, { at: Date.now(), tools });
   return tools;

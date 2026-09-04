@@ -956,20 +956,36 @@ export async function runDurableComposioAgent({
   }
 
   if (writeSlug && person && !pickRecipientEmail(run.scratch.emails || [], person)) {
-    const fromSearch = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
-      .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
-      .sort((left, right) => {
-        const rank = (slug) => (/SEARCH_PEOPLE|GET_CONTACT/i.test(slug) ? 0 : 1);
-        return rank(left) - rank(right);
-      });
-    const gmailWrite = /gmail|outlook/i.test(toolkitFromSlug(writeSlug) || '');
-    const fallback = gmailWrite && toolkitHasActiveConnection('gmail', connected, statuses)
-      ? ['GMAIL_SEARCH_PEOPLE', 'GMAIL_FETCH_EMAILS']
-      : [];
-    for (const lookup of [...fromSearch, ...fallback]) {
+    let fromSearch = [...(run.scratch.related_tool_slugs || []), ...(run.scratch.searched_slugs || []), ...plan]
+      .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses));
+    if (!fromSearch.length && run.composioSessionId && typeof composioSvc.discoverSessionTools === 'function') {
+      try {
+        const lookupMessage = `find the email address of a person called ${person}`;
+        const extra = await composioSvc.discoverSessionTools(orgId, {
+          toolkits: sessionToolkits,
+          useCases: [lookupMessage],
+          allowDisconnected: true,
+          searchPayload: formatComposioSearch({
+            message: lookupMessage,
+            sessionId: run.scratch.workflow_session_id,
+            destinationApps: sessionToolkits,
+            generateId: !run.scratch.workflow_session_id,
+          }),
+        });
+        fromSearch = [...(extra.primaryToolSlugs || []), ...(extra.relatedToolSlugs || [])]
+          .filter((slug) => isPersonResolveSlug(slug) && toolkitHasActiveConnection(toolkitFromSlug(slug), connected, extra.toolkitConnectionStatuses || statuses));
+      } catch {
+        fromSearch = [];
+      }
+    }
+    fromSearch.sort((left, right) => {
+      const rank = (slug) => (/SEARCH_PEOPLE|GET_CONTACT/i.test(slug) ? 0 : 1);
+      return rank(left) - rank(right);
+    });
+    for (const lookup of fromSearch) {
       if (!lookup || readResults.some((row) => row.slug === lookup)) continue;
       await runOneRead({ slug: lookup, arguments: argumentsForReadSlug(lookup, { person }) });
-      if ((run.scratch.emails || []).length) break;
+      if (pickRecipientEmail(run.scratch.emails || [], person)) break;
     }
   }
 

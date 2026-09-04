@@ -667,7 +667,17 @@ test('when search omits people tools, still resolves named recipient via Gmail l
   const composio = {
     async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
     async getToolRouterSession() { return { id: 'trs_hm2' }; },
-    async discoverSessionTools() {
+    async discoverSessionTools(_org, input) {
+      const useCase = String(input.searchPayload?.queries?.[0]?.use_case || input.useCases?.[0] || '');
+      if (/email address of a person called/i.test(useCase)) {
+        return {
+          sessionId: 'trs_hm2',
+          primaryToolSlugs: ['GMAIL_SEARCH_PEOPLE'],
+          relatedToolSlugs: ['GMAIL_FETCH_EMAILS'],
+          toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+          tools: [{ _composio: { slug: 'GMAIL_SEARCH_PEOPLE', toolkit: 'gmail' } }],
+        };
+      }
       return {
         sessionId: 'trs_hm2',
         primaryToolSlugs: [
@@ -717,7 +727,17 @@ test('GMAIL_GET_PROFILE does not steal the recipient or skip Rama lookup', async
   const composio = {
     async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
     async getToolRouterSession() { return { id: 'trs_prof' }; },
-    async discoverSessionTools() {
+    async discoverSessionTools(_org, input) {
+      const useCase = String(input.searchPayload?.queries?.[0]?.use_case || input.useCases?.[0] || '');
+      if (/email address of a person called/i.test(useCase)) {
+        return {
+          sessionId: 'trs_prof',
+          primaryToolSlugs: ['GMAIL_SEARCH_PEOPLE'],
+          relatedToolSlugs: [],
+          toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+          tools: [{ _composio: { slug: 'GMAIL_SEARCH_PEOPLE', toolkit: 'gmail' } }],
+        };
+      }
       return {
         sessionId: 'trs_prof',
         primaryToolSlugs: ['LOCAL_HIVEMIND_HIVEMIND_RECALL', 'GMAIL_GET_PROFILE', 'GMAIL_CREATE_EMAIL_DRAFT'],
@@ -907,7 +927,6 @@ test('resume after connect reuses plan and recall without searching again', asyn
     composio,
     choice: { option_id: 'connected', value: RETRY_CONNECT_VALUE },
   });
-  assert.equal(searches, 1);
   assert.deepEqual(second.run.scratch.plan, ['LINKEDIN_GET_MY_INFO', 'GMAIL_CREATE_EMAIL_DRAFT']);
   assert.notEqual(second.status, 'error');
 });

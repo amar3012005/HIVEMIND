@@ -44,16 +44,16 @@ export function composioSafeInputSchema(schema) {
   const isObject = out.type === 'object' || (!out.type && (out.properties || out.additionalProperties || out.description));
   if (isObject) {
     if (!out.type) out.type = 'object';
-    if (!out.properties && !out.additionalProperties) {
-      out.additionalProperties = { type: 'string' };
+    const hadProperties = Boolean(schema.properties && typeof schema.properties === 'object');
+    if (!hadProperties) {
+      out.properties = {};
+      if (!out.additionalProperties) out.additionalProperties = { type: 'string' };
     }
-    if (out.properties && typeof out.properties === 'object') {
-      const props = {};
-      for (const [key, value] of Object.entries(out.properties)) {
-        props[key] = composioSafeInputSchema(value);
-      }
-      out.properties = props;
+    const props = {};
+    for (const [key, value] of Object.entries(out.properties || {})) {
+      props[key] = composioSafeInputSchema(value);
     }
+    out.properties = props;
   }
   return out;
 }
@@ -123,14 +123,14 @@ export function composioSessionExperimentalFromToolkit(toolkit) {
       name: spec.name,
       description: spec.description,
       preload: spec.preload,
-      tools: spec.tools.map((tool) => ({
+      tools: spec.tools.filter((tool) => tool.preload).map((tool) => ({
         slug: tool.slug,
         name: tool.name,
         description: tool.description,
         input_schema: tool.input_schema,
         output_schema: tool.output_schema,
         original_slug: tool.original_slug,
-        preload: tool.preload,
+        preload: true,
       })),
     }],
   };

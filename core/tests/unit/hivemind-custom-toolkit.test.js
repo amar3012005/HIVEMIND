@@ -60,13 +60,17 @@ test('Composio schema sanitizer fills object fields that have no properties', ()
     },
   });
   assert.equal(schema.properties.fields.type, 'object');
+  assert.deepEqual(schema.properties.fields.properties, {});
   assert.deepEqual(schema.properties.fields.additionalProperties, { type: 'string' });
 });
 
 test('session experimental payload uses Composio custom toolkit shape', () => {
   const experimental = composioSessionExperimentalFromToolkit(buildHivemindCustomToolkit({ schemas: schemasForGroups() }));
   assert.equal(experimental.custom_toolkits[0].slug, 'HIVEMIND');
-  assert.ok(experimental.custom_toolkits[0].tools.length >= 20);
+  assert.ok(experimental.custom_toolkits[0].tools.length >= 4);
+  assert.ok(experimental.custom_toolkits[0].tools.every((tool) => tool.preload));
+  assert.ok(experimental.custom_toolkits[0].tools.some((tool) => tool.original_slug === 'hivemind_recall'));
+  assert.equal(experimental.custom_toolkits[0].tools.some((tool) => tool.original_slug === 'update_user_profile'), false);
   assert.equal(nativeNameFromComposioSlug('HIVEMIND_RECALL'), 'hivemind_recall');
   assert.equal(nativeNameFromComposioSlug('LOCAL_HIVEMIND_HIVEMIND_RECALL'), 'hivemind_recall');
   assert.equal(nativeNameFromComposioSlug('LOCAL_HIVEMIND_RECALL'), 'hivemind_recall');

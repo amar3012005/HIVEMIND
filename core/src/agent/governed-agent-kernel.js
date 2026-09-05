@@ -1121,12 +1121,19 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         allowDirectFallback: false,
       }))[0];
     const successful = receipt?.successful === true;
-    const proposedOutcomeIds = state.decision?.purpose === 'outcome' ? (state.decision.outcome_ids || outcomeIds(state)) : [];
+    const proposedOutcomeIds = state.decision?.purpose === 'outcome'
+      ? (state.decision.outcome_ids || outcomeIds(state))
+      : outcomeIds(state).filter(id => {
+        const outcome = state.intent?.outcomes?.find(item => item.id === id);
+        return outcome?.kind === 'read' && outcome?.evidence;
+      });
     const evidenceChecks = proposedOutcomeIds.map(id => {
       const outcome = state.intent?.outcomes?.find(item => item.id === id);
       return { id, ...receiptSatisfiesEvidence(receipt?.data, outcome?.evidence) };
     });
-    const evidenceSufficient = successful && evidenceChecks.every(check => check.ok);
+    const coveredOutcomeIds = successful ? evidenceChecks.filter(check => check.ok).map(check => check.id) : [];
+    const evidenceSufficient = successful && proposedOutcomeIds.length > 0
+      && (state.decision?.purpose === 'outcome' ? evidenceChecks.every(check => check.ok) : coveredOutcomeIds.length > 0);
     const row = {
       slug: card.slug,
       source: card.source,
@@ -1134,7 +1141,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       data: projectGovernedEvidence(receipt?.data, 24000),
       error_code: successful ? null : 'provider_read_failed',
       summary: successful ? safeReceiptSummary(receipt?.data) : text(receipt?.error || 'Provider read failed', 300),
-      outcome_ids: evidenceSufficient ? proposedOutcomeIds : [],
+      outcome_ids: evidenceSufficient ? coveredOutcomeIds : [],
       evidence_sufficient: evidenceSufficient,
       evidence_checks: evidenceChecks,
     };

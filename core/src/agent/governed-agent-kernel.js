@@ -857,6 +857,20 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       await persist(state, patch);
       return patch;
     }
+    const scheduledOutcome = schedulePlan(state.executionPlan);
+    if (scheduledOutcome.action === 'draft' && scheduledOutcome.candidate
+      && (state.receipts || []).some(receipt => receipt?.successful)) {
+      const decision = {
+        action: 'draft', tool_slug: scheduledOutcome.candidate.tool_slug,
+        purpose: 'outcome', outcome_ids: scheduledOutcome.node.outcome_ids || [],
+        reason: 'Persisted plan candidate is ready after prerequisite evidence resolved.',
+      };
+      const patch = await transition(state, 'dependency_resolved', { decision, planRepair: null }, {
+        reason_code: 'scheduler_outcome_candidate', tool_slug: decision.tool_slug,
+      });
+      await persist(state, patch);
+      return patch;
+    }
     if (state.capabilityGap) {
       const request = state.pendingInput || capabilityGap(state);
       const patch = await transition(state, 'awaiting_input', { pendingInput: request, decision: { action: 'ask', question: request.prompt, reason: 'capability_gap' } }, { reason_code: 'capability_gap', input_fields: request.fields.map(field => field.id) });

@@ -6,6 +6,17 @@ const SEARCH_FIELD = /^(?:query|search_query|search_term|term|name)$/i;
 const CONTENT_FIELD = /(?:body|content|message|text|description)/i;
 const BUSINESS_PAYLOAD_FIELD = /(?:body|content|message|text|description|subject|title)/i;
 const COLLECTION_KEY = /^(?:results|items|records|messages|contacts|people|data)$/i;
+const FACT_EQUIVALENTS = [
+  ['body', 'content', 'message', 'text', 'description', 'summary'],
+  ['subject', 'title', 'headline'],
+];
+
+function equivalentFactKey(left, right) {
+  const a = left.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const b = right.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (a === b || (Math.min(a.length, b.length) >= 4 && (a.endsWith(b) || b.endsWith(a)))) return true;
+  return FACT_EQUIVALENTS.some(group => group.some(item => a.includes(item)) && group.some(item => b.includes(item)));
+}
 
 function fieldMatchesEntityRole(field, role) {
   const name = String(field || '').toLowerCase();
@@ -163,9 +174,7 @@ export function compileGroundedArguments({ card = {}, intent = {}, receipts = []
     const normalizedField = field.toLowerCase().replace(/[^a-z0-9]/g, '');
     const grounded = Object.entries(groundedFields).find(([key, value]) => {
       if (!asText(value)) return false;
-      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return normalizedKey === normalizedField || (Math.min(normalizedKey.length, normalizedField.length) >= 4
-        && (normalizedKey.endsWith(normalizedField) || normalizedField.endsWith(normalizedKey)));
+      return equivalentFactKey(key, normalizedField);
     });
     if (grounded) compiled[field] = grounded[1];
   }

@@ -665,7 +665,7 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
     const intent = normalizedIntent(raw, ctx.language || 'en');
     const resolvedReference = state.resolvedReference
       || resolveGovernedConversationReferenceBySelector(intent.reference_selector, state.referenceEvidence);
-    if (resolvedReference) {
+    if (resolvedReference && intent.kind === 'read') {
       intent.discovery_query = 'Fetch the full content and metadata for one referenced record using a known provider identifier from a prior authenticated receipt.';
     }
     if (!intent.outcomes.length || !intent.discovery_query) throw new Error('governed_intent_contract');
@@ -1133,7 +1133,8 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       ? (state.decision.outcome_ids || outcomeIds(state))
       : outcomeIds(state).filter(id => {
         const outcome = state.intent?.outcomes?.find(item => item.id === id);
-        return outcome?.kind === 'read' && outcome?.evidence;
+        return outcome?.kind === 'read' && outcome?.evidence
+          && ((outcome.evidence.required_fields || []).length > 0 || Number(outcome.evidence.min_records) > 1);
       });
     const evidenceChecks = proposedOutcomeIds.map(id => {
       const outcome = state.intent?.outcomes?.find(item => item.id === id);

@@ -215,10 +215,11 @@ test('parameterless capability bypasses argument generation while required scope
 
 test('default argument HTTP envelope preserves optional filters and rejects tool changes or unknown keys', () => enabled(async () => {
   const originalFetch = globalThis.fetch;
-  const names = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED'];
+  const names = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED', 'PROGRESSIVE_HARNESS_MODEL'];
   const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
   process.env.OPENROUTER_API_KEY = 'fixture-not-a-real-key';
   process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+  delete process.env.PROGRESSIVE_HARNESS_MODEL;
   const slug = 'NOTION_GET_PAGE';
   const expected = { sort: 'updated', direction: 'desc', per_page: 3 };
   try {
@@ -241,7 +242,10 @@ test('default argument HTTP envelope preserves optional filters and rejects tool
       globalThis.fetch = async (_url, options) => {
         httpCalls++;
         assert.equal(options.method, 'POST');
-        assert.deepEqual(JSON.parse(options.body).response_format, { type: 'json_object' });
+        const body = JSON.parse(options.body);
+        assert.deepEqual(body.response_format, { type: 'json_object' });
+        assert.equal(body.model, 'deepseek/deepseek-v4-flash-0731');
+        assert.equal(body.max_tokens, 1800);
         const payload = variant === 'mismatch' ? { slug: 'NOTION_DELETE_PAGE', args: expected }
           : variant === 'unknown' ? { filter_typo: 'updated' }
             : variant === 'direct' ? { ...expected, org_id: 'must-be-stripped' }

@@ -15,11 +15,12 @@ test('flag requires literal true and an explicitly allowed tenant', () => {
 
 test('default intent and action planners use valid POST requests through the real provider adapter', async () => {
   const previousFetch = globalThis.fetch;
-  const keys = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED', 'DURABLE_NEXT_ACTION_MODEL'];
+  const keys = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED', 'DURABLE_NEXT_ACTION_MODEL', 'PROGRESSIVE_HARNESS_MODEL'];
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   process.env.OPENROUTER_API_KEY = 'local-test-placeholder';
   process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
   process.env.DURABLE_NEXT_ACTION_MODEL = 'google/gemini-2.5-flash-lite';
+  delete process.env.PROGRESSIVE_HARNESS_MODEL;
   const replies = [
     { kind: 'lookup', apps: [], person: '', use_case: 'recall project context', known_fields: '', language: 'de', needs_memory: true,
       outcomes: [{ id: 'context', description: 'Recall project context', kind: 'memory' }] },
@@ -34,7 +35,7 @@ test('default intent and action planners use valid POST requests through the rea
     assert.equal(request.method, 'POST');
     assert.equal(request.headers.get('Content-Type'), 'application/json');
     const body = await request.json();
-    assert.equal(body.model, 'google/gemini-2.5-flash-lite');
+    assert.equal(body.model, 'deepseek/deepseek-v4-flash-0731');
     assert.equal(body.messages[0].role, 'system');
     if (calls === 0) assert.match(body.messages[0].content, /clarification questions are internal steps, not additional outcomes/);
     assert.doesNotThrow(() => JSON.parse(body.messages[1].content));

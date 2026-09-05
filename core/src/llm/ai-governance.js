@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { currentApiKey, currentOrg, currentUser } from '../db/prisma.js';
 
 export const MODEL_POLICY_DEFAULTS = Object.freeze({
+  progressive_agent: ['deepseek/deepseek-v4-flash-0731', null],
   chat_planner: ['google/gemini-2.5-flash-lite', 'openai/gpt-oss-20b:nitro'],
   chat_synthesis: ['openai/gpt-oss-20b:nitro', 'nvidia/nemotron-3.5-lightning:nitro'],
   compound_subtask: ['openai/gpt-oss-20b:nitro', 'google/gemini-2.5-flash-lite'],

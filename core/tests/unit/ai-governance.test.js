@@ -25,6 +25,23 @@ test('model policy resolves an admin primary and secondary atomically', async ()
   configureAiGovernance(null); invalidateAiModelPolicyCache();
 });
 
+test('progressive agent has isolated strong default without implicit fallback and obeys admin policy', async () => {
+  configureAiGovernance(null); invalidateAiModelPolicyCache();
+  const policy = await resolveAiModelPolicy('progressive_agent');
+  assert.equal(policy.primary, 'deepseek/deepseek-v4-flash-0731');
+  assert.equal(policy.secondary, null);
+  assert.equal((await resolveAiModelPolicy('chat_planner')).primary, 'google/gemini-2.5-flash-lite');
+  configureAiGovernance({ $queryRawUnsafe: async () => [{ use_case: 'progressive_agent', primary_model: 'test/admin-primary',
+    secondary_model: 'test/admin-secondary', enabled: true, revision: 1 }] });
+  invalidateAiModelPolicyCache();
+  try {
+    const overridden = await resolveAiModelPolicy('progressive_agent', 'test/environment-override');
+    assert.equal(overridden.primary, 'test/admin-primary');
+    assert.equal(overridden.secondary, 'test/admin-secondary');
+    assert.equal(overridden.source, 'admin');
+  } finally { configureAiGovernance(null); invalidateAiModelPolicyCache(); }
+});
+
 test('usage ledger prefers provider-reported cost over catalog estimation', async () => {
   let inserted = null;
   configureAiGovernance({

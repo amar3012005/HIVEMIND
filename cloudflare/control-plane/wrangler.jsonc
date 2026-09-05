@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hivemind-edge-control-plane",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "ENTITLEMENTS", "class_name": "OrganizationEntitlement" }]
+  },
+  "queues": {
+    "producers": [{ "binding": "CONTROL_EVENTS", "queue": "hivemind-control-events" }]
+  },
+  "migrations": [{ "tag": "v1", "new_classes": ["OrganizationEntitlement"] }],
+  "observability": { "enabled": true },
+  "vars": {
+    "CONTROL_PLANE_MODE": "default-off"
+  }
+}

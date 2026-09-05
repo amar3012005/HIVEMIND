@@ -1,0 +1,13 @@
+{
+  "name": "hivemind-edge-control-plane",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/contract.js && node --check src/index.js",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.39.0"
+  }
+}

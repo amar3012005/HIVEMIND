@@ -191,12 +191,15 @@ export function receiptSatisfiesEvidence(data, requirement = {}) {
   // (headers, labels, attachments). For singleton outcomes the root is the
   // evidence record; selecting the largest nested array validates the wrong
   // structural level. Multi-record outcomes still require a real collection.
-  const records = minimum === 1 && data && typeof data === 'object' && !Array.isArray(data)
-    ? [data]
-    : (collections.find(items => items.length >= minimum) || []);
-  if (records.length < minimum) return { ok: false, code: 'insufficient_record_count', observed_records: records.length, required_records: minimum };
-  const inspected = records.slice(0, minimum);
-  const missing = required.filter(field => inspected.some(record => !recordFields(record).some(actual => equivalentField(field, actual))));
+  const root = minimum === 1 && data && typeof data === 'object' && !Array.isArray(data) ? [[data]] : [];
+  const candidates = [...root, ...collections.filter(items => items.length >= minimum)];
+  if (!candidates.length) return { ok: false, code: 'insufficient_record_count', observed_records: collections[0]?.length || 0, required_records: minimum };
+  const evaluated = candidates.map(records => ({
+    records,
+    missing: required.filter(field => records.slice(0, minimum)
+      .some(record => !recordFields(record).some(actual => equivalentField(field, actual)))),
+  })).sort((left, right) => left.missing.length - right.missing.length || right.records.length - left.records.length);
+  const { records, missing } = evaluated[0];
   return missing.length
     ? { ok: false, code: 'required_evidence_fields_missing', missing_fields: missing, observed_records: records.length, required_records: minimum }
     : { ok: true, code: 'evidence_contract_satisfied', observed_records: records.length, required_records: minimum };

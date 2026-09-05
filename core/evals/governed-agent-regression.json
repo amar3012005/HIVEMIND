@@ -27,6 +27,6 @@
   {
     "id": "linkedin-latest-post-capability",
     "inputs": { "message": "What is my latest LinkedIn post about?", "language": "en", "history_turns": 6 },
-    "outputs": { "terminal": ["completed", "needs_input"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "forbidden_prompt_terms": ["post URN", "post_id", "account"], "live_write_forbidden": true }
+    "outputs": { "terminal": ["completed", "needs_input"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "forbidden_prompt_terms": ["post URN", "post_id", "post ID", "account"], "live_write_forbidden": true }
   }
 ]

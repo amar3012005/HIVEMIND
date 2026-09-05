@@ -100,6 +100,14 @@ function isPlaceholder(email) {
   return /@(example\.(com|net|org)|test\.com)$/i.test(email);
 }
 
+function humanQuestion(value) {
+  const question = String(value || '').trim();
+  if (/\b(?:provider|message|thread|person|post|account)[ _-]?(?:id|urn)\b|\burn\b/i.test(question)) {
+    return 'The connected integration cannot resolve this item automatically. Please share a human-readable link or paste the relevant content.';
+  }
+  return question || 'What business information should I use?';
+}
+
 function receiptSummary(data) {
   if (data == null) return 'No data returned';
   if (typeof data === 'string') return data.slice(0, 180);
@@ -281,7 +289,7 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
   };
 
   const humanNode = async state => {
-    const request = state.pendingInput || { kind: 'field_input', prompt: state.decision?.question || 'What information should I use?',
+    const request = state.pendingInput || { kind: 'field_input', prompt: humanQuestion(state.decision?.question),
       fields: (state.decision?.fields || ['missing_information']).map(id => ({ id, name: id, label: id.replaceAll('_', ' '), type: 'text', required: true })) };
     await persist(state, { pendingInput: request, status: 'awaiting_input' });
     const answer = interrupt({ run_id: state.runId, ...request });

@@ -4,33 +4,61 @@ import { Annotation, END, START, StateGraph, interrupt } from '@langchain/langgr
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { loadGovernedSkill } from './governed-agent-skills.js';
 import { loadGovernedConversationContext } from './governed-conversation-context.js';
+import {
+  capabilityCard,
+  capabilityGapQuestion,
+  compactCapability,
+  compactRecommendedPlan,
+  compactReceipt,
+  eligibleReadCapabilities,
+  humanizeField,
+  isProviderIdentifier,
+  missingRequiredFields,
+  normalizePlanCandidate,
+  outcomeIds,
+  outcomesCovered,
+  safeReceiptSummary,
+  serializeKnownFacts,
+  verifyPlanCandidate,
+} from './governed-agent-contract.js';
+import { GovernedAgentEventLedger, safeEventEnvelope } from './governed-agent-event-ledger.js';
+import { createGovernedTrace } from './governed-agent-observability.js';
+import { executeGovernedCoreRead, loadGovernedCoreCapabilities } from './governed-agent-core-tools.js';
 
-const MODEL = 'google/gemini-2.5-flash-lite';
-const READ_VERBS = new Set(['fetch', 'find', 'get', 'list', 'read', 'search', 'retrieve']);
-const WRITE_VERBS = new Set(['add', 'append', 'archive', 'create', 'delete', 'modify', 'patch', 'post', 'remove', 'reply', 'send', 'set', 'update']);
+const MODEL = process.env.GOVERNED_AGENT_MODEL || 'google/gemini-2.5-flash-lite';
+const HARNESS_VERSION = 'langgraph-native-v1';
 
 const GraphState = Annotation.Root({
-  runId: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  status: Annotation({ reducer: (_l, r) => r, default: () => 'received' }),
-  locale: Annotation({ reducer: (_l, r) => r, default: () => 'en' }),
-  intent: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  connected: Annotation({ reducer: (_l, r) => r, default: () => [] }),
-  sessionId: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  workflowSessionId: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  capabilities: Annotation({ reducer: (_l, r) => r, default: () => [] }),
-  receipts: Annotation({ reducer: (_l, r) => r, default: () => [] }),
-  steps: Annotation({ reducer: (_l, r) => r, default: () => [] }),
-  searchQueries: Annotation({ reducer: (_l, r) => r, default: () => [] }),
-  searchQuery: Annotation({ reducer: (_l, r) => r, default: () => '' }),
-  decision: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  toolArgs: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  fieldValues: Annotation({ reducer: (_l, r) => r, default: () => ({}) }),
-  pendingInput: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  pendingApprovalId: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  cycles: Annotation({ reducer: (_l, r) => r, default: () => 0 }),
-  result: Annotation({ reducer: (_l, r) => r, default: () => null }),
-  conversationContext: Annotation({ reducer: (_l, r) => r, default: () => [] }),
-  connectionRequest: Annotation({ reducer: (_l, r) => r, default: () => null }),
+  runId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  status: Annotation({ reducer: (_left, right) => right, default: () => 'received' }),
+  locale: Annotation({ reducer: (_left, right) => right, default: () => 'en' }),
+  intent: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  connected: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  connectionScope: Annotation({ reducer: (_left, right) => right, default: () => 'user' }),
+  sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  discovery: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  capabilities: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  receipts: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  steps: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  searchQueries: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  dependencySearches: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  discoveryAttempts: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
+  searchQuery: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  decision: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  planRepair: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  toolArgs: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  fieldValues: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
+  pendingInput: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  pendingApprovalId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  pendingProviderEvent: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  connectionRequest: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  event: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  eventSequence: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
+  cycles: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
+  capabilityGap: Annotation({ reducer: (_left, right) => right, default: () => false }),
+  result: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  conversationContext: Annotation({ reducer: (_left, right) => right, default: () => [] }),
 });
 
 const compact = (value, limit = 18000) => {
@@ -52,14 +80,25 @@ const compact = (value, limit = 18000) => {
   return json.length <= limit ? projected : { summary: json.slice(0, limit), truncated: true };
 };
 
-async function jsonDecision(system, input, signal) {
+const text = (value, limit = 800) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
+const unique = values => [...new Set((values || []).map(value => text(value, 80).toLowerCase()).filter(Boolean))];
+
+async function jsonDecision({ ctx, stage, system, input, signal }) {
+  if (typeof ctx.governedDecision === 'function') return ctx.governedDecision({ stage, system, input: compact(input) });
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await chatCompletionFetch(MODEL, { method: 'POST', signal, body: JSON.stringify({
-      temperature: 0, max_tokens: 1600, response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: `${system}\nReturn exactly one JSON object.${attempt ? ' Repair the prior contract failure; no prose or markdown.' : ''}` },
-        { role: 'user', content: JSON.stringify(compact(input)) }],
-    }) }, { useCase: 'governed_graph' });
+    const response = await chatCompletionFetch(MODEL, {
+      method: 'POST', signal,
+      body: JSON.stringify({
+        temperature: 0,
+        max_tokens: stage === 'synthesis' ? 1200 : 1000,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: `${system}\nReturn exactly one JSON object. ${attempt ? 'Repair the contract failure. No prose or markdown.' : ''}` },
+          { role: 'user', content: JSON.stringify(compact(input)) },
+        ],
+      }),
+    }, { useCase: 'governed_graph' });
     if (!response.ok) {
       lastError = new Error(`governed_model_${response.status}`);
       if (attempt === 0 && (response.status === 429 || response.status >= 500)) continue;
@@ -67,405 +106,847 @@ async function jsonDecision(system, input, signal) {
     }
     try {
       const payload = await response.json();
-      const text = payload?.choices?.[0]?.message?.content;
-      if (!text) throw new Error('governed_model_empty');
-      const parsed = JSON.parse(String(text).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+      const raw = payload?.choices?.[0]?.message?.content;
+      if (!raw) throw new Error('governed_model_empty');
+      const parsed = JSON.parse(String(raw).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('governed_model_object_required');
       return parsed;
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+    }
   }
   throw lastError || new Error('governed_model_failed');
 }
 
-function authority(slug = '') {
-  const parts = String(slug).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const verb = parts[1] || parts[0];
-  return READ_VERBS.has(verb) ? 'read' : WRITE_VERBS.has(verb) ? 'write' : 'unknown';
+function normalizedIntent(value, fallbackLocale = 'en') {
+  const rawOutcomes = Array.isArray(value?.outcomes) ? value.outcomes : [];
+  const outcomes = rawOutcomes.slice(0, 8).map((outcome, index) => ({
+    id: text(outcome?.id || `outcome_${index + 1}`, 80),
+    kind: outcome?.kind === 'draft' ? 'draft' : 'read',
+    description: text(outcome?.description, 600),
+  })).filter(outcome => outcome.description);
+  const kind = value?.kind === 'write' ? 'write' : 'read';
+  const knownFacts = value?.known_facts && typeof value.known_facts === 'object' && !Array.isArray(value.known_facts)
+    ? compact(value.known_facts, 5000) : {};
+  return {
+    locale: text(value?.locale || fallbackLocale, 20) || 'en',
+    kind,
+    apps: unique(value?.apps || value?.requested_apps || []).slice(0, 12),
+    use_case: text(value?.use_case, 900),
+    discovery_query: text(value?.discovery_query || value?.use_case, 900),
+    outcomes,
+    known_facts: knownFacts,
+    business_question: text(value?.business_question, 500) || null,
+  };
 }
 
-function semanticTokens(value) {
-  return new Set(String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []);
+function connectionStatus(status) {
+  const value = typeof status === 'string' ? status : (status?.status || status?.connection_status || status?.state || '');
+  return text(value, 80).toLowerCase();
 }
 
-function bestCapability(cards, intent) {
-  const wanted = semanticTokens([intent?.use_case, ...(intent?.outcomes || []).map(item => item.description)].join(' '));
-  return [...cards].sort((a, b) => {
-    const score = card => [...semanticTokens(`${card.slug} ${card.description}`)].filter(token => wanted.has(token)).length;
-    return score(b) - score(a);
-  })[0] || null;
-}
-
-function destinationEmails(value) {
-  return JSON.stringify(value || {}).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)?.map(x => x.toLowerCase()) || [];
-}
-
-function isPlaceholder(email) {
-  return /@(example\.(com|net|org)|test\.com)$/i.test(email);
-}
-
-function schemaEvidenceNeed(intent, capabilities, receipts) {
-  if (intent?.kind !== 'write' || destinationEmails(receipts).length) return null;
-  const writableFields = new Set(capabilities.filter(card => card.authority === 'write').flatMap(card => card.fields || []));
-  for (const [factKey, rawValue] of Object.entries(intent?.known_facts || {})) {
-    const value = typeof rawValue === 'string' ? rawValue.trim() : '';
-    const stem = String(factKey).toLowerCase().replace(/_?name$/, '');
-    if (!value || !stem || !String(factKey).toLowerCase().includes('name')) continue;
-    const targetField = [...writableFields].find(field => {
-      const normalized = String(field).toLowerCase();
-      return normalized.includes(stem) && /(?:email|id|urn|url)$/.test(normalized);
-    });
-    if (targetField) return { factKey, value, targetField };
+function pendingConnectionToolkit(state) {
+  const statuses = state.discovery?.connection_statuses || {};
+  for (const toolkit of state.intent?.apps || []) {
+    if (['hivemind', 'local', 'core'].includes(toolkit)) continue;
+    if (state.connected?.includes(toolkit)) continue;
+    const status = connectionStatus(statuses[toolkit]);
+    if (!status || !/(active|connected|ready)/.test(status)) return toolkit;
   }
   return null;
 }
 
-function humanQuestion(value) {
-  const question = String(value || '').trim();
-  if (/\b(?:provider|message|thread|person|post|account)[ _-]?(?:id|urn)\b|\burn\b/i.test(question)) {
-    return 'The connected integration cannot resolve this item automatically. Please share a human-readable link or paste the relevant content.';
-  }
-  return question || 'What business information should I use?';
+function callbackUrlFor(ctx) {
+  if (!ctx.composioCallbackOrigin) return null;
+  const url = new URL('/hivemind/app/connect/composio/callback', ctx.composioCallbackOrigin);
+  return url.toString();
 }
 
-function receiptSummary(data) {
-  if (data == null) return 'No data returned';
-  if (typeof data === 'string') return data.slice(0, 180);
-  const candidate = data?.name || data?.title || data?.subject || data?.snippet || data?.message || data?.data?.name;
-  return candidate ? String(candidate).slice(0, 180) : 'Provider read completed';
+function governedConnectionScope(ctx = {}) {
+  // User scope is the secure default. Organization scope is an explicit
+  // migration mode for an existing organization-owned connection; arbitrary
+  // model-provided values are never admitted as an authority scope.
+  return String(ctx.composioConnectionScope || 'user').trim().toLowerCase() === 'org' ? 'org' : 'user';
+}
+
+function capabilityGap(state, missing = []) {
+  // Field ids remain internal contract keys so a resumed graph can validate
+  // them against the selected schema. Labels and prompts are business
+  // language; the UI never needs to expose provider field names.
+  const fields = (missing || [])
+    .filter(item => item?.field && !isProviderIdentifier(item.field))
+    .slice(0, 4)
+    .map(item => ({
+      id: String(item.field),
+      name: String(item.field),
+      label: humanizeField(item.field),
+      type: item?.schema?.format === 'email' || /(?:email|address)/i.test(String(item.field)) ? 'email' : 'text',
+      required: true,
+    }));
+  return {
+    kind: 'field_input',
+    prompt: capabilityGapQuestion(missing),
+    fields: fields.length ? fields : [{ id: 'business_context', name: 'business_context', label: 'More context', type: 'text', required: true }],
+    reason: 'capability_gap',
+  };
+}
+
+function hasResolvableEntityFact(state) {
+  const facts = { ...(state?.intent?.known_facts || {}), ...(state?.fieldValues || {}) };
+  return Object.entries(facts).some(([key, value]) => {
+    if (!/(?:name|person|recipient|contact|assignee|owner|member|user|customer|company|account)/i.test(String(key))) return false;
+    if (typeof value === 'string') return Boolean(value.trim());
+    return Array.isArray(value) ? value.some(item => String(item || '').trim()) : Boolean(value);
+  });
+}
+
+function unresolvedDependencyKey(requirements = []) {
+  return [...new Set((requirements || []).map(item => String(item?.field || '').trim()).filter(Boolean))]
+    .sort()
+    .join('|');
+}
+
+function shouldResolveDependency(state, requirements, relevantReads) {
+  if (relevantReads.length) return true;
+  if ((requirements || []).some(item => isProviderIdentifier(item.field))) return true;
+  // A named entity and a missing identity-shaped schema field is enough to
+  // justify one bounded upstream search. This is schema/intent reasoning, not
+  // a connector-specific recipient heuristic.
+  return hasResolvableEntityFact(state)
+    && (requirements || []).some(item => /(?:email|address|recipient|contact|person|assignee|owner|member|user|customer|company|account|destination)/i.test(String(item?.field || '')));
 }
 
 function resultShape(state, summary, status = state.status) {
   const draftIds = state.pendingApprovalId ? [state.pendingApprovalId] : [];
-  return { response: summary, summary, status, run: { id: state.runId, status, composioSessionId: state.sessionId,
-    scratch: { harness_version: 'langgraph-native-v1', read_results: state.receipts } },
-    steps: state.steps, draftIds, pendingActions: draftIds.map(id => ({ id })),
-    resumeState: state.pendingInput ? { kind: 'governed_langgraph', fields: state.pendingInput.fields } : null };
+  return {
+    response: summary,
+    summary,
+    status,
+    locale: state.locale,
+    run: {
+      id: state.runId,
+      status,
+      composioSessionId: state.sessionId,
+      scratch: { harness_version: HARNESS_VERSION, read_results: state.receipts },
+    },
+    steps: state.steps,
+    draftIds,
+    pendingActions: draftIds.map(id => ({ id })),
+    resumeState: state.pendingInput ? { kind: 'governed_langgraph', fields: state.pendingInput.fields } : null,
+  };
 }
 
-export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () => {}, composio, prisma }) {
-  const emitState = (state, status, extra = {}) => onEvent({ type: 'agent_state', state: status,
-    run_id: state.runId || extra.run_id || null, ...extra });
+function sensitiveIdentifierValues(args = {}) {
+  const values = [];
+  for (const [field, value] of Object.entries(args || {})) {
+    if (!isProviderIdentifier(field) && !/(?:email|address|recipient)/i.test(field)) continue;
+    if (typeof value === 'string' && value.trim()) values.push({ field, value: value.trim() });
+    if (Array.isArray(value)) values.push(...value.filter(item => typeof item === 'string' && item.trim()).map(item => ({ field, value: item.trim() })));
+  }
+  return values;
+}
+
+function identifierEvidence(state) {
+  return [
+    JSON.stringify(state.fieldValues || {}),
+    JSON.stringify((state.receipts || []).filter(row => row.successful).map(row => row.data)),
+    String(state.intent?.known_facts ? JSON.stringify(state.intent.known_facts) : ''),
+    String(state.message || ''),
+  ].join('\n').toLowerCase();
+}
+
+function ungroundedIdentifiers(state, args) {
+  const evidence = identifierEvidence(state);
+  return sensitiveIdentifierValues(args).filter(item => !evidence.includes(item.value.toLowerCase()));
+}
+
+function providerEventExpected(receipt) {
+  const data = receipt?.data;
+  const status = text(data?.status || data?.state || data?.execution_status, 60).toLowerCase();
+  return data?.awaits_provider_event === true || data?.asynchronous === true || ['pending', 'queued', 'processing'].includes(status);
+}
+
+function providerEventOutcome(event) {
+  const raw = text(event?.outcome || event?.status || event?.result || '', 48).toLowerCase();
+  if (['succeeded', 'success', 'completed', 'complete', 'sent', 'delivered'].includes(raw)) return 'succeeded';
+  if (['failed', 'failure', 'error', 'cancelled', 'canceled', 'rejected'].includes(raw)) return 'failed';
+  return 'unknown';
+}
+
+export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () => {}, composio, prisma, traceClient = null }) {
+  const ledger = new GovernedAgentEventLedger({ prisma });
+  const tracePromise = createGovernedTrace({ ctx, runId: ctx.governedRunId || ctx.durableChatTurnId || randomUUID(), client: traceClient });
+
+  const trace = async (name, extra, fn) => {
+    const root = await tracePromise;
+    const span = await root?.span(name, extra);
+    try {
+      const result = await fn();
+      await span?.end({ status: extra?.status || 'ok' });
+      return result;
+    } catch (error) {
+      await span?.error(error);
+      throw error;
+    }
+  };
+
   const persist = async (state, patch = {}) => {
     if (!prisma?.agentRun?.update || !state.runId) return;
-    await prisma.agentRun.update({ where: { id: state.runId }, data: {
-      status: patch.status || state.status,
-      steps: patch.steps || state.steps,
-      composioSessionId: patch.sessionId === undefined ? state.sessionId : patch.sessionId,
-      scratch: compact({ runtime: 'langgraph-native-v1', locale: patch.locale || state.locale,
-        intent: patch.intent === undefined ? state.intent : patch.intent,
-        capabilities: patch.capabilities === undefined ? state.capabilities : patch.capabilities,
-        receipts: patch.receipts === undefined ? state.receipts : patch.receipts,
-        searchQueries: patch.searchQueries === undefined ? state.searchQueries : patch.searchQueries,
-        pendingInput: patch.pendingInput === undefined ? state.pendingInput : patch.pendingInput,
-        pendingApprovalId: patch.pendingApprovalId === undefined ? state.pendingApprovalId : patch.pendingApprovalId }, 50000),
-    } });
+    const next = { ...state, ...patch };
+    await prisma.agentRun.update({
+      where: { id: state.runId },
+      data: {
+        status: patch.status || state.status,
+        steps: next.steps || [],
+        composioSessionId: next.sessionId || null,
+        scratch: compact({
+          runtime: HARNESS_VERSION,
+          graph_thread_id: ctx.governedGraphThreadId,
+          locale: next.locale,
+          connection_scope: next.connectionScope,
+          intent: next.intent,
+          session_id: next.sessionId,
+          workflow_session_id: next.workflowSessionId,
+          discovery: next.discovery && {
+            recommended_plan: next.discovery.recommended_plan,
+            connection_statuses: next.discovery.connection_statuses,
+          },
+          capabilities: (next.capabilities || []).map(compactCapability),
+          receipts: (next.receipts || []).map(compactReceipt),
+          search_queries: next.searchQueries,
+          dependency_searches: next.dependencySearches,
+          pending_input: next.pendingInput,
+          pending_approval_id: next.pendingApprovalId,
+          pending_provider_event: next.pendingProviderEvent,
+          event_sequence: next.eventSequence,
+          capability_gap: next.capabilityGap,
+        }, 50000),
+      },
+    });
   };
 
-  const contextNode = async state => {
-    const accounts = await composio.listConnectedAccounts(ctx.orgId);
-    const connected = [...new Set(accounts.filter(row => row.status === 'ACTIVE').map(row => row.toolkit).filter(Boolean))];
-    const runId = state.runId || randomUUID();
-    const conversationContext = await loadGovernedConversationContext({ prisma, orgId: ctx.orgId, userId: ctx.userId,
-      conversationId: ctx.threadId || ctx.conversationId, turns: ctx.historyTurns });
-    if (prisma?.agentRun?.create && !state.runId) await prisma.agentRun.create({ data: { id: runId, orgId: ctx.orgId,
-      userId: ctx.userId, conversationId: `${ctx.conversationId || ctx.threadId || 'chat'}:${runId}`.slice(0, 160), goal: message, status: 'context_loaded', steps: [],
-      scratch: { runtime: 'langgraph-native-v1' } } });
-    onEvent({ type: 'agent_state', state: 'context_loaded', run_id: runId });
-    return { runId, connected, conversationContext, status: 'context_loaded' };
+  const transition = async (state, status, patch = {}, detail = {}) => {
+    const runId = patch.runId || state.runId;
+    const sequence = Number(state.eventSequence || 0) + 1;
+    const appended = await ledger.append({
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      runId,
+      sequence,
+      type: 'state_transition',
+      causationId: state.event?.id || null,
+      payload: {
+        state: status,
+        tool_slug: detail.tool_slug || null,
+        reason_code: detail.reason_code || null,
+        input_fields: Array.isArray(detail.input_fields) ? detail.input_fields.slice(0, 12) : [],
+      },
+    });
+    const event = safeEventEnvelope({ event: appended.event, runId, state: status, sequence });
+    onEvent({ type: 'agent_state', state: status, ...event });
+    return { ...patch, status, eventSequence: sequence };
   };
 
-  const intentNode = async state => {
-    const intent = await jsonDecision(`Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,missing_business_context:boolean,business_question:string}. Preserve explicitly named people and supplied destinations in known_facts.`,
-    { message, connected: state.connected, conversation_context: state.conversationContext }, ctx._signal);
-    if (!Array.isArray(intent.outcomes) || !intent.outcomes.length || !['read', 'write'].includes(intent.kind)) throw new Error('governed_intent_contract');
-    const locale = String(intent.locale || ctx.language || 'en').slice(0, 20);
-    await persist(state, { intent, locale, status: 'intent_resolved' });
-    onEvent({ type: 'agent_state', state: 'intent_resolved', run_id: state.runId });
-    return { intent, locale, searchQuery: String(intent.use_case || message).slice(0, 500), status: 'intent_resolved' };
-  };
-
-  const missingApp = state => (state.intent?.apps || []).map(app => String(app).toLowerCase())
-    .find(app => app !== 'hivemind' && !state.connected.includes(app));
-
-  const prepareConnectionNode = async state => {
-    const toolkit = missingApp(state);
-    if (!toolkit) return { connectionRequest: null, status: 'resumed' };
-    let callbackUrl = null;
-    if (ctx.composioCallbackOrigin) {
-      const url = new URL('/hivemind/app/connect/composio/callback', ctx.composioCallbackOrigin);
-      url.searchParams.set('composio_toolkit', toolkit);
-      callbackUrl = url.toString();
+  const ensureCanonicalRun = async runId => {
+    if (!prisma?.agentRun?.create || !runId) return;
+    const scope = { id: runId, orgId: ctx.orgId, userId: ctx.userId };
+    const existing = typeof prisma.agentRun.findFirst === 'function'
+      ? await prisma.agentRun.findFirst({ where: scope })
+      : null;
+    if (existing) return;
+    try {
+      await prisma.agentRun.create({ data: {
+        id: runId,
+        orgId: ctx.orgId,
+        userId: ctx.userId,
+        // AgentRun is a run ledger, not a chat-conversation singleton. A
+        // fixed run key prevents long client thread IDs from being truncated
+        // into accidental unique-key collisions.
+        conversationId: `governed:${runId}`,
+        goal: message,
+        status: 'received',
+        steps: [],
+        scratch: { runtime: HARNESS_VERSION },
+      } });
+    } catch (error) {
+      // Concurrent delivery of the same user turn may race at admission. The
+      // unique run ID is its idempotency boundary; re-read before treating a
+      // duplicate create as an error.
+      if (error?.code !== 'P2002') throw error;
+      const raced = typeof prisma.agentRun.findFirst === 'function'
+        ? await prisma.agentRun.findFirst({ where: scope })
+        : null;
+      if (!raced) throw error;
     }
-    const link = await composio.createConnectLink(toolkit, ctx.orgId, { callbackUrl });
-    const request = { kind: 'connect_account', toolkit, provider: toolkit, blocking: true,
-      prompt: `Connect ${toolkit} to continue, then return here.`,
-      options: [{ id: 'connect', label: `Connect ${toolkit}`, href: link.redirectUrl, open_url: true, value: link.redirectUrl },
-        { id: 'connected', label: `I've connected ${toolkit} — continue`, value: 'retry_connection' }] };
-    await persist(state, { pendingInput: request, status: 'awaiting_connection' });
-    emitState(state, 'awaiting_connection', { toolkit });
-    return { connectionRequest: request, pendingInput: request, status: 'awaiting_connection' };
   };
 
-  const awaitConnectionNode = async state => {
-    interrupt({ run_id: state.runId, ...state.connectionRequest });
-    const accounts = await composio.listConnectedAccounts(ctx.orgId);
-    const connected = [...new Set(accounts.filter(row => row.status === 'ACTIVE').map(row => row.toolkit).filter(Boolean))];
-    emitState(state, 'resumed');
-    return { connected, connectionRequest: null, pendingInput: null, status: 'resumed' };
+  const loadSessionBinding = async connectionScope => {
+    if (!prisma?.governedComposioSession || !ctx.orgId || !ctx.userId) return null;
+    const where = { orgId_userId_connectionScope: { orgId: ctx.orgId, userId: ctx.userId, connectionScope } };
+    const row = typeof prisma.governedComposioSession.findUnique === 'function'
+      ? await prisma.governedComposioSession.findUnique({ where })
+      : (typeof prisma.governedComposioSession.findFirst === 'function'
+        ? await prisma.governedComposioSession.findFirst({ where: { orgId: ctx.orgId, userId: ctx.userId, connectionScope } })
+        : null);
+    return text(row?.sessionId, 160) || null;
   };
 
-  const discoverNode = async state => {
-    const query = state.searchQuery || state.intent?.use_case || message;
-    const toolkits = (state.intent?.apps?.length ? state.intent.apps : state.connected).slice(0, 12);
-    onEvent({ type: 'tool_start', name: 'COMPOSIO_SEARCH_TOOLS', args: { query } });
-    const discovery = await composio.discoverSessionTools(ctx.orgId, { toolkits, useCases: [query], allowDisconnected: true, userId: ctx.userId,
-      searchPayload: { queries: [{ use_case: query, known_fields: JSON.stringify(state.intent?.known_facts || {}) }],
-        session: state.workflowSessionId ? { id: state.workflowSessionId } : { generate_id: true }, search_strategy: 'auto' } });
-    const cards = [...state.capabilities];
+  const persistSessionBinding = async ({ connectionScope, sessionId, toolkits }) => {
+    if (!prisma?.governedComposioSession?.upsert || !ctx.orgId || !ctx.userId || !sessionId) return;
+    const scope = connectionScope === 'org' ? 'org' : 'user';
+    const data = {
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      connectionScope: scope,
+      sessionId: text(sessionId, 160),
+      toolkits: [...new Set((toolkits || []).map(item => text(item, 80).toLowerCase()).filter(Boolean))].sort(),
+    };
+    await prisma.governedComposioSession.upsert({
+      where: { orgId_userId_connectionScope: { orgId: ctx.orgId, userId: ctx.userId, connectionScope: scope } },
+      create: data,
+      update: { sessionId: data.sessionId, toolkits: data.toolkits },
+    });
+  };
+
+  const contextNode = async state => trace('history_load', {}, async () => {
+    const runId = state.runId || ctx.governedRunId || randomUUID();
+    // LangGraph applies annotation defaults before the first node, so merge
+    // the explicit admission scope instead of letting the default silently
+    // override a deliberate organization-scoped migration turn.
+    const connectionScope = state.connectionScope === 'org' || governedConnectionScope(ctx) === 'org' ? 'org' : 'user';
+    const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
+    const connected = unique(accounts.filter(row => row?.status === 'ACTIVE').map(row => row?.toolkit));
+    const coreCapabilities = await loadGovernedCoreCapabilities();
+    const conversationContext = await loadGovernedConversationContext({
+      prisma,
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      conversationId: ctx.threadId || ctx.conversationId,
+      turns: ctx.historyTurns,
+    });
+    await ensureCanonicalRun(runId);
+    const boundSessionId = state.sessionId || ctx.governedComposioSessionId || await loadSessionBinding(connectionScope);
+    const patch = await transition({ ...state, runId }, 'context_loaded', {
+      runId, connected, connectionScope, sessionId: boundSessionId || null, conversationContext, capabilities: coreCapabilities,
+    });
+    await persist({ ...state, runId }, patch);
+    return patch;
+  });
+
+  const intentNode = async state => trace('intent_resolution', { model: MODEL }, async () => {
+    const raw = await jsonDecision({
+      ctx,
+      stage: 'intent',
+      signal: ctx._signal,
+      system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,business_question?:string}. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+      input: { message, connected: state.connected, conversation_context: state.conversationContext },
+    });
+    const intent = normalizedIntent(raw, ctx.language || 'en');
+    if (!intent.outcomes.length || !intent.discovery_query) throw new Error('governed_intent_contract');
+    const patch = await transition(state, 'intent_resolved', { intent, locale: intent.locale }, { reason_code: 'intent_resolved' });
+    await persist(state, patch);
+    return patch;
+  });
+
+  const discoverNode = async state => trace('composio_search', { attempt: Number(state.discoveryAttempts || 0) + 1 }, async () => {
+    const query = text(state.searchQuery || state.intent?.discovery_query || message, 900);
+    const toolkits = unique(state.intent?.apps?.length ? state.intent.apps : state.connected)
+      .filter(toolkit => !['hivemind', 'local', 'core', 'composio'].includes(toolkit)).slice(0, 12);
+    if (!toolkits.length) {
+      if ((state.capabilities || []).some(card => card.source === 'core')) {
+        const patch = await transition(state, 'capability_discovered', {
+          discovery: state.discovery || {
+            recommended_plan: { steps: [], guidance: 'Core read capabilities are available.' },
+            connection_statuses: {}, primary_tool_slugs: [], related_tool_slugs: [], search_strategy: null,
+          },
+        }, { reason_code: 'core_capability_catalog' });
+        await persist(state, patch);
+        return patch;
+      }
+      const request = capabilityGap(state);
+      const patch = await transition(state, 'awaiting_input', { pendingInput: request, capabilityGap: true }, { reason_code: 'no_connected_toolkits', input_fields: request.fields.map(field => field.id) });
+      await persist(state, patch);
+      return patch;
+    }
+    onEvent({ type: 'tool_start', name: 'COMPOSIO_SEARCH_TOOLS', run_id: state.runId });
+    const discovery = await trace('schema_fetch', { source: 'composio_meta_tools' }, () => composio.discoverSessionTools(ctx.orgId, {
+      userId: ctx.userId,
+      connectionScope: state.connectionScope,
+      toolkits,
+      useCases: [query],
+      allowDisconnected: true,
+      sessionId: state.sessionId || null,
+      includeCustomToolkit: false,
+      manageConnections: true,
+      callbackUrl: callbackUrlFor(ctx),
+      searchPayload: {
+        queries: [{ use_case: query, known_fields: serializeKnownFacts({ ...state.intent?.known_facts, ...state.fieldValues }) }],
+        session: state.workflowSessionId ? { id: state.workflowSessionId } : { generate_id: true },
+        search_strategy: 'tool_search',
+      },
+    }));
+    const cards = new Map((state.capabilities || []).map(card => [card.slug, card]));
     for (const tool of discovery.tools || []) {
       const slug = tool?._composio?.slug;
-      const raw = discovery.toolSchemas?.[slug];
-      if (!slug || !raw?.input_schema?.properties) continue;
-      const card = { slug, toolkit: String(raw.toolkit || tool._composio?.toolkit || '').toLowerCase(), authority: authority(slug),
-        description: String(raw.description || tool.function?.description || '').slice(0, 800), schema: raw.input_schema };
-      const index = cards.findIndex(item => item.slug === slug);
-      if (index >= 0) cards[index] = card; else cards.push(card);
+      const schema = discovery.toolSchemas?.[slug];
+      if (!slug || !schema?.input_schema) continue;
+      cards.set(slug, capabilityCard({ tool, schema }));
     }
-    const steps = [...state.steps, { kind: 'search', slug: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', summary: `${cards.length} capabilities discovered` }];
-    const searchQueries = [...state.searchQueries, query].slice(-4);
-    const patch = { capabilities: cards.slice(0, 48), sessionId: discovery.sessionId || state.sessionId,
-      workflowSessionId: discovery.workflowSessionId || state.workflowSessionId, steps, searchQueries, status: 'capability_discovered' };
+    const capabilities = [...cards.values()].slice(0, 48);
+    const searchQueries = [...(state.searchQueries || []), query].slice(-4);
+    const discovered = {
+      recommended_plan: compactRecommendedPlan(discovery.recommendedPlanSteps, discovery.nextStepsGuidance),
+      connection_statuses: discovery.toolkitConnectionStatuses || {},
+      primary_tool_slugs: discovery.primaryToolSlugs || [],
+      related_tool_slugs: discovery.relatedToolSlugs || [],
+      search_strategy: discovery.searchStrategy || 'tool_search',
+    };
+    const connectionToolkit = pendingConnectionToolkit({ ...state, discovery: discovered });
+    const steps = [...(state.steps || []), {
+      kind: 'search', slug: 'COMPOSIO_SEARCH_TOOLS', status: 'completed',
+      summary: `${capabilities.length} capabilities discovered`,
+    }];
+    const patch = await transition(state, 'capability_discovered', {
+      capabilities,
+      discovery: discovered,
+      sessionId: discovery.sessionId || state.sessionId,
+      workflowSessionId: discovery.workflowSessionId || state.workflowSessionId,
+      searchQueries,
+      searchQuery: null,
+      discoveryAttempts: Number(state.discoveryAttempts || 0) + 1,
+      connectionRequest: connectionToolkit ? { toolkit: connectionToolkit } : null,
+      steps,
+    }, { reason_code: 'composio_discovery' });
+    await persistSessionBinding({
+      connectionScope: state.connectionScope,
+      sessionId: patch.sessionId,
+      toolkits,
+    });
     await persist(state, patch);
-    onEvent({ type: 'tool_result', name: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', summary: `${cards.length} capabilities discovered` });
-    emitState(state, 'capability_discovered');
+    onEvent({ type: 'tool_result', name: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', run_id: state.runId,
+      summary: `${capabilities.length} capabilities discovered` });
     return patch;
-  };
+  });
 
-  const reasonNode = async state => {
-    const covered = new Set(state.receipts.filter(row => row.successful).flatMap(row => row.outcome_ids || []));
-    if (state.intent.outcomes.every(outcome => covered.has(outcome.id))) return { decision: { action: 'done' }, status: 'ready_to_synthesize' };
-    const resumedWriteCards = state.capabilities.filter(card => card.authority === 'write');
-    const hasHumanBusinessInput = Object.values(state.fieldValues || {}).some(value => String(value ?? '').trim());
-    const hasPrerequisiteEvidence = state.receipts.some(row => row.successful && !row.draft_id);
-    if (state.intent.kind === 'write' && hasHumanBusinessInput && hasPrerequisiteEvidence && resumedWriteCards.length) {
-      const selected = bestCapability(resumedWriteCards, state.intent);
-      const outcomeIds = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.id);
-      const decision = { action: 'draft', slug: selected.slug, purpose: 'outcome', outcome_ids: outcomeIds,
-        reason: 'Resume the prepared write with human business input and verified prerequisite evidence' };
-      emitState(state, 'dependency_resolved', { next_action: 'draft' });
-      return { decision, cycles: state.cycles + 1, status: 'planned' };
+  const requestConnectionNode = async state => trace('connection_resolution', {}, async () => {
+    const toolkit = state.connectionRequest?.toolkit;
+    if (!toolkit) return { connectionRequest: null };
+    if (!state.sessionId || typeof composio.manageSessionConnections !== 'function') {
+      throw new Error('governed_connection_session_unavailable');
     }
-    if (state.cycles >= 6) return { decision: { action: 'ask', question: 'I could not find a connected capability that can resolve the remaining information. Please provide that business detail.', fields: ['missing_information'] }, status: 'awaiting_input' };
-    const failedSlugs = new Set(state.receipts.filter(row => !row.successful).map(row => row.slug));
-    const capabilities = state.capabilities.map(card => ({ slug: card.slug, toolkit: card.toolkit, authority: card.authority,
-      description: card.description, required: card.schema.required || [], fields: Object.keys(card.schema.properties || {}),
-      attempted_failed: failedSlugs.has(card.slug) }));
-    let decision = await jsonDecision(`Act as a self-governing tool agent. Active skill: ${loadGovernedSkill('dependency').content}
-Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:string,query?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. For read or draft, purpose is required. Use purpose:"outcome" and the unresolved outcome_ids when the capability directly fulfills the request. Use purpose:"prerequisite" and outcome_ids:[] only when its data is required by a later action. Use discovered capabilities before searching again. Never repeat a successful read unless materially different arguments are required. Never ask for provider IDs or account names. A write is only draft. Search queries must be materially new. If the catalog lacks the required reader after two searches, ask for a human-readable business fact or explain the capability gap.`,
-      { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
-        outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
-    const viable = capabilities.filter(card => card.authority === 'read' && !card.attempted_failed);
-    const evidenceNeed = schemaEvidenceNeed(state.intent, capabilities, state.receipts);
-    if (evidenceNeed && !viable.length && state.searchQueries.length < 3) {
-      const attempt = state.searchQueries.length + 1;
-      decision = {
-        action: 'search',
-        query: `Resolve known ${evidenceNeed.factKey} "${evidenceNeed.value}" into verified ${evidenceNeed.targetField} using connected directory, contact, search, or message evidence. Discovery attempt ${attempt}.`,
-        reason: 'A write destination must be supported by connected evidence before drafting',
-      };
-    } else if (evidenceNeed && !viable.length && state.searchQueries.length >= 3) {
-      decision = {
-        action: 'ask',
-        question: `What ${evidenceNeed.targetField.replaceAll('_', ' ')} should I use for ${evidenceNeed.value}?`,
-        fields: [evidenceNeed.targetField],
-        reason: 'Connected evidence searches were exhausted without resolving the named destination',
-      };
-    }
-    if (failedSlugs.size && !viable.length && state.searchQueries.length < 3 && ['ask', 'done'].includes(decision.action)) {
-      const unresolved = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.description).join('; ');
-      decision = {
-        action: 'search',
-        query: `Find a different connected read capability for unresolved outcomes: ${unresolved || state.intent.use_case}. Exclude failed capabilities: ${[...failedSlugs].join(', ')}. Prefer capabilities that list, search, or resolve prerequisite evidence before requiring an identifier.`,
-        reason: 'A failed capability cannot justify user clarification while bounded alternative discovery remains',
-      };
-    }
-    const selected = capabilities.find(card => card.slug === decision.slug);
-    const invalidAuthority = decision.action === 'read' && selected?.authority !== 'read';
-    if (viable.length && (invalidAuthority || (['search', 'ask'].includes(decision.action) && state.searchQueries.length >= 2))) {
-      decision = await jsonDecision(`Self-heal a stalled tool plan. Viable read capabilities already exist, so select the best one before asking the user.
-Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. Choose read when a capability can directly fulfill an outcome or obtain a prerequisite without a technical identifier. Ask only for a human-readable business fact that no capability can obtain.`,
-      { message, intent: state.intent, viable_capabilities: viable, successful_receipts: state.receipts.filter(row => row.successful), fields: state.fieldValues }, ctx._signal);
-    }
-    if (decision.action === 'read' && !viable.some(card => card.slug === decision.slug)) {
-      const fallback = bestCapability(viable, state.intent);
-      if (fallback) decision = { action: 'read', slug: fallback.slug, purpose: 'outcome',
-        outcome_ids: state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.id), reason: 'Closed-world admissible capability fallback' };
-      else decision = state.searchQueries.length < 3
-        ? { action: 'search', query: `Find an alternative connected capability for ${state.intent.use_case}`, reason: 'Previously attempted capabilities failed' }
-        : { action: 'ask', question: 'The connected integration does not expose a working reader for this request. Please provide the missing business information.', fields: ['missing_information'], reason: 'No admissible capability remains' };
-    }
-    if (!['search', 'read', 'draft', 'ask', 'done'].includes(decision.action)) throw new Error('governed_action_contract');
-    if (['read', 'draft'].includes(decision.action) && !['outcome', 'prerequisite'].includes(decision.purpose)) {
-      throw new Error('governed_action_purpose_required');
-    }
-    if (decision.action === 'search') {
-      const prior = new Set(state.searchQueries.map(x => x.toLowerCase()));
-      let query = String(decision.query || '').trim();
-      if (!query || prior.has(query.toLowerCase())) {
-        const unresolved = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.description).join('; ');
-        query = `Find a connected capability to ${unresolved || state.intent.use_case} using the authenticated ${(state.intent.apps || []).join(', ') || 'account'}`;
-      }
-      if (!query || prior.has(query.toLowerCase()) || state.searchQueries.length >= 3) {
-        return { decision: { action: 'ask', question: 'The connected integration does not expose the reader needed to resolve this automatically. Please provide the missing business information.', fields: ['missing_information'] }, status: 'awaiting_input', cycles: state.cycles + 1 };
-      }
-      emitState(state, 'dependency_resolved', { next_action: 'discover' });
-      return { decision, searchQuery: query.slice(0, 500), cycles: state.cycles + 1, status: 'discovering_dependency' };
-    }
-    emitState(state, decision.action === 'ask' ? 'awaiting_input' : 'dependency_resolved', { next_action: decision.action });
-    return { decision, cycles: state.cycles + 1, status: decision.action === 'ask' ? 'awaiting_input' : 'planned' };
-  };
+    const link = await trace('composio_manage_connections', { toolkit }, () => composio.manageSessionConnections(state.sessionId, [toolkit]));
+    if (!link?.redirectUrl) throw new Error('governed_connection_link_unavailable');
+    const request = {
+      kind: 'connect_account', toolkit, provider: toolkit, blocking: true,
+      prompt: `Connect ${toolkit} to continue, then return here.`,
+      options: [
+        { id: 'connect', label: `Connect ${toolkit}`, href: link.redirectUrl, open_url: true, value: link.redirectUrl },
+        { id: 'connected', label: `I've connected ${toolkit} — continue`, value: 'retry_connection' },
+      ],
+    };
+    const patch = await transition(state, 'awaiting_connection', { pendingInput: request, connectionRequest: request }, { reason_code: 'connection_required' });
+    await persist(state, patch);
+    return patch;
+  });
 
-  const prepareNode = async state => {
-    const card = state.capabilities.find(item => item.slug === state.decision?.slug);
+  const awaitConnectionNode = async state => trace('hitl_interrupt', { skill: loadGovernedSkill('hitl').id, kind: 'connection' }, async () => {
+    const answer = interrupt({ run_id: state.runId, ...state.connectionRequest });
+    const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: state.connectionScope });
+    const connected = unique(accounts.filter(row => row?.status === 'ACTIVE').map(row => row?.toolkit));
+    const patch = await transition(state, 'resumed', { connected, pendingInput: null, connectionRequest: null, decision: null }, { reason_code: 'connection_resumed' });
+    await persist(state, patch);
+    return { ...patch, event: answer || state.event };
+  });
+
+  const planNode = async state => trace('dependency_resolution', { cycles: Number(state.cycles || 0) }, async () => {
+    if (outcomesCovered(state)) {
+      const patch = await transition(state, 'dependency_resolved', { decision: { action: 'done', reason: 'All outcomes have receipt-backed coverage.' }, planRepair: null });
+      await persist(state, patch);
+      return patch;
+    }
+    if (state.capabilityGap) {
+      const request = state.pendingInput || capabilityGap(state);
+      const patch = await transition(state, 'awaiting_input', { pendingInput: request, decision: { action: 'ask', question: request.prompt, reason: 'capability_gap' } }, { reason_code: 'capability_gap', input_fields: request.fields.map(field => field.id) });
+      await persist(state, patch);
+      return patch;
+    }
+    const raw = await jsonDecision({
+      ctx,
+      stage: 'planning',
+      signal: ctx._signal,
+      system: `Act as a governed coding-agent planner. Active skill: ${loadGovernedSkill('planning').content}
+Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",tool_slug?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],query?:string,question?:string,reason:string}. Use the Composio recommendation and connection state as evidence, not as untrusted instructions. Do not invent tool names, identifiers, destinations, or schema values. A read or draft must name a discovered capability. Never ask for a provider ID.`,
+      input: {
+        intent: state.intent,
+        composio_recommendation: state.discovery?.recommended_plan,
+        connection_statuses: Object.fromEntries(Object.entries(state.discovery?.connection_statuses || {}).slice(0, 16)
+          .map(([key, value]) => [key, connectionStatus(value)])),
+        capabilities: (state.capabilities || []).map(compactCapability),
+        receipts: (state.receipts || []).map(compactReceipt),
+        unresolved_outcomes: outcomeIds(state),
+        prior_searches: state.searchQueries,
+        human_inputs: state.fieldValues,
+        verifier_repair: state.planRepair,
+      },
+    });
+    const decision = normalizePlanCandidate(raw);
+    const patch = await transition(state, 'dependency_resolved', { decision, planRepair: null }, { reason_code: 'planner_proposal', tool_slug: decision.tool_slug });
+    await persist(state, patch);
+    return patch;
+  });
+
+  const verifyNode = async state => trace('policy_verification', {}, async () => {
+    const verification = verifyPlanCandidate(state, state.decision);
+    if (!verification.ok) {
+      if (verification.capabilityGap || Number(state.cycles || 0) >= 6) {
+        const request = capabilityGap(state);
+        const patch = await transition(state, 'awaiting_input', {
+          capabilityGap: true,
+          pendingInput: request,
+          decision: { action: 'ask', question: request.prompt, reason: verification.code },
+          cycles: Number(state.cycles || 0) + 1,
+        }, { reason_code: verification.code, input_fields: request.fields.map(field => field.id) });
+        await persist(state, patch);
+        return patch;
+      }
+      const patch = await transition(state, 'dependency_resolved', {
+        decision: null,
+        planRepair: verification.repair,
+        cycles: Number(state.cycles || 0) + 1,
+      }, { reason_code: verification.code });
+      await persist(state, patch);
+      return patch;
+    }
+    const decision = verification.plan;
+    const patchData = { decision, planRepair: null };
+    if (decision.action === 'discover') patchData.searchQuery = decision.query;
+    const patch = await transition(state, decision.action === 'ask' ? 'awaiting_input' : 'dependency_resolved', patchData,
+      { reason_code: 'policy_admitted', tool_slug: decision.tool_slug });
+    await persist(state, patch);
+    return patch;
+  });
+
+  const prepareNode = async state => trace('schema_validation', { tool_slug: state.decision?.tool_slug || null }, async () => {
+    const card = (state.capabilities || []).find(item => item.slug === state.decision?.tool_slug);
     if (!card) throw new Error('governed_capability_not_discovered');
-    if (state.decision.action === 'read' && card.authority !== 'read') throw new Error('governed_read_authority_denied');
-    if (state.decision.action === 'draft' && card.authority !== 'write') throw new Error('governed_write_authority_denied');
-    const args = await jsonDecision(`Generate only arguments for the selected schema. Use explicit user facts and successful receipts. Never copy example values from the schema, invent identifiers, or invent destinations. Omit unknown optional fields.`,
-      { message, intent: state.intent, selected: card, fields: state.fieldValues,
-        receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful, data: compact(row.data, 5000) })) }, ctx._signal);
+    const raw = await jsonDecision({
+      ctx,
+      stage: 'arguments',
+      signal: ctx._signal,
+      system: `Generate only arguments for the selected JSON schema. Active skill: ${loadGovernedSkill('arguments').content}
+Return the argument object itself. Never use schema examples, fabricate identifiers, or add fields absent from the schema.`,
+      input: {
+        intent: state.intent,
+        action: state.decision,
+        selected_capability: compactCapability(card),
+        schema: compact(card.schema, 6500),
+        human_inputs: state.fieldValues,
+        successful_receipts: (state.receipts || []).filter(row => row.successful).map(row => ({ slug: row.slug, data: compact(row.data, 5000) })),
+      },
+    });
+    const args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     const ajv = new Ajv({ strict: false, allErrors: true });
-    if (!ajv.compile(card.schema)(args)) throw new Error('governed_arguments_invalid');
-    if (state.decision.action === 'draft') {
-      const supported = new Set([...destinationEmails(message), ...state.receipts.flatMap(row => destinationEmails(row.data))]);
-      const unsupported = destinationEmails(args).filter(email => isPlaceholder(email) || !supported.has(email));
-      if (unsupported.length) return { decision: { action: 'search', query: 'resolve the named destination from connected account records', reason: 'Destination evidence required' },
-        searchQuery: 'resolve the named destination from connected account records', toolArgs: null, status: 'discovering_dependency' };
+    const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
+    const valid = validator(args);
+    const missing = missingRequiredFields(card.schema, args);
+    const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
+    if (!valid || missing.length || ungrounded.length) {
+      const requirements = [...missing, ...ungrounded.map(item => ({ field: item.field, schema: {} }))];
+      const relevantReads = eligibleReadCapabilities(state, requirements).filter(item => item.relevance > 0);
+      const dependencyKey = unresolvedDependencyKey(requirements);
+      const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
+      if (Number(state.discoveryAttempts || 0) < 3 && !dependencyAttempted && shouldResolveDependency(state, requirements, relevantReads)) {
+        const fields = [...new Set(requirements.map(item => humanizeField(item.field)))].join(', ');
+        const query = `Find a connected read capability that can resolve evidence for ${fields || 'the missing information'} needed to complete: ${text(state.intent?.discovery_query, 420)}`;
+        const patch = await transition(state, 'dependency_resolved', {
+          decision: { action: 'discover', query, reason: 'schema_requirements_unresolved' },
+          toolArgs: null,
+          planRepair: 'The selected schema lacks evidence-backed required arguments. Discover an upstream read capability.',
+          dependencySearches: dependencyKey ? [...(state.dependencySearches || []), dependencyKey].slice(-8) : state.dependencySearches,
+          cycles: Number(state.cycles || 0) + 1,
+        }, { reason_code: 'schema_requirements_unresolved' });
+        await persist(state, patch);
+        return patch;
+      }
+      const request = capabilityGap(state, requirements);
+      const patch = await transition(state, 'awaiting_input', {
+        pendingInput: request,
+        capabilityGap: Number(state.discoveryAttempts || 0) >= 3,
+        decision: { action: 'ask', question: request.prompt, reason: 'schema_requirements_unresolved' },
+        toolArgs: null,
+      }, { reason_code: 'schema_requirements_unresolved', input_fields: request.fields.map(field => field.id) });
+      await persist(state, patch);
+      return patch;
     }
-    emitState(state, 'arguments_validated', { tool: card.slug });
-    return { toolArgs: args, status: 'arguments_validated' };
-  };
+    const patch = await transition(state, 'arguments_validated', { toolArgs: args }, { reason_code: 'schema_valid', tool_slug: card.slug });
+    await persist(state, patch);
+    return patch;
+  });
 
-  const executeNode = async state => {
-    const card = state.capabilities.find(item => item.slug === state.decision.slug);
-    const [receipt] = await composio.executeToolsParallel(ctx.orgId, [{ slug: card.slug, arguments: state.toolArgs }],
-      { sessionId: state.sessionId, allowDirectFallback: false });
-    const unresolved = state.intent.outcomes.map(outcome => outcome.id)
-      .filter(id => !state.receipts.some(row => row.successful && row.outcome_ids?.includes(id)));
-    const outcomeIds = state.decision.purpose === 'outcome'
-      ? (Array.isArray(state.decision.outcome_ids) && state.decision.outcome_ids.length ? state.decision.outcome_ids : unresolved)
-      : [];
-    const row = { slug: card.slug, successful: receipt?.successful === true, data: compact(receipt?.data, 7000),
-      error: receipt?.successful ? null : 'Provider read failed', outcome_ids: outcomeIds };
-    const receipts = [...state.receipts, row];
-    const steps = [...state.steps, { kind: 'read', slug: card.slug, status: row.successful ? 'completed' : 'error', summary: row.successful ? receiptSummary(receipt.data) : row.error }];
-    await persist(state, { receipts, steps, status: row.successful ? 'tool_executed' : 'tool_failed' });
-    onEvent({ type: 'tool_result', name: card.slug, status: row.successful ? 'completed' : 'error', summary: steps.at(-1).summary });
-    emitState(state, row.successful ? 'tool_executed' : 'tool_failed', { tool: card.slug });
-    return { receipts, steps, toolArgs: null, decision: null, status: row.successful ? 'tool_executed' : 'tool_failed' };
-  };
+  const executeNode = async state => trace('tool_execution', { tool_slug: state.decision?.tool_slug || null, authority: 'read' }, async () => {
+    const card = (state.capabilities || []).find(item => item.slug === state.decision?.tool_slug);
+    if (!card || card.authority !== 'read') throw new Error('governed_read_authority_denied');
+    onEvent({ type: 'tool_start', name: card.slug, run_id: state.runId });
+    const receipt = card.source === 'core'
+      ? await executeGovernedCoreRead(card.slug, state.toolArgs, ctx)
+      : (await composio.executeToolsParallel(ctx.orgId, [{ slug: card.slug, arguments: state.toolArgs }], {
+        sessionId: state.sessionId,
+        allowDirectFallback: false,
+      }))[0];
+    const successful = receipt?.successful === true;
+    const row = {
+      slug: card.slug,
+      source: card.source,
+      successful,
+      data: compact(receipt?.data, 7000),
+      error_code: successful ? null : 'provider_read_failed',
+      summary: successful ? safeReceiptSummary(receipt?.data) : text(receipt?.error || 'Provider read failed', 300),
+      outcome_ids: state.decision?.purpose === 'outcome' ? (state.decision.outcome_ids || outcomeIds(state)) : [],
+    };
+    const receipts = [...(state.receipts || []), row];
+    const steps = [...(state.steps || []), { kind: 'read', slug: card.slug, status: successful ? 'completed' : 'error', summary: row.summary }];
+    const patch = await transition(state, successful ? 'tool_executed' : 'tool_failed', { receipts, steps, toolArgs: null, decision: null },
+      { reason_code: successful ? 'read_receipt' : 'read_failure', tool_slug: card.slug });
+    await persist(state, patch);
+    onEvent({ type: 'tool_result', name: card.slug, status: successful ? 'completed' : 'error', run_id: state.runId, summary: row.summary });
+    return patch;
+  });
 
-  const draftNode = async state => {
-    const card = state.capabilities.find(item => item.slug === state.decision.slug);
-    const toolArgs = { ...state.toolArgs, _composio_slug: card.slug, _harness_version: 'langgraph-native-v1',
-      _graph_thread_id: ctx.governedGraphThreadId, _composio_session_id: state.sessionId, _input_schema: card.schema };
+  const draftNode = async state => trace('approval_draft', { tool_slug: state.decision?.tool_slug || null, authority: 'write' }, async () => {
+    const card = (state.capabilities || []).find(item => item.slug === state.decision?.tool_slug);
+    if (!card || card.source !== 'composio' || card.authority !== 'write') throw new Error('governed_write_authority_denied');
+    const ajv = new Ajv({ strict: false, allErrors: true });
+    const valid = ajv.compile(card.schema || { type: 'object', properties: {} })(state.toolArgs || {});
+    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length) {
+      throw new Error('governed_draft_schema_or_evidence_denied');
+    }
+    const toolArgs = {
+      ...state.toolArgs,
+      _composio_slug: card.slug,
+      _harness_version: HARNESS_VERSION,
+      _graph_thread_id: ctx.governedGraphThreadId,
+      _composio_session_id: state.sessionId,
+      _input_schema: card.schema,
+    };
     const idempotencyKey = createHash('sha256').update(`graph:${ctx.orgId}:${ctx.userId}:${state.runId}:${card.slug}:${JSON.stringify(toolArgs)}`).digest('hex');
     let row = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: ctx.orgId, userId: ctx.userId } });
-    if (!row) row = await prisma.pendingWrite.create({ data: { userId: ctx.userId, orgId: ctx.orgId, provider: 'composio', toolGroup: 'composio',
-      toolName: card.slug, toolArgs, argsHash: createHash('sha256').update(JSON.stringify(toolArgs)).digest('hex'), traceId: state.runId,
-      idempotencyKey, expiresAt: new Date(Date.now() + 15 * 60_000), preview: `${card.slug} awaiting approval`.slice(0, 200), status: 'draft' } });
-    const steps = [...state.steps, { kind: 'write', slug: card.slug, status: 'draft_created', summary: 'Draft ready for approval; not sent' }];
-    const receipts = [...state.receipts, { slug: card.slug, successful: true, outcome_ids: state.decision.outcome_ids || [], draft_id: row.id, status: 'draft_created' }];
+    if (!row) row = await prisma.pendingWrite.create({ data: {
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      provider: 'composio',
+      toolGroup: 'composio',
+      toolName: card.slug,
+      toolArgs,
+      argsHash: createHash('sha256').update(JSON.stringify(toolArgs)).digest('hex'),
+      traceId: state.runId,
+      idempotencyKey,
+      expiresAt: new Date(Date.now() + 15 * 60_000),
+      preview: `${card.slug} awaiting approval`.slice(0, 200),
+      status: 'draft',
+    } });
+    const steps = [...(state.steps || []), { kind: 'write', slug: card.slug, status: 'draft_created', summary: 'Draft ready for approval; not sent' }];
+    const receipts = [...(state.receipts || []), { slug: card.slug, successful: true, outcome_ids: state.decision?.outcome_ids || [], draft_id: row.id, status: 'draft_created', summary: 'Approval draft created' }];
     const summary = 'Draft ready for approval. Nothing has been sent.';
-    const patch = { pendingApprovalId: row.id, receipts, steps, status: 'awaiting_approval', result: resultShape({ ...state, pendingApprovalId: row.id, receipts, steps }, summary, 'pending') };
+    const result = resultShape({ ...state, pendingApprovalId: row.id, receipts, steps }, summary, 'pending');
+    const patch = await transition(state, 'awaiting_approval', { pendingApprovalId: row.id, receipts, steps, result }, { reason_code: 'approval_required', tool_slug: card.slug });
     await persist(state, patch);
-    emitState(state, 'awaiting_approval', { approval_id: row.id });
     return patch;
-  };
+  });
 
-  const approvalNode = async state => {
+  const approvalNode = async state => trace('approval_receipt', { approval_id: state.pendingApprovalId || null }, async () => {
     const choice = interrupt({ kind: 'approval', run_id: state.runId, approval_id: state.pendingApprovalId,
       prompt: 'Review this draft. Approve to execute it once, or reject it.' });
-    const action = String(choice?.action || choice?.value || choice || '').toLowerCase();
+    const action = text(choice?.action || choice?.value || choice, 40).toLowerCase();
     const row = await prisma.pendingWrite.findFirst({ where: { id: state.pendingApprovalId, orgId: ctx.orgId, userId: ctx.userId } });
     if (!row) throw new Error('governed_approval_not_found');
     if (['reject', 'cancel', 'cancelled'].includes(action)) {
       if (row.status === 'draft') await prisma.pendingWrite.updateMany({ where: { id: row.id, status: 'draft' }, data: { status: 'cancelled' } });
-      const steps = [...state.steps, { kind: 'approval', slug: row.toolName, status: 'cancelled', summary: 'Draft rejected; nothing sent' }];
-      await persist(state, { steps, status: 'completed' });
-      emitState(state, 'completed', { approval_id: row.id, approval_status: 'cancelled' });
-      return { steps, status: 'done', result: resultShape({ ...state, steps, pendingApprovalId: null }, 'Draft rejected. Nothing was sent.', 'completed') };
+      const steps = [...(state.steps || []), { kind: 'approval', slug: row.toolName, status: 'cancelled', summary: 'Draft rejected; nothing sent' }];
+      const result = resultShape({ ...state, steps, pendingApprovalId: null }, 'Draft rejected. Nothing was sent.', 'completed');
+      const patch = await transition(state, 'completed', { steps, pendingApprovalId: null, result }, { reason_code: 'approval_rejected' });
+      await persist(state, patch);
+      return patch;
     }
     if (action !== 'approve') throw new Error('governed_approval_decision_invalid');
     if (row.status !== 'draft') {
-      const summary = row.status === 'sent' ? 'This approved action was already completed.' : `This draft is already ${row.status}.`;
-      return { status: row.status === 'sent' ? 'done' : 'failed', result: resultShape(state, summary, row.status === 'sent' ? 'completed' : 'error') };
+      const status = row.status === 'sent' ? 'completed' : 'error';
+      const result = resultShape(state, row.status === 'sent' ? 'This approved action was already completed.' : `This draft is already ${row.status}.`, status);
+      return { status: row.status === 'sent' ? 'done' : 'failed', result };
     }
-    const claimed = await prisma.pendingWrite.updateMany({ where: { id: row.id, orgId: ctx.orgId, userId: ctx.userId, status: 'draft',
-      expiresAt: { gt: new Date() } }, data: { status: 'approved', approvedAt: new Date() } });
+    const claimed = await prisma.pendingWrite.updateMany({ where: {
+      id: row.id, orgId: ctx.orgId, userId: ctx.userId, status: 'draft', expiresAt: { gt: new Date() },
+    }, data: { status: 'approved', approvedAt: new Date() } });
     if (claimed.count !== 1) throw new Error('governed_approval_state_changed');
     const args = { ...(row.toolArgs || {}) };
     for (const key of Object.keys(args)) if (key.startsWith('_')) delete args[key];
-    const [receipt] = await composio.executeToolsParallel(ctx.orgId, [{ slug: row.toolName, arguments: args }],
-      { sessionId: row.toolArgs?._composio_session_id || state.sessionId, allowDirectFallback: false });
+    const [receipt] = await composio.executeToolsParallel(ctx.orgId, [{ slug: row.toolName, arguments: args }], {
+      sessionId: row.toolArgs?._composio_session_id || state.sessionId,
+      allowDirectFallback: false,
+    });
     const successful = receipt?.successful === true;
-    const final = await prisma.pendingWrite.update({ where: { id: row.id }, data: { status: successful ? 'sent' : 'failed',
-      sentAt: successful ? new Date() : null, result: successful ? compact(receipt.data, 7000) : null,
-      errorMsg: successful ? null : String(receipt?.error || 'Provider execution failed').slice(0, 1000) } });
-    const steps = [...state.steps, { kind: 'write', slug: row.toolName, status: successful ? 'completed' : 'failed',
-      summary: successful ? 'Approved action completed once' : 'Approved action failed' }];
-    await persist(state, { steps, status: successful ? 'completed' : 'failed' });
-    emitState(state, successful ? 'completed' : 'failed', { approval_id: final.id, approval_status: final.status });
-    return { steps, status: successful ? 'done' : 'failed',
-      result: resultShape({ ...state, steps }, successful ? 'Approved action completed.' : 'The approved action failed. It was not retried.', successful ? 'completed' : 'error') };
-  };
+    const awaitingProviderEvent = successful && providerEventExpected(receipt);
+    const final = await prisma.pendingWrite.update({ where: { id: row.id }, data: {
+      // A provider acknowledgement that explicitly says it is asynchronous is
+      // not proof of delivery. Keep the pending write approved until a typed,
+      // idempotent provider event settles it.
+      status: successful ? (awaitingProviderEvent ? 'approved' : 'sent') : 'failed',
+      sentAt: successful && !awaitingProviderEvent ? new Date() : null,
+      result: successful ? compact(receipt?.data, 7000) : null,
+      errorMsg: successful ? null : text(receipt?.error || 'Provider execution failed', 1000),
+    } });
+    const steps = [...(state.steps || []), { kind: 'write', slug: row.toolName, status: successful ? 'completed' : 'failed',
+      summary: successful ? 'Approved action completed once' : 'Approved action failed; it was not retried automatically' }];
+    if (awaitingProviderEvent) {
+      const request = { kind: 'provider_event', run_id: state.runId, approval_id: final.id,
+        prompt: 'Waiting for the provider confirmation.', fields: [],
+        accepted_outcomes: ['succeeded', 'failed'],
+      };
+      const patch = await transition(state, 'awaiting_provider_event', { steps, pendingProviderEvent: request }, { reason_code: 'provider_confirmation_required' });
+      await persist(state, patch);
+      return patch;
+    }
+    const summary = successful ? 'Approved action completed.' : 'The approved action failed. It was not retried automatically.';
+    const result = resultShape({ ...state, steps }, summary, successful ? 'completed' : 'error');
+    const patch = await transition(state, successful ? 'completed' : 'failed', { steps, result }, { reason_code: successful ? 'approved_write_receipt' : 'approved_write_failed' });
+    await persist(state, patch);
+    return patch;
+  });
 
-  const humanNode = async state => {
-    const request = state.pendingInput || { kind: 'field_input', prompt: humanQuestion(state.decision?.question),
-      fields: (state.decision?.fields || ['missing_information']).map(id => ({ id, name: id, label: id.replaceAll('_', ' '), type: 'text', required: true })) };
-    await persist(state, { pendingInput: request, status: 'awaiting_input' });
-    emitState(state, 'awaiting_input');
+  const awaitProviderEventNode = async state => trace('hitl_interrupt', { skill: loadGovernedSkill('hitl').id, kind: 'provider_event' }, async () => {
+    const event = interrupt(state.pendingProviderEvent || { kind: 'provider_event', run_id: state.runId, prompt: 'Waiting for provider confirmation.', fields: [] });
+    const outcome = providerEventOutcome(event);
+    if (outcome === 'unknown') {
+      const patch = await transition(state, 'awaiting_provider_event', { event }, { reason_code: 'provider_event_non_terminal' });
+      await persist(state, patch);
+      return patch;
+    }
+    const approvalId = state.pendingProviderEvent?.approval_id;
+    if (approvalId) {
+      await prisma.pendingWrite.updateMany({
+        where: { id: approvalId, orgId: ctx.orgId, userId: ctx.userId, status: 'approved' },
+        data: outcome === 'succeeded'
+          ? { status: 'sent', sentAt: new Date(), errorMsg: null }
+          : { status: 'failed', errorMsg: 'The provider reported that the approved action failed.' },
+      });
+    }
+    const success = outcome === 'succeeded';
+    const steps = [...(state.steps || []), {
+      kind: 'provider_event', status: success ? 'completed' : 'failed',
+      summary: success ? 'Provider confirmed the approved action.' : 'Provider reported that the approved action failed.',
+    }];
+    const result = success
+      ? null
+      : resultShape({ ...state, steps, pendingProviderEvent: null }, 'The provider reported that the approved action failed.', 'error');
+    const patch = await transition(state, success ? 'resumed' : 'failed', {
+      // Provider settlement closes the approval lifecycle. Leaving this ID in
+      // state would make synthesis render a completed provider receipt as a
+      // still-pending draft.
+      event, pendingProviderEvent: null, pendingApprovalId: null, steps, result,
+    }, { reason_code: success ? 'provider_event_succeeded' : 'provider_event_failed' });
+    await persist(state, patch);
+    return patch;
+  });
+
+  const humanNode = async state => trace('hitl_interrupt', { skill: loadGovernedSkill('hitl').id, kind: 'clarification' }, async () => {
+    const request = state.pendingInput || {
+      kind: 'field_input',
+      prompt: text(state.decision?.question, 600) || 'What information should I use?',
+      fields: [{ id: 'business_context', name: 'business_context', label: 'More context', type: 'text', required: true }],
+    };
+    const waiting = await transition(state, 'awaiting_input', { pendingInput: request }, { reason_code: state.decision?.reason || 'human_input', input_fields: request.fields?.map(field => field.id || field.name) });
+    await persist(state, waiting);
     const answer = interrupt({ run_id: state.runId, ...request });
-    emitState(state, 'resumed');
-    return { fieldValues: { ...state.fieldValues, ...(answer?.values || answer || {}) }, pendingInput: null, decision: null, status: 'resumed' };
-  };
+    const values = answer?.values && typeof answer.values === 'object' ? answer.values : (answer && typeof answer === 'object' ? answer : { business_context: answer });
+    const patch = await transition({ ...state, ...waiting }, 'resumed', {
+      fieldValues: { ...(state.fieldValues || {}), ...values },
+      pendingInput: null,
+      decision: null,
+      capabilityGap: false,
+      planRepair: null,
+    }, { reason_code: 'human_input_resumed' });
+    await persist({ ...state, ...waiting }, patch);
+    return patch;
+  });
 
-  const synthNode = async state => {
-    const output = await jsonDecision(`Synthesize the final response in ${state.locale}. Active skill: ${loadGovernedSkill('synthesis').content}
-Contract: {response:string}. Use only successful receipts. A successful receipt is authorized evidence: extract and summarize its returned fields directly. Never claim you cannot access data that a successful receipt contains. State genuine capability gaps honestly.`, { message, intent: state.intent, receipts: state.receipts,
-      steps: state.steps }, ctx._signal);
-    const summary = String(output.response || 'I could not complete the request from available evidence.').slice(0, 5000);
-    const status = state.receipts.some(row => row.draft_id) ? 'pending' : 'completed';
+  const synthNode = async state => trace('final_synthesis', { locale: state.locale }, async () => {
+    const raw = await jsonDecision({
+      ctx,
+      stage: 'synthesis',
+      signal: ctx._signal,
+      system: `Synthesize the final response in ${state.locale}. Active skill: ${loadGovernedSkill('synthesis').content}
+Contract: {response:string}. Use only successful receipts. State a genuine capability gap plainly. Do not expose provider schema fields or identifiers.`,
+      input: { message, intent: state.intent, receipts: (state.receipts || []).map(compactReceipt), steps: state.steps, capability_gap: state.capabilityGap },
+    });
+    const summary = text(raw?.response || (state.capabilityGap ? capabilityGapQuestion() : 'I could not complete the request from available evidence.'), 5000);
+    const status = state.pendingApprovalId ? 'pending' : 'completed';
     const result = resultShape(state, summary, status);
-    await persist(state, { status: status === 'completed' ? 'done' : 'awaiting_approval' });
-    emitState(state, status === 'completed' ? 'completed' : 'awaiting_approval');
-    return { result, status: status === 'completed' ? 'done' : 'awaiting_approval' };
+    const patch = await transition(state, status === 'completed' ? 'completed' : 'awaiting_approval', { result }, { reason_code: 'synthesis_complete' });
+    await persist(state, patch);
+    return patch;
+  });
+
+  const sealNode = async state => trace('run_seal', {}, async () => {
+    const result = state.result || resultShape(state,
+      state.status === 'failed' ? 'The governed run failed before completion.' : 'The governed run completed.',
+      state.status === 'failed' ? 'error' : 'completed');
+    const patch = await transition(state, 'sealed', { result }, { reason_code: 'run_sealed' });
+    await persist(state, patch);
+    const root = await tracePromise;
+    await root?.end({ terminal_state: result.status || 'completed' });
+    return patch;
+  });
+
+  const routeAfterDiscover = state => state.connectionRequest ? 'request_connection' : (state.pendingInput ? 'await_human' : 'plan');
+  const routeAfterVerify = state => {
+    if (state.pendingInput || state.decision?.action === 'ask') return 'await_human';
+    if (!state.decision) return 'plan';
+    if (state.decision.action === 'discover') return 'discover';
+    if (state.decision.action === 'read' || state.decision.action === 'draft') return 'prepare';
+    return 'synthesize';
+  };
+  const routeAfterPrepare = state => {
+    if (state.pendingInput || state.decision?.action === 'ask') return 'await_human';
+    if (state.decision?.action === 'discover') return 'verify';
+    return state.decision?.action === 'draft' ? 'draft' : 'execute';
+  };
+  const routeAfterApproval = state => state.pendingProviderEvent ? 'await_provider_event' : 'seal';
+  const routeAfterProviderEvent = state => {
+    if (state.pendingProviderEvent) return 'await_provider_event';
+    return state.result?.status === 'error' ? 'seal' : 'synthesize';
   };
 
-  const routeReason = state => ({ search: 'discover', read: 'prepare', draft: 'prepare', ask: 'await_human', done: 'synthesize' }[state.decision?.action] || 'synthesize');
-  const routePrepared = state => state.decision?.action === 'draft' ? 'draft' : state.decision?.action === 'search' ? 'discover' : 'execute';
-  const routeIntent = state => missingApp(state) ? 'prepare_connection' : 'discover';
-  const routeConnection = state => missingApp(state) ? 'prepare_connection' : 'discover';
   return new StateGraph(GraphState)
     .addNode('context', contextNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('resolve_intent', intentNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
-    .addNode('prepare_connection', prepareConnectionNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
-    .addNode('await_connection', awaitConnectionNode)
     .addNode('discover', discoverNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
-    .addNode('reason', reasonNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
+    .addNode('request_connection', requestConnectionNode)
+    .addNode('await_connection', awaitConnectionNode)
+    .addNode('plan', planNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
+    .addNode('verify', verifyNode)
     .addNode('prepare', prepareNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('execute', executeNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.4 } })
     .addNode('draft', draftNode)
     .addNode('await_approval', approvalNode)
+    .addNode('await_provider_event', awaitProviderEventNode)
     .addNode('await_human', humanNode)
     .addNode('synthesize', synthNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
-    .addEdge(START, 'context').addEdge('context', 'resolve_intent')
-    .addConditionalEdges('resolve_intent', routeIntent, ['prepare_connection', 'discover'])
-    .addEdge('prepare_connection', 'await_connection')
-    .addConditionalEdges('await_connection', routeConnection, ['prepare_connection', 'discover'])
-    .addConditionalEdges('reason', routeReason, ['discover', 'prepare', 'await_human', 'synthesize'])
-    .addConditionalEdges('prepare', routePrepared, ['discover', 'execute', 'draft'])
-    .addEdge('discover', 'reason').addEdge('execute', 'reason').addEdge('await_human', 'reason')
-    .addEdge('draft', 'await_approval').addEdge('await_approval', END).addEdge('synthesize', END)
+    .addNode('seal', sealNode)
+    .addEdge(START, 'context')
+    .addEdge('context', 'resolve_intent')
+    .addEdge('resolve_intent', 'discover')
+    .addConditionalEdges('discover', routeAfterDiscover, ['request_connection', 'await_human', 'plan'])
+    .addEdge('request_connection', 'await_connection')
+    .addEdge('await_connection', 'discover')
+    .addEdge('plan', 'verify')
+    .addConditionalEdges('verify', routeAfterVerify, ['plan', 'discover', 'prepare', 'await_human', 'synthesize'])
+    .addConditionalEdges('prepare', routeAfterPrepare, ['verify', 'execute', 'draft', 'await_human'])
+    .addEdge('execute', 'plan')
+    .addEdge('draft', 'await_approval')
+    .addConditionalEdges('await_approval', routeAfterApproval, ['await_provider_event', 'seal'])
+    .addConditionalEdges('await_provider_event', routeAfterProviderEvent, ['await_provider_event', 'synthesize', 'seal'])
+    .addEdge('await_human', 'plan')
+    .addEdge('synthesize', 'seal')
+    .addEdge('seal', END)
     .compile({ checkpointer });
 }

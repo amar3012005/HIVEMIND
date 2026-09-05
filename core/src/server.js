@@ -24655,6 +24655,7 @@ exit \$RC
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                       governedGraphThreadId: stored.resumeState.graph_thread_id || null,
+                      governedRunId: stored.resumeState.run_id || null,
                       composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                         ? String(req.headers.origin)
                         : process.env.HIVEMIND_FRONTEND_URL) || undefined,
@@ -24996,6 +24997,9 @@ exit \$RC
                         durableChatTurnId: durableChatTurn?.id || null,
                         historyTurns,
                         threadId: body?.thread_id || body?.conversation_id || null,
+                        composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
+                          ? String(req.headers.origin)
+                          : process.env.HIVEMIND_FRONTEND_URL) || undefined,
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
                         prisma,

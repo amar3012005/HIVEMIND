@@ -17,8 +17,10 @@
  * Multi-tenant model: ONE Composio project (one COMPOSIO_API_KEY, set only
  * on the control plane, never sent to the frontend). Tenant isolation is
  * the `user_id` parameter Composio scopes connected_accounts/executions
- * by — we pass HIVEMIND's own orgId (or `${orgId}:${userId}` for a
- * connector that must be per-user rather than org-wide) as that user_id.
+ * by. Governed runs use a stable `${orgId}:${userId}` subject so one user's
+ * connected account is never silently reused by another person in the same
+ * organization. Older non-governed routes remain explicitly org-scoped until
+ * their connection migration is complete.
  * Auth configs (one per toolkit) are created once, ops-time, in the
  * Composio dashboard or via createAuthConfig() below — never per-tenant.
  */
@@ -85,6 +87,18 @@ function composioPost(path, body) { return _composioRequest('POST', path, body);
 function composioDelete(path) { return _composioRequest('DELETE', path); }
 
 /**
+ * A connection subject is authority, not a display identifier. New governed
+ * calls must supply userId and are user-scoped by default. Legacy routes can
+ * remain organization scoped only by omitting userId or explicitly choosing
+ * connectionScope:"org" during the migration window.
+ */
+export function composioConnectionSubject(orgId, { userId = null, connectionScope = null } = {}) {
+  const scope = String(connectionScope || process.env.COMPOSIO_GOVERNED_CONNECTION_SCOPE || (userId ? 'user' : 'org')).toLowerCase();
+  if (scope === 'user' && userId) return `${orgId}:${userId}`;
+  return String(orgId || '');
+}
+
+/**
  * Delete every connected account an org has for one toolkit (disconnect).
  * Returns the number of accounts removed.
  */
@@ -125,8 +139,9 @@ export async function disconnectToolkit(orgId, toolkitSlug) {
  * @param {string} orgId — used as Composio's user_id (tenant key)
  * @returns {Promise<Array<{ id, toolkit, status }>>}
  */
-export async function listConnectedAccounts(orgId) {
-  const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(orgId)}`);
+export async function listConnectedAccounts(orgId, opts = {}) {
+  const subject = composioConnectionSubject(orgId, opts);
+  const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}`);
   return (data?.items || []).map((it) => ({
     id: it.id,
     toolkit: it.toolkit?.slug,
@@ -242,7 +257,7 @@ export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
   }
   const body = {
     auth_config_id: authConfigId,
-    user_id: orgId,
+    user_id: composioConnectionSubject(orgId, opts),
     ...(opts.callbackUrl ? { callback_url: opts.callbackUrl } : {}),
   };
   const data = await composioPost('/api/v3/connected_accounts/link', body);
@@ -313,8 +328,20 @@ const SESSION_DISCOVERY_TTL_MS = Number(process.env.COMPOSIO_SESSION_DISCOVERY_T
 const TOOL_ROUTER_SESSION_CACHE = new Map();
 const TOOL_ROUTER_DISCOVERY_CACHE = new Map();
 
-function normalizedSessionKey(orgId, toolkits, userId = null) {
-  return `${orgId}:${userId || 'org'}:${[...new Set(toolkits || [])].map(String).sort().join(',')}`;
+function normalizedSessionKey(orgId, toolkits, {
+  userId = null,
+  connectionScope = null,
+  includeCustomToolkit = true,
+  manageConnections = false,
+  callbackUrl = null,
+} = {}) {
+  const subject = composioConnectionSubject(orgId, { userId, connectionScope });
+  const modes = [
+    includeCustomToolkit ? 'custom' : 'external-only',
+    manageConnections ? 'connections' : 'no-connections',
+    manageConnections && callbackUrl ? `callback:${String(callbackUrl).slice(0, 400)}` : '',
+  ].filter(Boolean).join('|');
+  return `${subject}:${[...new Set(toolkits || [])].map(String).sort().join(',')}:${modes}`;
 }
 
 function collectToolSlugs(value, prefixes, output = new Set()) {
@@ -362,14 +389,46 @@ async function executeSessionMeta(sessionId, slug, args, { timeoutMs = 6_500 } =
 }
 
 /** Create or reuse a tenant-scoped Tool Router Session. */
-export async function getToolRouterSession(orgId, toolkits, { allowDisconnected = false, userId = null } = {}) {
+export async function getToolRouterSession(orgId, toolkits, {
+  allowDisconnected = false,
+  userId = null,
+  connectionScope = null,
+  sessionId = null,
+  includeCustomToolkit = true,
+  manageConnections = false,
+  callbackUrl = null,
+} = {}) {
   const enabled = [...new Set((toolkits || []).map((toolkit) => String(toolkit).toLowerCase()).filter(Boolean))].sort();
   if (!orgId || !enabled.length) throw new Error('Composio Session requires an org and at least one toolkit');
-  const key = normalizedSessionKey(orgId, enabled, userId);
+  const subject = composioConnectionSubject(orgId, { userId, connectionScope });
+  const sessionOptions = { userId, connectionScope, includeCustomToolkit, manageConnections, callbackUrl };
+  const key = normalizedSessionKey(orgId, enabled, sessionOptions);
+
+  // A graph checkpoint is the authority for a resumed run. Reattach to its
+  // stored Composio session before consulting the process-local cache, so a
+  // worker restart cannot silently create a different tool context.
+  if (sessionId) {
+    try {
+      const existing = await composioGet(`/api/v3.1/tool_router/session/${encodeURIComponent(String(sessionId))}`);
+      const sessionSubject = existing?.config?.user_id || existing?.user_id || null;
+      if (sessionSubject && String(sessionSubject) !== subject) throw new Error('Composio session subject mismatch');
+      const value = {
+        id: String(sessionId), subject, toolkits: enabled, connectedAccounts: {},
+        customToolkitAttached: false, customToolkitError: null,
+      };
+      TOOL_ROUTER_SESSION_CACHE.set(key, { at: Date.now(), value });
+      return { ...value, cacheHit: true, resumed: true };
+    } catch (error) {
+      // A deleted/expired remote session is safe to replace for the same
+      // authenticated subject. All other failures are observable rather than
+      // being masked by a fresh session.
+      if (error?.status !== 404) throw error;
+    }
+  }
   const cached = TOOL_ROUTER_SESSION_CACHE.get(key);
   if (cached && Date.now() - cached.at < SESSION_TTL_MS) return { ...cached.value, cacheHit: true };
 
-  const accounts = await listConnectedAccounts(orgId);
+  const accounts = await listConnectedAccounts(orgId, { userId, connectionScope });
   const connectedAccounts = {};
   const { isUseToolsUnifiedDagEnabled } = await import('../../agent/use-tools-unified-flag.js');
   const unified = isUseToolsUnifiedDagEnabled();
@@ -382,31 +441,41 @@ export async function getToolRouterSession(orgId, toolkits, { allowDisconnected 
     connectedAccounts[toolkit] = account.id;
   }
   const body = {
-    // Connected accounts are provisioned under the organization Composio user.
-    // The local cache key above isolates one Tool Router session per app user;
-    // the remote session must retain the account owner's org identity.
-    user_id: orgId,
+    // The remote Tool Router session must use the same authority subject that
+    // owns its connected accounts. This is what keeps session discovery,
+    // schemas, and execution scoped to the authenticated app user.
+    user_id: subject,
     toolkits: { enable: enabled },
     connected_accounts: connectedAccounts,
-    manage_connections: { enable: false },
+    manage_connections: manageConnections
+      ? {
+        enable: true,
+        enable_wait_for_connections: false,
+        ...(callbackUrl ? { callback_url: String(callbackUrl).slice(0, 1800) } : {}),
+      }
+      : { enable: false },
     workbench: { enable: false },
   };
   let data;
   let customToolkitAttached = false;
   let customToolkitError = null;
-  try {
-    const { loadHivemindCustomToolkit, composioSessionExperimentalFromToolkit } = await import('./hivemind-custom-toolkit.js');
-    const hivemindToolkit = await loadHivemindCustomToolkit();
-    data = await _composioRequest('POST', '/api/v3/tool_router/session', {
-      ...body,
-      experimental: composioSessionExperimentalFromToolkit(hivemindToolkit),
-    }, { retries: 0, timeoutMs: 8_000 });
-    customToolkitAttached = true;
-  } catch (error) {
-    customToolkitError = String(error.message || error).slice(0, 240);
+  if (!includeCustomToolkit) {
     data = await _composioRequest('POST', '/api/v3/tool_router/session', body, { retries: 0, timeoutMs: 5_000 });
+  } else {
+    try {
+      const { loadHivemindCustomToolkit, composioSessionExperimentalFromToolkit } = await import('./hivemind-custom-toolkit.js');
+      const hivemindToolkit = await loadHivemindCustomToolkit();
+      data = await _composioRequest('POST', '/api/v3/tool_router/session', {
+        ...body,
+        experimental: composioSessionExperimentalFromToolkit(hivemindToolkit),
+      }, { retries: 0, timeoutMs: 8_000 });
+      customToolkitAttached = true;
+    } catch (error) {
+      customToolkitError = String(error.message || error).slice(0, 240);
+      data = await _composioRequest('POST', '/api/v3/tool_router/session', body, { retries: 0, timeoutMs: 5_000 });
+    }
   }
-  const value = { id: data?.session_id, toolkits: enabled, connectedAccounts, customToolkitAttached, customToolkitError };
+  const value = { id: data?.session_id, subject, toolkits: enabled, connectedAccounts, customToolkitAttached, customToolkitError };
   if (!value.id) throw new Error('Composio Session did not return a session_id');
   TOOL_ROUTER_SESSION_CACHE.set(key, { at: Date.now(), value });
   return { ...value, cacheHit: false };
@@ -577,9 +646,22 @@ function normalizeToolkitConnectionStatuses(raw) {
   return out;
 }
 
-export async function discoverSessionTools(orgId, { toolkits, useCases, searchPayload = null, allowDisconnected = false, userId = null }) {
+export async function discoverSessionTools(orgId, {
+  toolkits,
+  useCases,
+  searchPayload = null,
+  allowDisconnected = false,
+  userId = null,
+  connectionScope = null,
+  sessionId = null,
+  includeCustomToolkit = true,
+  manageConnections = false,
+  callbackUrl = null,
+}) {
   const { formatComposioSearch, extractWorkflowSessionId } = await import('./composio-search-formatter.js');
-  const session = await getToolRouterSession(orgId, toolkits, { allowDisconnected, userId });
+  const session = await getToolRouterSession(orgId, toolkits, {
+    allowDisconnected, userId, connectionScope, sessionId, includeCustomToolkit, manageConnections, callbackUrl,
+  });
   const normalizedCases = (useCases || []).map((item) => String(item || '').trim()).filter(Boolean);
   if (!normalizedCases.length && !searchPayload?.queries?.length) {
     throw new Error('Composio Session discovery requires a use-case');
@@ -675,6 +757,49 @@ export async function discoverSessionTools(orgId, { toolkits, useCases, searchPa
   };
   TOOL_ROUTER_DISCOVERY_CACHE.set(cacheKey, { at: Date.now(), value });
   return { ...value, sessionCacheHit: session.cacheHit, discoveryCacheHit: false };
+}
+
+function connectionRedirectUrl(value, depth = 0) {
+  if (depth > 5 || value == null) return null;
+  if (typeof value === 'string') return /^https:\/\//i.test(value) ? value : null;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 24)) {
+      const found = connectionRedirectUrl(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  for (const key of ['redirect_url', 'redirectUrl', 'auth_url', 'authUrl', 'url']) {
+    const found = connectionRedirectUrl(value[key], depth + 1);
+    if (found) return found;
+  }
+  for (const nested of Object.values(value).slice(0, 24)) {
+    const found = connectionRedirectUrl(nested, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Connection management for governed sessions is itself a Composio Meta Tool.
+ * The returned link is tied to the same session/user that discovered the
+ * capability; Core only presents it and resumes its own graph after OAuth.
+ */
+export async function manageSessionConnections(sessionId, toolkits, { reinitiateAll = false } = {}) {
+  const enabled = [...new Set((toolkits || []).map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+  if (!sessionId || !enabled.length) throw new Error('Composio connection management requires a session and toolkit');
+  const result = await executeSessionMeta(sessionId, 'COMPOSIO_MANAGE_CONNECTIONS', {
+    toolkits: enabled,
+    reinitiate_all: Boolean(reinitiateAll),
+  }, { timeoutMs: 20_000 });
+  if (result?.successful === false || result?.data?.successful === false) {
+    throw new Error(String(result?.error || result?.data?.error || 'Composio connection management failed').slice(0, 300));
+  }
+  return {
+    successful: true,
+    redirectUrl: connectionRedirectUrl(result?.data || result),
+  };
 }
 
 export async function getSessionToolSchemas(sessionId, slugs = []) {

@@ -59,7 +59,7 @@ test('Cloudflare mirror receives metadata only', () => {
     event: { type: 'coverage_assessed', sequence: 4, trace_id: 'private-trace', message: 'secret', evidence: ['secret'] },
     phase: 'recall_verified', status: 'running',
   });
-  assert.deepEqual(Object.keys(metadata).sort(), ['event_type', 'occurred_at', 'phase', 'sequence', 'status', 'trace_id', 'turn_id']);
+  assert.deepEqual(Object.keys(metadata).sort(), ['causation_id', 'event_id', 'event_type', 'idempotency_key', 'occurred_at', 'phase', 'run_id', 'sequence', 'state', 'status', 'trace_id', 'turn_id']);
   assert.equal(JSON.stringify(metadata).includes('secret'), false);
   assert.equal(metadata.trace_id.length, 32);
 });

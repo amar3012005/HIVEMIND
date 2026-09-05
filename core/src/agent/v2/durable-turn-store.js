@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 
 const TERMINAL_PHASES = new Set(['completed', 'failed', 'cancelled']);
 const GOVERNED_PHASES = new Set(['received', 'context_loaded', 'intent_resolved', 'capability_discovered', 'dependency_resolved',
-  'arguments_validated', 'tool_executed', 'tool_failed', 'awaiting_connection', 'awaiting_input', 'awaiting_approval', 'resumed', 'completed', 'failed', 'sealed']);
+  'arguments_validated', 'tool_executed', 'tool_failed', 'awaiting_connection', 'awaiting_input', 'awaiting_approval', 'awaiting_provider_event', 'resumed', 'completed', 'failed', 'sealed']);
 
 const EVENT_PHASES = Object.freeze({
   turn_accepted: 'accepted',
@@ -42,8 +42,10 @@ export function phaseForChatEvent(event = {}) {
 
 export function cloudflareEventMetadata({ turnId, event, phase, status }) {
   return {
-    event_id: `${turnId}:${Number(event?.sequence || 0)}`,
+    event_id: event?.event_id ? `${turnId}:${String(event.event_id).slice(0, 120)}` : `${turnId}:${Number(event?.sequence || 0)}`,
     run_id: event?.run_id || null,
+    causation_id: event?.causation_id || null,
+    idempotency_key: event?.idempotency_key || null,
     turn_id: turnId,
     sequence: Number(event?.sequence || 0),
     event_type: String(event?.type || 'progress').slice(0, 80),

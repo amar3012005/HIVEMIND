@@ -55,7 +55,7 @@ test('thread identity is tenant, user, and turn scoped without exposing identifi
 });
 
 test('progressive skills are individually bounded and load only by stage', () => {
-  assert.deepEqual(governedSkillIds, ['intent', 'dependency', 'hitl', 'synthesis']);
+  assert.deepEqual(governedSkillIds, ['intent', 'planning', 'arguments', 'hitl', 'synthesis']);
   for (const id of governedSkillIds) {
     const skill = loadGovernedSkill(id);
     assert.ok(skill.id.includes(`/${id}/`));

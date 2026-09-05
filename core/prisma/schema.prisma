@@ -579,10 +579,53 @@ model AgentRun {
   scratch            Json     @default("{}") @db.JsonB
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  governedEvents     GovernedAgentEvent[]
 
   @@unique([orgId, conversationId], map: "agent_runs_org_conversation_key")
   @@index([orgId, userId, updatedAt(sort: Desc)], map: "agent_runs_org_user_updated_idx")
   @@map("agent_runs")
+}
+
+/// Canonical append-only ledger for the governed LangGraph runtime. Provider
+/// payloads are deliberately not duplicated here: the ledger holds the
+/// event envelope, causation chain, and idempotency proof needed to resume a
+/// checkpoint exactly once.
+model GovernedAgentEvent {
+  id             String   @id @db.VarChar(80)
+  orgId          String   @map("org_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  runId          String   @map("run_id") @db.Uuid
+  sequence       Int
+  type           String   @db.VarChar(80)
+  causationId    String?  @map("causation_id") @db.VarChar(160)
+  idempotencyKey String   @map("idempotency_key") @db.VarChar(160)
+  payload        Json     @default("{}") @db.JsonB
+  occurredAt     DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  run            AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sequence], map: "governed_agent_events_run_sequence_key")
+  @@unique([orgId, idempotencyKey], map: "governed_agent_events_org_idempotency_key")
+  @@index([orgId, userId, runId, occurredAt], map: "governed_agent_events_run_lookup_idx")
+  @@map("governed_agent_events")
+}
+
+/// Stable user-scoped Composio Tool Router session binding. The graph stores
+/// the exact session on each run as well; this binding lets a new governed
+/// turn reuse the same authenticated connector context after a Core restart.
+model GovernedComposioSession {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String   @map("org_id") @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  connectionScope String   @default("user") @map("connection_scope") @db.VarChar(32)
+  sessionId       String   @map("session_id") @db.VarChar(160)
+  toolkits        Json     @default("[]") @db.JsonB
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, userId, connectionScope], map: "governed_composio_sessions_scope_key")
+  @@index([orgId, userId, updatedAt(sort: Desc)], map: "governed_composio_sessions_user_updated_idx")
+  @@map("governed_composio_sessions")
 }
 
 /// Pending writes from agent — held for explicit user approval before

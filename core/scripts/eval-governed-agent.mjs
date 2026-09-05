@@ -28,7 +28,7 @@ try {
       prisma,
       onEvent: event => events.push(event),
     });
-    const output = { status: result.status, response: result.summary || result.response, trajectory: result.steps || events,
+    const output = { status: result.status, locale: result.locale || item.inputs.language, response: result.summary || result.response, trajectory: result.steps || events,
       draft_ids: result.draftIds || [], input_requests: result.inputRequests || [] };
     const scores = evaluateGovernedOutput(output, item.outputs);
     if (scores.some(score => score.score !== 1)) failed = true;

@@ -15,6 +15,8 @@ export interface Env extends Cloudflare.Env {
 type MetadataRow = {
   event_id: string | null;
   run_id: string | null;
+  causation_id: string | null;
+  idempotency_key: string | null;
   sequence: number;
   event_type: string;
   phase: string;
@@ -35,12 +37,15 @@ export class HivemindChatSession extends Agent<Env> {
     this.sql`CREATE TABLE IF NOT EXISTS lifecycle_events (
       sequence INTEGER PRIMARY KEY, event_type TEXT NOT NULL, phase TEXT NOT NULL,
       status TEXT NOT NULL, trace_id TEXT, occurred_at TEXT NOT NULL,
-      event_id TEXT, run_id TEXT, state TEXT
+      event_id TEXT, run_id TEXT, causation_id TEXT, idempotency_key TEXT, state TEXT
     )`;
     const columns = new Set(this.sql<{ name: string }>`PRAGMA table_info(lifecycle_events)`.map(row => row.name));
     if (!columns.has('event_id')) this.sql`ALTER TABLE lifecycle_events ADD COLUMN event_id TEXT`;
     if (!columns.has('run_id')) this.sql`ALTER TABLE lifecycle_events ADD COLUMN run_id TEXT`;
+    if (!columns.has('causation_id')) this.sql`ALTER TABLE lifecycle_events ADD COLUMN causation_id TEXT`;
+    if (!columns.has('idempotency_key')) this.sql`ALTER TABLE lifecycle_events ADD COLUMN idempotency_key TEXT`;
     if (!columns.has('state')) this.sql`ALTER TABLE lifecycle_events ADD COLUMN state TEXT`;
+    this.sql`CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_events_event_id_unique ON lifecycle_events(event_id) WHERE event_id IS NOT NULL`;
   }
 
   open(input: SessionMetadata): { ok: true; turn_id: string } {
@@ -54,10 +59,12 @@ export class HivemindChatSession extends Agent<Env> {
   record(input: SessionMetadata): { ok: true; sequence: number; duplicate: boolean } {
     const metadata = validateMetadata(input);
     const sequence = Number(metadata.sequence || 0);
-    const exists = this.sql<{ sequence: number }>`SELECT sequence FROM lifecycle_events WHERE sequence=${sequence}`[0];
+    const exists = metadata.event_id
+      ? this.sql<{ sequence: number }>`SELECT sequence FROM lifecycle_events WHERE sequence=${sequence} OR event_id=${metadata.event_id}`[0]
+      : this.sql<{ sequence: number }>`SELECT sequence FROM lifecycle_events WHERE sequence=${sequence}`[0];
     if (exists) return { ok: true, sequence, duplicate: true };
-    this.sql`INSERT INTO lifecycle_events (sequence, event_type, phase, status, trace_id, occurred_at, event_id, run_id, state)
-      VALUES (${sequence}, ${metadata.event_type || 'progress'}, ${metadata.phase}, ${metadata.status}, ${metadata.trace_id || null}, ${metadata.occurred_at}, ${metadata.event_id || null}, ${metadata.run_id || null}, ${metadata.state || null})`;
+    this.sql`INSERT INTO lifecycle_events (sequence, event_type, phase, status, trace_id, occurred_at, event_id, run_id, causation_id, idempotency_key, state)
+      VALUES (${sequence}, ${metadata.event_type || 'progress'}, ${metadata.phase}, ${metadata.status}, ${metadata.trace_id || null}, ${metadata.occurred_at}, ${metadata.event_id || null}, ${metadata.run_id || null}, ${metadata.causation_id || null}, ${metadata.idempotency_key || null}, ${metadata.state || null})`;
     this.sql`UPDATE session_state SET phase=${metadata.phase}, status=${metadata.status}, last_sequence=${sequence}, updated_at=${metadata.occurred_at}
       WHERE singleton=1 AND last_sequence <= ${sequence}`;
     return { ok: true, sequence, duplicate: false };
@@ -65,7 +72,7 @@ export class HivemindChatSession extends Agent<Env> {
 
   status(): { state: Record<string, unknown> | null; events: MetadataRow[] } {
     const state = this.sql<Record<string, unknown>>`SELECT * FROM session_state WHERE singleton=1`[0] || null;
-    const events = this.sql<MetadataRow>`SELECT sequence, event_type, phase, status, trace_id, occurred_at, event_id, run_id, state FROM lifecycle_events ORDER BY sequence DESC LIMIT 100`;
+    const events = this.sql<MetadataRow>`SELECT sequence, event_type, phase, status, trace_id, occurred_at, event_id, run_id, causation_id, idempotency_key, state FROM lifecycle_events ORDER BY sequence DESC LIMIT 100`;
     return { state, events };
   }
 }

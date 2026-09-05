@@ -42,8 +42,41 @@ export function interactionEvaluator(run, example) {
     comment: forbidden ? `Technical clarification leaked: ${forbidden}` : contradicted ? `Successful evidence contradicted: ${contradicted}` : repeated ? `Repeated read: ${repeated[0]} x${repeated[1]}` : 'Interaction contract satisfied' };
 }
 
+export function receiptEvaluator(run, example) {
+  const output = run?.outputs || run || {};
+  const expected = example?.outputs || example || {};
+  const completed = output.status === 'completed';
+  const requiresReceipt = expected.requires_receipt === true || (expected.terminal || []).includes('completed');
+  const trajectory = output.trajectory || [];
+  const hasReceipt = trajectory.some(step => ['completed', 'draft_created'].includes(String(step?.status || ''))
+    && ['read', 'write', 'provider_event'].includes(String(step?.kind || '')));
+  return {
+    key: 'receipt',
+    score: !requiresReceipt || !completed || hasReceipt ? 1 : 0,
+    comment: !requiresReceipt || !completed || hasReceipt ? 'Receipt invariant satisfied' : 'Completed result has no execution receipt',
+  };
+}
+
+export function localeEvaluator(run, example) {
+  const output = run?.outputs || run || {};
+  const expected = example?.outputs || example || {};
+  if (!expected.locale) return { key: 'locale', score: 1, comment: 'No locale expectation' };
+  return {
+    key: 'locale',
+    score: String(output.locale || '').toLowerCase() === String(expected.locale).toLowerCase() ? 1 : 0,
+    comment: `Expected ${expected.locale}, got ${output.locale || 'missing'}`,
+  };
+}
+
 export function evaluateGovernedOutput(output, expected) {
   const run = { outputs: output };
   const example = { outputs: expected };
-  return [trajectoryEvaluator(run, example), terminalStateEvaluator(run, example), governanceEvaluator(run, example), interactionEvaluator(run, example)];
+  return [
+    trajectoryEvaluator(run, example),
+    terminalStateEvaluator(run, example),
+    governanceEvaluator(run, example),
+    interactionEvaluator(run, example),
+    receiptEvaluator(run, example),
+    localeEvaluator(run, example),
+  ];
 }

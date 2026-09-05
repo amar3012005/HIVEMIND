@@ -27,6 +27,8 @@
     "check:whatsapp-runtime": "node scripts/check-whatsapp-runtime.mjs",
     "eval:chat-v2": "node scripts/eval-native-chat-v2-golden.mjs",
     "eval:governed-agent": "node scripts/eval-governed-agent.mjs",
+    "test:governed-agent-e2e": "node --test tests/integration/governed-agent-local-e2e.test.js tests/unit/governed-agent-contract.test.js tests/unit/governed-agent-runtime.test.js tests/unit/composio-session-service.test.js tests/unit/durable-chat-turn-store.test.js",
+    "langsmith:governed-sync": "node scripts/sync-governed-agent-langsmith.mjs",
     "build": "tsc"
   },
   "dependencies": {
@@ -34,6 +36,7 @@
     "@humation/core": "^1.0.1",
     "@langchain/langgraph": "^1.4.8",
     "@langchain/langgraph-checkpoint-postgres": "^1.0.4",
+    "langsmith": "^0.8.8",
     "@lightpanda/browser": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@noble/post-quantum": "^0.6.1",

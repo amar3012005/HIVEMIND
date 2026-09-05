@@ -4,6 +4,8 @@ export type ChatMode = typeof CHAT_MODES[number];
 export type SessionMetadata = {
   event_id?: string;
   run_id?: string | null;
+  causation_id?: string | null;
+  idempotency_key?: string | null;
   turn_id: string;
   mode?: ChatMode;
   sequence?: number;
@@ -18,7 +20,7 @@ export type SessionMetadata = {
 export type ChatTurnWorkflowParams = { turn_id: string; mode: ChatMode };
 
 const ALLOWED_KEYS = new Set([
-  'event_id', 'run_id', 'turn_id', 'mode', 'sequence', 'event_type', 'phase', 'status', 'state', 'trace_id', 'occurred_at',
+  'event_id', 'run_id', 'causation_id', 'idempotency_key', 'turn_id', 'mode', 'sequence', 'event_type', 'phase', 'status', 'state', 'trace_id', 'occurred_at',
 ]);
 const FORBIDDEN_KEYS = /(message|content|prompt|answer|response|memory|evidence|citation|source|tool|artifact|email|name)/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -38,6 +40,8 @@ export function validateMetadata(input: unknown): SessionMetadata {
   if (record.event_type != null && String(record.event_type).length > 80) throw new Error('invalid_event_type');
   if (record.event_id != null && String(record.event_id).length > 160) throw new Error('invalid_event_id');
   if (record.run_id != null && String(record.run_id).length > 80) throw new Error('invalid_run_id');
+  if (record.causation_id != null && String(record.causation_id).length > 160) throw new Error('invalid_causation_id');
+  if (record.idempotency_key != null && String(record.idempotency_key).length > 160) throw new Error('invalid_idempotency_key');
   if (record.state != null && String(record.state).length > 40) throw new Error('invalid_state');
   if (record.trace_id != null && String(record.trace_id).length > 64) throw new Error('invalid_trace_id');
   return record as SessionMetadata;

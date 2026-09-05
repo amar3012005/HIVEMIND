@@ -93,3 +93,42 @@ test('Tool Router caches session discovery and executes the selected provider re
     else process.env.COMPOSIO_API_KEY = originalKey;
   }
 });
+
+test('governed sessions resume the authenticated user session and use Meta connection management', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.COMPOSIO_API_KEY;
+  process.env.COMPOSIO_API_KEY = 'test-composio-key';
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    const call = { url: String(url), method: options.method, body };
+    calls.push(call);
+    const json = payload => new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (options.method === 'GET' && String(url).endsWith('/api/v3.1/tool_router/session/trs_governed')) {
+      return json({ id: 'trs_governed', config: { user_id: 'org-1:user-1' } });
+    }
+    if (body?.slug === 'COMPOSIO_MANAGE_CONNECTIONS') {
+      return json({ successful: true, data: { connections: [{ redirect_url: 'https://auth.example.test/linkedin' }] } });
+    }
+    return new Response('unexpected request', { status: 500 });
+  };
+
+  try {
+    const service = await import(`../../src/connectors/composio/composio-service.js?governed-session-test=${Date.now()}`);
+    const session = await service.getToolRouterSession('org-1', ['linkedin'], {
+      userId: 'user-1', sessionId: 'trs_governed', includeCustomToolkit: false, manageConnections: true,
+    });
+    const connection = await service.manageSessionConnections(session.id, ['linkedin']);
+
+    assert.equal(session.id, 'trs_governed');
+    assert.equal(session.subject, 'org-1:user-1');
+    assert.equal(session.resumed, true);
+    assert.equal(connection.redirectUrl, 'https://auth.example.test/linkedin');
+    assert.equal(calls.filter(call => call.body?.slug === 'COMPOSIO_MANAGE_CONNECTIONS').length, 1);
+    assert.equal(calls.some(call => call.method === 'POST' && call.url.endsWith('/api/v3/tool_router/session')), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;
+    else process.env.COMPOSIO_API_KEY = originalKey;
+  }
+});

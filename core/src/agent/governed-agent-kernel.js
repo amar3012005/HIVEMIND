@@ -80,6 +80,18 @@ function authority(slug = '') {
   return READ_VERBS.has(verb) ? 'read' : WRITE_VERBS.has(verb) ? 'write' : 'unknown';
 }
 
+function semanticTokens(value) {
+  return new Set(String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []);
+}
+
+function bestCapability(cards, intent) {
+  const wanted = semanticTokens([intent?.use_case, ...(intent?.outcomes || []).map(item => item.description)].join(' '));
+  return [...cards].sort((a, b) => {
+    const score = card => [...semanticTokens(`${card.slug} ${card.description}`)].filter(token => wanted.has(token)).length;
+    return score(b) - score(a);
+  })[0] || null;
+}
+
 function destinationEmails(value) {
   return JSON.stringify(value || {}).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)?.map(x => x.toLowerCase()) || [];
 }
@@ -185,6 +197,11 @@ Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:strin
       decision = await jsonDecision(`Self-heal a stalled tool plan. Viable read capabilities already exist, so select the best one before asking the user.
 Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. Choose read when a capability can directly fulfill an outcome or obtain a prerequisite without a technical identifier. Ask only for a human-readable business fact that no capability can obtain.`,
       { message, intent: state.intent, viable_capabilities: viable, successful_receipts: state.receipts.filter(row => row.successful), fields: state.fieldValues }, ctx._signal);
+    }
+    if (decision.action === 'read' && !viable.some(card => card.slug === decision.slug)) {
+      const fallback = bestCapability(viable, state.intent);
+      if (fallback) decision = { action: 'read', slug: fallback.slug, purpose: 'outcome',
+        outcome_ids: state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.id), reason: 'Closed-world admissible capability fallback' };
     }
     if (!['search', 'read', 'draft', 'ask', 'done'].includes(decision.action)) throw new Error('governed_action_contract');
     if (['read', 'draft'].includes(decision.action) && !['outcome', 'prerequisite'].includes(decision.purpose)) {

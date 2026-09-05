@@ -18,10 +18,25 @@ function candidateSource(slug, discovery = {}) {
   return 'catalog';
 }
 
+function mutationFamily(value) {
+  const tokens = new Set(String(value || '').toLowerCase().match(/[a-z0-9]+/g) || []);
+  if (['delete', 'remove', 'revoke', 'cancel'].some(token => tokens.has(token))) return 'delete';
+  if (['patch', 'update', 'edit', 'modify', 'change'].some(token => tokens.has(token))) return 'update';
+  if (['create', 'draft', 'send', 'post', 'publish', 'add', 'insert', 'schedule'].some(token => tokens.has(token))) return 'create';
+  return null;
+}
+
+function matchesMutationIntent(outcome, card) {
+  if (outcome.kind !== 'draft') return true;
+  const requested = mutationFamily(`${outcome.id || ''} ${outcome.description || ''}`);
+  const offered = mutationFamily(`${card.slug || ''} ${card.description || ''}`);
+  return !requested || !offered || requested === offered;
+}
+
 function candidatesFor(outcome, capabilities = [], discovery = {}) {
   const authority = outcome.kind === 'draft' ? 'write' : 'read';
   return capabilities
-    .filter(card => card?.slug && card.authority === authority)
+    .filter(card => card?.slug && card.authority === authority && matchesMutationIntent(outcome, card))
     .map(card => {
       const source = card.source === 'core' ? 'core' : candidateSource(card.slug, discovery);
       const sourceRank = source === 'composio_primary' ? 0 : source === 'core' ? 1 : source === 'composio_related' ? 2 : 3;

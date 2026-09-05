@@ -1026,16 +1026,11 @@ Return the argument object itself. Never use schema examples, fabricate identifi
           requirements,
         });
         const query = dependencyDiscoveryQuery({ requirements: dependencyRequirements, intent: state.intent });
-        const executionPlan = settlePlanNode(state.executionPlan, {
-          nodeId: state.activePlanNodeId,
-          toolSlug: card.slug,
-          successful: false,
-          evidenceSufficient: false,
-          failureCode: 'schema_requirements_unresolved',
-        });
         const patch = await transition(state, 'dependency_resolved', {
           decision: { action: 'discover', query, reason: 'schema_requirements_unresolved' },
-          executionPlan,
+          // Missing evidence does not make the selected operation invalid.
+          // Keep its candidate available while a prerequisite node is added.
+          executionPlan: state.executionPlan,
           toolArgs: null,
           planRepair: 'The selected schema lacks evidence-backed required arguments. Discover an upstream read capability.',
           dependencySearches: dependencyKey ? [...(state.dependencySearches || []), dependencyKey].slice(-8) : state.dependencySearches,

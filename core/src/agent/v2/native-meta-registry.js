@@ -121,3 +121,18 @@ export function bindNativeMetaArguments(plan, schema) {
   ));
   return Object.freeze({ args: Object.freeze(args), unresolved: Object.freeze(unresolved) });
 }
+
+export function renderCertifiedNativeResult({ tool, result, language = 'en' } = {}) {
+  if (tool !== 'hivemind_count_where' || result?.complete !== true || !Number.isInteger(result?.count)) return null;
+  const count = result.count;
+  const type = String(result?.filter?.memory_type || '').replace(/[_-]+/g, ' ').trim();
+  const subject = type ? `${type} ${count === 1 ? 'memory' : 'memories'}` : `matching ${count === 1 ? 'memory' : 'memories'}`;
+  const locale = String(language || 'en').slice(0, 2).toLowerCase();
+  const responses = {
+    de: `Du hast genau ${count} ${type ? `${type}-${count === 1 ? 'Erinnerung' : 'Erinnerungen'}` : `passende ${count === 1 ? 'Erinnerung' : 'Erinnerungen'}`}.`,
+    fr: `Vous avez exactement ${count} ${type ? `${count === 1 ? 'mémoire' : 'mémoires'} de type ${type}` : `${count === 1 ? 'mémoire correspondante' : 'mémoires correspondantes'}`}.`,
+    es: `Tienes exactamente ${count} ${type ? `${count === 1 ? 'memoria' : 'memorias'} de tipo ${type}` : `${count === 1 ? 'memoria coincidente' : 'memorias coincidentes'}`}.`,
+    en: `You have exactly ${count} ${subject}.`,
+  };
+  return Object.freeze({ response: responses[locale] || responses.en, count, complete: true });
+}

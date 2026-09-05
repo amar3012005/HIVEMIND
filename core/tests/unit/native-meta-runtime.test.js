@@ -4,7 +4,7 @@ import { createNativePlanTool } from '../../src/agent/v2/planner-schema.js';
 import { compileNativePlan } from '../../src/agent/v2/plan-compiler.js';
 import { validateNativePlan, validateNativePlanResult } from '../../src/agent/v2/plan-validator.js';
 import { createNativeMetaPlannerGraph } from '../../src/agent/v2/orchestrator.js';
-import { assertNativeMetaAuthority, bindNativeMetaArguments, buildNativeMetaReceipt, getNativeToolSchemas } from '../../src/agent/v2/native-meta-registry.js';
+import { assertNativeMetaAuthority, bindNativeMetaArguments, buildNativeMetaReceipt, getNativeToolSchemas, renderCertifiedNativeResult } from '../../src/agent/v2/native-meta-registry.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
 import { nativeOrchestratorFor } from '../../src/agent/v2/cloudflare-chat-session-client.js';
 
@@ -68,6 +68,13 @@ test('selected canonical schema binds only precise structured arguments', () => 
   assert.deepEqual(bindNativeMetaArguments(compiled, schema), {
     args: { memory_type: 'decision', limit: 5 }, unresolved: [],
   });
+});
+
+test('certified native scalar receipts bypass probabilistic synthesis', () => {
+  const result = { count: 2, complete: true, filter: { memory_type: 'decision' } };
+  assert.equal(renderCertifiedNativeResult({ tool: 'hivemind_count_where', result, language: 'en' })?.response, 'You have exactly 2 decision memories.');
+  assert.equal(renderCertifiedNativeResult({ tool: 'hivemind_count_where', result: { ...result, complete: false }, language: 'en' }), null);
+  assert.equal(renderCertifiedNativeResult({ tool: 'hivemind_recall', result, language: 'en' }), null);
 });
 
 test('parentless exact memory count self-repairs to count_where without an invented substring', () => {

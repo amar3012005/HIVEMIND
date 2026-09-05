@@ -56,6 +56,7 @@ import {
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
 import { remainingStageMs, runWithStageDeadline, StageDeadlineError } from '../runtime/stage-deadline.js';
+import { renderCertifiedNativeResult } from './v2/native-meta-registry.js';
 import { promoteWebEvidenceWindow, publicWebFallbackEligible, recentPublicContextPacket, webResultPacket } from './web-fallback.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
@@ -1366,6 +1367,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   let aggregateResult = null;
   let profileContext = '';
   let projectsResult = null;
+  let mappedNative = null;
   let temporalCoverage = null;
   for (const cap of OP_STAGE) {
     if (!cap.predicate(plan)) continue;
@@ -1378,6 +1380,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     else if (cap.scalar === 'profileContext') profileContext = patch?.profileContext || profileContext;
     else if (cap.scalar === 'projectsResult') projectsResult = patch?.projectsResult ?? projectsResult;
     else if (cap.scalar === 'temporalCoverage') temporalCoverage = patch?.temporalCoverage ?? temporalCoverage;
+    else if (cap.scalar === 'mappedNative') mappedNative = patch?.mappedNative ?? mappedNative;
   }
 
   let coverage = assessRecallCoverage({
@@ -1502,6 +1505,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     recall_telemetry: recallTelemetry,
     profile_context: profileContext,
     projects: projectsResult,
+    mapped_native: mappedNative,
     aggregate: aggregateResult,
     relation: relationResult,
     coverage: {
@@ -2005,6 +2009,19 @@ export async function answerStep({ message, history, evidence, plan, language, a
     responseDepth: plan.response_depth,
     answerObjective: plan.answer_objective || message,
   });
+  const certifiedNative = renderCertifiedNativeResult({
+    tool: plan?._native_meta?.capability?.tool || plan?.native_tool,
+    result: evidence?.mapped_native,
+    language,
+  });
+  if (certifiedNative) {
+    return {
+      response: certifiedNative.response,
+      claims: [{ text: certifiedNative.response, grounded: true, citation_ids: ['NATIVE1'], provenance: 'native_tool_receipt' }],
+      rejected_claims: [], grounded: true, evidence_used: ['NATIVE1'], confidence: 1,
+      gaps: [], context_status: 'sufficient', answer_coverage: [], usage: null,
+    };
+  }
   if (plan.web_fallback?.reason === 'explicit_web' && evidence.coverage?.external_web_unavailable) {
     return {
       response: publicWebUnavailableResponse({ evidence, language }),

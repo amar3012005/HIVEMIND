@@ -1,9 +1,6 @@
 /** Progressive planning: bounded observations, semantic decisions, no tool execution. */
 export const PROGRESSIVE_PROMPT_BUDGETS = Object.freeze({ intent: 10000, action: 18000, synthesis: 24000 });
-export const PROGRESSIVE_HARNESS_MODEL = 'deepseek/deepseek-v4-flash-0731';
-export const PROGRESSIVE_HARNESS_PROVIDER = Object.freeze({
-  order: ['CoreWeave'], allow_fallbacks: false, require_parameters: false, data_collection: 'deny',
-});
+export const PROGRESSIVE_HARNESS_MODEL = 'openai/gpt-oss-20b:nitro';
 
 export function buildProgressiveConversationContext(history = []) {
   const turns = (Array.isArray(history) ? history : []).filter(turn => ['user', 'assistant'].includes(turn?.role)
@@ -72,7 +69,7 @@ async function decide(system, data, generateImpl, useCase, signal) {
   const response = await chatCompletionFetch(PROGRESSIVE_HARNESS_MODEL, {
     method: 'POST',
     signal,
-    body: JSON.stringify({ temperature: 0, max_tokens: 1800, provider: PROGRESSIVE_HARNESS_PROVIDER, messages: [
+    body: JSON.stringify({ temperature: 0, max_tokens: 1800, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages: [
       { role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) },
     ] }),
   }, { useCase });

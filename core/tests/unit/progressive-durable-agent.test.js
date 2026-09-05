@@ -244,8 +244,7 @@ test('default argument HTTP envelope preserves optional filters and rejects tool
         httpCalls++;
         assert.equal(options.method, 'POST');
         const body = JSON.parse(options.body);
-        assert.equal(body.response_format, undefined);
-        assert.deepEqual(body.provider, { order: ['CoreWeave'], allow_fallbacks: false, require_parameters: false, data_collection: 'deny' });
+        assert.deepEqual(body.response_format, { type: 'json_object' });
         assert.equal(body.model, PROGRESSIVE_HARNESS_MODEL);
         assert.equal(body.max_tokens, 1800);
         const payload = variant === 'mismatch' ? { slug: 'NOTION_DELETE_PAGE', args: expected }
@@ -364,8 +363,7 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
     const paused = await runDurableComposioAgent({ message: 'Erstelle eine Seite', ...compose });
     assert.equal(paused.status, 'needs_input', paused.summary);
     assert.equal(paused.summary, 'Bitte geben Sie title an.');
-    assert.equal(requests.at(-1).body.response_format, undefined);
-    assert.deepEqual(requests.at(-1).body.provider, { order: ['CoreWeave'], allow_fallbacks: false, require_parameters: false, data_collection: 'deny' });
+    assert.deepEqual(requests.at(-1).body.response_format, { type: 'json_object' });
     assert.equal(compose.writes.length, 0);
     assert.equal(replies.length, 0);
     assert.equal(requests.length, 10);

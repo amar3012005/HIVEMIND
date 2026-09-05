@@ -174,10 +174,16 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
     if (state.cycles >= 8) return { decision: { action: 'ask', question: 'I could not find a connected capability that can resolve the remaining information. Please provide that business detail.', fields: ['missing_information'] }, status: 'awaiting_input' };
     const capabilities = state.capabilities.map(card => ({ slug: card.slug, toolkit: card.toolkit, authority: card.authority,
       description: card.description, required: card.schema.required || [], fields: Object.keys(card.schema.properties || {}) }));
-    const decision = await jsonDecision(`Act as a self-governing tool agent. Active skill: ${loadGovernedSkill('dependency').content}
+    let decision = await jsonDecision(`Act as a self-governing tool agent. Active skill: ${loadGovernedSkill('dependency').content}
 Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:string,query?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. For read or draft, purpose is required. Use purpose:"outcome" and the unresolved outcome_ids when the capability directly fulfills the request. Use purpose:"prerequisite" and outcome_ids:[] only when its data is required by a later action. Use discovered capabilities before searching again. Never repeat a successful read unless materially different arguments are required. Never ask for provider IDs or account names. A write is only draft. Search queries must be materially new. If the catalog lacks the required reader after two searches, ask for a human-readable business fact or explain the capability gap.`,
       { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
         outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
+    const viable = capabilities.filter(card => card.authority === 'read');
+    if (['search', 'ask'].includes(decision.action) && viable.length && state.searchQueries.length >= 2) {
+      decision = await jsonDecision(`Self-heal a stalled tool plan. Viable read capabilities already exist, so select the best one before asking the user.
+Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. Choose read when a capability can directly fulfill an outcome or obtain a prerequisite without a technical identifier. Ask only for a human-readable business fact that no capability can obtain.`,
+      { message, intent: state.intent, viable_capabilities: viable, successful_receipts: state.receipts.filter(row => row.successful), fields: state.fieldValues }, ctx._signal);
+    }
     if (!['search', 'read', 'draft', 'ask', 'done'].includes(decision.action)) throw new Error('governed_action_contract');
     if (['read', 'draft'].includes(decision.action) && !['outcome', 'prerequisite'].includes(decision.purpose)) {
       throw new Error('governed_action_purpose_required');

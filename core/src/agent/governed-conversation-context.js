@@ -70,3 +70,38 @@ export async function loadGovernedConversationEvidence({
   }
   return evidence.slice(-8);
 }
+
+function referenceCandidates(value, source, found = [], depth = 0) {
+  if (value == null || depth > 8) return found;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 50)) {
+      if (item && typeof item === 'object' && !Array.isArray(item)) found.push({ source, record: item });
+      referenceCandidates(item, source, found, depth + 1);
+    }
+  } else if (typeof value === 'object') {
+    for (const item of Object.values(value).slice(0, 50)) referenceCandidates(item, source, found, depth + 1);
+  }
+  return found;
+}
+
+const normalized = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/** Resolve demonstratives such as "this email" against displayed evidence.
+ * Matching uses the business values the user quoted; provider IDs remain an
+ * output of resolution and are never expected from the user.
+ */
+export function resolveGovernedConversationReference(message, evidence = []) {
+  const request = normalized(message);
+  if (!request || !evidence.length) return null;
+  const candidates = evidence.flatMap(item => referenceCandidates(item?.data, {
+    prior_run_id: item?.prior_run_id, slug: item?.slug, completed_at: item?.completed_at,
+  }));
+  const scored = candidates.map(candidate => {
+    const values = Object.values(candidate.record || {}).filter(value =>
+      ['string', 'number'].includes(typeof value)).map(normalized).filter(value => value.length >= 4 && value.length <= 500);
+    const matches = values.filter(value => request.includes(value));
+    return { ...candidate, score: matches.reduce((sum, value) => sum + Math.min(80, value.length), 0), matches: matches.length };
+  }).filter(item => item.matches > 0).sort((a, b) => b.score - a.score);
+  if (!scored.length || (scored[1] && scored[0].score === scored[1].score)) return null;
+  return projectGovernedEvidence({ ...scored[0].source, record: scored[0].record }, 12000);
+}

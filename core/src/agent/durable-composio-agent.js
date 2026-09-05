@@ -31,7 +31,7 @@ Rules:
 - Never send, reply, publish, label, or modify live. The only write is action draft after facts (and a recipient when emailing a named person).
 - Do not repeat a completed slug. execute/draft slug must be in known.slugs or known.related.
 - If a named app is disconnected, connect.
-- If the user asked what/latest/show and receipts already have list or fetch data, done.
+- If this is a lookup and one provider read already succeeded, done. Do not keep calling extra tools.
 - Search once unless query is a new person-email lookup.
 - Answer from the user's request and tool receipts only.`;
 
@@ -929,8 +929,8 @@ export function fallbackNextDurableAction(obs) {
     && !isNativeHivemindSlug(row.slug)
     && !/^COMPOSIO_SEARCH/i.test(row.slug)
   ));
-  if (obs.read_only && successfulAppReads.length >= 2) {
-    return { action: 'done', reason: 'enough read evidence' };
+  if (obs.read_only && successfulAppReads.length >= 1) {
+    return { action: 'done', reason: 'answer from the read that already succeeded' };
   }
 
   if (last && failedMissing(last.slug)) {
@@ -1327,10 +1327,7 @@ export async function runDurableComposioAgent({
             sessionId: run.scratch.workflow_session_id,
             destinationApps: sessionToolkits,
             generateId: !run.scratch.workflow_session_id,
-            searchStrategy: (
-              (isReadLookupUseCase(queryMessage) && /\b(post|posts)\b/i.test(String(queryMessage || '')))
-              || /list the authenticated user's latest|find a person email address|email address of a person called/i.test(String(queryMessage || ''))
-            ) ? 'tool_search' : 'auto',
+            searchStrategy: isReadLookupUseCase(queryMessage) ? 'tool_search' : 'auto',
           }),
         });
         discovery.fromSession = true;

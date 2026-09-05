@@ -45,6 +45,53 @@ test('LinkedIn create-post is a write and last-post questions are read-only', ()
   assert.equal(isWriteSlug('GMAIL_FETCH_EMAILS'), false);
 });
 
+test('a profile lookup stops after the one info read and does not dump memory', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'linkedin', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_prof_li' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_prof_li',
+        primaryToolSlugs: [
+          'LINKEDIN_GET_MY_INFO',
+          'LINKEDIN_LIST_REACTIONS',
+          'LINKEDIN_GET_COMPANY_INFO',
+          'LINKEDIN_GET_IMAGES',
+          'LINKEDIN_GET_POST_CONTENT',
+          'LOCAL_HIVEMIND_HIVEMIND_RECALL',
+        ],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { linkedin: { has_active_connection: true } },
+        tools: [{ _composio: { slug: 'LINKEDIN_GET_MY_INFO' } }],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'LINKEDIN_GET_MY_INFO') {
+          return { successful: true, data: { localizedFirstName: 'Amar', localizedLastName: 'Sai', localizedHeadline: 'Founder' } };
+        }
+        return { successful: false, error: '1 out of 1 tools failed', data: null };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'what is my linkedin profile',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-li-profile',
+      synthesizeDurableAnswer: async ({ evidence }) => String(evidence || ''),
+      _tracedDispatch: async () => ({ memories: [{ title: 'Singulance', content: 'company dump' }] }),
+    },
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(executed, ['LINKEDIN_GET_MY_INFO']);
+  assert.match(result.summary, /Amar Sai/);
+  assert.equal(result.summary.includes('company dump'), false);
+});
+
 test('latest emails is a read: no reply, no label mutate, no hivemind dump', async () => {
   resetDurableAgentMemory();
   const executed = [];
@@ -609,7 +656,7 @@ test('durable production path uses Session search and Session execution, never c
   });
   assert.equal(result.status, 'completed');
   assert.equal(sessionExecutions, 1);
-  assert.equal(searchPayload.search_strategy, 'auto');
+  assert.equal(searchPayload.search_strategy, 'tool_search');
   assert.equal(searchPayload.session.generate_id, true);
   assert.equal(typeof searchPayload.queries[0].known_fields, 'string');
   assert.equal(searchPayload.queries[0].known_fields.includes('product_context'), false);

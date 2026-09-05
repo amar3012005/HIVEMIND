@@ -65,9 +65,24 @@ function namedEntityAddresses({ intent = {}, receipts = [] } = {}) {
     if (typeof value !== 'object') return;
     const entries = Object.entries(value);
     const isCollectionWrapper = entries.some(([key, item]) => COLLECTION_KEY.test(key) && Array.isArray(item));
-    const serialized = JSON.stringify(value);
-    if (!isCollectionWrapper && names.some(name => serialized.toLowerCase().includes(name))) {
-      for (const address of serialized.match(addressPattern) || []) matches.add(address.replace(/[),.;]+$/, ''));
+    if (!isCollectionWrapper) {
+      const identityEntries = entries.filter(([key, item]) => (
+        /(?:sender|from|author|name|display|email|address|contact|person)/i.test(key)
+        && names.some(name => JSON.stringify(item).toLowerCase().includes(name))
+      ));
+      let foundDirect = false;
+      for (const [, item] of identityEntries) {
+        for (const address of JSON.stringify(item).match(addressPattern) || []) {
+          matches.add(address.replace(/[),.;]+$/, ''));
+          foundDirect = true;
+        }
+      }
+      if (!foundDirect && identityEntries.length) {
+        for (const [key, item] of entries.filter(([key]) => /(?:email|address)/i.test(key))) {
+          void key;
+          for (const address of JSON.stringify(item).match(addressPattern) || []) matches.add(address.replace(/[),.;]+$/, ''));
+        }
+      }
     }
     for (const item of Object.values(value)) visit(item, depth + 1);
   };

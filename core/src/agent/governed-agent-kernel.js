@@ -144,9 +144,6 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
         typeof parsed.discovery_query !== 'string' || !parsed.discovery_query.trim())) {
         throw new Error('Required: discovery_query as a nonempty string; outcomes as a nonempty array of objects with id, kind, and description strings.');
       }
-      if (stage === 'intent' && !Array.isArray(parsed.entities)) {
-        throw new Error('Required: entities as an array of named business entities with name and role; use an empty array only when none are named.');
-      }
       if (stage === 'intent' && parsed.kind === 'read' && parsed.outcomes.some(item => item.kind === 'draft')) {
         throw new Error('A read-only request cannot contain draft outcomes. Summarizing, comparing, formatting, and answering from retrieved data are read outcomes. Draft means an external mutation requiring human approval.');
       }

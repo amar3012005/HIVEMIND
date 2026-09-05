@@ -290,6 +290,13 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
     return { ok: true, plan: { ...plan, purpose: 'outcome', outcome_ids: outcomeIds } };
   }
   if (plan.action === 'ask') {
+    const unresolvedDraft = (state.intent?.outcomes || []).some(outcome => outcome.kind === 'draft'
+      && !(state.receipts || []).some(row => row?.draft_id && (row.outcome_ids || []).includes(outcome.id)));
+    const availableWrite = cards.some(card => card?.authority === 'write');
+    if (unresolvedDraft && availableWrite && !(state.receipts || []).some(row => row?.successful)) {
+      return { ok: false, code: 'premature_draft_clarification',
+        repair: 'A mutation capability is available. Select it as a governed draft so schema validation can resolve prerequisite evidence or ask only for genuinely missing business fields.' };
+    }
     const namedEntities = Array.isArray(state.intent?.entities) ? state.intent.entities.filter(entity => entity?.name) : [];
     const facts = state.intent?.known_facts && typeof state.intent.known_facts === 'object' ? state.intent.known_facts : {};
     const hasNamedIdentity = namedEntities.length > 0 || Object.keys(facts).some(key =>

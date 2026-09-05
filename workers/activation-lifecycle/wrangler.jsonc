@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-activation-lifecycle",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": { "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com" },
+  "flagship": [{ "binding": "FLAGS", "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9", "remote": true }],
+  "queues": {
+    "producers": [{ "binding": "ACTIVATION_ADMISSION", "queue": "hivemind-activation-admission-v1" }],
+    "consumers": [{ "queue": "hivemind-activation-admission-v1", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 25, "max_retries": 10, "dead_letter_queue": "hivemind-activation-admission-dlq-v1" }]
+  },
+  "workflows": [{ "name": "hivemind-activation-lifecycle", "binding": "ACTIVATION_WORKFLOW", "class_name": "ActivationLifecycleWorkflow" }]
+}

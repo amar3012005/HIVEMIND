@@ -145,6 +145,19 @@ import {
 } from './lifecycle/day1-first-move.js';
 import { startDayZeroOnboardingReport } from './lifecycle/day0-onboarding-report.js';
 import { DAY_ZERO_REPORT_VERSION } from './email/templates/day0-company-onboarding.js';
+import {
+  ACTIVATION_STAGES,
+  activationReminderCopy,
+  advanceActivationForEmail,
+  claimActivationReminder,
+  evaluateActivationReminder,
+  isActivationLifecycleEnabled,
+  isAuthorizedActivationLifecycleRequest,
+  recordActivationReminder,
+  releaseActivationReminderClaim,
+  scheduleActivationWorkflow,
+  startInvitationActivation,
+} from './lifecycle/activation-lifecycle.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -3255,6 +3268,17 @@ const server = http.createServer(async (req, res) => {
             sendCount: { increment: 1 },
           },
         });
+        // The invitation delivery receipt is the only point at which the
+        // reminder clock may begin. A failed/unsent invitation never creates
+        // an activation lifecycle.
+        const activation = await startInvitationActivation({
+          prisma,
+          invite,
+          metadata: { company_name: vars?.orgName || vars?.companyName || null, invitation_kind: requestMeta?.kind || 'workspace' },
+        });
+        if (activation && !activation.skipped) {
+          scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] invitation scheduling failed:', error.message));
+        }
       }
       await audit({
         organizationId: orgId,
@@ -3386,6 +3410,65 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       console.warn('[hyper-company] day-0 report reissue failed:', error.message);
       return jsonResponse(res, { error: 'day0_report_delivery_failed', retryable: true }, 502);
+    }
+  }
+
+  // Activation reminders use Cloudflare Workflows only as the durable clock.
+  // PostgreSQL remains authoritative: every delivery is revalidated here so
+  // a delayed workflow can never remind a user who has already progressed.
+  if (pathname.startsWith('/internal/lifecycle/activation/')) {
+    if (!isAuthorizedActivationLifecycleRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!isActivationLifecycleEnabled()) return jsonResponse(res, { error: 'activation_feature_disabled', retryable: false }, 403);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    const activationId = String(body.activation_id || '');
+    const generation = Number(body.generation);
+    if (!/^[0-9a-f-]{36}$/i.test(activationId) || !Number.isInteger(generation)) {
+      return jsonResponse(res, { error: 'activation_id and generation are required', retryable: false }, 400);
+    }
+    try {
+      const evaluation = await evaluateActivationReminder({ prisma, activationId, generation });
+      if (pathname === '/internal/lifecycle/activation/evaluate') {
+        return jsonResponse(res, { status: evaluation.status });
+      }
+      if (pathname !== '/internal/lifecycle/activation/deliver') return jsonResponse(res, { error: 'Not found' }, 404);
+      if (evaluation.status !== 'due') return jsonResponse(res, { status: evaluation.status });
+      const lifecycle = await claimActivationReminder({ prisma, activationId, generation });
+      if (!lifecycle) return jsonResponse(res, { status: 'in_flight_or_stale' });
+      if (!lifecycle?.email) {
+        await releaseActivationReminderClaim({ prisma, activationId, generation });
+        return jsonResponse(res, { error: 'activation_recipient_unavailable', retryable: false }, 422);
+      }
+      const copy = activationReminderCopy(lifecycle.stage, lifecycle.metadata?.company_name || 'your company');
+      const appUrl = `${String(process.env.APP_URL || 'https://next.singulancelabs.com').replace(/\/$/, '')}${copy.href}`;
+      const delivery = await sendSystemEmail({
+        templateId: 'announcement',
+        to: lifecycle.email,
+        vars: { name: 'there', subject: copy.subject, preheader: copy.subject, heading: copy.heading, body: copy.body, appUrl },
+        notification: lifecycle.org_id && lifecycle.user_id ? {
+          orgId: lifecycle.org_id,
+          userId: lifecycle.user_id,
+          type: copy.type,
+          title: copy.subject,
+          body: copy.body,
+          resourceType: 'activation_lifecycle',
+          resourceId: lifecycle.id,
+          href: copy.href,
+          data: { stage: lifecycle.stage, activation_id: lifecycle.id, generation: lifecycle.generation },
+        } : undefined,
+      });
+      if (!delivery.ok) {
+        await releaseActivationReminderClaim({ prisma, activationId, generation });
+        return jsonResponse(res, { error: delivery.error || 'activation_delivery_failed', retryable: delivery.retryable !== false }, 502);
+      }
+      const updated = await recordActivationReminder({ prisma, activationId, generation, delivery: { provider: delivery.provider || null, message_id: delivery.messageId || null } });
+      if (updated?.next_reminder_at) {
+        await scheduleActivationWorkflow({ activation: updated }).catch((error) => console.warn('[activation-lifecycle] reschedule failed:', error.message));
+      }
+      return jsonResponse(res, { status: 'delivered', next_reminder_at: updated?.next_reminder_at || null });
+    } catch (error) {
+      console.warn('[activation-lifecycle] worker request failed:', error.message);
+      return jsonResponse(res, { error: 'activation_delivery_failed', retryable: true }, 502);
     }
   }
 
@@ -4484,6 +4567,18 @@ const server = http.createServer(async (req, res) => {
       const membership = await resolveCurrentOrg(user.id);
       if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
+      // A newly authenticated person without an organization has reached the
+      // next activation stage. Generation invalidates any queued invite mail.
+      if (!membership.org) {
+        const activations = await advanceActivationForEmail({
+          prisma, email: user.email, userId: user.id,
+          stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY,
+          reason: 'authenticated_without_company',
+        });
+        for (const activation of activations) {
+          scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] signup scheduling failed:', error.message));
+        }
+      }
       const redirectTo = safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
       return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
     } catch (error) {
@@ -4706,6 +4801,13 @@ const server = http.createServer(async (req, res) => {
         email: user.email,
         orgId: org?.id || null,
       });
+      if (!org) {
+        const activations = await advanceActivationForEmail({
+          prisma, email: user.email, userId: user.id,
+          stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY, reason: 'authenticated_without_company',
+        });
+        for (const activation of activations) scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] google signup scheduling failed:', error.message));
+      }
       console.log('[google-auth] Session created');
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
@@ -5109,6 +5211,13 @@ const server = http.createServer(async (req, res) => {
         email: user.email,
         orgId: org?.id || null
       });
+      if (!org) {
+        const activations = await advanceActivationForEmail({
+          prisma, email: user.email, userId: user.id,
+          stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY, reason: 'authenticated_without_company',
+        });
+        for (const activation of activations) scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] oauth signup scheduling failed:', error.message));
+      }
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
       // Cross-origin handshake support for external tools (MiroFish, VS Code, etc.)
@@ -5619,6 +5728,11 @@ const server = http.createServer(async (req, res) => {
       ...current.session,
       orgId: org.id
     });
+    const activations = await advanceActivationForEmail({
+      prisma, email: current.session.email, userId: current.session.userId, orgId: org.id,
+      stage: ACTIVATION_STAGES.ONBOARDING_IN_PROGRESS, reason: 'organization_created',
+    });
+    for (const activation of activations) scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] onboarding scheduling failed:', error.message));
 
     return jsonResponse(res, {
       success: true,
@@ -11363,6 +11477,15 @@ Write the persona now.`;
         // report reissue never starts a second complimentary lifecycle.
         void started.completion.then(async (result) => {
           if (started.reissue) return;
+          // Day 0 seals onboarding; activation reminders stop here. Day 1+
+          // remain owned by their established, typed lifecycle workflows.
+          const owner = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
+          if (owner?.email) {
+            await advanceActivationForEmail({
+              prisma, email: owner.email, userId: current.session.userId, orgId: current.session.orgId,
+              stage: ACTIVATION_STAGES.DAY0_DELIVERED, reason: 'day0_delivered',
+            });
+          }
           const dayOne = await scheduleDayOneWorkflow({
             orgId: started.orgId, hqRoomId: started.hqRoomId, onboardedAt: started.company.onboarded_at,
           });

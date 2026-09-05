@@ -302,6 +302,33 @@ model WorkspaceNotification {
   @@map("workspace_notifications")
 }
 
+/// Durable, privacy-minimal reminder state. Cloudflare Workflows holds only
+/// this record id/generation; PostgreSQL remains the authoritative lifecycle.
+model ActivationLifecycle {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  inviteId         String?   @map("invite_id") @db.Uuid
+  orgId            String?   @map("org_id") @db.Uuid
+  userId           String?   @map("user_id") @db.Uuid
+  emailHash        String    @map("email_hash") @db.Char(64)
+  emailHint        String    @map("email_hint") @db.VarChar(160)
+  stage            String    @db.VarChar(64)
+  generation       Int       @default(1)
+  reminderCount    Int       @default(0) @map("reminder_count")
+  nextReminderAt   DateTime? @map("next_reminder_at") @db.Timestamptz(6)
+  lastReminderAt   DateTime? @map("last_reminder_at") @db.Timestamptz(6)
+  deliveryLeaseUntil DateTime? @map("delivery_lease_until") @db.Timestamptz(6)
+  workflowInstanceId String? @map("workflow_instance_id") @db.VarChar(128)
+  stoppedAt        DateTime? @map("stopped_at") @db.Timestamptz(6)
+  stopReason       String?   @map("stop_reason") @db.VarChar(80)
+  metadata         Json      @default("{}")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([stage, nextReminderAt])
+  @@index([emailHash, createdAt(sort: Desc)])
+  @@map("activation_lifecycles")
+}
+
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
 /// Members can be granted team-scope memory access via TeamMember.
 model Team {

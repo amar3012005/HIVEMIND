@@ -1,0 +1,7 @@
+{
+  "name": "hivemind-activation-lifecycle",
+  "private": true,
+  "type": "module",
+  "scripts": { "check": "tsc --noEmit", "types": "wrangler types", "deploy": "wrangler deploy" },
+  "devDependencies": { "typescript": "^5.9.2", "wrangler": "^4.32.0" }
+}

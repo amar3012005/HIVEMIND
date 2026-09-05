@@ -145,7 +145,7 @@ test('provider success does not satisfy an unmet generic evidence contract', () 
   const requirement = { min_records: 5, required_fields: ['subject', 'sender', 'time'] };
   const threadReceipt = { threads: Array.from({ length: 5 }, (_, index) => ({ id: String(index), title: `Thread ${index}` })) };
   const emailReceipt = { records: Array.from({ length: 5 }, (_, index) => ({
-    subject: `Subject ${index}`, from: `sender-${index}`, received_at: `2026-09-05T10:0${index}:00Z`,
+    subject: `Subject ${index}`, from: `sender-${index}`, messageTimestamp: `2026-09-05T10:0${index}:00Z`,
   })) };
   assert.deepEqual(receiptSatisfiesEvidence(threadReceipt, requirement), {
     ok: false, code: 'required_evidence_fields_missing', missing_fields: ['sender', 'time'], observed_records: 5, required_records: 5,

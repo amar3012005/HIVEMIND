@@ -148,7 +148,9 @@ const FIELD_EQUIVALENTS = [
   ['id', 'identifier', 'urn', 'url'],
 ];
 
-const fieldTokens = value => normalized(value).split(/[^a-z0-9]+/).filter(Boolean);
+const fieldTokens = value => String(value || '')
+  .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+  .toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 const equivalentField = (required, actual) => {
   const wanted = fieldTokens(required);
   const found = fieldTokens(actual);

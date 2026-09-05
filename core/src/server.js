@@ -59,6 +59,13 @@ import { admitProjectionAttempt, beginProjectionStage, finishCoreFallback, finis
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
 import { CloudflareChatSessionClient } from './agent/v2/cloudflare-chat-session-client.js';
 import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
+import { reconcileProgressiveApproval } from './agent/progressive-approval-events.js';
+
+async function projectProgressiveApproval(prisma, draft) {
+  if (draft?.toolArgs?._harness_version !== 'progressive-v1') return;
+  try { await reconcileProgressiveApproval({ prisma, draft }); }
+  catch { console.warn('[progressive-approval] projection deferred; canonical draft receipt retained'); }
+}
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -10294,6 +10301,19 @@ exit \$RC
           const draftId = pwEdit[1];
           const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId, status: 'draft' } });
           if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
+          if (row.toolArgs?._harness_version === 'progressive-v1') {
+            const { editProgressiveDraft } = await import('./agent/progressive-draft-contract.js');
+            let nextArgs;
+            try { nextArgs = editProgressiveDraft(row, body?.tool_args); }
+            catch { return jsonResponse(res, { error: 'Draft fields do not match the required tool schema.' }, 400); }
+            const updated = await prisma.pendingWrite.updateMany({
+              where: { id: draftId, userId, orgId, status: 'draft' },
+              data: { toolArgs: nextArgs, argsHash: crypto.createHash('sha256').update(JSON.stringify(nextArgs)).digest('hex'),
+                preview: `${row.toolName} draft` },
+            });
+            if (updated.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
+            return jsonResponse(res, { ok: true, draft: await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }) });
+          }
           const incoming = body?.tool_args && typeof body.tool_args === 'object' ? body.tool_args : {};
           const nextArgs = { ...(row.toolArgs || {}) };
           for (const key of ['to', 'recipient_email', 'recipient', 'subject', 'body', 'message', 'text', 'content', 'from_email']) {
@@ -10315,12 +10335,14 @@ exit \$RC
             const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } });
             if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
             if (row.status !== 'draft') {
+              await projectProgressiveApproval(prisma, row);
               return jsonResponse(res, { error: `draft already ${row.status}` }, 409);
             }
             if (!row.expiresAt || new Date(row.expiresAt).getTime() <= Date.now()) {
               await prisma.pendingWrite.updateMany({
                 where: { id: draftId, userId, orgId, status: 'draft' }, data: { status: 'expired' },
               });
+              await projectProgressiveApproval(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }));
               return jsonResponse(res, { error: 'draft expired' }, 410);
             }
             if (action === 'cancel') {
@@ -10329,9 +10351,16 @@ exit \$RC
                 data: { status: 'cancelled' },
               });
               if (cancelled.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
+              await projectProgressiveApproval(prisma, { ...row, status: 'cancelled' });
               return jsonResponse(res, { ok: true, status: 'cancelled', id: draftId });
             }
             let approvalCredit = null;
+            let progressiveArgs = null;
+            if (row.toolArgs?._harness_version === 'progressive-v1') {
+              const { progressiveDraftArguments } = await import('./agent/progressive-draft-contract.js');
+              try { progressiveArgs = progressiveDraftArguments(row); }
+              catch { return jsonResponse(res, { error: 'Draft fields do not match the required tool schema.' }, 400); }
+            }
             const approvalCreditKey = `composio-approval:${draftId}`;
             if (row.provider === 'composio' && creditService) {
               approvalCredit = await creditService.reserve({
@@ -10344,7 +10373,8 @@ exit \$RC
             // Approve → mark approved, then re-dispatch tool with
             // _approval_token. Middleware verifies + flips to sent.
             const approved = await prisma.pendingWrite.updateMany({
-              where: { id: draftId, userId, orgId, status: 'draft', expiresAt: { gt: new Date() } },
+              where: { id: draftId, userId, orgId, status: 'draft', expiresAt: { gt: new Date() },
+                ...(progressiveArgs ? { argsHash: row.argsHash } : {}) },
               data: { status: 'approved', approvedAt: new Date() },
             });
             if (approved.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
@@ -10357,9 +10387,9 @@ exit \$RC
               if (row.provider === 'composio') {
                 const { executeTool: composioExecute, listConnectedAccounts } = await import('./connectors/composio/composio-service.js');
                 const slug = row.toolName || row.toolArgs?._composio_slug;
-                const args = { ...(row.toolArgs || {}) };
+                const args = progressiveArgs || { ...(row.toolArgs || {}) };
                 delete args._composio_slug;
-                if (!args.from_email && typeof listConnectedAccounts === 'function') {
+                if (!progressiveArgs && !args.from_email && typeof listConnectedAccounts === 'function') {
                   try {
                     const accounts = await listConnectedAccounts(orgId);
                     const mailbox = (accounts || []).find((account) => account?.status === 'ACTIVE' && account.email);
@@ -10373,6 +10403,10 @@ exit \$RC
                   where: { id: draftId },
                   data: { status: ok ? 'sent' : 'failed', sentAt: ok ? new Date() : null, result: result?.data || null, errorMsg: ok ? null : (result?.error || 'composio execution failed') },
                 }).catch(() => null);
+                if (progressiveArgs && !final) return jsonResponse(res, {
+                  ok: false, status: 'unknown', error: 'Provider returned but its receipt could not be persisted. Do not retry automatically.',
+                }, 502);
+                await projectProgressiveApproval(prisma, final);
                 return jsonResponse(res, {
                   ok,
                   status: ok ? 'sent' : 'failed',
@@ -10405,6 +10439,7 @@ exit \$RC
                 where: { id: draftId },
                 data: { status: 'failed', errorMsg: execErr.message },
               }).catch(() => {});
+              await projectProgressiveApproval(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }).catch(() => null));
               return jsonResponse(res, { ok: false, error: execErr.message }, 500);
             }
           } catch (err) {
@@ -24204,15 +24239,17 @@ exit \$RC
             const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 100);
             const statusFilter = url.searchParams.get('status');
             const rows = await prisma.pendingWrite.findMany({
-              where: { userId, ...(statusFilter ? { status: statusFilter } : {}) },
+              where: { userId, orgId, ...(statusFilter ? { status: statusFilter } : {}) },
               orderBy: { createdAt: 'desc' },
               take: limit,
               select: {
-                id: true, provider: true, toolName: true, toolArgs: true,
+                id: true, provider: true, toolName: true, toolArgs: true, traceId: true, orgId: true, userId: true,
                 preview: true, status: true, errorMsg: true,
                 createdAt: true, approvedAt: true, sentAt: true,
               },
             });
+            // Repair only projections of canonical terminal receipts, never re-execute a tool.
+            await Promise.all(rows.map(row => projectProgressiveApproval(prisma, row)));
             return jsonResponse(res, { drafts: rows });
           }
           break;
@@ -24524,6 +24561,7 @@ exit \$RC
                   const durable = await runDurableComposioAgent({
                     message: stored.message,
                     ctx: {
+                      language: stored.language,
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
@@ -24540,6 +24578,7 @@ exit \$RC
                     const next = await createChatContinuation({
                       userId, orgId, message: stored.message, language: stored.language,
                       resumeState: durable.resumeState,
+                      threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     }, {
                       prisma,
                       durable: ['session', 'workflow', 'full'].includes(continuationMode),
@@ -24555,8 +24594,10 @@ exit \$RC
                     confidence: durable.status === 'completed' ? 1 : 0.5,
                     gaps: durable.status === 'error' ? ['durable_agent_failed'] : [], scopes_found: [],
                     draft_ids: durable.draftIds, compound_status: durable.status,
+                    harness_version: durable.run?.scratch?.harness_version || null,
                     pending_actions: durable.pendingActions || [],
                     execution: {
+                      harness_version: durable.run?.scratch?.harness_version || null,
                       status: durable.status, steps: durable.steps, draft_ids: durable.draftIds,
                       pending_actions: durable.pendingActions || [],
                       run_id: durable.run?.id || null, session_id: durable.run?.composioSessionId || null,
@@ -24569,6 +24610,7 @@ exit \$RC
                   const durable = await runDurableComposioAgent({
                     message: stored.message,
                     ctx: {
+                      language: stored.language,
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
@@ -24576,8 +24618,8 @@ exit \$RC
                         ? String(req.headers.origin)
                         : process.env.HIVEMIND_FRONTEND_URL) || undefined,
                       durableChoice: allowed
-                        ? { option_id: allowed.id, value: allowed.value, toolkit: allowed.toolkit || pending.toolkit }
-                        : { option_id: 'field-input', values: fieldValues },
+                        ? { run_id: stored.resumeState.run_id, option_id: allowed.id, value: allowed.value, toolkit: allowed.toolkit || pending.toolkit }
+                        : { run_id: stored.resumeState.run_id, option_id: 'field-input', values: fieldValues },
                       _trace: { traceId: crypto.randomUUID() },
                     },
                     onEvent: emit,
@@ -24588,6 +24630,7 @@ exit \$RC
                     const next = await createChatContinuation({
                       userId, orgId, message: stored.message, language: stored.language,
                       resumeState: durable.resumeState,
+                      threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     }, {
                       prisma,
                       durable: ['session', 'workflow', 'full'].includes(continuationMode),
@@ -24603,8 +24646,10 @@ exit \$RC
                     confidence: durable.status === 'completed' ? 1 : 0.5,
                     gaps: durable.status === 'error' ? ['durable_agent_failed'] : [], scopes_found: [],
                     draft_ids: durable.draftIds, compound_status: durable.status,
+                    harness_version: durable.run?.scratch?.harness_version || null,
                     pending_actions: durable.pendingActions || [],
                     execution: {
+                      harness_version: durable.run?.scratch?.harness_version || null,
                       status: durable.status, steps: durable.steps, draft_ids: durable.draftIds,
                       pending_actions: durable.pendingActions || [],
                       run_id: durable.run?.id || null, session_id: durable.run?.composioSessionId || null,

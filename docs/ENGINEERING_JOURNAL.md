@@ -1,5 +1,15 @@
 # HIVEMIND Engineering Journal
 
+## 2026-09-05 UTC — progressive connected-tool harness (Started)
+
+- State: Started; implementation and verification underway, not deployed.
+- Owner: Codex; branch `codex/governed-agent-harness-e2e`.
+- Base: `2f8757af25257ab9f54306de28beb2b784e36be8`, verified against running Core and GitHub `singulance-main`.
+- Scope: default-off tenant-gated durable-agent upgrade, multilingual progressive decisions, canonical approval drafts, continuation identity, frontend semantic Markdown.
+- Verification: focused suites passing during development; broad unit comparison has the same 56 failures as the untouched baseline. Final candidate and PostgreSQL acceptance remain separate gates.
+- Production: unchanged. Deployment and provider completion are not implied by source tests.
+- Design and release checklist: `docs/PROGRESSIVE_HARNESS.md`.
+
 ## 2026-09-01 UTC — connector runtime and organic campaigns globally enabled
 
 - Production inspection established that Connector Runtime V1 was already

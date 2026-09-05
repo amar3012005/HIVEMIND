@@ -3539,6 +3539,80 @@ export async function runReactAgentV2({
     _originalUserMessage: message,
   };
 
+  const serveDurableAgent = async () => {
+        const { runDurableComposioAgent } = await import('./durable-composio-agent.js');
+        const durable = await runDurableComposioAgent({
+          message,
+          ctx: {
+            ...ctx,
+            language,
+            composioCallbackOrigin: ctx.composioCallbackOrigin || process.env.HIVEMIND_FRONTEND_URL || undefined,
+          },
+          onEvent,
+          prisma: ctx.prisma,
+        });
+        let continuation = null;
+        if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
+          const { createChatContinuation } = await import('./chat-continuation-store.js');
+          const stored = await createChatContinuation({
+            userId: ctx.userId, orgId: ctx.orgId, message, language,
+            threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
+            resumeState: durable.resumeState,
+          }, {
+            prisma: ctx.prisma,
+            durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+            parentTurnId: ctx.durableChatTurnId || null,
+          });
+          continuation = {
+            schema_version: 1,
+            token: stored.token,
+            expires_at: stored.expires_at,
+            requests: durable.inputRequests,
+          };
+          onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
+        }
+        let finalText = durable.summary;
+        onEvent?.({ type: 'finish', text: finalText });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'durable_agent', success: durable.status !== 'error' });
+        return {
+          response: finalText,
+          answer_mode: 'compound',
+          sources: [],
+          citations: [],
+          relationships: [],
+          synthesis_chains: [],
+          evidence_packets: [],
+          steps: durable.steps || [],
+          evidence_used: [],
+          claims: [],
+          rejected_claims: [],
+          grounded: durable.status === 'completed',
+          confidence: durable.status === 'completed' ? 1.0 : 0.5,
+          gaps: durable.status === 'error' ? ['durable_agent_failed'] : [],
+          scopes_found: [],
+          project_choice: null,
+          aggregate: null,
+          action_result: null,
+          assistant_name: assistantName || null,
+          usage: sumUsage(usages),
+          trace: finalizeTrace(trace, usages),
+          draft_ids: durable.draftIds || [],
+          pending_actions: durable.pendingActions || [],
+          compound_status: durable.status,
+          harness_version: durable.run?.scratch?.harness_version || null,
+          continuation,
+          execution: {
+            harness_version: durable.run?.scratch?.harness_version || null,
+            status: durable.status,
+            steps: durable.steps,
+            draft_ids: durable.draftIds || [],
+            pending_actions: durable.pendingActions || [],
+            run_id: durable.run?.id || null,
+            session_id: durable.run?.composioSessionId || null,
+          },
+        };
+  };
+
   try {
     if (ctx.projectId) {
       const authorizedProjects = Array.isArray(ctx.accessContext?.projectIds)
@@ -3562,6 +3636,15 @@ export async function runReactAgentV2({
       authorized_project_count: ctx.accessContext?.projectIds?.length || 0,
     });
     onEvent?.({ type: 'turn_accepted', schema_version: 1, trace_id: trace.traceId });
+
+    // The enabled harness plans once, progressively; avoid loading the legacy router/catalog.
+    if (useTools === true) {
+      const { isProgressiveHarnessEnabled } = await import('./progressive-harness.js');
+      const { isUseToolsDurableAgentEnabled } = await import('./use-tools-durable-agent-flag.js');
+      if (isProgressiveHarnessEnabled(process.env, ctx) && await isUseToolsDurableAgentEnabled()) {
+        return await serveDurableAgent();
+      }
+    }
 
     if (useTools !== true) {
       const { isEnableToolsHitlEnabled } = await import('./enable-tools-hitl-flag.js');
@@ -3897,75 +3980,7 @@ export async function runReactAgentV2({
     // never as done.
     if (useTools === true) {
       const { isUseToolsDurableAgentEnabled } = await import('./use-tools-durable-agent-flag.js');
-      if (await isUseToolsDurableAgentEnabled()) {
-        const { runDurableComposioAgent } = await import('./durable-composio-agent.js');
-        const durable = await runDurableComposioAgent({
-          message,
-          ctx: {
-            ...ctx,
-            composioCallbackOrigin: ctx.composioCallbackOrigin || process.env.HIVEMIND_FRONTEND_URL || undefined,
-          },
-          onEvent,
-          prisma: ctx.prisma,
-        });
-        let continuation = null;
-        if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
-          const { createChatContinuation } = await import('./chat-continuation-store.js');
-          const stored = await createChatContinuation({
-            userId: ctx.userId, orgId: ctx.orgId, message, language,
-            resumeState: durable.resumeState,
-          }, {
-            prisma: ctx.prisma,
-            durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
-            parentTurnId: ctx.durableChatTurnId || null,
-          });
-          continuation = {
-            schema_version: 1,
-            token: stored.token,
-            expires_at: stored.expires_at,
-            requests: durable.inputRequests,
-          };
-          onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
-        }
-        let finalText = durable.summary;
-        onEvent?.({ type: 'finish', text: finalText });
-        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'durable_agent', success: durable.status !== 'error' });
-        return {
-          response: finalText,
-          answer_mode: 'compound',
-          sources: [],
-          citations: [],
-          relationships: [],
-          synthesis_chains: [],
-          evidence_packets: [],
-          steps: durable.steps || [],
-          evidence_used: [],
-          claims: [],
-          rejected_claims: [],
-          grounded: durable.status === 'completed',
-          confidence: durable.status === 'completed' ? 1.0 : 0.5,
-          gaps: durable.status === 'error' ? ['durable_agent_failed'] : [],
-          scopes_found: [],
-          project_choice: null,
-          aggregate: null,
-          action_result: null,
-          assistant_name: assistantName || null,
-          usage: sumUsage(usages),
-          trace: finalizeTrace(trace, usages),
-          draft_ids: durable.draftIds || [],
-          pending_actions: durable.pendingActions || [],
-          compound_status: durable.status,
-          continuation,
-          execution: {
-            status: durable.status,
-            steps: durable.steps,
-            draft_ids: durable.draftIds || [],
-            pending_actions: durable.pendingActions || [],
-            run_id: durable.run?.id || null,
-            session_id: durable.run?.composioSessionId || null,
-          },
-        };
-      }
+      if (await isUseToolsDurableAgentEnabled()) return await serveDurableAgent();
     }
     if (intentDecision.operation === 'compound'
         && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'

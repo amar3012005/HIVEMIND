@@ -941,7 +941,13 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
     const executionPlan = (decision.action === 'read' || decision.action === 'draft')
       ? markPlanNodeRunning(state.executionPlan, state.activePlanNodeId, decision.tool_slug)
       : state.executionPlan;
-    const patchData = { decision, executionPlan, planRepair: null };
+    const request = decision.action === 'ask' ? capabilityGap(state) : null;
+    const patchData = {
+      decision: request ? { ...decision, question: request.prompt } : decision,
+      executionPlan,
+      planRepair: null,
+      ...(request ? { pendingInput: request } : {}),
+    };
     if (decision.action === 'discover') patchData.searchQuery = decision.query;
     const patch = await transition(state, decision.action === 'ask' ? 'awaiting_input' : 'dependency_resolved', patchData,
       { reason_code: 'policy_admitted', tool_slug: decision.tool_slug });

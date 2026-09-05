@@ -298,6 +298,21 @@ test('planner may refine discovery but gets one bounded correction for an identi
   assert.equal(refined.action, 'search');
 });
 
+test('unchanged capability catalog forces tool use instead of endless refined searches', async () => {
+  const observation = { searched: true, capabilities: [{ slug: 'PEOPLE_SEARCH', authority: 'read' }],
+    steps: [{ slug: 'COMPOSIO_SEARCH_TOOLS', summary: '3 capabilities discovered' },
+      { slug: 'COMPOSIO_SEARCH_TOOLS', summary: '3 capabilities discovered' }],
+    intent: { outcomes: [{ id: 'draft', kind: 'draft' }] }, remaining_outcomes: [{ id: 'draft', kind: 'draft' }] };
+  let calls = 0;
+  const action = await chooseProgressiveAction({ observation, generateImpl: async input => {
+    if (++calls === 1) return { action: 'search', query: 'find named recipient', reason: 'Search again' };
+    assert.equal(input.feedback.code, 'capability_catalog_unchanged');
+    return { action: 'execute', slug: 'PEOPLE_SEARCH', outcome_ids: [], reason: 'Use available resolver' };
+  } });
+  assert.equal(action.action, 'execute');
+  assert.equal(calls, 2);
+});
+
 test('redundant clarification retry is capped and false or zero are supplied answers', async () => {
   let calls = 0;
   await assert.rejects(chooseProgressiveAction({ observation: { fields: { enabled: false, count: 0 } }, generateImpl: async () => {

@@ -214,6 +214,15 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
       }
     }
   }
+  const recentSearches = (decisionObservation.steps || []).filter(step => step?.slug === 'COMPOSIO_SEARCH_TOOLS').slice(-2);
+  if (raw.action === 'search' && recentSearches.length === 2
+    && recentSearches[0]?.summary === recentSearches[1]?.summary) {
+    raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
+      code: 'capability_catalog_unchanged', available_slugs: decisionObservation.capabilities.slice(0, 48).map(card => card.slug),
+      instruction: 'Two searches produced the same capability catalog. Do not search again. Execute a compatible available prerequisite/read/draft capability, ask only for non-provider information, or return done only when receipts cover every outcome.',
+    } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+    if (raw.action === 'search') throw new Error('Progressive capability discovery exhausted without a usable tool');
+  }
   if (redundant(raw)) {
     raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
       code: 'clarification_already_answered', supplied_fields: raw.fields.slice(0, 12),

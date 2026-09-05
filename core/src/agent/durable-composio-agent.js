@@ -1464,6 +1464,12 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
         const review = await reviewProgressiveArguments({ observation: { ...input, arguments: args },
           generateImpl: ctx.reviewProgressiveArguments, signal: ctx._signal });
         if (!review.valid) {
+          if (review.replan) {
+            run.scratch.argument_feedback = { slug: card.slug, issues: review.issues,
+              reason: 'The selected capability cannot satisfy the requested outcome. Choose another discovered capability or one targeted search.' };
+            await persist();
+            continue executionLoop;
+          }
           if (argumentAttempt === 1) throw new Error('Tool inputs do not match the requested scope after review');
           reviewFeedback = { issues: review.issues, instruction: 'Correct only these scope issues using the supplied request, context and receipts.' };
           continue;

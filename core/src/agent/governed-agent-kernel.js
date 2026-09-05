@@ -59,6 +59,7 @@ const GraphState = Annotation.Root({
   connectionScope: Annotation({ reducer: (_left, right) => right, default: () => 'user' }),
   sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  sessionToolkits: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   discovery: Annotation({ reducer: (_left, right) => right, default: () => null }),
   capabilities: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   receipts: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -391,6 +392,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
           intent: next.intent,
           session_id: next.sessionId,
           workflow_session_id: next.workflowSessionId,
+          session_toolkits: next.sessionToolkits,
           discovery: next.discovery && {
             recommended_plan: next.discovery.recommended_plan,
             connection_statuses: next.discovery.connection_statuses,
@@ -475,7 +477,11 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       : (typeof prisma.governedComposioSession.findFirst === 'function'
         ? await prisma.governedComposioSession.findFirst({ where: { orgId: ctx.orgId, userId: ctx.userId, connectionScope } })
         : null);
-    return text(row?.sessionId, 160) || null;
+    const sessionId = text(row?.sessionId, 160) || null;
+    return sessionId ? {
+      sessionId,
+      toolkits: unique(Array.isArray(row?.toolkits) ? row.toolkits : []),
+    } : null;
   };
 
   const persistSessionBinding = async ({ connectionScope, sessionId, toolkits }) => {
@@ -517,9 +523,18 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
     });
     const resolvedReference = resolveGovernedConversationReference(message, referenceEvidence);
     await ensureCanonicalRun(runId);
-    const boundSessionId = state.sessionId || ctx.governedComposioSessionId || await loadSessionBinding(connectionScope);
+    const binding = await loadSessionBinding(connectionScope);
+    const boundSessionId = state.sessionId || ctx.governedComposioSessionId || binding?.sessionId || null;
     const patch = await transition({ ...state, runId }, 'context_loaded', {
-      runId, connected, connectionScope, sessionId: boundSessionId || null, conversationContext, referenceEvidence, resolvedReference, capabilities: coreCapabilities,
+      runId,
+      connected,
+      connectionScope,
+      sessionId: boundSessionId,
+      sessionToolkits: state.sessionToolkits?.length ? state.sessionToolkits : (binding?.toolkits || []),
+      conversationContext,
+      referenceEvidence,
+      resolvedReference,
+      capabilities: coreCapabilities,
     });
     await persist({ ...state, runId }, patch);
     return patch;
@@ -570,13 +585,15 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       return patch;
     }
     onEvent({ type: 'tool_start', name: 'COMPOSIO_SEARCH_TOOLS', run_id: state.runId });
+    const boundToolkits = new Set((state.sessionToolkits || []).map(toolkit => String(toolkit).toLowerCase()));
+    const sessionCompatible = state.sessionId && toolkits.every(toolkit => boundToolkits.has(toolkit));
     const discovery = await trace('schema_fetch', { source: 'composio_meta_tools' }, () => composio.discoverSessionTools(ctx.orgId, {
       userId: ctx.userId,
       connectionScope: state.connectionScope,
       toolkits,
       useCases: [query],
       allowDisconnected: true,
-      sessionId: state.sessionId || null,
+      sessionId: sessionCompatible ? state.sessionId : null,
       includeCustomToolkit: false,
       manageConnections: true,
       callbackUrl: callbackUrlFor(ctx),
@@ -614,6 +631,7 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       discovery: discovered,
       sessionId: discovery.sessionId || state.sessionId,
       workflowSessionId: discovery.workflowSessionId || state.workflowSessionId,
+      sessionToolkits: toolkits,
       searchQueries,
       searchQuery: null,
       discoveryAttempts: Number(state.discoveryAttempts || 0) + 1,

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
-import { runGovernedAgentRuntime } from '../src/agent/governed-agent-runtime.js';
+import { resumeGovernedApproval, runGovernedAgentRuntime } from '../src/agent/governed-agent-runtime.js';
 import { evaluateGovernedOutput } from '../src/evaluation/governed-agent-evaluators.js';
 
 const datasetPath = new URL('../evals/governed-agent-regression.json', import.meta.url);
@@ -34,7 +34,10 @@ try {
     if (scores.some(score => score.score !== 1)) failed = true;
     console.log(JSON.stringify({ case_id: item.id, output, scores }));
     for (const draftId of result.draftIds || []) {
-      await prisma.pendingWrite.updateMany({ where: { id: draftId, status: 'draft' }, data: { status: 'cancelled' } });
+      const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, orgId, userId } });
+      if (row?.status === 'draft') await resumeGovernedApproval({ row, action: 'cancel', ctx: { orgId, userId, prisma }, prisma });
+      const rejected = await prisma.pendingWrite.findFirst({ where: { id: draftId, orgId, userId }, select: { status: true, sentAt: true } });
+      if (rejected?.status !== 'cancelled' || rejected?.sentAt) throw new Error(`Draft rejection invariant failed: ${draftId}`);
     }
   }
 } finally {

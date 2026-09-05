@@ -17,8 +17,14 @@ export function buildProgressiveConversationContext(history = []) {
 
 export function isProgressiveHarnessEnabled(env = process.env, ctx = {}) {
   const org = ctx.orgId || ctx.org_id || ctx.organizationId;
+  const user = ctx.userId || ctx.user_id;
   const allow = String(env.USE_TOOLS_PROGRESSIVE_HARNESS_ORGS || '').split(',').map(s => s.trim()).filter(Boolean);
-  return env.USE_TOOLS_PROGRESSIVE_HARNESS === 'true' && typeof org === 'string' && org !== '*' && allow.includes(org);
+  const users = String(env.USE_TOOLS_PROGRESSIVE_HARNESS_USERS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (env.USE_TOOLS_PROGRESSIVE_HARNESS !== 'true') return false;
+  // A user allowlist, when present, narrows admission below the tenant gate.
+  // IDs are authenticated server-side; email never becomes an execution input.
+  if (users.length) return typeof user === 'string' && user !== '*' && users.includes(user);
+  return typeof org === 'string' && org !== '*' && allow.includes(org);
 }
 
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -62,7 +68,7 @@ async function decide(system, data, generateImpl, useCase, signal) {
   const response = await chatCompletionFetch(process.env.PROGRESSIVE_HARNESS_MODEL || DEFAULT_HQ_DISPATCH_MODEL, {
     method: 'POST',
     signal,
-    body: JSON.stringify({ temperature: 0, max_tokens: 1800, response_format: { type: 'json_object' }, messages: [
+    body: JSON.stringify({ temperature: 0, max_tokens: 1800, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages: [
       { role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) },
     ] }),
   }, { useCase });

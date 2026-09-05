@@ -34,6 +34,8 @@ This change reuses existing persisted runs, continuations and transport events. 
 
 ## Verification and rollout
 
+The progressive harness uses `openai/gpt-oss-20b:nitro` with low reasoning effort for intent, action planning, semantic argument review and schema argument generation. This is one model policy for the governed turn, rather than a provider-specific special case or a separate agent runtime.
+
 Run the focused helper, runtime, continuation and PostgreSQL integration suites before promotion. The PostgreSQL test uses isolated local state and injected providers; it is not proof of a live Composio action. Frontend verification includes semantic Markdown/security tests and the canonical Cloudflare production build.
 
 The baseline full unit suite currently has 56 failures. Compare named failures at the exact base rather than claiming the entire suite passes. Existing baseline source omissions include `core/src/search/hybrid.js` and `three-tier-retrieval.js`.
@@ -54,8 +56,10 @@ These references informed the boundaries; neither SDK is newly installed by this
 
 ## Local candidate evidence (2026-09-05)
 
-- Focused backend suites: 86 passing tests.
+- Focused backend suites: 111 passing tests, including native HTTP Request validation across default planning, argument, localization and synthesis calls.
 - Full backend unit suite: 1444 passing, 56 failing; all failing names match the untouched `2f8757af` baseline.
 - Real local PostgreSQL/Prisma canary: pause/recreate/resume, tenant isolation, concurrency, one idempotent draft, sent/cancelled/failed approval projection and duplicate receipt protection passed. Four isolated runs, three drafts and one fixture provider read; disposable schema removed.
 - Frontend candidate: `f53326325005d154901e244b52fb522400c51ba9`; semantic Markdown and mounted schema Edit/Save tests pass; `npm run build:cloudflare` passes.
 - Local fixtures do not prove live provider behavior or production rollout. Those require separate immutable release evidence.
+
+See [release acceptance](./PROGRESSIVE_HARNESS_ACCEPTANCE.md) for live evidence and remaining rollout limits.

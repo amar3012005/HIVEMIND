@@ -11,6 +11,8 @@ test('flag requires literal true and an explicitly allowed tenant', () => {
   assert.equal(isProgressiveHarnessEnabled(env, {}), false);
   assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS: '1' }, { orgId: 'org-a' }), false);
   assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_ORGS: '*' }, { orgId: 'org-a' }), false);
+  assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_USERS: 'user-a' }, { orgId: 'org-a', userId: 'user-a' }), true);
+  assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_USERS: 'user-a' }, { orgId: 'org-a', userId: 'user-b' }), false);
 });
 
 test('default intent and action planners use valid POST requests through the real provider adapter', async () => {

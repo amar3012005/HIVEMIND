@@ -6,7 +6,7 @@ import { DEFAULT_EDGE_CAPABILITIES, resolveEdgeCapabilities, verifySignedEdgeEnt
  * local kill switch, endpoint, credentials, signature, or network is invalid.
  */
 export class EdgeCapabilityClient {
-  constructor({ baseUrl = process.env.CLOUDFLARE_EDGE_CONTROL_URL, token = process.env.CLOUDFLARE_EDGE_CONTROL_TOKEN, publicKey = process.env.CLOUDFLARE_EDGE_ENTITLEMENT_PUBLIC_KEY, featureEnabled = process.env.CLOUDFLARE_EDGE_CONTROL_ENABLED === 'true', fetchImpl = globalThis.fetch, now = () => new Date(), timeoutMs = 2_000 } = {}) {
+  constructor({ baseUrl = process.env.CLOUDFLARE_EDGE_CONTROL_URL, token = process.env.CLOUDFLARE_EDGE_CONTROL_READ_TOKEN, publicKey = process.env.CLOUDFLARE_EDGE_ENTITLEMENT_PUBLIC_KEY, featureEnabled = process.env.CLOUDFLARE_EDGE_CONTROL_ENABLED === 'true', fetchImpl = globalThis.fetch, now = () => new Date(), timeoutMs = 2_000 } = {}) {
     this.baseUrl = baseUrl?.replace(/\/$/, '');
     this.token = token;
     this.publicKey = publicKey;

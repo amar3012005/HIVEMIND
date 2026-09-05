@@ -19,6 +19,7 @@ route tenant content, start a tunnel, enable support, or enable remote inference
 Set these through `wrangler secret put`; do not commit them:
 
 - `CONTROL_PLANE_ADMIN_TOKEN`
+- `CONTROL_PLANE_READ_TOKEN` — read-only token used by Core to fetch a signed entitlement
 - `CONTROL_PLANE_INSTALLATION_TOKEN`
 - `ENTITLEMENT_PUBLIC_KEY` — base64 of the 32-byte offline Ed25519 public key
 

@@ -62,10 +62,15 @@ export default {
     const entitlementMatch = url.pathname.match(/^\/v1\/control\/organizations\/([0-9a-f-]{36})\/entitlement$/i);
     if (entitlementMatch) {
       const id = entitlementMatch[1].toLowerCase();
-      if (!requireToken(request, env.CONTROL_PLANE_ADMIN_TOKEN)) return unauthorized();
       const object = env.ENTITLEMENTS.get(env.ENTITLEMENTS.idFromName(`organization:${id}`));
-      if (request.method === 'GET') return object.fetch('https://internal/entitlement');
+      // Core only needs to read the already signed envelope.  It never needs
+      // the administrative credential that is allowed to publish one.
+      if (request.method === 'GET') {
+        if (!requireToken(request, env.CONTROL_PLANE_READ_TOKEN)) return unauthorized();
+        return object.fetch('https://internal/entitlement');
+      }
       if (request.method !== 'PUT') return new Response('method not allowed', { status: 405 });
+      if (!requireToken(request, env.CONTROL_PLANE_ADMIN_TOKEN)) return unauthorized();
       try {
         const envelope = await readJson(request);
         if (!envelope?.document || typeof envelope.signature !== 'string') throw new Error('signed entitlement required');

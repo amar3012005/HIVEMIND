@@ -29,12 +29,12 @@ operations.
 
 1. Provision `hivemind-control-events` and the Worker binding through reviewed
    Terraform.
-2. Store `CONTROL_PLANE_ADMIN_TOKEN`, `CONTROL_PLANE_INSTALLATION_TOKEN`, and
+2. Store `CONTROL_PLANE_ADMIN_TOKEN`, `CONTROL_PLANE_READ_TOKEN`, `CONTROL_PLANE_INSTALLATION_TOKEN`, and
    `ENTITLEMENT_PUBLIC_KEY` as Worker secrets.
 3. Publish the Worker only after an offline-signed entitlement test fixture
    validates against its public key.
 4. Set `CLOUDFLARE_EDGE_CONTROL_URL`,
-   `CLOUDFLARE_EDGE_CONTROL_TOKEN`, and
+   `CLOUDFLARE_EDGE_CONTROL_READ_TOKEN`, and
    `CLOUDFLARE_EDGE_ENTITLEMENT_PUBLIC_KEY` on a non-production canary Core.
 5. Keep `CLOUDFLARE_EDGE_CONTROL_ENABLED=false`; verify no request is made.
 6. Enable it only for a canary organization with every individual capability

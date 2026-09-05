@@ -382,7 +382,10 @@ export async function getToolRouterSession(orgId, toolkits, { allowDisconnected 
     connectedAccounts[toolkit] = account.id;
   }
   const body = {
-    user_id: userId ? `${orgId}:${userId}` : orgId,
+    // Connected accounts are provisioned under the organization Composio user.
+    // The local cache key above isolates one Tool Router session per app user;
+    // the remote session must retain the account owner's org identity.
+    user_id: orgId,
     toolkits: { enable: enabled },
     connected_accounts: connectedAccounts,
     manage_connections: { enable: false },

@@ -408,6 +408,21 @@ function resolvedNamedEntityEmail(state) {
   return matches.size === 1 ? [...matches][0] : null;
 }
 
+function missingConditionalSchemaFields(schema = {}, args = {}) {
+  const properties = schema?.properties || {};
+  const descriptions = Object.values(properties).map(item => text(item?.description, 1000)).join(' ');
+  const missing = [];
+  const either = [...descriptions.matchAll(/either\s+[`'" ]*([a-z][a-z0-9_]*)[`'" ]*\s+or\s+[`'" ]*([a-z][a-z0-9_]*)[`'" ]*\s+must be provided/gi)];
+  for (const match of either) {
+    const fields = [match[1], match[2]].filter(field => Object.hasOwn(properties, field));
+    if (fields.length && !fields.some(field => text(args[field]))) {
+      const preferred = fields.find(field => /(?:body|content|message|text|description)/i.test(field)) || fields[0];
+      missing.push({ field: preferred, schema: properties[preferred] || {} });
+    }
+  }
+  return missing;
+}
+
 const meaningfulTokens = value => new Set(String(value || '').toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) || []);
 
 function ungroundedReferencedContent(state, args, schema = {}) {
@@ -1026,7 +1041,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
     const valid = validator(args);
-    const missing = missingRequiredFields(card.schema, args);
+    const missing = [...missingRequiredFields(card.schema, args), ...missingConditionalSchemaFields(card.schema, args)];
     const invalid = invalidSchemaValues(card.schema, args);
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
     if (!valid || missing.length || invalid.length || ungrounded.length || ungroundedContent.length) {

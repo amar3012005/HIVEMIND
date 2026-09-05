@@ -38,7 +38,71 @@ test('LinkedIn create-post is a write and last-post questions are read-only', ()
   assert.equal(isWriteSlug('LINKEDIN_GET_POST_CONTENT'), false);
   assert.equal(isReadOnlyRequest('what do u think about my last linkedin post'), true);
   assert.equal(isReadOnlyRequest('what was my last linkedin post about?'), true);
+  assert.equal(isReadOnlyRequest('what were my latest emails?'), true);
   assert.equal(isReadOnlyRequest('send rama, about information about the company'), false);
+  assert.equal(isWriteSlug('GMAIL_REPLY_TO_THREAD'), true);
+  assert.equal(isWriteSlug('GMAIL_MODIFY_THREAD_LABELS'), true);
+  assert.equal(isWriteSlug('GMAIL_FETCH_EMAILS'), false);
+});
+
+test('latest emails is a read: no reply, no label mutate, no hivemind dump', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_mail' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_mail',
+        primaryToolSlugs: [
+          'GMAIL_LIST_THREADS',
+          'GMAIL_FETCH_EMAILS',
+          'GMAIL_FETCH_MESSAGE_BY_THREAD_ID',
+          'GMAIL_REPLY_TO_THREAD',
+          'GMAIL_MODIFY_THREAD_LABELS',
+          'GMAIL_GET_ATTACHMENT',
+          'LOCAL_HIVEMIND_HIVEMIND_RECALL',
+        ],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'GMAIL_LIST_THREADS' } },
+          { _composio: { slug: 'GMAIL_FETCH_EMAILS' } },
+          { _composio: { slug: 'GMAIL_REPLY_TO_THREAD' } },
+          { _composio: { slug: 'GMAIL_MODIFY_THREAD_LABELS' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_REPLY_TO_THREAD' || tool.slug === 'GMAIL_MODIFY_THREAD_LABELS') {
+          return { successful: true, data: { labelIds: ['SENT'] } };
+        }
+        return {
+          successful: true,
+          data: { threads: [{ id: 't1', snippet: 'Travel report card' }], messages: [{ subject: 'Travel report card' }] },
+        };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'what were my latest emails?',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-latest-mail',
+      synthesizeDurableAnswer: async ({ evidence }) => `synth:${evidence || 'none'}`,
+      _tracedDispatch: async () => ({ memories: [{ title: 'Singulance', content: 'should not dump' }] }),
+    },
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(executed.includes('GMAIL_REPLY_TO_THREAD'), false);
+  assert.equal(executed.includes('GMAIL_MODIFY_THREAD_LABELS'), false);
+  assert.equal(executed.includes('GMAIL_GET_ATTACHMENT'), false);
+  assert.equal(executed.includes('LOCAL_HIVEMIND_HIVEMIND_RECALL'), false);
+  assert.ok(executed.includes('GMAIL_LIST_THREADS') || executed.includes('GMAIL_FETCH_EMAILS'));
+  assert.equal(String(result.summary).includes('should not dump'), false);
+  assert.match(result.summary, /synth:/);
 });
 
 test('read-only LinkedIn questions do not execute create-post', async () => {
@@ -549,7 +613,8 @@ test('durable production path uses Session search and Session execution, never c
   assert.equal(searchPayload.session.generate_id, true);
   assert.equal(typeof searchPayload.queries[0].known_fields, 'string');
   assert.equal(searchPayload.queries[0].known_fields.includes('product_context'), false);
-  assert.equal(searchPayload.queries[0].use_case, "fetch the authenticated user's latest gmail emails");
+  assert.match(searchPayload.queries[0].use_case, /look up existing gmail records for:/i);
+  assert.match(searchPayload.queries[0].use_case, /Show my important Gmail emails from the last month/i);
   assert.equal(searchPayload.queries[0].search_strategy, undefined);
   assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
   assert.deepEqual(result.run.scratch.recommended_plan_steps, [{ tool_slug: 'GMAIL_FETCH_EMAILS' }]);
@@ -736,7 +801,7 @@ test('LinkedIn last-post adapts after GET-without-id instead of creating a post'
   assert.equal(result.status, 'completed');
   assert.ok(result.run.scratch.cursor);
   assert.equal(searchPayload.queries[0].known_fields, '');
-  assert.equal(searchPayload.queries[0].use_case, "list the authenticated user's latest linkedin posts");
+  assert.equal(searchPayload.queries[0].use_case, 'look up existing linkedin records for: what was my last linkedin post about?');
   assert.equal(searchPayload.search_strategy, 'tool_search');
 });
 
@@ -881,7 +946,8 @@ test('precise Composio search uses related people lookup then drafts, never list
     },
     composio,
   });
-  assert.equal(searchPayload.queries[0].use_case, 'send an email with company information');
+  assert.match(searchPayload.queries[0].use_case, /prepare a message in gmail for:/i);
+  assert.match(searchPayload.queries[0].use_case, /send rama, about information about the company/i);
   assert.equal(searchPayload.queries[0].known_fields, 'recipient_name:rama');
   assert.equal(result.status, 'pending');
   assert.equal(executed.includes('GMAIL_LIST_DRAFTS'), false);

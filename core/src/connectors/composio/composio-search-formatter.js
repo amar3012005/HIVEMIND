@@ -26,10 +26,16 @@ export function namedRecipient(message) {
   return null;
 }
 
-export function isReadLookupUseCase(message) {
+export function isWriteIntentMessage(message) {
   const text = String(message || '');
-  if (/\b(send|email|mail to|draft|publish|create|post this|share this|write a|reply to)\b/i.test(text)) return false;
-  return /\b(what|think|last|show|get|read|about my|did i|have i|was my|latest|recent|list)\b/i.test(text);
+  if (/\b(send|draft|publish|create|share this|write a|reply to|forward this|mail to)\b/i.test(text)) return true;
+  if (/\bsend\b/i.test(text) && /\b(e-?mails?|mail|gmail|message)\b/i.test(text)) return true;
+  return false;
+}
+
+export function isReadLookupUseCase(message) {
+  if (isWriteIntentMessage(message)) return false;
+  return /\b(what|think|last|latest|show|get|read|about my|did i|have i|was my|recent|list|e-?mails?|inbox)\b/i.test(String(message || ''));
 }
 
 function destinationAppsList(destinationApps = []) {
@@ -45,35 +51,18 @@ export function formatKnownFields({ recipient } = {}) {
 
 export function formatUseCase({ message, destinationApps = [] } = {}) {
   const raw = compact(message, 800);
-  const recipient = namedRecipient(raw);
   const apps = destinationAppsList(destinationApps);
   const app = apps[0] || '';
-  if (recipient && /\b(company|hivemind|singulance)\b/i.test(raw)) {
-    return 'send an email with company information';
-  }
-  if (/email address of a person|find the email/i.test(raw)) {
-    return 'find a person email address in gmail contacts';
+  if (/find a person email address|email address of a person/i.test(raw)) {
+    return app ? `find a person email address in ${app} contacts` : 'find a person email address in contacts';
   }
   if (isReadLookupUseCase(raw)) {
-    if (/\b(post|posts)\b/i.test(raw) || app === 'linkedin') {
-      return `list the authenticated user's latest ${app || 'linkedin'} posts`;
-    }
-    if (app === 'gmail' || /\b(email|emails|inbox|mail)\b/i.test(raw)) {
-      return "fetch the authenticated user's latest gmail emails";
-    }
-    if (app === 'youtube' || /\b(watch|video|history)\b/i.test(raw)) {
-      return "list the authenticated user's latest youtube watch history";
-    }
-    if (app === 'github' || /\b(repo|repos|repository)\b/i.test(raw)) {
-      return "list the authenticated user's github repositories";
-    }
-    return app
-      ? `retrieve the authenticated user's latest ${app} records`
-      : compact(raw, 400);
+    return (app ? `look up existing ${app} records for: ${raw}` : `look up existing records for: ${raw}`).slice(0, 1024);
   }
-  if (recipient) return app && app !== 'gmail' ? `send a message via ${app}` : 'send an email to someone';
-  if (app) return `use ${app} for the requested action`;
-  return compact(raw, 400);
+  if (namedRecipient(raw) || isWriteIntentMessage(raw)) {
+    return (app ? `prepare a message in ${app} for: ${raw}` : `prepare a message for: ${raw}`).slice(0, 1024);
+  }
+  return (app ? `use ${app} for: ${raw}` : raw).slice(0, 1024);
 }
 
 export function isToolRouterSessionId(value) {

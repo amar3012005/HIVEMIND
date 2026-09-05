@@ -17,20 +17,24 @@ test('Composio search formatter matches the legal COMPOSIO_SEARCH_TOOLS schema',
   assert.equal(payload.queries[0].search_strategy, undefined);
   assert.equal(payload.queries[0].destination_app, undefined);
   assert.equal(payload.queries[0].known_fields, 'recipient_name:rama');
-  assert.equal(payload.queries[0].use_case, 'send an email with company information');
+  assert.match(payload.queries[0].use_case, /prepare a message in gmail for:/i);
+  assert.match(payload.queries[0].use_case, /send the company information to a person called rama/i);
   assert.equal(Object.keys(payload.queries[0]).sort().join(','), 'known_fields,use_case');
 });
 
-test('read lookups ask for list/get-my tools and name the destination app', () => {
+test('read lookups keep the user query and name the destination app', () => {
   const payload = formatComposioSearch({
     message: 'what was my last linkedin post about?',
     destinationApps: ['linkedin'],
   });
   assert.equal(Object.keys(payload.queries[0]).sort().join(','), 'known_fields,use_case');
   assert.equal(payload.queries[0].known_fields, '');
-  assert.equal(payload.queries[0].use_case, "list the authenticated user's latest linkedin posts");
-  assert.equal(/create a post/i.test(payload.queries[0].use_case), false);
-  assert.equal(/rama/i.test(payload.queries[0].use_case), false);
+  assert.equal(payload.queries[0].use_case, 'look up existing linkedin records for: what was my last linkedin post about?');
+  const mail = formatComposioSearch({
+    message: 'what were my latest emails?',
+    destinationApps: ['gmail'],
+  });
+  assert.equal(mail.queries[0].use_case, 'look up existing gmail records for: what were my latest emails?');
 });
 
 test('later searches reuse the workflow word, never a Tool Router id', () => {

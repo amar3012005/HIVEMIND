@@ -28,11 +28,12 @@ Rules:
 - One step. Prefer LIST/GET_MY/RECENT before GET-by-id or *_CONTENT.
 - If a GET failed for missing id, LIST or GET_MY next. Never retry the same GET with empty args.
 - HIVEMIND_* / LOCAL_HIVEMIND_* use action native.
-- Never send, publish, or create live. The only write is action draft after facts (and a recipient when emailing a named person).
+- Never send, reply, publish, label, or modify live. The only write is action draft after facts (and a recipient when emailing a named person).
 - Do not repeat a completed slug. execute/draft slug must be in known.slugs or known.related.
 - If a named app is disconnected, connect.
-- If the question is already answered by receipts, done.
-- Search once unless query is a new person-email lookup.`;
+- If the user asked what/latest/show and receipts already have list or fetch data, done.
+- Search once unless query is a new person-email lookup.
+- Answer from the user's request and tool receipts only.`;
 
 export function conversationKey(ctx = {}) {
   const user = String(ctx.userId || 'anon').trim() || 'anon';
@@ -123,20 +124,26 @@ export function isNativeHivemindSlug(slug) {
   return native.startsWith('hivemind_') || native === 'get_user_profile';
 }
 
+export function isMutationSlug(slug) {
+  const t = tokens(slug);
+  return t.some((x) => (
+    x === 'reply' || x === 'forward' || x === 'modify' || x === 'label'
+    || x === 'delete' || x === 'trash' || x === 'remove' || x === 'archive'
+    || x === 'star' || x === 'filter' || x === 'settings' || x === 'comment'
+  ));
+}
+
 export function isWriteSlug(slug) {
   const t = tokens(slug);
+  if (isMutationSlug(slug)) return true;
   if (t.some((x) => READ_TOKENS.has(x))) return false;
-  if (t.some((x) => BLOCKED_WRITE_TOKENS.has(x))) return false;
   if (t.includes('draft') && t.includes('create')) return true;
   if (t.includes('create') || t.includes('publish') || t.includes('upload')) return true;
-  if (t.includes('reply') || t.includes('comment')) return false;
   return t.some((x) => WRITE_SEND_TOKENS.has(x));
 }
 
 export function isReadOnlyRequest(message) {
-  const text = String(message || '');
-  if (/\b(send|email|mail to|draft|publish|create|post this|share this|write a|reply to)\b/i.test(text)) return false;
-  return /\b(what|think|last|show|get|read|about my|did i|have i|was my)\b/i.test(text);
+  return isReadLookupUseCase(message);
 }
 
 export function selectWriteSlug(slugs = [], connected = []) {
@@ -894,6 +901,7 @@ export function fallbackNextDurableAction(obs) {
   const pendingReads = slugs
     .filter((slug) => !isWriteSlug(slug) && !isMailboxInventorySlug(slug) && !isNativeHivemindSlug(slug))
     .filter((slug) => !tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x)))
+    .filter((slug) => !/ATTACHMENT|HISTORY|CODESPACE|SECRET/i.test(slug))
     .filter((slug) => !done(slug) && !failedMissing(slug))
     .filter((slug) => toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
     .sort((left, right) => rankDurableReadSlug(left) - rankDurableReadSlug(right));
@@ -910,9 +918,19 @@ export function fallbackNextDurableAction(obs) {
   }
 
   const natives = slugs.filter((slug) => isNativeHivemindSlug(slug) && !done(slug) && !failedMissing(slug) && !/GET_MEMORY/i.test(slug));
-  if (natives.length && !obs.known?.recall) {
+  if (!obs.read_only && natives.length && !obs.known?.recall) {
     const recall = natives.find((slug) => /RECALL/i.test(slug)) || natives[0];
     return { action: 'native', slug: recall, reason: 'hivemind recall' };
+  }
+
+  const successfulAppReads = (obs.receipts || []).filter((row) => (
+    row.status === 'completed'
+    && row.slug
+    && !isNativeHivemindSlug(row.slug)
+    && !/^COMPOSIO_SEARCH/i.test(row.slug)
+  ));
+  if (obs.read_only && successfulAppReads.length >= 2) {
+    return { action: 'done', reason: 'enough read evidence' };
   }
 
   if (last && failedMissing(last.slug)) {
@@ -927,7 +945,7 @@ export function fallbackNextDurableAction(obs) {
       const app = toolkit || (obs.known?.candidates || []).find((item) => item && item !== 'gmail') || 'app';
       return {
         action: 'search',
-        query: `list the authenticated user's latest ${app} posts`,
+        query: String(obs.goal || '').slice(0, 400) || `look up existing ${app} records`,
         reason: 'search list tools after get-by-id miss',
       };
     }
@@ -943,7 +961,7 @@ export function fallbackNextDurableAction(obs) {
     const people = pendingReads.find((slug) => isPersonResolveSlug(slug) || isRecipientLookupSlug(slug));
     if (people) return { action: 'execute', slug: people, reason: 'resolve recipient' };
     if (!obs.known?.people_search) {
-      return { action: 'search', query: `find the email address of a person called ${obs.person}`, reason: 'recipient lookup search' };
+      return { action: 'search', query: 'find a person email address in contacts', reason: 'recipient lookup search' };
     }
     return { action: 'ask_user', reason: 'recipient unresolved' };
   }
@@ -1336,8 +1354,8 @@ export async function runDurableComposioAgent({
       });
       return { ok: false, error: run.scratch.search_error };
     }
-    const peopleSearch = /email address of a person called/i.test(String(queryMessage || ''));
-    const listSearch = /list the authenticated user's latest/i.test(String(queryMessage || ''));
+    const peopleSearch = /find a person email address|email address of a person/i.test(String(queryMessage || ''));
+    const listSearch = /look up existing|list the authenticated user's latest/i.test(String(queryMessage || ''));
     mergeDiscovery(discovery, { peopleSearch, listSearch });
     finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', {
       kind: 'search', status: 'completed',
@@ -1481,6 +1499,7 @@ export async function runDurableComposioAgent({
     }
 
     if (next.action === 'native') {
+      if (readOnly) continue;
       const slug = next.slug || (run.scratch.primary_tool_slugs || []).find((item) => isNativeHivemindSlug(item)) || 'HIVEMIND_RECALL';
       if (/GET_MEMORY/i.test(slug) && !recallData?.memories?.[0]?.id) continue;
       if (run.scratch.recall && /RECALL/i.test(slug)) continue;
@@ -1491,7 +1510,7 @@ export async function runDurableComposioAgent({
 
     if (next.action === 'execute') {
       const slug = next.slug;
-      if (!slug || alreadyTerminal(slug) || isWriteSlug(slug) || isMailboxInventorySlug(slug)) continue;
+      if (!slug || alreadyTerminal(slug) || isWriteSlug(slug) || isMailboxInventorySlug(slug) || /ATTACHMENT|HISTORY/i.test(slug)) continue;
       const toolkit = toolkitFromSlug(slug);
       if (toolkit && !toolkitHasActiveConnection(toolkit, connected, run.scratch.toolkit_connection_statuses || {})) {
         return pauseForAppConnect(toolkit);
@@ -1553,9 +1572,11 @@ export async function synthesizeDurableAnswer({
 } = {}) {
   const ok = (reads || []).filter((row) => row.successful);
   const fail = (reads || []).filter((row) => !row.successful);
+  const appOk = ok.filter((row) => !isNativeHivemindSlug(row.slug));
+  const evidenceRows = appOk.length ? appOk : ok;
   const evidence = [
-    recallText,
-    ...ok.map((row) => summarizeToolData(row.data, 500)).filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text)),
+    ...(appOk.length ? [] : [recallText]),
+    ...evidenceRows.map((row) => summarizeToolData(row.data, 500)).filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text)),
   ].filter(Boolean).join('\n\n').slice(0, 4000);
   const failures = fail.map((row) => `${row.slug}: ${row.error || 'failed'}`).slice(0, 8).join('; ');
   if (typeof generateImpl === 'function') {

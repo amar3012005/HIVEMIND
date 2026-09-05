@@ -66,6 +66,10 @@ async function projectProgressiveApproval(prisma, draft) {
   try { await reconcileProgressiveApproval({ prisma, draft }); }
   catch { console.warn('[progressive-approval] projection deferred; canonical draft receipt retained'); }
 }
+function publicPendingWrite(draft) {
+  if (!draft || typeof draft !== 'object') return draft;
+  return { ...draft, toolArgs: Object.fromEntries(Object.entries(draft.toolArgs || {}).filter(([key]) => !key.startsWith('_'))) };
+}
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -10314,7 +10318,7 @@ exit \$RC
             const updated = await prisma.pendingWrite.updateMany({ where: { id: draftId, userId, orgId, status: 'draft' },
               data: { toolArgs: nextArgs, argsHash, preview: `${row.toolName} awaiting approval` } });
             if (updated.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
-            return jsonResponse(res, { ok: true, draft: await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }) });
+            return jsonResponse(res, { ok: true, draft: publicPendingWrite(await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } })) });
           }
           if (row.toolArgs?._harness_version === 'progressive-v1') {
             const { editProgressiveDraft } = await import('./agent/progressive-draft-contract.js');
@@ -10327,7 +10331,7 @@ exit \$RC
                 preview: `${row.toolName} draft` },
             });
             if (updated.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
-            return jsonResponse(res, { ok: true, draft: await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }) });
+            return jsonResponse(res, { ok: true, draft: publicPendingWrite(await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } })) });
           }
           const incoming = body?.tool_args && typeof body.tool_args === 'object' ? body.tool_args : {};
           const nextArgs = { ...(row.toolArgs || {}) };
@@ -10339,7 +10343,7 @@ exit \$RC
             where: { id: draftId },
             data: { toolArgs: nextArgs, preview: `${row.toolName}(${JSON.stringify(nextArgs).slice(0, 400)})` },
           });
-          return jsonResponse(res, { ok: true, draft: updated });
+          return jsonResponse(res, { ok: true, draft: publicPendingWrite(updated) });
         }
         const pwMatch = pathname.match(/^\/api\/pending-writes\/([0-9a-f-]{36})\/(approve|cancel)$/i);
         if (pwMatch && req.method === 'POST') {
@@ -10368,7 +10372,7 @@ exit \$RC
                 ok: final?.status === 'sent' || final?.status === 'cancelled',
                 status: final?.status || result?.status,
                 text: result?.summary || result?.response || null,
-                draft: final,
+                draft: publicPendingWrite(final),
                 execution: { harness_version: 'langgraph-native-v1', run_id: result?.run?.id || row.traceId },
               });
             }
@@ -10439,7 +10443,7 @@ exit \$RC
                   status: ok ? 'sent' : 'failed',
                   tool_status: ok ? 'completed' : 'failed',
                   text: ok ? JSON.stringify(result?.data || {}).slice(0, 500) : (result?.error || 'composio execution failed'),
-                  draft: final,
+                  draft: publicPendingWrite(final),
                 });
               }
               const { buildToolkitForUser } = await import('./agent/toolkit-factory.js');
@@ -10456,7 +10460,7 @@ exit \$RC
                 status: final?.status || resp.status,
                 tool_status: resp.status,
                 text: resp.content?.[0]?.text || null,
-                draft: final,
+                draft: publicPendingWrite(final),
               });
             } catch (execErr) {
               if (row.provider === 'composio' && creditService && !approvalCredit?.duplicate) {
@@ -24277,7 +24281,7 @@ exit \$RC
             });
             // Repair only projections of canonical terminal receipts, never re-execute a tool.
             await Promise.all(rows.map(row => projectProgressiveApproval(prisma, row)));
-            return jsonResponse(res, { drafts: rows });
+            return jsonResponse(res, { drafts: rows.map(publicPendingWrite) });
           }
           break;
 

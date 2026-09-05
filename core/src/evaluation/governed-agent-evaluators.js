@@ -68,6 +68,24 @@ export function localeEvaluator(run, example) {
   };
 }
 
+export function presentationEvaluator(run, example) {
+  const output = run?.outputs || run || {};
+  const expected = example?.outputs || example || {};
+  const response = String(output.response || '');
+  const objectCoercion = /\[object Object\]/i.test(response);
+  const tableRows = response.split('\n').map(line => line.trim()).filter(line => /^\|.*\|$/.test(line));
+  const dataRows = tableRows.filter(line => !/^\|?\s*:?-{3,}/.test(line) && !/subject\s*\|\s*sender\s*\|\s*time/i.test(line));
+  const requiredRows = Number(expected.min_markdown_table_rows || 0);
+  const missingRows = requiredRows > 0 && dataRows.length < requiredRows;
+  return {
+    key: 'presentation',
+    score: objectCoercion || missingRows ? 0 : 1,
+    comment: objectCoercion ? 'Object coercion leaked into the answer'
+      : missingRows ? `Expected at least ${requiredRows} Markdown rows, got ${dataRows.length}`
+        : 'Structured presentation contract satisfied',
+  };
+}
+
 export function evaluateGovernedOutput(output, expected) {
   const run = { outputs: output };
   const example = { outputs: expected };
@@ -78,5 +96,6 @@ export function evaluateGovernedOutput(output, expected) {
     interactionEvaluator(run, example),
     receiptEvaluator(run, example),
     localeEvaluator(run, example),
+    presentationEvaluator(run, example),
   ];
 }

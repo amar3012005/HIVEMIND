@@ -1,5 +1,10 @@
 [
   {
+    "id": "gmail-five-unread-en",
+    "inputs": { "message": "What are my 5 latest unread Gmail emails? Show subject, sender, and time", "language": "en", "history_turns": 4 },
+    "outputs": { "locale": "en", "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id", "business information"], "forbidden_response_terms": ["cannot directly display", "can only confirm", "[object Object]"], "min_markdown_table_rows": 5, "max_same_read": 1, "requires_receipt": true }
+  },
+  {
     "id": "linkedin-profile-en",
     "inputs": { "message": "What is my LinkedIn profile?", "language": "en", "history_turns": 6 },
     "outputs": { "locale": "en", "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS", "LINKEDIN_GET_MY_INFO"], "forbidden_prompt_terms": ["account", "person_id", "URN"], "max_same_read": 1, "requires_receipt": true }

@@ -57,6 +57,8 @@ import {
   missingConditionalSchemaFields,
   requirementsResolvedByEvidence,
   resolvableSchemaRequirements,
+  roleIncompatibleEvidenceBindings,
+  schemaFieldForNamedEntity,
 } from './governed-schema-resolver.js';
 
 const MODEL = process.env.GOVERNED_AGENT_MODEL || 'google/gemini-2.5-flash-lite';
@@ -319,8 +321,8 @@ function capabilityGap(state, missing = []) {
   if (ambiguities.length && !uniqueMissing.some(item => /(?:email|address|recipient|destination)/i.test(String(item.field)))) {
     const destinationField = (state.capabilities || [])
       .filter(card => card?.authority === 'write')
-      .flatMap(card => Object.entries(card.schema?.properties || {}))
-      .find(([field, definition]) => definition?.format === 'email' || /(?:email|address|recipient|destination)/i.test(field));
+      .map(card => schemaFieldForNamedEntity(card, state.intent))
+      .find(Boolean);
     if (destinationField) uniqueMissing.push({ field: destinationField[0], schema: destinationField[1] });
   }
   const businessQuestion = text(state.intent?.business_question, 500);
@@ -1048,10 +1050,12 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const invalid = invalidSchemaValues(card.schema, args);
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
     const ambiguous = ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args });
-    if (!valid || missing.length || invalid.length || ungrounded.length || ungroundedContent.length || ambiguous.length) {
+    const misbound = roleIncompatibleEvidenceBindings({ intent: state.intent, receipts: state.receipts, args });
+    if (!valid || missing.length || invalid.length || ungrounded.length || ungroundedContent.length || ambiguous.length || misbound.length) {
       const requirements = [...missing, ...invalid, ...ungroundedContent,
         ...ungrounded.map(item => ({ field: item.field, schema: card.schema?.properties?.[item.field] || {} })),
-        ...ambiguous.map(item => ({ ...item, schema: card.schema?.properties?.[item.field] || {} }))];
+        ...ambiguous.map(item => ({ ...item, schema: card.schema?.properties?.[item.field] || {} })),
+        ...misbound.map(item => ({ ...item, schema: card.schema?.properties?.[item.field] || {} }))];
       const relevantReads = eligibleReadCapabilities(state, requirements).filter(item => item.relevance > 0);
       const dependencyKey = unresolvedDependencyKey(requirements);
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
@@ -1154,7 +1158,8 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || missingBusinessPayloadFields(card, state.toolArgs).length
       || invalidSchemaValues(card.schema, state.toolArgs).length
       || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length
-      || ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args: state.toolArgs }).length) {
+      || ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args: state.toolArgs }).length
+      || roleIncompatibleEvidenceBindings({ intent: state.intent, receipts: state.receipts, args: state.toolArgs }).length) {
       throw new Error('governed_draft_schema_or_evidence_denied');
     }
     const toolArgs = {

@@ -7,6 +7,25 @@ const CONTENT_FIELD = /(?:body|content|message|text|description)/i;
 const BUSINESS_PAYLOAD_FIELD = /(?:body|content|message|text|description|subject|title)/i;
 const COLLECTION_KEY = /^(?:results|items|records|messages|contacts|people|data)$/i;
 
+function fieldMatchesEntityRole(field, role) {
+  const name = String(field || '').toLowerCase();
+  const semanticRole = String(role || '').toLowerCase();
+  if (/(?:recipient|destination|assignee|invitee|attendee|member)/.test(semanticRole)) {
+    return /(?:recipient|destination|assignee|invitee|attendee|member|^to$|to_email)/.test(name);
+  }
+  if (/(?:sender|author|from)/.test(semanticRole)) return /(?:sender|author|from)/.test(name);
+  if (/(?:owner|customer|user|contact|person|account)/.test(semanticRole)) return new RegExp(semanticRole).test(name) || IDENTITY_FIELD.test(name);
+  return IDENTITY_FIELD.test(name);
+}
+
+export function schemaFieldForNamedEntity(card = {}, intent = {}) {
+  const role = (intent.entities || []).map(entity => asText(entity?.role, 80)).find(Boolean) || '';
+  return Object.entries(card.schema?.properties || {}).find(([field, definition]) => (
+    fieldMatchesEntityRole(field, role)
+    && (definition?.format === 'email' || /(?:email|address|recipient|destination|assignee|invitee|attendee|member|^to$)/i.test(field))
+  )) || null;
+}
+
 export function hasNamedBusinessEntity(intent = {}, fieldValues = {}) {
   if ((intent.entities || []).some(entity => asText(entity?.name, 160))) return true;
   return Object.entries({ ...(intent.known_facts || {}), ...(fieldValues || {}) }).some(([key, value]) => (
@@ -71,11 +90,21 @@ export function ambiguousEvidenceBindings({ intent = {}, receipts = [], fieldVal
   if (options.size < 2) return [];
   const supplied = new Set(Object.values(fieldValues || {}).flatMap(value => Array.isArray(value) ? value : [value])
     .map(value => asText(value).toLowerCase()).filter(Boolean));
+  const role = (intent.entities || []).map(entity => asText(entity?.role, 80)).find(Boolean) || '';
   return Object.entries(args || {}).filter(([field, value]) => {
-    if (!IDENTITY_FIELD.test(field)) return false;
+    if (!fieldMatchesEntityRole(field, role)) return false;
     const selected = asText(value).toLowerCase();
     return options.has(selected) && !supplied.has(selected);
   }).map(([field]) => ({ field, code: 'ambiguous_evidence_requires_selection' }));
+}
+
+export function roleIncompatibleEvidenceBindings({ intent = {}, receipts = [], args = {} } = {}) {
+  const options = new Set(namedEntityAddresses({ intent, receipts }).map(value => value.toLowerCase()));
+  if (!options.size) return [];
+  const role = (intent.entities || []).map(entity => asText(entity?.role, 80)).find(Boolean) || '';
+  return Object.entries(args || {}).filter(([field, value]) => (
+    options.has(asText(value).toLowerCase()) && !fieldMatchesEntityRole(field, role)
+  )).map(([field]) => ({ field, code: 'entity_role_schema_mismatch' }));
 }
 
 function receiptHasField(receipts = [], field) {
@@ -113,18 +142,19 @@ export function requirementsResolvedByEvidence({ intent = {}, receipts = [], req
 export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], args = {} } = {}) {
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
   const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));
+  const role = entities.map(entity => asText(entity?.role, 80)).find(Boolean) || '';
+  const entityAddresses = new Set(namedEntityAddresses({ intent, receipts }).map(value => value.toLowerCase()));
+  for (const [field, value] of Object.entries(compiled)) {
+    if (entityAddresses.has(asText(value).toLowerCase()) && !fieldMatchesEntityRole(field, role)) delete compiled[field];
+  }
   const searchableField = (card.fields || Object.keys(card.schema?.properties || {})).find(field => SEARCH_FIELD.test(String(field)));
   if (card.authority === 'read' && searchableField && !asText(compiled[searchableField]) && entities.length === 1) {
     compiled[searchableField] = entities[0].name;
   }
   if (card.authority === 'write') {
     const address = namedEntityAddress({ intent, receipts });
-    if (address) {
-      for (const [field, definition] of Object.entries(card.schema?.properties || {})) {
-        const acceptsAddress = definition?.format === 'email' || /(?:^|_)(?:email|address|recipient)(?:$|_)/i.test(field);
-        if (acceptsAddress && !asText(compiled[field])) compiled[field] = address;
-      }
-    }
+    const destination = schemaFieldForNamedEntity(card, intent);
+    if (address && destination && !asText(compiled[destination[0]])) compiled[destination[0]] = address;
   }
   return compiled;
 }

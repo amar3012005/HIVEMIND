@@ -1,4 +1,4 @@
-import { capabilityRelevance } from './governed-agent-contract.js';
+import { capabilityRelevance, isProviderIdentifier } from './governed-agent-contract.js';
 
 const asText = (value, limit = 800) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 const unique = values => [...new Set((values || []).map(value => asText(value, 160)).filter(Boolean))];
@@ -26,11 +26,15 @@ function candidatesFor(outcome, capabilities = [], discovery = {}) {
       const source = card.source === 'core' ? 'core' : candidateSource(card.slug, discovery);
       const sourceRank = source === 'composio_primary' ? 0 : source === 'core' ? 1 : source === 'composio_related' ? 2 : 3;
       const relevance = capabilityRelevance(card, { intent: { outcomes: [outcome], discovery_query: outcome.description } });
+      const unresolvedProviderInputs = (card.required || []).filter(isProviderIdentifier).length;
       return {
         tool_slug: card.slug,
         toolkit: card.toolkit || null,
         source,
-        rank: sourceRank * 100 - relevance,
+        // A top-level outcome should not start with a detail/follow-up tool
+        // whose required provider identifier has no receipt yet. Keep it as a
+        // fallback candidate, but rank directly executable capabilities first.
+        rank: sourceRank * 100 - relevance + unresolvedProviderInputs * 250,
         schema_status: card.schema ? 'valid' : 'unknown',
         status: 'available',
         attempts: 0,
@@ -130,6 +134,30 @@ export function schedulePlan(plan) {
   if (node.status === 'waiting_input') return { action: 'ask', node, candidate };
   if (!candidate) return { action: 'blocked', node, candidate: null };
   return { action: node.kind === 'draft_write' ? 'draft' : 'read', node, candidate };
+}
+
+export function scheduleExecutionDecision({ plan, capabilities = [], receipts = [], dependencyRequirements = [] } = {}) {
+  if (dependencyRequirements.length) {
+    const failed = new Set(receipts.filter(row => row?.successful === false).map(row => row?.slug));
+    const candidate = capabilities
+      .filter(card => card?.source !== 'core' && card?.authority === 'read' && !failed.has(card.slug))
+      .map(card => ({ card, relevance: capabilityRelevance(card, { missing: dependencyRequirements }) }))
+      .sort((left, right) => right.relevance - left.relevance || left.card.slug.localeCompare(right.card.slug))
+      .find(item => item.relevance > 0);
+    if (candidate) return {
+      action: 'read', tool_slug: candidate.card.slug, purpose: 'prerequisite', outcome_ids: [],
+      reason: 'Highest-ranked discovered read capability for the persisted schema dependency.',
+    };
+  }
+  const scheduled = schedulePlan(plan);
+  if (scheduled.action === 'draft' && scheduled.candidate && receipts.some(receipt => receipt?.successful)) {
+    return {
+      action: 'draft', tool_slug: scheduled.candidate.tool_slug, purpose: 'outcome',
+      outcome_ids: scheduled.node.outcome_ids || [],
+      reason: 'Persisted plan candidate is ready after prerequisite evidence resolved.',
+    };
+  }
+  return null;
 }
 
 export function markPlanNodeRunning(plan, nodeId, toolSlug) {

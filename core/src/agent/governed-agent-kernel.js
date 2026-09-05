@@ -43,9 +43,17 @@ import {
   reopenPlanOutcomes,
   revisePlanConnection,
   revisePlanHumanInput,
+  scheduleExecutionDecision,
   schedulePlan,
   settlePlanNode,
 } from './governed-execution-plan.js';
+import {
+  compileGroundedArguments,
+  dependencyDiscoveryQuery,
+  hasNamedBusinessEntity,
+  missingConditionalSchemaFields,
+  resolvableSchemaRequirements,
+} from './governed-schema-resolver.js';
 
 const MODEL = process.env.GOVERNED_AGENT_MODEL || 'google/gemini-2.5-flash-lite';
 const HARNESS_VERSION = 'langgraph-native-v1';
@@ -318,16 +326,6 @@ function capabilityGap(state, missing = []) {
   };
 }
 
-function hasResolvableEntityFact(state) {
-  const facts = { ...(state?.intent?.known_facts || {}), ...(state?.fieldValues || {}) };
-  if ((state?.intent?.entities || []).some(entity => entity?.name)) return true;
-  return Object.entries(facts).some(([key, value]) => {
-    if (!/(?:name|person|recipient|contact|assignee|owner|member|user|customer|company|account)/i.test(String(key))) return false;
-    if (typeof value === 'string') return Boolean(value.trim());
-    return Array.isArray(value) ? value.some(item => String(item || '').trim()) : Boolean(value);
-  });
-}
-
 function unresolvedDependencyKey(requirements = []) {
   return [...new Set((requirements || []).map(item => String(item?.field || '').trim()).filter(Boolean))]
     .sort()
@@ -340,7 +338,7 @@ function shouldResolveDependency(state, requirements, relevantReads) {
   // A named entity and a missing identity-shaped schema field is enough to
   // justify one bounded upstream search. This is schema/intent reasoning, not
   // a connector-specific recipient heuristic.
-  return hasResolvableEntityFact(state)
+  return hasNamedBusinessEntity(state.intent, state.fieldValues)
     && (requirements || []).some(item => /(?:email|address|recipient|contact|person|assignee|owner|member|user|customer|company|account|destination)/i.test(String(item?.field || '')));
 }
 
@@ -360,6 +358,7 @@ function resultShape(state, summary, status = state.status) {
     steps: state.steps,
     draftIds,
     pendingActions: draftIds.map(id => ({ id })),
+    inputRequests: state.pendingInput ? [state.pendingInput] : [],
     resumeState: state.pendingInput ? { kind: 'governed_langgraph', fields: state.pendingInput.fields } : null,
   };
 }
@@ -387,40 +386,6 @@ function identifierEvidence(state) {
 function ungroundedIdentifiers(state, args) {
   const evidence = identifierEvidence(state);
   return sensitiveIdentifierValues(args).filter(item => !evidence.includes(item.value.toLowerCase()));
-}
-
-function resolvedNamedEntityEmail(state) {
-  const names = (state.intent?.entities || []).map(entity => text(entity?.name, 160).toLowerCase()).filter(Boolean);
-  if (names.length !== 1) return null;
-  const matches = new Set();
-  const emailPattern = /[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+/g;
-  const visit = (value, depth = 0) => {
-    if (!value || depth > 10) return;
-    if (Array.isArray(value)) return value.slice(0, 50).forEach(item => visit(item, depth + 1));
-    if (typeof value !== 'object') return;
-    const serialized = JSON.stringify(value);
-    if (names.some(name => serialized.toLowerCase().includes(name))) {
-      for (const address of serialized.match(emailPattern) || []) matches.add(address.replace(/[),.;]+$/, ''));
-    }
-    for (const item of Object.values(value)) visit(item, depth + 1);
-  };
-  for (const receipt of state.receipts || []) if (receipt?.successful) visit(receipt.data);
-  return matches.size === 1 ? [...matches][0] : null;
-}
-
-function missingConditionalSchemaFields(schema = {}, args = {}) {
-  const properties = schema?.properties || {};
-  const descriptions = Object.values(properties).map(item => text(item?.description, 1000)).join(' ');
-  const missing = [];
-  const either = [...descriptions.matchAll(/either\s+[`'" ]*([a-z][a-z0-9_]*)[`'" ]*\s+or\s+[`'" ]*([a-z][a-z0-9_]*)[`'" ]*\s+must be provided/gi)];
-  for (const match of either) {
-    const fields = [match[1], match[2]].filter(field => Object.hasOwn(properties, field));
-    if (fields.length && !fields.some(field => text(args[field]))) {
-      const preferred = fields.find(field => /(?:body|content|message|text|description)/i.test(field)) || fields[0];
-      missing.push({ field: preferred, schema: properties[preferred] || {} });
-    }
-  }
-  return missing;
 }
 
 const meaningfulTokens = value => new Set(String(value || '').toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) || []);
@@ -859,29 +824,17 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       await persist(state, patch);
       return patch;
     }
-    const scheduledDependency = eligibleReadCapabilities(state, state.dependencyRequirements || [])
-      .find(item => item.relevance > 0 && item.card?.source !== 'core');
-    if ((state.dependencyRequirements || []).length && scheduledDependency) {
-      const decision = {
-        action: 'read', tool_slug: scheduledDependency.card.slug, purpose: 'prerequisite', outcome_ids: [],
-        reason: 'Highest-ranked discovered read capability for the persisted schema dependency.',
-      };
+    const scheduledDecision = scheduleExecutionDecision({
+      plan: state.executionPlan,
+      capabilities: state.capabilities,
+      receipts: state.receipts,
+      dependencyRequirements: state.dependencyRequirements,
+    });
+    if (scheduledDecision) {
+      const decision = scheduledDecision;
       const patch = await transition(state, 'dependency_resolved', { decision, planRepair: null }, {
-        reason_code: 'scheduler_dependency_candidate', tool_slug: decision.tool_slug,
-      });
-      await persist(state, patch);
-      return patch;
-    }
-    const scheduledOutcome = schedulePlan(state.executionPlan);
-    if (scheduledOutcome.action === 'draft' && scheduledOutcome.candidate
-      && (state.receipts || []).some(receipt => receipt?.successful)) {
-      const decision = {
-        action: 'draft', tool_slug: scheduledOutcome.candidate.tool_slug,
-        purpose: 'outcome', outcome_ids: scheduledOutcome.node.outcome_ids || [],
-        reason: 'Persisted plan candidate is ready after prerequisite evidence resolved.',
-      };
-      const patch = await transition(state, 'dependency_resolved', { decision, planRepair: null }, {
-        reason_code: 'scheduler_outcome_candidate', tool_slug: decision.tool_slug,
+        reason_code: decision.purpose === 'prerequisite' ? 'scheduler_dependency_candidate' : 'scheduler_outcome_candidate',
+        tool_slug: decision.tool_slug,
       });
       await persist(state, patch);
       return patch;
@@ -1000,27 +953,12 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
 Return the argument object itself. Never use schema examples, fabricate identifiers, or add fields absent from the schema. When the user refers to prior content, reproduce the substantive prior assistant content and resolve destinations from evidence; never replace it with a placeholder. Include a useful subject when the selected schema supports one.`,
       input: argumentInput,
     });
-    let args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-    // Schema-grounded entity binding is part of argument compilation, not an
-    // application rule. A discovered read/search capability commonly exposes
-    // a free-text query field; when one named entity is the unresolved fact,
-    // bind that exact user-provided name instead of asking the model to invent
-    // or rediscover it.
-    const namedEntities = (state.intent?.entities || []).filter(entity => entity?.name);
-    const searchableField = (card.fields || Object.keys(card.schema?.properties || {}))
-      .find(field => /^(?:query|search_query|search_term|term|name)$/i.test(String(field)));
-    if (card.authority === 'read' && searchableField && !text(args[searchableField]) && namedEntities.length === 1) {
-      args = { ...args, [searchableField]: namedEntities[0].name };
-    }
-    if (card.authority === 'write') {
-      const resolvedEmail = resolvedNamedEntityEmail(state);
-      if (resolvedEmail) {
-        for (const [field, definition] of Object.entries(card.schema?.properties || {})) {
-          const emailField = definition?.format === 'email' || /(?:^|_)(?:email|address|recipient)(?:$|_)/i.test(field);
-          if (emailField && !text(args[field])) args = { ...args, [field]: resolvedEmail };
-        }
-      }
-    }
+    let args = compileGroundedArguments({
+      card,
+      intent: state.intent,
+      receipts: state.receipts,
+      args: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {},
+    });
     let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
     if (ungroundedContent.length) {
       raw = await jsonDecision({
@@ -1032,11 +970,13 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         system: `Repair the selected tool arguments. Return only the schema argument object. The prior attempt did not ground referenced content in the conversation. Copy the substantive referenced assistant content into the appropriate body/content field, preserve its meaning, resolve destinations only from evidence, and include a useful subject when supported.`,
         input: { ...argumentInput, rejected_arguments: args, validation_errors: ungroundedContent.map(item => ({ field: item.field, code: item.code })) },
       });
-      args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      args = compileGroundedArguments({
+        card,
+        intent: state.intent,
+        receipts: state.receipts,
+        args: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {},
+      });
       ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
-    }
-    if (card.authority === 'read' && searchableField && !text(args[searchableField]) && namedEntities.length === 1) {
-      args = { ...args, [searchableField]: namedEntities[0].name };
     }
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
@@ -1050,19 +990,12 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       const dependencyKey = unresolvedDependencyKey(requirements);
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
       if (Number(state.discoveryAttempts || 0) < 3 && !dependencyAttempted && shouldResolveDependency(state, requirements, relevantReads)) {
-        const dependencyRequirements = hasResolvableEntityFact(state)
-          ? requirements.filter(item => /(?:email|address|recipient|contact|person|assignee|owner|member|user|customer|company|account|destination)/i.test(String(item?.field || '')))
-          : requirements;
-        const fields = [...new Set(dependencyRequirements.map(item => humanizeField(item.field)))].join(', ');
-        const entityRoles = [...new Set((state.intent?.entities || []).map(entity => text(entity?.role, 80)).filter(Boolean))].join(', ');
-        const apps = (state.intent?.apps || []).join(', ');
-        const query = [
-          `Find a read or search capability that resolves ${fields || 'missing business information'}`,
-          entityRoles ? `for a named ${entityRoles}` : 'from authenticated evidence',
-          apps ? `inside the connected ${apps} account` : 'inside the connected account',
-          'using account data, directories, contacts, records, or prior activity before the requested mutation.',
-          'The capability must return the required value; do not return another mutation tool.',
-        ].join(' ');
+        const dependencyRequirements = resolvableSchemaRequirements({
+          intent: state.intent,
+          fieldValues: state.fieldValues,
+          requirements,
+        });
+        const query = dependencyDiscoveryQuery({ requirements: dependencyRequirements, intent: state.intent });
         const executionPlan = settlePlanNode(state.executionPlan, {
           nodeId: state.activePlanNodeId,
           toolSlug: card.slug,

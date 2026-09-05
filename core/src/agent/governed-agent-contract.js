@@ -140,6 +140,59 @@ export function outcomesCovered(state = {}) {
   return Array.isArray(state.intent?.outcomes) && state.intent.outcomes.length > 0 && !unresolved.length;
 }
 
+const FIELD_EQUIVALENTS = [
+  ['time', 'date', 'timestamp', 'datetime', 'created', 'updated', 'received', 'sent'],
+  ['sender', 'from', 'author', 'owner', 'creator'],
+  ['subject', 'title', 'name', 'headline'],
+  ['body', 'content', 'text', 'description', 'message', 'snippet'],
+  ['id', 'identifier', 'urn', 'url'],
+];
+
+const fieldTokens = value => normalized(value).split(/[^a-z0-9]+/).filter(Boolean);
+const equivalentField = (required, actual) => {
+  const wanted = fieldTokens(required);
+  const found = fieldTokens(actual);
+  if (wanted.some(token => found.includes(token)) || found.some(token => wanted.includes(token))) return true;
+  return FIELD_EQUIVALENTS.some(group => wanted.some(token => group.includes(token)) && found.some(token => group.includes(token)));
+};
+
+function recordFields(value, depth = 0, fields = []) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 3) return fields;
+  for (const [key, item] of Object.entries(value)) {
+    if (item !== undefined && item !== null && item !== '') fields.push(key);
+    if (item && typeof item === 'object' && !Array.isArray(item)) recordFields(item, depth + 1, fields);
+  }
+  return fields;
+}
+
+function evidenceCollections(value, depth = 0, collections = []) {
+  if (depth > 6 || value == null) return collections;
+  if (Array.isArray(value)) {
+    if (value.length && value.some(item => item && typeof item === 'object' && !Array.isArray(item))) collections.push(value);
+    for (const item of value.slice(0, 24)) evidenceCollections(item, depth + 1, collections);
+  } else if (typeof value === 'object') {
+    for (const item of Object.values(value).slice(0, 48)) evidenceCollections(item, depth + 1, collections);
+  }
+  return collections;
+}
+
+/** Validate business evidence, not provider success. This is deliberately
+ * connector-neutral: requirements come from the resolved outcome and fields
+ * are matched semantically across ordinary API naming conventions. */
+export function receiptSatisfiesEvidence(data, requirement = {}) {
+  const minimum = Math.max(1, Math.min(100, Number(requirement?.min_records) || 1));
+  const required = (Array.isArray(requirement?.required_fields) ? requirement.required_fields : [])
+    .map(value => asText(value, 80)).filter(Boolean).slice(0, 16);
+  const collections = evidenceCollections(data).sort((a, b) => b.length - a.length);
+  const records = collections.find(items => items.length >= minimum) || (minimum === 1 && data && typeof data === 'object' ? [data] : []);
+  if (records.length < minimum) return { ok: false, code: 'insufficient_record_count', observed_records: records.length, required_records: minimum };
+  const inspected = records.slice(0, minimum);
+  const missing = required.filter(field => inspected.some(record => !recordFields(record).some(actual => equivalentField(field, actual))));
+  return missing.length
+    ? { ok: false, code: 'required_evidence_fields_missing', missing_fields: missing, observed_records: records.length, required_records: minimum }
+    : { ok: true, code: 'evidence_contract_satisfied', observed_records: records.length, required_records: minimum };
+}
+
 export function normalizePlanCandidate(value = {}) {
   const action = GOVERNED_ACTIONS.includes(value?.action) ? value.action : null;
   return {
@@ -185,6 +238,8 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
     if (selected.authority !== 'read') return { ok: false, code: 'read_authority_denied', repair: 'A read action requires a discovered read capability.' };
     const failed = (state.receipts || []).some(row => row?.slug === selected.slug && row?.successful === false);
     if (failed) return { ok: false, code: 'failed_tool_repeat', repair: 'Do not retry the failed tool with unchanged facts; discover a materially different capability.' };
+    const insufficient = (state.receipts || []).some(row => row?.slug === selected.slug && row?.evidence_sufficient === false);
+    if (insufficient) return { ok: false, code: 'insufficient_tool_repeat', repair: 'This capability completed but did not satisfy the required evidence shape. Select a materially different discovered capability.' };
     const purpose = plan.purpose || 'outcome';
     const outcomeIds = purpose === 'prerequisite' ? [] : (plan.outcome_ids.length ? plan.outcome_ids : unresolved);
     const invalidOutcome = outcomeIds.find(id => state.intent?.outcomes?.find(outcome => outcome.id === id)?.kind === 'draft');
@@ -233,6 +288,15 @@ export function compactReceipt(row = {}) {
     summary: row.summary || safeReceiptSummary(row.data),
     error_code: row.error_code || null,
     draft_id: row.draft_id || null,
+    evidence_sufficient: row.evidence_sufficient !== false,
+    evidence_checks: Array.isArray(row.evidence_checks) ? row.evidence_checks.slice(0, 12).map(check => ({
+      id: check.id,
+      ok: check.ok === true,
+      code: check.code,
+      missing_fields: check.missing_fields,
+      observed_records: check.observed_records,
+      required_records: check.required_records,
+    })) : [],
   };
 }
 

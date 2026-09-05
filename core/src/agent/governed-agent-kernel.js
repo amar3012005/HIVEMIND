@@ -22,6 +22,7 @@ import {
   serializeKnownFacts,
   synthesisReceipt,
   renderStructuredReceiptEvidence,
+  receiptSatisfiesEvidence,
   validSynthesisResponse,
   verifyPlanCandidate,
 } from './governed-agent-contract.js';
@@ -126,6 +127,10 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
       if (stage === 'intent' && parsed.kind === 'read' && parsed.outcomes.some(item => item.kind === 'draft')) {
         throw new Error('A read-only request cannot contain draft outcomes. Summarizing, comparing, formatting, and answering from retrieved data are read outcomes. Draft means an external mutation requiring human approval.');
       }
+      if (stage === 'intent' && parsed.outcomes.some(item => item.kind !== 'draft' &&
+        (!item.evidence || !Number.isFinite(Number(item.evidence.min_records)) || !Array.isArray(item.evidence.required_fields)))) {
+        throw new Error('Every read outcome requires evidence.min_records as a number and evidence.required_fields as an array of business field names.');
+      }
       if (stage === 'synthesis' && (!validSynthesisResponse(parsed.response) || typeof parsed.complete !== 'boolean')) {
         throw new Error('Required: response as a nonempty Markdown string and complete as a boolean. Do not return an array in response.');
       }
@@ -143,6 +148,10 @@ function normalizedIntent(value, fallbackLocale = 'en') {
     id: text(outcome?.id || `outcome_${index + 1}`, 80),
     kind: outcome?.kind === 'draft' ? 'draft' : 'read',
     description: text(outcome?.description, 600),
+    evidence: outcome?.kind === 'draft' ? null : {
+      min_records: Math.max(1, Math.min(100, Number(outcome?.evidence?.min_records) || 1)),
+      required_fields: unique(outcome?.evidence?.required_fields || []).slice(0, 16),
+    },
   })).filter(outcome => outcome.description);
   const kind = value?.kind === 'write' ? 'write' : 'read';
   const knownFacts = value?.known_facts && typeof value.known_facts === 'object' && !Array.isArray(value.known_facts)
@@ -465,7 +474,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,business_question?:string}. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,business_question?:string}. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
       input: { message, connected: state.connected, conversation_context: state.conversationContext, prior_conversation_evidence: state.referenceEvidence, resolved_reference: state.resolvedReference },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
@@ -730,6 +739,12 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         allowDirectFallback: false,
       }))[0];
     const successful = receipt?.successful === true;
+    const proposedOutcomeIds = state.decision?.purpose === 'outcome' ? (state.decision.outcome_ids || outcomeIds(state)) : [];
+    const evidenceChecks = proposedOutcomeIds.map(id => {
+      const outcome = state.intent?.outcomes?.find(item => item.id === id);
+      return { id, ...receiptSatisfiesEvidence(receipt?.data, outcome?.evidence) };
+    });
+    const evidenceSufficient = successful && evidenceChecks.every(check => check.ok);
     const row = {
       slug: card.slug,
       source: card.source,
@@ -737,12 +752,16 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       data: projectGovernedEvidence(receipt?.data, 24000),
       error_code: successful ? null : 'provider_read_failed',
       summary: successful ? safeReceiptSummary(receipt?.data) : text(receipt?.error || 'Provider read failed', 300),
-      outcome_ids: state.decision?.purpose === 'outcome' ? (state.decision.outcome_ids || outcomeIds(state)) : [],
+      outcome_ids: evidenceSufficient ? proposedOutcomeIds : [],
+      evidence_sufficient: evidenceSufficient,
+      evidence_checks: evidenceChecks,
     };
     const receipts = [...(state.receipts || []), row];
     const steps = [...(state.steps || []), { kind: 'read', slug: card.slug, status: successful ? 'completed' : 'error', summary: row.summary }];
-    const patch = await transition(state, successful ? 'tool_executed' : 'tool_failed', { receipts, steps, toolArgs: null, decision: null },
-      { reason_code: successful ? 'read_receipt' : 'read_failure', tool_slug: card.slug });
+    const patch = await transition(state, successful ? 'tool_executed' : 'tool_failed', {
+      receipts, steps, toolArgs: null, decision: null,
+      planRepair: successful && !evidenceSufficient ? 'The provider operation succeeded but did not satisfy the outcome evidence contract. Select a materially different capability that returns the missing record count and fields.' : null,
+    }, { reason_code: successful ? (evidenceSufficient ? 'read_receipt' : 'read_evidence_insufficient') : 'read_failure', tool_slug: card.slug });
     await persist(state, patch);
     onEvent({ type: 'tool_result', name: card.slug, status: successful ? 'completed' : 'error', run_id: state.runId, summary: row.summary });
     return patch;

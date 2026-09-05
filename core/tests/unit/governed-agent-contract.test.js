@@ -7,6 +7,7 @@ import {
   capabilityAuthority,
   missingRequiredFields,
   renderStructuredReceiptEvidence,
+  receiptSatisfiesEvidence,
   synthesisReceipt,
   validSynthesisResponse,
   verifyPlanCandidate,
@@ -121,6 +122,8 @@ test('synthesis receives successful structured evidence while the durable ledger
     summary: 'Provider operation completed',
     error_code: null,
     draft_id: null,
+    evidence_sufficient: true,
+    evidence_checks: [],
     data: receipt.data,
   });
   assert.equal(synthesisReceipt({ ...receipt, successful: false }).data, null);
@@ -136,6 +139,21 @@ test('structured receipt fallback renders records and rejects object coercion', 
   assert.equal(validSynthesisResponse([{ subject: 'First' }]), null);
   assert.equal(validSynthesisResponse('[object Object]'), null);
   assert.equal(validSynthesisResponse('First returned item'), 'First returned item');
+});
+
+test('provider success does not satisfy an unmet generic evidence contract', () => {
+  const requirement = { min_records: 5, required_fields: ['subject', 'sender', 'time'] };
+  const threadReceipt = { threads: Array.from({ length: 5 }, (_, index) => ({ id: String(index), title: `Thread ${index}` })) };
+  const emailReceipt = { records: Array.from({ length: 5 }, (_, index) => ({
+    subject: `Subject ${index}`, from: `sender-${index}`, received_at: `2026-09-05T10:0${index}:00Z`,
+  })) };
+  assert.deepEqual(receiptSatisfiesEvidence(threadReceipt, requirement), {
+    ok: false, code: 'required_evidence_fields_missing', missing_fields: ['sender', 'time'], observed_records: 5, required_records: 5,
+  });
+  assert.deepEqual(receiptSatisfiesEvidence(emailReceipt, requirement), {
+    ok: true, code: 'evidence_contract_satisfied', observed_records: 5, required_records: 5,
+  });
+  assert.equal(receiptSatisfiesEvidence({ records: emailReceipt.records.slice(0, 2) }, requirement).code, 'insufficient_record_count');
 });
 
 test('five large records survive executor and model projections with Markdown intact', () => {

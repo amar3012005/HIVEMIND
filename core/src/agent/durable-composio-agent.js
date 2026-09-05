@@ -223,6 +223,17 @@ export function emailsFromProviderData(data) {
   return [...found];
 }
 
+export function unsupportedDraftDestinations(args, message, receipts = []) {
+  const raw = JSON.stringify(args || {});
+  const destinations = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  if (!destinations.length) return [];
+  const supported = new Set([
+    ...emailsFromProviderData(message),
+    ...receipts.flatMap(receipt => emailsFromProviderData(receipt?.data)),
+  ].map(email => email.toLowerCase()));
+  return [...new Set(destinations.map(email => email.toLowerCase()))].filter(email => !supported.has(email));
+}
+
 export function pickRecipientEmail(emails = [], person = '') {
   const list = [...new Set((emails || []).map((email) => String(email).toLowerCase()))];
   const needle = String(person || '').toLowerCase();
@@ -1492,6 +1503,15 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       }
       const argsHash = createHash('sha256').update(JSON.stringify(Object.fromEntries(Object.entries(args).sort(([a], [b]) => a.localeCompare(b))))).digest('hex');
       if (reads.some(r => r.slug === next.slug && r.argsHash === argsHash)) throw new Error('Repeated completed or failed step requires replanning');
+      if (next.action === 'draft') {
+        const unsupportedDestinations = unsupportedDraftDestinations(args, run.goal || message, reads);
+        if (unsupportedDestinations.length) {
+          run.scratch.argument_feedback = { slug: card.slug, missing_fields: ['recipient_destination'],
+            reason: 'A write destination must come from explicit user input or a successful provider receipt. Resolve the named destination with an available read capability; never use placeholder or invented addresses.' };
+          await persist();
+          continue;
+        }
+      }
       checkCancelled();
       run.scratch.lease = { owner: leaseOwner, until: Date.now() + DURABLE_LEASE_MS };
       await persist();

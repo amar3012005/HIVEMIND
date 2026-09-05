@@ -13,6 +13,7 @@ import {
   conversationKey,
   draftSubject,
   emailsFromProviderData,
+  unsupportedDraftDestinations,
   fallbackNextDurableAction,
   getOrCreateAgentRun,
   governNextAction,
@@ -1497,4 +1498,12 @@ test('emailsFromProviderData ignores example.com placeholders', () => {
     emailsFromProviderData({ from: 'Rama <rama@x.dev>', extra: 'x@example.com' }),
     ['rama@x.dev'],
   );
+});
+
+test('draft destinations require explicit input or successful provider evidence', () => {
+  assert.deepEqual(unsupportedDraftDestinations({ to: 'rama@example.com' }, 'Email Rama', []), ['rama@example.com']);
+  assert.deepEqual(unsupportedDraftDestinations({ to: 'rama@company.dev' }, 'Email Rama', [
+    { data: { person: { email: 'rama@company.dev' } } },
+  ]), []);
+  assert.deepEqual(unsupportedDraftDestinations({ to: 'rama@company.dev' }, 'Email rama@company.dev', []), []);
 });

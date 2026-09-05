@@ -389,6 +389,25 @@ function ungroundedIdentifiers(state, args) {
   return sensitiveIdentifierValues(args).filter(item => !evidence.includes(item.value.toLowerCase()));
 }
 
+function resolvedNamedEntityEmail(state) {
+  const names = (state.intent?.entities || []).map(entity => text(entity?.name, 160).toLowerCase()).filter(Boolean);
+  if (names.length !== 1) return null;
+  const matches = new Set();
+  const emailPattern = /[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+/g;
+  const visit = (value, depth = 0) => {
+    if (!value || depth > 10) return;
+    if (Array.isArray(value)) return value.slice(0, 50).forEach(item => visit(item, depth + 1));
+    if (typeof value !== 'object') return;
+    const serialized = JSON.stringify(value);
+    if (names.some(name => serialized.toLowerCase().includes(name))) {
+      for (const address of serialized.match(emailPattern) || []) matches.add(address.replace(/[),.;]+$/, ''));
+    }
+    for (const item of Object.values(value)) visit(item, depth + 1);
+  };
+  for (const receipt of state.receipts || []) if (receipt?.successful) visit(receipt.data);
+  return matches.size === 1 ? [...matches][0] : null;
+}
+
 const meaningfulTokens = value => new Set(String(value || '').toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) || []);
 
 function ungroundedReferencedContent(state, args, schema = {}) {
@@ -963,6 +982,15 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       .find(field => /^(?:query|search_query|search_term|term|name)$/i.test(String(field)));
     if (card.authority === 'read' && searchableField && !text(args[searchableField]) && namedEntities.length === 1) {
       args = { ...args, [searchableField]: namedEntities[0].name };
+    }
+    if (card.authority === 'write') {
+      const resolvedEmail = resolvedNamedEntityEmail(state);
+      if (resolvedEmail) {
+        for (const [field, definition] of Object.entries(card.schema?.properties || {})) {
+          const emailField = definition?.format === 'email' || /(?:^|_)(?:email|address|recipient)(?:$|_)/i.test(field);
+          if (emailField && !text(args[field])) args = { ...args, [field]: resolvedEmail };
+        }
+      }
     }
     let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
     if (ungroundedContent.length) {

@@ -841,7 +841,7 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       connected,
       executionPlan,
       pendingInput: null,
-      connectionRequest: null,
+      connectionRequest: actualState === 'connected' ? null : { toolkit },
       decision: null,
     }, { reason_code: actualState === 'connected' ? 'connection_resumed' : 'connection_still_required' });
     await persist(state, patch);

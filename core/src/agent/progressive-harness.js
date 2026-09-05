@@ -68,7 +68,7 @@ async function decide(system, data, generateImpl, useCase, signal) {
   const response = await chatCompletionFetch(process.env.PROGRESSIVE_HARNESS_MODEL || DEFAULT_HQ_DISPATCH_MODEL, {
     method: 'POST',
     signal,
-    body: JSON.stringify({ temperature: 0, max_tokens: 1800, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages: [
+    body: JSON.stringify({ temperature: 0, max_tokens: 1800, reasoning_effort: 'none', response_format: { type: 'json_object' }, messages: [
       { role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) },
     ] }),
   }, { useCase });

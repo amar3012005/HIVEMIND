@@ -34,7 +34,7 @@ This change reuses existing persisted runs, continuations and transport events. 
 
 ## Verification and rollout
 
-The progressive harness uses `openai/gpt-oss-20b:nitro` with low reasoning effort for intent, action planning, semantic argument review and schema argument generation. This is one model policy for the governed turn, rather than a provider-specific special case or a separate agent runtime.
+The progressive harness uses `openai/gpt-oss-20b:nitro` with reasoning disabled for intent, action planning, semantic argument review and schema argument generation. Deterministic schema, authority and receipt checks remain in Core. This is one model policy for the governed turn, rather than a provider-specific special case or a separate agent runtime.
 
 Run the focused helper, runtime, continuation and PostgreSQL integration suites before promotion. The PostgreSQL test uses isolated local state and injected providers; it is not proof of a live Composio action. Frontend verification includes semantic Markdown/security tests and the canonical Cloudflare production build.
 

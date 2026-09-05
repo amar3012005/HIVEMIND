@@ -14,7 +14,7 @@ This upgrades the existing runtime behind a default-off tenant gate. It does not
 
 ## Model policy
 
-The progressive durable turn uses one model: `openai/gpt-oss-20b:nitro`, at low reasoning effort, for intent, action selection, semantic argument validation and schema argument generation. Gemini and DeepSeek are not progressive-harness fallbacks.
+The progressive durable turn uses one model: `openai/gpt-oss-20b:nitro`, with reasoning disabled, for intent, action selection, semantic argument validation and schema argument generation. Gemini and DeepSeek are not progressive-harness fallbacks.
 
 ## Verification
 

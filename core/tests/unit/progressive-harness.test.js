@@ -254,6 +254,14 @@ test('invalid fast-model action gets one bounded contract repair', async () => {
   assert.equal(calls, 2);
 });
 
+test('receipt action ignores irrelevant malformed clarification fields', async () => {
+  const action = await chooseProgressiveAction({ observation: { intent: { outcomes: [{ id: 'mail', kind: 'read' }] },
+    remaining_outcomes: [{ id: 'mail', kind: 'read' }] }, generateImpl: async () => ({ action: 'execute', slug: 'MAIL_LIST',
+    outcome_ids: ['mail'], reason: 'Read mail', fields: { irrelevant: true } }) });
+  assert.equal(action.action, 'execute');
+  assert.equal(Object.hasOwn(action, 'fields'), false);
+});
+
 test('connected account permission clarification is corrected to capability use', async () => {
   const observation = { connected: ['mail'], intent: { apps: ['mail'], outcomes: [{ id: 'mail', kind: 'read' }] },
     remaining_outcomes: [{ id: 'mail', kind: 'read' }], capabilities: [{ slug: 'MAIL_LIST', authority: 'read' }] };

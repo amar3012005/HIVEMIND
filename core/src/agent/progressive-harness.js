@@ -272,7 +272,7 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
     ...(producesReceipt && raw.outcome_ids ? { outcome_ids: [...raw.outcome_ids] } : {}),
     ...(raw.toolkit ? { toolkit: clip(raw.toolkit, 80) } : {}),
     ...(raw.query ? { query: clip(raw.query, 500) } : {}), ...(raw.question ? { question: clip(raw.question, 1000) } : {}),
-    ...(raw.fields ? { fields: raw.fields.slice(0, 12).map(f => clip(f, 100)) } : {}) };
+    ...(raw.action === 'ask_user' ? { fields: raw.fields.slice(0, 12).map(f => clip(f, 100)) } : {}) };
 }
 
 export async function reviewProgressiveArguments({ observation, generateImpl, signal } = {}) {

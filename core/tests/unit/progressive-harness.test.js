@@ -163,6 +163,19 @@ test('intent defaults omitted empty metadata without weakening typed outcomes', 
   assert.equal(result.context_question, '');
 });
 
+test('valid JSON with an invalid intent contract gets one semantic repair', async () => {
+  let calls = 0;
+  const intent = await resolveHarnessIntent({ message: 'Find the latest record', generateImpl: async input => {
+    if (++calls === 1) return { kind: 'lookup', apps: ['records'], use_case: '', outcomes: [] };
+    assert.ok(input.previous_invalid_output);
+    return { kind: 'lookup', apps: ['records'], person: '', subject_scope: 'authenticated_user',
+      use_case: 'retrieve latest record', known_fields: '', language: 'en', needs_memory: false,
+      unresolved_context: false, context_question: '', outcomes: [{ id: 'record', description: 'Retrieve latest record', kind: 'read' }] };
+  } });
+  assert.equal(intent.outcomes[0].id, 'record');
+  assert.equal(calls, 2);
+});
+
 test('typed outcomes cannot be absent, duplicated or hide a write in a lookup', async () => {
   const intent = { kind: 'lookup', apps: [], person: '', use_case: 'read records', known_fields: '', language: 'en', needs_memory: false };
   for (const outcomes of [undefined, [], [{ id: 'one', kind: 'draft', description: 'write' }],

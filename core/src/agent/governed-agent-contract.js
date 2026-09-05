@@ -250,3 +250,65 @@ export function synthesisReceipt(row = {}) {
     data: row?.successful === true && row.data !== undefined ? row.data : null,
   };
 }
+
+function markdownCell(value) {
+  return asText(value, 280).replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+}
+
+function flattenEvidenceRecord(value, prefix = '', depth = 0, target = {}) {
+  if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    if (prefix) target[prefix] = markdownCell(value);
+    return target;
+  }
+  if (Array.isArray(value)) {
+    if (value.every(item => item == null || ['string', 'number', 'boolean'].includes(typeof item))) {
+      if (prefix) target[prefix] = markdownCell(value.filter(item => item != null).join(', '));
+      return target;
+    }
+    if (prefix) target[prefix] = markdownCell(JSON.stringify(value).slice(0, 260));
+    return target;
+  }
+  if (typeof value !== 'object' || depth >= 2) {
+    if (prefix) target[prefix] = markdownCell(JSON.stringify(value).slice(0, 260));
+    return target;
+  }
+  for (const [key, item] of Object.entries(value).slice(0, 16)) {
+    flattenEvidenceRecord(item, prefix ? `${prefix}.${key}` : key, depth + 1, target);
+  }
+  return target;
+}
+
+function evidenceRows(data) {
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== 'object') return [data];
+  const firstCollection = Object.values(data).find(value => Array.isArray(value) && value.length);
+  return firstCollection || [data];
+}
+
+/**
+ * Last-resort authenticated presentation for a successful structured read.
+ * This is intentionally provider-neutral: it prevents malformed model output
+ * from turning valid evidence into JavaScript object coercions while keeping
+ * normal answer style model-driven.
+ */
+export function renderStructuredReceiptEvidence(receipts = {}) {
+  const sections = [];
+  for (const receipt of (Array.isArray(receipts) ? receipts : []).filter(row => row?.successful && row.data != null).slice(0, 4)) {
+    const rows = evidenceRows(receipt.data).slice(0, 12).map(row => flattenEvidenceRecord(row));
+    const columns = [...new Set(rows.flatMap(row => Object.keys(row)))].slice(0, 8);
+    if (!columns.length) {
+      sections.push(`Results from ${receipt.slug}:\n\n${markdownCell(JSON.stringify(receipt.data).slice(0, 1200))}`);
+      continue;
+    }
+    const header = `| ${columns.join(' | ')} |`;
+    const divider = `| ${columns.map(() => '---').join(' | ')} |`;
+    const body = rows.map(row => `| ${columns.map(column => row[column] || '—').join(' | ')} |`).join('\n');
+    sections.push(`Results from ${receipt.slug}:\n\n${header}\n${divider}\n${body}`);
+  }
+  return sections.join('\n\n');
+}
+
+export function validSynthesisResponse(value) {
+  const response = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  return response && !/\[object Object\]/i.test(response) ? response.slice(0, 5000) : null;
+}

@@ -4,7 +4,9 @@ import { MemorySaver } from '@langchain/langgraph';
 import {
   capabilityAuthority,
   missingRequiredFields,
+  renderStructuredReceiptEvidence,
   synthesisReceipt,
+  validSynthesisResponse,
   verifyPlanCandidate,
 } from '../../src/agent/governed-agent-contract.js';
 import { GovernedAgentEventLedger } from '../../src/agent/governed-agent-event-ledger.js';
@@ -109,6 +111,18 @@ test('synthesis receives successful structured evidence while the durable ledger
     data: receipt.data,
   });
   assert.equal(synthesisReceipt({ ...receipt, successful: false }).data, null);
+});
+
+test('structured receipt fallback renders records and rejects object coercion', () => {
+  const rendered = renderStructuredReceiptEvidence([{
+    slug: 'ANY_PROVIDER_LIST_ITEMS', successful: true,
+    data: { items: [{ subject: 'First', sender: 'Ada', received_at: '2026-09-05T17:00:00Z' }] },
+  }]);
+  assert.match(rendered, /\| subject \| sender \| received_at \|/);
+  assert.match(rendered, /\| First \| Ada \| 2026-09-05T17:00:00Z \|/);
+  assert.equal(validSynthesisResponse([{ subject: 'First' }]), null);
+  assert.equal(validSynthesisResponse('[object Object]'), null);
+  assert.equal(validSynthesisResponse('First returned item'), 'First returned item');
 });
 
 test('verifier rejects a write selected as a read and premature clarification', () => {

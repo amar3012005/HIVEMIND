@@ -20,6 +20,8 @@ import {
   safeReceiptSummary,
   serializeKnownFacts,
   synthesisReceipt,
+  renderStructuredReceiptEvidence,
+  validSynthesisResponse,
   verifyPlanCandidate,
 } from './governed-agent-contract.js';
 import { GovernedAgentEventLedger, safeEventEnvelope } from './governed-agent-event-ledger.js';
@@ -871,7 +873,8 @@ Return the argument object itself. Never use schema examples, fabricate identifi
   });
 
   const synthNode = async state => trace('final_synthesis', { locale: state.locale }, async () => {
-    const raw = await jsonDecision({
+    const synthesisInput = { message, intent: state.intent, receipts: (state.receipts || []).map(synthesisReceipt), steps: state.steps, capability_gap: state.capabilityGap };
+    let raw = await jsonDecision({
       ctx,
       stage: 'synthesis',
       signal: ctx._signal,
@@ -879,9 +882,20 @@ Return the argument object itself. Never use schema examples, fabricate identifi
 Contract: {response:string}. Use only successful receipts. State a genuine capability gap plainly. Do not expose provider schema fields or identifiers.
 
 When a successful receipt includes structured data, render the requested facts from that data directly. Do not say that you can retrieve, show, or access results without actually presenting the returned evidence.`,
-      input: { message, intent: state.intent, receipts: (state.receipts || []).map(synthesisReceipt), steps: state.steps, capability_gap: state.capabilityGap },
+      input: synthesisInput,
     });
-    const summary = text(raw?.response || (state.capabilityGap ? capabilityGapQuestion() : 'I could not complete the request from available evidence.'), 5000);
+    let summary = validSynthesisResponse(raw?.response);
+    if (!summary) {
+      raw = await jsonDecision({
+        ctx,
+        stage: 'synthesis',
+        signal: ctx._signal,
+        system: `Repair the final response in ${state.locale}. Return exactly {"response":string}; response must be a non-empty plain string, never an array or object. Render the successful receipt data for the user.`,
+        input: synthesisInput,
+      });
+      summary = validSynthesisResponse(raw?.response);
+    }
+    summary = summary || renderStructuredReceiptEvidence(state.receipts) || (state.capabilityGap ? capabilityGapQuestion() : 'I could not complete the request from available evidence.');
     const status = state.pendingApprovalId ? 'pending' : 'completed';
     const result = resultShape(state, summary, status);
     const patch = await transition(state, status === 'completed' ? 'completed' : 'awaiting_approval', { result }, { reason_code: 'synthesis_complete' });

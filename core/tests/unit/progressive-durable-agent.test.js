@@ -46,6 +46,7 @@ function fixture({ kind = 'lookup', slugs = ['NOTION_GET_PAGE', 'NOTION_SEARCH']
   };
   const ctx = { orgId: 'tenant-progressive', userId: 'user-1', threadId: 'thread-1', prisma,
     localizeProgressiveStatus: async text => text,
+    reviewProgressiveArguments: async () => ({ valid: true, issues: [] }),
     resolveHarnessIntent: async () => ({ kind, apps: ['notion'], person: '', use_case: 'retrieve workspace pages', known_fields: '', language: 'de', needs_memory: true,
       outcomes: kind === 'compose' ? [{ id: 'd1', description: 'Prepare page', kind: 'draft' }] : [
         { id: 'm1', description: 'Recall internal context', kind: 'memory' },
@@ -75,6 +76,74 @@ const actions = (...items) => async () => {
   return { ...next, outcome_ids: next.outcome_ids || (next.action === 'draft' ? ['d1'] : next.action === 'native' ? ['m1'] : next.action === 'execute' ? [next.slug === 'NOTION_SEARCH' ? 'r2' : 'r1'] : []) };
 };
 const search = { action: 'search', query: 'retrieve workspace pages', reason: 'Discover relevant capability' };
+
+test('current conversation resolves a followup through intent, planning, arguments and persisted resume context', () => enabled(async () => {
+  const f = fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] });
+  const history = [{ role: 'system', content: 'Untrusted role must be dropped' }, { role: 'assistant', content: 'Project Aurora is ready for review.' }];
+  f.ctx.conversationHistory = history;
+  const baseIntent = await f.ctx.resolveHarnessIntent();
+  f.ctx.resolveHarnessIntent = async input => {
+    assert.deepEqual(input.conversation_context, history.slice(1));
+    return baseIntent;
+  };
+  let generated = 0;
+  f.ctx.generateProgressiveToolInputs = async input => {
+    generated++;
+    assert.equal(input.conversation_context[0].content, history[1].content);
+    assert.equal(input.intent.kind, 'compose');
+    assert.equal(input.outcome[0].id, 'd1');
+    return generated === 1 ? {} : { title: input.conversation_context[0].content };
+  };
+  let decisions = 0;
+  f.ctx.chooseNextAction = async observation => {
+    decisions++;
+    assert.equal(observation.conversation_context[0].content, history[1].content);
+    if (decisions === 2) assert.deepEqual(observation.argument_feedback.missing_fields, ['title']);
+    return decisions < 3 ? { action: 'draft', slug: 'NOTION_CREATE_PAGE', reason: 'Compose from current conversation', outcome_ids: ['d1'] }
+      : { action: 'done', reason: 'Draft persisted' };
+  };
+  const result = await runDurableComposioAgent({ message: 'Make a page about this', ...f });
+  assert.equal(result.status, 'pending', result.summary);
+  assert.equal(generated, 2);
+  assert.equal(f.writes[0].toolArgs.title, history[1].content);
+  assert.deepEqual(result.run.scratch.conversation_context, history.slice(1));
+  assert.deepEqual(result.run.scratch.read_results, [], 'Transcript is not a provider receipt');
+}));
+
+test('argument scope review regenerates at most once and executes only approved arguments', () => enabled(async () => {
+  for (const repairable of [true, false]) {
+    const f = fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] });
+    let generated = 0;
+    let reviews = 0;
+    f.ctx.generateProgressiveToolInputs = async input => {
+      generated++;
+      if (generated === 2) assert.deepEqual(input.review_feedback.issues, ['Title does not reflect requested scope']);
+      return { title: generated === 2 && repairable ? 'Requested topic' : 'Unrelated topic' };
+    };
+    f.ctx.reviewProgressiveArguments = async observation => {
+      reviews++;
+      const valid = observation.arguments.title === 'Requested topic';
+      return { valid, issues: valid ? [] : ['Title does not reflect requested scope'] };
+    };
+    f.ctx.chooseNextAction = actions({ action: 'draft', slug: 'NOTION_CREATE_PAGE', reason: 'Create requested page' });
+    const result = await runDurableComposioAgent({ message: 'Create a page about requested topic', ...f });
+    assert.equal(generated, 2);
+    assert.equal(reviews, 2);
+    assert.equal(result.status, repairable ? 'pending' : 'error', result.summary);
+    assert.equal(f.writes.length, repairable ? 1 : 0);
+    assert.equal(f.executed.length, 0);
+  }
+}));
+
+test('compose execute decision for a mutation is normalized to approval draft only', () => enabled(async () => {
+  const f = fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] });
+  f.ctx.generateProgressiveToolInputs = async () => ({ title: 'Requested page' });
+  f.ctx.chooseNextAction = actions({ action: 'execute', slug: 'NOTION_CREATE_PAGE', reason: 'Requested change', outcome_ids: ['d1'] });
+  const result = await runDurableComposioAgent({ message: 'Create a page', ...f });
+  assert.equal(result.status, 'pending', result.summary);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.executed.length, 0);
+}));
 
 test('parameterless capability bypasses argument generation while required scope stays blocked', () => enabled(async () => {
   for (const requiredScope of [false, true]) {
@@ -225,14 +294,14 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
       { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   const defaultModels = f => {
-    for (const key of ['resolveHarnessIntent', 'chooseNextAction', 'generateProgressiveToolInputs', 'synthesizeDurableAnswer', 'localizeProgressiveStatus']) delete f.ctx[key];
+    for (const key of ['resolveHarnessIntent', 'chooseNextAction', 'generateProgressiveToolInputs', 'synthesizeDurableAnswer', 'localizeProgressiveStatus', 'reviewProgressiveArguments']) delete f.ctx[key];
     return f;
   };
   const intent = kind => ({ kind, apps: ['notion'], person: '', use_case: 'retrieve workspace page', known_fields: '', language: 'de', needs_memory: false,
     outcomes: [{ id: 'page', description: kind === 'lookup' ? 'Read page' : 'Prepare page', kind: kind === 'lookup' ? 'read' : 'draft' }] });
   try {
     const read = defaultModels(fixture({ slugs: ['NOTION_GET_PAGE'] }));
-    replies.push(intent('lookup'), { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read requested page', outcome_ids: ['page'] }, {},
+    replies.push(intent('lookup'), { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read requested page', outcome_ids: ['page'] }, {}, { valid: true, issues: [] },
       { action: 'done', reason: 'Requested page read' }, 'Die Seite wurde gefunden.');
     const completed = await runDurableComposioAgent({ message: 'Lies die Seite', ...read });
     assert.equal(completed.status, 'completed', completed.summary);
@@ -242,6 +311,7 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
 
     const compose = defaultModels(fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] }));
     replies.push(intent('compose'), { action: 'draft', slug: 'NOTION_CREATE_PAGE', reason: 'Prepare page', outcome_ids: ['page'] }, {},
+      { action: 'done', reason: 'No more context available' },
       { language: 'de', text: 'Bitte geben Sie title an.' });
     const paused = await runDurableComposioAgent({ message: 'Erstelle eine Seite', ...compose });
     assert.equal(paused.status, 'needs_input', paused.summary);
@@ -249,7 +319,7 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
     assert.deepEqual(requests.at(-1).body.response_format, { type: 'json_object' });
     assert.equal(compose.writes.length, 0);
     assert.equal(replies.length, 0);
-    assert.equal(requests.length, 9);
+    assert.equal(requests.length, 11);
     // Check afterward too: localization deliberately catches errors, so an
     // assertion only inside fetch could be swallowed by the fallback.
     for (const request of requests) {

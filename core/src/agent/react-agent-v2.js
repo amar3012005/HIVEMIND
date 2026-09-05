@@ -3546,6 +3546,7 @@ export async function runReactAgentV2({
           ctx: {
             ...ctx,
             language,
+            conversationHistory: history,
             composioCallbackOrigin: ctx.composioCallbackOrigin || process.env.HIVEMIND_FRONTEND_URL || undefined,
           },
           onEvent,
@@ -3556,6 +3557,7 @@ export async function runReactAgentV2({
           const { createChatContinuation } = await import('./chat-continuation-store.js');
           const stored = await createChatContinuation({
             userId: ctx.userId, orgId: ctx.orgId, message, language,
+            conversationHistory: durable.run?.scratch?.conversation_context || [],
             threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
             resumeState: durable.resumeState,
           }, {
@@ -3658,11 +3660,13 @@ export async function runReactAgentV2({
           step_id: 'step-1',
         };
         const { createChatContinuation } = await import('./chat-continuation-store.js');
+        const { buildProgressiveConversationContext } = await import('./progressive-harness.js');
         const stored = await createChatContinuation({
           userId: ctx.userId,
           orgId: ctx.orgId,
           message,
           language,
+          conversationHistory: buildProgressiveConversationContext(history),
           threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
           resumeState: {
             kind: 'enable_tools',

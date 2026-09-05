@@ -24,6 +24,8 @@ test('initial response exposes presentation marker and execution receipt metadat
   assert.match(helper, /run_id: durable\.run\?\.id/);
   assert.match(helper, /threadId: ctx\.threadId \|\| ctx\.conversationId \|\| ctx\._conversationId \|\| null/);
   assert.match(helper, /\.\.\.ctx,\s+language,/);
+  assert.match(helper, /conversationHistory: history/);
+  assert.match(helper, /conversationHistory: durable\.run\?\.scratch\?\.conversation_context \|\| \[\]/);
 });
 
 test('both durable continuation branches retain locale, thread identity and response marker', () => {
@@ -32,6 +34,8 @@ test('both durable continuation branches retain locale, thread identity and resp
   const end = server.indexOf("const { runCompoundOrchestrator }", durable);
   for (const section of [server.slice(enable, durable), server.slice(durable, end)]) {
     assert.match(section, /language: stored\.language/);
+    assert.match(section, /conversationHistory: stored\.conversationHistory \|\| \[\]/);
+    assert.match(section, /conversationHistory: durable\.run\?\.scratch\?\.conversation_context \|\| stored\.conversationHistory \|\| \[\]/);
     assert.equal((section.match(/threadId: body\?\.thread_id \|\| body\?\.conversation_id \|\| stored\.threadId \|\| null/g) || []).length, 2);
     assert.equal((section.match(/harness_version: durable\.run\?\.scratch\?\.harness_version/g) || []).length, 2);
     assert.match(section, /execution: \{[\s\S]*status: durable\.status/);

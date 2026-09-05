@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isProgressiveHarnessEnabled, resolveHarnessIntent, chooseProgressiveAction,
-  boundedEvidence, buildProgressiveSynthesisMessages, PROGRESSIVE_PROMPT_BUDGETS } from '../../src/agent/progressive-harness.js';
+  boundedEvidence, buildProgressiveSynthesisMessages, PROGRESSIVE_PROMPT_BUDGETS,
+  buildProgressiveConversationContext, reviewProgressiveArguments } from '../../src/agent/progressive-harness.js';
 
 test('flag requires literal true and an explicitly allowed tenant', () => {
   const env = { USE_TOOLS_PROGRESSIVE_HARNESS: 'true', USE_TOOLS_PROGRESSIVE_HARNESS_ORGS: 'org-a, org-b' };
@@ -23,6 +24,7 @@ test('default intent and action planners use valid POST requests through the rea
     { kind: 'lookup', apps: [], person: '', use_case: 'recall project context', known_fields: '', language: 'de', needs_memory: true,
       outcomes: [{ id: 'context', description: 'Recall project context', kind: 'memory' }] },
     { action: 'native', slug: 'HIVEMIND_RECALL', reason: 'Retrieve context', outcome_ids: ['context'] },
+    { valid: true, issues: [] },
   ];
   let calls = 0;
   globalThis.fetch = async (url, init) => {
@@ -34,6 +36,7 @@ test('default intent and action planners use valid POST requests through the rea
     const body = await request.json();
     assert.equal(body.model, 'google/gemini-2.5-flash-lite');
     assert.equal(body.messages[0].role, 'system');
+    if (calls === 0) assert.match(body.messages[0].content, /clarification questions are internal steps, not additional outcomes/);
     assert.doesNotThrow(() => JSON.parse(body.messages[1].content));
     return Response.json({ choices: [{ message: { content: JSON.stringify(replies[calls++]) } }] });
   };
@@ -42,12 +45,55 @@ test('default intent and action planners use valid POST requests through the rea
     const action = await chooseProgressiveAction({ observation: { intent, capabilities: [], receipts: [] } });
     assert.equal(action.action, 'native');
     assert.deepEqual(action.outcome_ids, ['context']);
-    assert.equal(calls, 2);
+    assert.deepEqual(await reviewProgressiveArguments({ observation: { message: 'Recall context', args: { query: 'project' } } }), { valid: true, issues: [] });
+    assert.equal(calls, 3);
   } finally {
     globalThis.fetch = previousFetch;
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
     }
+  }
+});
+
+test('conversation context keeps bounded recent user and assistant turns in order', () => {
+  const history = [{ role: 'system', content: 'never include' }, ...Array.from({ length: 9 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `turn-${index} ` + '"'.repeat(1600) })),
+    { role: 'tool', content: 'never include tool' }, { role: 'assistant', content: [{ text: 'not a string' }] }];
+  const result = buildProgressiveConversationContext(history);
+  assert.ok(result.length <= 6);
+  assert.ok(JSON.stringify(result).length <= 4000);
+  assert.ok(result.every(turn => turn.content.length <= 1200 && ['user', 'assistant'].includes(turn.role)));
+  assert.match(result.at(-1).content, /^turn-8/);
+  const indices = result.map(turn => Number(turn.content.match(/^turn-(\d)/)[1]));
+  assert.deepEqual(indices, [...indices].sort((a, b) => a - b));
+});
+
+test('intent and synthesis receive conversation evidence independently', async () => {
+  const conversationContext = [{ role: 'assistant', content: 'Prior report describes the project status.' }];
+  await resolveHarnessIntent({ message: 'Share this', conversationContext, generateImpl: async observation => {
+    assert.deepEqual(observation.conversation_context, conversationContext);
+    return { kind: 'compose', apps: [], person: '', use_case: 'prepare status update', known_fields: '', language: 'en', needs_memory: false,
+      outcomes: [{ id: 'draft', description: 'Share report', kind: 'draft' }] };
+  } });
+  const messages = buildProgressiveSynthesisMessages({ message: '"'.repeat(4000), conversationContext,
+    reads: Array.from({ length: 30 }, () => ({ data: 'x'.repeat(10000) })), recallText: 'Native evidence',
+    steps: Array.from({ length: 30 }, () => ({ data: 'y'.repeat(10000) })) });
+  const evidence = JSON.parse(messages[1].content);
+  assert.deepEqual(evidence.conversation_context, conversationContext);
+  assert.equal(evidence.native_memory, 'Native evidence');
+  assert.ok(messages[1].content.length <= PROGRESSIVE_PROMPT_BUDGETS.synthesis);
+});
+
+test('semantic argument review reports unsupported scope without app rules', async () => {
+  const observation = { message: 'Show recent records', args: { query: 'status:pending' } };
+  const review = await reviewProgressiveArguments({ observation, generateImpl: async input => {
+    assert.deepEqual(input, observation);
+    return { valid: false, issues: ['The request did not restrict records to pending status.'] };
+  } });
+  assert.equal(review.valid, false);
+  assert.equal(review.issues.length, 1);
+  for (const invalid of [{ valid: true, issues: ['Contradiction'] }, { valid: false, issues: [] }, { valid: 'true', issues: [] },
+    { valid: false, issues: ['x'.repeat(201)] }]) {
+    await assert.rejects(reviewProgressiveArguments({ observation, generateImpl: async () => invalid }), /violates contract/);
   }
 });
 

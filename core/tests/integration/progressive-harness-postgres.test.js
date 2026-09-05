@@ -72,10 +72,11 @@ test('progressive harness persists, resumes and isolates runs in real PostgreSQL
         outcomes: [{ id: 'page', description: kind === 'compose' ? 'Create page' : 'Read page', kind: kind === 'compose' ? 'draft' : 'read' }] }),
       generateProgressiveToolInputs: async () => ({}),
       localizeProgressiveStatus: async text => text,
+      reviewProgressiveArguments: async () => ({ valid: true, issues: [] }),
       synthesizeDurableAnswer: async () => 'Die Ergebnisse sind verfügbar.',
     });
     const first = await runDurableComposioAgent({ message: 'Erstelle eine Seite', prisma: db, composio,
-      ctx: { ...context(db, 'pause-resume'), chooseNextAction: actions(search, draft) } });
+      ctx: { ...context(db, 'pause-resume'), conversationHistory: [{ role: 'assistant', content: 'Current thread project briefing' }], chooseNextAction: actions(search, draft) } });
     assert.equal(first.status, 'needs_input', first.summary);
     assert.equal((await db.agentRun.findUnique({ where: { id: first.run.id } })).status, 'waiting_user');
     await db.$disconnect();
@@ -85,6 +86,7 @@ test('progressive harness persists, resumes and isolates runs in real PostgreSQL
       ctx: resumeCtx, choice: { run_id: first.run.id, values: { title: 'Projektplan' } } });
     assert.equal(resumed.status, 'pending', resumed.summary);
     assert.equal(resumed.run.id, first.run.id);
+    assert.deepEqual(resumed.run.scratch.conversation_context, [{ role: 'assistant', content: 'Current thread project briefing' }]);
     assert.equal(await resumedDb.pendingWrite.count(), 1);
     const replay = await runDurableComposioAgent({ message: 'Erstelle eine Seite', prisma: resumedDb, composio,
       ctx: resumeCtx, choice: { run_id: first.run.id, values: { title: 'Projektplan' } } });

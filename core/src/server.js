@@ -24562,6 +24562,7 @@ exit \$RC
                     message: stored.message,
                     ctx: {
                       language: stored.language,
+                      conversationHistory: stored.conversationHistory || [],
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
@@ -24577,6 +24578,7 @@ exit \$RC
                   if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
                     const next = await createChatContinuation({
                       userId, orgId, message: stored.message, language: stored.language,
+                      conversationHistory: durable.run?.scratch?.conversation_context || stored.conversationHistory || [],
                       resumeState: durable.resumeState,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     }, {
@@ -24611,6 +24613,7 @@ exit \$RC
                     message: stored.message,
                     ctx: {
                       language: stored.language,
+                      conversationHistory: stored.conversationHistory || [],
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
@@ -24629,6 +24632,7 @@ exit \$RC
                   if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
                     const next = await createChatContinuation({
                       userId, orgId, message: stored.message, language: stored.language,
+                      conversationHistory: durable.run?.scratch?.conversation_context || stored.conversationHistory || [],
                       resumeState: durable.resumeState,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     }, {

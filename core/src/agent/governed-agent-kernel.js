@@ -1404,6 +1404,7 @@ Render requested records and fields as a Markdown table when appropriate, preser
     return state.decision?.action === 'draft' ? 'draft' : 'execute';
   };
   const routeAfterApproval = state => state.pendingProviderEvent ? 'await_provider_event' : 'seal';
+  const routeAfterConnection = state => state.status === 'awaiting_connection' ? 'request_connection' : 'discover';
   const routeAfterProviderEvent = state => {
     if (state.pendingProviderEvent) return 'await_provider_event';
     return state.result?.status === 'error' ? 'seal' : 'synthesize';
@@ -1433,7 +1434,7 @@ Render requested records and fields as a Markdown table when appropriate, preser
     .addConditionalEdges('discover', routeAfterDiscover, ['await_human', 'compile_plan'])
     .addEdge('compile_plan', 'schedule_plan')
     .addEdge('request_connection', 'await_connection')
-    .addEdge('await_connection', 'discover')
+    .addConditionalEdges('await_connection', routeAfterConnection, ['request_connection', 'discover'])
     .addEdge('plan', 'verify')
     .addConditionalEdges('verify', routeAfterVerify, ['plan', 'discover', 'prepare', 'request_connection', 'await_human', 'synthesize'])
     .addConditionalEdges('prepare', routeAfterPrepare, ['verify', 'execute', 'draft', 'await_human'])

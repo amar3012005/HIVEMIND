@@ -1190,6 +1190,8 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     const safeDetail = safePrefixes.some(prefix => detail.startsWith(prefix)) ? detail.slice(0, 500) : 'A planning or tool service failed. Completed evidence is retained.';
     run.status = run.scratch.draft_ids?.length ? 'waiting_approval' : 'failed';
     run.scratch.lease = null;
+    run.scratch.failure_code = detail.slice(0, 240);
+    console.warn(`[governed-agent] run=${run.id} failed: ${run.scratch.failure_code}`);
     recordStep(run, { kind: 'harness', status: 'error', summary: safeDetail });
     try { await persist(); } catch { /* Lost ownership or storage outage: never overwrite another worker. */ }
     leaseOwner = null;

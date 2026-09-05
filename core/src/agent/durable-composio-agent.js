@@ -1308,7 +1308,13 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       // planner must see actual schema cards before it can select a tool.
       const needsInitialDiscovery = !run.scratch.discovery_attempted && !cards.length
         && outcomes.some(outcome => outcome.kind === 'read' || outcome.kind === 'draft');
-      const next = needsInitialDiscovery
+      // Receipt coverage is an authoritative host invariant. Do not spend a
+      // model call—or risk a repeated side effect—asking whether completed
+      // typed outcomes are complete.
+      const allOutcomesCovered = draftReceipts.length === 0 && outcomes.every(outcome => covered().has(outcome.id));
+      const next = allOutcomesCovered
+        ? { action: 'done', reason: 'All requested outcomes have persisted receipts' }
+        : needsInitialDiscovery
         ? { action: 'search', query: intent.use_case, reason: 'Discover capabilities for the requested outcomes' }
         : await chooseProgressiveAction({ observation: { message: run.goal || message, intent, conversation_context: conversationContext,
         argument_feedback: run.scratch.argument_feedback || null,

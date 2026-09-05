@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runDurableComposioAgent } from '../../src/agent/durable-composio-agent.js';
 import { reconcileProgressiveApproval } from '../../src/agent/progressive-approval-events.js';
+import { PROGRESSIVE_HARNESS_MODEL } from '../../src/agent/progressive-harness.js';
 
 function fixture({ kind = 'lookup', slugs = ['NOTION_GET_PAGE', 'NOTION_SEARCH'], required = [] } = {}) {
   const rows = new Map();
@@ -244,7 +245,7 @@ test('default argument HTTP envelope preserves optional filters and rejects tool
         assert.equal(options.method, 'POST');
         const body = JSON.parse(options.body);
         assert.deepEqual(body.response_format, { type: 'json_object' });
-        assert.equal(body.model, 'deepseek/deepseek-v4-flash-0731');
+        assert.equal(body.model, PROGRESSIVE_HARNESS_MODEL);
         assert.equal(body.max_tokens, 1800);
         const payload = variant === 'mismatch' ? { slug: 'NOTION_DELETE_PAGE', args: expected }
           : variant === 'unknown' ? { filter_typo: 'updated' }
@@ -275,7 +276,7 @@ test('default argument HTTP envelope preserves optional filters and rejects tool
   }
 }));
 
-test('harness discovers external schemas before the first planner decision', () => enabled(async () => {
+test('harness discovers schemas before planning and seals from receipt coverage without replanning', () => enabled(async () => {
   const f = fixture({ slugs: ['NOTION_GET_PAGE'] });
   f.ctx.resolveHarnessIntent = async () => ({ kind: 'lookup', apps: ['notion'], person: '', use_case: 'retrieve workspace pages', known_fields: '', language: 'de', needs_memory: false,
     outcomes: [{ id: 'r1', description: 'Read page', kind: 'read' }] });
@@ -299,6 +300,7 @@ test('harness discovers external schemas before the first planner decision', () 
   const result = await runDurableComposioAgent({ message: 'Lies die Seite', ...f });
   assert.equal(result.status, 'completed', result.summary);
   assert.equal(discoveries, 1);
+  assert.equal(decisions, 1);
   assert.equal(f.executed.length, 1);
   assert.equal([...f.rows.values()][0].scratch.discovery_attempted, true);
 }));
@@ -347,7 +349,7 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
   try {
     const read = defaultModels(fixture({ slugs: ['NOTION_GET_PAGE'] }));
     replies.push(intent('lookup'), { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read requested page', outcome_ids: ['page'] }, {}, { valid: true, issues: [] },
-      { action: 'done', reason: 'Requested page read' }, 'Die Seite wurde gefunden.');
+      'Die Seite wurde gefunden.');
     const completed = await runDurableComposioAgent({ message: 'Lies die Seite', ...read });
     assert.equal(completed.status, 'completed', completed.summary);
     assert.equal(completed.summary, 'Die Seite wurde gefunden.');
@@ -364,7 +366,7 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
     assert.deepEqual(requests.at(-1).body.response_format, { type: 'json_object' });
     assert.equal(compose.writes.length, 0);
     assert.equal(replies.length, 0);
-    assert.equal(requests.length, 11);
+    assert.equal(requests.length, 10);
     // Check afterward too: localization deliberately catches errors, so an
     // assertion only inside fetch could be swallowed by the fallback.
     for (const request of requests) {

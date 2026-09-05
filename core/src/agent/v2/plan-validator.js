@@ -317,6 +317,14 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.aggregate = null;
     repairs.push('operation.filtered_memory_count');
   }
+  const typedMemoryCategories = new Set(['decision', 'event', 'goal', 'preference', 'lesson']);
+  if (plan.operation === 'count_where'
+      && plan.retrieval
+      && plan.retrieval.memory_types.length === 0
+      && typedMemoryCategories.has(plan.response.type)) {
+    plan.retrieval.memory_types = [plan.response.type];
+    repairs.push('retrieval.memory_types.response_type');
+  }
   const webUnsafe = !['recall', 'event_range'].includes(plan.operation)
     || Boolean(plan.references.source)
     || !plan.external_fallback.query

@@ -77,6 +77,20 @@ test('certified native scalar receipts bypass probabilistic synthesis', () => {
   assert.equal(renderCertifiedNativeResult({ tool: 'hivemind_recall', result, language: 'en' }), null);
 });
 
+test('filtered counts inherit a typed memory category from the response contract', () => {
+  const raw = plan({
+    operation: 'count_where', aggregate: null,
+    retrieval: { limit: 15, tags: [], memory_types: [], scope_filter: 'personal', entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
+    response: { language: 'en', type: 'decision', scope: 'bounded', depth: 'standard', shape: 'inventory', objective: 'Return the exact complete count of decision memories.' },
+    references: { resolved_pronouns: [], entities: [], source: null },
+    steps: [{ id: 'count', capability: 'workspace_read', tool: 'count_where', query: 'decision', entities: [], depends_on: [], result_binding: 'count' }],
+  });
+  const validation = validateNativePlanResult(raw);
+  assert.equal(validation.status, 'repairable');
+  assert.deepEqual(validation.plan.retrieval.memory_types, ['decision']);
+  assert.ok(validation.repairs.includes('retrieval.memory_types.response_type'));
+});
+
 test('parentless exact memory count self-repairs to count_where without an invented substring', () => {
   const raw = plan({
     operation: 'aggregate', aggregate: null,

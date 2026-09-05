@@ -166,6 +166,7 @@ export function outcomesCovered(state = {}) {
 const FIELD_EQUIVALENTS = [
   ['time', 'date', 'timestamp', 'datetime', 'created', 'updated', 'received', 'sent'],
   ['sender', 'from', 'author', 'owner', 'creator'],
+  ['recipient', 'to', 'destination', 'invitee', 'attendee'],
   ['subject', 'title', 'name', 'headline'],
   ['body', 'content', 'text', 'description', 'message', 'snippet'],
   ['id', 'identifier', 'urn', 'url'],

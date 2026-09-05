@@ -317,7 +317,8 @@ function capabilityGap(state, missing = []) {
   const uniqueMissing = [...new Map((missing || [])
     .filter(item => item?.field && !isProviderIdentifier(item.field))
     .map(item => [String(item.field), item])).values()];
-  const ambiguityOptions = evidenceAmbiguities({ intent: state.intent, receipts: state.receipts });
+  const hasWriteOutcome = state.intent?.kind === 'write' || (state.intent?.outcomes || []).some(outcome => outcome.kind === 'draft');
+  const ambiguityOptions = hasWriteOutcome ? evidenceAmbiguities({ intent: state.intent, receipts: state.receipts }) : [];
   const suppliedValues = new Set(Object.values(state.fieldValues || {}).map(value => text(value, 1000).toLowerCase()).filter(Boolean));
   const ambiguities = ambiguityOptions.some(option => suppliedValues.has(option.value.toLowerCase())) ? [] : ambiguityOptions;
   if (ambiguities.length && !uniqueMissing.some(item => /(?:email|address|recipient|destination)/i.test(String(item.field)))) {

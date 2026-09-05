@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { MemorySaver } from '@langchain/langgraph';
 import { projectGovernedEvidence } from '../../src/agent/governed-evidence-projection.js';
 import {
@@ -18,16 +19,21 @@ function fakePrisma() {
   const drafts = [];
   const events = new Map();
   const bindings = new Map();
+  const durableTurns = [];
   const bindingKey = ({ orgId, userId, connectionScope }) => `${orgId}:${userId}:${connectionScope}`;
   return {
     runs,
     drafts,
     events,
     bindings,
+    durableTurns,
     agentRun: {
       async create({ data }) { runs.set(data.id, { ...data }); return runs.get(data.id); },
       async update({ where, data }) { const row = { ...(runs.get(where.id) || {}), ...data, id: where.id }; runs.set(where.id, row); return row; },
       async findFirst({ where }) { return [...runs.values()].find(row => Object.entries(where).every(([key, value]) => row[key] === value)) || null; },
+      async findMany({ where }) {
+        return [...runs.values()].filter(row => row.orgId === where.orgId && row.userId === where.userId && where.id.in.includes(row.id));
+      },
     },
     pendingWrite: {
       async findFirst({ where }) { return drafts.find(row => Object.entries(where).every(([key, value]) => row[key] === value)) || null; },
@@ -57,6 +63,12 @@ function fakePrisma() {
         const row = { ...(bindings.get(key) || create), ...(bindings.has(key) ? update : {}) };
         bindings.set(key, row);
         return row;
+      },
+    },
+    durableChatTurn: {
+      async findMany({ where, take }) {
+        return durableTurns.filter(row => row.orgId === where.orgId && row.userId === where.userId &&
+          row.threadDigest === where.threadDigest && row.status === where.status).slice(0, take);
       },
     },
   };
@@ -175,6 +187,49 @@ test('graph recovers missing detail evidence before returning all five records',
   assert.equal(result.status, 'completed');
   assert.equal(result.response.split('\n').length, 7);
   assert.match(result.response, /Subject 4/);
+});
+
+test('a new graph run resolves a follow-up from tenant-scoped prior receipt evidence', async () => {
+  const prisma = fakePrisma();
+  const threadId = 'durable-follow-up-thread';
+  const priorRunId = '00000000-0000-4000-8000-000000000099';
+  prisma.runs.set(priorRunId, {
+    id: priorRunId, orgId: 'org', userId: 'user',
+    scratch: { receipts: [{ slug: 'APP_LIST_ITEMS', successful: true, data: { items: [{ id: 'item-1', subject: 'Security alert', sender: 'Provider' }] } }] },
+  });
+  prisma.durableTurns.push({
+    orgId: 'org', userId: 'user', status: 'completed',
+    threadDigest: createHash('sha256').update(threadId).digest('hex'),
+    completedAt: new Date(), responsePayload: { execution: { run_id: priorRunId }, response: 'Prior list' }, requestPayload: { message: 'List items' },
+  });
+  const detail = tool('APP_FETCH_ITEM', {
+    type: 'object', properties: { item_id: { type: 'string' } }, required: ['item_id'], additionalProperties: false,
+  });
+  const composio = composioWith([detail]);
+  let executedArgs;
+  composio.executeToolsParallel = async (_org, calls) => {
+    executedArgs = calls[0].arguments;
+    return [{ successful: true, data: { subject: 'Security alert', details: 'A new sign-in was detected.' } }];
+  };
+  let observedReference;
+  const result = await runGovernedAgentRuntime({
+    message: 'Tell me more about the Security alert email.',
+    ctx: { orgId: 'org', userId: 'user', threadId, historyTurns: 4, governedDecision: async ({ stage, input }) => {
+      if (stage === 'intent') {
+        observedReference = input.prior_conversation_evidence;
+        return { locale: 'en', kind: 'read', apps: ['gmail'], discovery_query: 'fetch full details for the referenced prior item', outcomes: [{ id: 'detail', kind: 'read', description: 'details of the referenced item' }] };
+      }
+      if (stage === 'planning') return { action: 'read', tool_slug: 'APP_FETCH_ITEM', outcome_ids: ['detail'] };
+      if (stage === 'arguments') return { item_id: input.prior_conversation_evidence[0].data.items[0].id };
+      if (stage === 'synthesis') return { complete: true, response: 'A new sign-in was detected.' };
+      throw new Error(`Unexpected stage ${stage}`);
+    } },
+    composio, prisma, checkpointer: new MemorySaver(),
+  });
+  assert.equal(observedReference[0].data.items[0].subject, 'Security alert');
+  assert.deepEqual(executedArgs, { item_id: 'item-1' });
+  assert.equal(result.status, 'completed');
+  assert.match(result.response, /new sign-in/i);
 });
 
 test('verifier rejects a write selected as a read and premature clarification', () => {

@@ -4,7 +4,7 @@ import { Annotation, END, START, StateGraph, interrupt } from '@langchain/langgr
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { loadGovernedSkill } from './governed-agent-skills.js';
 import { projectGovernedEvidence } from './governed-evidence-projection.js';
-import { loadGovernedConversationContext } from './governed-conversation-context.js';
+import { loadGovernedConversationContext, loadGovernedConversationEvidence } from './governed-conversation-context.js';
 import {
   capabilityCard,
   capabilityGapQuestion,
@@ -63,6 +63,7 @@ const GraphState = Annotation.Root({
   capabilityGap: Annotation({ reducer: (_left, right) => right, default: () => false }),
   result: Annotation({ reducer: (_left, right) => right, default: () => null }),
   conversationContext: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  referenceEvidence: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   answerRepairs: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
 });
 
@@ -267,6 +268,7 @@ function identifierEvidence(state) {
   return [
     JSON.stringify(state.fieldValues || {}),
     JSON.stringify((state.receipts || []).filter(row => row.successful).map(row => row.data)),
+    JSON.stringify(state.referenceEvidence || []),
     String(state.intent?.known_facts ? JSON.stringify(state.intent.known_facts) : ''),
     String(state.message || ''),
   ].join('\n').toLowerCase();
@@ -329,7 +331,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
             connection_statuses: next.discovery.connection_statuses,
           },
           capabilities: (next.capabilities || []).map(compactCapability),
-          receipts: (next.receipts || []).map(compactReceipt),
+          receipts: (next.receipts || []).map(synthesisReceipt),
           search_queries: next.searchQueries,
           dependency_searches: next.dependencySearches,
           pending_input: next.pendingInput,
@@ -441,10 +443,14 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       conversationId: ctx.threadId || ctx.conversationId,
       turns: ctx.historyTurns,
     });
+    const referenceEvidence = await loadGovernedConversationEvidence({
+      prisma, checkpointer, orgId: ctx.orgId, userId: ctx.userId,
+      conversationId: ctx.threadId || ctx.conversationId, turns: ctx.historyTurns,
+    });
     await ensureCanonicalRun(runId);
     const boundSessionId = state.sessionId || ctx.governedComposioSessionId || await loadSessionBinding(connectionScope);
     const patch = await transition({ ...state, runId }, 'context_loaded', {
-      runId, connected, connectionScope, sessionId: boundSessionId || null, conversationContext, capabilities: coreCapabilities,
+      runId, connected, connectionScope, sessionId: boundSessionId || null, conversationContext, referenceEvidence, capabilities: coreCapabilities,
     });
     await persist({ ...state, runId }, patch);
     return patch;
@@ -457,7 +463,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
 Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,business_question?:string}. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
-      input: { message, connected: state.connected, conversation_context: state.conversationContext },
+      input: { message, connected: state.connected, conversation_context: state.conversationContext, prior_conversation_evidence: state.referenceEvidence },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
     if (!intent.outcomes.length || !intent.discovery_query) throw new Error('governed_intent_contract');
@@ -601,6 +607,7 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
           .map(([key, value]) => [key, connectionStatus(value)])),
         capabilities: (state.capabilities || []).map(compactCapability),
         receipts: (state.receipts || []).map(synthesisReceipt),
+        prior_conversation_evidence: state.referenceEvidence,
         unresolved_outcomes: outcomeIds(state),
         prior_searches: state.searchQueries,
         human_inputs: state.fieldValues,
@@ -661,6 +668,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         schema: card.schema,
         human_inputs: state.fieldValues,
         successful_receipts: (state.receipts || []).filter(row => row.successful).map(synthesisReceipt),
+        prior_conversation_evidence: state.referenceEvidence,
         recovery_instruction: state.planRepair,
       },
     });

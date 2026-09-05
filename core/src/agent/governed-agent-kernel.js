@@ -179,7 +179,9 @@ Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:strin
       { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
         outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
     const viable = capabilities.filter(card => card.authority === 'read');
-    if (['search', 'ask'].includes(decision.action) && viable.length && state.searchQueries.length >= 2) {
+    const selected = capabilities.find(card => card.slug === decision.slug);
+    const invalidAuthority = decision.action === 'read' && selected?.authority !== 'read';
+    if (viable.length && (invalidAuthority || (['search', 'ask'].includes(decision.action) && state.searchQueries.length >= 2))) {
       decision = await jsonDecision(`Self-heal a stalled tool plan. Viable read capabilities already exist, so select the best one before asking the user.
 Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. Choose read when a capability can directly fulfill an outcome or obtain a prerequisite without a technical identifier. Ask only for a human-readable business fact that no capability can obtain.`,
       { message, intent: state.intent, viable_capabilities: viable, successful_receipts: state.receipts.filter(row => row.successful), fields: state.fieldValues }, ctx._signal);

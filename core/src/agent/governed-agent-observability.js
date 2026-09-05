@@ -29,7 +29,9 @@ export async function createGovernedTrace({ ctx = {}, runId, env = process.env, 
   if (!isLangSmithTracingEnabled(env) && !client) return null;
   const projectName = String(env.LANGSMITH_PROJECT || 'singulance-governed-agent-canary').slice(0, 120);
   let traceClient = client;
+  let RunTree;
   try {
+    ({ RunTree } = await import('langsmith/run_trees'));
     if (!traceClient) {
       const { Client } = await import('langsmith');
       traceClient = new Client({
@@ -44,63 +46,47 @@ export async function createGovernedTrace({ ctx = {}, runId, env = process.env, 
     logger?.warn?.(`[governed-agent] LangSmith unavailable: ${error.message}`);
     return null;
   }
-  const rootId = crypto.randomUUID();
-  const traceId = rootId;
   const metadata = safeTraceMetadata({ ctx, runId });
   const safely = promise => Promise.resolve(promise).catch(error => logger?.warn?.(`[governed-agent] LangSmith trace degraded: ${error.message}`));
-  await safely(traceClient.createRun({
-    id: rootId,
-    trace_id: traceId,
+  const root = new RunTree({
     name: 'governed_run',
     run_type: 'chain',
     project_name: projectName,
-    start_time: Date.now(),
     inputs: { redacted: true },
     extra: { metadata },
-  }));
+    client: traceClient,
+  });
+  await safely(root.postRun());
 
   return {
     async span(name, extra = {}) {
-      const id = crypto.randomUUID();
       const spanMetadata = safeTraceMetadata({ ctx, runId, extra });
-      await safely(traceClient.createRun({
-        id,
-        trace_id: traceId,
-        parent_run_id: rootId,
+      const child = root.createChild({
         name: asText(name, 120),
         run_type: 'tool',
-        project_name: projectName,
-        start_time: Date.now(),
         inputs: { redacted: true },
         extra: { metadata: spanMetadata },
-      }));
+      });
+      await safely(child.postRun());
       return {
-        end: async (result = {}) => safely(traceClient.updateRun(id, {
-          end_time: Date.now(),
-          outputs: { redacted: true },
-          extra: { metadata: safeTraceMetadata({ ctx, runId, extra: { ...extra, ...result } }) },
-        })),
-        error: async (error) => safely(traceClient.updateRun(id, {
-          end_time: Date.now(),
-          error: asText(error?.message || error || 'unknown', 300),
-          outputs: { redacted: true },
-        })),
+        end: async (result = {}) => {
+          await child.end({ redacted: true }, undefined, Date.now(), safeTraceMetadata({ ctx, runId, extra: { ...extra, ...result } }));
+          return safely(child.patchRun());
+        },
+        error: async (error) => {
+          await child.end({ redacted: true }, asText(error?.message || error || 'unknown', 300));
+          return safely(child.patchRun());
+        },
       };
     },
     async end(result = {}) {
-      await safely(traceClient.updateRun(rootId, {
-        end_time: Date.now(),
-        outputs: { redacted: true },
-        extra: { metadata: safeTraceMetadata({ ctx, runId, extra: result }) },
-      }));
+      await root.end({ redacted: true }, undefined, Date.now(), safeTraceMetadata({ ctx, runId, extra: result }));
+      await safely(root.patchRun());
       await safely(traceClient.flush?.());
     },
     async error(error) {
-      await safely(traceClient.updateRun(rootId, {
-        end_time: Date.now(),
-        error: asText(error?.message || error || 'unknown', 300),
-        outputs: { redacted: true },
-      }));
+      await root.end({ redacted: true }, asText(error?.message || error || 'unknown', 300));
+      await safely(root.patchRun());
       await safely(traceClient.flush?.());
     },
   };

@@ -1056,7 +1056,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
     let valid = validator(args);
-    const missing = [
+    let missing = [
       ...missingRequiredFields(card.schema, args),
       ...missingConditionalSchemaFields(card.schema, args),
       ...missingBusinessPayloadFields(card, args),
@@ -1070,6 +1070,12 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       for (const item of removable) delete args[item.field];
       valid = validator(args);
       invalid = invalidSchemaValues(card.schema, args);
+      missing = [
+        ...missingRequiredFields(card.schema, args),
+        ...missingConditionalSchemaFields(card.schema, args),
+        ...missingBusinessPayloadFields(card, args),
+        ...missingNamedEntityBinding(card, state.intent, args),
+      ];
     }
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
     const ambiguous = ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args });

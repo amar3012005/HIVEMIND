@@ -213,7 +213,10 @@ export function missingBusinessPayloadFields(card = {}, args = {}) {
 export function missingNamedEntityBinding(card = {}, intent = {}, args = {}) {
   if (card.authority !== 'write' || !(intent.entities || []).some(entity => asText(entity?.name, 160))) return [];
   const target = schemaFieldForNamedEntity(card, intent);
-  if (!target || asText(args[target[0]])) return [];
+  if (!target) return [];
+  const value = asText(args[target[0]]);
+  const emailDestination = target[1]?.format === 'email' || /(?:email|address|recipient|^to$)/i.test(target[0]);
+  if (value && (!emailDestination || /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(value))) return [];
   return [{ field: target[0], schema: target[1] || {}, code: 'named_entity_destination_required' }];
 }
 

@@ -158,7 +158,12 @@ export function compileGroundedArguments({ card = {}, intent = {}, receipts = []
   if (card.authority === 'write') {
     const address = namedEntityAddress({ intent, receipts });
     const destination = schemaFieldForNamedEntity(card, intent);
-    if (address && destination && !asText(compiled[destination[0]])) compiled[destination[0]] = address;
+    if (destination) {
+      for (const field of Object.keys(compiled)) {
+        if (field !== destination[0] && fieldMatchesEntityRole(field, role) && !asText(fieldValues?.[field])) delete compiled[field];
+      }
+      if (address && !asText(compiled[destination[0]])) compiled[destination[0]] = address;
+    }
   }
   return compiled;
 }

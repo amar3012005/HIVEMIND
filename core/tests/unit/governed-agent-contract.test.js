@@ -247,11 +247,13 @@ test('a new graph run resolves a follow-up from tenant-scoped prior receipt evid
     message: 'Tell me more about the Security alert email.',
     ctx: { orgId: 'org', userId: 'user', threadId, historyTurns: 4, governedDecision: async ({ stage, input }) => {
       if (stage === 'intent') {
-        observedReference = input.prior_conversation_evidence;
         assert.equal(input.resolved_reference.record.id, 'item-1');
         return { locale: 'en', kind: 'read', apps: ['gmail'], discovery_query: 'fetch full details for the referenced prior item', outcomes: [{ id: 'detail', kind: 'read', description: 'details of the referenced item' }] };
       }
-      if (stage === 'planning') return { action: 'read', tool_slug: 'APP_FETCH_ITEM', outcome_ids: ['detail'] };
+      if (stage === 'planning') {
+        observedReference = input.prior_conversation_evidence;
+        return { action: 'read', tool_slug: 'APP_FETCH_ITEM', outcome_ids: ['detail'] };
+      }
       if (stage === 'arguments') return { item_id: input.resolved_reference.record.id };
       if (stage === 'synthesis') return { complete: true, response: 'A new sign-in was detected.' };
       throw new Error(`Unexpected stage ${stage}`);

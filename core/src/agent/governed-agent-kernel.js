@@ -504,7 +504,10 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
 Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,business_question?:string}. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
-      input: { message, connected: state.connected, conversation_context: state.conversationContext, prior_conversation_evidence: state.referenceEvidence, resolved_reference: state.resolvedReference },
+      // Intent needs bounded conversational meaning, not raw connector rows.
+      // Structured prior receipts remain available to planning/arguments for
+      // evidence grounding after the outcome contract exists.
+      input: { message, connected: state.connected, conversation_context: state.conversationContext, resolved_reference: state.resolvedReference },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
     if (state.resolvedReference) {

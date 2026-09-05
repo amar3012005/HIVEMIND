@@ -58,7 +58,8 @@ export class HivemindChatSession extends Agent<Env> {
     if (exists) return { ok: true, sequence, duplicate: true };
     this.sql`INSERT INTO lifecycle_events (sequence, event_type, phase, status, trace_id, occurred_at, event_id, run_id, state)
       VALUES (${sequence}, ${metadata.event_type || 'progress'}, ${metadata.phase}, ${metadata.status}, ${metadata.trace_id || null}, ${metadata.occurred_at}, ${metadata.event_id || null}, ${metadata.run_id || null}, ${metadata.state || null})`;
-    this.sql`UPDATE session_state SET phase=${metadata.phase}, status=${metadata.status}, last_sequence=${sequence}, updated_at=${metadata.occurred_at} WHERE singleton=1`;
+    this.sql`UPDATE session_state SET phase=${metadata.phase}, status=${metadata.status}, last_sequence=${sequence}, updated_at=${metadata.occurred_at}
+      WHERE singleton=1 AND last_sequence <= ${sequence}`;
     return { ok: true, sequence, duplicate: false };
   }
 

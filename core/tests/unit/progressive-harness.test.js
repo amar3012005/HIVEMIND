@@ -337,6 +337,20 @@ test('provider identifiers trigger upstream discovery before clarification even 
   assert.equal(calls, 2);
 });
 
+test('repeated provider identifier clarification becomes one generic upstream search', async () => {
+  let calls = 0;
+  const result = await chooseProgressiveAction({ observation: { searched: true,
+    intent: { subject_scope: 'authenticated_user', outcomes: [{ id: 'latest', kind: 'read' }] }, receipts: [],
+    capabilities: [{ slug: 'NETWORK_GET_ITEM', authority: 'read' }], remaining_outcomes: [{ id: 'latest', kind: 'read' }] },
+  generateImpl: async () => {
+    calls++;
+    return { action: 'ask_user', question: 'Provide item ID?', fields: ['item_id'], reason: 'Need provider identifier' };
+  } });
+  assert.equal(result.action, 'search');
+  assert.match(result.query, /list authenticated account records/);
+  assert.equal(calls, 2);
+});
+
 test('mixed clarification requests retain only unresolved fields without a retry', async () => {
   let calls = 0;
   const result = await chooseProgressiveAction({ observation: { fields: { title: 'Supplied', destination: '' } }, generateImpl: async () => {

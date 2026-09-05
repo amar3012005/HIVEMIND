@@ -1,7 +1,7 @@
 /** Progressive planning: bounded observations, semantic decisions, no tool execution. */
 import { loadGovernedSkill } from './governed-agent-skills.js';
 export const PROGRESSIVE_PROMPT_BUDGETS = Object.freeze({ intent: 10000, action: 18000, synthesis: 24000 });
-export const PROGRESSIVE_HARNESS_MODEL = 'openai/gpt-oss-20b:nitro';
+export const PROGRESSIVE_HARNESS_MODEL = 'google/gemini-2.5-flash-lite';
 
 export function normalizeHistoryTurns(value, fallback = 6) {
   const parsed = Number(value);
@@ -246,6 +246,11 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
       requested_fields: raw.fields.slice(0, 12),
       instruction: 'Before asking for a provider identifier, search for a relevant list, feed, profile, lookup, or discovery read capability that can resolve it from connected account data. Do not invent the identifier.',
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+    if (raw.action === 'ask_user' && Array.isArray(raw.fields)
+      && raw.fields.some(field => /(^|_)(id|urn|identifier)($|_)/i.test(field))) {
+      raw = { action: 'search', reason: 'Resolve the provider identifier from connected account data before asking the user',
+        query: 'list authenticated account records to resolve the most recent item identifier' };
+    }
   }
   if (typeof raw.reason !== 'string' || !raw.reason.trim()) raw = { ...raw, reason: `Planner selected ${String(raw.action || 'an action')}` };
   if (!['search', 'execute', 'native', 'draft', 'connect', 'ask_user', 'done'].includes(raw.action)

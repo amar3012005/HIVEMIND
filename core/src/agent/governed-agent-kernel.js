@@ -111,6 +111,72 @@ const compact = (value, limit = 18000) => {
 const text = (value, limit = 800) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 const unique = values => [...new Set((values || []).map(value => text(value, 80).toLowerCase()).filter(Boolean))];
 
+const intentResponseFormat = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'governed_connected_intent',
+    strict: true,
+    schema: {
+      type: 'object', additionalProperties: false,
+      required: ['locale', 'kind', 'apps', 'discovery_query', 'outcomes', 'known_facts', 'entities', 'business_question', 'reference_selector'],
+      properties: {
+        locale: { type: 'string' },
+        kind: { type: 'string', enum: ['read', 'write'] },
+        apps: { type: 'array', items: { type: 'string' } },
+        discovery_query: { type: 'string' },
+        outcomes: {
+          type: 'array', minItems: 1,
+          items: {
+            type: 'object', additionalProperties: false,
+            required: ['id', 'kind', 'description', 'evidence'],
+            properties: {
+              id: { type: 'string' },
+              kind: { type: 'string', enum: ['read', 'draft'] },
+              description: { type: 'string' },
+              evidence: {
+                anyOf: [
+                  {
+                    type: 'object', additionalProperties: false,
+                    required: ['min_records', 'required_fields'],
+                    properties: {
+                      min_records: { type: 'integer', minimum: 1, maximum: 100 },
+                      required_fields: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                  { type: 'null' },
+                ],
+              },
+            },
+          },
+        },
+        known_facts: { type: 'object', additionalProperties: true },
+        entities: {
+          type: 'array',
+          items: {
+            type: 'object', additionalProperties: false,
+            required: ['name', 'role'],
+            properties: { name: { type: 'string' }, role: { type: 'string' } },
+          },
+        },
+        business_question: { type: ['string', 'null'] },
+        reference_selector: {
+          anyOf: [
+            {
+              type: 'object', additionalProperties: false,
+              required: ['position', 'record_kind'],
+              properties: {
+                position: { anyOf: [{ type: 'integer', minimum: 1, maximum: 100 }, { type: 'string', enum: ['last'] }] },
+                record_kind: { type: ['string', 'null'] },
+              },
+            },
+            { type: 'null' },
+          ],
+        },
+      },
+    },
+  },
+};
+
 async function jsonDecision({ ctx, stage, system, input, signal }) {
   const projectedInput = projectGovernedEvidence(input);
   if (typeof ctx.governedDecision === 'function') return ctx.governedDecision({ stage, system, input: projectedInput });
@@ -121,7 +187,7 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
       body: JSON.stringify({
         temperature: 0,
         max_tokens: stage === 'synthesis' ? 1200 : 1000,
-        response_format: { type: 'json_object' },
+        response_format: stage === 'intent' ? intentResponseFormat : { type: 'json_object' },
         messages: [
           { role: 'system', content: `${system}\nReturn exactly one JSON object. ${attempt ? `Repair this contract failure: ${lastError?.message || 'invalid object'}. Return the documented field names and types.` : ''}` },
           { role: 'user', content: JSON.stringify(projectedInput) },

@@ -142,8 +142,9 @@ export function requirementsResolvedByEvidence({ intent = {}, receipts = [], fie
 
 export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], fieldValues = {}, args = {} } = {}) {
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
+  const groundedFields = { ...(intent.known_facts || {}), ...(fieldValues || {}) };
   for (const field of Object.keys(card.schema?.properties || {})) {
-    if (asText(fieldValues?.[field])) compiled[field] = fieldValues[field];
+    if (asText(groundedFields?.[field])) compiled[field] = groundedFields[field];
   }
   const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));
   const role = entities.map(entity => asText(entity?.role, 80)).find(Boolean) || '';

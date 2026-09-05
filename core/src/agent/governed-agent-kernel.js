@@ -183,14 +183,16 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
   const reasonNode = async state => {
     const covered = new Set(state.receipts.filter(row => row.successful).flatMap(row => row.outcome_ids || []));
     if (state.intent.outcomes.every(outcome => covered.has(outcome.id))) return { decision: { action: 'done' }, status: 'ready_to_synthesize' };
-    if (state.cycles >= 8) return { decision: { action: 'ask', question: 'I could not find a connected capability that can resolve the remaining information. Please provide that business detail.', fields: ['missing_information'] }, status: 'awaiting_input' };
+    if (state.cycles >= 6) return { decision: { action: 'ask', question: 'I could not find a connected capability that can resolve the remaining information. Please provide that business detail.', fields: ['missing_information'] }, status: 'awaiting_input' };
+    const failedSlugs = new Set(state.receipts.filter(row => !row.successful).map(row => row.slug));
     const capabilities = state.capabilities.map(card => ({ slug: card.slug, toolkit: card.toolkit, authority: card.authority,
-      description: card.description, required: card.schema.required || [], fields: Object.keys(card.schema.properties || {}) }));
+      description: card.description, required: card.schema.required || [], fields: Object.keys(card.schema.properties || {}),
+      attempted_failed: failedSlugs.has(card.slug) }));
     let decision = await jsonDecision(`Act as a self-governing tool agent. Active skill: ${loadGovernedSkill('dependency').content}
 Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:string,query?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. For read or draft, purpose is required. Use purpose:"outcome" and the unresolved outcome_ids when the capability directly fulfills the request. Use purpose:"prerequisite" and outcome_ids:[] only when its data is required by a later action. Use discovered capabilities before searching again. Never repeat a successful read unless materially different arguments are required. Never ask for provider IDs or account names. A write is only draft. Search queries must be materially new. If the catalog lacks the required reader after two searches, ask for a human-readable business fact or explain the capability gap.`,
       { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
         outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
-    const viable = capabilities.filter(card => card.authority === 'read');
+    const viable = capabilities.filter(card => card.authority === 'read' && !card.attempted_failed);
     const selected = capabilities.find(card => card.slug === decision.slug);
     const invalidAuthority = decision.action === 'read' && selected?.authority !== 'read';
     if (viable.length && (invalidAuthority || (['search', 'ask'].includes(decision.action) && state.searchQueries.length >= 2))) {
@@ -202,6 +204,9 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
       const fallback = bestCapability(viable, state.intent);
       if (fallback) decision = { action: 'read', slug: fallback.slug, purpose: 'outcome',
         outcome_ids: state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.id), reason: 'Closed-world admissible capability fallback' };
+      else decision = state.searchQueries.length < 3
+        ? { action: 'search', query: `Find an alternative connected capability for ${state.intent.use_case}`, reason: 'Previously attempted capabilities failed' }
+        : { action: 'ask', question: 'The connected integration does not expose a working reader for this request. Please provide the missing business information.', fields: ['missing_information'], reason: 'No admissible capability remains' };
     }
     if (!['search', 'read', 'draft', 'ask', 'done'].includes(decision.action)) throw new Error('governed_action_contract');
     if (['read', 'draft'].includes(decision.action) && !['outcome', 'prerequisite'].includes(decision.purpose)) {

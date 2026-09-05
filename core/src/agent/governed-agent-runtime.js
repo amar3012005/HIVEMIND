@@ -79,6 +79,7 @@ export async function runGovernedAgentRuntime({ message, ctx = {}, onEvent, comp
   const runtime = graph || createGovernedKernel({ checkpointer: await productionCheckpointer(), ctx, message, onEvent, composio: connector, prisma: db });
   const config = {
     configurable: { thread_id: threadId },
+    recursionLimit: 64,
     metadata: {
       runtime: 'langgraph-native-v1',
       org_hash: crypto.createHash('sha256').update(String(ctx.orgId || '')).digest('hex').slice(0, 16),

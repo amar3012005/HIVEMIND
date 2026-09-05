@@ -87,6 +87,7 @@ const GraphState = Annotation.Root({
   answerRepairs: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   executionPlan: Annotation({ reducer: (_left, right) => right, default: () => null }),
   activePlanNodeId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  dependencyRequirements: Annotation({ reducer: (_left, right) => right, default: () => [] }),
 });
 
 const compact = (value, limit = 18000) => {
@@ -480,6 +481,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
           capability_gap: next.capabilityGap,
           execution_plan: next.executionPlan,
           active_plan_node_id: next.activePlanNodeId,
+          dependency_requirements: next.dependencyRequirements,
         }, 50000),
       },
     });
@@ -823,6 +825,19 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       await persist(state, patch);
       return patch;
     }
+    const scheduledDependency = eligibleReadCapabilities(state, state.dependencyRequirements || [])
+      .find(item => item.relevance > 0 && item.card?.source !== 'core');
+    if ((state.dependencyRequirements || []).length && scheduledDependency) {
+      const decision = {
+        action: 'read', tool_slug: scheduledDependency.card.slug, purpose: 'prerequisite', outcome_ids: [],
+        reason: 'Highest-ranked discovered read capability for the persisted schema dependency.',
+      };
+      const patch = await transition(state, 'dependency_resolved', { decision, planRepair: null }, {
+        reason_code: 'scheduler_dependency_candidate', tool_slug: decision.tool_slug,
+      });
+      await persist(state, patch);
+      return patch;
+    }
     if (state.capabilityGap) {
       const request = state.pendingInput || capabilityGap(state);
       const patch = await transition(state, 'awaiting_input', { pendingInput: request, decision: { action: 'ask', question: request.prompt, reason: 'capability_gap' } }, { reason_code: 'capability_gap', input_fields: request.fields.map(field => field.id) });
@@ -978,7 +993,10 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       const dependencyKey = unresolvedDependencyKey(requirements);
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
       if (Number(state.discoveryAttempts || 0) < 3 && !dependencyAttempted && shouldResolveDependency(state, requirements, relevantReads)) {
-        const fields = [...new Set(requirements.map(item => humanizeField(item.field)))].join(', ');
+        const dependencyRequirements = hasResolvableEntityFact(state)
+          ? requirements.filter(item => /(?:email|address|recipient|contact|person|assignee|owner|member|user|customer|company|account|destination)/i.test(String(item?.field || '')))
+          : requirements;
+        const fields = [...new Set(dependencyRequirements.map(item => humanizeField(item.field)))].join(', ');
         const entityRoles = [...new Set((state.intent?.entities || []).map(entity => text(entity?.role, 80)).filter(Boolean))].join(', ');
         const apps = (state.intent?.apps || []).join(', ');
         const query = [
@@ -1001,6 +1019,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
           toolArgs: null,
           planRepair: 'The selected schema lacks evidence-backed required arguments. Discover an upstream read capability.',
           dependencySearches: dependencyKey ? [...(state.dependencySearches || []), dependencyKey].slice(-8) : state.dependencySearches,
+          dependencyRequirements: dependencyRequirements.map(item => ({ field: item.field, schema: compact(item.schema || {}, 1200) })),
           cycles: Number(state.cycles || 0) + 1,
         }, { reason_code: 'schema_requirements_unresolved', input_fields: requirements.map(item => item.field).filter(Boolean).slice(0, 12) });
         await persist(state, patch);
@@ -1068,6 +1087,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const steps = [...(state.steps || []), { kind: 'read', slug: card.slug, status: successful ? 'completed' : 'error', summary: row.summary }];
     const patch = await transition(state, successful ? 'tool_executed' : 'tool_failed', {
       receipts, steps, executionPlan, toolArgs: null, decision: null, activePlanNodeId: null,
+      dependencyRequirements: successful ? [] : state.dependencyRequirements,
       planRepair: successful && !evidenceSufficient ? 'The provider operation succeeded but did not satisfy the outcome evidence contract. Select a materially different capability that returns the missing record count and fields.' : null,
     }, { reason_code: successful ? (evidenceSufficient ? 'read_receipt' : 'read_evidence_insufficient') : 'read_failure', tool_slug: card.slug });
     await persist(state, patch);

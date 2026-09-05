@@ -48,6 +48,7 @@ function interruptedResult(output, threadId) {
   const payload = output?.__interrupt__?.[0]?.value || {};
   const fields = Array.isArray(payload.fields) ? payload.fields : [];
   const request = {
+    ...payload,
     kind: payload.kind || 'field_input',
     prompt: payload.prompt || 'What information should I use?',
     fields,

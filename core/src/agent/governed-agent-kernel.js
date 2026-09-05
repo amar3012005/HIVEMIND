@@ -30,6 +30,7 @@ const GraphState = Annotation.Root({
   cycles: Annotation({ reducer: (_l, r) => r, default: () => 0 }),
   result: Annotation({ reducer: (_l, r) => r, default: () => null }),
   conversationContext: Annotation({ reducer: (_l, r) => r, default: () => [] }),
+  connectionRequest: Annotation({ reducer: (_l, r) => r, default: () => null }),
 });
 
 const compact = (value, limit = 18000) => {
@@ -166,6 +167,36 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
     await persist(state, { intent, locale, status: 'intent_resolved' });
     onEvent({ type: 'agent_state', state: 'intent_resolved', run_id: state.runId });
     return { intent, locale, searchQuery: String(intent.use_case || message).slice(0, 500), status: 'intent_resolved' };
+  };
+
+  const missingApp = state => (state.intent?.apps || []).map(app => String(app).toLowerCase())
+    .find(app => app !== 'hivemind' && !state.connected.includes(app));
+
+  const prepareConnectionNode = async state => {
+    const toolkit = missingApp(state);
+    if (!toolkit) return { connectionRequest: null, status: 'resumed' };
+    let callbackUrl = null;
+    if (ctx.composioCallbackOrigin) {
+      const url = new URL('/hivemind/app/connect/composio/callback', ctx.composioCallbackOrigin);
+      url.searchParams.set('composio_toolkit', toolkit);
+      callbackUrl = url.toString();
+    }
+    const link = await composio.createConnectLink(toolkit, ctx.orgId, { callbackUrl });
+    const request = { kind: 'connect_account', toolkit, provider: toolkit, blocking: true,
+      prompt: `Connect ${toolkit} to continue, then return here.`,
+      options: [{ id: 'connect', label: `Connect ${toolkit}`, href: link.redirectUrl, open_url: true, value: link.redirectUrl },
+        { id: 'connected', label: `I've connected ${toolkit} — continue`, value: 'retry_connection' }] };
+    await persist(state, { pendingInput: request, status: 'awaiting_connection' });
+    emitState(state, 'awaiting_connection', { toolkit });
+    return { connectionRequest: request, pendingInput: request, status: 'awaiting_connection' };
+  };
+
+  const awaitConnectionNode = async state => {
+    interrupt({ run_id: state.runId, ...state.connectionRequest });
+    const accounts = await composio.listConnectedAccounts(ctx.orgId);
+    const connected = [...new Set(accounts.filter(row => row.status === 'ACTIVE').map(row => row.toolkit).filter(Boolean))];
+    emitState(state, 'resumed');
+    return { connected, connectionRequest: null, pendingInput: null, status: 'resumed' };
   };
 
   const discoverNode = async state => {
@@ -362,9 +393,13 @@ Contract: {response:string}. Use only successful receipts. A successful receipt 
 
   const routeReason = state => ({ search: 'discover', read: 'prepare', draft: 'prepare', ask: 'await_human', done: 'synthesize' }[state.decision?.action] || 'synthesize');
   const routePrepared = state => state.decision?.action === 'draft' ? 'draft' : state.decision?.action === 'search' ? 'discover' : 'execute';
+  const routeIntent = state => missingApp(state) ? 'prepare_connection' : 'discover';
+  const routeConnection = state => missingApp(state) ? 'prepare_connection' : 'discover';
   return new StateGraph(GraphState)
     .addNode('context', contextNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('resolve_intent', intentNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
+    .addNode('prepare_connection', prepareConnectionNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
+    .addNode('await_connection', awaitConnectionNode)
     .addNode('discover', discoverNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
     .addNode('reason', reasonNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('prepare', prepareNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
@@ -373,7 +408,10 @@ Contract: {response:string}. Use only successful receipts. A successful receipt 
     .addNode('await_approval', approvalNode)
     .addNode('await_human', humanNode)
     .addNode('synthesize', synthNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
-    .addEdge(START, 'context').addEdge('context', 'resolve_intent').addEdge('resolve_intent', 'discover')
+    .addEdge(START, 'context').addEdge('context', 'resolve_intent')
+    .addConditionalEdges('resolve_intent', routeIntent, ['prepare_connection', 'discover'])
+    .addEdge('prepare_connection', 'await_connection')
+    .addConditionalEdges('await_connection', routeConnection, ['prepare_connection', 'discover'])
     .addConditionalEdges('reason', routeReason, ['discover', 'prepare', 'await_human', 'synthesize'])
     .addConditionalEdges('prepare', routePrepared, ['discover', 'execute', 'draft'])
     .addEdge('discover', 'reason').addEdge('execute', 'reason').addEdge('await_human', 'reason')

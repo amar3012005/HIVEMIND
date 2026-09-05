@@ -305,9 +305,15 @@ function ungroundedReferencedContent(state, args, schema = {}) {
     const currentOverlap = [...generated].filter(token => current.has(token)).length;
     const priorOverlap = [...generated].filter(token => prior.has(token)).length;
     const requiredOverlap = Math.min(8, Math.max(4, Math.ceil(generated.size * 0.15)));
-    if (currentOverlap < requiredOverlap && priorOverlap < requiredOverlap) {
+    const requiredLength = Math.min(600, Math.max(80, Math.ceil(String(priorAssistant).length * 0.4)));
+    if (currentOverlap < requiredOverlap && (priorOverlap < requiredOverlap || value.trim().length < requiredLength)) {
       invalid.push({ field, schema: schema?.properties?.[field] || {}, code: 'referenced_content_ungrounded' });
     }
+  }
+  const supportsSubject = Object.hasOwn(schema?.properties || {}, 'subject');
+  const hasContent = Object.entries(args || {}).some(([field, value]) => /(?:body|content|message|text)/i.test(field) && typeof value === 'string' && value.trim());
+  if (supportsSubject && hasContent && !String(args?.subject || '').trim()) {
+    invalid.push({ field: 'subject', schema: schema.properties.subject || {}, code: 'draft_subject_missing' });
   }
   return invalid;
 }

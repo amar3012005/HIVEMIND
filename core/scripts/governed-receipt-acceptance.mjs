@@ -9,6 +9,7 @@ const root = process.env.GOVERNED_ACCEPTANCE_CORE_ROOT || process.cwd();
 const { internalFetch } = await import(pathToFileURL(`${root}/src/internal/internal-fetch.js`));
 const email = process.env.GOVERNED_ACCEPTANCE_EMAIL;
 const stream = process.env.GOVERNED_ACCEPTANCE_STREAM === 'true';
+const followup = process.env.GOVERNED_ACCEPTANCE_FOLLOWUP === 'true';
 assert.ok(email, 'GOVERNED_ACCEPTANCE_EMAIL is required');
 const p = new PrismaClient();
 const saver = PostgresSaver.fromConnString(process.env.DATABASE_URL, { schema: 'hivemind_governed_agent_langgraph' });
@@ -19,11 +20,12 @@ try {
   const prior = await p.agentRun.findFirst({ where: { userId: user.id }, orderBy: { createdAt: 'desc' }, select: { orgId: true } });
   assert.ok(prior, 'canary_scope_missing');
   const started = Date.now();
+  const threadId = `receipt-acceptance-${crypto.randomUUID()}`;
   const response = await internalFetch('http://core:3000/api/chat', {
     method: 'POST', userId: user.id, orgId: prior.orgId,
     body: {
       message: 'What are my 5 latest unread Gmail emails? Show subject, sender, and time in UTC. Then briefly summarize what they are about.',
-      use_tools: true, history_turns: 0, thread_id: `receipt-acceptance-${crypto.randomUUID()}`,
+      use_tools: true, history_turns: followup ? 4 : 0, thread_id: threadId,
       stream,
     },
   });
@@ -60,8 +62,31 @@ try {
     assert.ok(answer.includes(normalize(address)), 'sender_address_missing_or_abbreviated');
     assert.ok(answer.includes(new Date(record.messageTimestamp).toISOString().slice(11, 16)), 'UTC_time_missing');
   }
+  let followupProof = null;
+  if (followup) {
+    const selected = records[0];
+    const detailResponse = await internalFetch('http://core:3000/api/chat', {
+      method: 'POST', userId: user.id, orgId: prior.orgId,
+      body: {
+        message: `Tell me more about this email: ${selected.subject}, from ${selected.sender}, at ${selected.messageTimestamp}`,
+        use_tools: true, history_turns: 4, thread_id: threadId,
+      },
+    });
+    assert.equal(detailResponse.status, 200, 'followup_chat_endpoint_failed');
+    const detail = await detailResponse.json();
+    assert.equal(detail.compound_status, 'completed');
+    assert.equal(detail.draft_ids?.length || 0, 0);
+    const detailRun = await p.agentRun.findUnique({ where: { id: detail.execution.run_id } });
+    assert.equal(detailRun.orgId, prior.orgId);
+    assert.equal(detailRun.userId, user.id);
+    assert.ok(detailRun.steps.some(step => /MESSAGE_BY_MESSAGE_ID/.test(step.slug || '')), 'detail_capability_not_used');
+    assert.ok(JSON.stringify(detailRun.scratch.receipts || []).includes(selected.messageId), 'detail_receipt_does_not_match_reference');
+    assert.ok(String(detail.response || '').length > 100, 'followup_detail_response_too_short');
+    assert.doesNotMatch(String(detail.response), /couldn.t find|no emails matching/i, 'contradictory_empty_followup');
+    followupProof = { run_id: detailRun.id, detail_capability: true, matched_reference: true };
+  }
   console.log(JSON.stringify({ passed: true, transport: stream ? 'authenticated_core_chat_SSE' : 'authenticated_core_chat', run_id: run.id,
-    receipt_records: records.length, rendered_rows: tableRows.length - 2, checked_fields: ['subject', 'sender', 'UTC time'], elapsed_ms: Date.now() - started }));
+    receipt_records: records.length, rendered_rows: tableRows.length - 2, checked_fields: ['subject', 'sender', 'UTC time'], followup: followupProof, elapsed_ms: Date.now() - started }));
 } finally {
   await saver.end();
   await p.$disconnect();

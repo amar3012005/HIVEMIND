@@ -235,3 +235,18 @@ export function compactReceipt(row = {}) {
     draft_id: row.draft_id || null,
   };
 }
+
+/**
+ * The durable ledger deliberately stores only a redacted receipt projection.
+ * A synthesis invocation is different: it runs inside the authenticated turn
+ * and must receive the bounded evidence that the connector successfully
+ * returned. Reusing `compactReceipt` here made successful reads impossible to
+ * answer from, because the final model could see that a tool ran but none of
+ * its results. Keep this projection generic and connector-agnostic.
+ */
+export function synthesisReceipt(row = {}) {
+  return {
+    ...compactReceipt(row),
+    data: row?.successful === true && row.data !== undefined ? row.data : null,
+  };
+}

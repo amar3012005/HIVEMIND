@@ -19,6 +19,7 @@ import {
   outcomesCovered,
   safeReceiptSummary,
   serializeKnownFacts,
+  synthesisReceipt,
   verifyPlanCandidate,
 } from './governed-agent-contract.js';
 import { GovernedAgentEventLedger, safeEventEnvelope } from './governed-agent-event-ledger.js';
@@ -875,8 +876,10 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       stage: 'synthesis',
       signal: ctx._signal,
       system: `Synthesize the final response in ${state.locale}. Active skill: ${loadGovernedSkill('synthesis').content}
-Contract: {response:string}. Use only successful receipts. State a genuine capability gap plainly. Do not expose provider schema fields or identifiers.`,
-      input: { message, intent: state.intent, receipts: (state.receipts || []).map(compactReceipt), steps: state.steps, capability_gap: state.capabilityGap },
+Contract: {response:string}. Use only successful receipts. State a genuine capability gap plainly. Do not expose provider schema fields or identifiers.
+
+When a successful receipt includes structured data, render the requested facts from that data directly. Do not say that you can retrieve, show, or access results without actually presenting the returned evidence.`,
+      input: { message, intent: state.intent, receipts: (state.receipts || []).map(synthesisReceipt), steps: state.steps, capability_gap: state.capabilityGap },
     });
     const summary = text(raw?.response || (state.capabilityGap ? capabilityGapQuestion() : 'I could not complete the request from available evidence.'), 5000);
     const status = state.pendingApprovalId ? 'pending' : 'completed';

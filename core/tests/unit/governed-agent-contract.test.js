@@ -4,6 +4,7 @@ import { MemorySaver } from '@langchain/langgraph';
 import {
   capabilityAuthority,
   missingRequiredFields,
+  synthesisReceipt,
   verifyPlanCandidate,
 } from '../../src/agent/governed-agent-contract.js';
 import { GovernedAgentEventLedger } from '../../src/agent/governed-agent-event-ledger.js';
@@ -88,6 +89,26 @@ test('authority uses the leading action rather than nouns in a tool slug', () =>
   assert.equal(capabilityAuthority('LINKEDIN_GET_POST_CONTENT'), 'read');
   assert.equal(capabilityAuthority('GMAIL_SEND_DRAFT'), 'write');
   assert.equal(capabilityAuthority('NOTION_CREATE_PAGE'), 'write');
+});
+
+test('synthesis receives successful structured evidence while the durable ledger stays redacted', () => {
+  const receipt = {
+    slug: 'ANY_PROVIDER_LIST_ITEMS',
+    successful: true,
+    outcome_ids: ['latest'],
+    summary: 'Provider operation completed',
+    data: { items: [{ title: 'First returned item', timestamp: '2026-09-05T17:00:00Z' }] },
+  };
+  assert.deepEqual(synthesisReceipt(receipt), {
+    slug: 'ANY_PROVIDER_LIST_ITEMS',
+    successful: true,
+    outcome_ids: ['latest'],
+    summary: 'Provider operation completed',
+    error_code: null,
+    draft_id: null,
+    data: receipt.data,
+  });
+  assert.equal(synthesisReceipt({ ...receipt, successful: false }).data, null);
 });
 
 test('verifier rejects a write selected as a read and premature clarification', () => {

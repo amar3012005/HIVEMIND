@@ -1165,14 +1165,22 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       const response = await chatCompletionFetch(DEFAULT_CHAT_PLANNER_MODEL, {
         method: 'POST',
         signal: ctx._signal ? AbortSignal.any([ctx._signal, AbortSignal.timeout(2500)]) : AbortSignal.timeout(2500),
-        body: JSON.stringify({ temperature: 0, max_tokens: 180, messages: [
-          { role: 'system', content: 'Translate this interface message into the supplied language. Preserve field identifiers and app names exactly. Return only the translated message.' },
+        body: JSON.stringify({ temperature: 0, max_tokens: 180, response_format: { type: 'json_object' }, messages: [
+          { role: 'system', content: 'Translate this interface message into the supplied language. Preserve field identifiers and app names exactly. Return JSON {"text":string} containing only the translated message in text.' },
           { role: 'user', content: JSON.stringify({ language: run.scratch.language, text }) },
         ] }),
       }, { useCase: 'chat_planner' });
       if (!response.ok) return text;
       const translated = (await response.json())?.choices?.[0]?.message?.content;
-      return typeof translated === 'string' && translated.trim() ? translated.slice(0, 1000) : text;
+      if (typeof translated !== 'string' || !translated.trim()) return text;
+      try {
+        const parsed = parseProgressiveObject(translated);
+        return typeof parsed.text === 'string' && parsed.text.trim() ? parsed.text.slice(0, 1000) : text;
+      } catch {
+        // Keep older plain-text models compatible, but never expose a JSON
+        // envelope (including a malformed/fenced envelope) as interface copy.
+        return /^\s*(?:[\[{]|```)/.test(translated) ? text : translated.slice(0, 1000);
+      }
     } catch { return text; }
   };
   const fail = async (error) => {
@@ -1289,10 +1297,16 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       run.scratch.loop_steps = index;
       run.scratch.lease = { owner: leaseOwner, until: Date.now() + DURABLE_LEASE_MS };
       await persist();
-      const next = await chooseProgressiveAction({ observation: { message: run.goal || message, intent,
+      // Capability discovery is a prerequisite owned by the harness. The
+      // planner must see actual schema cards before it can select a tool.
+      const needsInitialDiscovery = !run.scratch.discovery_attempted && !cards.length
+        && outcomes.some(outcome => outcome.kind === 'read' || outcome.kind === 'draft');
+      const next = needsInitialDiscovery
+        ? { action: 'search', query: intent.use_case, reason: 'Discover capabilities for the requested outcomes' }
+        : await chooseProgressiveAction({ observation: { message: run.goal || message, intent,
         connected, read_only: intent.kind === 'lookup', capabilities: cards, receipts: [...reads, ...draftReceipts],
         remaining_outcomes: outcomes.filter(o => !covered().has(o.id)),
-        steps: run.steps.slice(-12), fields: run.scratch.field_values || {}, searched: Boolean(cards.length),
+        steps: run.steps.slice(-12), fields: run.scratch.field_values || {}, searched: Boolean(run.scratch.discovery_attempted || cards.length),
         native_memory: run.scratch.recall_text || '' }, generateImpl: ctx.chooseNextAction, signal: ctx._signal });
       run.scratch.cursor = next;
       if (['execute', 'native', 'draft'].includes(next.action)) {
@@ -1303,6 +1317,8 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       if (next.action === 'ask_user') return ask(next.question, next.fields);
       if (next.action === 'connect') return connect(next.toolkit || run.scratch.needs_toolkit || intent.apps.find(a => !connected.includes(a)));
       if (next.action === 'search') {
+        run.scratch.discovery_attempted = true;
+        await persist();
         if (!svc.discoverSessionTools) throw new Error('Durable session discovery is unavailable');
         beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: next.query });
         const discovery = await svc.discoverSessionTools(ctx.orgId, { toolkits: (intent.apps.length ? intent.apps : connected).slice(0, 12),

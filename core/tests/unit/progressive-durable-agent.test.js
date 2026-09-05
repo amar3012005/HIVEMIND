@@ -76,6 +76,49 @@ const actions = (...items) => async () => {
 };
 const search = { action: 'search', query: 'retrieve workspace pages', reason: 'Discover relevant capability' };
 
+test('harness discovers external schemas before the first planner decision', () => enabled(async () => {
+  const f = fixture({ slugs: ['NOTION_GET_PAGE'] });
+  f.ctx.resolveHarnessIntent = async () => ({ kind: 'lookup', apps: ['notion'], person: '', use_case: 'retrieve workspace pages', known_fields: '', language: 'de', needs_memory: false,
+    outcomes: [{ id: 'r1', description: 'Read page', kind: 'read' }] });
+  let discoveries = 0;
+  let decisions = 0;
+  const discover = f.composio.discoverSessionTools;
+  f.composio.discoverSessionTools = async (org, options) => {
+    discoveries++;
+    assert.deepEqual(options.useCases, ['retrieve workspace pages']);
+    assert.equal(decisions, 0);
+    return discover(org, options);
+  };
+  f.ctx.chooseNextAction = async observation => {
+    decisions++;
+    assert.equal(discoveries, 1);
+    assert.equal(observation.searched, true);
+    assert.ok(observation.capabilities.some(card => card.slug === 'NOTION_GET_PAGE'));
+    return decisions === 1 ? { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Discovered read', outcome_ids: ['r1'] }
+      : { action: 'done', reason: 'Requested outcome covered' };
+  };
+  const result = await runDurableComposioAgent({ message: 'Lies die Seite', ...f });
+  assert.equal(result.status, 'completed', result.summary);
+  assert.equal(discoveries, 1);
+  assert.equal(f.executed.length, 1);
+  assert.equal([...f.rows.values()][0].scratch.discovery_attempted, true);
+}));
+
+test('empty discovery is attempted once before planner and cannot authorize invented tools', () => enabled(async () => {
+  const f = fixture();
+  let discoveries = 0;
+  f.composio.discoverSessionTools = async () => { discoveries++; return { sessionId: 'session-tenant', tools: [], toolSchemas: {} }; };
+  f.ctx.chooseNextAction = async observation => {
+    assert.equal(observation.searched, true);
+    assert.deepEqual(observation.capabilities, []);
+    return { action: 'execute', slug: 'r1', reason: 'Invented outcome as tool', outcome_ids: ['r1'] };
+  };
+  const result = await runDurableComposioAgent({ message: 'Read', ...f });
+  assert.equal(result.status, 'error');
+  assert.equal(discoveries, 1);
+  assert.equal(f.executed.length, 0);
+}));
+
 test('default progressive model transport POSTs JSON for intent, action, arguments, synthesis and pause localization', () => enabled(async () => {
   const originalFetch = globalThis.fetch;
   const envNames = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED', 'DURABLE_NEXT_ACTION_MODEL', 'HIVEMIND_BRIEFING_MODEL'];
@@ -104,7 +147,7 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
     outcomes: [{ id: 'page', description: kind === 'lookup' ? 'Read page' : 'Prepare page', kind: kind === 'lookup' ? 'read' : 'draft' }] });
   try {
     const read = defaultModels(fixture({ slugs: ['NOTION_GET_PAGE'] }));
-    replies.push(intent('lookup'), search, { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read requested page', outcome_ids: ['page'] }, {},
+    replies.push(intent('lookup'), { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read requested page', outcome_ids: ['page'] }, {},
       { action: 'done', reason: 'Requested page read' }, 'Die Seite wurde gefunden.');
     const completed = await runDurableComposioAgent({ message: 'Lies die Seite', ...read });
     assert.equal(completed.status, 'completed', completed.summary);
@@ -113,14 +156,15 @@ test('default progressive model transport POSTs JSON for intent, action, argumen
     assert.equal(replies.length, 0);
 
     const compose = defaultModels(fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] }));
-    replies.push(intent('compose'), search, { action: 'draft', slug: 'NOTION_CREATE_PAGE', reason: 'Prepare page', outcome_ids: ['page'] }, {},
-      'Bitte geben Sie title an.');
+    replies.push(intent('compose'), { action: 'draft', slug: 'NOTION_CREATE_PAGE', reason: 'Prepare page', outcome_ids: ['page'] }, {},
+      { language: 'de', text: 'Bitte geben Sie title an.' });
     const paused = await runDurableComposioAgent({ message: 'Erstelle eine Seite', ...compose });
     assert.equal(paused.status, 'needs_input', paused.summary);
     assert.equal(paused.summary, 'Bitte geben Sie title an.');
+    assert.deepEqual(requests.at(-1).body.response_format, { type: 'json_object' });
     assert.equal(compose.writes.length, 0);
     assert.equal(replies.length, 0);
-    assert.equal(requests.length, 11);
+    assert.equal(requests.length, 9);
     // Check afterward too: localization deliberately catches errors, so an
     // assertion only inside fetch could be swallowed by the fallback.
     for (const request of requests) {

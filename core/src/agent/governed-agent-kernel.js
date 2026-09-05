@@ -239,6 +239,14 @@ Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:strin
       { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
         outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
     const viable = capabilities.filter(card => card.authority === 'read' && !card.attempted_failed);
+    if (failedSlugs.size && !viable.length && state.searchQueries.length < 3 && ['ask', 'done'].includes(decision.action)) {
+      const unresolved = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.description).join('; ');
+      decision = {
+        action: 'search',
+        query: `Find a different connected read capability for unresolved outcomes: ${unresolved || state.intent.use_case}. Exclude failed capabilities: ${[...failedSlugs].join(', ')}. Prefer capabilities that list, search, or resolve prerequisite evidence before requiring an identifier.`,
+        reason: 'A failed capability cannot justify user clarification while bounded alternative discovery remains',
+      };
+    }
     const selected = capabilities.find(card => card.slug === decision.slug);
     const invalidAuthority = decision.action === 'read' && selected?.authority !== 'read';
     if (viable.length && (invalidAuthority || (['search', 'ask'].includes(decision.action) && state.searchQueries.length >= 2))) {

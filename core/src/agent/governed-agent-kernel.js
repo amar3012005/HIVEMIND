@@ -175,10 +175,13 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
     const capabilities = state.capabilities.map(card => ({ slug: card.slug, toolkit: card.toolkit, authority: card.authority,
       description: card.description, required: card.schema.required || [], fields: Object.keys(card.schema.properties || {}) }));
     const decision = await jsonDecision(`Act as a self-governing tool agent. Active skill: ${loadGovernedSkill('dependency').content}
-Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:string,query?:string,outcome_ids?:string[],question?:string,fields?:string[],reason:string}. Use discovered capabilities before searching again. Reads used only to resolve a prerequisite use outcome_ids:[]. Never ask for provider IDs or account names. A write is only draft. Search queries must be materially new. If the catalog lacks the required reader after two searches, ask for a human-readable business fact or explain the capability gap.`,
+Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:string,query?:string,purpose?:"outcome"|"prerequisite",outcome_ids?:string[],question?:string,fields?:string[],reason:string}. For read or draft, purpose is required. Use purpose:"outcome" and the unresolved outcome_ids when the capability directly fulfills the request. Use purpose:"prerequisite" and outcome_ids:[] only when its data is required by a later action. Use discovered capabilities before searching again. Never repeat a successful read unless materially different arguments are required. Never ask for provider IDs or account names. A write is only draft. Search queries must be materially new. If the catalog lacks the required reader after two searches, ask for a human-readable business fact or explain the capability gap.`,
       { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
         outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
     if (!['search', 'read', 'draft', 'ask', 'done'].includes(decision.action)) throw new Error('governed_action_contract');
+    if (['read', 'draft'].includes(decision.action) && !['outcome', 'prerequisite'].includes(decision.purpose)) {
+      throw new Error('governed_action_purpose_required');
+    }
     if (decision.action === 'search') {
       const query = String(decision.query || '').trim();
       if (!query || state.searchQueries.map(x => x.toLowerCase()).includes(query.toLowerCase()) || state.searchQueries.length >= 3) {
@@ -212,8 +215,13 @@ Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:strin
     const card = state.capabilities.find(item => item.slug === state.decision.slug);
     const [receipt] = await composio.executeToolsParallel(ctx.orgId, [{ slug: card.slug, arguments: state.toolArgs }],
       { sessionId: state.sessionId, allowDirectFallback: false });
+    const unresolved = state.intent.outcomes.map(outcome => outcome.id)
+      .filter(id => !state.receipts.some(row => row.successful && row.outcome_ids?.includes(id)));
+    const outcomeIds = state.decision.purpose === 'outcome'
+      ? (Array.isArray(state.decision.outcome_ids) && state.decision.outcome_ids.length ? state.decision.outcome_ids : unresolved)
+      : [];
     const row = { slug: card.slug, successful: receipt?.successful === true, data: compact(receipt?.data, 7000),
-      error: receipt?.successful ? null : 'Provider read failed', outcome_ids: state.decision.outcome_ids || [] };
+      error: receipt?.successful ? null : 'Provider read failed', outcome_ids: outcomeIds };
     const receipts = [...state.receipts, row];
     const steps = [...state.steps, { kind: 'read', slug: card.slug, status: row.successful ? 'completed' : 'error', summary: row.successful ? receiptSummary(receipt.data) : row.error }];
     await persist(state, { receipts, steps, status: row.successful ? 'tool_executed' : 'tool_failed' });

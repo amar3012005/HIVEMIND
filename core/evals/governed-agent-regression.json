@@ -1,0 +1,32 @@
+[
+  {
+    "id": "linkedin-profile-en",
+    "inputs": { "message": "What is my LinkedIn profile?", "language": "en", "history_turns": 6 },
+    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS", "LINKEDIN_GET_MY_INFO"], "forbidden_prompt_terms": ["account", "person_id", "URN"], "max_same_read": 1 }
+  },
+  {
+    "id": "gmail-latest-de",
+    "inputs": { "message": "Worum geht es in meinen neuesten E-Mails?", "language": "de", "history_turns": 6 },
+    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id"], "max_same_read": 1 }
+  },
+  {
+    "id": "gmail-latest-fr",
+    "inputs": { "message": "De quoi parlent mes derniers e-mails ?", "language": "fr", "history_turns": 6 },
+    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id"], "max_same_read": 1 }
+  },
+  {
+    "id": "rama-draft-unresolved",
+    "inputs": { "message": "Send an email to Rama about Singulance.", "language": "en", "history_turns": 6 },
+    "outputs": { "terminal": ["pending", "needs_input"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "forbidden_destinations": ["rama@example.com"], "live_write_forbidden": true }
+  },
+  {
+    "id": "gmail-draft-explicit-recipient",
+    "inputs": { "message": "Draft an email to amarsai2005@gmail.com about Singulance. Do not send it.", "language": "en", "history_turns": 2 },
+    "outputs": { "terminal": ["pending"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "draft_required": true, "live_write_forbidden": true }
+  },
+  {
+    "id": "linkedin-latest-post-capability",
+    "inputs": { "message": "What is my latest LinkedIn post about?", "language": "en", "history_turns": 6 },
+    "outputs": { "terminal": ["completed", "needs_input"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "forbidden_prompt_terms": ["post URN", "post_id", "account"], "live_write_forbidden": true }
+  }
+]

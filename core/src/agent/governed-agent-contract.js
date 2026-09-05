@@ -282,10 +282,9 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
     if (failed) return { ok: false, code: 'failed_tool_repeat', repair: 'Do not retry the failed tool with unchanged facts; discover a materially different capability.' };
     const insufficient = (state.receipts || []).some(row => row?.slug === selected.slug && row?.evidence_sufficient === false);
     if (insufficient) return { ok: false, code: 'insufficient_tool_repeat', repair: 'This capability completed but did not satisfy the required evidence shape. Select a materially different discovered capability.' };
+    const succeeded = (state.receipts || []).some(row => row?.slug === selected.slug && row?.successful === true);
+    if (succeeded) return { ok: false, code: 'successful_tool_repeat', repair: 'This read node already succeeded. Reuse its receipt or select a materially different capability; do not execute it twice.' };
     const purpose = plan.purpose || 'outcome';
-    if (purpose === 'prerequisite' && (state.receipts || []).some(row => row?.slug === selected.slug && row?.successful === true)) {
-      return { ok: false, code: 'successful_prerequisite_repeat', repair: 'This prerequisite read already succeeded. Use its receipt to prepare the draft, or ask only for a genuinely absent business field.' };
-    }
     const outcomeIds = purpose === 'prerequisite' ? [] : (plan.outcome_ids.length ? plan.outcome_ids : unresolved);
     const invalidOutcome = outcomeIds.find(id => state.intent?.outcomes?.find(outcome => outcome.id === id)?.kind === 'draft');
     if (invalidOutcome) return { ok: false, code: 'read_cannot_complete_draft', repair: 'A read can supply evidence only. Keep draft outcomes unresolved until a governed draft is created.' };

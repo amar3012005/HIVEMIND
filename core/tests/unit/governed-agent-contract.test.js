@@ -459,6 +459,60 @@ test('Core evidence is a first-class prerequisite and an approved draft executes
   assert.ok([...prisma.events.values()].some(event => event.payload?.state === 'sealed'));
 });
 
+test('a canonical Core mutation is exposed but executes only after approval', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  let writes = 0;
+  const ctx = {
+    orgId: 'org', userId: 'user', language: 'en', threadId: 'thread-core-write', historyTurns: 2,
+    _tracedDispatch: async (name, args) => {
+      assert.equal(name, 'hivemind_save_memory');
+      assert.equal(args.title, 'Governed agent rollout');
+      assert.equal(args.content, 'The governed agent exposes canonical Core tools behind approval.');
+      assert.equal(args.memory_type, 'fact');
+      assert.equal(args.scope, 'personal');
+      writes += 1;
+      return { saved: true, memory_id: 'memory-1' };
+    },
+    governedDecision: async ({ stage }) => {
+      if (stage === 'intent') return {
+        locale: 'en', kind: 'write', apps: ['HIVE-MIND'], discovery_query: 'save one durable memory',
+        outcomes: [{ id: 'save_memory', kind: 'draft', description: 'save the supplied durable memory' }],
+        known_facts: {
+          title: 'Governed agent rollout',
+          content: 'The governed agent exposes canonical Core tools behind approval.',
+          tags: ['governed-agent', 'runtime'],
+        },
+        entities: [], business_question: null, reference_selector: null,
+      };
+      if (stage === 'planning') return {
+        action: 'draft', tool_slug: 'hivemind_save_memory', outcome_ids: ['save_memory'], reason: 'canonical Core mutation',
+      };
+      if (stage === 'arguments') return {
+        title: 'Governed agent rollout',
+        content: 'The governed agent exposes canonical Core tools behind approval.',
+        tags: ['governed-agent', 'runtime'],
+      };
+      if (stage === 'synthesis') return { response: 'The approved memory was saved.' };
+      throw new Error(`unexpected stage ${stage}`);
+    },
+  };
+  const composio = composioWith([]);
+  const pending = await runGovernedAgentRuntime({ message: 'Remember this personal fact.', ctx, composio, prisma, checkpointer });
+  assert.equal(pending.status, 'pending');
+  assert.equal(writes, 0);
+  assert.equal(prisma.drafts[0].provider, 'hivemind');
+  const completed = await runGovernedAgentRuntime({
+    message: 'Remember this personal fact.',
+    ctx: { ...ctx, governedGraphThreadId: pending.resumeState.graph_thread_id, governedRunId: pending.run.id },
+    choice: { run_id: pending.run.id, action: 'approve', approval_id: pending.draftIds[0] },
+    composio, prisma, checkpointer,
+  });
+  assert.equal(completed.status, 'completed');
+  assert.equal(writes, 1);
+  assert.equal(prisma.drafts[0].status, 'sent');
+});
+
 test('a nonterminal provider acknowledgement stays pending until a typed provider outcome resumes the same graph', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

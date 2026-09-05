@@ -187,6 +187,7 @@ function recordFields(value, depth = 0, fields = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 3) return fields;
   for (const [key, item] of Object.entries(value)) {
     if (item !== undefined && item !== null && item !== '') fields.push(key);
+    if (key === 'key' && typeof item === 'string' && item.trim()) fields.push(item.trim());
     if (item && typeof item === 'object' && !Array.isArray(item)) recordFields(item, depth + 1, fields);
   }
   return fields;
@@ -211,6 +212,15 @@ export function receiptSatisfiesEvidence(data, requirement = {}) {
   const required = (Array.isArray(requirement?.required_fields) ? requirement.required_fields : [])
     .map(value => asText(value, 80)).filter(Boolean).slice(0, 16);
   const collections = evidenceCollections(data).sort((a, b) => b.length - a.length);
+  const emptyTopLevelCollection = data && typeof data === 'object' && !Array.isArray(data)
+    && Object.values(data).some(value => Array.isArray(value) && value.length === 0)
+    && !collections.length;
+  // An authenticated list endpoint returning an explicit empty collection is
+  // complete negative evidence. Asking the user for more context cannot turn
+  // zero provider records into one; synthesize the empty result honestly.
+  if (emptyTopLevelCollection) {
+    return { ok: true, code: 'empty_result_set', observed_records: 0, required_records: minimum };
+  }
   // A detail endpoint often returns one root record containing nested arrays
   // (headers, labels, attachments). For singleton outcomes the root is the
   // evidence record; selecting the largest nested array validates the wrong
@@ -218,11 +228,17 @@ export function receiptSatisfiesEvidence(data, requirement = {}) {
   const root = minimum === 1 && data && typeof data === 'object' && !Array.isArray(data) ? [[data]] : [];
   const candidates = [...root, ...collections.filter(items => items.length >= minimum)];
   if (!candidates.length) return { ok: false, code: 'insufficient_record_count', observed_records: collections[0]?.length || 0, required_records: minimum };
-  const evaluated = candidates.map(records => ({
-    records,
-    missing: required.filter(field => records.slice(0, minimum)
-      .some(record => !recordFields(record).some(actual => equivalentField(field, actual)))),
-  })).sort((left, right) => left.missing.length - right.missing.length || right.records.length - left.records.length);
+  const evaluated = candidates.map(records => {
+    const keyValueCollection = records.every(record => record && typeof record === 'object'
+      && !Array.isArray(record) && typeof record.key === 'string' && Object.hasOwn(record, 'value'));
+    const evidenceRecords = keyValueCollection ? records : records.slice(0, minimum);
+    return {
+      records,
+      missing: required.filter(field => keyValueCollection
+        ? evidenceRecords.every(record => !recordFields(record).some(actual => equivalentField(field, actual)))
+        : evidenceRecords.some(record => !recordFields(record).some(actual => equivalentField(field, actual)))),
+    };
+  }).sort((left, right) => left.missing.length - right.missing.length || right.records.length - left.records.length);
   const { records, missing } = evaluated[0];
   return missing.length
     ? { ok: false, code: 'required_evidence_fields_missing', missing_fields: missing, observed_records: records.length, required_records: minimum }
@@ -294,7 +310,6 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
   if (plan.action === 'draft') {
     if (!selected) return { ok: false, code: 'tool_not_discovered', repair: 'Select only a discovered mutation capability.' };
     if (selected.authority !== 'write') return { ok: false, code: 'write_authority_denied', repair: 'A draft action requires a discovered write capability.' };
-    if (selected.source === 'core') return { ok: false, code: 'core_write_not_supported', repair: 'Core capabilities are read-only in this governed graph. Select an external mutation capability.' };
     const outcomeIds = plan.outcome_ids.length ? plan.outcome_ids : unresolved;
     const invalidOutcome = outcomeIds.find(id => state.intent?.outcomes?.find(outcome => outcome.id === id)?.kind !== 'draft');
     if (invalidOutcome) return { ok: false, code: 'draft_cannot_complete_read', repair: 'A draft may only complete a requested mutation outcome.' };

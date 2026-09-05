@@ -167,7 +167,7 @@ export function requirementsResolvedByEvidence({ intent = {}, receipts = [], fie
   });
 }
 
-export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], fieldValues = {}, conversationContext = [], args = {} } = {}) {
+export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], fieldValues = {}, conversationContext = [], message = '', args = {} } = {}) {
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
   const groundedFields = { ...(intent.known_facts || {}), ...(fieldValues || {}) };
   for (const field of Object.keys(card.schema?.properties || {})) {
@@ -177,6 +177,12 @@ export function compileGroundedArguments({ card = {}, intent = {}, receipts = []
       return equivalentFactKey(key, normalizedField);
     });
     if (grounded) compiled[field] = grounded[1];
+  }
+  const messageTokens = new Set(asText(message, 6000).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) || []);
+  for (const [field, definition] of Object.entries(card.schema?.properties || {})) {
+    if (asText(compiled[field]) || !Array.isArray(definition?.enum)) continue;
+    const explicit = definition.enum.find(value => typeof value === 'string' && messageTokens.has(value.toLowerCase()));
+    if (explicit) compiled[field] = explicit;
   }
   const referencedAssistantContent = [...conversationContext].reverse()
     .find(turn => turn?.role === 'assistant' && asText(turn?.content, 6000))?.content;

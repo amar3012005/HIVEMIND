@@ -12,6 +12,7 @@ import {
 } from './governed-conversation-context.js';
 import {
   capabilityCard,
+  capabilityRelevance,
   capabilityGapQuestion,
   compactCapability,
   compactRecommendedPlan,
@@ -34,7 +35,7 @@ import {
 } from './governed-agent-contract.js';
 import { GovernedAgentEventLedger, safeEventEnvelope } from './governed-agent-event-ledger.js';
 import { createGovernedTrace } from './governed-agent-observability.js';
-import { executeGovernedCoreRead, loadGovernedCoreCapabilities } from './governed-agent-core-tools.js';
+import { executeGovernedCoreRead, executeGovernedCoreWrite, loadGovernedCoreCapabilities } from './governed-agent-core-tools.js';
 import {
   compileExecutionPlan,
   markPlanNodeRunning,
@@ -677,8 +678,13 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
 
   const discoverNode = async state => trace('composio_search', { attempt: Number(state.discoveryAttempts || 0) + 1 }, async () => {
     const query = text(state.searchQuery || state.intent?.discovery_query || message, 900);
-    const toolkits = unique(state.intent?.apps?.length ? state.intent.apps : state.connected)
-      .filter(toolkit => !['hivemind', 'local', 'core', 'composio'].includes(toolkit)).slice(0, 12);
+    const explicitCoreNamespace = /\bhive[\s-]?mind\b/i.test(message);
+    const coreCanOwnOutcome = explicitCoreNamespace && (state.capabilities || [])
+      .filter(card => card.source === 'core')
+      .some(card => capabilityRelevance(card, { intent: state.intent }) >= 2);
+    const toolkits = (coreCanOwnOutcome ? [] : unique(state.intent?.apps?.length ? state.intent.apps : state.connected))
+      .filter(toolkit => !['hivemind', 'local', 'core', 'composio']
+        .includes(String(toolkit).toLowerCase().replace(/[^a-z0-9]/g, ''))).slice(0, 12);
     if (!toolkits.length) {
       if ((state.capabilities || []).some(card => card.source === 'core')) {
         const patch = await transition(state, 'capability_discovered', {
@@ -788,6 +794,17 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       return new Command({ update: patch, goto: 'synthesize' });
     }
     if (scheduled.action === 'blocked') {
+      const attemptedOutcome = (state.receipts || []).some(receipt => receipt?.successful
+        && (receipt.evidence_checks || []).some(check => (scheduled.node?.outcome_ids || []).includes(check.id)));
+      if (attemptedOutcome) {
+        const patch = await transition(state, 'outcomes_verified', {
+          decision: { action: 'done', reason: 'Available provider evidence is partial and no materially different candidate remains.' },
+          activePlanNodeId: null,
+          capabilityGap: true,
+        }, { reason_code: 'partial_evidence_terminal' });
+        await persist(state, patch);
+        return new Command({ update: patch, goto: 'synthesize' });
+      }
       const patch = await transition(state, 'dependency_resolved', {
         activePlanNodeId: scheduled.node?.id || null,
         decision: null,
@@ -1032,6 +1049,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       receipts: state.receipts,
       fieldValues: state.fieldValues,
       conversationContext: state.conversationContext,
+      message,
       args: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {},
     });
     let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
@@ -1051,6 +1069,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         receipts: state.receipts,
         fieldValues: state.fieldValues,
         conversationContext: state.conversationContext,
+        message,
         args: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {},
       });
       ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
@@ -1191,7 +1210,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
 
   const draftNode = async state => trace('approval_draft', { tool_slug: state.decision?.tool_slug || null, authority: 'write' }, async () => {
     const card = (state.capabilities || []).find(item => item.slug === state.decision?.tool_slug);
-    if (!card || card.source !== 'composio' || card.authority !== 'write') throw new Error('governed_write_authority_denied');
+    if (!card || !['composio', 'core'].includes(card.source) || card.authority !== 'write') throw new Error('governed_write_authority_denied');
     const ajv = new Ajv({ strict: false, allErrors: true });
     const valid = ajv.compile(card.schema || { type: 'object', properties: {} })(state.toolArgs || {});
     if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || missingBusinessPayloadFields(card, state.toolArgs).length
@@ -1204,10 +1223,11 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     }
     const toolArgs = {
       ...state.toolArgs,
-      _composio_slug: card.slug,
+      _governed_tool_source: card.source,
+      ...(card.source === 'composio' ? { _composio_slug: card.slug } : {}),
       _harness_version: HARNESS_VERSION,
       _graph_thread_id: ctx.governedGraphThreadId,
-      _composio_session_id: state.sessionId,
+      ...(card.source === 'composio' ? { _composio_session_id: state.sessionId } : {}),
       _input_schema: card.schema,
     };
     const idempotencyKey = createHash('sha256').update(`graph:${ctx.orgId}:${ctx.userId}:${state.runId}:${card.slug}:${JSON.stringify(toolArgs)}`).digest('hex');
@@ -1215,8 +1235,8 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (!row) row = await prisma.pendingWrite.create({ data: {
       userId: ctx.userId,
       orgId: ctx.orgId,
-      provider: 'composio',
-      toolGroup: 'composio',
+      provider: card.source === 'core' ? 'hivemind' : 'composio',
+      toolGroup: card.source === 'core' ? 'hivemind' : 'composio',
       toolName: card.slug,
       toolArgs,
       argsHash: createHash('sha256').update(JSON.stringify(toolArgs)).digest('hex'),
@@ -1268,12 +1288,14 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (claimed.count !== 1) throw new Error('governed_approval_state_changed');
     const args = { ...(row.toolArgs || {}) };
     for (const key of Object.keys(args)) if (key.startsWith('_')) delete args[key];
-    const [receipt] = await composio.executeToolsParallel(ctx.orgId, [{ slug: row.toolName, arguments: args }], {
-      sessionId: row.toolArgs?._composio_session_id || state.sessionId,
-      allowDirectFallback: false,
-    });
+    const receipt = row.toolArgs?._governed_tool_source === 'core' || row.provider === 'hivemind'
+      ? await executeGovernedCoreWrite(row.toolName, args, ctx)
+      : (await composio.executeToolsParallel(ctx.orgId, [{ slug: row.toolName, arguments: args }], {
+        sessionId: row.toolArgs?._composio_session_id || state.sessionId,
+        allowDirectFallback: false,
+      }))[0];
     const successful = receipt?.successful === true;
-    const awaitingProviderEvent = successful && providerEventExpected(receipt);
+    const awaitingProviderEvent = row.provider !== 'hivemind' && successful && providerEventExpected(receipt);
     const final = await prisma.pendingWrite.update({ where: { id: row.id }, data: {
       // A provider acknowledgement that explicitly says it is asynchronous is
       // not proof of delivery. Keep the pending write approved until a typed,

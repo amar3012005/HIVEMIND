@@ -153,8 +153,9 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
     if (redundant(raw)) throw new Error('Progressive planner repeated an answered clarification');
   }
+  if (typeof raw.reason !== 'string' || !raw.reason.trim()) raw = { ...raw, reason: `Planner selected ${String(raw.action || 'an action')}` };
   if (!['search', 'execute', 'native', 'draft', 'connect', 'ask_user', 'done'].includes(raw.action)
-    || typeof raw.reason !== 'string' || !raw.reason.trim()) throw new Error('Progressive action violates contract');
+    || !raw.reason.trim()) throw new Error('Progressive action violates contract');
   if (['execute', 'native', 'draft'].includes(raw.action) && (typeof raw.slug !== 'string' || !raw.slug.trim())) throw new Error('Progressive action requires slug');
   if (raw.action === 'search' && (typeof raw.query !== 'string' || !raw.query.trim())) throw new Error('Progressive search requires query');
   if (raw.action === 'connect' && (typeof raw.toolkit !== 'string' || !raw.toolkit.trim())) throw new Error('Progressive connect requires toolkit');

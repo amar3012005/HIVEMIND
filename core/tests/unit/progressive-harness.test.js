@@ -142,6 +142,16 @@ test('action outcome references must identify one known requested outcome', asyn
   }
 });
 
+test('missing action reason receives neutral host audit metadata', async () => {
+  const observation = { intent: { outcomes: [{ id: 'profile', kind: 'read' }] },
+    remaining_outcomes: [{ id: 'profile', kind: 'read' }] };
+  const action = await chooseProgressiveAction({ observation, generateImpl: async () => ({
+    action: 'execute', slug: 'WORKSPACE_GET_PROFILE', outcome_ids: ['profile'],
+  }) });
+  assert.equal(action.action, 'execute');
+  assert.equal(action.reason, 'Planner selected execute');
+});
+
 test('intent failures close instead of selecting an app from language keywords', async () => {
   await assert.rejects(resolveHarnessIntent({ message: 'send mail', generateImpl: async () => { throw new Error('offline'); } }), /offline/);
   for (const raw of ['not json', '[]', { kind: 'compose', apps: ['gmail'] }]) {

@@ -53,6 +53,7 @@ import {
   dependencyDiscoveryQuery,
   evidenceAmbiguities,
   hasNamedBusinessEntity,
+  missingBusinessPayloadFields,
   missingConditionalSchemaFields,
   requirementsResolvedByEvidence,
   resolvableSchemaRequirements,
@@ -1039,7 +1040,11 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
     const valid = validator(args);
-    const missing = [...missingRequiredFields(card.schema, args), ...missingConditionalSchemaFields(card.schema, args)];
+    const missing = [
+      ...missingRequiredFields(card.schema, args),
+      ...missingConditionalSchemaFields(card.schema, args),
+      ...missingBusinessPayloadFields(card, args),
+    ];
     const invalid = invalidSchemaValues(card.schema, args);
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
     const ambiguous = ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args });
@@ -1146,7 +1151,8 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (!card || card.source !== 'composio' || card.authority !== 'write') throw new Error('governed_write_authority_denied');
     const ajv = new Ajv({ strict: false, allErrors: true });
     const valid = ajv.compile(card.schema || { type: 'object', properties: {} })(state.toolArgs || {});
-    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || invalidSchemaValues(card.schema, state.toolArgs).length
+    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || missingBusinessPayloadFields(card, state.toolArgs).length
+      || invalidSchemaValues(card.schema, state.toolArgs).length
       || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length
       || ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args: state.toolArgs }).length) {
       throw new Error('governed_draft_schema_or_evidence_denied');

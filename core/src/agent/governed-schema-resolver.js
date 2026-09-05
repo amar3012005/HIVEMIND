@@ -4,6 +4,7 @@ const asText = (value, limit = 1000) => String(value ?? '').replace(/\s+/g, ' ')
 const IDENTITY_FIELD = /(?:email|address|recipient|contact|person|assignee|owner|member|user|customer|company|account|destination)/i;
 const SEARCH_FIELD = /^(?:query|search_query|search_term|term|name)$/i;
 const CONTENT_FIELD = /(?:body|content|message|text|description)/i;
+const BUSINESS_PAYLOAD_FIELD = /(?:body|content|message|text|description|subject|title)/i;
 const COLLECTION_KEY = /^(?:results|items|records|messages|contacts|people|data)$/i;
 
 export function hasNamedBusinessEntity(intent = {}, fieldValues = {}) {
@@ -126,6 +127,15 @@ export function compileGroundedArguments({ card = {}, intent = {}, receipts = []
     }
   }
   return compiled;
+}
+
+export function missingBusinessPayloadFields(card = {}, args = {}) {
+  if (card.authority !== 'write') return [];
+  const properties = card.schema?.properties || {};
+  const fields = Object.keys(properties).filter(field => BUSINESS_PAYLOAD_FIELD.test(field));
+  if (!fields.length || fields.some(field => asText(args[field]))) return [];
+  const preferred = fields.find(field => CONTENT_FIELD.test(field)) || fields[0];
+  return [{ field: preferred, schema: properties[preferred] || {}, code: 'business_payload_required' }];
 }
 
 export function missingConditionalSchemaFields(schema = {}, args = {}) {

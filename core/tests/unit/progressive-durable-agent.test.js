@@ -76,6 +76,33 @@ const actions = (...items) => async () => {
 };
 const search = { action: 'search', query: 'retrieve workspace pages', reason: 'Discover relevant capability' };
 
+test('parameterless capability bypasses argument generation while required scope stays blocked', () => enabled(async () => {
+  for (const requiredScope of [false, true]) {
+    const f = fixture({ slugs: ['NOTION_GET_PAGE'] });
+    const intent = await f.ctx.resolveHarnessIntent();
+    f.ctx.resolveHarnessIntent = async () => ({ ...intent, needs_memory: false, outcomes: [{ id: 'r1', description: 'Read profile', kind: 'read' }] });
+    const discover = f.composio.discoverSessionTools;
+    f.composio.discoverSessionTools = async () => {
+      const discovery = await discover();
+      discovery.toolSchemas.NOTION_GET_PAGE.input_schema = { type: 'object', properties: requiredScope ? { org_id: { type: 'string' } } : {}, required: requiredScope ? ['org_id'] : [] };
+      return discovery;
+    };
+    let generated = 0;
+    f.ctx.generateProgressiveToolInputs = async () => { generated++; throw new Error('Must not generate arguments for a parameterless capability'); };
+    f.ctx.chooseNextAction = actions({ action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read profile' });
+    const result = await runDurableComposioAgent({ message: 'Read profile', ...f });
+    assert.equal(generated, 0);
+    if (requiredScope) {
+      assert.notEqual(result.status, 'completed');
+      assert.equal(f.executed.length, 0);
+    } else {
+      assert.equal(result.status, 'completed', result.summary);
+      assert.deepEqual(f.executed[0].arguments, {});
+      assert.deepEqual(result.run.scratch.read_results[0].args, {});
+    }
+  }
+}));
+
 test('default argument HTTP envelope preserves optional filters and rejects tool changes or unknown keys', () => enabled(async () => {
   const originalFetch = globalThis.fetch;
   const names = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED'];

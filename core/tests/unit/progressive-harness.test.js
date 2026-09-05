@@ -102,6 +102,41 @@ test('shared discovery and control actions never claim outcome coverage', async 
   }
 });
 
+test('latest answers trigger one bounded corrective plan instead of a repeated clarification', async () => {
+  const observation = { message: 'Create a document; title is not supplied yet', fields: { title: 'Current user answer' },
+    intent: { outcomes: [{ id: 'document', kind: 'draft' }] } };
+  let calls = 0;
+  const action = await chooseProgressiveAction({ observation, generateImpl: async data => {
+    if (++calls === 1) return { action: 'ask_user', question: 'What title?', fields: ['title'], reason: 'Old request has no title' };
+    assert.equal(data.feedback.code, 'clarification_already_answered');
+    assert.equal(data.fields.title, 'Current user answer');
+    assert.ok(JSON.stringify(data).length <= PROGRESSIVE_PROMPT_BUDGETS.action);
+    return { action: 'draft', slug: 'WORKSPACE_CREATE_DOCUMENT', outcome_ids: ['document'], reason: 'Use supplied title' };
+  } });
+  assert.equal(action.action, 'draft');
+  assert.equal(calls, 2);
+});
+
+test('redundant clarification retry is capped and false or zero are supplied answers', async () => {
+  let calls = 0;
+  await assert.rejects(chooseProgressiveAction({ observation: { fields: { enabled: false, count: 0 } }, generateImpl: async () => {
+    calls++;
+    return { action: 'ask_user', question: 'Enabled and count?', fields: ['enabled', 'count'], reason: 'Need values' };
+  } }), /repeated an answered clarification/);
+  assert.equal(calls, 2);
+});
+
+test('mixed clarification requests retain only unresolved fields without a retry', async () => {
+  let calls = 0;
+  const result = await chooseProgressiveAction({ observation: { fields: { title: 'Supplied', destination: '' } }, generateImpl: async () => {
+    calls++;
+    return { action: 'ask_user', question: 'Titel und Ziel?', fields: ['title', 'destination'], reason: 'Missing destination' };
+  } });
+  assert.deepEqual(result.fields, ['destination']);
+  assert.equal(result.question, 'Titel und Ziel?');
+  assert.equal(calls, 1);
+});
+
 test('bounded observations remain parseable and preserve both evidence classes', () => {
   const messages = buildProgressiveSynthesisMessages({ message: 'Compare', language: 'de', recallText: 'native '.repeat(10000),
     reads: Array.from({ length: 100 }, () => ({ source: 'external', payload: 'fact'.repeat(10000) })),

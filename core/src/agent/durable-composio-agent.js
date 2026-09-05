@@ -1384,9 +1384,12 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       if (!connected.includes(card.toolkit)) return connect(card.toolkit);
       const input = boundedEvidence({ slug: card.slug, schema: card.schema, message: run.goal || message,
         fields: run.scratch.field_values || {}, receipts: reads, language: intent.language }, 14000);
+      const reserved = new Set(['user_id', 'userid', 'org_id', 'connected_account_id', 'entity_id', 'session_id', 'metadata', '__proto__', 'constructor', 'prototype']);
+      const hasParameters = Object.keys(card.schema.properties).some(key => !reserved.has(key.toLowerCase()));
       let generated;
       const generator = ctx.generateProgressiveToolInputs || (next.action === 'draft' ? ctx.composeWriteToolArgs : null);
-      if (typeof generator === 'function') generated = await generator(input);
+      if (!hasParameters) generated = {};
+      else if (typeof generator === 'function') generated = await generator(input);
       else {
         const { chatCompletionFetch, DEFAULT_CHAT_PLANNER_MODEL } = await import('../llm/chat-provider.js');
         const response = await chatCompletionFetch(DEFAULT_CHAT_PLANNER_MODEL, { method: 'POST', signal: ctx._signal, body: JSON.stringify({ temperature: 0, max_tokens: 1000, response_format: { type: 'json_object' },
@@ -1397,7 +1400,6 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       }
       generated = parseProgressiveObject(generated);
       const args = {};
-      const reserved = new Set(['user_id', 'userid', 'org_id', 'connected_account_id', 'entity_id', 'session_id', 'metadata', '__proto__', 'constructor', 'prototype']);
       if (!Object.hasOwn(card.schema.properties, 'args') && Object.hasOwn(generated, 'args')) {
         // Some providers wrap arguments despite JSON instructions. Accept only
         // the exact selected-tool envelope; it cannot change the host action.

@@ -91,7 +91,7 @@ test('parentless exact memory count self-repairs to count_where without an inven
 test('partial aggregate reconciles from the selected canonical read tool', () => {
   const raw = plan({
     operation: 'aggregate', aggregate: { parent: null, kind: 'memory' },
-    retrieval: { limit: 1, tags: [], memory_types: ['decision'], scope_filter: 'personal', entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
+    retrieval: { limit: null, tags: [], memory_types: [], scope_filter: null, entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
     references: { resolved_pronouns: [], entities: [], source: null },
     response: { language: 'en', type: 'decision', scope: 'exhaustive', depth: 'comprehensive', shape: 'inventory', objective: 'Return the exact complete count of decision memories.' },
     steps: [{ id: 'count', capability: 'workspace_read', tool: 'count_where', query: "memory_type = 'decision' AND scope = 'personal'", entities: [], depends_on: [], result_binding: 'count' }],
@@ -104,9 +104,26 @@ test('partial aggregate reconciles from the selected canonical read tool', () =>
   assert.ok(validation.repairs.includes('operation.selected_tool'));
 });
 
+test('parentless aggregate with typed memory predicates becomes a filtered count', () => {
+  const raw = plan({
+    operation: 'aggregate', aggregate: { parent: null, kind: 'memory' },
+    retrieval: { limit: 1, tags: [], memory_types: ['decision'], scope_filter: 'personal', entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
+    references: { resolved_pronouns: [], entities: [], source: null },
+    response: { language: 'en', type: 'fact', scope: 'exhaustive', depth: 'comprehensive', shape: 'inventory', objective: 'Return the complete filtered count.' },
+    steps: [{ id: 'count', capability: 'workspace_read', tool: 'aggregate', query: 'filtered complete count', entities: [], depends_on: [], result_binding: 'count' }],
+  });
+  const validation = validateNativePlanResult(raw);
+  assert.equal(validation.status, 'repairable');
+  assert.equal(validation.plan.operation, 'count_where');
+  assert.equal(validation.plan.aggregate, null);
+  assert.equal(validation.plan.steps[0].tool, 'hivemind_count_where');
+  assert.ok(validation.repairs.includes('operation.filtered_memory_count'));
+});
+
 test('selected-tool recovery cannot cross the read/write authority boundary', () => {
   const raw = plan({
     operation: 'aggregate', aggregate: { parent: null, kind: 'memory' },
+    retrieval: { limit: null, tags: [], memory_types: [], scope_filter: null, entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
     references: { resolved_pronouns: [], entities: [], source: null },
     steps: [{ id: 'unsafe', capability: 'workspace_read', tool: 'hivemind_save_memory', query: 'count records', entities: [], depends_on: [], result_binding: 'result' }],
   });

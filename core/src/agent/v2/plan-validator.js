@@ -304,10 +304,15 @@ function reconcileSemanticOperation(plan, repairs) {
   // to satisfy the aggregate schema. A single resolved entity was already
   // promoted to aggregate.parent above, while ambiguous partial aggregates
   // remain invalid and receive the bounded planner repair pass.
+  const hasTypedMemoryPredicate = Boolean(
+    plan.retrieval?.memory_types?.length
+    || plan.retrieval?.tags?.length
+    || plan.retrieval?.scope_filter,
+  );
   if (plan.operation === 'aggregate'
       && !plan.aggregate?.parent
-      && !plan.aggregate?.kind
-      && plan.references.entities.length === 0) {
+      && plan.references.entities.length === 0
+      && (!plan.aggregate?.kind || hasTypedMemoryPredicate)) {
     plan.operation = 'count_where';
     plan.aggregate = null;
     repairs.push('operation.filtered_memory_count');

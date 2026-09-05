@@ -276,6 +276,14 @@ test('verifier rejects a write selected as a read and premature clarification', 
   };
   assert.equal(verifyPlanCandidate(state, { action: 'read', tool_slug: 'GMAIL_SEND_DRAFT' }).code, 'tool_not_discovered');
   assert.equal(verifyPlanCandidate(state, { action: 'ask', question: 'Which account?' }).code, 'premature_clarification');
+  const recoverable = {
+    ...state,
+    discoveryAttempts: 2,
+    capabilities: [...state.capabilities, { slug: 'APP_FETCH_ITEMS', authority: 'read', description: 'Fetch complete items', fields: [], schema: { properties: {} } }],
+    receipts: [{ slug: 'LINKEDIN_GET_MY_INFO', successful: true, evidence_sufficient: false }],
+  };
+  assert.equal(verifyPlanCandidate(recoverable, { action: 'ask', question: 'What information?' }).code,
+    'premature_clarification_after_insufficient_evidence');
   const draftOnly = { ...state, intent: { outcomes: [{ id: 'draft', kind: 'draft', description: 'send an update' }] } };
   assert.equal(verifyPlanCandidate(draftOnly, { action: 'read', tool_slug: 'LINKEDIN_GET_MY_INFO', outcome_ids: ['draft'] }).code, 'read_cannot_complete_draft');
   assert.deepEqual(missingRequiredFields({ required: ['post_id'], properties: { post_id: { type: 'string' } } }, {}), [{ field: 'post_id', schema: { type: 'string' } }]);

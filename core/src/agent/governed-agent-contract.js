@@ -144,7 +144,7 @@ export function capabilityRelevance(card, { intent, missing = [] } = {}) {
 }
 
 export function eligibleReadCapabilities(state = {}, missing = []) {
-  const failed = new Set((state.receipts || []).filter(row => row?.successful === false).map(row => String(row.slug)));
+  const failed = new Set((state.receipts || []).filter(row => row?.successful === false || row?.evidence_sufficient === false).map(row => String(row.slug)));
   return (state.capabilities || [])
     .filter(card => card?.authority === 'read' && !failed.has(card.slug))
     .map(card => ({ card, relevance: capabilityRelevance(card, { intent: state.intent, missing }) }))
@@ -290,6 +290,10 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
     return { ok: true, plan: { ...plan, purpose: 'outcome', outcome_ids: outcomeIds } };
   }
   if (plan.action === 'ask') {
+    const insufficientReceipt = (state.receipts || []).some(row => row?.successful === true && row?.evidence_sufficient === false);
+    if (insufficientReceipt && availableReads.length) {
+      return { ok: false, code: 'premature_clarification_after_insufficient_evidence', repair: 'A different connected read remains available. Use it to satisfy the missing evidence contract before asking the user.' };
+    }
     if (discoveryAttempts < 2 && availableReads.some(item => item.relevance > 0)) {
       return { ok: false, code: 'premature_clarification', repair: 'A relevant connected read remains. Resolve factual evidence before asking the user.' };
     }

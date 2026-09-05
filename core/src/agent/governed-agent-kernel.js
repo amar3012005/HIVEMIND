@@ -998,7 +998,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
           planRepair: 'The selected schema lacks evidence-backed required arguments. Discover an upstream read capability.',
           dependencySearches: dependencyKey ? [...(state.dependencySearches || []), dependencyKey].slice(-8) : state.dependencySearches,
           cycles: Number(state.cycles || 0) + 1,
-        }, { reason_code: 'schema_requirements_unresolved' });
+        }, { reason_code: 'schema_requirements_unresolved', input_fields: requirements.map(item => item.field).filter(Boolean).slice(0, 12) });
         await persist(state, patch);
         return patch;
       }

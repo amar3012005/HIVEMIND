@@ -3540,8 +3540,8 @@ export async function runReactAgentV2({
   };
 
   const serveDurableAgent = async () => {
-        const { runDurableComposioAgent } = await import('./durable-composio-agent.js');
-        const durable = await runDurableComposioAgent({
+        const { runGovernedToolsAgent } = await import('./governed-agent-adapter.js');
+        const durable = await runGovernedToolsAgent({
           message,
           ctx: {
             ...ctx,
@@ -3558,6 +3558,7 @@ export async function runReactAgentV2({
           const stored = await createChatContinuation({
             userId: ctx.userId, orgId: ctx.orgId, message, language,
             conversationHistory: durable.run?.scratch?.conversation_context || [],
+            historyTurns: ctx.historyTurns,
             threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
             resumeState: durable.resumeState,
           }, {
@@ -3666,7 +3667,8 @@ export async function runReactAgentV2({
           orgId: ctx.orgId,
           message,
           language,
-          conversationHistory: buildProgressiveConversationContext(history),
+          conversationHistory: buildProgressiveConversationContext(history, ctx.historyTurns),
+          historyTurns: ctx.historyTurns,
           threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
           resumeState: {
             kind: 'enable_tools',

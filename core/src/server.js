@@ -24344,6 +24344,8 @@ exit \$RC
               return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
             }
             let { message, model = null, history = [], stream: wantStream = false, language = null } = body;
+            const historyTurns = Number.isInteger(body?.history_turns) && body.history_turns >= 0 && body.history_turns <= 12
+              ? body.history_turns : 6;
             // ADDITIVE per-turn capability gate (default false). When true,
             // connected Composio apps / external tools become ELIGIBLE for this
             // turn (never mandatory — native recall is still preferred when it
@@ -24557,12 +24559,14 @@ exit \$RC
                       draft_ids: [], compound_status: 'completed', pending_actions: [], continuation: null,
                     };
                   }
-                  const { runDurableComposioAgent } = await import('./agent/durable-composio-agent.js');
-                  const durable = await runDurableComposioAgent({
+                  const { runGovernedToolsAgent } = await import('./agent/governed-agent-adapter.js');
+                  const durable = await runGovernedToolsAgent({
                     message: stored.message,
                     ctx: {
                       language: stored.language,
                       conversationHistory: stored.conversationHistory || [],
+                      historyTurns: stored.historyTurns ?? 6,
+                      durableChatMode: continuationMode,
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
@@ -24607,16 +24611,19 @@ exit \$RC
                     continuation,
                   };
                 }
-                if (stored.resumeState?.kind === 'durable_agent') {
-                  const { runDurableComposioAgent } = await import('./agent/durable-composio-agent.js');
-                  const durable = await runDurableComposioAgent({
+                if (['durable_agent', 'governed_langgraph'].includes(stored.resumeState?.kind)) {
+                  const { runGovernedToolsAgent } = await import('./agent/governed-agent-adapter.js');
+                  const durable = await runGovernedToolsAgent({
                     message: stored.message,
                     ctx: {
                       language: stored.language,
                       conversationHistory: stored.conversationHistory || [],
+                      historyTurns: stored.historyTurns ?? 6,
+                      durableChatMode: continuationMode,
                       userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
                       prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
+                      governedGraphThreadId: stored.resumeState.graph_thread_id || null,
                       composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                         ? String(req.headers.origin)
                         : process.env.HIVEMIND_FRONTEND_URL) || undefined,
@@ -24824,6 +24831,7 @@ exit \$RC
                       mode: durableChatMode,
                       requestPayload: {
                         message, history, language, model, use_tools: useTools,
+                        history_turns: historyTurns,
                         recall_mode: body?.recall_mode || null,
                         source: body?.source || null,
                         time: body?.time || null,
@@ -24955,6 +24963,7 @@ exit \$RC
                         recallReliabilityV1,
                         durableChatMode,
                         durableChatTurnId: durableChatTurn?.id || null,
+                        historyTurns,
                         threadId: body?.thread_id || body?.conversation_id || null,
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
@@ -25041,6 +25050,7 @@ exit \$RC
                     recallReliabilityV1,
                     durableChatMode,
                     durableChatTurnId: durableChatTurn?.id || null,
+                    historyTurns,
                     threadId: body?.thread_id || body?.conversation_id || null,
                     composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                       ? String(req.headers.origin)

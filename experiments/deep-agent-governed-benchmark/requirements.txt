@@ -1,0 +1,2 @@
+deepagents
+langchain-core

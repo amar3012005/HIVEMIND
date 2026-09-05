@@ -8,12 +8,28 @@ New runs use `progressive-v1` only when the existing durable-agent gate is enabl
 
 Ordinary `use_tools:false` keeps its existing route. Flag-off connected chat retains its old planner and runtime. Enabled chat enters after scope authorization, before the legacy capability catalog and intent planner, avoiding duplicate planning context.
 
+`GOVERNED_LANGGRAPH_RUNTIME=true` adds a second fail-closed gate. A new
+connected-tool turn uses the checkpointed graph only when Cloudflare latched
+durable-chat mode `full` at admission. `off`, `shadow`, `session`, and
+`workflow` retain the current durable loop. A graph continuation stores its
+opaque checkpoint thread ID and resumes the same graph even if the admission
+flag changes; it never forks into the fallback runtime.
+
+The client may request `history_turns`, but Core accepts only an integer from
+0 through 12 and defaults to 6. Only recent user/assistant turns enter the
+progressive context. Stage guidance is loaded as one compact skill packet for
+intent, dependency resolution, HITL, or synthesis; app names and languages do
+not select code paths.
+
 ## Responsibilities
 
 | File | Responsibility |
 | --- | --- |
 | `core/src/agent/progressive-harness.js` | Semantic multilingual intent, bounded valid JSON observations, one next action, evidence-based Markdown synthesis instructions |
 | `core/src/agent/durable-composio-agent.js` | Persistent execution, discovery, schema validation, connection/field pauses, native reads, approval drafts and receipts |
+| `core/src/agent/governed-agent-runtime.js` | LangGraph checkpoint, interrupt/resume, safe trace projection and stable tenant/user/turn thread identity |
+| `core/src/agent/governed-agent-adapter.js` | Compatibility switch between the graph and the existing durable loop |
+| `core/src/agent/governed-agent-skills.js` | Small stage-specific guidance loaded progressively instead of one growing system prompt |
 | `core/src/agent/progressive-draft-contract.js` | Schema-validated edits and clean provider arguments at canonical approval |
 | `core/src/agent/progressive-approval-events.js` | Idempotent projection of canonical approval/provider receipts into run state |
 | `core/src/agent/react-agent-v2.js` | Gated admission and final response envelope |
@@ -31,6 +47,14 @@ Each requested outcome has a stable ID and read/draft/memory type. A successful 
 Progressive draft editing is schema-driven, including typed numbers, booleans and nested JSON. Private harness/schema metadata cannot be edited or passed to providers. Approval validates the stored arguments again and compares the argument hash when claiming the draft, preventing an edit/approve race from executing stale values. Terminal sent/failed/cancelled/expired events project into the same run; duplicate projection does not re-execute the tool. Reading canonical draft receipts also repairs missed projections.
 
 This change reuses existing persisted runs, continuations and transport events. It does not introduce a second LangGraph approval authority or a new provider-webhook scheduler. A completed chat response is distinct from a pending external action; an approval draft is not a sent action.
+
+Composio sessions still use the existing organization-scoped Composio identity
+for backward compatibility with already connected accounts. Core independently
+scopes every `AgentRun`, checkpoint, continuation, approval and receipt to the
+authenticated organization and user. Moving Composio itself to a new per-user
+`user_id` requires a dual-read/reconnection migration; changing that key in
+place would make existing connected accounts unavailable and is intentionally
+not part of this safe release.
 
 ## Verification and rollout
 

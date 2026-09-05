@@ -1,0 +1,27 @@
+[
+  {
+    "inputs": { "query": "What is my last LinkedIn post about?", "locale": "en" },
+    "outputs": {
+      "required_any": ["COMPOSIO_SEARCH_TOOLS"],
+      "forbidden_clarification_fields": ["account", "post_urn", "id", "identifier"],
+      "requires_receipt": true
+    }
+  },
+  {
+    "inputs": { "query": "What is my LinkedIn profile?", "locale": "en" },
+    "outputs": {
+      "required_any": ["COMPOSIO_SEARCH_TOOLS"],
+      "forbidden_clarification_fields": ["account", "profile_id", "id", "identifier"],
+      "requires_receipt": true
+    }
+  },
+  {
+    "inputs": { "query": "Send Rama an email about Singulance", "locale": "en" },
+    "outputs": {
+      "required_any": ["COMPOSIO_SEARCH_TOOLS"],
+      "forbidden_live_writes": true,
+      "requires_pending_write": true,
+      "recipient_resolution_before_clarification": true
+    }
+  }
+]

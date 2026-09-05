@@ -1231,7 +1231,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     leaseOwner = owner;
     checkCancelled();
     if (!run.scratch.conversation_context) {
-      run.scratch.conversation_context = buildProgressiveConversationContext(ctx.conversationHistory);
+      run.scratch.conversation_context = buildProgressiveConversationContext(ctx.conversationHistory, ctx.historyTurns);
     }
     const conversationContext = run.scratch.conversation_context;
     if ((run.status === 'waiting_approval' && run.scratch.outcomes_complete) || run.status === 'done') {

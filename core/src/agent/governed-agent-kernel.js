@@ -121,6 +121,9 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
         typeof parsed.discovery_query !== 'string' || !parsed.discovery_query.trim())) {
         throw new Error('Required: discovery_query as a nonempty string; outcomes as a nonempty array of objects with id, kind, and description strings.');
       }
+      if (stage === 'intent' && parsed.kind === 'read' && parsed.outcomes.some(item => item.kind === 'draft')) {
+        throw new Error('A read-only request cannot contain draft outcomes. Summarizing, comparing, formatting, and answering from retrieved data are read outcomes. Draft means an external mutation requiring human approval.');
+      }
       if (stage === 'synthesis' && (!validSynthesisResponse(parsed.response) || typeof parsed.complete !== 'boolean')) {
         throw new Error('Required: response as a nonempty Markdown string and complete as a boolean. Do not return an array in response.');
       }
@@ -453,7 +456,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,business_question?:string}. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,business_question?:string}. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
       input: { message, connected: state.connected, conversation_context: state.conversationContext },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
@@ -651,6 +654,7 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
       system: `Generate only arguments for the selected JSON schema. Active skill: ${loadGovernedSkill('arguments').content}
 Return the argument object itself. Never use schema examples, fabricate identifiers, or add fields absent from the schema.`,
       input: {
+        message,
         intent: state.intent,
         action: state.decision,
         selected_capability: compactCapability(card),

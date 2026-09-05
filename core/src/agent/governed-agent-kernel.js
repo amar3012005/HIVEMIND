@@ -260,7 +260,7 @@ Contract: {response:string}. Use only successful receipts. State capability gaps
   const routePrepared = state => state.decision?.action === 'draft' ? 'draft' : state.decision?.action === 'search' ? 'discover' : 'execute';
   return new StateGraph(GraphState)
     .addNode('context', contextNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
-    .addNode('intent', intentNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
+    .addNode('resolve_intent', intentNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('discover', discoverNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
     .addNode('reason', reasonNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('prepare', prepareNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
@@ -268,7 +268,7 @@ Contract: {response:string}. Use only successful receipts. State capability gaps
     .addNode('draft', draftNode)
     .addNode('await_human', humanNode)
     .addNode('synthesize', synthNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
-    .addEdge(START, 'context').addEdge('context', 'intent').addEdge('intent', 'discover')
+    .addEdge(START, 'context').addEdge('context', 'resolve_intent').addEdge('resolve_intent', 'discover')
     .addConditionalEdges('reason', routeReason, ['discover', 'prepare', 'await_human', 'synthesize'])
     .addConditionalEdges('prepare', routePrepared, ['discover', 'execute', 'draft'])
     .addEdge('discover', 'reason').addEdge('execute', 'reason').addEdge('await_human', 'reason')

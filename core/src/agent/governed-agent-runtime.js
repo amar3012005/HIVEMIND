@@ -76,7 +76,8 @@ export async function runGovernedAgentRuntime({ message, ctx = {}, onEvent, comp
   const db = prisma || ctx.prisma;
   if (!db) throw new Error('governed_prisma_required');
   const connector = composio || await import('../connectors/composio/composio-service.js');
-  const runtime = graph || createGovernedKernel({ checkpointer: await productionCheckpointer(), ctx, message, onEvent, composio: connector, prisma: db });
+  const runtimeCtx = { ...ctx, governedGraphThreadId: threadId };
+  const runtime = graph || createGovernedKernel({ checkpointer: await productionCheckpointer(), ctx: runtimeCtx, message, onEvent, composio: connector, prisma: db });
   const config = {
     configurable: { thread_id: threadId },
     recursionLimit: 64,
@@ -91,6 +92,19 @@ export async function runGovernedAgentRuntime({ message, ctx = {}, onEvent, comp
   const output = baseChoice
     ? await runtime.invoke(new Command({ resume: baseChoice }), config)
     : await runtime.invoke({ status: 'received' }, config);
-  if (output?.__interrupt__?.length) return interruptedResult(output, threadId);
+  if (output?.__interrupt__?.length) {
+    const payload = output.__interrupt__[0]?.value || {};
+    if (payload.kind === 'approval' && output.result) return { ...output.result, resumeState: null };
+    return interruptedResult(output, threadId);
+  }
   return withGraphResume(output?.result, threadId);
+}
+
+export async function resumeGovernedApproval({ row, action, ctx, onEvent, prisma } = {}) {
+  const threadId = row?.toolArgs?._graph_thread_id;
+  if (!threadId || row?.toolArgs?._harness_version !== 'langgraph-native-v1') throw new Error('governed_approval_checkpoint_missing');
+  const run = await prisma.agentRun.findFirst({ where: { id: row.traceId, orgId: ctx.orgId, userId: ctx.userId } });
+  if (!run) throw new Error('governed_approval_run_missing');
+  return runGovernedAgentRuntime({ message: run.goal, ctx: { ...ctx, governedGraphThreadId: threadId }, onEvent, prisma,
+    choice: { action: action === 'cancel' ? 'reject' : 'approve', approval_id: row.id } });
 }

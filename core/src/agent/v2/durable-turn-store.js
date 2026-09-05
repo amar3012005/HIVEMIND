@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 
 const TERMINAL_PHASES = new Set(['completed', 'failed', 'cancelled']);
+const GOVERNED_PHASES = new Set(['received', 'context_loaded', 'intent_resolved', 'capability_discovered', 'dependency_resolved',
+  'arguments_validated', 'tool_executed', 'tool_failed', 'awaiting_connection', 'awaiting_input', 'awaiting_approval', 'resumed', 'completed', 'failed', 'sealed']);
 
 const EVENT_PHASES = Object.freeze({
   turn_accepted: 'accepted',
@@ -34,16 +36,20 @@ function digest(value) {
 }
 
 export function phaseForChatEvent(event = {}) {
+  if (event.type === 'agent_state' && GOVERNED_PHASES.has(String(event.state || ''))) return String(event.state);
   return EVENT_PHASES[String(event.type || '')] || null;
 }
 
 export function cloudflareEventMetadata({ turnId, event, phase, status }) {
   return {
+    event_id: `${turnId}:${Number(event?.sequence || 0)}`,
+    run_id: event?.run_id || null,
     turn_id: turnId,
     sequence: Number(event?.sequence || 0),
     event_type: String(event?.type || 'progress').slice(0, 80),
     phase: String(phase || 'running').slice(0, 40),
     status: String(status || 'running').slice(0, 32),
+    state: event?.state ? String(event.state).slice(0, 40) : null,
     trace_id: event?.trace_id ? digest(event.trace_id).slice(0, 32) : null,
     occurred_at: new Date().toISOString(),
   };

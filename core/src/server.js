@@ -10301,6 +10301,21 @@ exit \$RC
           const draftId = pwEdit[1];
           const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId, status: 'draft' } });
           if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
+          if (row.toolArgs?._harness_version === 'langgraph-native-v1') {
+            const incoming = body?.tool_args && typeof body.tool_args === 'object' ? body.tool_args : {};
+            const nextArgs = { ...(row.toolArgs || {}) };
+            for (const key of Object.keys(incoming)) if (!key.startsWith('_') && incoming[key] != null) nextArgs[key] = incoming[key];
+            const schemaArgs = Object.fromEntries(Object.entries(nextArgs).filter(([key]) => !key.startsWith('_')));
+            const { default: Ajv } = await import('ajv');
+            if (!(new Ajv({ strict: false, allErrors: true })).compile(row.toolArgs?._input_schema || { type: 'object' })(schemaArgs)) {
+              return jsonResponse(res, { error: 'Draft fields do not match the required tool schema.' }, 400);
+            }
+            const argsHash = crypto.createHash('sha256').update(JSON.stringify(nextArgs)).digest('hex');
+            const updated = await prisma.pendingWrite.updateMany({ where: { id: draftId, userId, orgId, status: 'draft' },
+              data: { toolArgs: nextArgs, argsHash, preview: `${row.toolName} awaiting approval` } });
+            if (updated.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
+            return jsonResponse(res, { ok: true, draft: await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }) });
+          }
           if (row.toolArgs?._harness_version === 'progressive-v1') {
             const { editProgressiveDraft } = await import('./agent/progressive-draft-contract.js');
             let nextArgs;
@@ -10344,6 +10359,18 @@ exit \$RC
               });
               await projectProgressiveApproval(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }));
               return jsonResponse(res, { error: 'draft expired' }, 410);
+            }
+            if (row.toolArgs?._harness_version === 'langgraph-native-v1') {
+              const { resumeGovernedApproval } = await import('./agent/governed-agent-runtime.js');
+              const result = await resumeGovernedApproval({ row, action, ctx: { userId, orgId, prisma }, prisma });
+              const final = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } });
+              return jsonResponse(res, {
+                ok: final?.status === 'sent' || final?.status === 'cancelled',
+                status: final?.status || result?.status,
+                text: result?.summary || result?.response || null,
+                draft: final,
+                execution: { harness_version: 'langgraph-native-v1', run_id: result?.run?.id || row.traceId },
+              });
             }
             if (action === 'cancel') {
               const cancelled = await prisma.pendingWrite.updateMany({

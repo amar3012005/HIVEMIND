@@ -313,8 +313,8 @@ const SESSION_DISCOVERY_TTL_MS = Number(process.env.COMPOSIO_SESSION_DISCOVERY_T
 const TOOL_ROUTER_SESSION_CACHE = new Map();
 const TOOL_ROUTER_DISCOVERY_CACHE = new Map();
 
-function normalizedSessionKey(orgId, toolkits) {
-  return `${orgId}:${[...new Set(toolkits || [])].map(String).sort().join(',')}`;
+function normalizedSessionKey(orgId, toolkits, userId = null) {
+  return `${orgId}:${userId || 'org'}:${[...new Set(toolkits || [])].map(String).sort().join(',')}`;
 }
 
 function collectToolSlugs(value, prefixes, output = new Set()) {
@@ -362,10 +362,10 @@ async function executeSessionMeta(sessionId, slug, args, { timeoutMs = 6_500 } =
 }
 
 /** Create or reuse a tenant-scoped Tool Router Session. */
-export async function getToolRouterSession(orgId, toolkits, { allowDisconnected = false } = {}) {
+export async function getToolRouterSession(orgId, toolkits, { allowDisconnected = false, userId = null } = {}) {
   const enabled = [...new Set((toolkits || []).map((toolkit) => String(toolkit).toLowerCase()).filter(Boolean))].sort();
   if (!orgId || !enabled.length) throw new Error('Composio Session requires an org and at least one toolkit');
-  const key = normalizedSessionKey(orgId, enabled);
+  const key = normalizedSessionKey(orgId, enabled, userId);
   const cached = TOOL_ROUTER_SESSION_CACHE.get(key);
   if (cached && Date.now() - cached.at < SESSION_TTL_MS) return { ...cached.value, cacheHit: true };
 
@@ -382,7 +382,7 @@ export async function getToolRouterSession(orgId, toolkits, { allowDisconnected 
     connectedAccounts[toolkit] = account.id;
   }
   const body = {
-    user_id: orgId,
+    user_id: userId ? `${orgId}:${userId}` : orgId,
     toolkits: { enable: enabled },
     connected_accounts: connectedAccounts,
     manage_connections: { enable: false },
@@ -574,9 +574,9 @@ function normalizeToolkitConnectionStatuses(raw) {
   return out;
 }
 
-export async function discoverSessionTools(orgId, { toolkits, useCases, searchPayload = null, allowDisconnected = false }) {
+export async function discoverSessionTools(orgId, { toolkits, useCases, searchPayload = null, allowDisconnected = false, userId = null }) {
   const { formatComposioSearch, extractWorkflowSessionId } = await import('./composio-search-formatter.js');
-  const session = await getToolRouterSession(orgId, toolkits, { allowDisconnected });
+  const session = await getToolRouterSession(orgId, toolkits, { allowDisconnected, userId });
   const normalizedCases = (useCases || []).map((item) => String(item || '').trim()).filter(Boolean);
   if (!normalizedCases.length && !searchPayload?.queries?.length) {
     throw new Error('Composio Session discovery requires a use-case');

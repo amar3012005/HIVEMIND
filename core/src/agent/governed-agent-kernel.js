@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import { Annotation, END, START, StateGraph, interrupt } from '@langchain/langgraph';
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { loadGovernedSkill } from './governed-agent-skills.js';
+import { loadGovernedConversationContext } from './governed-conversation-context.js';
 
 const MODEL = 'google/gemini-2.5-flash-lite';
 const READ_VERBS = new Set(['fetch', 'find', 'get', 'list', 'read', 'search', 'retrieve']);
@@ -28,6 +29,7 @@ const GraphState = Annotation.Root({
   pendingApprovalId: Annotation({ reducer: (_l, r) => r, default: () => null }),
   cycles: Annotation({ reducer: (_l, r) => r, default: () => 0 }),
   result: Annotation({ reducer: (_l, r) => r, default: () => null }),
+  conversationContext: Annotation({ reducer: (_l, r) => r, default: () => [] }),
 });
 
 const compact = (value, limit = 18000) => {
@@ -124,6 +126,8 @@ function resultShape(state, summary, status = state.status) {
 }
 
 export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () => {}, composio, prisma }) {
+  const emitState = (state, status, extra = {}) => onEvent({ type: 'agent_state', state: status,
+    run_id: state.runId || extra.run_id || null, ...extra });
   const persist = async (state, patch = {}) => {
     if (!prisma?.agentRun?.update || !state.runId) return;
     await prisma.agentRun.update({ where: { id: state.runId }, data: {
@@ -144,17 +148,19 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
     const accounts = await composio.listConnectedAccounts(ctx.orgId);
     const connected = [...new Set(accounts.filter(row => row.status === 'ACTIVE').map(row => row.toolkit).filter(Boolean))];
     const runId = state.runId || randomUUID();
+    const conversationContext = await loadGovernedConversationContext({ prisma, orgId: ctx.orgId, userId: ctx.userId,
+      conversationId: ctx.threadId || ctx.conversationId, turns: ctx.historyTurns });
     if (prisma?.agentRun?.create && !state.runId) await prisma.agentRun.create({ data: { id: runId, orgId: ctx.orgId,
       userId: ctx.userId, conversationId: `${ctx.conversationId || ctx.threadId || 'chat'}:${runId}`.slice(0, 160), goal: message, status: 'context_loaded', steps: [],
       scratch: { runtime: 'langgraph-native-v1' } } });
     onEvent({ type: 'agent_state', state: 'context_loaded', run_id: runId });
-    return { runId, connected, status: 'context_loaded' };
+    return { runId, connected, conversationContext, status: 'context_loaded' };
   };
 
   const intentNode = async state => {
     const intent = await jsonDecision(`Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
 Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outcomes:[{id:string,kind:"read"|"draft",description:string}],known_facts:object,missing_business_context:boolean,business_question:string}. Preserve explicitly named people and supplied destinations in known_facts.`,
-    { message, connected: state.connected, conversation_context: ctx.conversationHistory || [] }, ctx._signal);
+    { message, connected: state.connected, conversation_context: state.conversationContext }, ctx._signal);
     if (!Array.isArray(intent.outcomes) || !intent.outcomes.length || !['read', 'write'].includes(intent.kind)) throw new Error('governed_intent_contract');
     const locale = String(intent.locale || ctx.language || 'en').slice(0, 20);
     await persist(state, { intent, locale, status: 'intent_resolved' });
@@ -166,7 +172,7 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
     const query = state.searchQuery || state.intent?.use_case || message;
     const toolkits = (state.intent?.apps?.length ? state.intent.apps : state.connected).slice(0, 12);
     onEvent({ type: 'tool_start', name: 'COMPOSIO_SEARCH_TOOLS', args: { query } });
-    const discovery = await composio.discoverSessionTools(ctx.orgId, { toolkits, useCases: [query], allowDisconnected: true,
+    const discovery = await composio.discoverSessionTools(ctx.orgId, { toolkits, useCases: [query], allowDisconnected: true, userId: ctx.userId,
       searchPayload: { queries: [{ use_case: query, known_fields: JSON.stringify(state.intent?.known_facts || {}) }],
         session: state.workflowSessionId ? { id: state.workflowSessionId } : { generate_id: true }, search_strategy: 'auto' } });
     const cards = [...state.capabilities];
@@ -185,6 +191,7 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
       workflowSessionId: discovery.workflowSessionId || state.workflowSessionId, steps, searchQueries, status: 'capability_discovered' };
     await persist(state, patch);
     onEvent({ type: 'tool_result', name: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', summary: `${cards.length} capabilities discovered` });
+    emitState(state, 'capability_discovered');
     return patch;
   };
 
@@ -230,8 +237,10 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
       if (!query || prior.has(query.toLowerCase()) || state.searchQueries.length >= 3) {
         return { decision: { action: 'ask', question: 'The connected integration does not expose the reader needed to resolve this automatically. Please provide the missing business information.', fields: ['missing_information'] }, status: 'awaiting_input', cycles: state.cycles + 1 };
       }
+      emitState(state, 'dependency_resolved', { next_action: 'discover' });
       return { decision, searchQuery: query.slice(0, 500), cycles: state.cycles + 1, status: 'discovering_dependency' };
     }
+    emitState(state, decision.action === 'ask' ? 'awaiting_input' : 'dependency_resolved', { next_action: decision.action });
     return { decision, cycles: state.cycles + 1, status: decision.action === 'ask' ? 'awaiting_input' : 'planned' };
   };
 
@@ -251,6 +260,7 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
       if (unsupported.length) return { decision: { action: 'search', query: 'resolve the named destination from connected account records', reason: 'Destination evidence required' },
         searchQuery: 'resolve the named destination from connected account records', toolArgs: null, status: 'discovering_dependency' };
     }
+    emitState(state, 'arguments_validated', { tool: card.slug });
     return { toolArgs: args, status: 'arguments_validated' };
   };
 
@@ -269,12 +279,14 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
     const steps = [...state.steps, { kind: 'read', slug: card.slug, status: row.successful ? 'completed' : 'error', summary: row.successful ? receiptSummary(receipt.data) : row.error }];
     await persist(state, { receipts, steps, status: row.successful ? 'tool_executed' : 'tool_failed' });
     onEvent({ type: 'tool_result', name: card.slug, status: row.successful ? 'completed' : 'error', summary: steps.at(-1).summary });
+    emitState(state, row.successful ? 'tool_executed' : 'tool_failed', { tool: card.slug });
     return { receipts, steps, toolArgs: null, decision: null, status: row.successful ? 'tool_executed' : 'tool_failed' };
   };
 
   const draftNode = async state => {
     const card = state.capabilities.find(item => item.slug === state.decision.slug);
-    const toolArgs = { ...state.toolArgs, _composio_slug: card.slug, _harness_version: 'langgraph-native-v1', _input_schema: card.schema };
+    const toolArgs = { ...state.toolArgs, _composio_slug: card.slug, _harness_version: 'langgraph-native-v1',
+      _graph_thread_id: ctx.governedGraphThreadId, _composio_session_id: state.sessionId, _input_schema: card.schema };
     const idempotencyKey = createHash('sha256').update(`graph:${ctx.orgId}:${ctx.userId}:${state.runId}:${card.slug}:${JSON.stringify(toolArgs)}`).digest('hex');
     let row = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: ctx.orgId, userId: ctx.userId } });
     if (!row) row = await prisma.pendingWrite.create({ data: { userId: ctx.userId, orgId: ctx.orgId, provider: 'composio', toolGroup: 'composio',
@@ -285,14 +297,54 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
     const summary = 'Draft ready for approval. Nothing has been sent.';
     const patch = { pendingApprovalId: row.id, receipts, steps, status: 'awaiting_approval', result: resultShape({ ...state, pendingApprovalId: row.id, receipts, steps }, summary, 'pending') };
     await persist(state, patch);
+    emitState(state, 'awaiting_approval', { approval_id: row.id });
     return patch;
+  };
+
+  const approvalNode = async state => {
+    const choice = interrupt({ kind: 'approval', run_id: state.runId, approval_id: state.pendingApprovalId,
+      prompt: 'Review this draft. Approve to execute it once, or reject it.' });
+    const action = String(choice?.action || choice?.value || choice || '').toLowerCase();
+    const row = await prisma.pendingWrite.findFirst({ where: { id: state.pendingApprovalId, orgId: ctx.orgId, userId: ctx.userId } });
+    if (!row) throw new Error('governed_approval_not_found');
+    if (['reject', 'cancel', 'cancelled'].includes(action)) {
+      if (row.status === 'draft') await prisma.pendingWrite.updateMany({ where: { id: row.id, status: 'draft' }, data: { status: 'cancelled' } });
+      const steps = [...state.steps, { kind: 'approval', slug: row.toolName, status: 'cancelled', summary: 'Draft rejected; nothing sent' }];
+      await persist(state, { steps, status: 'completed' });
+      emitState(state, 'completed', { approval_id: row.id, approval_status: 'cancelled' });
+      return { steps, status: 'done', result: resultShape({ ...state, steps, pendingApprovalId: null }, 'Draft rejected. Nothing was sent.', 'completed') };
+    }
+    if (action !== 'approve') throw new Error('governed_approval_decision_invalid');
+    if (row.status !== 'draft') {
+      const summary = row.status === 'sent' ? 'This approved action was already completed.' : `This draft is already ${row.status}.`;
+      return { status: row.status === 'sent' ? 'done' : 'failed', result: resultShape(state, summary, row.status === 'sent' ? 'completed' : 'error') };
+    }
+    const claimed = await prisma.pendingWrite.updateMany({ where: { id: row.id, orgId: ctx.orgId, userId: ctx.userId, status: 'draft',
+      expiresAt: { gt: new Date() } }, data: { status: 'approved', approvedAt: new Date() } });
+    if (claimed.count !== 1) throw new Error('governed_approval_state_changed');
+    const args = { ...(row.toolArgs || {}) };
+    for (const key of Object.keys(args)) if (key.startsWith('_')) delete args[key];
+    const [receipt] = await composio.executeToolsParallel(ctx.orgId, [{ slug: row.toolName, arguments: args }],
+      { sessionId: row.toolArgs?._composio_session_id || state.sessionId, allowDirectFallback: false });
+    const successful = receipt?.successful === true;
+    const final = await prisma.pendingWrite.update({ where: { id: row.id }, data: { status: successful ? 'sent' : 'failed',
+      sentAt: successful ? new Date() : null, result: successful ? compact(receipt.data, 7000) : null,
+      errorMsg: successful ? null : String(receipt?.error || 'Provider execution failed').slice(0, 1000) } });
+    const steps = [...state.steps, { kind: 'write', slug: row.toolName, status: successful ? 'completed' : 'failed',
+      summary: successful ? 'Approved action completed once' : 'Approved action failed' }];
+    await persist(state, { steps, status: successful ? 'completed' : 'failed' });
+    emitState(state, successful ? 'completed' : 'failed', { approval_id: final.id, approval_status: final.status });
+    return { steps, status: successful ? 'done' : 'failed',
+      result: resultShape({ ...state, steps }, successful ? 'Approved action completed.' : 'The approved action failed. It was not retried.', successful ? 'completed' : 'error') };
   };
 
   const humanNode = async state => {
     const request = state.pendingInput || { kind: 'field_input', prompt: humanQuestion(state.decision?.question),
       fields: (state.decision?.fields || ['missing_information']).map(id => ({ id, name: id, label: id.replaceAll('_', ' '), type: 'text', required: true })) };
     await persist(state, { pendingInput: request, status: 'awaiting_input' });
+    emitState(state, 'awaiting_input');
     const answer = interrupt({ run_id: state.runId, ...request });
+    emitState(state, 'resumed');
     return { fieldValues: { ...state.fieldValues, ...(answer?.values || answer || {}) }, pendingInput: null, decision: null, status: 'resumed' };
   };
 
@@ -304,6 +356,7 @@ Contract: {response:string}. Use only successful receipts. A successful receipt 
     const status = state.receipts.some(row => row.draft_id) ? 'pending' : 'completed';
     const result = resultShape(state, summary, status);
     await persist(state, { status: status === 'completed' ? 'done' : 'awaiting_approval' });
+    emitState(state, status === 'completed' ? 'completed' : 'awaiting_approval');
     return { result, status: status === 'completed' ? 'done' : 'awaiting_approval' };
   };
 
@@ -317,12 +370,13 @@ Contract: {response:string}. Use only successful receipts. A successful receipt 
     .addNode('prepare', prepareNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('execute', executeNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.4 } })
     .addNode('draft', draftNode)
+    .addNode('await_approval', approvalNode)
     .addNode('await_human', humanNode)
     .addNode('synthesize', synthNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addEdge(START, 'context').addEdge('context', 'resolve_intent').addEdge('resolve_intent', 'discover')
     .addConditionalEdges('reason', routeReason, ['discover', 'prepare', 'await_human', 'synthesize'])
     .addConditionalEdges('prepare', routePrepared, ['discover', 'execute', 'draft'])
     .addEdge('discover', 'reason').addEdge('execute', 'reason').addEdge('await_human', 'reason')
-    .addEdge('draft', END).addEdge('synthesize', END)
+    .addEdge('draft', 'await_approval').addEdge('await_approval', END).addEdge('synthesize', END)
     .compile({ checkpointer });
 }

@@ -290,6 +290,16 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
     return { ok: true, plan: { ...plan, purpose: 'outcome', outcome_ids: outcomeIds } };
   }
   if (plan.action === 'ask') {
+    const namedEntities = Array.isArray(state.intent?.entities) ? state.intent.entities.filter(entity => entity?.name) : [];
+    const facts = state.intent?.known_facts && typeof state.intent.known_facts === 'object' ? state.intent.known_facts : {};
+    const hasNamedIdentity = namedEntities.length > 0 || Object.keys(facts).some(key =>
+      /(?:name|person|recipient|contact|assignee|owner|member|user|customer|company|account|destination)/i.test(key));
+    const hasResolvedIdentity = (state.receipts || []).some(row => row?.successful &&
+      /[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/.test(JSON.stringify(row.data || {})));
+    if (hasNamedIdentity && !hasResolvedIdentity && availableReads.length && discoveryAttempts < 3) {
+      return { ok: false, code: 'premature_identity_clarification',
+        repair: 'A named business entity is unresolved. Use a discovered read or a materially different capability search to resolve it before asking the user.' };
+    }
     const insufficientReceipt = (state.receipts || []).some(row => row?.successful === true && row?.evidence_sufficient === false);
     if (insufficientReceipt && availableReads.length) {
       return { ok: false, code: 'premature_clarification_after_insufficient_evidence', repair: 'A different connected read remains available. Use it to satisfy the missing evidence contract before asking the user.' };

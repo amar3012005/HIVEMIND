@@ -144,6 +144,9 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
         typeof parsed.discovery_query !== 'string' || !parsed.discovery_query.trim())) {
         throw new Error('Required: discovery_query as a nonempty string; outcomes as a nonempty array of objects with id, kind, and description strings.');
       }
+      if (stage === 'intent' && !Array.isArray(parsed.entities)) {
+        throw new Error('Required: entities as an array of named business entities with name and role; use an empty array only when none are named.');
+      }
       if (stage === 'intent' && parsed.kind === 'read' && parsed.outcomes.some(item => item.kind === 'draft')) {
         throw new Error('A read-only request cannot contain draft outcomes. Summarizing, comparing, formatting, and answering from retrieved data are read outcomes. Draft means an external mutation requiring human approval.');
       }
@@ -173,7 +176,7 @@ function normalizedIntent(value, fallbackLocale = 'en') {
       required_fields: unique(outcome?.evidence?.required_fields || []).slice(0, 16),
     },
   })).filter(outcome => outcome.description);
-  const kind = value?.kind === 'write' ? 'write' : 'read';
+  const kind = outcomes.some(outcome => outcome.kind === 'draft') ? 'write' : 'read';
   const knownFacts = value?.known_facts && typeof value.known_facts === 'object' && !Array.isArray(value.known_facts)
     ? compact(value.known_facts, 5000) : {};
   return {
@@ -184,6 +187,10 @@ function normalizedIntent(value, fallbackLocale = 'en') {
     discovery_query: text(value?.discovery_query || value?.use_case, 900),
     outcomes,
     known_facts: knownFacts,
+    entities: (Array.isArray(value?.entities) ? value.entities : []).slice(0, 12).map(entity => ({
+      name: text(entity?.name, 160),
+      role: text(entity?.role, 80) || 'subject',
+    })).filter(entity => entity.name),
     business_question: text(value?.business_question, 500) || null,
     reference_selector: value?.reference_selector && typeof value.reference_selector === 'object'
       ? {
@@ -249,6 +256,7 @@ function capabilityGap(state, missing = []) {
 
 function hasResolvableEntityFact(state) {
   const facts = { ...(state?.intent?.known_facts || {}), ...(state?.fieldValues || {}) };
+  if ((state?.intent?.entities || []).some(entity => entity?.name)) return true;
   return Object.entries(facts).some(([key, value]) => {
     if (!/(?:name|person|recipient|contact|assignee|owner|member|user|customer|company|account)/i.test(String(key))) return false;
     if (typeof value === 'string') return Boolean(value.trim());
@@ -546,7 +554,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,entities:[{name:string,role:string}],business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Extract every explicitly named person, organization, account, project, or record into entities with its semantic role such as recipient, sender, owner, or subject. Names remain evidence to resolve, never provider identifiers. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
       // Intent needs bounded conversational meaning, not raw connector rows.
       // Structured prior receipts remain available to planning/arguments for
       // evidence grounding after the outcome contract exists.

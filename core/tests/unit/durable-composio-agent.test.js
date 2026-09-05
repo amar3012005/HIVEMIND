@@ -43,6 +43,7 @@ test('LinkedIn create-post is a write and last-post questions are read-only', ()
   assert.equal(isReadOnlyRequest('what do u think about my last linkedin post'), true);
   assert.equal(isReadOnlyRequest('what was my last linkedin post about?'), true);
   assert.equal(isReadOnlyRequest('what were my latest emails?'), true);
+  assert.equal(isReadOnlyRequest('write email to rama about Amars professional life'), false);
   assert.equal(isReadOnlyRequest('send rama, about information about the company'), false);
   assert.equal(isWriteSlug('GMAIL_REPLY_TO_THREAD'), true);
   assert.equal(isWriteSlug('GMAIL_MODIFY_THREAD_LABELS'), true);
@@ -94,6 +95,54 @@ test('a profile lookup stops after the one info read and does not dump memory', 
   assert.deepEqual(executed, ['LINKEDIN_GET_MY_INFO']);
   assert.match(result.summary, /Amar Sai/);
   assert.equal(result.summary.includes('company dump'), false);
+});
+
+test('write email about professional life drafts after people lookup and recall', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const created = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_prof_mail' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_prof_mail',
+        primaryToolSlugs: ['GMAIL_SEARCH_PEOPLE', 'GMAIL_CREATE_EMAIL_DRAFT'],
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'GMAIL_SEARCH_PEOPLE' } },
+          { _composio: { slug: 'GMAIL_CREATE_EMAIL_DRAFT' } },
+        ],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map((tool) => {
+        if (tool.slug === 'GMAIL_SEARCH_PEOPLE') {
+          return { successful: true, data: { people: [{ email: 'rama@x.dev', name: 'Rama' }] } };
+        }
+        return { successful: true, data: {} };
+      });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'write email to rama about Amars professional life',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-write-rama-prof',
+      _tracedDispatch: async () => ({
+        memories: [{ title: 'Amar Sai', content: 'Founder of Singulance in Hannover.' }],
+      }),
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DRAFT-PROF' }; } } },
+    },
+    composio,
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(executed.includes('GMAIL_SEARCH_PEOPLE'), true);
+  assert.equal(executed.includes('GMAIL_CREATE_EMAIL_DRAFT'), false);
+  assert.equal(created[0].toolName, 'GMAIL_CREATE_EMAIL_DRAFT');
+  assert.equal(created[0].toolArgs.recipient_email, 'rama@x.dev');
+  assert.match(created[0].toolArgs.body, /Singulance/);
 });
 
 test('know-about questions use HIVEMIND recall, not LinkedIn', async () => {

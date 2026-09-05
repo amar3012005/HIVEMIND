@@ -245,6 +245,17 @@ Contract: {locale:string,apps:string[],kind:"read"|"write",use_case:string,outco
   const reasonNode = async state => {
     const covered = new Set(state.receipts.filter(row => row.successful).flatMap(row => row.outcome_ids || []));
     if (state.intent.outcomes.every(outcome => covered.has(outcome.id))) return { decision: { action: 'done' }, status: 'ready_to_synthesize' };
+    const resumedWriteCards = state.capabilities.filter(card => card.authority === 'write');
+    const hasHumanBusinessInput = Object.values(state.fieldValues || {}).some(value => String(value ?? '').trim());
+    const hasPrerequisiteEvidence = state.receipts.some(row => row.successful && !row.draft_id);
+    if (state.intent.kind === 'write' && hasHumanBusinessInput && hasPrerequisiteEvidence && resumedWriteCards.length) {
+      const selected = bestCapability(resumedWriteCards, state.intent);
+      const outcomeIds = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.id);
+      const decision = { action: 'draft', slug: selected.slug, purpose: 'outcome', outcome_ids: outcomeIds,
+        reason: 'Resume the prepared write with human business input and verified prerequisite evidence' };
+      emitState(state, 'dependency_resolved', { next_action: 'draft' });
+      return { decision, cycles: state.cycles + 1, status: 'planned' };
+    }
     if (state.cycles >= 6) return { decision: { action: 'ask', question: 'I could not find a connected capability that can resolve the remaining information. Please provide that business detail.', fields: ['missing_information'] }, status: 'awaiting_input' };
     const failedSlugs = new Set(state.receipts.filter(row => !row.successful).map(row => row.slug));
     const capabilities = state.capabilities.map(card => ({ slug: card.slug, toolkit: card.toolkit, authority: card.authority,

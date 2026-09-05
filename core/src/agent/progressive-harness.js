@@ -129,6 +129,14 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
   const redundant = action => action.action === 'ask_user' && Array.isArray(action.fields)
     && action.fields.length > 0 && action.fields.every(field => typeof field === 'string' && supplied(field));
   let raw = await decide(system, boundedEvidence(observation, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+  if (raw.action === 'search' && observation?.searched && Array.isArray(observation.capabilities) && observation.capabilities.length) {
+    raw = await decide(system, boundedEvidence({ ...observation, feedback: {
+      code: 'capabilities_already_discovered',
+      available_slugs: observation.capabilities.slice(0, 48).map(card => card.slug),
+      instruction: 'Select an existing compatible capability. Search again only if none can satisfy any remaining outcome.',
+    } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+    if (raw.action === 'search') throw new Error('Progressive planner repeated capability discovery');
+  }
   if (redundant(raw)) {
     raw = await decide(system, boundedEvidence({ ...observation, feedback: {
       code: 'clarification_already_answered', supplied_fields: raw.fields.slice(0, 12),

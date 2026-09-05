@@ -179,6 +179,23 @@ test('latest answers trigger one bounded corrective plan instead of a repeated c
   assert.equal(calls, 2);
 });
 
+test('planner gets one bounded correction instead of repeating capability discovery', async () => {
+  const observation = { searched: true, capabilities: [{ slug: 'WORKSPACE_READ_RECORDS' }],
+    intent: { outcomes: [{ id: 'records', kind: 'read' }] }, remaining_outcomes: [{ id: 'records', kind: 'read' }] };
+  let calls = 0;
+  const action = await chooseProgressiveAction({ observation, generateImpl: async input => {
+    if (++calls === 1) return { action: 'search', query: 'read records', reason: 'Find a tool' };
+    assert.equal(input.feedback.code, 'capabilities_already_discovered');
+    assert.deepEqual(input.feedback.available_slugs, ['WORKSPACE_READ_RECORDS']);
+    return { action: 'execute', slug: 'WORKSPACE_READ_RECORDS', reason: 'Use discovered reader', outcome_ids: ['records'] };
+  } });
+  assert.equal(action.action, 'execute');
+  assert.equal(calls, 2);
+  await assert.rejects(chooseProgressiveAction({ observation, generateImpl: async () => ({
+    action: 'search', query: 'read records', reason: 'Search again',
+  }) }), /repeated capability discovery/);
+});
+
 test('redundant clarification retry is capped and false or zero are supplied answers', async () => {
   let calls = 0;
   await assert.rejects(chooseProgressiveAction({ observation: { fields: { enabled: false, count: 0 } }, generateImpl: async () => {

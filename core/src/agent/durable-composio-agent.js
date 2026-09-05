@@ -1185,7 +1185,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
   };
   const fail = async (error) => {
     const detail = String(error?.message || error);
-    const safePrefixes = ['Execution step budget exhausted', 'Requested write has not reached', 'Requested reads are incomplete', 'Selected capability was not discovered', 'Capability requires an approval draft', 'Read-only intent cannot', 'Native capability is not allowed', 'Repeated native step', 'Repeated completed or failed step', 'Tool inputs do not match', 'Connection target is not', 'Execution was cancelled'];
+    const safePrefixes = ['Execution step budget exhausted', 'Requested write has not reached', 'Requested reads are incomplete', 'Selected capability was not discovered', 'Capability requires an approval draft', 'Read-only intent cannot', 'Native capability is not allowed', 'Repeated native step', 'Repeated completed or failed step', 'Progressive planner repeated capability discovery', 'Tool inputs do not match', 'Connection target is not', 'Execution was cancelled'];
     const safeDetail = safePrefixes.some(prefix => detail.startsWith(prefix)) ? detail.slice(0, 500) : 'A planning or tool service failed. Completed evidence is retained.';
     run.status = run.scratch.draft_ids?.length ? 'waiting_approval' : 'failed';
     run.scratch.lease = null;

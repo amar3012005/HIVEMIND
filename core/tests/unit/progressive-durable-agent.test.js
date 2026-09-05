@@ -446,7 +446,7 @@ test('read-only intent cannot draft; compose cannot finish without a persisted d
   }
 }));
 
-test('planner error, unavailable persistence and budget exhaustion fail honestly', () => enabled(async () => {
+test('planner error, unavailable persistence and repeated discovery fail honestly', () => enabled(async () => {
   const f = fixture();
   f.ctx.chooseNextAction = async () => { throw new Error('model unavailable'); };
   const failed = await runDurableComposioAgent({ message: 'Read', ...f });
@@ -461,7 +461,7 @@ test('planner error, unavailable persistence and budget exhaustion fail honestly
   looping.ctx.chooseNextAction = async () => search;
   const exhausted = await runDurableComposioAgent({ message: 'Read', ...looping });
   assert.equal(exhausted.status, 'error');
-  assert.match(exhausted.summary, /budget exhausted/);
+  assert.match(exhausted.summary, /repeated capability discovery/);
 }));
 
 test('one successful read cannot satisfy remaining declared outcomes', () => enabled(async () => {

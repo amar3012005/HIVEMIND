@@ -14,6 +14,7 @@ import {
   eligibleReadCapabilities,
   humanizeField,
   isProviderIdentifier,
+  invalidSchemaValues,
   missingRequiredFields,
   normalizePlanCandidate,
   outcomeIds,
@@ -623,6 +624,7 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
         capabilities: (state.capabilities || []).map(compactCapability),
         receipts: (state.receipts || []).map(synthesisReceipt),
         prior_conversation_evidence: state.referenceEvidence,
+        conversation_context: state.conversationContext,
         resolved_reference: state.resolvedReference,
         unresolved_outcomes: outcomeIds(state),
         prior_searches: state.searchQueries,
@@ -694,9 +696,10 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
     const valid = validator(args);
     const missing = missingRequiredFields(card.schema, args);
+    const invalid = invalidSchemaValues(card.schema, args);
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
-    if (!valid || missing.length || ungrounded.length) {
-      const requirements = [...missing, ...ungrounded.map(item => ({ field: item.field, schema: {} }))];
+    if (!valid || missing.length || invalid.length || ungrounded.length) {
+      const requirements = [...missing, ...invalid, ...ungrounded.map(item => ({ field: item.field, schema: card.schema?.properties?.[item.field] || {} }))];
       const relevantReads = eligibleReadCapabilities(state, requirements).filter(item => item.relevance > 0);
       const dependencyKey = unresolvedDependencyKey(requirements);
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
@@ -772,7 +775,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (!card || card.source !== 'composio' || card.authority !== 'write') throw new Error('governed_write_authority_denied');
     const ajv = new Ajv({ strict: false, allErrors: true });
     const valid = ajv.compile(card.schema || { type: 'object', properties: {} })(state.toolArgs || {});
-    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length) {
+    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || invalidSchemaValues(card.schema, state.toolArgs).length || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length) {
       throw new Error('governed_draft_schema_or_evidence_denied');
     }
     const toolArgs = {

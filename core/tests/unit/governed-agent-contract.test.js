@@ -5,6 +5,7 @@ import { MemorySaver } from '@langchain/langgraph';
 import { projectGovernedEvidence } from '../../src/agent/governed-evidence-projection.js';
 import {
   capabilityAuthority,
+  invalidSchemaValues,
   missingRequiredFields,
   renderStructuredReceiptEvidence,
   receiptSatisfiesEvidence,
@@ -105,6 +106,14 @@ test('authority uses the leading action rather than nouns in a tool slug', () =>
   assert.equal(capabilityAuthority('LINKEDIN_GET_POST_CONTENT'), 'read');
   assert.equal(capabilityAuthority('GMAIL_SEND_DRAFT'), 'write');
   assert.equal(capabilityAuthority('NOTION_CREATE_PAGE'), 'write');
+});
+
+test('schema descriptions cannot admit a plain name as an email destination', () => {
+  const schema = { type: 'object', properties: { recipient_email: {
+    type: 'string', description: 'Primary recipient email address. Must be a full user@domain address.',
+  } } };
+  assert.equal(invalidSchemaValues(schema, { recipient_email: 'rama' })[0].code, 'invalid_email_address');
+  assert.deepEqual(invalidSchemaValues(schema, { recipient_email: 'Rama <rama@example.com>' }), []);
 });
 
 test('synthesis receives successful structured evidence while the durable ledger stays redacted', () => {

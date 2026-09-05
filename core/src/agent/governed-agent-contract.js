@@ -105,6 +105,28 @@ export function missingRequiredFields(schema = {}, args = {}) {
     .map(key => ({ field: key, schema: properties[key] || {} }));
 }
 
+export function invalidSchemaValues(schema = {}, args = {}) {
+  const properties = schema?.properties || {};
+  const invalid = [];
+  const email = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+  for (const [field, value] of Object.entries(args || {})) {
+    const definition = properties[field] || {};
+    const descriptor = `${field} ${definition.format || ''} ${definition.description || ''}`.toLowerCase();
+    const expectsEmail = definition.format === 'email' || /email address|full user@domain|must be a valid email/.test(descriptor);
+    if (!expectsEmail) continue;
+    const values = Array.isArray(value) ? value : [value];
+    if (values.some(item => {
+      if (typeof item !== 'string') return true;
+      const candidate = item.trim();
+      const address = candidate.match(/<([^<>]+)>$/)?.[1] || candidate;
+      return !email.test(address) && candidate.toLowerCase() !== 'me';
+    })) {
+      invalid.push({ field, schema: definition, code: 'invalid_email_address' });
+    }
+  }
+  return invalid;
+}
+
 function tokens(value) {
   return new Set(normalized(value).match(/[a-z0-9]{3,}/g) || []);
 }

@@ -1363,7 +1363,9 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
           const namespace = toolkit.replace(/[^a-z0-9]/g, '').toUpperCase();
           const actionTokens = slug.startsWith(`${namespace}_`) ? tokens(slug.slice(namespace.length + 1)) : [];
           const mutation = actionTokens.some(t => ['create', 'update', 'delete', 'send', 'reply', 'post', 'remove', 'add', 'append', 'modify', 'set', 'patch', 'archive', 'trash', 'execute', 'run'].includes(t));
-          const authority = mutation ? 'write' : READ_TOKENS.has(actionTokens[0]) ? 'read' : 'unknown';
+          // The leading operation verb carries authority. Nouns later in a
+          // read slug (for example GET_POST_CONTENT) must not turn it into a write.
+          const authority = READ_TOKENS.has(actionTokens[0]) ? 'read' : mutation ? 'write' : 'unknown';
           const card = { slug, toolkit, authority, description: String(raw?.description || tool.function?.description || '').slice(0, 600), schema };
           const prior = cards.findIndex(c => c.slug === slug);
           if (prior >= 0) cards[prior] = card; else if (cards.length < 48) cards.push(card);

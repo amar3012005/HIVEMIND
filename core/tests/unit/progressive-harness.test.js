@@ -245,7 +245,7 @@ test('named entity factual identifiers trigger one resolver search before clarif
   assert.equal(calls, 2);
 });
 
-test('authenticated account identifiers trigger upstream discovery before clarification', async () => {
+test('provider identifiers trigger upstream discovery before clarification even when optional scope is omitted', async () => {
   let calls = 0;
   const result = await chooseProgressiveAction({ observation: { searched: true,
     intent: { subject_scope: 'authenticated_user', outcomes: [{ id: 'latest', kind: 'read' }] },
@@ -254,7 +254,7 @@ test('authenticated account identifiers trigger upstream discovery before clarif
   generateImpl: async input => {
     calls++;
     if (calls === 1) return { action: 'ask_user', question: 'What is the item URN?', fields: ['item_urn'], reason: 'Missing identifier' };
-    assert.equal(input.feedback.code, 'authenticated_subject_identifier_unresolved');
+    assert.equal(input.feedback.code, 'factual_identifier_unresolved');
     return { action: 'search', query: 'list authenticated account items to identify the most recent item', reason: 'Resolve identifier from account' };
   } });
   assert.equal(result.action, 'search');

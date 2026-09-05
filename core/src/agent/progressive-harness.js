@@ -174,13 +174,13 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
       instruction: 'The user supplied a named entity. Search for a relevant read capability that can resolve the factual destination identifier before asking the user. Do not invent the identifier.',
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
   }
-  if (raw.action === 'ask_user' && observation?.intent?.subject_scope === 'authenticated_user'
+  if (raw.action === 'ask_user'
     && Array.isArray(raw.fields) && raw.fields.some(field => /(^|_)(id|urn|identifier)($|_)/i.test(field))
     && !(observation?.receipts || []).some(receipt => receipt?.successful)) {
     raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
-      code: 'authenticated_subject_identifier_unresolved',
+      code: 'factual_identifier_unresolved',
       requested_fields: raw.fields.slice(0, 12),
-      instruction: 'The connected account is already authenticated. Search for a relevant list, feed, profile, or discovery read capability that can resolve the required identifier from that account before asking the user. Do not invent the identifier.',
+      instruction: 'Before asking for a provider identifier, search for a relevant list, feed, profile, lookup, or discovery read capability that can resolve it from connected account data. Do not invent the identifier.',
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
   }
   if (typeof raw.reason !== 'string' || !raw.reason.trim()) raw = { ...raw, reason: `Planner selected ${String(raw.action || 'an action')}` };

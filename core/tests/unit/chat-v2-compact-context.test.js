@@ -13,8 +13,7 @@ test('compact context is tenant-thread isolated and strictly bounded', async () 
   const graph = createCompactContextGraph({ checkpointer: new MemorySaver() });
   const identity = { orgId: 'org-a', userId: 'user-a', threadId: 'browser-thread' };
   for (let index = 0; index < 10; index += 1) {
-    await hydrateCompactContext({ ...identity, message: `user-${index}`, history: [] }, { graph });
-    await recordCompactAssistantTurn({ ...identity, response: `assistant-${index}`, sources: [] }, { graph });
+    await recordCompactAssistantTurn({ ...identity, userMessage: `user-${index}`, response: `assistant-${index}`, sources: [] }, { graph });
   }
   const state = await graph.getState({ configurable: { thread_id: compactThreadKey(identity) } });
   assert.equal(state.values.turns.length, compactContextLimits.turns);
@@ -25,6 +24,16 @@ test('compact context is tenant-thread isolated and strictly bounded', async () 
 
   const other = await hydrateCompactContext({ ...identity, orgId: 'org-b', message: 'new', history: [] }, { graph });
   assert.deepEqual(other.history, []);
+});
+
+test('no implicit thread is created and hydration never commits an active turn', async () => {
+  const graph = createCompactContextGraph({ checkpointer: new MemorySaver() });
+  assert.equal(compactThreadKey({ orgId: 'org-a', userId: 'user-a' }), null);
+  const identity = { orgId: 'org-a', userId: 'user-a', threadId: 'explicit-thread' };
+  const hydrated = await hydrateCompactContext({ ...identity, message: 'this turn later fails', history: [] }, { graph });
+  assert.deepEqual(hydrated.history, []);
+  const state = await graph.getState({ configurable: { thread_id: compactThreadKey(identity) } });
+  assert.deepEqual(state.values || {}, {});
 });
 
 test('compact context preserves only bounded public source references', async () => {

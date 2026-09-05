@@ -90,8 +90,8 @@ export async function warmCompactContextCheckpoint() {
 }
 
 export function compactThreadKey({ orgId, userId, threadId } = {}) {
-  if (!orgId || !userId) return null;
-  const tid = String(threadId || `user:${userId}`).trim() || `user:${userId}`;
+  if (!orgId || !userId || !String(threadId || '').trim()) return null;
+  const tid = String(threadId).trim();
   const digest = crypto.createHash('sha256').update(tid).digest('hex').slice(0, 32);
   return `chat:${orgId}:${userId}:${digest}:v2`;
 }
@@ -107,31 +107,21 @@ export async function hydrateCompactContext(input = {}, { graph } = {}) {
   if (!config) return { history: fallback, sourceRefs: [], sourceContext: null };
   try {
     const runtime = graph || await productionGraph();
-    const current = normalizeTurn({ role: 'user', content: input.message });
-    // PostgresSaver materializes omitted annotated fields using their default
-    // value. For replace-on-write fields that would turn an ordinary user-turn
-    // append into an accidental clear. Read the current checkpoint and carry
-    // the replaceable source context through the append explicitly.
+    // Hydration is a read boundary. Persisting the active user message here
+    // would commit failed/aborted turns before validation and poison later
+    // plans. The completed-turn boundary below appends the user/assistant pair.
     const checkpoint = await runtime.getState(config);
-    const priorSourceContext = checkpoint?.values?.sourceContext || null;
-    const result = await runtime.invoke({
-      turns: [...fallback, ...(current ? [current] : [])],
-      sourceRefs: [],
-      sourceContext: priorSourceContext,
-    }, config);
-    // The current message is supplied separately to the planner. Do not send
-    // it twice as both history and the active user turn.
-    const turns = compactTurns(result.turns || []);
-    if (current && turns.at(-1)?.role === 'user' && turns.at(-1)?.content === current.content) turns.pop();
-    const sourceContext = result.sourceContext && typeof result.sourceContext === 'object'
+    const values = checkpoint?.values || {};
+    const turns = compactTurns([...(values.turns || []), ...fallback]);
+    const sourceContext = values.sourceContext && typeof values.sourceContext === 'object'
       ? {
-        answer: String(result.sourceContext.answer || '').slice(0, 4000),
-        refs: compactSourceRefs(result.sourceContext.refs || []),
+        answer: String(values.sourceContext.answer || '').slice(0, 4000),
+        refs: compactSourceRefs(values.sourceContext.refs || []),
       }
       : null;
     return {
       history: turns,
-      sourceRefs: sourceContext?.refs || compactSourceRefs(result.sourceRefs || []),
+      sourceRefs: sourceContext?.refs || compactSourceRefs(values.sourceRefs || []),
       sourceContext,
     };
   } catch (error) {
@@ -140,10 +130,11 @@ export async function hydrateCompactContext(input = {}, { graph } = {}) {
   }
 }
 
-export async function recordCompactAssistantTurn({ orgId, userId, threadId, response, sources = [] } = {}, { graph } = {}) {
+export async function recordCompactAssistantTurn({ orgId, userId, threadId, userMessage, response, sources = [] } = {}, { graph } = {}) {
   const config = graphConfig({ orgId, userId, threadId });
-  const turn = normalizeTurn({ role: 'assistant', content: response });
-  if (!config || !turn) return false;
+  const userTurn = normalizeTurn({ role: 'user', content: userMessage });
+  const assistantTurn = normalizeTurn({ role: 'assistant', content: response });
+  if (!config || !assistantTurn) return false;
   try {
     const runtime = graph || await productionGraph();
     const publicRefs = compactSourceRefs((sources || []).filter((source) => (
@@ -152,9 +143,9 @@ export async function recordCompactAssistantTurn({ orgId, userId, threadId, resp
       || String(source?.segment_id || '').startsWith('web:')
     )));
     await runtime.invoke({
-      turns: [turn],
+      turns: [userTurn, assistantTurn].filter(Boolean),
       sourceRefs: publicRefs,
-      sourceContext: publicRefs.length ? { answer: turn.content, refs: publicRefs } : null,
+      sourceContext: publicRefs.length ? { answer: assistantTurn.content, refs: publicRefs } : null,
     }, config);
     return true;
   } catch (error) {

@@ -25045,6 +25045,7 @@ exit \$RC
                       const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
                       await recordCompactAssistantTurn({
                         orgId, userId, threadId: body.thread_id || body.conversation_id,
+                        userMessage: message,
                         response: result?.response, sources: result?.sources || [],
                       });
                     }
@@ -25151,6 +25152,7 @@ exit \$RC
                   const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
                   await recordCompactAssistantTurn({
                     orgId, userId, threadId: body.thread_id || body.conversation_id,
+                    userMessage: message,
                     response: result?.response, sources: result?.sources || [],
                   });
                 }

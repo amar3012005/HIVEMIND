@@ -938,6 +938,16 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       input: argumentInput,
     });
     let args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    // Schema-grounded entity binding is part of argument compilation, not an
+    // application rule. A discovered read/search capability commonly exposes
+    // a free-text query field; when one named entity is the unresolved fact,
+    // bind that exact user-provided name instead of asking the model to invent
+    // or rediscover it.
+    const namedEntities = (state.intent?.entities || []).filter(entity => entity?.name);
+    const queryProperty = card.schema?.properties?.query;
+    if (card.authority === 'read' && queryProperty && !text(args.query) && namedEntities.length === 1) {
+      args = { ...args, query: namedEntities[0].name };
+    }
     let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
     if (ungroundedContent.length) {
       raw = await jsonDecision({

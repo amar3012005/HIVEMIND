@@ -853,6 +853,17 @@ test('LinkedIn last-post adapts after GET-without-id instead of creating a post'
 });
 
 
+test('summarizeToolData lists thread snippets', () => {
+  const text = summarizeToolData({
+    threads: [
+      { id: 't1', snippet: 'Travel report card is in' },
+      { id: 't2', snippet: 'Invoice attached' },
+    ],
+  });
+  assert.match(text, /Travel report card is in/);
+  assert.match(text, /Invoice attached/);
+});
+
 test('summarizeToolData decodes GitHub README base64', () => {
   const text = summarizeToolData({
     encoding: 'base64',

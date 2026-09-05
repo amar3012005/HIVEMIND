@@ -328,14 +328,17 @@ export function summarizeToolData(data, limit = 1800) {
   if (name || headline) {
     return [name, headline, profileUrl].filter(Boolean).join('\n').slice(0, limit);
   }
-  const rows = data.items || data.repositories || data.repos || data.messages || data.videos || data.playlists || data.elements || [];
+  const rows = data.items || data.repositories || data.repos || data.messages
+    || data.videos || data.playlists || data.elements || data.threads || [];
   if (Array.isArray(rows) && rows.length) {
     const lines = rows.slice(0, 10).map((item) => {
       if (item == null || typeof item !== 'object') return String(item);
       const nested = item.snippet && typeof item.snippet === 'object' ? item.snippet : {};
       const nestedText = typeof item.snippet === 'string' ? item.snippet : '';
       return [
-        item.full_name || item.name || item.title || item.subject || nested.title || item.facetName,
+        item.full_name || item.name || item.title || item.subject
+          || (typeof item.snippet === 'string' ? item.snippet : '')
+          || nested.title || item.facetName,
         item.id || item.playlistId || nested.playlistId || '',
         item.description || item.body || nestedText || nested.description || nested.channelTitle,
         item.html_url || item.url || nested.url,

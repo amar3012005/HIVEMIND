@@ -53,6 +53,33 @@ const schema = z.object({
 
 function requireValue(value, code) { if (!value) throw new Error(code); }
 
+const READ_OPERATIONS = new Set([
+  'recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline',
+  'relation_between', 'aggregate', 'projects', 'list_memories', 'get_memory',
+  'traverse', 'query_with_ai', 'count_where', 'query_table', 'web_search',
+  'recall_bugs', 'why_code', 'code_at',
+]);
+
+function operationForSelectedTool(tool) {
+  const selected = String(tool || '').trim();
+  if (!selected) return null;
+  return Object.entries(NATIVE_OPERATION_TO_TOOL).find(([operation, canonicalTool]) => (
+    selected === operation || selected === canonicalTool
+  ))?.[0] || null;
+}
+
+function reconcileInvalidReadFromSelectedTool(plan, error, repairs) {
+  const selectedOperation = operationForSelectedTool(plan.steps?.[0]?.tool);
+  if (!String(error?.message || '').startsWith('native_plan_missing_')
+      || !selectedOperation || selectedOperation === plan.operation
+      || !READ_OPERATIONS.has(plan.operation) || !READ_OPERATIONS.has(selectedOperation)) return false;
+  plan.operation = selectedOperation;
+  if (selectedOperation !== 'aggregate') plan.aggregate = null;
+  if (selectedOperation !== 'relation_between') plan.relation_entities = [];
+  repairs.push('operation.selected_tool');
+  return true;
+}
+
 function normalizeNullableObject(value, keys) {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
   if (!keys.some((key) => value[key] != null && value[key] !== '')) return null;
@@ -400,7 +427,17 @@ export function validateNativePlanResult(input) {
     }
     reconcileSemanticOperation(plan, semanticRepairs);
     recoverCanonicalProfileUpdate(plan, semanticRepairs);
-    validateSemantics(plan);
+    try {
+      validateSemantics(plan);
+    } catch (error) {
+      // The planner returns both a semantic operation and a selected tool.
+      // If the operation is incomplete but the independently selected tool
+      // identifies another read-only operation, reconcile those typed fields
+      // and validate again. Writes/direct responses never use this recovery.
+      if (!reconcileInvalidReadFromSelectedTool(plan, error, semanticRepairs)) throw error;
+      reconcileSemanticOperation(plan, semanticRepairs);
+      validateSemantics(plan);
+    }
     const expectedCapability = capabilityForOperation(plan.operation);
     const expectedTool = NATIVE_OPERATION_TO_TOOL[plan.operation];
     const repairs = [...normalized.repairs, ...semanticRepairs];

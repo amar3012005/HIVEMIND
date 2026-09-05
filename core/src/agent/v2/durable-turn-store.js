@@ -9,6 +9,8 @@ const EVENT_PHASES = Object.freeze({
   scope_bound: 'authorized',
   intent_parsed: 'planned',
   plan_ready: 'planned',
+  native_capabilities_discovered: 'capability_discovered',
+  native_schemas_loaded: 'arguments_validated',
   retrieval_planned: 'retrieving',
   query_optimized: 'retrieving',
   recall_window_revealed: 'recall_verified',

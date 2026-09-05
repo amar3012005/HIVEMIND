@@ -29,6 +29,7 @@ export function compileNativePlan(plan, message, context = {}) {
     answer_type: plan.response.type, answer_scope: plan.response.scope,
     response_depth: plan.response.depth, retrieval_shape: plan.response.shape,
     answer_objective: plan.response.objective,
+    retrieval: plan.retrieval || null,
     recall_mode: plan.response.scope === 'bounded' ? 'fact' : 'explain',
     tool_groups: Object.keys(HIVEMIND_TOOL_GROUPS),
     side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',

@@ -7,8 +7,12 @@ import { validateNativePlanResult } from './plan-validator.js';
 const PRIMARY = process.env.NATIVE_CHAT_V2_PLANNER_MODEL || 'google/gemini-2.5-flash';
 const FALLBACK = process.env.NATIVE_CHAT_V2_PLANNER_FALLBACK_MODEL || 'google/gemini-2.5-flash';
 
-export async function planNativeTurn({ context, apiKey, signal, fetchImpl } = {}) {
-  const stable = getStaticPromptArtifact({ family: 'native-chat-v2', version: NATIVE_PLANNER_PROMPT_VERSION, build: buildNativePlannerPrompt });
+export async function planNativeTurn({ context, apiKey, signal, fetchImpl, nativeMeta = false } = {}) {
+  const stable = getStaticPromptArtifact({
+    family: nativeMeta ? 'native-meta-v1' : 'native-chat-v2',
+    version: nativeMeta ? `${NATIVE_PLANNER_PROMPT_VERSION}-meta1` : NATIVE_PLANNER_PROMPT_VERSION,
+    build: () => `${buildNativePlannerPrompt()}${nativeMeta ? `\n\nNATIVE META RETRIEVAL CONTRACT\nPopulate retrieval from semantic intent. Preserve an explicit requested result count as retrieval.limit. Use memory_types/tags/scope/relationship filters only when the user explicitly requests that restriction. entity_filter_mode defaults to should; use must only for an exact entity-bounded request and off only when no entity restriction is intended. These are language-neutral structured controls.` : ''}`,
+  });
   const messages = [
     { role: 'system', content: stable.value },
     { role: 'system', content: buildNativePlannerDynamicContext(context) },
@@ -30,7 +34,7 @@ export async function planNativeTurn({ context, apiKey, signal, fetchImpl } = {}
         : messages;
       const response = await chatCompletionFetch(model, {
         method: 'POST', signal, body: JSON.stringify({
-          messages: attemptMessages, tools: [createNativePlanTool()],
+          messages: attemptMessages, tools: [createNativePlanTool({ nativeMeta })],
           tool_choice: { type: 'function', function: { name: NATIVE_PLAN_TOOL_NAME } },
           parallel_tool_calls: false, temperature: 0, max_tokens: 850, prompt_cache_key: stable.key,
         }),

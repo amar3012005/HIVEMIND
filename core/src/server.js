@@ -57,7 +57,7 @@ import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonic
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
 import { admitProjectionAttempt, beginProjectionStage, finishCoreFallback, finishProjectionStage, projectionAttemptStatus, releaseProjectionStage, selectCoreFallback } from './memory/canonical-projection-attempts.js';
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
-import { CloudflareChatSessionClient } from './agent/v2/cloudflare-chat-session-client.js';
+import { CloudflareChatSessionClient, nativeOrchestratorFor } from './agent/v2/cloudflare-chat-session-client.js';
 import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
 import { reconcileProgressiveApproval } from './agent/progressive-approval-events.js';
 
@@ -24848,9 +24848,14 @@ exit \$RC
                 // Additive durable execution envelope. The selected mode is
                 // evaluated once and latched on the turn. Flag/Worker/schema
                 // failures fail closed to the unchanged Chat V2 path.
-                let durableChatMode = await cloudflareChatSessionClient
-                  .modeFor({ orgId, userId })
-                  .catch(() => 'off');
+                const chatAdmission = await cloudflareChatSessionClient
+                  .admissionFor({ orgId, userId })
+                  .catch(() => ({ mode: 'off', nativeMetaMode: 'off' }));
+                let durableChatMode = chatAdmission.mode;
+                // Both Cloudflare decisions are evaluated in one edge request
+                // and latched for the authenticated turn. Connector turns can
+                // never enter the native-only Meta runtime.
+                const nativeMetaMode = !useTools ? chatAdmission.nativeMetaMode : 'off';
                 let durableChatStore = null;
                 let durableChatTurn = null;
                 if (durableChatMode !== 'off') {
@@ -24863,6 +24868,7 @@ exit \$RC
                       mode: durableChatMode,
                       requestPayload: {
                         message, history, language, model, use_tools: useTools,
+                        native_meta_mode: nativeMetaMode,
                         history_turns: historyTurns,
                         recall_mode: body?.recall_mode || null,
                         source: body?.source || null,
@@ -24978,7 +24984,7 @@ exit \$RC
                       language,
                       router: body?.router,
                       useTools,
-                      nativeOrchestrator: !useTools ? 'v2' : null,
+                      nativeOrchestrator: nativeOrchestratorFor({ useTools, nativeMetaMode }),
                       recallMode: body?.recall_mode,
                       recallSource: body?.source || {
                         document_id: body?.source_document_id,
@@ -24993,6 +24999,7 @@ exit \$RC
                       ctx: {
                         userId, orgId,
                         recallReliabilityV1,
+                        nativeMetaMode,
                         durableChatMode,
                         durableChatTurnId: durableChatTurn?.id || null,
                         historyTurns,
@@ -25068,7 +25075,7 @@ exit \$RC
                   language,
                   router: body?.router,
                   useTools,
-                  nativeOrchestrator: !useTools ? 'v2' : null,
+                  nativeOrchestrator: nativeOrchestratorFor({ useTools, nativeMetaMode }),
                   recallMode: body?.recall_mode,
                   recallSource: body?.source || {
                     document_id: body?.source_document_id,
@@ -25083,6 +25090,7 @@ exit \$RC
                   ctx: {
                     userId, orgId,
                     recallReliabilityV1,
+                    nativeMetaMode,
                     durableChatMode,
                     durableChatTurnId: durableChatTurn?.id || null,
                     historyTurns,

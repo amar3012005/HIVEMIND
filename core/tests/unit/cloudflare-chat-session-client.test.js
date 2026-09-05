@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CloudflareChatSessionClient } from '../../src/agent/v2/cloudflare-chat-session-client.js';
+import { CloudflareChatSessionClient, nativeOrchestratorFor } from '../../src/agent/v2/cloudflare-chat-session-client.js';
 
 async function withEnv(values, fn) {
   const prior = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
@@ -24,4 +24,18 @@ test('environment kill switch avoids any Cloudflare request', async () => withEn
   const client = new CloudflareChatSessionClient({ fetchImpl: async () => { called = true; return Response.json({ mode: 'full' }); } });
   assert.equal(await client.modeFor({ orgId: 'o', userId: 'u' }), 'off');
   assert.equal(called, false);
+}));
+
+test('native meta admission fails closed and flag off preserves Native V2', async () => withEnv({
+  DURABLE_CHAT_AGENT_ENABLED: 'true', CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
+}, async () => {
+  const enabled = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'session', native_meta_mode: 'native-meta-v1' }) });
+  const disabled = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'off', native_meta_mode: 'off' }) });
+  const invalid = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'unexpected', native_meta_mode: 'unexpected' }) });
+  assert.equal(await enabled.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'native-meta-v1');
+  assert.equal(await disabled.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'off');
+  assert.equal(await invalid.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'off');
+  assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'off' }), 'v2');
+  assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'native-meta-v1' }), 'meta-v1');
+  assert.equal(nativeOrchestratorFor({ useTools: true, nativeMetaMode: 'native-meta-v1' }), null);
 }));

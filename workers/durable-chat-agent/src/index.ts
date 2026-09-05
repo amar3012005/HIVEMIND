@@ -1,5 +1,7 @@
 import { Agent, getAgentByName } from 'agents';
 import { CHAT_MODES, isTerminalMetadata, type ChatMode, type SessionMetadata, validateMetadata } from './contract';
+import { evaluateNativeMetaMode } from './native-meta-flag';
+export { evaluateNativeMetaMode } from './native-meta-flag';
 export { ChatTurnWorkflow } from './workflow';
 
 export interface Env extends Cloudflare.Env {
@@ -8,6 +10,8 @@ export interface Env extends Cloudflare.Env {
   ENVIRONMENT: 'development' | 'local' | 'production';
   DURABLE_CHAT_FLAG: 'durable_chat_agent_v1';
   DURABLE_CHAT_AGENT_ENABLED: 'true' | 'false';
+  NATIVE_META_FLAG: 'hivemind-native-meta-tools-v1';
+  NATIVE_META_TOOLS_ENABLED: 'true' | 'false';
   DURABLE_CHAT_AGENT_SECRET: string;
   CHAT_TURN_WORKFLOW: Workflow;
 }
@@ -103,7 +107,13 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ ok: true, service: 'hivemind-durable-chat-agent', content_storage: false });
     if (!authorized(request, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
-    if (url.pathname === '/mode' && request.method === 'GET') return Response.json({ mode: await evaluateMode(env, url) });
+    if (url.pathname === '/mode' && request.method === 'GET') {
+      const [mode, nativeMetaMode] = await Promise.all([evaluateMode(env, url), evaluateNativeMetaMode(env, url)]);
+      return Response.json({ mode, native_meta_mode: nativeMetaMode });
+    }
+    if (url.pathname === '/native-meta-mode' && request.method === 'GET') {
+      return Response.json({ mode: await evaluateNativeMetaMode(env, url) });
+    }
     if ((url.pathname === '/sessions/open' || url.pathname === '/sessions/event') && request.method === 'POST') {
       try {
         const metadata = validateMetadata(await request.json());

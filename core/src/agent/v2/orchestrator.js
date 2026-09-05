@@ -5,10 +5,12 @@ import { compileNativePlan } from './plan-compiler.js';
 import { buildTurnContext } from './turn-context-builder.js';
 import { compactCapabilityCatalog } from './capability-registry.js';
 import { hydrateCompactContext } from './compact-context.js';
+import { assertNativeMetaAuthority, bindNativeMetaArguments, buildNativeMetaReceipt } from './native-meta-registry.js';
 
 const State = Annotation.Root({
   input: Annotation(), context: Annotation(), capabilityCatalog: Annotation(), rawPlan: Annotation(),
   validation: Annotation(), validatedPlan: Annotation(), decision: Annotation(), usage: Annotation(),
+  nativeMeta: Annotation(), nativeArguments: Annotation(),
 });
 
 export function createNativePlannerGraph({ planner = planNativeTurn, compactContextGraph } = {}) {
@@ -40,6 +42,71 @@ export function createNativePlannerGraph({ planner = planNativeTurn, compactCont
     .addEdge('validate_plan', 'compile_plan')
     .addEdge('compile_plan', END)
     .compile();
+}
+
+export function createNativeMetaPlannerGraph({ planner = planNativeTurn, compactContextGraph } = {}) {
+  return new StateGraph(State)
+    .addNode('turn_context', async (state) => {
+      const compact = await hydrateCompactContext(state.input, { graph: compactContextGraph });
+      return { context: buildTurnContext({
+        ...state.input,
+        history: compact.history,
+        recentSourceRefs: compact.sourceContext?.refs || compact.sourceRefs,
+        recentContextAnswer: compact.sourceContext?.answer || null,
+      }) };
+    })
+    .addNode('capability_catalog', async () => ({ capabilityCatalog: compactCapabilityCatalog() }))
+    .addNode('semantic_planner', async (state) => {
+      const result = await planner({ ...state.input, context: state.context, capabilityCatalog: state.capabilityCatalog, nativeMeta: true });
+      return { rawPlan: result.rawPlan, usage: result.usage };
+    })
+    .addNode('validate_plan', async (state) => {
+      const validation = validateNativePlanResult(state.rawPlan);
+      if (validation.status === 'invalid') throw new Error(validation.error);
+      return { validation, validatedPlan: validation.plan };
+    })
+    .addNode('discover_native_capability', async (state) => ({
+      nativeMeta: assertNativeMetaAuthority(buildNativeMetaReceipt({ plan: state.validatedPlan, validation: state.validation })),
+    }))
+    .addNode('bind_native_arguments', async (state) => {
+      const schema = state.nativeMeta.schemas[0];
+      return { nativeArguments: schema ? bindNativeMetaArguments(
+        compileNativePlan(state.validatedPlan, state.input.message, state.context), schema,
+      ) : { args: {}, unresolved: [] } };
+    })
+    .addNode('compile_plan', async (state) => ({
+      decision: {
+        ...compileNativePlan(state.validatedPlan, state.input.message, state.context),
+        native_arguments: state.nativeArguments.args,
+        _native_meta: {
+          schema_version: state.nativeMeta.schema_version,
+          capability: state.nativeMeta.capability,
+          schema_tools: state.nativeMeta.schemas.map((entry) => entry.function.name),
+          validation: state.nativeMeta.validation,
+          unresolved_arguments: state.nativeArguments.unresolved,
+        },
+      },
+    }))
+    .addEdge(START, 'turn_context')
+    .addEdge('turn_context', 'capability_catalog')
+    .addEdge('capability_catalog', 'semantic_planner')
+    .addEdge('semantic_planner', 'validate_plan')
+    .addEdge('validate_plan', 'discover_native_capability')
+    .addEdge('discover_native_capability', 'bind_native_arguments')
+    .addEdge('bind_native_arguments', 'compile_plan')
+    .addEdge('compile_plan', END)
+    .compile();
+}
+
+export async function parseNativeMetaTurn(input, dependencies = {}) {
+  const result = await createNativeMetaPlannerGraph(dependencies).invoke({ input });
+  return {
+    decision: result.decision,
+    usage: result.usage,
+    plan: result.validatedPlan,
+    validation: result.validation,
+    nativeMeta: result.nativeMeta,
+  };
 }
 
 export async function parseNativeTurnV2(input, dependencies = {}) {

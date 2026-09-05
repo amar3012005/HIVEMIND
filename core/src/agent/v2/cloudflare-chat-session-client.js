@@ -7,24 +7,36 @@ function configuration() {
 
 const VALID_MODES = new Set(['off', 'shadow', 'session', 'workflow', 'full']);
 
+export function nativeOrchestratorFor({ useTools = false, nativeMetaMode = 'off' } = {}) {
+  if (useTools) return null;
+  return nativeMetaMode === 'native-meta-v1' ? 'meta-v1' : 'v2';
+}
+
 export class CloudflareChatSessionClient {
   constructor({ fetchImpl = fetch, logger = console } = {}) { this.fetchImpl = fetchImpl; this.logger = logger; }
 
-  async modeFor({ orgId, userId }) {
+  async admissionFor({ orgId, userId }) {
     const config = configuration();
-    if (!config || !orgId || !userId) return 'off';
+    if (!config || !orgId || !userId) return { mode: 'off', nativeMetaMode: 'off' };
     try {
       const response = await this.fetchImpl(`${config.baseUrl}/mode?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, {
         headers: { authorization: `Bearer ${config.secret}` }, signal: AbortSignal.timeout(3000),
       });
-      if (!response.ok) return 'off';
-      const mode = (await response.json())?.mode;
-      return VALID_MODES.has(mode) ? mode : 'off';
+      if (!response.ok) return { mode: 'off', nativeMetaMode: 'off' };
+      const payload = await response.json();
+      return {
+        mode: VALID_MODES.has(payload?.mode) ? payload.mode : 'off',
+        nativeMetaMode: payload?.native_meta_mode === 'native-meta-v1' ? 'native-meta-v1' : 'off',
+      };
     } catch (error) {
       this.logger.warn?.(`[durable-chat] Flagship evaluation failed closed: ${error.message}`);
-      return 'off';
+      return { mode: 'off', nativeMetaMode: 'off' };
     }
   }
+
+  async modeFor(identity) { return (await this.admissionFor(identity)).mode; }
+
+  async nativeMetaModeFor(identity) { return (await this.admissionFor(identity)).nativeMetaMode; }
 
   async request(path, payload) {
     const config = configuration();

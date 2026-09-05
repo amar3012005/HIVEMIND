@@ -7,7 +7,9 @@
   "vars": {
     "ENVIRONMENT": "development",
     "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-    "DURABLE_CHAT_AGENT_ENABLED": "false"
+    "DURABLE_CHAT_AGENT_ENABLED": "false",
+    "NATIVE_META_FLAG": "hivemind-native-meta-tools-v1",
+    "NATIVE_META_TOOLS_ENABLED": "false"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "durable_objects": {
@@ -28,7 +30,9 @@
       "vars": {
         "ENVIRONMENT": "local",
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-        "DURABLE_CHAT_AGENT_ENABLED": "true"
+        "DURABLE_CHAT_AGENT_ENABLED": "true",
+        "NATIVE_META_FLAG": "hivemind-native-meta-tools-v1",
+        "NATIVE_META_TOOLS_ENABLED": "true"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "workflows": [{
@@ -45,7 +49,9 @@
       "vars": {
         "ENVIRONMENT": "production",
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-        "DURABLE_CHAT_AGENT_ENABLED": "true"
+        "DURABLE_CHAT_AGENT_ENABLED": "true",
+        "NATIVE_META_FLAG": "hivemind-native-meta-tools-v1",
+        "NATIVE_META_TOOLS_ENABLED": "true"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "workflows": [{

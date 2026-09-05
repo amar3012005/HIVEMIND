@@ -3,7 +3,7 @@ import { NATIVE_OPERATIONS } from './capability-registry.js';
 export const NATIVE_PLAN_TOOL_NAME = 'hivemind_native_plan_v2';
 const nullableString = { type: ['string', 'null'] };
 
-export function createNativePlanTool() {
+export function createNativePlanTool({ nativeMeta = false } = {}) {
   return { type: 'function', function: {
     name: NATIVE_PLAN_TOOL_NAME,
     description: 'Return one complete NativeTurnPlanV2. Do not answer the user.',
@@ -11,6 +11,20 @@ export function createNativePlanTool() {
       schema_version: { type: 'string', enum: ['native-turn-plan.v2'] },
       capability: { type: 'string', enum: ['profile', 'memory_write', 'workspace_read', 'direct'] },
       operation: { type: 'string', enum: NATIVE_OPERATIONS, description: 'Semantic operation. aggregate is only complete deduplicated registry count/enumeration, never arithmetic, attribute filtering, comparison, or a document-derived list. relation_between is only a stored relationship/path, never an attribute comparison. Time-bounded events use event_range with resolved ISO bounds.' },
+      ...(nativeMeta ? { retrieval: {
+        type: 'object', additionalProperties: false,
+        description: 'Exact caller-requested retrieval controls. Use null/empty values when not requested; never invent a restrictive filter.',
+        properties: {
+          limit: { type: ['integer', 'null'], minimum: 1, maximum: 15 },
+          tags: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          scope_filter: { type: ['string', 'null'], enum: ['personal', 'project', 'team', 'organization', null] },
+          entity_filter_mode: { type: 'string', enum: ['must', 'should', 'off'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
+        },
+        required: ['limit', 'tags', 'memory_types', 'scope_filter', 'entity_filter_mode', 'relationship_types', 'relationship_direction'],
+      } } : {}),
       response: { type: 'object', additionalProperties: false, properties: {
         language: { type: 'string' }, type: { type: 'string', enum: ['fact', 'decision', 'event', 'goal', 'preference', 'lesson', 'relationship', 'profile', 'acknowledgement'] },
         scope: { type: 'string', enum: ['bounded', 'broad', 'exhaustive'], description: 'Requested answer coverage. Use bounded for ordinary fact/entity questions, broad only for meaningful multi-aspect breadth, exhaustive only for complete inventories.' }, depth: { type: 'string', enum: ['standard', 'detailed', 'comprehensive'] },
@@ -53,6 +67,6 @@ export function createNativePlanTool() {
         preferences: { type: 'array', items: { type: 'string' }, maxItems: 12 },
       } },
       direct_response: nullableString, context_free_certificate: { type: 'boolean' },
-    }, required: ['schema_version', 'capability', 'operation', 'response', 'references', 'time', 'steps', 'completion', 'relation_entities', 'aggregate', 'external_fallback', 'uses_recent_public_sources', 'memory', 'direct_response', 'context_free_certificate'] },
+    }, required: ['schema_version', 'capability', 'operation', ...(nativeMeta ? ['retrieval'] : []), 'response', 'references', 'time', 'steps', 'completion', 'relation_entities', 'aggregate', 'external_fallback', 'uses_recent_public_sources', 'memory', 'direct_response', 'context_free_certificate'] },
   } };
 }

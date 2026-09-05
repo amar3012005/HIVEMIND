@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isTerminalMetadata, validateMetadata, validateWorkflowParams, type SessionMetadata } from '../src/contract';
+import { evaluateNativeMetaMode } from '../src/native-meta-flag';
 
 const valid: SessionMetadata = {
   event_id: '74fb72fc-08da-41cc-8c56-598eae67bfee:3',
@@ -33,5 +34,34 @@ describe('metadata-only Workflow contract', () => {
     expect(isTerminalMetadata({ ...valid, status: 'running' })).toBe(false);
     expect(isTerminalMetadata({ ...valid, status: 'completed' })).toBe(true);
     expect(isTerminalMetadata({ ...valid, status: 'failed' })).toBe(true);
+  });
+});
+
+describe('native meta Flagship admission', () => {
+  const url = new URL('https://worker/native-meta-mode?org_id=org-1&user_id=user-1');
+  it('fails closed when the local master switch is off', async () => {
+    let evaluated = false;
+    const env = {
+      NATIVE_META_TOOLS_ENABLED: 'false', ENVIRONMENT: 'production',
+      FLAGS: { getBooleanDetails: async () => { evaluated = true; return { value: true }; } },
+    } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
+    expect(await evaluateNativeMetaMode(env, url)).toBe('off');
+    expect(evaluated).toBe(false);
+  });
+  it('uses a stable tenant-user targeting key and accepts only true', async () => {
+    let context: Record<string, unknown> | undefined;
+    const env = {
+      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-native-meta-tools-v1', ENVIRONMENT: 'production',
+      FLAGS: { getBooleanDetails: async (_key: string, _fallback: boolean, ctx?: Record<string, string | number | boolean>) => { context = ctx; return { value: true }; } },
+    } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
+    expect(await evaluateNativeMetaMode(env, url)).toBe('native-meta-v1');
+    expect(context?.targetingKey).toBe('org-1:user-1');
+  });
+  it('fails closed on Flagship errors', async () => {
+    const env = {
+      NATIVE_META_TOOLS_ENABLED: 'true', ENVIRONMENT: 'production',
+      FLAGS: { getBooleanDetails: async () => { throw new Error('offline'); } },
+    } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
+    expect(await evaluateNativeMetaMode(env, url)).toBe('off');
   });
 });

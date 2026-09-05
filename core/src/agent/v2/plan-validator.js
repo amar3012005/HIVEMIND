@@ -6,6 +6,15 @@ const schema = z.object({
   schema_version: z.literal('native-turn-plan.v2'),
   capability: z.enum(['profile', 'memory_write', 'workspace_read', 'direct']),
   operation: z.enum(NATIVE_OPERATIONS),
+  retrieval: z.object({
+    limit: z.number().int().min(1).max(15).nullable(),
+    tags: z.array(z.string()).max(12),
+    memory_types: z.array(z.string()).max(12),
+    scope_filter: z.enum(['personal', 'project', 'team', 'organization']).nullable(),
+    entity_filter_mode: z.enum(['must', 'should', 'off']),
+    relationship_types: z.array(z.string()).max(12),
+    relationship_direction: z.enum(['any', 'incoming', 'outgoing']),
+  }).strict().optional(),
   response: z.object({
     language: z.string().trim().min(1).max(32), type: z.enum(['fact', 'decision', 'event', 'goal', 'preference', 'lesson', 'relationship', 'profile', 'acknowledgement']),
     scope: z.enum(['bounded', 'broad', 'exhaustive']), depth: z.enum(['standard', 'detailed', 'comprehensive']),

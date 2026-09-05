@@ -929,7 +929,7 @@ async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTo
 async function execMappedNativeTool(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
   const tool = plan.native_tool;
   if (!tool || remaining() <= 0) return;
-  const args = {
+  const args = plan._native_meta ? (plan.native_arguments || {}) : {
     query: plan.queries?.[0] || plan.user_message,
     query_original: plan.user_message,
     title: plan.save_intent?.title,
@@ -1072,7 +1072,7 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
           : (plan.query_original || plan.user_message || q),
         query_canonical_en: plan.query_canonical_en || q,
         entities: plan.named_entities || [],
-        ...(plan.answer_scope === 'exhaustive' && plan.answer_type ? { answer_type: plan.answer_type } : {}),
+        ...((plan._native_meta || plan.answer_scope === 'exhaustive') && plan.answer_type ? { answer_type: plan.answer_type } : {}),
         mode: recallMode,
         limit: recallLimit,
         _explicit_mode: !!plan.explicit_recall_mode,
@@ -1263,7 +1263,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // text/entity compatibility check could run. `should` keeps the dedicated
     // entity lane and exact lexical query additive; downstream coverage still
     // requires every requested entity to occur in the delivered packet.
-    entity_filter_mode: 'should',
+    entity_filter_mode: plan.retrieval?.entity_filter_mode || 'should',
     // Latched once by the authenticated chat route. The recall tool receives
     // the same fail-closed rollout decision as the public recall endpoint.
     reliability_v1: ctx.recallReliabilityV1 === true,
@@ -1284,6 +1284,12 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ...(Array.isArray(plan.named_entities) && plan.named_entities.length
       ? { entities: plan.named_entities }
       : {}),
+    ...(Array.isArray(plan.retrieval?.tags) && plan.retrieval.tags.length ? { tags: plan.retrieval.tags } : {}),
+    ...(Array.isArray(plan.retrieval?.memory_types) && plan.retrieval.memory_types.length ? { memory_types: plan.retrieval.memory_types } : {}),
+    ...(Array.isArray(plan.retrieval?.relationship_types) && plan.retrieval.relationship_types.length
+      ? { relationship_types: plan.retrieval.relationship_types } : {}),
+    ...(plan.retrieval?.relationship_direction && plan.retrieval.relationship_direction !== 'any'
+      ? { relationship_direction: plan.retrieval.relationship_direction } : {}),
     // Internal-only delivery mode: ranking still runs on the canonical recall
     // path, but answer synthesis receives the complete authorized rows so its
     // semantic projector can recover details beyond the public 400-char preview.
@@ -1309,7 +1315,8 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // Scope: an EXPLICIT request scope (the chat's personal/organization/project selector,
     // ctx.scopeFilter) WINS over the planner's inferred scope — the user's chosen lens is
     // authoritative. 'organization'/none → no filter (everything accessible in the org).
-    ...((ctx.scopeFilter || plan.scope_filter) ? { scope_filter: ctx.scopeFilter || plan.scope_filter } : {}),
+    ...((ctx.scopeFilter || plan.retrieval?.scope_filter || plan.scope_filter)
+      ? { scope_filter: ctx.scopeFilter || plan.retrieval?.scope_filter || plan.scope_filter } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick
@@ -1323,7 +1330,9 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
   // smaller set and downstream dedup carries less.
-  const recallLimit = 15;
+  const recallLimit = Number.isInteger(plan.retrieval?.limit)
+    ? Math.max(1, Math.min(15, plan.retrieval.limit))
+    : 15;
   // Lead with the optimised canonical-English query (set upstream by
   // optimizeRecallQueries) instead of the raw conversational message, so the
   // SEARCH uses the optimised version. Falls back to user_message if unset.
@@ -3761,8 +3770,10 @@ export async function runReactAgentV2({
     // unchanged. Default (unset/any other value) = the current parseChatIntent.
     let intentParsed;
     const nativeV2Module = useTools !== true ? await import('./v2/orchestrator.js') : null;
-    const nativeV2Mode = nativeOrchestrator === 'v2' && useTools !== true
-      ? 'serve'
+    const nativeV2Mode = nativeOrchestrator === 'meta-v1' && useTools !== true
+      ? 'meta-v1'
+      : nativeOrchestrator === 'v2' && useTools !== true
+        ? 'serve'
       : (nativeV2Module?.nativeV2RoutingMode({ useTools, seed: ctx.userId || trace.traceId }) || 'off');
     const nativeV2Input = async () => ({
       message, history, language, apiKey, signal: abortCtrl.signal,
@@ -3773,7 +3784,20 @@ export async function runReactAgentV2({
       orgId: ctx.orgId, userId: ctx.userId, threadId: ctx.threadId || null,
       timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
     });
-    if (nativeV2Mode === 'serve') {
+    if (nativeOrchestrator === 'meta-v1' && useTools !== true) {
+      intentParsed = await nativeV2Module.parseNativeMetaTurn(await nativeV2Input());
+      const meta = intentParsed.nativeMeta;
+      onEvent?.({
+        type: 'native_capabilities_discovered', schema_version: 1,
+        operation: meta?.capability?.operation || null,
+        tool: meta?.capability?.tool || null,
+        authority: meta?.capability?.authority || null,
+      });
+      onEvent?.({
+        type: 'native_schemas_loaded', schema_version: 1,
+        tools: (meta?.schemas || []).map((entry) => entry?.function?.name).filter(Boolean),
+      });
+    } else if (nativeV2Mode === 'serve') {
       // One turn owns one planner request. Provider failover belongs to the
       // Cloudflare route; invoking the progressive planner here paid for a
       // second LLM decision and could execute a different plan.
@@ -3844,6 +3868,13 @@ export async function runReactAgentV2({
       validation_status: intentParsed?.validation?.status || null,
       deterministic_repairs: intentParsed?.validation?.repairs || [],
       planned_steps: intentParsed?.plan?.steps?.length || null,
+      native_meta: intentParsed?.nativeMeta ? {
+        schema_version: intentParsed.nativeMeta.schema_version,
+        operation: intentParsed.nativeMeta.capability?.operation || null,
+        tool: intentParsed.nativeMeta.capability?.tool || null,
+        authority: intentParsed.nativeMeta.capability?.authority || null,
+        schema_count: intentParsed.nativeMeta.schemas?.length || 0,
+      } : null,
     };
     _pt('intent_parse_ms', _ps);
     let intentDecision = collapseNativeOnlyCompoundDecision(intentParsed.decision, message);
@@ -4618,9 +4649,11 @@ export async function runReactAgentV2({
     // selects exactly one synthesis window before the model runs: ordinary
     // turns see five, detailed turns ten, comprehensive turns fifteen. There
     // is no post-answer reveal, retrieval retry, rerank, or synthesis hop.
-    const evidenceWindowSize = evidenceWindowSizeForDepth(plan.response_depth, {
-      nativeSingleCall: plan._native_single_call === true,
-    });
+    const evidenceWindowSize = Number.isInteger(plan.retrieval?.limit)
+      ? Math.max(1, Math.min(15, plan.retrieval.limit))
+      : evidenceWindowSizeForDepth(plan.response_depth, {
+        nativeSingleCall: plan._native_single_call === true,
+      });
     const progressiveSession = createProgressiveRecallSession({
       rankedCandidates: evidence.ranked_candidates || [],
       memories: evidence.memories || [],

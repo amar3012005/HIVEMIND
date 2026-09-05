@@ -290,6 +290,28 @@ function ungroundedIdentifiers(state, args) {
   return sensitiveIdentifierValues(args).filter(item => !evidence.includes(item.value.toLowerCase()));
 }
 
+const meaningfulTokens = value => new Set(String(value || '').toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) || []);
+
+function ungroundedReferencedContent(state, args, schema = {}) {
+  if (state.decision?.action !== 'draft' || !(state.conversationContext || []).length) return [];
+  const priorAssistant = [...state.conversationContext].reverse().find(turn => turn?.role === 'assistant')?.content || '';
+  if (!priorAssistant) return [];
+  const current = meaningfulTokens(state.message);
+  const prior = meaningfulTokens(priorAssistant);
+  const invalid = [];
+  for (const [field, value] of Object.entries(args || {})) {
+    if (!/(?:body|content|message|text|description)/i.test(field) || typeof value !== 'string') continue;
+    const generated = meaningfulTokens(value);
+    const currentOverlap = [...generated].filter(token => current.has(token)).length;
+    const priorOverlap = [...generated].filter(token => prior.has(token)).length;
+    const requiredOverlap = Math.min(8, Math.max(4, Math.ceil(generated.size * 0.15)));
+    if (currentOverlap < requiredOverlap && priorOverlap < requiredOverlap) {
+      invalid.push({ field, schema: schema?.properties?.[field] || {}, code: 'referenced_content_ungrounded' });
+    }
+  }
+  return invalid;
+}
+
 function providerEventExpected(receipt) {
   const data = receipt?.data;
   const status = text(data?.status || data?.state || data?.execution_status, 60).toLowerCase();
@@ -672,34 +694,46 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
   const prepareNode = async state => trace('schema_validation', { tool_slug: state.decision?.tool_slug || null }, async () => {
     const card = (state.capabilities || []).find(item => item.slug === state.decision?.tool_slug);
     if (!card) throw new Error('governed_capability_not_discovered');
-    const raw = await jsonDecision({
+    const argumentInput = {
+      message,
+      intent: state.intent,
+      action: state.decision,
+      selected_capability: compactCapability(card),
+      schema: card.schema,
+      human_inputs: state.fieldValues,
+      successful_receipts: (state.receipts || []).filter(row => row.successful).map(synthesisReceipt),
+      prior_conversation_evidence: state.referenceEvidence,
+      conversation_context: state.conversationContext,
+      resolved_reference: state.resolvedReference,
+      recovery_instruction: state.planRepair,
+    };
+    let raw = await jsonDecision({
       ctx,
       stage: 'arguments',
       signal: ctx._signal,
       system: `Generate only arguments for the selected JSON schema. Active skill: ${loadGovernedSkill('arguments').content}
-Return the argument object itself. Never use schema examples, fabricate identifiers, or add fields absent from the schema.`,
-      input: {
-        message,
-        intent: state.intent,
-        action: state.decision,
-        selected_capability: compactCapability(card),
-        schema: card.schema,
-        human_inputs: state.fieldValues,
-        successful_receipts: (state.receipts || []).filter(row => row.successful).map(synthesisReceipt),
-        prior_conversation_evidence: state.referenceEvidence,
-        resolved_reference: state.resolvedReference,
-        recovery_instruction: state.planRepair,
-      },
+Return the argument object itself. Never use schema examples, fabricate identifiers, or add fields absent from the schema. When the user refers to prior content, reproduce the substantive prior assistant content and resolve destinations from evidence; never replace it with a placeholder. Include a useful subject when the selected schema supports one.`,
+      input: argumentInput,
     });
-    const args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    let args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
+    if (ungroundedContent.length) {
+      raw = await jsonDecision({
+        ctx, stage: 'arguments', signal: ctx._signal,
+        system: `Repair the selected tool arguments. Return only the schema argument object. The prior attempt did not ground referenced content in the conversation. Copy the substantive referenced assistant content into the appropriate body/content field, preserve its meaning, resolve destinations only from evidence, and include a useful subject when supported.`,
+        input: { ...argumentInput, rejected_arguments: args, validation_errors: ungroundedContent.map(item => ({ field: item.field, code: item.code })) },
+      });
+      args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
+    }
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
     const valid = validator(args);
     const missing = missingRequiredFields(card.schema, args);
     const invalid = invalidSchemaValues(card.schema, args);
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
-    if (!valid || missing.length || invalid.length || ungrounded.length) {
-      const requirements = [...missing, ...invalid, ...ungrounded.map(item => ({ field: item.field, schema: card.schema?.properties?.[item.field] || {} }))];
+    if (!valid || missing.length || invalid.length || ungrounded.length || ungroundedContent.length) {
+      const requirements = [...missing, ...invalid, ...ungroundedContent, ...ungrounded.map(item => ({ field: item.field, schema: card.schema?.properties?.[item.field] || {} }))];
       const relevantReads = eligibleReadCapabilities(state, requirements).filter(item => item.relevance > 0);
       const dependencyKey = unresolvedDependencyKey(requirements);
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);

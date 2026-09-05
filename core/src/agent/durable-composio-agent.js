@@ -1333,7 +1333,8 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
         await persist();
         if (!svc.discoverSessionTools) throw new Error('Durable session discovery is unavailable');
         beginTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { query: next.query });
-        const discovery = await svc.discoverSessionTools(ctx.orgId, { toolkits: (intent.apps.length ? intent.apps : connected).slice(0, 12),
+        const discoveryToolkits = (intent.apps.length ? intent.apps : connected).slice(0, 12);
+        const discovery = await svc.discoverSessionTools(ctx.orgId, { toolkits: discoveryToolkits,
           useCases: [next.query], allowDisconnected: true,
           searchPayload: { queries: [{ use_case: next.query, known_fields: intent.known_fields }],
             session: run.scratch.workflow_session_id ? { id: run.scratch.workflow_session_id } : { generate_id: true },
@@ -1347,6 +1348,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
           const schema = raw?.input_schema;
           if (!slug || !schema || !schema.properties) continue;
           const toolkit = String(raw?.toolkit || tool._composio.toolkit || '').toLowerCase();
+          if (!discoveryToolkits.includes(toolkit)) continue;
           // Controlled capability identifiers, never user-language or model authority.
           const namespace = toolkit.replace(/[^a-z0-9]/g, '').toUpperCase();
           const actionTokens = slug.startsWith(`${namespace}_`) ? tokens(slug.slice(namespace.length + 1)) : [];
@@ -1363,8 +1365,9 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
         if (next.slug !== 'HIVEMIND_RECALL') throw new Error('Native capability is not allowed');
         if (reads.some(r => r.slug === next.slug)) throw new Error('Repeated native step requires a new request');
         const dispatch = ctx._tracedDispatch || ctx._dispatchTool;
-        beginTool(emit, run, next.slug, { query: run.goal || message });
-        const nativeArgs = { query: run.goal || message, query_original: run.goal || message };
+        const nativeQuery = typeof next.query === 'string' && next.query.trim() ? next.query.trim().slice(0, 2000) : run.goal || message;
+        beginTool(emit, run, next.slug, { query: nativeQuery });
+        const nativeArgs = { query: nativeQuery, query_original: run.goal || message };
         const nativeResult = typeof dispatch === 'function' ? null : await executeHivemindCustomTool('HIVEMIND_RECALL', nativeArgs, ctx);
         const data = typeof dispatch === 'function' ? await dispatch('hivemind_recall', nativeArgs, ctx) : nativeResult?.data;
         if (nativeResult && !nativeResult.successful) throw new Error('Native recall is unavailable');

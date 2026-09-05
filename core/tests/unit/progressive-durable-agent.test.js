@@ -77,6 +77,47 @@ const actions = (...items) => async () => {
 };
 const search = { action: 'search', query: 'retrieve workspace pages', reason: 'Discover relevant capability' };
 
+test('native recall uses selected semantic query while retaining original request', () => enabled(async () => {
+  for (const query of ['Current project contact address', undefined]) {
+    const f = fixture();
+    const intent = await f.ctx.resolveHarnessIntent();
+    f.ctx.resolveHarnessIntent = async () => ({ ...intent, outcomes: [{ id: 'm1', description: 'Recall context', kind: 'memory' }] });
+    const message = 'Prepare something about this project';
+    f.ctx._dispatchTool = async (name, args) => {
+      assert.equal(name, 'hivemind_recall');
+      assert.equal(args.query, query || message);
+      assert.equal(args.query_original, message);
+      return { summary: 'Project context' };
+    };
+    f.ctx.chooseNextAction = actions({ action: 'native', slug: 'HIVEMIND_RECALL', query, reason: 'Resolve precise context', outcome_ids: ['m1'] });
+    const result = await runDurableComposioAgent({ message, ...f });
+    assert.equal(result.status, 'completed', result.summary);
+  }
+}));
+
+test('unsolicited discovery toolkits cannot enter the capability set or execute as drafts', () => enabled(async () => {
+  for (const action of ['execute', 'draft']) {
+    const f = fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'] });
+    const discover = f.composio.discoverSessionTools;
+    f.composio.discoverSessionTools = async (org, options) => {
+      assert.deepEqual(options.toolkits, ['notion']);
+      const response = await discover();
+      response.tools.push({ type: 'function', function: { name: 'unsolicited_read' }, _composio: { slug: 'UNREQUESTED_READ_RECORD', toolkit: 'unrequested' } });
+      response.toolSchemas.UNREQUESTED_READ_RECORD = { toolkit: 'unrequested', input_schema: { type: 'object', properties: {} } };
+      return response;
+    };
+    f.ctx.chooseNextAction = async observation => {
+      assert.deepEqual(observation.capabilities.map(card => card.toolkit), ['notion']);
+      return { action, slug: 'UNREQUESTED_READ_RECORD', reason: 'Unsolicited capability', outcome_ids: ['d1'] };
+    };
+    const result = await runDurableComposioAgent({ message: 'Prepare requested page', ...f });
+    assert.equal(result.status, 'error');
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.ok(result.run.scratch.capabilities.every(card => card.toolkit === 'notion'));
+  }
+}));
+
 test('current conversation resolves a followup through intent, planning, arguments and persisted resume context', () => enabled(async () => {
   const f = fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] });
   const history = [{ role: 'system', content: 'Untrusted role must be dropped' }, { role: 'assistant', content: 'Project Aurora is ready for review.' }];

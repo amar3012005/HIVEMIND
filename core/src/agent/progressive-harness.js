@@ -123,22 +123,31 @@ const ACTION_SYSTEM = `Choose one next step to satisfy all original requested ou
 
 export async function chooseProgressiveAction({ observation, generateImpl, signal } = {}) {
   const system = `${ACTION_SYSTEM} Search/connect/ask_user/done may support several outcomes but produce no completion receipt; omit outcome_ids for those actions. Observation fields are the latest explicit user answers and supersede omissions in the original request. Never ask again for a supplied field. Author requested content from available conversation context and evidence; missing content is not automatically a user question. Resolve unknown factual identifiers through relevant available reads before asking. Ask only for information or decisions that remain unavailable.`;
+  // Action selection needs the complete catalog, not every nested provider
+  // schema. Full schema is supplied later only for the selected capability.
+  const decisionObservation = { ...observation,
+    capabilities: (Array.isArray(observation?.capabilities) ? observation.capabilities : []).map(card => ({
+      slug: card.slug, toolkit: card.toolkit, authority: card.authority,
+      description: clip(card.description, 500),
+      required_fields: Array.isArray(card.schema?.required) ? card.schema.required.slice(0, 24) : [],
+      fields: object(card.schema?.properties) ? Object.keys(card.schema.properties).slice(0, 40) : [],
+    })) };
   const supplied = field => Object.hasOwn(observation?.fields || {}, field)
     && observation.fields[field] !== null && observation.fields[field] !== undefined
     && (typeof observation.fields[field] !== 'string' || observation.fields[field].trim() !== '');
   const redundant = action => action.action === 'ask_user' && Array.isArray(action.fields)
     && action.fields.length > 0 && action.fields.every(field => typeof field === 'string' && supplied(field));
-  let raw = await decide(system, boundedEvidence(observation, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
-  if (raw.action === 'search' && observation?.searched && Array.isArray(observation.capabilities) && observation.capabilities.length) {
-    raw = await decide(system, boundedEvidence({ ...observation, feedback: {
+  let raw = await decide(system, boundedEvidence(decisionObservation, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+  if (raw.action === 'search' && decisionObservation.searched && decisionObservation.capabilities.length) {
+    raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
       code: 'capabilities_already_discovered',
-      available_slugs: observation.capabilities.slice(0, 48).map(card => card.slug),
+      available_slugs: decisionObservation.capabilities.slice(0, 48).map(card => card.slug),
       instruction: 'Select an existing compatible capability. Search again only if none can satisfy any remaining outcome.',
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
     if (raw.action === 'search') throw new Error('Progressive planner repeated capability discovery');
   }
   if (redundant(raw)) {
-    raw = await decide(system, boundedEvidence({ ...observation, feedback: {
+    raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
       code: 'clarification_already_answered', supplied_fields: raw.fields.slice(0, 12),
       instruction: 'Use current fields and choose the next useful action. These answers are already present.',
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);

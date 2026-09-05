@@ -154,6 +154,7 @@ const fieldTokens = value => String(value || '')
 const equivalentField = (required, actual) => {
   const wanted = fieldTokens(required);
   const found = fieldTokens(actual);
+  if (wanted.join('') === found.join('')) return true;
   if (wanted.some(token => found.includes(token)) || found.some(token => wanted.includes(token))) return true;
   return FIELD_EQUIVALENTS.some(group => wanted.some(token => group.includes(token)) && found.some(token => group.includes(token)));
 };
@@ -186,7 +187,13 @@ export function receiptSatisfiesEvidence(data, requirement = {}) {
   const required = (Array.isArray(requirement?.required_fields) ? requirement.required_fields : [])
     .map(value => asText(value, 80)).filter(Boolean).slice(0, 16);
   const collections = evidenceCollections(data).sort((a, b) => b.length - a.length);
-  const records = collections.find(items => items.length >= minimum) || (minimum === 1 && data && typeof data === 'object' ? [data] : []);
+  // A detail endpoint often returns one root record containing nested arrays
+  // (headers, labels, attachments). For singleton outcomes the root is the
+  // evidence record; selecting the largest nested array validates the wrong
+  // structural level. Multi-record outcomes still require a real collection.
+  const records = minimum === 1 && data && typeof data === 'object' && !Array.isArray(data)
+    ? [data]
+    : (collections.find(items => items.length >= minimum) || []);
   if (records.length < minimum) return { ok: false, code: 'insufficient_record_count', observed_records: records.length, required_records: minimum };
   const inspected = records.slice(0, minimum);
   const missing = required.filter(field => inspected.some(record => !recordFields(record).some(actual => equivalentField(field, actual))));

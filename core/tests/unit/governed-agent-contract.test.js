@@ -154,6 +154,10 @@ test('provider success does not satisfy an unmet generic evidence contract', () 
     ok: true, code: 'evidence_contract_satisfied', observed_records: 5, required_records: 5,
   });
   assert.equal(receiptSatisfiesEvidence({ records: emailReceipt.records.slice(0, 2) }, requirement).code, 'insufficient_record_count');
+  assert.equal(receiptSatisfiesEvidence({
+    sender: 'Provider', subject: 'Alert', messageText: 'Details', messageTimestamp: '2026-09-05T10:00:00Z',
+    payload: { headers: Array.from({ length: 24 }, (_, index) => ({ name: `Header-${index}`, value: 'x' })) },
+  }, { min_records: 1, required_fields: ['sender', 'subject', 'messagetext', 'messagetimestamp'] }).ok, true);
 });
 
 test('five large records survive executor and model projections with Markdown intact', () => {

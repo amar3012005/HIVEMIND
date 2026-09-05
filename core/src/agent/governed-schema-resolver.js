@@ -167,7 +167,7 @@ export function requirementsResolvedByEvidence({ intent = {}, receipts = [], fie
   });
 }
 
-export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], fieldValues = {}, args = {} } = {}) {
+export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], fieldValues = {}, conversationContext = [], args = {} } = {}) {
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
   const groundedFields = { ...(intent.known_facts || {}), ...(fieldValues || {}) };
   for (const field of Object.keys(card.schema?.properties || {})) {
@@ -177,6 +177,16 @@ export function compileGroundedArguments({ card = {}, intent = {}, receipts = []
       return equivalentFactKey(key, normalizedField);
     });
     if (grounded) compiled[field] = grounded[1];
+  }
+  const referencedAssistantContent = [...conversationContext].reverse()
+    .find(turn => turn?.role === 'assistant' && asText(turn?.content, 6000))?.content;
+  const projectedReference = Object.entries(intent.known_facts || {}).some(([key, value]) => (
+    CONTENT_FIELD.test(key) && typeof value === 'string' && value.includes('[content shortened]')
+  ));
+  if (referencedAssistantContent && projectedReference) {
+    for (const field of Object.keys(card.schema?.properties || {})) {
+      if (CONTENT_FIELD.test(field)) compiled[field] = asText(referencedAssistantContent, 6000);
+    }
   }
   const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));
   const role = entities.map(entity => asText(entity?.role, 80)).find(Boolean) || '';

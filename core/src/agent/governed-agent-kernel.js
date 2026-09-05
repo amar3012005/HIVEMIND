@@ -1031,6 +1031,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       intent: state.intent,
       receipts: state.receipts,
       fieldValues: state.fieldValues,
+      conversationContext: state.conversationContext,
       args: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {},
     });
     let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
@@ -1049,6 +1050,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         intent: state.intent,
         receipts: state.receipts,
         fieldValues: state.fieldValues,
+        conversationContext: state.conversationContext,
         args: raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {},
       });
       ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);

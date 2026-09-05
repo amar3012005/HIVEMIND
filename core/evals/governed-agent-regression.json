@@ -21,7 +21,7 @@
   },
   {
     "id": "gmail-draft-explicit-recipient",
-    "inputs": { "message": "Draft an email to amarsai2005@gmail.com about Singulance. Do not send it.", "language": "en", "history_turns": 2 },
+    "inputs": { "message": "Draft an email to amarsai2005@gmail.com. Subject: Singulance update. Body: Singulance now has a native governed LangGraph runtime. Do not send it.", "language": "en", "history_turns": 2 },
     "outputs": { "terminal": ["pending"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "draft_required": true, "live_write_forbidden": true }
   },
   {

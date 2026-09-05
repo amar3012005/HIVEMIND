@@ -183,8 +183,13 @@ Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:strin
       throw new Error('governed_action_purpose_required');
     }
     if (decision.action === 'search') {
-      const query = String(decision.query || '').trim();
-      if (!query || state.searchQueries.map(x => x.toLowerCase()).includes(query.toLowerCase()) || state.searchQueries.length >= 3) {
+      const prior = new Set(state.searchQueries.map(x => x.toLowerCase()));
+      let query = String(decision.query || '').trim();
+      if (!query || prior.has(query.toLowerCase())) {
+        const unresolved = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.description).join('; ');
+        query = `Find a connected capability to ${unresolved || state.intent.use_case} using the authenticated ${(state.intent.apps || []).join(', ') || 'account'}`;
+      }
+      if (!query || prior.has(query.toLowerCase()) || state.searchQueries.length >= 3) {
         return { decision: { action: 'ask', question: 'The connected integration does not expose the reader needed to resolve this automatically. Please provide the missing business information.', fields: ['missing_information'] }, status: 'awaiting_input', cycles: state.cycles + 1 };
       }
       return { decision, searchQuery: query.slice(0, 500), cycles: state.cycles + 1, status: 'discovering_dependency' };

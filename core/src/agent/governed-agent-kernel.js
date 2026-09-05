@@ -48,6 +48,7 @@ import {
   settlePlanNode,
 } from './governed-execution-plan.js';
 import {
+  ambiguousEvidenceBindings,
   compileGroundedArguments,
   dependencyDiscoveryQuery,
   evidenceAmbiguities,
@@ -321,6 +322,11 @@ function capabilityGap(state, missing = []) {
       .find(([field, definition]) => definition?.format === 'email' || /(?:email|address|recipient|destination)/i.test(field));
     if (destinationField) uniqueMissing.push({ field: destinationField[0], schema: destinationField[1] });
   }
+  const businessQuestion = text(state.intent?.business_question, 500);
+  if (businessQuestion && !text(state.fieldValues?.business_context)
+    && !uniqueMissing.some(item => String(item.field) === 'business_context')) {
+    uniqueMissing.push({ field: 'business_context', schema: { type: 'string' } });
+  }
   const fields = uniqueMissing
     .slice(0, 4)
     .map(item => ({
@@ -336,7 +342,7 @@ function capabilityGap(state, missing = []) {
   const entityName = (state.intent?.entities || []).map(entity => text(entity?.name, 120)).find(Boolean);
   const prompt = ambiguities.length
     ? `I found ${ambiguities.length} matches${entityName ? ` for ${entityName}` : ''}. Choose the correct destination${fields.some(field => !/(?:email|address|recipient|destination)/i.test(field.name)) ? ' and provide the remaining details' : ''}.`
-    : capabilityGapQuestion(missing);
+    : (businessQuestion || capabilityGapQuestion(missing));
   return {
     kind: 'field_input',
     prompt,
@@ -637,7 +643,7 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,entities:[{name:string,role:string}],business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Extract every explicitly named person, organization, account, project, or record into entities with its semantic role such as recipient, sender, owner, or subject. Names remain evidence to resolve, never provider identifiers. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,entities:[{name:string,role:string}],business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Extract every explicitly named person, organization, account, project, or record into entities with its semantic role such as recipient, sender, owner, or subject. Names remain evidence to resolve, never provider identifiers. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. For a write with missing substantive content or settings, set business_question to one concise user-facing question; never use it for provider identifiers or named-entity lookup. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
       // Intent needs bounded conversational meaning, not raw connector rows.
       // Structured prior receipts remain available to planning/arguments for
       // evidence grounding after the outcome contract exists.
@@ -855,6 +861,17 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       }),
     });
     if (scheduledDecision) {
+      if (scheduledDecision.action === 'draft' && state.intent?.business_question && !text(state.fieldValues?.business_context)) {
+        const request = capabilityGap(state);
+        const executionPlan = markPlanNodeWaitingInput(state.executionPlan, state.activePlanNodeId, 'business_input_required');
+        const patch = await transition(state, 'awaiting_input', {
+          executionPlan,
+          pendingInput: request,
+          decision: { action: 'ask', question: request.prompt, reason: 'business_input_required' },
+        }, { reason_code: 'business_input_required', input_fields: request.fields.map(field => field.id) });
+        await persist(state, patch);
+        return patch;
+      }
       const decision = scheduledDecision;
       const patch = await transition(state, 'dependency_resolved', { decision, planRepair: null }, {
         reason_code: decision.purpose === 'prerequisite' ? 'scheduler_dependency_candidate' : 'scheduler_outcome_candidate',
@@ -922,6 +939,17 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
       return patch;
     }
     const decision = verification.plan;
+    if (decision.action === 'draft' && state.intent?.business_question && !text(state.fieldValues?.business_context)) {
+      const request = capabilityGap(state);
+      const executionPlan = markPlanNodeWaitingInput(state.executionPlan, state.activePlanNodeId, 'business_input_required');
+      const patch = await transition(state, 'awaiting_input', {
+        executionPlan,
+        pendingInput: request,
+        decision: { action: 'ask', question: request.prompt, reason: 'business_input_required' },
+      }, { reason_code: 'business_input_required', input_fields: request.fields.map(field => field.id) });
+      await persist(state, patch);
+      return patch;
+    }
     const selected = (state.capabilities || []).find(card => card.slug === decision.tool_slug);
     if ((decision.action === 'read' || decision.action === 'draft') && selected?.source !== 'core') {
       const connected = (state.connected || []).includes(String(selected?.toolkit || '').toLowerCase());
@@ -1014,8 +1042,11 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const missing = [...missingRequiredFields(card.schema, args), ...missingConditionalSchemaFields(card.schema, args)];
     const invalid = invalidSchemaValues(card.schema, args);
     const ungrounded = ungroundedIdentifiers({ ...state, message }, args);
-    if (!valid || missing.length || invalid.length || ungrounded.length || ungroundedContent.length) {
-      const requirements = [...missing, ...invalid, ...ungroundedContent, ...ungrounded.map(item => ({ field: item.field, schema: card.schema?.properties?.[item.field] || {} }))];
+    const ambiguous = ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args });
+    if (!valid || missing.length || invalid.length || ungrounded.length || ungroundedContent.length || ambiguous.length) {
+      const requirements = [...missing, ...invalid, ...ungroundedContent,
+        ...ungrounded.map(item => ({ field: item.field, schema: card.schema?.properties?.[item.field] || {} })),
+        ...ambiguous.map(item => ({ ...item, schema: card.schema?.properties?.[item.field] || {} }))];
       const relevantReads = eligibleReadCapabilities(state, requirements).filter(item => item.relevance > 0);
       const dependencyKey = unresolvedDependencyKey(requirements);
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
@@ -1115,7 +1146,9 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (!card || card.source !== 'composio' || card.authority !== 'write') throw new Error('governed_write_authority_denied');
     const ajv = new Ajv({ strict: false, allErrors: true });
     const valid = ajv.compile(card.schema || { type: 'object', properties: {} })(state.toolArgs || {});
-    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || invalidSchemaValues(card.schema, state.toolArgs).length || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length) {
+    if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || invalidSchemaValues(card.schema, state.toolArgs).length
+      || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length
+      || ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args: state.toolArgs }).length) {
       throw new Error('governed_draft_schema_or_evidence_denied');
     }
     const toolArgs = {

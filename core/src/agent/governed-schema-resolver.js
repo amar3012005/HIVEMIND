@@ -65,6 +65,18 @@ export function evidenceAmbiguities({ intent = {}, receipts = [] } = {}) {
   return values.map(value => ({ kind: 'address', value, label: value }));
 }
 
+export function ambiguousEvidenceBindings({ intent = {}, receipts = [], fieldValues = {}, args = {} } = {}) {
+  const options = new Set(evidenceAmbiguities({ intent, receipts }).map(item => item.value.toLowerCase()));
+  if (options.size < 2) return [];
+  const supplied = new Set(Object.values(fieldValues || {}).flatMap(value => Array.isArray(value) ? value : [value])
+    .map(value => asText(value).toLowerCase()).filter(Boolean));
+  return Object.entries(args || {}).filter(([field, value]) => {
+    if (!IDENTITY_FIELD.test(field)) return false;
+    const selected = asText(value).toLowerCase();
+    return options.has(selected) && !supplied.has(selected);
+  }).map(([field]) => ({ field, code: 'ambiguous_evidence_requires_selection' }));
+}
+
 function receiptHasField(receipts = [], field) {
   const wanted = String(field || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!wanted) return false;

@@ -14,7 +14,15 @@ test('control-plane gates recurring schedulers behind runtime role checks', () =
   const text = readControlPlane();
   assert.match(text, /if \(prisma && shouldRunRecurringMaintenanceJobs\(\)\) \{/);
   assert.match(text, /if \(prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs\(\)\) \{/);
+  assert.match(text, /const HYPER_CYCLE_START_EMAIL_ENABLED = String\(process\.env\.HYPER_CYCLE_START_EMAIL_ENABLED \|\| 'false'\)/);
+  assert.match(text, /if \(HYPER_CYCLE_START_EMAIL_ENABLED\) \{/);
   assert.match(text, /if \(shouldStartHttpServer\(\)\) \{/);
+});
+
+test('workspace lifecycle notifications exclude generic activity events', () => {
+  const text = readControlPlane();
+  assert.match(text, /type: \{ startsWith: 'lifecycle\.' \}/);
+  assert.match(text, /const lifecycleWhere = \{ orgId: current\.session\.orgId, userId: current\.session\.userId, type: \{ startsWith: 'lifecycle\.' \} \}/);
 });
 
 test('control-plane routes hyper room-turn dispatches through shared helper', () => {

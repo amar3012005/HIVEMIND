@@ -21,7 +21,7 @@ test('accepted email creates one idempotent notification in exact lifecycle cont
     templateId: 'day1_first_move',
     rendered: { subject: 'Day 1 research ready' },
     result: { ok: true, provider: 'cloudflare', deliveryStatus: 'queued', messageId: '<receipt-1@example.test>' },
-    notification: { orgId: 'org-1', userId: 'user-1', href: 'https://next.example.test/room/1' },
+    notification: { type: 'lifecycle.email.sent', orgId: 'org-1', userId: 'user-1', href: 'https://next.example.test/room/1' },
   };
   const first = await sink(input);
   const second = await sink(input);
@@ -33,7 +33,7 @@ test('accepted email creates one idempotent notification in exact lifecycle cont
   assert.equal(prisma.writes[0].create.data.href, 'https://next.example.test/room/1');
 });
 
-test('generic email projects to every active platform workspace for its recipient', async () => {
+test('generic email is delivery-only and never enters the lifecycle inbox', async () => {
   const prisma = fakePrisma({ memberships: ['org-1', 'org-2'] });
   const sink = createEmailNotificationSink(prisma);
   const result = await sink({
@@ -42,17 +42,17 @@ test('generic email projects to every active platform workspace for its recipien
     rendered: { subject: 'Platform update' },
     result: { ok: true, provider: 'cloudflare', messageId: '<receipt-2@example.test>' },
   });
-  assert.equal(result.created, 2);
-  assert.equal(prisma.writes.length, 2);
+  assert.deepEqual(result, { created: 0, reason: 'not_lifecycle_notification' });
+  assert.equal(prisma.writes.length, 0);
 });
 
-test('external-only recipient is email-only because no platform inbox exists', async () => {
+test('unscoped lifecycle notification is rejected even for an external recipient', async () => {
   const prisma = fakePrisma();
   const sink = createEmailNotificationSink(prisma);
   const result = await sink({
     to: 'external@example.test', rendered: { subject: 'Invitation' },
     result: { ok: true, provider: 'cloudflare', messageId: '<receipt-3@example.test>' },
   });
-  assert.deepEqual(result, { created: 0, reason: 'recipient_has_no_platform_inbox' });
+  assert.deepEqual(result, { created: 0, reason: 'not_lifecycle_notification' });
   assert.equal(prisma.writes.length, 0);
 });

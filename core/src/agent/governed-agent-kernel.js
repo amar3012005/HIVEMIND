@@ -470,7 +470,7 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
     if (state.resolvedReference) {
-      intent.discovery_query = `${intent.discovery_query}. Use a known provider identifier from the prior authenticated receipt and find a detail capability that accepts it.`.slice(0, 900);
+      intent.discovery_query = 'Fetch the full content and metadata for one referenced record using a known provider identifier from a prior authenticated receipt.';
     }
     if (!intent.outcomes.length || !intent.discovery_query) throw new Error('governed_intent_contract');
     const patch = await transition(state, 'intent_resolved', { intent, locale: intent.locale }, { reason_code: 'intent_resolved' });

@@ -1252,6 +1252,9 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     const outcomes = intent.outcomes;
     if (!Array.isArray(outcomes) || !outcomes.length) throw new Error('Outcome contract is missing');
     emit({ type: 'tool_result', name: 'agent', status: 'planned', summary: 'Requested outcomes identified', kind: intent.kind });
+    if (intent.unresolved_context && !(run.scratch.field_values?.referenced_context || '').trim()) {
+      return ask(intent.context_question, ['referenced_context']);
+    }
     const reads = run.scratch.read_results || [];
     run.scratch.read_results = reads;
     const draftReceipts = run.scratch.draft_receipts || [];

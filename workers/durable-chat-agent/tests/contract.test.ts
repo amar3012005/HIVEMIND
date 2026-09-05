@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { isTerminalMetadata, validateMetadata, validateWorkflowParams, type SessionMetadata } from '../src/contract';
 
 const valid: SessionMetadata = {
+  event_id: '74fb72fc-08da-41cc-8c56-598eae67bfee:3',
+  run_id: 'f8c2fc70-b521-43e1-8e0d-156b74360c80',
   turn_id: '74fb72fc-08da-41cc-8c56-598eae67bfee',
   mode: 'session', sequence: 3, event_type: 'coverage_assessed',
   phase: 'recall_verified', status: 'running', trace_id: 'abc123',
   occurred_at: '2026-08-31T12:00:00.000Z',
+  state: 'tool_executed',
 };
 
 describe('metadata-only Cloudflare session contract', () => {

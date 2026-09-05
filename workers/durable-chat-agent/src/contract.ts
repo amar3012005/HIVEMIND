@@ -2,6 +2,8 @@ export const CHAT_MODES = ['off', 'shadow', 'session', 'workflow', 'full'] as co
 export type ChatMode = typeof CHAT_MODES[number];
 
 export type SessionMetadata = {
+  event_id?: string;
+  run_id?: string | null;
   turn_id: string;
   mode?: ChatMode;
   sequence?: number;
@@ -9,13 +11,14 @@ export type SessionMetadata = {
   phase: string;
   status: string;
   trace_id?: string | null;
+  state?: string | null;
   occurred_at: string;
 };
 
 export type ChatTurnWorkflowParams = { turn_id: string; mode: ChatMode };
 
 const ALLOWED_KEYS = new Set([
-  'turn_id', 'mode', 'sequence', 'event_type', 'phase', 'status', 'trace_id', 'occurred_at',
+  'event_id', 'run_id', 'turn_id', 'mode', 'sequence', 'event_type', 'phase', 'status', 'state', 'trace_id', 'occurred_at',
 ]);
 const FORBIDDEN_KEYS = /(message|content|prompt|answer|response|memory|evidence|citation|source|tool|artifact|email|name)/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,6 +36,9 @@ export function validateMetadata(input: unknown): SessionMetadata {
   if (record.mode != null && !CHAT_MODES.includes(record.mode as ChatMode)) throw new Error('invalid_mode');
   if (record.sequence != null && (!Number.isInteger(record.sequence) || Number(record.sequence) < 0)) throw new Error('invalid_sequence');
   if (record.event_type != null && String(record.event_type).length > 80) throw new Error('invalid_event_type');
+  if (record.event_id != null && String(record.event_id).length > 160) throw new Error('invalid_event_id');
+  if (record.run_id != null && String(record.run_id).length > 80) throw new Error('invalid_run_id');
+  if (record.state != null && String(record.state).length > 40) throw new Error('invalid_state');
   if (record.trace_id != null && String(record.trace_id).length > 64) throw new Error('invalid_trace_id');
   return record as SessionMetadata;
 }

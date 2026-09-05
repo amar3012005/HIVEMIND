@@ -112,7 +112,8 @@ export function invalidSchemaValues(schema = {}, args = {}) {
   for (const [field, value] of Object.entries(args || {})) {
     const definition = properties[field] || {};
     const descriptor = `${field} ${definition.format || ''} ${definition.description || ''}`.toLowerCase();
-    const expectsEmail = definition.format === 'email' || /email address|full user@domain|must be a valid email/.test(descriptor);
+    const identityAddressField = /(?:^|_)(?:email|emails|address|recipient)(?:$|_)/i.test(field);
+    const expectsEmail = definition.format === 'email' || (identityAddressField && /email address|full user@domain|must be a valid email/.test(descriptor));
     if (!expectsEmail) continue;
     const values = Array.isArray(value) ? value : [value];
     if (values.some(item => {

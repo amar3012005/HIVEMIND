@@ -169,6 +169,17 @@ test('partial evidence does not suppress recovery when requested entities remain
   }), false);
 });
 
+test('step entity hints are normalized into the canonical reference set', () => {
+  const raw = plan({
+    references: { resolved_pronouns: [], entities: [], source: null },
+    steps: [{ id: 'recall', capability: 'workspace_read', tool: 'hivemind_recall', query: 'Highfind meeting decisions', entities: ['Highfind'], depends_on: [], result_binding: 'evidence' }],
+  });
+  const validation = validateNativePlanResult(raw);
+  assert.equal(validation.status, 'repairable');
+  assert.deepEqual(validation.plan.references.entities, ['Highfind']);
+  assert.ok(validation.repairs.includes('references.entities.step'));
+});
+
 test('selected-tool recovery cannot cross the read/write authority boundary', () => {
   const raw = plan({
     operation: 'aggregate', aggregate: { parent: null, kind: 'memory' },

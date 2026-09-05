@@ -428,6 +428,20 @@ export function validateNativePlanResult(input) {
     const normalized = normalizePlanShape(input);
     const plan = schema.parse(normalized.input);
     const semanticRepairs = [];
+    // The planner schema intentionally exposes entity hints both on the
+    // canonical reference object and on the executable step. Providers can
+    // populate only the latter while still returning a valid plan. Merge the
+    // two typed fields once so retrieval coverage and bounded self-healing do
+    // not depend on which equivalent field a provider preferred.
+    const mergedEntities = [...new Set([
+      ...plan.references.entities,
+      ...(plan.steps[0]?.entities || []),
+    ].map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 12);
+    if (mergedEntities.length !== plan.references.entities.length
+        || mergedEntities.some((value, index) => value !== plan.references.entities[index])) {
+      plan.references.entities = mergedEntities;
+      semanticRepairs.push('references.entities.step');
+    }
     if (plan.operation === 'save' && !plan.memory?.title && plan.memory?.content) {
       plan.memory.title = deriveMemoryTitle(plan.memory);
       semanticRepairs.push('memory.title');

@@ -4616,7 +4616,7 @@ export async function runReactAgentV2({
       : null;
     if (!_dedicatedLane
         && durableEntityRecoveryEnabled
-        && evidence?.coverage?.evidence_found === false
+        && shouldRecoverIncompleteEntityCoverage(evidence?.coverage)
         && entityAnchor
         && String(plan.query_canonical_en || '').trim().toLocaleLowerCase() !== entityAnchor.trim().toLocaleLowerCase()) {
       const originalCanonicalQuery = plan.query_canonical_en;

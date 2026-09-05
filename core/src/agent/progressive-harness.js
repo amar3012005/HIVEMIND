@@ -1,6 +1,6 @@
 /** Progressive planning: bounded observations, semantic decisions, no tool execution. */
 export const PROGRESSIVE_PROMPT_BUDGETS = Object.freeze({ intent: 10000, action: 18000, synthesis: 24000 });
-export const PROGRESSIVE_HARNESS_MODEL = 'openai/gpt-oss-20b:nitro';
+export const PROGRESSIVE_HARNESS_MODEL = 'deepseek/deepseek-v4-flash-0731:exacto';
 
 export function buildProgressiveConversationContext(history = []) {
   const turns = (Array.isArray(history) ? history : []).filter(turn => ['user', 'assistant'].includes(turn?.role)

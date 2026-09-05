@@ -613,13 +613,20 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
     const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
     const connected = unique(accounts.filter(row => row?.status === 'ACTIVE').map(row => row?.toolkit));
     const coreCapabilities = await loadGovernedCoreCapabilities();
-    const conversationContext = await loadGovernedConversationContext({
+    const persistedConversationContext = await loadGovernedConversationContext({
       prisma,
       orgId: ctx.orgId,
       userId: ctx.userId,
       conversationId: ctx.threadId || ctx.conversationId,
       turns: ctx.historyTurns,
     });
+    const suppliedConversationContext = (Array.isArray(ctx.conversationHistory) ? ctx.conversationHistory : [])
+      .filter(turn => ['user', 'assistant'].includes(turn?.role) && text(turn?.content, 6000))
+      .slice(-Math.max(0, Math.min(12, Number(ctx.historyTurns) || 6)))
+      .map(turn => ({ role: turn.role, content: text(turn.content, 6000) }));
+    const conversationContext = [...persistedConversationContext, ...suppliedConversationContext]
+      .filter((turn, index, rows) => index === rows.findIndex(item => item.role === turn.role && item.content === turn.content))
+      .slice(-12);
     const referenceEvidence = await loadGovernedConversationEvidence({
       prisma, checkpointer, orgId: ctx.orgId, userId: ctx.userId,
       conversationId: ctx.threadId || ctx.conversationId, turns: ctx.historyTurns,

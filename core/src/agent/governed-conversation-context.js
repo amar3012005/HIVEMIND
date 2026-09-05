@@ -105,3 +105,34 @@ export function resolveGovernedConversationReference(message, evidence = []) {
   if (!scored.length || (scored[1] && scored[0].score === scored[1].score)) return null;
   return projectGovernedEvidence({ ...scored[0].source, record: scored[0].record }, 12000);
 }
+
+/** Resolve an LLM-normalized ordinal selector against prior authenticated
+ * receipt order. The selector is language-neutral; no provider or locale
+ * vocabulary is embedded in the harness. */
+export function resolveGovernedConversationReferenceBySelector(selector, evidence = []) {
+  if (!selector || !evidence.length) return null;
+  const position = selector.position === 'last' ? 'last' : Number(selector.position);
+  const receipt = [...evidence].reverse().find(item => item?.data != null);
+  if (!receipt) return null;
+  const collections = [];
+  const visit = (value, depth = 0) => {
+    if (value == null || depth > 5) return;
+    if (Array.isArray(value)) {
+      if (value.some(item => item && typeof item === 'object' && !Array.isArray(item))) collections.push({ depth, value });
+      for (const item of value.slice(0, 50)) visit(item, depth + 1);
+      return;
+    }
+    if (typeof value === 'object') for (const item of Object.values(value).slice(0, 50)) visit(item, depth + 1);
+  };
+  visit(receipt.data);
+  const records = collections.sort((left, right) => left.depth - right.depth || right.value.length - left.value.length)[0]?.value || [];
+  const index = position === 'last' ? records.length - 1 : Math.max(0, Math.floor(position || 1) - 1);
+  const record = records[index];
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+  return projectGovernedEvidence({
+    prior_run_id: receipt.prior_run_id,
+    slug: receipt.slug,
+    completed_at: receipt.completed_at,
+    record,
+  }, 12000);
+}

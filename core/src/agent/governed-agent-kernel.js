@@ -4,7 +4,12 @@ import { Annotation, Command, END, START, StateGraph, interrupt } from '@langcha
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { loadGovernedSkill } from './governed-agent-skills.js';
 import { projectGovernedEvidence } from './governed-evidence-projection.js';
-import { loadGovernedConversationContext, loadGovernedConversationEvidence, resolveGovernedConversationReference } from './governed-conversation-context.js';
+import {
+  loadGovernedConversationContext,
+  loadGovernedConversationEvidence,
+  resolveGovernedConversationReference,
+  resolveGovernedConversationReferenceBySelector,
+} from './governed-conversation-context.js';
 import {
   capabilityCard,
   capabilityGapQuestion,
@@ -179,6 +184,14 @@ function normalizedIntent(value, fallbackLocale = 'en') {
     outcomes,
     known_facts: knownFacts,
     business_question: text(value?.business_question, 500) || null,
+    reference_selector: value?.reference_selector && typeof value.reference_selector === 'object'
+      ? {
+        position: value.reference_selector.position === 'last'
+          ? 'last'
+          : Math.max(1, Math.min(100, Number(value.reference_selector.position) || 1)),
+        record_kind: text(value.reference_selector.record_kind, 80) || null,
+      }
+      : null,
   };
 }
 
@@ -518,18 +531,20 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,business_question?:string}. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
       // Intent needs bounded conversational meaning, not raw connector rows.
       // Structured prior receipts remain available to planning/arguments for
       // evidence grounding after the outcome contract exists.
       input: { message, connected: state.connected, conversation_context: state.conversationContext, resolved_reference: state.resolvedReference },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
-    if (state.resolvedReference) {
+    const resolvedReference = state.resolvedReference
+      || resolveGovernedConversationReferenceBySelector(intent.reference_selector, state.referenceEvidence);
+    if (resolvedReference) {
       intent.discovery_query = 'Fetch the full content and metadata for one referenced record using a known provider identifier from a prior authenticated receipt.';
     }
     if (!intent.outcomes.length || !intent.discovery_query) throw new Error('governed_intent_contract');
-    const patch = await transition(state, 'intent_resolved', { intent, locale: intent.locale }, { reason_code: 'intent_resolved' });
+    const patch = await transition(state, 'intent_resolved', { intent, locale: intent.locale, resolvedReference }, { reason_code: 'intent_resolved' });
     await persist(state, patch);
     return patch;
   });

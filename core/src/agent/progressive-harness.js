@@ -135,6 +135,11 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
   // Discovery and control actions may support several outcomes but never prove
   // completion. Ignore their references; only receipt-producing steps bind one.
   const producesReceipt = ['execute', 'native', 'draft'].includes(raw.action);
+  if (producesReceipt && raw.outcome_ids === undefined) {
+    const expectedKind = raw.action === 'draft' ? 'draft' : raw.action === 'native' ? 'memory' : 'read';
+    const compatible = (observation?.remaining_outcomes || []).filter(outcome => outcome?.kind === expectedKind);
+    if (compatible.length === 1) raw = { ...raw, outcome_ids: [compatible[0].id] };
+  }
   if (producesReceipt && raw.outcome_ids !== undefined && (!Array.isArray(raw.outcome_ids) || raw.outcome_ids.length > 1
     || raw.outcome_ids.some(id => typeof id !== 'string' || !observation?.intent?.outcomes?.some(o => o.id === id)))) {
     throw new Error('Progressive action names an invalid outcome');

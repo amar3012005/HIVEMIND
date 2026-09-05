@@ -963,6 +963,9 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
       ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
     }
+    if (card.authority === 'read' && searchableField && !text(args[searchableField]) && namedEntities.length === 1) {
+      args = { ...args, [searchableField]: namedEntities[0].name };
+    }
     const ajv = new Ajv({ strict: false, allErrors: true });
     const validator = ajv.compile(card.schema || { type: 'object', properties: {} });
     const valid = validator(args);

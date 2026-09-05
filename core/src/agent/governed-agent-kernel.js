@@ -954,7 +954,15 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       const dependencyAttempted = dependencyKey && (state.dependencySearches || []).includes(dependencyKey);
       if (Number(state.discoveryAttempts || 0) < 3 && !dependencyAttempted && shouldResolveDependency(state, requirements, relevantReads)) {
         const fields = [...new Set(requirements.map(item => humanizeField(item.field)))].join(', ');
-        const query = `Find a connected read capability that can resolve evidence for ${fields || 'the missing information'} needed to complete: ${text(state.intent?.discovery_query, 420)}`;
+        const entityRoles = [...new Set((state.intent?.entities || []).map(entity => text(entity?.role, 80)).filter(Boolean))].join(', ');
+        const apps = (state.intent?.apps || []).join(', ');
+        const query = [
+          `Find a read or search capability that resolves ${fields || 'missing business information'}`,
+          entityRoles ? `for a named ${entityRoles}` : 'from authenticated evidence',
+          apps ? `inside the connected ${apps} account` : 'inside the connected account',
+          'using account data, directories, contacts, records, or prior activity before the requested mutation.',
+          'The capability must return the required value; do not return another mutation tool.',
+        ].join(' ');
         const executionPlan = settlePlanNode(state.executionPlan, {
           nodeId: state.activePlanNodeId,
           toolSlug: card.slug,

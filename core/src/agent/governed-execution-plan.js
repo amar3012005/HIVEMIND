@@ -136,13 +136,21 @@ export function schedulePlan(plan) {
   return { action: node.kind === 'draft_write' ? 'draft' : 'read', node, candidate };
 }
 
-export function scheduleExecutionDecision({ plan, capabilities = [], receipts = [], dependencyRequirements = [] } = {}) {
-  if (dependencyRequirements.length) {
-    const failed = new Set(receipts.filter(row => row?.successful === false).map(row => row?.slug));
+export function scheduleExecutionDecision({ plan, capabilities = [], receipts = [], dependencyRequirements = [], dependencyResolved = false } = {}) {
+  if (dependencyRequirements.length && !dependencyResolved) {
+    const attempted = new Set(receipts.map(row => row?.slug).filter(Boolean));
     const candidate = capabilities
-      .filter(card => card?.source !== 'core' && card?.authority === 'read' && !failed.has(card.slug))
-      .map(card => ({ card, relevance: capabilityRelevance(card, { missing: dependencyRequirements }) }))
-      .sort((left, right) => right.relevance - left.relevance || left.card.slug.localeCompare(right.card.slug))
+      .filter(card => card?.source !== 'core' && card?.authority === 'read' && !attempted.has(card.slug))
+      .map(card => {
+        const acceptsSemanticInput = (card.fields || Object.keys(card.schema?.properties || {}))
+          .some(field => /^(?:query|search_query|search_term|term|name)$/i.test(String(field)));
+        return {
+          card,
+          relevance: capabilityRelevance(card, { missing: dependencyRequirements }),
+          inputRank: acceptsSemanticInput ? 0 : 1,
+        };
+      })
+      .sort((left, right) => left.inputRank - right.inputRank || right.relevance - left.relevance || left.card.slug.localeCompare(right.card.slug))
       .find(item => item.relevance > 0);
     if (candidate) return {
       action: 'read', tool_slug: candidate.card.slug, purpose: 'prerequisite', outcome_ids: [],

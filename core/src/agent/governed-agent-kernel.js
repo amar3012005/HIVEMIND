@@ -52,6 +52,7 @@ import {
   dependencyDiscoveryQuery,
   hasNamedBusinessEntity,
   missingConditionalSchemaFields,
+  requirementsResolvedByEvidence,
   resolvableSchemaRequirements,
 } from './governed-schema-resolver.js';
 
@@ -308,8 +309,10 @@ function capabilityGap(state, missing = []) {
   // Field ids remain internal contract keys so a resumed graph can validate
   // them against the selected schema. Labels and prompts are business
   // language; the UI never needs to expose provider field names.
-  const fields = (missing || [])
+  const uniqueMissing = [...new Map((missing || [])
     .filter(item => item?.field && !isProviderIdentifier(item.field))
+    .map(item => [String(item.field), item])).values()];
+  const fields = uniqueMissing
     .slice(0, 4)
     .map(item => ({
       id: String(item.field),
@@ -829,6 +832,11 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       capabilities: state.capabilities,
       receipts: state.receipts,
       dependencyRequirements: state.dependencyRequirements,
+      dependencyResolved: requirementsResolvedByEvidence({
+        intent: state.intent,
+        receipts: state.receipts,
+        requirements: state.dependencyRequirements,
+      }),
     });
     if (scheduledDecision) {
       const decision = scheduledDecision;
@@ -1077,7 +1085,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const steps = [...(state.steps || []), { kind: 'read', slug: card.slug, status: successful ? 'completed' : 'error', summary: row.summary }];
     const patch = await transition(state, successful ? 'tool_executed' : 'tool_failed', {
       receipts, steps, executionPlan, toolArgs: null, decision: null, activePlanNodeId: null,
-      dependencyRequirements: successful ? [] : state.dependencyRequirements,
+      dependencyRequirements: state.dependencyRequirements,
       planRepair: successful && !evidenceSufficient ? 'The provider operation succeeded but did not satisfy the outcome evidence contract. Select a materially different capability that returns the missing record count and fields.' : null,
     }, { reason_code: successful ? (evidenceSufficient ? 'read_receipt' : 'read_evidence_insufficient') : 'read_failure', tool_slug: card.slug });
     await persist(state, patch);

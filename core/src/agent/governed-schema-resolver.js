@@ -54,6 +54,38 @@ function namedEntityAddress({ intent = {}, receipts = [] } = {}) {
   return matches.size === 1 ? [...matches][0] : null;
 }
 
+function receiptHasField(receipts = [], field) {
+  const wanted = String(field || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!wanted) return false;
+  let found = false;
+  const visit = (value, depth = 0) => {
+    if (found || value == null || depth > 10) return;
+    if (Array.isArray(value)) return value.slice(0, 50).forEach(item => visit(item, depth + 1));
+    if (typeof value !== 'object') return;
+    for (const [key, item] of Object.entries(value)) {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if ((normalized === wanted || normalized.endsWith(wanted) || wanted.endsWith(normalized))
+        && (typeof item === 'string' || typeof item === 'number') && asText(item)) {
+        found = true;
+        return;
+      }
+      visit(item, depth + 1);
+    }
+  };
+  for (const receipt of receipts) if (receipt?.successful) visit(receipt.data);
+  return found;
+}
+
+export function requirementsResolvedByEvidence({ intent = {}, receipts = [], requirements = [] } = {}) {
+  if (!requirements.length) return true;
+  const address = namedEntityAddress({ intent, receipts });
+  return requirements.every(item => {
+    const field = String(item?.field || '');
+    if (IDENTITY_FIELD.test(field) && /(?:email|address|recipient|destination)/i.test(field) && address) return true;
+    return receiptHasField(receipts, field);
+  });
+}
+
 export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], args = {} } = {}) {
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
   const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));

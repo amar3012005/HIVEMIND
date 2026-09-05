@@ -100,7 +100,7 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
         max_tokens: stage === 'synthesis' ? 1200 : 1000,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: `${system}\nReturn exactly one JSON object. ${attempt ? 'Repair the contract failure. No prose or markdown.' : ''}` },
+          { role: 'system', content: `${system}\nReturn exactly one JSON object. ${attempt ? `Repair this contract failure: ${lastError?.message || 'invalid object'}. Return the documented field names and types.` : ''}` },
           { role: 'user', content: JSON.stringify(projectedInput) },
         ],
       }),
@@ -116,6 +116,14 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
       if (!raw) throw new Error('governed_model_empty');
       const parsed = JSON.parse(String(raw).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('governed_model_object_required');
+      if (stage === 'intent' && (!Array.isArray(parsed.outcomes) || !parsed.outcomes.length ||
+        parsed.outcomes.some(item => typeof item?.description !== 'string' || !item.description.trim()) ||
+        typeof parsed.discovery_query !== 'string' || !parsed.discovery_query.trim())) {
+        throw new Error('Required: discovery_query as a nonempty string; outcomes as a nonempty array of objects with id, kind, and description strings.');
+      }
+      if (stage === 'synthesis' && (!validSynthesisResponse(parsed.response) || typeof parsed.complete !== 'boolean')) {
+        throw new Error('Required: response as a nonempty Markdown string and complete as a boolean. Do not return an array in response.');
+      }
       return parsed;
     } catch (error) {
       lastError = error;
@@ -907,7 +915,7 @@ Render requested records and fields as a Markdown table when appropriate, preser
         ctx,
         stage: 'synthesis',
         signal: ctx._signal,
-        system: `Repair the final response in ${state.locale}. Return exactly {"response":string}; response must be a non-empty plain string, never an array or object. Render the successful receipt data for the user.`,
+        system: `Repair the final response in ${state.locale}. Return exactly {"response":string,"complete":boolean}; response must be a non-empty Markdown string, never an array or object. Render the successful receipt data for the user.`,
         input: synthesisInput,
       });
       summary = validSynthesisResponse(raw?.response);

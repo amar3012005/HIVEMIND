@@ -246,12 +246,19 @@ export function normalizePlanCandidate(value = {}) {
  * available, authorized, and supported by the current evidence state.
  */
 export function verifyPlanCandidate(state = {}, candidate = {}) {
-  const plan = normalizePlanCandidate(candidate);
+  let plan = normalizePlanCandidate(candidate);
   const unresolved = outcomeIds(state);
   const cards = state.capabilities || [];
   const selected = cards.find(card => card.slug === plan.tool_slug) || null;
   const discoveryAttempts = Number(state.discoveryAttempts || 0);
   const availableReads = eligibleReadCapabilities(state);
+
+  // Dependency resolution is an intent, not necessarily another discovery
+  // request. Once the planner names an already-discovered read capability,
+  // execute it as prerequisite evidence instead of searching for it again.
+  if (plan.action === 'resolve_dependency' && selected?.authority === 'read') {
+    plan = { ...plan, action: 'read', purpose: 'prerequisite', outcome_ids: [] };
+  }
 
   if (!plan.action) return { ok: false, code: 'invalid_action', repair: 'Return one supported action.' };
   if (plan.action === 'done') {

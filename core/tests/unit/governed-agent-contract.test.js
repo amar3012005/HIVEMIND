@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MemorySaver } from '@langchain/langgraph';
+import { projectGovernedEvidence } from '../../src/agent/governed-evidence-projection.js';
 import {
   capabilityAuthority,
   missingRequiredFields,
@@ -123,6 +124,57 @@ test('structured receipt fallback renders records and rejects object coercion', 
   assert.equal(validSynthesisResponse([{ subject: 'First' }]), null);
   assert.equal(validSynthesisResponse('[object Object]'), null);
   assert.equal(validSynthesisResponse('First returned item'), 'First returned item');
+});
+
+test('five large records survive executor and model projections with Markdown intact', () => {
+  const records = Array.from({ length: 5 }, (_, index) => ({
+    body: 'Long newsletter content '.repeat(6000),
+    subject: `Unique subject ${index}`, sender: `sender-${index}@example.com`,
+    time: `2026-09-05T10:0${index}:00Z`,
+  }));
+  const execution = projectGovernedEvidence({ records }, 24000);
+  const modelInput = projectGovernedEvidence({ receipts: [{ successful: true, data: execution }] });
+  assert.equal(modelInput.receipts[0].data.records.length, 5);
+  for (let i = 0; i < 5; i++) {
+    assert.equal(modelInput.receipts[0].data.records[i].subject, records[i].subject);
+    assert.equal(modelInput.receipts[0].data.records[i].sender, records[i].sender);
+    assert.equal(modelInput.receipts[0].data.records[i].time, records[i].time);
+  }
+  const markdown = '| Subject | Sender |\n| --- | --- |\n| Test | Ada |';
+  assert.equal(validSynthesisResponse(markdown), markdown);
+});
+
+test('graph recovers missing detail evidence before returning all five records', async () => {
+  const prisma = fakePrisma();
+  const list = tool('APP_LIST_ITEMS', { type: 'object', properties: {} });
+  const detail = tool('APP_FETCH_ITEMS', { type: 'object', properties: {} });
+  const composio = composioWith([list, detail]);
+  const calls = [];
+  const records = Array.from({ length: 5 }, (_, i) => ({ subject: `Subject ${i}`, sender: `author${i}`, time: `10:0${i}`, body: 'x'.repeat(20000) }));
+  composio.executeToolsParallel = async (_org, tools) => {
+    calls.push(tools[0].slug);
+    return [{ successful: true, data: { records: tools[0].slug === 'APP_LIST_ITEMS' ? records.map((_, i) => ({ id: `${i}` })) : records } }];
+  };
+  const result = await runGovernedAgentRuntime({
+    message: 'Show the latest five records with subject, sender, and time.',
+    ctx: { orgId: 'org', userId: 'user', governedDecision: async ({ stage, input }) => {
+      if (stage === 'intent') return { locale: 'en', apps: ['gmail'], discovery_query: 'retrieve five latest records with subject sender time', outcomes: [{ id: 'read', kind: 'read', description: 'five records and fields' }] };
+      if (stage === 'planning') return { action: 'read', tool_slug: input.receipts.length ? 'APP_FETCH_ITEMS' : 'APP_LIST_ITEMS', purpose: 'outcome', outcome_ids: ['read'] };
+      if (stage === 'arguments') return {};
+      if (stage === 'synthesis') {
+        const data = input.receipts.at(-1).data.records;
+        if (!data[0].subject) return { complete: false, response: 'More detail required.', missing_outcomes: ['read'], recovery_instruction: 'Fetch the details for these IDs.' };
+        assert.equal(data.length, 5);
+        assert.equal(data[4].sender, 'author4');
+        return { complete: true, response: '| Subject | Sender | Time |\n| --- | --- | --- |\n' + data.map(r => `| ${r.subject} | ${r.sender} | ${r.time} |`).join('\n') };
+      }
+      throw new Error(`Unexpected stage ${stage}`);
+    } }, prisma, composio, checkpointer: new MemorySaver(),
+  });
+  assert.deepEqual(calls, ['APP_LIST_ITEMS', 'APP_FETCH_ITEMS']);
+  assert.equal(result.status, 'completed');
+  assert.equal(result.response.split('\n').length, 7);
+  assert.match(result.response, /Subject 4/);
 });
 
 test('verifier rejects a write selected as a read and premature clarification', () => {

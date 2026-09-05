@@ -309,6 +309,6 @@ export function renderStructuredReceiptEvidence(receipts = {}) {
 }
 
 export function validSynthesisResponse(value) {
-  const response = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  const response = typeof value === 'string' ? value.replace(/\r\n/g, '\n').trim() : '';
   return response && !/\[object Object\]/i.test(response) ? response.slice(0, 5000) : null;
 }

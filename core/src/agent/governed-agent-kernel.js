@@ -944,9 +944,10 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     // bind that exact user-provided name instead of asking the model to invent
     // or rediscover it.
     const namedEntities = (state.intent?.entities || []).filter(entity => entity?.name);
-    const queryProperty = card.schema?.properties?.query;
-    if (card.authority === 'read' && queryProperty && !text(args.query) && namedEntities.length === 1) {
-      args = { ...args, query: namedEntities[0].name };
+    const searchableField = (card.fields || Object.keys(card.schema?.properties || {}))
+      .find(field => /^(?:query|search_query|search_term|term|name)$/i.test(String(field)));
+    if (card.authority === 'read' && searchableField && !text(args[searchableField]) && namedEntities.length === 1) {
+      args = { ...args, [searchableField]: namedEntities[0].name };
     }
     let ungroundedContent = ungroundedReferencedContent({ ...state, message }, args, card.schema);
     if (ungroundedContent.length) {

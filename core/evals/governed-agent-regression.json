@@ -7,12 +7,12 @@
   {
     "id": "gmail-latest-de",
     "inputs": { "message": "Worum geht es in meinen neuesten E-Mails?", "language": "de", "history_turns": 6 },
-    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id"], "max_same_read": 1 }
+    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id"], "forbidden_response_terms": ["kann nicht auf", "keinen zugriff"], "max_same_read": 1 }
   },
   {
     "id": "gmail-latest-fr",
     "inputs": { "message": "De quoi parlent mes derniers e-mails ?", "language": "fr", "history_turns": 6 },
-    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id"], "max_same_read": 1 }
+    "outputs": { "terminal": ["completed"], "required_tools": ["COMPOSIO_SEARCH_TOOLS"], "required_tool_prefix": "GMAIL_", "forbidden_prompt_terms": ["message_id", "thread_id"], "forbidden_response_terms": ["ne peux pas accéder", "impossible d'accéder"], "max_same_read": 1 }
   },
   {
     "id": "rama-draft-unresolved",

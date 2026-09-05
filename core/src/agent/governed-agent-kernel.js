@@ -268,7 +268,7 @@ Contract: {action:"read"|"ask",slug?:string,purpose?:"outcome"|"prerequisite",ou
 
   const synthNode = async state => {
     const output = await jsonDecision(`Synthesize the final response in ${state.locale}. Active skill: ${loadGovernedSkill('synthesis').content}
-Contract: {response:string}. Use only successful receipts. State capability gaps honestly.`, { message, intent: state.intent, receipts: state.receipts,
+Contract: {response:string}. Use only successful receipts. A successful receipt is authorized evidence: extract and summarize its returned fields directly. Never claim you cannot access data that a successful receipt contains. State genuine capability gaps honestly.`, { message, intent: state.intent, receipts: state.receipts,
       steps: state.steps }, ctx._signal);
     const summary = String(output.response || 'I could not complete the request from available evidence.').slice(0, 5000);
     const status = state.receipts.some(row => row.draft_id) ? 'pending' : 'completed';

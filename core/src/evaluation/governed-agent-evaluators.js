@@ -34,11 +34,12 @@ export function interactionEvaluator(run, example) {
   const expected = example?.outputs || example || {};
   const response = String(output.response || '');
   const forbidden = (expected.forbidden_prompt_terms || []).find(term => response.toLowerCase().includes(term.toLowerCase()));
+  const contradicted = (expected.forbidden_response_terms || []).find(term => response.toLowerCase().includes(term.toLowerCase()));
   const reads = (output.trajectory || []).filter(step => step.kind === 'read').map(step => step.slug || step.name);
   const counts = reads.reduce((map, name) => map.set(name, (map.get(name) || 0) + 1), new Map());
   const repeated = [...counts.entries()].find(([, count]) => count > (expected.max_same_read ?? Infinity));
-  return { key: 'interaction', score: forbidden || repeated ? 0 : 1,
-    comment: forbidden ? `Technical clarification leaked: ${forbidden}` : repeated ? `Repeated read: ${repeated[0]} x${repeated[1]}` : 'Interaction contract satisfied' };
+  return { key: 'interaction', score: forbidden || contradicted || repeated ? 0 : 1,
+    comment: forbidden ? `Technical clarification leaked: ${forbidden}` : contradicted ? `Successful evidence contradicted: ${contradicted}` : repeated ? `Repeated read: ${repeated[0]} x${repeated[1]}` : 'Interaction contract satisfied' };
 }
 
 export function evaluateGovernedOutput(output, expected) {

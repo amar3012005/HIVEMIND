@@ -7,6 +7,7 @@ import { createNativeMetaPlannerGraph } from '../../src/agent/v2/orchestrator.js
 import { assertNativeMetaAuthority, bindNativeMetaArguments, buildNativeMetaReceipt, getNativeToolSchemas, renderCertifiedNativeResult } from '../../src/agent/v2/native-meta-registry.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
 import { nativeOrchestratorFor } from '../../src/agent/v2/cloudflare-chat-session-client.js';
+import { shouldRecoverIncompleteEntityCoverage } from '../../src/agent/chat-synthesis-policy.js';
 
 function plan(overrides = {}) {
   return {
@@ -139,6 +140,33 @@ test('parentless aggregate with typed memory predicates becomes a filtered count
   assert.equal(validation.plan.aggregate, null);
   assert.equal(validation.plan.steps[0].tool, 'hivemind_count_where');
   assert.ok(validation.repairs.includes('operation.filtered_memory_count'));
+});
+
+test('typed memory count repairs before an aggregate kind placeholder can require a parent', () => {
+  const raw = plan({
+    operation: 'aggregate', aggregate: { parent: null, kind: 'count' },
+    retrieval: { limit: null, tags: [], memory_types: [], scope_filter: null, entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
+    references: { resolved_pronouns: [], entities: [], source: null },
+    response: { language: 'en', type: 'decision', scope: 'exhaustive', depth: 'comprehensive', shape: 'inventory', objective: 'Return the exact number of stored decision memories.' },
+    steps: [{ id: 'count', capability: 'workspace_read', tool: 'hivemind_aggregate_entities', query: 'stored decision memories', entities: [], depends_on: [], result_binding: 'count' }],
+  });
+  const validation = validateNativePlanResult(raw);
+  assert.equal(validation.status, 'repairable');
+  assert.equal(validation.plan.operation, 'count_where');
+  assert.deepEqual(validation.plan.retrieval.memory_types, ['decision']);
+  assert.equal(validation.plan.steps[0].tool, 'hivemind_count_where');
+});
+
+test('partial evidence does not suppress recovery when requested entities remain uncovered', () => {
+  assert.equal(shouldRecoverIncompleteEntityCoverage({
+    evidence_found: true, entities_requested: 1, entities_covered: 0,
+  }), true);
+  assert.equal(shouldRecoverIncompleteEntityCoverage({
+    evidence_found: true, entities_requested: 1, entities_covered: 1,
+  }), false);
+  assert.equal(shouldRecoverIncompleteEntityCoverage({
+    evidence_found: true, entities_requested: 0, entities_covered: 0,
+  }), false);
 });
 
 test('selected-tool recovery cannot cross the read/write authority boundary', () => {

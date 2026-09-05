@@ -34,7 +34,7 @@ import { appendGapClarification, buildSynthesisPromptArtifact, normalizeSearchab
 import { deriveAnswerContextStatus, normalizeAnswerCoverage, validateSupportedCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { chooseSynthesisModel, hasGroundingEvidence, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
+import { chooseSynthesisModel, hasGroundingEvidence, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRecoverIncompleteEntityCoverage, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildRecallIntentContext, fallbackRecallQueries, normalizeRecallOptimization } from './chat-query-optimizer.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -4541,7 +4541,7 @@ export async function runReactAgentV2({
     if (_dedicatedLane
         && durableRecoveryEnabled
         && plan.operation === 'relation_between'
-        && evidence?.coverage?.evidence_found === false
+        && shouldRecoverIncompleteEntityCoverage(evidence?.coverage)
         && Array.isArray(plan.named_entities)
         && plan.named_entities.length >= 2) {
       const saved = {

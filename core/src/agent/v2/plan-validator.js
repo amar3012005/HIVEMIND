@@ -304,6 +304,18 @@ function reconcileSemanticOperation(plan, repairs) {
   // to satisfy the aggregate schema. A single resolved entity was already
   // promoted to aggregate.parent above, while ambiguous partial aggregates
   // remain invalid and receive the bounded planner repair pass.
+  const typedMemoryCategories = new Set(['decision', 'event', 'goal', 'preference', 'lesson']);
+  const selectedOperation = operationForSelectedTool(plan.steps?.[0]?.tool);
+  if (plan.operation === 'aggregate'
+      && !plan.aggregate?.parent
+      && plan.references.entities.length === 0
+      && (!selectedOperation || selectedOperation === 'aggregate')
+      && plan.retrieval
+      && plan.retrieval.memory_types.length === 0
+      && typedMemoryCategories.has(plan.response.type)) {
+    plan.retrieval.memory_types = [plan.response.type];
+    repairs.push('retrieval.memory_types.response_type');
+  }
   const hasTypedMemoryPredicate = Boolean(
     plan.retrieval?.memory_types?.length
     || plan.retrieval?.tags?.length
@@ -317,7 +329,6 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.aggregate = null;
     repairs.push('operation.filtered_memory_count');
   }
-  const typedMemoryCategories = new Set(['decision', 'event', 'goal', 'preference', 'lesson']);
   if (plan.operation === 'count_where'
       && plan.retrieval
       && plan.retrieval.memory_types.length === 0

@@ -22,6 +22,12 @@ export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage,
     && alreadyOptimized !== true;
 }
 
+export function shouldRecoverIncompleteEntityCoverage(coverage = {}) {
+  const requested = Number(coverage?.entities_requested || 0);
+  const covered = Number(coverage?.entities_covered || 0);
+  return coverage?.evidence_found === false || (requested > 0 && covered < requested);
+}
+
 export function isCandidateSynthesisAcceptable(answer) {
   return answer?.grounded === true
     && typeof answer?.response === 'string'

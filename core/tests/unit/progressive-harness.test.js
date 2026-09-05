@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isProgressiveHarnessEnabled, resolveHarnessIntent, chooseProgressiveAction,
   boundedEvidence, buildProgressiveSynthesisMessages, PROGRESSIVE_PROMPT_BUDGETS,
-  buildProgressiveConversationContext, reviewProgressiveArguments } from '../../src/agent/progressive-harness.js';
+  buildProgressiveConversationContext, reviewProgressiveArguments, PROGRESSIVE_HARNESS_MODEL } from '../../src/agent/progressive-harness.js';
 
 test('flag requires literal true and an explicitly allowed tenant', () => {
   const env = { USE_TOOLS_PROGRESSIVE_HARNESS: 'true', USE_TOOLS_PROGRESSIVE_HARNESS_ORGS: 'org-a, org-b' };
@@ -37,7 +37,7 @@ test('default intent and action planners use valid POST requests through the rea
     assert.equal(request.method, 'POST');
     assert.equal(request.headers.get('Content-Type'), 'application/json');
     const body = await request.json();
-    assert.equal(body.model, 'deepseek/deepseek-v4-flash-0731');
+    assert.equal(body.model, PROGRESSIVE_HARNESS_MODEL);
     assert.equal(body.messages[0].role, 'system');
     if (calls === 0) assert.match(body.messages[0].content, /clarification questions are internal steps, not additional outcomes/);
     assert.doesNotThrow(() => JSON.parse(body.messages[1].content));
@@ -110,6 +110,19 @@ test('semantic intent consumes original multilingual input and returns language 
     assert.equal(result.language, language);
     assert.equal(result.kind, 'lookup');
   }
+});
+
+test('intent defaults omitted empty metadata without weakening typed outcomes', async () => {
+  const result = await resolveHarnessIntent({ message: 'List messages from Rama', generateImpl: async () => ({
+    kind: 'lookup', use_case: 'retrieve messages from a specific sender', language: 'en',
+    outcomes: [{ id: 'messages', description: 'Messages from the specified sender', kind: 'read' }],
+  }) });
+  assert.deepEqual(result.apps, []);
+  assert.equal(result.person, '');
+  assert.equal(result.known_fields, '');
+  assert.equal(result.needs_memory, false);
+  assert.equal(result.unresolved_context, false);
+  assert.equal(result.context_question, '');
 });
 
 test('typed outcomes cannot be absent, duplicated or hide a write in a lookup', async () => {

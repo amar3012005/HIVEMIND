@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { executeHivemindCustomTool, nativeNameFromComposioSlug } from '../connectors/composio/hivemind-custom-toolkit.js';
-import { formatComposioSearch, isReadLookupUseCase } from '../connectors/composio/composio-search-formatter.js';
+import { formatComposioSearch, formatKnownFields, isReadLookupUseCase } from '../connectors/composio/composio-search-formatter.js';
 import { isProgressiveHarnessEnabled, resolveHarnessIntent, chooseProgressiveAction, buildProgressiveSynthesisMessages, boundedEvidence, parseProgressiveObject, buildProgressiveConversationContext, reviewProgressiveArguments, PROGRESSIVE_HARNESS_MODEL } from './progressive-harness.js';
 
 const memoryRuns = new Map();
@@ -1345,7 +1345,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
         const discoveryToolkits = (intent.apps.length ? intent.apps : connected).slice(0, 12);
         const discovery = await svc.discoverSessionTools(ctx.orgId, { toolkits: discoveryToolkits,
           useCases: [next.query], allowDisconnected: true,
-          searchPayload: { queries: [{ use_case: next.query, known_fields: intent.known_fields }],
+          searchPayload: { queries: [{ use_case: next.query, known_fields: intent.known_fields || formatKnownFields({ recipient: intent.person }) }],
             session: run.scratch.workflow_session_id ? { id: run.scratch.workflow_session_id } : { generate_id: true },
             search_strategy: 'auto' } });
         if (!discovery.sessionId) throw new Error('Discovery returned no tenant session');

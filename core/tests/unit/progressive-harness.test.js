@@ -112,6 +112,17 @@ test('semantic intent consumes original multilingual input and returns language 
   }
 });
 
+test('authenticated subject scope uses the tenant-bound account without clarification', async () => {
+  const result = await resolveHarnessIntent({ message: 'show my profile', generateImpl: async () => ({
+    kind: 'lookup', apps: ['network'], person: '', subject_scope: 'authenticated_user', use_case: 'retrieve connected account profile',
+    known_fields: '', language: 'en', needs_memory: false, unresolved_context: true,
+    context_question: 'Which account?', outcomes: [{ id: 'profile', description: 'Retrieve own profile', kind: 'read' }],
+  }) });
+  assert.equal(result.subject_scope, 'authenticated_user');
+  assert.equal(result.unresolved_context, false);
+  assert.equal(result.context_question, '');
+});
+
 test('intent defaults omitted empty metadata without weakening typed outcomes', async () => {
   const result = await resolveHarnessIntent({ message: 'List messages from Rama', generateImpl: async () => ({
     kind: 'lookup', use_case: 'retrieve messages from a specific sender', language: 'en',
@@ -212,6 +223,20 @@ test('redundant clarification retry is capped and false or zero are supplied ans
     calls++;
     return { action: 'ask_user', question: 'Enabled and count?', fields: ['enabled', 'count'], reason: 'Need values' };
   } }), /repeated an answered clarification/);
+  assert.equal(calls, 2);
+});
+
+test('named entity factual identifiers trigger one resolver search before clarification', async () => {
+  let calls = 0;
+  const result = await chooseProgressiveAction({ observation: { intent: { person: 'Rama', outcomes: [{ id: 'draft', kind: 'draft' }] },
+    receipts: [], capabilities: [{ slug: 'MESSAGE_CREATE', authority: 'write' }], remaining_outcomes: [{ id: 'draft', kind: 'draft' }] },
+  generateImpl: async input => {
+    calls++;
+    if (calls === 1) return { action: 'ask_user', question: 'What is the address?', fields: ['recipient_email'], reason: 'Missing address' };
+    assert.equal(input.feedback.code, 'named_entity_identifier_unresolved');
+    return { action: 'search', query: 'find a person destination identifier in connected account data', reason: 'Resolve destination from evidence' };
+  } });
+  assert.equal(result.action, 'search');
   assert.equal(calls, 2);
 });
 

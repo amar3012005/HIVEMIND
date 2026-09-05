@@ -177,7 +177,7 @@ const intentResponseFormat = {
   },
 };
 
-async function jsonDecision({ ctx, stage, system, input, signal }) {
+async function jsonDecision({ ctx, stage, system, input, signal, responseFormat = null }) {
   const projectedInput = projectGovernedEvidence(input);
   if (typeof ctx.governedDecision === 'function') return ctx.governedDecision({ stage, system, input: projectedInput });
   let lastError;
@@ -187,7 +187,7 @@ async function jsonDecision({ ctx, stage, system, input, signal }) {
       body: JSON.stringify({
         temperature: 0,
         max_tokens: stage === 'synthesis' ? 1200 : 1000,
-        response_format: stage === 'intent' ? intentResponseFormat : { type: 'json_object' },
+        response_format: responseFormat || (stage === 'intent' ? intentResponseFormat : { type: 'json_object' }),
         messages: [
           { role: 'system', content: `${system}\nReturn exactly one JSON object. ${attempt ? `Repair this contract failure: ${lastError?.message || 'invalid object'}. Return the documented field names and types.` : ''}` },
           { role: 'user', content: JSON.stringify(projectedInput) },
@@ -929,6 +929,10 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
       ctx,
       stage: 'arguments',
       signal: ctx._signal,
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: { name: 'governed_tool_arguments', strict: false, schema: card.schema || { type: 'object', properties: {} } },
+      },
       system: `Generate only arguments for the selected JSON schema. Active skill: ${loadGovernedSkill('arguments').content}
 Return the argument object itself. Never use schema examples, fabricate identifiers, or add fields absent from the schema. When the user refers to prior content, reproduce the substantive prior assistant content and resolve destinations from evidence; never replace it with a placeholder. Include a useful subject when the selected schema supports one.`,
       input: argumentInput,
@@ -938,6 +942,10 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     if (ungroundedContent.length) {
       raw = await jsonDecision({
         ctx, stage: 'arguments', signal: ctx._signal,
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: { name: 'governed_tool_arguments', strict: false, schema: card.schema || { type: 'object', properties: {} } },
+        },
         system: `Repair the selected tool arguments. Return only the schema argument object. The prior attempt did not ground referenced content in the conversation. Copy the substantive referenced assistant content into the appropriate body/content field, preserve its meaning, resolve destinations only from evidence, and include a useful subject when supported.`,
         input: { ...argumentInput, rejected_arguments: args, validation_errors: ungroundedContent.map(item => ({ field: item.field, code: item.code })) },
       });

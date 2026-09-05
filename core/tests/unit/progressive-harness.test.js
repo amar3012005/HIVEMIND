@@ -200,6 +200,34 @@ test('latest answers trigger one bounded corrective plan instead of a repeated c
   assert.equal(calls, 2);
 });
 
+test('invalid fast-model action gets one bounded contract repair', async () => {
+  const observation = { intent: { outcomes: [{ id: 'mail', kind: 'read' }] },
+    remaining_outcomes: [{ id: 'mail', kind: 'read' }], capabilities: [{ slug: 'MAIL_LIST', authority: 'read' }] };
+  let calls = 0;
+  const action = await chooseProgressiveAction({ observation, generateImpl: async input => {
+    if (++calls === 1) return { action: 'execute', outcome_ids: ['unknown'], reason: 'Use a reader' };
+    assert.equal(input.feedback.code, 'action_contract_invalid');
+    assert.equal(input.feedback.issue, 'receipt action missing slug');
+    return { action: 'execute', slug: 'MAIL_LIST', outcome_ids: ['mail'], reason: 'Use the discovered reader' };
+  } });
+  assert.equal(action.action, 'execute');
+  assert.equal(calls, 2);
+});
+
+test('connected account permission clarification is corrected to capability use', async () => {
+  const observation = { connected: ['mail'], intent: { apps: ['mail'], outcomes: [{ id: 'mail', kind: 'read' }] },
+    remaining_outcomes: [{ id: 'mail', kind: 'read' }], capabilities: [{ slug: 'MAIL_LIST', authority: 'read' }] };
+  let calls = 0;
+  const action = await chooseProgressiveAction({ observation, generateImpl: async input => {
+    if (++calls === 1) return { action: 'ask_user', question: 'Grant mailbox permission?', fields: ['mail_permission'], reason: 'Need access' };
+    assert.equal(input.feedback.code, 'connected_account_already_authorized');
+    assert.deepEqual(input.feedback.connected, ['mail']);
+    return { action: 'execute', slug: 'MAIL_LIST', outcome_ids: ['mail'], reason: 'Use the connected mailbox' };
+  } });
+  assert.equal(action.action, 'execute');
+  assert.equal(calls, 2);
+});
+
 test('planner may refine discovery but gets one bounded correction for an identical query', async () => {
   const observation = { searched: true, capabilities: [{ slug: 'WORKSPACE_READ_RECORDS' }],
     steps: [{ slug: 'COMPOSIO_SEARCH_TOOLS', args: { query: 'read records' } }],

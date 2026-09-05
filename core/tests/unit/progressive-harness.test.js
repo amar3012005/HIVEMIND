@@ -12,6 +12,45 @@ test('flag requires literal true and an explicitly allowed tenant', () => {
   assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_ORGS: '*' }, { orgId: 'org-a' }), false);
 });
 
+test('default intent and action planners use valid POST requests through the real provider adapter', async () => {
+  const previousFetch = globalThis.fetch;
+  const keys = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED', 'DURABLE_NEXT_ACTION_MODEL'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  process.env.OPENROUTER_API_KEY = 'local-test-placeholder';
+  process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+  process.env.DURABLE_NEXT_ACTION_MODEL = 'google/gemini-2.5-flash-lite';
+  const replies = [
+    { kind: 'lookup', apps: [], person: '', use_case: 'recall project context', known_fields: '', language: 'de', needs_memory: true,
+      outcomes: [{ id: 'context', description: 'Recall project context', kind: 'memory' }] },
+    { action: 'native', slug: 'HIVEMIND_RECALL', reason: 'Retrieve context', outcome_ids: ['context'] },
+  ];
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    // Native Request construction reproduces the real GET-with-body failure,
+    // while the provider adapter itself and planner request remain unmocked.
+    const request = new Request(url, init);
+    assert.equal(request.method, 'POST');
+    assert.equal(request.headers.get('Content-Type'), 'application/json');
+    const body = await request.json();
+    assert.equal(body.model, 'google/gemini-2.5-flash-lite');
+    assert.equal(body.messages[0].role, 'system');
+    assert.doesNotThrow(() => JSON.parse(body.messages[1].content));
+    return Response.json({ choices: [{ message: { content: JSON.stringify(replies[calls++]) } }] });
+  };
+  try {
+    const intent = await resolveHarnessIntent({ message: 'Was wissen wir über das Projekt?' });
+    const action = await chooseProgressiveAction({ observation: { intent, capabilities: [], receipts: [] } });
+    assert.equal(action.action, 'native');
+    assert.deepEqual(action.outcome_ids, ['context']);
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    }
+  }
+});
+
 test('semantic intent consumes original multilingual input and returns language contract', async () => {
   for (const [message, language] of [['Finde die letzten Nachrichten', 'de'], ['पिछले संदेश खोजें', 'hi'], ['Find recent messages', 'en']]) {
     const result = await resolveHarnessIntent({ message, generateImpl: async input => {

@@ -46,6 +46,7 @@ async function decide(system, data, generateImpl, useCase, signal) {
   if (typeof generateImpl === 'function') return parseProgressiveObject(await generateImpl(data));
   const { chatCompletionFetch, DEFAULT_CHAT_PLANNER_MODEL } = await import('../llm/chat-provider.js');
   const response = await chatCompletionFetch(process.env.DURABLE_NEXT_ACTION_MODEL || DEFAULT_CHAT_PLANNER_MODEL, {
+    method: 'POST',
     signal,
     body: JSON.stringify({ temperature: 0, max_tokens: 1200, response_format: { type: 'json_object' }, messages: [
       { role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) },

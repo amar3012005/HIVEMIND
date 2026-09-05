@@ -76,6 +76,66 @@ const actions = (...items) => async () => {
 };
 const search = { action: 'search', query: 'retrieve workspace pages', reason: 'Discover relevant capability' };
 
+test('default progressive model transport POSTs JSON for intent, action, arguments, synthesis and pause localization', () => enabled(async () => {
+  const originalFetch = globalThis.fetch;
+  const envNames = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED', 'DURABLE_NEXT_ACTION_MODEL', 'HIVEMIND_BRIEFING_MODEL'];
+  const originalEnv = Object.fromEntries(envNames.map(key => [key, process.env[key]]));
+  const requests = [];
+  const replies = [];
+  process.env.OPENROUTER_API_KEY = 'fixture-not-a-real-key';
+  process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+  process.env.DURABLE_NEXT_ACTION_MODEL = 'google/gemini-2.5-flash-lite';
+  process.env.HIVEMIND_BRIEFING_MODEL = 'google/gemini-2.5-flash-lite';
+  globalThis.fetch = async (_url, options = {}) => {
+    // Stub only the HTTP boundary: use the actual non-injected model callers
+    // and shared chatCompletionFetch transport. Never make a network request.
+    const body = JSON.parse(options.body);
+    requests.push({ method: options.method, body });
+    assert.ok(replies.length, 'Unexpected model request');
+    const reply = replies.shift();
+    return new Response(JSON.stringify({ choices: [{ message: { content: typeof reply === 'string' ? reply : JSON.stringify(reply) } }] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const defaultModels = f => {
+    for (const key of ['resolveHarnessIntent', 'chooseNextAction', 'generateProgressiveToolInputs', 'synthesizeDurableAnswer', 'localizeProgressiveStatus']) delete f.ctx[key];
+    return f;
+  };
+  const intent = kind => ({ kind, apps: ['notion'], person: '', use_case: 'retrieve workspace page', known_fields: '', language: 'de', needs_memory: false,
+    outcomes: [{ id: 'page', description: kind === 'lookup' ? 'Read page' : 'Prepare page', kind: kind === 'lookup' ? 'read' : 'draft' }] });
+  try {
+    const read = defaultModels(fixture({ slugs: ['NOTION_GET_PAGE'] }));
+    replies.push(intent('lookup'), search, { action: 'execute', slug: 'NOTION_GET_PAGE', reason: 'Read requested page', outcome_ids: ['page'] }, {},
+      { action: 'done', reason: 'Requested page read' }, 'Die Seite wurde gefunden.');
+    const completed = await runDurableComposioAgent({ message: 'Lies die Seite', ...read });
+    assert.equal(completed.status, 'completed', completed.summary);
+    assert.equal(completed.summary, 'Die Seite wurde gefunden.');
+    assert.equal(read.executed.length, 1);
+    assert.equal(replies.length, 0);
+
+    const compose = defaultModels(fixture({ kind: 'compose', slugs: ['NOTION_CREATE_PAGE'], required: ['title'] }));
+    replies.push(intent('compose'), search, { action: 'draft', slug: 'NOTION_CREATE_PAGE', reason: 'Prepare page', outcome_ids: ['page'] }, {},
+      'Bitte geben Sie title an.');
+    const paused = await runDurableComposioAgent({ message: 'Erstelle eine Seite', ...compose });
+    assert.equal(paused.status, 'needs_input', paused.summary);
+    assert.equal(paused.summary, 'Bitte geben Sie title an.');
+    assert.equal(compose.writes.length, 0);
+    assert.equal(replies.length, 0);
+    assert.equal(requests.length, 11);
+    // Check afterward too: localization deliberately catches errors, so an
+    // assertion only inside fetch could be swallowed by the fallback.
+    for (const request of requests) {
+      assert.equal(request.method, 'POST', request.body.messages[0].content.slice(0, 100));
+      assert.ok(Array.isArray(request.body.messages) && request.body.messages.length >= 2);
+      assert.equal(typeof request.body.model, 'string');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const key of envNames) {
+      if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key];
+    }
+  }
+}));
+
 test('progressive multi-read persists receipts and preserves native evidence in synthesis', () => enabled(async () => {
   const f = fixture();
   f.ctx._dispatchTool = async () => ({ summary: 'Internal project context' });

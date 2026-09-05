@@ -271,6 +271,20 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.aggregate = null;
     repairs.push('operation.uncertified_aggregate');
   }
+  // A registry aggregate requires a named parent and entity kind. When neither
+  // exists, the plan describes a tenant-scoped filtered memory count instead.
+  // Reconcile that typed shape to count_where; never fabricate a parent merely
+  // to satisfy the aggregate schema. A single resolved entity was already
+  // promoted to aggregate.parent above, while ambiguous partial aggregates
+  // remain invalid and receive the bounded planner repair pass.
+  if (plan.operation === 'aggregate'
+      && !plan.aggregate?.parent
+      && !plan.aggregate?.kind
+      && plan.references.entities.length === 0) {
+    plan.operation = 'count_where';
+    plan.aggregate = null;
+    repairs.push('operation.filtered_memory_count');
+  }
   const webUnsafe = !['recall', 'event_range'].includes(plan.operation)
     || Boolean(plan.references.source)
     || !plan.external_fallback.query

@@ -102,6 +102,15 @@ export function bindNativeMetaArguments(plan, schema) {
   const parameters = schema?.function?.parameters || {};
   const properties = parameters.properties || {};
   const pool = semanticArgumentPool(plan);
+  // `contains` is a literal row/content predicate, not a place to copy the
+  // whole natural-language count request. For memory scans, only resolved
+  // entity anchors are safe substring filters. Table queries retain their
+  // canonical query because the selected table schema defines that contract.
+  if (schema?.function?.name === 'hivemind_count_where') {
+    pool.contains = Array.isArray(plan.named_entities) && plan.named_entities.length
+      ? plan.named_entities.join(' ')
+      : null;
+  }
   const args = {};
   for (const name of Object.keys(properties)) {
     const value = pool[name];

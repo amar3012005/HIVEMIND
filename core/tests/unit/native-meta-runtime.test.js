@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNativePlanTool } from '../../src/agent/v2/planner-schema.js';
 import { compileNativePlan } from '../../src/agent/v2/plan-compiler.js';
-import { validateNativePlan } from '../../src/agent/v2/plan-validator.js';
+import { validateNativePlan, validateNativePlanResult } from '../../src/agent/v2/plan-validator.js';
 import { createNativeMetaPlannerGraph } from '../../src/agent/v2/orchestrator.js';
 import { assertNativeMetaAuthority, bindNativeMetaArguments, buildNativeMetaReceipt, getNativeToolSchemas } from '../../src/agent/v2/native-meta-registry.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
@@ -68,6 +68,24 @@ test('selected canonical schema binds only precise structured arguments', () => 
   assert.deepEqual(bindNativeMetaArguments(compiled, schema), {
     args: { memory_type: 'decision', limit: 5 }, unresolved: [],
   });
+});
+
+test('parentless exact memory count self-repairs to count_where without an invented substring', () => {
+  const raw = plan({
+    operation: 'aggregate', aggregate: null,
+    retrieval: { limit: null, tags: [], memory_types: ['decision'], scope_filter: null, entity_filter_mode: 'off', relationship_types: [], relationship_direction: 'any' },
+    references: { resolved_pronouns: [], entities: [], source: null },
+    response: { language: 'en', type: 'decision', scope: 'exhaustive', depth: 'comprehensive', shape: 'inventory', objective: 'Return the exact complete count of decision memories.' },
+    steps: [{ id: 'count', capability: 'workspace_read', tool: 'hivemind_aggregate_entities', query: 'decision memories', entities: [], depends_on: [], result_binding: 'count' }],
+  });
+  const validation = validateNativePlanResult(raw);
+  assert.equal(validation.status, 'repairable');
+  assert.equal(validation.plan.operation, 'count_where');
+  assert.equal(validation.plan.steps[0].tool, 'hivemind_count_where');
+  assert.ok(validation.repairs.includes('operation.filtered_memory_count'));
+  const executable = intentDecisionToPlan(compileNativePlan(validation.plan, 'How many decision memories do I have?'), 'How many decision memories do I have?');
+  const binding = bindNativeMetaArguments(executable, getNativeToolSchemas(['hivemind_count_where'])[0]);
+  assert.deepEqual(binding, { args: { memory_type: 'decision' }, unresolved: [] });
 });
 
 test('LangGraph meta lane validates, discovers schema, and compiles one governed decision', async () => {

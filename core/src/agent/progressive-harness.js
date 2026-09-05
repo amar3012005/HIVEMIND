@@ -174,12 +174,16 @@ function actionContractIssue(raw, observation) {
 }
 
 export async function chooseProgressiveAction({ observation, generateImpl, signal } = {}) {
+  const resolvingDependency = Array.isArray(observation?.argument_feedback?.missing_fields)
+    && observation.argument_feedback.missing_fields.length > 0;
   const stage = observation?.pending_connection ? 'hitl' : 'dependency';
-  const system = `${ACTION_SYSTEM}\nActive skill: ${loadGovernedSkill(stage).content}\nSearch/connect/ask_user/done may support several outcomes but produce no completion receipt; omit outcome_ids for those actions. Observation fields are the latest explicit user answers and supersede omissions in the original request. Never ask again for a supplied field. Author requested content from available conversation context and evidence; missing content is not automatically a user question. Resolve unknown factual identifiers through relevant available reads before asking. Ask only for information or decisions that remain unavailable.`;
+  const system = `${ACTION_SYSTEM}\nActive skill: ${loadGovernedSkill(stage).content}\nSearch/connect/ask_user/done may support several outcomes but produce no completion receipt; omit outcome_ids for those actions. Observation fields are the latest explicit user answers and supersede omissions in the original request. Never ask again for a supplied field. Author requested content from available conversation context and evidence; missing content is not automatically a user question. Resolve unknown factual identifiers through relevant available reads before asking. Ask only for information or decisions that remain unavailable.${resolvingDependency ? '\nThis turn is dependency resolution. Only read capabilities are exposed. Execute the best compatible reader with outcome_ids:[] before returning to the requested write.' : ''}`;
   // Action selection needs the complete catalog, not every nested provider
   // schema. Full schema is supplied later only for the selected capability.
-  const decisionObservation = { ...observation,
-    capabilities: (Array.isArray(observation?.capabilities) ? observation.capabilities : []).map(card => ({
+  const availableCapabilities = (Array.isArray(observation?.capabilities) ? observation.capabilities : [])
+    .filter(card => !resolvingDependency || card.authority === 'read');
+  const decisionObservation = { ...observation, ...(resolvingDependency ? { phase: 'dependency_resolution' } : {}),
+    capabilities: availableCapabilities.map(card => ({
       slug: card.slug, toolkit: card.toolkit, authority: card.authority,
       description: clip(card.description, 500),
       required_fields: Array.isArray(card.schema?.required) ? card.schema.required.slice(0, 24) : [],

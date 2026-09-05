@@ -1,5 +1,6 @@
 /** Progressive planning: bounded observations, semantic decisions, no tool execution. */
 export const PROGRESSIVE_PROMPT_BUDGETS = Object.freeze({ intent: 10000, action: 18000, synthesis: 24000 });
+export const PROGRESSIVE_HARNESS_MODEL = 'openai/gpt-oss-20b:nitro';
 
 export function buildProgressiveConversationContext(history = []) {
   const turns = (Array.isArray(history) ? history : []).filter(turn => ['user', 'assistant'].includes(turn?.role)
@@ -64,8 +65,8 @@ export function parseProgressiveObject(raw) {
 async function decide(system, data, generateImpl, useCase, signal) {
   if (signal?.aborted) throw new Error('Execution was cancelled before planning');
   if (typeof generateImpl === 'function') return parseProgressiveObject(await generateImpl(data));
-  const { chatCompletionFetch, DEFAULT_HQ_DISPATCH_MODEL } = await import('../llm/chat-provider.js');
-  const response = await chatCompletionFetch(process.env.PROGRESSIVE_HARNESS_MODEL || DEFAULT_HQ_DISPATCH_MODEL, {
+  const { chatCompletionFetch } = await import('../llm/chat-provider.js');
+  const response = await chatCompletionFetch(PROGRESSIVE_HARNESS_MODEL, {
     method: 'POST',
     signal,
     body: JSON.stringify({ temperature: 0, max_tokens: 1800, reasoning_effort: 'none', response_format: { type: 'json_object' }, messages: [

@@ -357,6 +357,55 @@ export function summarizeToolData(data, limit = 1800) {
   }
 }
 
+function cellText(value) {
+  return String(value || '')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .replace(/\|/g, '/')
+    .trim();
+}
+
+export function rowsFromToolData(data) {
+  if (!data || typeof data !== 'object') return [];
+  const list = data.items || data.playlists || data.videos || data.threads
+    || data.messages || data.elements || data.repositories || data.repos || [];
+  if (!Array.isArray(list) || !list.length) return [];
+  return list.slice(0, 12).map((item) => {
+    if (item == null || typeof item !== 'object') return { title: String(item), extra: '' };
+    const nested = item.snippet && typeof item.snippet === 'object' ? item.snippet : {};
+    const title = item.full_name || item.name || item.title || item.subject
+      || (typeof item.snippet === 'string' ? item.snippet : '')
+      || nested.title || item.facetName || '';
+    const extra = nested.channelTitle || item.channelTitle || item.owner?.login
+      || item.description || nested.description || '';
+    if (!title || /adTargetingFacet|urn:li:ad/i.test(String(title))) return null;
+    return { title: cellText(title).slice(0, 80), extra: cellText(extra).slice(0, 80) };
+  }).filter(Boolean);
+}
+
+export function markdownTableFromRows(rows = [], headers = ['Title', 'Details']) {
+  const list = (rows || []).filter((row) => row && row.title);
+  if (!list.length) return '';
+  const head = `| ${headers[0]} | ${headers[1]} |`;
+  const sep = '| --- | --- |';
+  const body = list.map((row) => `| ${row.title} | ${row.extra || ''} |`);
+  return [head, sep, ...body].join('\n');
+}
+
+export function formatActionSummary(steps = [], reads = []) {
+  const slugs = [
+    ...(steps || []).map((step) => step.slug || step.tool).filter(Boolean),
+    ...(reads || []).filter((row) => row.successful).map((row) => row.slug),
+  ];
+  const apps = uniqueToolkitsFromSlugs(slugs).map(displayAppName);
+  if (!apps.length) return 'Looked this up.';
+  return `Looked up ${apps.join(' and ')}.`;
+}
+
 export function humanRecallText(data) {
   if (!data || data.error) return '';
   const memories = data.memories || data.data?.memories || [];
@@ -461,8 +510,8 @@ export async function polishBriefing({ message, body, person, polishImpl } = {})
 }
 
 export function argumentsForReadSlug(slug, { person = '' } = {}) {
-  if (/FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT|LIST_MESSAGES/i.test(slug) && person) {
-    return { query: person, max_results: 5 };
+  if (/FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT|LIST_MESSAGES|LIST_THREADS|LIST_EMAILS/i.test(slug) && person) {
+    return { query: person, max_results: 8 };
   }
   return {};
 }
@@ -661,14 +710,23 @@ export function clarifyAppsRequest(toolkits = []) {
   };
 }
 
+function isAppWord(word) {
+  const key = String(word || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!key || PERSON_STOP.has(key)) return true;
+  if (TOOLKIT_ALIASES[key]) return true;
+  return Object.values(TOOLKIT_ALIASES).some((aliases) => aliases.some((alias) => String(alias).replace(/[^a-z0-9]/g, '') === key));
+}
+
 export function namedPersonQuery(text) {
   const raw = String(text || '');
   const emails = emailsFromProviderData(raw);
   if (emails.length) return '';
+  const fromNamed = raw.match(/\bfrom\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
+  if (fromNamed?.[1] && !isAppWord(fromNamed[1])) return fromNamed[1];
   const toNamed = raw.match(/\bto\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
-  if (toNamed?.[1] && !PERSON_STOP.has(toNamed[1].toLowerCase())) return toNamed[1];
+  if (toNamed?.[1] && !isAppWord(toNamed[1])) return toNamed[1];
   const sendNamed = raw.match(/\bsend\s+([A-Za-z][A-Za-z0-9._-]{1,40})\b/i);
-  if (sendNamed?.[1] && !PERSON_STOP.has(sendNamed[1].toLowerCase())) return sendNamed[1];
+  if (sendNamed?.[1] && !isAppWord(sendNamed[1])) return sendNamed[1];
   return '';
 }
 
@@ -1103,8 +1161,9 @@ export async function runDurableComposioAgent({
   const impliedWrites = writeToolkitsIn(message, [...namedApps, ...connected]);
   namedApps = [...new Set([...namedApps, ...impliedWrites])];
   if (run.scratch.chosen_toolkit) namedApps = [run.scratch.chosen_toolkit];
-  let candidates = namedApps.length ? namedApps : connected.slice();
-  if (!candidates.length && !connected.length) {
+  const memoryOnly = !namedApps.length && isReadOnlyRequest(message);
+  let candidates = namedApps.length ? namedApps : (memoryOnly ? [] : connected.slice());
+  if (!memoryOnly && !candidates.length && !connected.length) {
     run.status = 'waiting_user';
     await saveAgentRun({ prisma: db, run });
     return pause(run, {
@@ -1124,7 +1183,7 @@ export async function runDurableComposioAgent({
     return pause(run, clarifyAppsRequest(namedApps), `Do you mean ${namedApps.map(displayAppName).join(' or ')}?`);
   }
 
-  const sessionToolkits = sessionToolkitsFor(connected, candidates);
+  const sessionToolkits = memoryOnly ? [] : sessionToolkitsFor(connected, candidates);
   const person = namedPersonQuery(message);
   const readOnly = isReadOnlyRequest(message);
   const leaseOwner = run.scratch.lease?.owner || randomUUID();
@@ -1455,6 +1514,28 @@ export async function runDurableComposioAgent({
   const alreadyTerminal = (slug) => (run.steps || []).some((step) => (step.slug === slug || step.tool === slug)
     && ['completed', 'draft_created', 'skipped', 'error'].includes(step.status));
 
+  if (memoryOnly) {
+    await runOneNative('HIVEMIND_RECALL');
+    const summary = await synthesizeDurableAnswer({
+      message,
+      reads: readResults,
+      recallText,
+      steps: run.steps,
+      generateImpl: ctx.synthesizeDurableAnswer,
+    });
+    run.status = 'done';
+    run.scratch.lease = null;
+    await saveAgentRun({ prisma: db, run });
+    return {
+      status: 'completed',
+      run,
+      summary,
+      steps: run.steps,
+      draftIds: [],
+      pendingActions: [],
+    };
+  }
+
   for (let index = 0; index < MAX_DURABLE_LOOP_STEPS; index += 1) {
     run.scratch.loop_steps = index;
     run.scratch.step_index = index;
@@ -1545,6 +1626,7 @@ export async function runDurableComposioAgent({
     message,
     reads: readResults,
     recallText,
+    steps: run.steps,
     writeSlug: null,
     generateImpl: ctx.synthesizeDurableAnswer,
   });
@@ -1566,6 +1648,7 @@ export async function synthesizeDurableAnswer({
   message,
   reads = [],
   recallText = '',
+  steps = [],
   writeSlug = null,
   draftTo = null,
   generateImpl,
@@ -1574,13 +1657,21 @@ export async function synthesizeDurableAnswer({
   const fail = (reads || []).filter((row) => !row.successful);
   const appOk = ok.filter((row) => !isNativeHivemindSlug(row.slug));
   const evidenceRows = appOk.length ? appOk : ok;
+  const tableRows = evidenceRows.flatMap((row) => rowsFromToolData(row.data));
+  const table = markdownTableFromRows(tableRows);
+  const action = formatActionSummary(steps, evidenceRows);
   const evidence = [
     ...(appOk.length ? [] : [recallText]),
     ...evidenceRows.map((row) => summarizeToolData(row.data, 500)).filter((text) => text && !isNoiseText(text) && !/^\s*\{/.test(text)),
   ].filter(Boolean).join('\n\n').slice(0, 4000);
   const failures = fail.map((row) => `${row.slug}: ${row.error || 'failed'}`).slice(0, 8).join('; ');
+  const fallback = [
+    action,
+    '',
+    table || evidence,
+  ].filter((line, index, all) => line || index === 0 || all[index - 1]).join('\n').trim();
   if (typeof generateImpl === 'function') {
-    const text = await generateImpl({ message, evidence, failures, writeSlug, draftTo });
+    const text = await generateImpl({ message, evidence, table, action, failures, writeSlug, draftTo });
     if (text) return String(text).slice(0, 4000);
   }
   try {
@@ -1588,28 +1679,34 @@ export async function synthesizeDurableAnswer({
     const response = await chatCompletionFetch(process.env.HIVEMIND_BRIEFING_MODEL || 'gemini-2.5-flash-lite', {
       body: JSON.stringify({
         temperature: 0.2,
-        max_tokens: 500,
+        max_tokens: 700,
         messages: [
           {
             role: 'system',
-            content: 'Answer the user from tool evidence. Say what you retrieved and what failed. Do not invent posts or emails. Do not say Completed durable agent steps. Plain text.',
+            content: 'Write the final chat answer. First line: one short sentence of what you did (example: Looked up your YouTube lists.). Then answer the user. If the evidence is a list, use a GitHub markdown table (| Title | Details |). Never dump raw ids, URNs, or JSON. Never invent rows. Do not mention tool slugs.',
           },
           {
             role: 'user',
-            content: `Request: ${String(message || '').slice(0, 500)}\nEvidence:\n${evidence || '(none)'}\nFailures: ${failures || '(none)'}`,
+            content: [
+              `Request: ${String(message || '').slice(0, 500)}`,
+              `Actions: ${action}`,
+              table ? `Table:\n${table}` : '',
+              `Evidence:\n${evidence || '(none)'}`,
+              `Failures: ${failures || '(none)'}`,
+            ].filter(Boolean).join('\n'),
           },
         ],
       }),
     }, { useCase: 'durable_synth' });
     const payload = await response.json();
     const text = payload?.choices?.[0]?.message?.content;
-    if (typeof text === 'string' && text.trim().length > 20 && !/Completed durable agent steps/i.test(text)) {
+    if (typeof text === 'string' && text.trim().length > 12 && !/Completed durable agent steps/i.test(text)) {
       return text.trim().slice(0, 4000);
     }
   } catch { /* template below */ }
   if (writeSlug && draftTo) return `Draft ready for ${draftTo}. Nothing has been sent.`;
-  if (evidence) return evidence.slice(0, 1500);
-  if (failures) return `I looked at the connected app tools but did not get the record you asked for (${failures}).`;
+  if (fallback && fallback !== action) return fallback.slice(0, 2500);
+  if (failures) return `${action} I could not get the record you asked for.`;
   return 'I could not complete that request from the tools that ran.';
 }
 

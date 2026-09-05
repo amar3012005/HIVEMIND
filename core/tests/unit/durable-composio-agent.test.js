@@ -25,6 +25,10 @@ import {
   pickRecipientEmail,
   shouldStartFreshRun,
   summarizeToolData,
+  synthesizeDurableAnswer,
+  formatActionSummary,
+  markdownTableFromRows,
+  rowsFromToolData,
   resetDurableAgentMemory,
   RETRY_CONNECT_VALUE,
   runDurableComposioAgent,
@@ -90,6 +94,94 @@ test('a profile lookup stops after the one info read and does not dump memory', 
   assert.deepEqual(executed, ['LINKEDIN_GET_MY_INFO']);
   assert.match(result.summary, /Amar Sai/);
   assert.equal(result.summary.includes('company dump'), false);
+});
+
+test('know-about questions use HIVEMIND recall, not LinkedIn', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const composio = {
+    async listConnectedAccounts() {
+      return [{ toolkit: 'linkedin', status: 'ACTIVE' }, { toolkit: 'gmail', status: 'ACTIVE' }];
+    },
+    async getToolRouterSession() { throw new Error('must not open a composio session'); },
+    async discoverSessionTools() { throw new Error('must not search composio'); },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      return tools.map(() => ({ successful: true, data: {} }));
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'what do u know about Amar Sai?',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-know-amar',
+      synthesizeDurableAnswer: async ({ evidence, action }) => `${action || ''}\n${evidence || ''}`,
+      _tracedDispatch: async () => ({
+        memories: [{ title: 'Amar Sai', content: 'Founder of Singulance, based in Hannover.' }],
+      }),
+    },
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(executed, []);
+  assert.match(result.summary, /Founder of Singulance/);
+  assert.equal((result.steps || []).some((step) => /LINKEDIN/i.test(step.slug || step.tool || '')), false);
+});
+
+test('emails from a named person pass the person into list/fetch', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const queries = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_rama_mail' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_rama_mail',
+        primaryToolSlugs: ['GMAIL_LIST_THREADS', 'GMAIL_REPLY_TO_THREAD'],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [{ _composio: { slug: 'GMAIL_LIST_THREADS' } }],
+      };
+    },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools.map((tool) => tool.slug));
+      queries.push(tools[0]?.arguments || {});
+      return [{
+        successful: true,
+        data: { threads: [{ id: 't1', snippet: 'Hi Amar, I miss you. Take care, Rama' }] },
+      }];
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'give me list of all emails from rama',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-rama-mail',
+      synthesizeDurableAnswer: async ({ table, action }) => `${action}\n\n${table}`,
+    },
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(executed.includes('GMAIL_REPLY_TO_THREAD'), false);
+  assert.equal(executed.includes('GMAIL_LIST_THREADS'), true);
+  assert.equal(queries[0].query, 'rama');
+  assert.match(result.summary, /Looked up Gmail/);
+  assert.match(result.summary, /I miss you/);
+  assert.match(result.summary, /\| Title \|/);
+});
+
+test('synth fallback is an action line plus a markdown table', async () => {
+  const text = await synthesizeDurableAnswer({
+    message: 'what are my favourite yt playlists',
+    steps: [{ slug: 'YOUTUBE_LIST_USER_PLAYLISTS', status: 'completed' }],
+    reads: [{
+      slug: 'YOUTUBE_LIST_USER_PLAYLISTS',
+      successful: true,
+      data: { items: [{ snippet: { title: 'HIVEMIND-DEMO', channelTitle: 'Amar Sai' } }] },
+    }],
+  });
+  assert.match(text, /Looked up Youtube/i);
+  assert.match(text, /\| Title \|/);
+  assert.match(text, /HIVEMIND-DEMO/);
+  assert.equal(/VVVIZlZJQ0w/i.test(text), false);
 });
 
 test('latest emails is a read: no reply, no label mutate, no hivemind dump', async () => {
@@ -268,6 +360,7 @@ test('search slugs pick fetch reads and send writes, never label or delete', () 
   assert.equal(namedPersonQuery('send important information about repo to rama via gmail'), 'rama');
   assert.equal(namedPersonQuery('send a mail to rama about it'), 'rama');
   assert.equal(namedPersonQuery('send Rama about my linkedin profile'), 'Rama');
+  assert.equal(namedPersonQuery('give me list of all emails from rama'), 'rama');
   assert.equal(pickRecipientEmail(['amarsai2005@gmail.com', 'ramasantoshi1206@gmail.com'], 'rama'), 'ramasantoshi1206@gmail.com');
   assert.deepEqual(
     appsMatchingRequest('go through HIVEMIND git repo and send to rama via gmail', ['gmail', 'github', 'slack']),

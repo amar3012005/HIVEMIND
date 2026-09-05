@@ -950,6 +950,9 @@ async function storeFirecrawlWebsiteVisual({ screenshot, orgId }) {
 // summary email. HARD-GUARDED: flag default-OFF + per-org daily token cap —
 // autonomous spend without a cap is Polsia's admitted, margin-killing mistake.
 const HYPER_CYCLE_ENABLED = String(process.env.HYPER_CYCLE_ENABLED || 'false').toLowerCase() === 'true';
+// Starting a room is an internal scheduler action. Generic start emails are
+// disabled by default; typed lifecycle workflows own customer delivery.
+const HYPER_CYCLE_START_EMAIL_ENABLED = String(process.env.HYPER_CYCLE_START_EMAIL_ENABLED || 'false').toLowerCase() === 'true';
 const HYPER_CYCLE_HOUR_UTC = parseInt(process.env.HYPER_CYCLE_HOUR_UTC || '5', 10); // 05 UTC ≈ 07:00 DE
 const HYPER_DAILY_TOKEN_CAP = parseInt(process.env.HYPER_DAILY_TOKEN_CAP || '200000', 10);
 if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
@@ -1049,29 +1052,32 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
         task.status = 'active'; task.room_id = roomId;
         await persist();
         console.log(`[hyper-cycle] org ${hq.org_id}: kicked "${task.title}" (spent today ${spent} tok)`);
-        // Morning summary email to the owner (best-effort).
-        try {
-          const owner = await prisma.user.findUnique({ where: { id: hq.user_id }, select: { email: true, displayName: true } });
-          if (owner?.email && !owner.email.endsWith('@local.hivemind.dev')) {
-            const doneCount = (state.tasks || []).filter((x) => x.status === 'done').length;
-            const todoCount = (state.tasks || []).filter((x) => x.status === 'todo').length;
-            const { sendSystemEmail } = await import('./email/email-service.js');
-            sendSystemEmail({
-              templateId: 'announcement',
-              to: owner.email,
-              vars: {
-                name: (owner.displayName || owner.email).split(' ')[0],
-                subject: `${state.company}: your AI team started "${task.title}"`,
-                heading: 'Your AI team is on it',
-                preheader: `Overnight cycle for ${state.company}`,
-                body: `While you were away, your HyperAgents team picked up the next task for ${state.company}:\n\n"${task.title}" — ${task.detail || ''}\n\nProgress: ${doneCount} done · ${todoCount} still queued.\nOpen the room to review the deliverable and steer the next step.`,
-                cta: 'Open your workspace',
-                appUrl: 'https://singulancelabs.com/hivemind/app/employees',
-                year: String(new Date().getFullYear()),
-              },
-            }).catch((e) => console.warn('[hyper-cycle] summary email failed:', e.message));
-          }
-        } catch { /* email best-effort */ }
+        // The scheduler always dispatches the work. This legacy generic email
+        // is strictly opt-in so it cannot masquerade as a lifecycle delivery.
+        if (HYPER_CYCLE_START_EMAIL_ENABLED) {
+          try {
+            const owner = await prisma.user.findUnique({ where: { id: hq.user_id }, select: { email: true, displayName: true } });
+            if (owner?.email && !owner.email.endsWith('@local.hivemind.dev')) {
+              const doneCount = (state.tasks || []).filter((x) => x.status === 'done').length;
+              const todoCount = (state.tasks || []).filter((x) => x.status === 'todo').length;
+              const { sendSystemEmail } = await import('./email/email-service.js');
+              sendSystemEmail({
+                templateId: 'announcement',
+                to: owner.email,
+                vars: {
+                  name: (owner.displayName || owner.email).split(' ')[0],
+                  subject: `${state.company}: your AI team started "${task.title}"`,
+                  heading: 'Your AI team is on it',
+                  preheader: `Overnight cycle for ${state.company}`,
+                  body: `While you were away, your HyperAgents team picked up the next task for ${state.company}:\n\n"${task.title}" — ${task.detail || ''}\n\nProgress: ${doneCount} done · ${todoCount} still queued.\nOpen the room to review the deliverable and steer the next step.`,
+                  cta: 'Open your workspace',
+                  appUrl: 'https://singulancelabs.com/hivemind/app/employees',
+                  year: String(new Date().getFullYear()),
+                },
+              }).catch((e) => console.warn('[hyper-cycle] summary email failed:', e.message));
+            }
+          } catch { /* email best-effort */ }
+        }
       } catch (e) {
         console.warn('[hyper-cycle] org tick failed:', e.message);
       }
@@ -1081,7 +1087,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
     if (new Date().getUTCHours() !== HYPER_CYCLE_HOUR_UTC) return;
     runNightlyCycle().catch((e) => console.warn('[hyper-cycle] run failed:', e.message));
   }, 55 * 60 * 1000);
-  console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day)`);
+  console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day, start-email=${HYPER_CYCLE_START_EMAIL_ENABLED ? 'enabled' : 'disabled'})`);
 }
 
 let hqScheduler = null;
@@ -7041,10 +7047,14 @@ const server = http.createServer(async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
     const unreadOnly = url.searchParams.get('unread') === 'true';
     try {
-      const where = { orgId: current.session.orgId, userId: current.session.userId, ...(unreadOnly ? { readAt: null } : {}) };
+      // This endpoint powers the "Your workspace lifecycle" panel. It is not
+      // a general activity feed: only deliberately typed lifecycle events may
+      // enter it, regardless of how an email or other generic activity started.
+      const lifecycleWhere = { orgId: current.session.orgId, userId: current.session.userId, type: { startsWith: 'lifecycle.' } };
+      const where = { ...lifecycleWhere, ...(unreadOnly ? { readAt: null } : {}) };
       const [items, unread] = await Promise.all([
         prisma.workspaceNotification.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit }),
-        prisma.workspaceNotification.count({ where: { orgId: current.session.orgId, userId: current.session.userId, readAt: null } }),
+        prisma.workspaceNotification.count({ where: { ...lifecycleWhere, readAt: null } }),
       ]);
       return jsonResponse(res, { items, unread });
     } catch {

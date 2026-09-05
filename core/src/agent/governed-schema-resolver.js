@@ -33,9 +33,9 @@ export function dependencyDiscoveryQuery({ requirements = [], intent = {} } = {}
   ].join(' ');
 }
 
-function namedEntityAddress({ intent = {}, receipts = [] } = {}) {
+function namedEntityAddresses({ intent = {}, receipts = [] } = {}) {
   const names = (intent.entities || []).map(entity => asText(entity?.name, 160).toLowerCase()).filter(Boolean);
-  if (names.length !== 1) return null;
+  if (names.length !== 1) return [];
   const matches = new Set();
   const addressPattern = /[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+/g;
   const visit = (value, depth = 0) => {
@@ -51,7 +51,18 @@ function namedEntityAddress({ intent = {}, receipts = [] } = {}) {
     for (const item of Object.values(value)) visit(item, depth + 1);
   };
   for (const receipt of receipts) if (receipt?.successful) visit(receipt.data);
-  return matches.size === 1 ? [...matches][0] : null;
+  return [...matches];
+}
+
+function namedEntityAddress(input = {}) {
+  const matches = namedEntityAddresses(input);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function evidenceAmbiguities({ intent = {}, receipts = [] } = {}) {
+  const values = namedEntityAddresses({ intent, receipts });
+  if (values.length < 2) return [];
+  return values.map(value => ({ kind: 'address', value, label: value }));
 }
 
 function receiptHasField(receipts = [], field) {

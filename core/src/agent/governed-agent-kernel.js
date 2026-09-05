@@ -50,6 +50,7 @@ import {
 import {
   compileGroundedArguments,
   dependencyDiscoveryQuery,
+  evidenceAmbiguities,
   hasNamedBusinessEntity,
   missingConditionalSchemaFields,
   requirementsResolvedByEvidence,
@@ -312,6 +313,14 @@ function capabilityGap(state, missing = []) {
   const uniqueMissing = [...new Map((missing || [])
     .filter(item => item?.field && !isProviderIdentifier(item.field))
     .map(item => [String(item.field), item])).values()];
+  const ambiguities = evidenceAmbiguities({ intent: state.intent, receipts: state.receipts });
+  if (ambiguities.length && !uniqueMissing.some(item => /(?:email|address|recipient|destination)/i.test(String(item.field)))) {
+    const destinationField = (state.capabilities || [])
+      .filter(card => card?.authority === 'write')
+      .flatMap(card => Object.entries(card.schema?.properties || {}))
+      .find(([field, definition]) => definition?.format === 'email' || /(?:email|address|recipient|destination)/i.test(field));
+    if (destinationField) uniqueMissing.push({ field: destinationField[0], schema: destinationField[1] });
+  }
   const fields = uniqueMissing
     .slice(0, 4)
     .map(item => ({
@@ -320,10 +329,17 @@ function capabilityGap(state, missing = []) {
       label: humanizeField(item.field),
       type: item?.schema?.format === 'email' || /(?:email|address)/i.test(String(item.field)) ? 'email' : 'text',
       required: true,
+      ...(ambiguities.length && /(?:email|address|recipient|destination)/i.test(String(item.field))
+        ? { options: ambiguities.map(option => ({ id: option.value, label: option.label, value: option.value })) }
+        : {}),
     }));
+  const entityName = (state.intent?.entities || []).map(entity => text(entity?.name, 120)).find(Boolean);
+  const prompt = ambiguities.length
+    ? `I found ${ambiguities.length} matches${entityName ? ` for ${entityName}` : ''}. Choose the correct destination${fields.some(field => !/(?:email|address|recipient|destination)/i.test(field.name)) ? ' and provide the remaining details' : ''}.`
+    : capabilityGapQuestion(missing);
   return {
     kind: 'field_input',
-    prompt: capabilityGapQuestion(missing),
+    prompt,
     fields: fields.length ? fields : [{ id: 'business_context', name: 'business_context', label: 'More context', type: 'text', required: true }],
     reason: 'capability_gap',
   };

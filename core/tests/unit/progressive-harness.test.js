@@ -58,6 +58,33 @@ test('default intent and action planners use valid POST requests through the rea
   }
 });
 
+test('default planner retries one malformed non-empty provider choice', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENROUTER_API_KEY;
+  const previousGateway = process.env.CLOUDFLARE_AI_GATEWAY_ENABLED;
+  process.env.OPENROUTER_API_KEY = 'local-test-placeholder';
+  process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls++;
+    if (calls === 1) return Response.json({ choices: [{ message: { content: 'not-json' } }] });
+    assert.match(body.messages[0].content, /Retry: return one non-empty valid JSON object only/);
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ kind: 'lookup', apps: [], person: '',
+      use_case: 'recall context', known_fields: '', language: 'en', needs_memory: true,
+      outcomes: [{ id: 'context', description: 'Recall context', kind: 'memory' }] }) } }] });
+  };
+  try {
+    const intent = await resolveHarnessIntent({ message: 'Recall context' });
+    assert.equal(intent.outcomes[0].id, 'context');
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previousKey;
+    if (previousGateway === undefined) delete process.env.CLOUDFLARE_AI_GATEWAY_ENABLED; else process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = previousGateway;
+  }
+});
+
 test('conversation context keeps bounded recent user and assistant turns in order', () => {
   const history = [{ role: 'system', content: 'never include' }, ...Array.from({ length: 9 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `turn-${index} ` + '"'.repeat(1600) })),
     { role: 'tool', content: 'never include tool' }, { role: 'assistant', content: [{ text: 'not a string' }] }];

@@ -58,6 +58,7 @@ function namedEntityAddresses({ intent = {}, receipts = [] } = {}) {
   if (names.length !== 1) return [];
   const matches = new Set();
   const addressPattern = /[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+/g;
+  for (const address of names[0].match(addressPattern) || []) matches.add(address.replace(/[),.;]+$/, ''));
   const visit = (value, depth = 0) => {
     if (!value || depth > 10) return;
     if (Array.isArray(value)) return value.slice(0, 50).forEach(item => visit(item, depth + 1));
@@ -144,7 +145,14 @@ export function compileGroundedArguments({ card = {}, intent = {}, receipts = []
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
   const groundedFields = { ...(intent.known_facts || {}), ...(fieldValues || {}) };
   for (const field of Object.keys(card.schema?.properties || {})) {
-    if (asText(groundedFields?.[field])) compiled[field] = groundedFields[field];
+    const normalizedField = field.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const grounded = Object.entries(groundedFields).find(([key, value]) => {
+      if (!asText(value)) return false;
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return normalizedKey === normalizedField || (Math.min(normalizedKey.length, normalizedField.length) >= 4
+        && (normalizedKey.endsWith(normalizedField) || normalizedField.endsWith(normalizedKey)));
+    });
+    if (grounded) compiled[field] = grounded[1];
   }
   const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));
   const role = entities.map(entity => asText(entity?.role, 80)).find(Boolean) || '';

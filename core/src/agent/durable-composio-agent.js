@@ -666,6 +666,7 @@ function finishTool(emit, run, name, { kind, status, summary, extra = {}, args }
     operation: name,
     status,
     summary,
+    ...(args ? { args } : {}),
     ...extra,
   });
   emit({
@@ -1367,7 +1368,8 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
           const prior = cards.findIndex(c => c.slug === slug);
           if (prior >= 0) cards[prior] = card; else if (cards.length < 48) cards.push(card);
         }
-        finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'completed', summary: `${cards.length} capabilities discovered`, extra: { executor: 'composio' } });
+        finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'completed', summary: `${cards.length} capabilities discovered`,
+          args: { query: next.query }, extra: { executor: 'composio' } });
         continue;
       }
       if (next.action === 'native') {

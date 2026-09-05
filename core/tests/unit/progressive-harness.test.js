@@ -200,13 +200,14 @@ test('latest answers trigger one bounded corrective plan instead of a repeated c
   assert.equal(calls, 2);
 });
 
-test('planner gets one bounded correction instead of repeating capability discovery', async () => {
+test('planner may refine discovery but gets one bounded correction for an identical query', async () => {
   const observation = { searched: true, capabilities: [{ slug: 'WORKSPACE_READ_RECORDS' }],
+    steps: [{ slug: 'COMPOSIO_SEARCH_TOOLS', args: { query: 'read records' } }],
     intent: { outcomes: [{ id: 'records', kind: 'read' }] }, remaining_outcomes: [{ id: 'records', kind: 'read' }] };
   let calls = 0;
   const action = await chooseProgressiveAction({ observation, generateImpl: async input => {
     if (++calls === 1) return { action: 'search', query: 'read records', reason: 'Find a tool' };
-    assert.equal(input.feedback.code, 'capabilities_already_discovered');
+    assert.equal(input.feedback.code, 'capability_search_already_attempted');
     assert.deepEqual(input.feedback.available_slugs, ['WORKSPACE_READ_RECORDS']);
     return { action: 'execute', slug: 'WORKSPACE_READ_RECORDS', reason: 'Use discovered reader', outcome_ids: ['records'] };
   } });
@@ -215,6 +216,10 @@ test('planner gets one bounded correction instead of repeating capability discov
   await assert.rejects(chooseProgressiveAction({ observation, generateImpl: async () => ({
     action: 'search', query: 'read records', reason: 'Search again',
   }) }), /repeated capability discovery/);
+  const refined = await chooseProgressiveAction({ observation, generateImpl: async () => ({
+    action: 'search', query: 'list records to resolve the latest record identifier', reason: 'Find prerequisite capability',
+  }) });
+  assert.equal(refined.action, 'search');
 });
 
 test('redundant clarification retry is capped and false or zero are supplied answers', async () => {
@@ -235,6 +240,22 @@ test('named entity factual identifiers trigger one resolver search before clarif
     if (calls === 1) return { action: 'ask_user', question: 'What is the address?', fields: ['recipient_email'], reason: 'Missing address' };
     assert.equal(input.feedback.code, 'named_entity_identifier_unresolved');
     return { action: 'search', query: 'find a person destination identifier in connected account data', reason: 'Resolve destination from evidence' };
+  } });
+  assert.equal(result.action, 'search');
+  assert.equal(calls, 2);
+});
+
+test('authenticated account identifiers trigger upstream discovery before clarification', async () => {
+  let calls = 0;
+  const result = await chooseProgressiveAction({ observation: { searched: true,
+    intent: { subject_scope: 'authenticated_user', outcomes: [{ id: 'latest', kind: 'read' }] },
+    receipts: [], capabilities: [{ slug: 'NETWORK_GET_ITEM', authority: 'read' }],
+    remaining_outcomes: [{ id: 'latest', kind: 'read' }] },
+  generateImpl: async input => {
+    calls++;
+    if (calls === 1) return { action: 'ask_user', question: 'What is the item URN?', fields: ['item_urn'], reason: 'Missing identifier' };
+    assert.equal(input.feedback.code, 'authenticated_subject_identifier_unresolved');
+    return { action: 'search', query: 'list authenticated account items to identify the most recent item', reason: 'Resolve identifier from account' };
   } });
   assert.equal(result.action, 'search');
   assert.equal(calls, 2);

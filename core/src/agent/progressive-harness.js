@@ -144,12 +144,20 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
     && action.fields.length > 0 && action.fields.every(field => typeof field === 'string' && supplied(field));
   let raw = await decide(system, boundedEvidence(decisionObservation, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
   if (raw.action === 'search' && decisionObservation.searched && decisionObservation.capabilities.length) {
-    raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
-      code: 'capabilities_already_discovered',
-      available_slugs: decisionObservation.capabilities.slice(0, 48).map(card => card.slug),
-      instruction: 'Select an existing compatible capability. Search again only if none can satisfy any remaining outcome.',
-    } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
-    if (raw.action === 'search') throw new Error('Progressive planner repeated capability discovery');
+    const priorQueries = (decisionObservation.steps || []).filter(step => step?.slug === 'COMPOSIO_SEARCH_TOOLS')
+      .map(step => String(step?.args?.query || step?.query || '').trim().toLowerCase()).filter(Boolean);
+    const query = String(raw.query || '').trim().toLowerCase();
+    if (query && priorQueries.includes(query)) {
+      raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
+        code: 'capability_search_already_attempted',
+        attempted_query: raw.query,
+        available_slugs: decisionObservation.capabilities.slice(0, 48).map(card => card.slug),
+        instruction: 'Do not repeat this discovery query. Select a compatible capability or search once with a materially different prerequisite use case.',
+      } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+      if (raw.action === 'search' && String(raw.query || '').trim().toLowerCase() === query) {
+        throw new Error('Progressive planner repeated capability discovery');
+      }
+    }
   }
   if (redundant(raw)) {
     raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
@@ -164,6 +172,15 @@ export async function chooseProgressiveAction({ observation, generateImpl, signa
       code: 'named_entity_identifier_unresolved',
       explicit_entity: observation.intent.person,
       instruction: 'The user supplied a named entity. Search for a relevant read capability that can resolve the factual destination identifier before asking the user. Do not invent the identifier.',
+    } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
+  }
+  if (raw.action === 'ask_user' && observation?.intent?.subject_scope === 'authenticated_user'
+    && Array.isArray(raw.fields) && raw.fields.some(field => /(^|_)(id|urn|identifier)($|_)/i.test(field))
+    && !(observation?.receipts || []).some(receipt => receipt?.successful)) {
+    raw = await decide(system, boundedEvidence({ ...decisionObservation, feedback: {
+      code: 'authenticated_subject_identifier_unresolved',
+      requested_fields: raw.fields.slice(0, 12),
+      instruction: 'The connected account is already authenticated. Search for a relevant list, feed, profile, or discovery read capability that can resolve the required identifier from that account before asking the user. Do not invent the identifier.',
     } }, PROGRESSIVE_PROMPT_BUDGETS.action), generateImpl, 'progressive_agent', signal);
   }
   if (typeof raw.reason !== 'string' || !raw.reason.trim()) raw = { ...raw, reason: `Planner selected ${String(raw.action || 'an action')}` };

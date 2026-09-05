@@ -76,6 +76,64 @@ const actions = (...items) => async () => {
 };
 const search = { action: 'search', query: 'retrieve workspace pages', reason: 'Discover relevant capability' };
 
+test('default argument HTTP envelope preserves optional filters and rejects tool changes or unknown keys', () => enabled(async () => {
+  const originalFetch = globalThis.fetch;
+  const names = ['OPENROUTER_API_KEY', 'CLOUDFLARE_AI_GATEWAY_ENABLED'];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  process.env.OPENROUTER_API_KEY = 'fixture-not-a-real-key';
+  process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+  const slug = 'NOTION_GET_PAGE';
+  const expected = { sort: 'updated', direction: 'desc', per_page: 3 };
+  try {
+    for (const variant of ['wrapped', 'mismatch', 'unknown', 'direct', 'schema-args']) {
+      const f = fixture({ slugs: [slug] });
+      const intent = await f.ctx.resolveHarnessIntent();
+      f.ctx.resolveHarnessIntent = async () => ({ ...intent, needs_memory: false, outcomes: [{ id: 'r1', description: 'Latest three records', kind: 'read' }] });
+      const discover = f.composio.discoverSessionTools;
+      f.composio.discoverSessionTools = async () => {
+        const discovery = await discover();
+        const schema = { type: 'object', additionalProperties: false, properties: variant === 'schema-args'
+          ? { args: { type: 'object' } }
+          : { sort: { type: 'string' }, direction: { type: 'string' }, per_page: { type: 'integer' } } };
+        discovery.toolSchemas[slug].input_schema = schema;
+        return discovery;
+      };
+      delete f.ctx.generateProgressiveToolInputs;
+      f.ctx.chooseNextAction = actions({ action: 'execute', slug, reason: 'Latest three records' });
+      let httpCalls = 0;
+      globalThis.fetch = async (_url, options) => {
+        httpCalls++;
+        assert.equal(options.method, 'POST');
+        assert.deepEqual(JSON.parse(options.body).response_format, { type: 'json_object' });
+        const payload = variant === 'mismatch' ? { slug: 'NOTION_DELETE_PAGE', args: expected }
+          : variant === 'unknown' ? { filter_typo: 'updated' }
+            : variant === 'direct' ? { ...expected, org_id: 'must-be-stripped' }
+              : variant === 'schema-args' ? { args: { filter: 'declared-argument' } }
+                : { slug, args: expected };
+        return new Response(JSON.stringify({ choices: [{ message: { content: '```json\n' + JSON.stringify(payload) + '\n```' } }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } });
+      };
+      const result = await runDurableComposioAgent({ message: 'Read the latest three records', ...f });
+      assert.equal(httpCalls, 1);
+      if (['mismatch', 'unknown'].includes(variant)) {
+        assert.equal(result.status, 'error', result.summary);
+        assert.equal(f.executed.length, 0);
+      } else {
+        assert.equal(result.status, 'completed', result.summary);
+        const args = variant === 'schema-args' ? { args: { filter: 'declared-argument' } } : expected;
+        assert.deepEqual(f.executed[0].arguments, args);
+        assert.deepEqual(result.run.scratch.read_results[0].args, args);
+        assert.equal(result.run.scratch.read_results[0].args.org_id, undefined);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
+    }
+  }
+}));
+
 test('harness discovers external schemas before the first planner decision', () => enabled(async () => {
   const f = fixture({ slugs: ['NOTION_GET_PAGE'] });
   f.ctx.resolveHarnessIntent = async () => ({ kind: 'lookup', apps: ['notion'], person: '', use_case: 'retrieve workspace pages', known_fields: '', language: 'de', needs_memory: false,

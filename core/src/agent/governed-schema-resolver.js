@@ -129,18 +129,22 @@ function receiptHasField(receipts = [], field) {
   return found;
 }
 
-export function requirementsResolvedByEvidence({ intent = {}, receipts = [], requirements = [] } = {}) {
+export function requirementsResolvedByEvidence({ intent = {}, receipts = [], fieldValues = {}, requirements = [] } = {}) {
   if (!requirements.length) return true;
   const address = namedEntityAddress({ intent, receipts });
   return requirements.every(item => {
     const field = String(item?.field || '');
+    if (asText(fieldValues?.[field])) return true;
     if (IDENTITY_FIELD.test(field) && /(?:email|address|recipient|destination)/i.test(field) && address) return true;
     return receiptHasField(receipts, field);
   });
 }
 
-export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], args = {} } = {}) {
+export function compileGroundedArguments({ card = {}, intent = {}, receipts = [], fieldValues = {}, args = {} } = {}) {
   let compiled = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : {};
+  for (const field of Object.keys(card.schema?.properties || {})) {
+    if (asText(fieldValues?.[field])) compiled[field] = fieldValues[field];
+  }
   const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));
   const role = entities.map(entity => asText(entity?.role, 80)).find(Boolean) || '';
   const entityAddresses = new Set(namedEntityAddresses({ intent, receipts }).map(value => value.toLowerCase()));

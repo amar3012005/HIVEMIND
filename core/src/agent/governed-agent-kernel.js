@@ -103,6 +103,22 @@ function isPlaceholder(email) {
   return /@(example\.(com|net|org)|test\.com)$/i.test(email);
 }
 
+function schemaEvidenceNeed(intent, capabilities, receipts) {
+  if (intent?.kind !== 'write' || destinationEmails(receipts).length) return null;
+  const writableFields = new Set(capabilities.filter(card => card.authority === 'write').flatMap(card => card.fields || []));
+  for (const [factKey, rawValue] of Object.entries(intent?.known_facts || {})) {
+    const value = typeof rawValue === 'string' ? rawValue.trim() : '';
+    const stem = String(factKey).toLowerCase().replace(/_?name$/, '');
+    if (!value || !stem || !String(factKey).toLowerCase().includes('name')) continue;
+    const targetField = [...writableFields].find(field => {
+      const normalized = String(field).toLowerCase();
+      return normalized.includes(stem) && /(?:email|id|urn|url)$/.test(normalized);
+    });
+    if (targetField) return { factKey, value, targetField };
+  }
+  return null;
+}
+
 function humanQuestion(value) {
   const question = String(value || '').trim();
   if (/\b(?:provider|message|thread|person|post|account)[ _-]?(?:id|urn)\b|\burn\b/i.test(question)) {
@@ -239,6 +255,22 @@ Choose one next action: {action:"search"|"read"|"draft"|"ask"|"done",slug?:strin
       { message, intent: state.intent, capabilities, receipts: state.receipts.map(row => ({ slug: row.slug, successful: row.successful,
         outcome_ids: row.outcome_ids, summary: receiptSummary(row.data) })), prior_searches: state.searchQueries, fields: state.fieldValues }, ctx._signal);
     const viable = capabilities.filter(card => card.authority === 'read' && !card.attempted_failed);
+    const evidenceNeed = schemaEvidenceNeed(state.intent, capabilities, state.receipts);
+    if (evidenceNeed && !viable.length && state.searchQueries.length < 3) {
+      const attempt = state.searchQueries.length + 1;
+      decision = {
+        action: 'search',
+        query: `Resolve known ${evidenceNeed.factKey} "${evidenceNeed.value}" into verified ${evidenceNeed.targetField} using connected directory, contact, search, or message evidence. Discovery attempt ${attempt}.`,
+        reason: 'A write destination must be supported by connected evidence before drafting',
+      };
+    } else if (evidenceNeed && !viable.length && state.searchQueries.length >= 3) {
+      decision = {
+        action: 'ask',
+        question: `What ${evidenceNeed.targetField.replaceAll('_', ' ')} should I use for ${evidenceNeed.value}?`,
+        fields: [evidenceNeed.targetField],
+        reason: 'Connected evidence searches were exhausted without resolving the named destination',
+      };
+    }
     if (failedSlugs.size && !viable.length && state.searchQueries.length < 3 && ['ask', 'done'].includes(decision.action)) {
       const unresolved = state.intent.outcomes.filter(outcome => !covered.has(outcome.id)).map(outcome => outcome.description).join('; ');
       decision = {

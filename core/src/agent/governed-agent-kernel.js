@@ -55,6 +55,7 @@ import {
   hasNamedBusinessEntity,
   missingBusinessPayloadFields,
   missingConditionalSchemaFields,
+  missingNamedEntityBinding,
   requirementsResolvedByEvidence,
   resolvableSchemaRequirements,
   roleIncompatibleEvidenceBindings,
@@ -1059,6 +1060,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       ...missingRequiredFields(card.schema, args),
       ...missingConditionalSchemaFields(card.schema, args),
       ...missingBusinessPayloadFields(card, args),
+      ...missingNamedEntityBinding(card, state.intent, args),
     ];
     let invalid = invalidSchemaValues(card.schema, args);
     const requiredFields = new Set(card.schema?.required || []);
@@ -1185,6 +1187,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const ajv = new Ajv({ strict: false, allErrors: true });
     const valid = ajv.compile(card.schema || { type: 'object', properties: {} })(state.toolArgs || {});
     if (!valid || missingRequiredFields(card.schema, state.toolArgs).length || missingBusinessPayloadFields(card, state.toolArgs).length
+      || missingNamedEntityBinding(card, state.intent, state.toolArgs).length
       || invalidSchemaValues(card.schema, state.toolArgs).length
       || ungroundedIdentifiers({ ...state, message }, state.toolArgs).length
       || ambiguousEvidenceBindings({ intent: state.intent, receipts: state.receipts, fieldValues: state.fieldValues, args: state.toolArgs }).length

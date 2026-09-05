@@ -210,6 +210,13 @@ export function missingBusinessPayloadFields(card = {}, args = {}) {
   return [{ field: preferred, schema: properties[preferred] || {}, code: 'business_payload_required' }];
 }
 
+export function missingNamedEntityBinding(card = {}, intent = {}, args = {}) {
+  if (card.authority !== 'write' || !(intent.entities || []).some(entity => asText(entity?.name, 160))) return [];
+  const target = schemaFieldForNamedEntity(card, intent);
+  if (!target || asText(args[target[0]])) return [];
+  return [{ field: target[0], schema: target[1] || {}, code: 'named_entity_destination_required' }];
+}
+
 export function missingConditionalSchemaFields(schema = {}, args = {}) {
   const properties = schema?.properties || {};
   const descriptions = Object.values(properties).map(item => asText(item?.description)).join(' ');

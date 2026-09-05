@@ -88,6 +88,15 @@ services:
       ENABLE_TOOLS_HITL_FLAG_URL: ${ENABLE_TOOLS_HITL_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/enable-tools-hitl}
       USE_TOOLS_DURABLE_AGENT: ${USE_TOOLS_DURABLE_AGENT:-false}
       USE_TOOLS_DURABLE_AGENT_FLAG_URL: ${USE_TOOLS_DURABLE_AGENT_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/use-tools-durable-agent}
+      # Structural, metadata-only traces for the governed LangGraph runtime.
+      # The API key remains in the host secret env and is never baked into the
+      # image. Core refuses to start tracing unless both payload guards are on.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://eu.api.smith.langchain.com}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-singulance-governed-agent-canary}
+      LANGSMITH_HIDE_INPUTS: ${LANGSMITH_HIDE_INPUTS:-true}
+      LANGSMITH_HIDE_OUTPUTS: ${LANGSMITH_HIDE_OUTPUTS:-true}
     volumes:
       - hivemind-data:/app/data        # ← .amr files live here; BACK UP
       - hivemind-logs:/app/logs

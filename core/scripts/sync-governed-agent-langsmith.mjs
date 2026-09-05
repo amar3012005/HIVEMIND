@@ -33,7 +33,9 @@ if (await client.hasDataset({ datasetName })) {
 }
 
 const existing = new Set();
-for await (const example of client.listExamples({ datasetId: dataset.id, limit: 500 })) {
+// LangSmith's EU API currently caps this page size at 100. The iterator
+// transparently paginates, so the smaller limit is both portable and complete.
+for await (const example of client.listExamples({ datasetId: dataset.id, limit: 100 })) {
   if (example.metadata?.case_id) existing.add(String(example.metadata.case_id));
 }
 const uploads = cases.filter(item => !existing.has(item.id)).map(item => ({

@@ -1185,8 +1185,8 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     try { await persist(); } catch { /* Lost ownership or storage outage: never overwrite another worker. */ }
     leaseOwner = null;
     emit({ type: 'tool_result', name: 'agent', status: 'error', summary: safeDetail });
-    return result(run.scratch.draft_ids?.length ? 'pending' : 'error', 'I could not finish this request. ' + safeDetail
-      + (run.scratch.draft_ids?.length ? ' Prepared drafts still require approval; remaining outcomes are incomplete.' : ''));
+    return result(run.scratch.draft_ids?.length ? 'pending' : 'error', await localize('I could not finish this request. ' + safeDetail
+      + (run.scratch.draft_ids?.length ? ' Prepared drafts still require approval; remaining outcomes are incomplete.' : '')));
   };
   const ask = async (question, fields) => {
     question = await localize(question);

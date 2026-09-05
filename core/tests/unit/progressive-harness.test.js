@@ -87,6 +87,21 @@ test('intent failures close instead of selecting an app from language keywords',
   }
 });
 
+test('shared discovery and control actions never claim outcome coverage', async () => {
+  const observation = { intent: { outcomes: [{ id: 'profile', kind: 'read' }, { id: 'recent_items', kind: 'read' }] } };
+  for (const action of [
+    { action: 'search', query: 'retrieve account profile and recent items' },
+    { action: 'connect', toolkit: 'workspace' },
+    { action: 'ask_user', question: 'Which workspace?', fields: ['workspace'] },
+    { action: 'done' },
+  ]) {
+    const result = await chooseProgressiveAction({ observation, generateImpl: async () => ({ ...action,
+      reason: 'Shared preparation for requested outcomes', outcome_ids: ['profile', 'recent_items'] }) });
+    assert.equal(result.action, action.action);
+    assert.equal(Object.hasOwn(result, 'outcome_ids'), false);
+  }
+});
+
 test('bounded observations remain parseable and preserve both evidence classes', () => {
   const messages = buildProgressiveSynthesisMessages({ message: 'Compare', language: 'de', recallText: 'native '.repeat(10000),
     reads: Array.from({ length: 100 }, () => ({ source: 'external', payload: 'fact'.repeat(10000) })),

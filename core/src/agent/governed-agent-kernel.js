@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import Ajv from 'ajv';
-import { Annotation, END, START, StateGraph, interrupt } from '@langchain/langgraph';
+import { Annotation, Command, END, START, StateGraph, interrupt } from '@langchain/langgraph';
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { loadGovernedSkill } from './governed-agent-skills.js';
 import { projectGovernedEvidence } from './governed-evidence-projection.js';
@@ -30,6 +30,17 @@ import {
 import { GovernedAgentEventLedger, safeEventEnvelope } from './governed-agent-event-ledger.js';
 import { createGovernedTrace } from './governed-agent-observability.js';
 import { executeGovernedCoreRead, loadGovernedCoreCapabilities } from './governed-agent-core-tools.js';
+import {
+  compileExecutionPlan,
+  markPlanNodeRunning,
+  markPlanNodeWaitingInput,
+  normalizeConnectionState,
+  reopenPlanOutcomes,
+  revisePlanConnection,
+  revisePlanHumanInput,
+  schedulePlan,
+  settlePlanNode,
+} from './governed-execution-plan.js';
 
 const MODEL = process.env.GOVERNED_AGENT_MODEL || 'google/gemini-2.5-flash-lite';
 const HARNESS_VERSION = 'langgraph-native-v1';
@@ -68,6 +79,8 @@ const GraphState = Annotation.Root({
   referenceEvidence: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   resolvedReference: Annotation({ reducer: (_left, right) => right, default: () => null }),
   answerRepairs: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
+  executionPlan: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  activePlanNodeId: Annotation({ reducer: (_left, right) => right, default: () => null }),
 });
 
 const compact = (value, limit = 18000) => {
@@ -379,6 +392,8 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
           pending_provider_event: next.pendingProviderEvent,
           event_sequence: next.eventSequence,
           capability_gap: next.capabilityGap,
+          execution_plan: next.executionPlan,
+          active_plan_node_id: next.activePlanNodeId,
         }, 50000),
       },
     });
@@ -567,12 +582,14 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
     const searchQueries = [...(state.searchQueries || []), query].slice(-4);
     const discovered = {
       recommended_plan: compactRecommendedPlan(discovery.recommendedPlanSteps, discovery.nextStepsGuidance),
-      connection_statuses: discovery.toolkitConnectionStatuses || {},
+      connection_statuses: {
+        ...(discovery.toolkitConnectionStatuses || {}),
+        ...Object.fromEntries((state.connected || []).map(toolkit => [toolkit, 'connected'])),
+      },
       primary_tool_slugs: discovery.primaryToolSlugs || [],
       related_tool_slugs: discovery.relatedToolSlugs || [],
       search_strategy: discovery.searchStrategy || 'tool_search',
     };
-    const connectionToolkit = pendingConnectionToolkit({ ...state, discovery: discovered });
     const steps = [...(state.steps || []), {
       kind: 'search', slug: 'COMPOSIO_SEARCH_TOOLS', status: 'completed',
       summary: `${capabilities.length} capabilities discovered`,
@@ -585,7 +602,7 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       searchQueries,
       searchQuery: null,
       discoveryAttempts: Number(state.discoveryAttempts || 0) + 1,
-      connectionRequest: connectionToolkit ? { toolkit: connectionToolkit } : null,
+      connectionRequest: null,
       steps,
     }, { reason_code: 'composio_discovery' });
     await persistSessionBinding({
@@ -597,6 +614,61 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
     onEvent({ type: 'tool_result', name: 'COMPOSIO_SEARCH_TOOLS', status: 'completed', run_id: state.runId,
       summary: `${capabilities.length} capabilities discovered` });
     return patch;
+  });
+
+  const compilePlanNode = async state => trace('plan_compile', { previous_version: state.executionPlan?.version || 0 }, async () => {
+    const executionPlan = compileExecutionPlan({
+      intent: state.intent,
+      capabilities: state.capabilities,
+      discovery: state.discovery,
+      previous: state.executionPlan,
+      reason: state.executionPlan ? 'capability_or_connection_refresh' : 'initial_compile',
+    });
+    const patch = await transition(state, 'plan_compiled', {
+      executionPlan,
+      activePlanNodeId: null,
+      decision: null,
+    }, { reason_code: executionPlan.revision_reason });
+    await persist(state, patch);
+    return patch;
+  });
+
+  const scheduleNode = async state => trace('node_schedule', { plan_version: state.executionPlan?.version || null }, async () => {
+    const scheduled = schedulePlan(state.executionPlan);
+    if (scheduled.action === 'done') {
+      const patch = await transition(state, 'outcomes_verified', {
+        decision: { action: 'done', reason: 'The persisted execution plan is complete.' },
+        activePlanNodeId: null,
+      }, { reason_code: 'plan_complete' });
+      await persist(state, patch);
+      return new Command({ update: patch, goto: 'synthesize' });
+    }
+    if (scheduled.action === 'blocked') {
+      const patch = await transition(state, 'dependency_resolved', {
+        activePlanNodeId: scheduled.node?.id || null,
+        decision: null,
+        planRepair: 'The persisted plan has no usable candidate. Discover one materially different capability or request only genuine missing business input.',
+      }, { reason_code: 'plan_candidates_exhausted' });
+      await persist(state, patch);
+      return new Command({ update: patch, goto: 'plan' });
+    }
+    if (scheduled.action === 'ask') {
+      const request = state.pendingInput || capabilityGap(state);
+      const patch = await transition(state, 'awaiting_input', {
+        activePlanNodeId: scheduled.node.id,
+        pendingInput: request,
+        decision: { action: 'ask', question: request.prompt, reason: scheduled.node.blocked_reason || 'business_input_required' },
+      }, { reason_code: scheduled.node.blocked_reason || 'business_input_required', input_fields: request.fields.map(field => field.id) });
+      await persist(state, patch);
+      return new Command({ update: patch, goto: 'await_human' });
+    }
+    const patch = await transition(state, 'node_ready', {
+      activePlanNodeId: scheduled.node.id,
+      decision: null,
+      planRepair: null,
+    }, { reason_code: 'plan_node_ready' });
+    await persist(state, patch);
+    return new Command({ update: patch, goto: 'plan' });
   });
 
   const requestConnectionNode = async state => trace('connection_resolution', {}, async () => {
@@ -621,10 +693,19 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
   });
 
   const awaitConnectionNode = async state => trace('hitl_interrupt', { skill: loadGovernedSkill('hitl').id, kind: 'connection' }, async () => {
+    const toolkit = state.connectionRequest?.toolkit;
     const answer = interrupt({ run_id: state.runId, ...state.connectionRequest });
     const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: state.connectionScope });
     const connected = unique(accounts.filter(row => row?.status === 'ACTIVE').map(row => row?.toolkit));
-    const patch = await transition(state, 'resumed', { connected, pendingInput: null, connectionRequest: null, decision: null }, { reason_code: 'connection_resumed' });
+    const actualState = connected.includes(String(toolkit || '').toLowerCase()) ? 'connected' : 'disconnected';
+    const executionPlan = revisePlanConnection(state.executionPlan, toolkit, actualState);
+    const patch = await transition(state, actualState === 'connected' ? 'resumed' : 'awaiting_connection', {
+      connected,
+      executionPlan,
+      pendingInput: null,
+      connectionRequest: null,
+      decision: null,
+    }, { reason_code: actualState === 'connected' ? 'connection_resumed' : 'connection_still_required' });
     await persist(state, patch);
     return { ...patch, event: answer || state.event };
   });
@@ -661,6 +742,8 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
         prior_searches: state.searchQueries,
         human_inputs: state.fieldValues,
         verifier_repair: state.planRepair,
+        execution_plan: state.executionPlan,
+        ready_node_id: state.activePlanNodeId,
       },
     });
     const decision = normalizePlanCandidate(raw);
@@ -692,7 +775,26 @@ Contract: {action:"discover"|"resolve_dependency"|"read"|"draft"|"ask"|"done",to
       return patch;
     }
     const decision = verification.plan;
-    const patchData = { decision, planRepair: null };
+    const selected = (state.capabilities || []).find(card => card.slug === decision.tool_slug);
+    if ((decision.action === 'read' || decision.action === 'draft') && selected?.source !== 'core') {
+      const connected = (state.connected || []).includes(String(selected?.toolkit || '').toLowerCase());
+      const status = normalizeConnectionState(state.discovery?.connection_statuses?.[selected?.toolkit]);
+      if (!connected && status !== 'connected') {
+        const selectedPlan = markPlanNodeRunning(state.executionPlan, state.activePlanNodeId, decision.tool_slug);
+        const executionPlan = revisePlanConnection(selectedPlan, selected?.toolkit, status);
+        const patch = await transition(state, 'connection_required', {
+          executionPlan,
+          connectionRequest: { toolkit: selected?.toolkit },
+          decision: null,
+        }, { reason_code: 'selected_candidate_connection_required', tool_slug: decision.tool_slug });
+        await persist(state, patch);
+        return patch;
+      }
+    }
+    const executionPlan = (decision.action === 'read' || decision.action === 'draft')
+      ? markPlanNodeRunning(state.executionPlan, state.activePlanNodeId, decision.tool_slug)
+      : state.executionPlan;
+    const patchData = { decision, executionPlan, planRepair: null };
     if (decision.action === 'discover') patchData.searchQuery = decision.query;
     const patch = await transition(state, decision.action === 'ask' ? 'awaiting_input' : 'dependency_resolved', patchData,
       { reason_code: 'policy_admitted', tool_slug: decision.tool_slug });
@@ -749,8 +851,16 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       if (Number(state.discoveryAttempts || 0) < 3 && !dependencyAttempted && shouldResolveDependency(state, requirements, relevantReads)) {
         const fields = [...new Set(requirements.map(item => humanizeField(item.field)))].join(', ');
         const query = `Find a connected read capability that can resolve evidence for ${fields || 'the missing information'} needed to complete: ${text(state.intent?.discovery_query, 420)}`;
+        const executionPlan = settlePlanNode(state.executionPlan, {
+          nodeId: state.activePlanNodeId,
+          toolSlug: card.slug,
+          successful: false,
+          evidenceSufficient: false,
+          failureCode: 'schema_requirements_unresolved',
+        });
         const patch = await transition(state, 'dependency_resolved', {
           decision: { action: 'discover', query, reason: 'schema_requirements_unresolved' },
+          executionPlan,
           toolArgs: null,
           planRepair: 'The selected schema lacks evidence-backed required arguments. Discover an upstream read capability.',
           dependencySearches: dependencyKey ? [...(state.dependencySearches || []), dependencyKey].slice(-8) : state.dependencySearches,
@@ -760,7 +870,9 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         return patch;
       }
       const request = capabilityGap(state, requirements);
+      const executionPlan = markPlanNodeWaitingInput(state.executionPlan, state.activePlanNodeId, 'schema_requirements_unresolved');
       const patch = await transition(state, 'awaiting_input', {
+        executionPlan,
         pendingInput: request,
         capabilityGap: Number(state.discoveryAttempts || 0) >= 3,
         decision: { action: 'ask', question: request.prompt, reason: 'schema_requirements_unresolved' },
@@ -802,10 +914,23 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       evidence_sufficient: evidenceSufficient,
       evidence_checks: evidenceChecks,
     };
+    const receiptRef = createHash('sha256').update(`${state.runId}:${card.slug}:${JSON.stringify(row.data)}`).digest('hex').slice(0, 32);
+    // A prerequisite receipt enriches the ready outcome node but cannot close
+    // it. Only a tool explicitly assigned outcome_ids may settle that node.
+    const executionPlan = proposedOutcomeIds.length
+      ? settlePlanNode(state.executionPlan, {
+        nodeId: state.activePlanNodeId,
+        toolSlug: card.slug,
+        receiptRef,
+        successful,
+        evidenceSufficient,
+        failureCode: successful ? 'insufficient_evidence' : 'provider_read_failed',
+      })
+      : state.executionPlan;
     const receipts = [...(state.receipts || []), row];
     const steps = [...(state.steps || []), { kind: 'read', slug: card.slug, status: successful ? 'completed' : 'error', summary: row.summary }];
     const patch = await transition(state, successful ? 'tool_executed' : 'tool_failed', {
-      receipts, steps, toolArgs: null, decision: null,
+      receipts, steps, executionPlan, toolArgs: null, decision: null, activePlanNodeId: null,
       planRepair: successful && !evidenceSufficient ? 'The provider operation succeeded but did not satisfy the outcome evidence contract. Select a materially different capability that returns the missing record count and fields.' : null,
     }, { reason_code: successful ? (evidenceSufficient ? 'read_receipt' : 'read_evidence_insufficient') : 'read_failure', tool_slug: card.slug });
     await persist(state, patch);
@@ -848,8 +973,15 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     const steps = [...(state.steps || []), { kind: 'write', slug: card.slug, status: 'draft_created', summary: 'Draft ready for approval; not sent' }];
     const receipts = [...(state.receipts || []), { slug: card.slug, successful: true, outcome_ids: state.decision?.outcome_ids || [], draft_id: row.id, status: 'draft_created', summary: 'Approval draft created' }];
     const summary = 'Draft ready for approval. Nothing has been sent.';
-    const result = resultShape({ ...state, pendingApprovalId: row.id, receipts, steps }, summary, 'pending');
-    const patch = await transition(state, 'awaiting_approval', { pendingApprovalId: row.id, receipts, steps, result }, { reason_code: 'approval_required', tool_slug: card.slug });
+    const executionPlan = settlePlanNode(state.executionPlan, {
+      nodeId: state.activePlanNodeId,
+      toolSlug: card.slug,
+      receiptRef: row.id,
+      successful: true,
+      evidenceSufficient: true,
+    });
+    const result = resultShape({ ...state, pendingApprovalId: row.id, receipts, steps, executionPlan }, summary, 'pending');
+    const patch = await transition(state, 'awaiting_approval', { pendingApprovalId: row.id, receipts, steps, executionPlan, result }, { reason_code: 'approval_required', tool_slug: card.slug });
     await persist(state, patch);
     return patch;
   });
@@ -954,12 +1086,15 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       prompt: text(state.decision?.question, 600) || 'What information should I use?',
       fields: [{ id: 'business_context', name: 'business_context', label: 'More context', type: 'text', required: true }],
     };
-    const waiting = await transition(state, 'awaiting_input', { pendingInput: request }, { reason_code: state.decision?.reason || 'human_input', input_fields: request.fields?.map(field => field.id || field.name) });
+    const waitingPlan = markPlanNodeWaitingInput(state.executionPlan, state.activePlanNodeId, state.decision?.reason || 'business_input_required');
+    const waiting = await transition(state, 'awaiting_input', { pendingInput: request, executionPlan: waitingPlan }, { reason_code: state.decision?.reason || 'human_input', input_fields: request.fields?.map(field => field.id || field.name) });
     await persist(state, waiting);
     const answer = interrupt({ run_id: state.runId, ...request });
     const values = answer?.values && typeof answer.values === 'object' ? answer.values : (answer && typeof answer === 'object' ? answer : { business_context: answer });
+    const executionPlan = revisePlanHumanInput(waitingPlan, Object.keys(values || {}));
     const patch = await transition({ ...state, ...waiting }, 'resumed', {
       fieldValues: { ...(state.fieldValues || {}), ...values },
+      executionPlan,
       pendingInput: null,
       decision: null,
       capabilityGap: false,
@@ -986,6 +1121,7 @@ Render requested records and fields as a Markdown table when appropriate, preser
         (!Array.isArray(raw.missing_outcomes) || !raw.missing_outcomes.length || raw.missing_outcomes.includes(item.id))).map(item => item.id);
       const patch = await transition(state, 'dependency_resolved', {
         receipts: state.receipts.map(row => ({ ...row, outcome_ids: (row.outcome_ids || []).filter(id => !missing.includes(id)) })),
+        executionPlan: reopenPlanOutcomes(state.executionPlan, missing, 'answer_evidence_incomplete'),
         decision: null,
         planRepair: text(raw.recovery_instruction || 'Read the missing requested fields from the existing result identifiers; do not repeat an identical read.', 900),
         answerRepairs: Number(state.answerRepairs || 0) + 1,
@@ -1024,8 +1160,9 @@ Render requested records and fields as a Markdown table when appropriate, preser
     return patch;
   });
 
-  const routeAfterDiscover = state => state.connectionRequest ? 'request_connection' : (state.pendingInput ? 'await_human' : 'plan');
+  const routeAfterDiscover = state => state.pendingInput ? 'await_human' : 'compile_plan';
   const routeAfterVerify = state => {
+    if (state.connectionRequest) return 'request_connection';
     if (state.pendingInput || state.decision?.action === 'ask') return 'await_human';
     if (!state.decision) return 'plan';
     if (state.decision.action === 'discover') return 'discover';
@@ -1047,6 +1184,8 @@ Render requested records and fields as a Markdown table when appropriate, preser
     .addNode('context', contextNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('resolve_intent', intentNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('discover', discoverNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
+    .addNode('compile_plan', compilePlanNode)
+    .addNode('schedule_plan', scheduleNode, { ends: ['await_human', 'plan', 'synthesize'] })
     .addNode('request_connection', requestConnectionNode)
     .addNode('await_connection', awaitConnectionNode)
     .addNode('plan', planNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
@@ -1062,18 +1201,19 @@ Render requested records and fields as a Markdown table when appropriate, preser
     .addEdge(START, 'context')
     .addEdge('context', 'resolve_intent')
     .addEdge('resolve_intent', 'discover')
-    .addConditionalEdges('discover', routeAfterDiscover, ['request_connection', 'await_human', 'plan'])
+    .addConditionalEdges('discover', routeAfterDiscover, ['await_human', 'compile_plan'])
+    .addEdge('compile_plan', 'schedule_plan')
     .addEdge('request_connection', 'await_connection')
     .addEdge('await_connection', 'discover')
     .addEdge('plan', 'verify')
-    .addConditionalEdges('verify', routeAfterVerify, ['plan', 'discover', 'prepare', 'await_human', 'synthesize'])
+    .addConditionalEdges('verify', routeAfterVerify, ['plan', 'discover', 'prepare', 'request_connection', 'await_human', 'synthesize'])
     .addConditionalEdges('prepare', routeAfterPrepare, ['verify', 'execute', 'draft', 'await_human'])
-    .addEdge('execute', 'plan')
+    .addEdge('execute', 'schedule_plan')
     .addEdge('draft', 'await_approval')
     .addConditionalEdges('await_approval', routeAfterApproval, ['await_provider_event', 'seal'])
     .addConditionalEdges('await_provider_event', routeAfterProviderEvent, ['await_provider_event', 'synthesize', 'seal'])
-    .addEdge('await_human', 'plan')
-    .addConditionalEdges('synthesize', state => state.result ? 'seal' : 'plan', ['seal', 'plan'])
+    .addEdge('await_human', 'schedule_plan')
+    .addConditionalEdges('synthesize', state => state.result ? 'seal' : 'schedule_plan', ['seal', 'schedule_plan'])
     .addEdge('seal', END)
     .compile({ checkpointer });
 }

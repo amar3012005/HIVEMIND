@@ -209,7 +209,11 @@ test('graph recovers missing detail evidence before returning all five records',
         if (!data[0].subject) return { complete: false, response: 'More detail required.', missing_outcomes: ['read'], recovery_instruction: 'Fetch the details for these IDs.' };
         assert.equal(data.length, 5);
         assert.equal(data[4].sender, 'author4');
-        return { complete: true, response: '| Subject | Sender | Time |\n| --- | --- | --- |\n' + data.map(r => `| ${r.subject} | ${r.sender} | ${r.time} |`).join('\n') };
+        return {
+          complete: true,
+          response: '| Subject | Sender | Time |\n| --- | --- | --- |\n' + data.map(r => `| ${r.subject} | ${r.sender} | ${r.time} |`).join('\n'),
+          follow_ups: ['Which of these records should I open?'],
+        };
       }
       throw new Error(`Unexpected stage ${stage}`);
     } }, prisma, composio, checkpointer: new MemorySaver(),
@@ -218,6 +222,7 @@ test('graph recovers missing detail evidence before returning all five records',
   assert.equal(result.status, 'completed');
   assert.equal(result.response.split('\n').length, 7);
   assert.match(result.response, /Subject 4/);
+  assert.deepEqual(result.followUps, ['Which of these records should I open?']);
 });
 
 test('a new graph run resolves a follow-up from tenant-scoped prior receipt evidence', async () => {

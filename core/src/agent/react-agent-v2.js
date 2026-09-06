@@ -3627,6 +3627,7 @@ export async function runReactAgentV2({
           trace: finalizeTrace(trace, usages),
           draft_ids: durable.draftIds || [],
           pending_actions: durable.pendingActions || [],
+          follow_ups: Array.isArray(durable.followUps) ? durable.followUps : [],
           compound_status: durable.status,
           harness_version: durable.run?.scratch?.harness_version || null,
           continuation,

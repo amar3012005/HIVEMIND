@@ -4918,6 +4918,41 @@ model MeetingAudioSegment {
   @@map("meeting_audio_segments")
 }
 
+/// Append-only, tenant-scoped live transcript for a multi-participant
+/// Operating Room. Separate rows avoid lost updates when several browsers
+/// finish utterances at the same time.
+model OperatingRoomEvent {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId        String   @map("room_id") @db.Uuid
+  orgId         String   @map("org_id") @db.Uuid
+  speakerUserId String   @map("speaker_user_id") @db.Uuid
+  speakerName   String   @map("speaker_name") @db.VarChar(120)
+  speakerRole   String   @map("speaker_role") @db.VarChar(60)
+  text          String   @db.Text
+  addressed     Boolean  @default(false)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([roomId, createdAt, id], map: "operating_room_events_room_time_idx")
+  @@index([orgId, speakerUserId, createdAt], map: "operating_room_events_tenant_speaker_idx")
+  @@map("operating_room_events")
+}
+
+/// Durable, server-authoritative roster projection for an Operating Room.
+model OperatingRoomParticipant {
+  roomId                String   @map("room_id") @db.Uuid
+  orgId                 String   @map("org_id") @db.Uuid
+  userId                String   @map("user_id") @db.Uuid
+  name                  String   @db.VarChar(120)
+  role                  String   @db.VarChar(60)
+  realtimeParticipantId String?  @map("realtime_participant_id") @db.VarChar(120)
+  joinedAt              DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+  lastSeenAt            DateTime @default(now()) @updatedAt @map("last_seen_at") @db.Timestamptz(6)
+
+  @@id([roomId, userId])
+  @@index([orgId, userId], map: "operating_room_participants_tenant_user_idx")
+  @@map("operating_room_participants")
+}
+
 /// Durable outbox for engine→agent pushes (Phase 4 — remote/self-host orgs only).
 /// Every write/edge/update/updateTags/delete op destined for a remote agent is
 /// recorded here BEFORE the BullMQ job is enqueued. If Redis is unavailable at

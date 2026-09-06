@@ -100,6 +100,9 @@ import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
+import { queueMeetingFinalization } from './knowledge/meeting-finalization-worker.js';
+import { addRealtimeParticipant, createRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
+import { compactRoomContext, normalizeRoomText, roomProjection, wakeIntent } from './operating-room/room-contract.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
@@ -8990,6 +8993,248 @@ const server = http.createServer(async (req, res) => {
   // ─── End Audit + DSR ─────────────────────────────────────
 
   // ─── Digital Employees ───────────────────────────────────
+  // ─── Operating Rooms ─────────────────────────────────────
+  // Reuses HyperRoom as the durable room envelope. RealtimeKit owns only the
+  // live media session; authenticated HIVEMIND identity and transcript state
+  // remain tenant-scoped in Postgres.
+  if (pathname.startsWith('/v1/operating-rooms') && process.env.OPERATING_ROOMS_V1 !== 'true') {
+    return jsonResponse(res, { error: 'not_found' }, 404);
+  }
+  if (pathname === '/v1/operating-rooms' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    try {
+      const rooms = await prisma.hyperRoom.findMany({
+        where: { orgId: current.session.orgId, roomMode: 'operating', archivedAt: null },
+        orderBy: { updatedAt: 'desc' },
+        take: 50,
+      });
+      return jsonResponse(res, { rooms: rooms.map(roomProjection) });
+    } catch (error) {
+      return jsonResponse(res, { error: 'operating_room_list_failed', message: error.message }, 500);
+    }
+  }
+
+  if (pathname === '/v1/operating-rooms' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!membership?.isActive) return jsonResponse(res, { error: 'organization_membership_required' }, 403);
+    const body = await parseBody(req);
+    const name = normalizeRoomText(body.name || 'Company Operating Room', 120);
+    const goal = normalizeRoomText(body.goal || 'Understand the company and coordinate the next best actions.', 1200);
+    try {
+      const meeting = await createRealtimeMeeting({ title: name });
+      const room = await prisma.hyperRoom.create({
+        data: {
+          userId: current.session.userId,
+          orgId: current.session.orgId,
+          name,
+          goal,
+          template: 'facilitated_voice',
+          roomTag: 'general',
+          roomMode: 'operating',
+          roomPlaybook: {
+            schema_version: 1,
+            status: 'open',
+            media_provider: 'cloudflare-realtimekit',
+            meeting_id: meeting.id,
+            participants: [],
+            transcript: [],
+          },
+        },
+      });
+      return jsonResponse(res, { room: roomProjection(room) }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || 'operating_room_create_failed', message: error.message }, error.status || 500);
+    }
+  }
+
+  const operatingRoomMatch = pathname.match(/^\/v1\/operating-rooms\/([0-9a-f-]{36})(?:\/(join|transcript|close))?$/i);
+  if (operatingRoomMatch) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const room = await prisma.hyperRoom.findFirst({
+      where: { id: operatingRoomMatch[1], orgId: current.session.orgId, roomMode: 'operating', archivedAt: null },
+    });
+    if (!room) return jsonResponse(res, { error: 'operating_room_not_found' }, 404);
+    const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!membership?.isActive) return jsonResponse(res, { error: 'organization_membership_required' }, 403);
+    const action = operatingRoomMatch[2];
+    const state = room.roomPlaybook && typeof room.roomPlaybook === 'object' ? room.roomPlaybook : {};
+
+    if (!action && req.method === 'GET') return jsonResponse(res, { room: roomProjection(room) });
+
+    if (action === 'join' && req.method === 'POST') {
+      if (!state.meeting_id) return jsonResponse(res, { error: 'operating_room_media_unavailable' }, 503);
+      try {
+        const verifiedName = normalizeRoomText(membership.user?.displayName || membership.user?.email?.split('@')[0] || 'Member', 120);
+        const existingParticipant = await prisma.operatingRoomParticipant.findUnique({
+          where: { roomId_userId: { roomId: room.id, userId: current.session.userId } },
+        });
+        let participant;
+        if (existingParticipant?.realtimeParticipantId) {
+          participant = await refreshRealtimeParticipant({ meetingId: state.meeting_id, participantId: existingParticipant.realtimeParticipantId });
+        } else {
+          participant = await addRealtimeParticipant({
+            meetingId: state.meeting_id,
+            userId: current.session.userId,
+            name: verifiedName,
+            isHost: membership.role === 'owner' || membership.role === 'admin',
+          });
+        }
+        const identity = { user_id: current.session.userId, name: verifiedName, role: membership.role || 'member' };
+        await prisma.operatingRoomParticipant.upsert({
+          where: { roomId_userId: { roomId: room.id, userId: identity.user_id } },
+          create: {
+            roomId: room.id,
+            orgId: room.orgId,
+            userId: identity.user_id,
+            name: identity.name,
+            role: identity.role,
+            realtimeParticipantId: participant.id || null,
+          },
+          update: { name: identity.name, role: identity.role, realtimeParticipantId: participant.id || undefined },
+        });
+        const durableRoster = await prisma.operatingRoomParticipant.findMany({
+          where: { roomId: room.id, orgId: room.orgId },
+          orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
+        });
+        const participants = durableRoster.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role }));
+        await prisma.hyperRoom.update({
+          where: { id: room.id },
+          data: { roomPlaybook: { ...state, participants, status: 'live' } },
+        });
+        return jsonResponse(res, {
+          room: { ...roomProjection(room), status: 'live', participants },
+          participant: identity,
+          auth_token: participant.token || participant.auth_token,
+          room_name: state.meeting_id,
+        });
+      } catch (error) {
+        return jsonResponse(res, { error: error.code || 'operating_room_join_failed', message: error.message }, error.status || 500);
+      }
+    }
+
+    if (action === 'transcript' && req.method === 'POST') {
+      const body = await parseBody(req);
+      const text = normalizeRoomText(body.text, 4000);
+      if (!text) return jsonResponse(res, { error: 'transcript_text_required' }, 400);
+      const wake = wakeIntent(text);
+      const durableSpeaker = await prisma.operatingRoomParticipant.findUnique({
+        where: { roomId_userId: { roomId: room.id, userId: current.session.userId } },
+      });
+      const verified = durableSpeaker ? {
+        user_id: durableSpeaker.userId,
+        name: durableSpeaker.name,
+        role: durableSpeaker.role,
+      } : {
+        user_id: current.session.userId,
+        name: normalizeRoomText(membership.user?.displayName || 'Member', 120),
+        role: membership.role || 'member',
+      };
+      const persisted = await prisma.operatingRoomEvent.create({
+        data: {
+          roomId: room.id,
+          orgId: room.orgId,
+          speakerUserId: verified.user_id,
+          speakerName: verified.name,
+          speakerRole: verified.role,
+          text,
+          addressed: wake.addressed,
+        },
+      });
+      const [durableRoster, recentDesc] = await Promise.all([
+        prisma.operatingRoomParticipant.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }] }),
+        prisma.operatingRoomEvent.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 10 }),
+      ]);
+      const roster = durableRoster.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role }));
+      const transcript = recentDesc.reverse().map((entry) => ({ speaker_name: entry.speakerName, speaker_role: entry.speakerRole, text: entry.text, at: entry.createdAt }));
+      await prisma.hyperRoom.update({ where: { id: room.id }, data: { roomPlaybook: { ...state, participants: roster, status: 'live' } } });
+      const turn = { id: persisted.id, speaker_user_id: verified.user_id, speaker_name: verified.name, speaker_role: verified.role, text, at: persisted.createdAt };
+      return jsonResponse(res, {
+        accepted: true,
+        turn,
+        addressed_to_hivemind: wake.addressed,
+        query: wake.query,
+        context: wake.addressed ? compactRoomContext({ room, roster, transcript, speaker: verified }) : undefined,
+      });
+    }
+
+    if (action === 'close' && req.method === 'POST') {
+      const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+      if (!admin) return;
+      const [transcriptRows, participantRows] = await Promise.all([
+        prisma.operatingRoomEvent.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+        prisma.operatingRoomParticipant.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }] }),
+      ]);
+      const transcript = transcriptRows.map((entry) => ({
+        speaker_user_id: entry.speakerUserId,
+        speaker_name: entry.speakerName,
+        speaker_role: entry.speakerRole,
+        text: entry.text,
+        at: entry.createdAt,
+      }));
+      if (!transcript.length) return jsonResponse(res, { error: 'operating_room_transcript_empty' }, 409);
+      const transcriptText = transcript.map((turn) => `${turn.speaker_name}: ${turn.text}`).join('\n');
+      const speakers = transcript.map((turn) => ({
+        speaker: turn.speaker_name,
+        speaker_user_id: turn.speaker_user_id,
+        role: turn.speaker_role,
+        text: turn.text,
+        at: turn.at,
+      }));
+      await prisma.$transaction([
+        prisma.meetingSession.upsert({
+          where: { id: room.id },
+          create: {
+            id: room.id,
+            orgId: room.orgId,
+            userId: room.userId,
+            status: 'recording',
+            consentRecorded: true,
+            expectedSegments: 1,
+          },
+          update: { consentRecorded: true, expectedSegments: 1 },
+        }),
+        prisma.meetingSegment.upsert({
+          where: { sessionId_idx: { sessionId: room.id, idx: 0 } },
+          create: {
+            sessionId: room.id,
+            orgId: room.orgId,
+            userId: room.userId,
+            idx: 0,
+            text: transcriptText,
+            speakers,
+            status: 'transcribed',
+          },
+          update: { text: transcriptText, speakers, status: 'transcribed' },
+        }),
+      ]);
+      await queueMeetingFinalization(prisma, {
+        sessionId: room.id,
+        orgId: room.orgId,
+        userId: room.userId,
+        expectedSegments: 1,
+        payload: {
+          title: room.name,
+          notes: room.goal || '',
+          participants: participantRows.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role })),
+          speaker_count: participantRows.length,
+          scope: 'organization',
+          operating_room_id: room.id,
+        },
+      });
+      const updated = await prisma.hyperRoom.update({
+        where: { id: room.id },
+        data: { roomPlaybook: { ...state, status: 'finalizing', meeting_session_id: room.id, closed_at: new Date().toISOString() }, archivedAt: new Date() },
+      });
+      return jsonResponse(res, { room: roomProjection(updated) });
+    }
+
+    return jsonResponse(res, { error: 'method_not_allowed' }, 405);
+  }
+
   // Lazy-init EmployeeStore + audit logger
   const _getEmployeeStore = async () => {
     if (!prisma) return null;

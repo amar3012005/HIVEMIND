@@ -573,6 +573,13 @@ services:
             HOST: 0.0.0.0
             VERSION: '${VERSION:-2.0.0}'
             Visual_path_In_Hyperrooms: '${Visual_path_In_Hyperrooms:-false}'
+            OPERATING_ROOMS_V1: '${OPERATING_ROOMS_V1:-false}'
+            CLOUDFLARE_ACCOUNT_ID: '${CLOUDFLARE_ACCOUNT_ID:-}'
+            CLOUDFLARE_REALTIMEKIT_APP_ID: '${CLOUDFLARE_REALTIMEKIT_APP_ID:-}'
+            CLOUDFLARE_REALTIMEKIT_API_TOKEN: '${CLOUDFLARE_REALTIMEKIT_API_TOKEN:-}'
+            CLOUDFLARE_REALTIMEKIT_HOST_PRESET: '${CLOUDFLARE_REALTIMEKIT_HOST_PRESET:-group_call_host}'
+            CLOUDFLARE_REALTIMEKIT_MEMBER_PRESET: '${CLOUDFLARE_REALTIMEKIT_MEMBER_PRESET:-group_call_participant}'
+            CLOUDFLARE_REALTIMEKIT_API_URL: '${CLOUDFLARE_REALTIMEKIT_API_URL:-https://api.cloudflare.com/client/v4}'
             HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://core.hivemind.davinciai.eu:8050}'
             HIVEMIND_CORE_API_BASE_URL: '${HIVEMIND_CORE_API_BASE_URL:-https://core.hivemind.davinciai.eu:8050}'
             HIVEMIND_CONTROL_PLANE_PUBLIC_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu:8040}'

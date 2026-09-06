@@ -34,11 +34,14 @@ RUN apt-get update && \
 
 # Copy package files
 COPY core/package.json core/package-lock.json ./
-COPY core/prisma ./prisma
 COPY core/tsconfig.json ./
 
 # Install dependencies
 RUN npm ci && npm cache clean --force
+
+# Schema and migration-only releases must not invalidate the expensive npm
+# dependency layer. Prisma is needed for client generation, not installation.
+COPY core/prisma ./prisma
 
 # Cache-bust arg: pass --build-arg CACHE_BUST=$(date +%s) to force src refresh
 ARG CACHE_BUST=1

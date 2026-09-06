@@ -452,7 +452,7 @@ test('a connected draft consumes the prior native answer from the shared graph s
           return {
             locale: 'en', kind: 'write', apps: ['gmail'], discovery_query: 'prepare an email draft from prior conversation content',
             outcomes: [{ id: 'deliver', kind: 'draft', description: 'deliver prior conversation content by email' }],
-            known_facts: { recipient_email: 'rama@example.com' }, business_question: null,
+            known_facts: { recipient_email: 'rama@example.com' }, content_source: 'conversation', business_question: 'What information should I send?',
           };
         }
         if (stage === 'planning') return { action: 'draft', tool_slug: 'GMAIL_SEND_EMAIL', outcome_ids: ['deliver'], reason: 'create the requested external draft' };

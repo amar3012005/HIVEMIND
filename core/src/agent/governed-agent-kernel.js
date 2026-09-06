@@ -138,7 +138,7 @@ const intentResponseFormat = {
     strict: true,
     schema: {
       type: 'object', additionalProperties: false,
-      required: ['locale', 'kind', 'apps', 'discovery_query', 'outcomes', 'known_facts', 'entities', 'business_question', 'reference_selector'],
+      required: ['locale', 'kind', 'apps', 'discovery_query', 'outcomes', 'known_facts', 'entities', 'content_source', 'business_question', 'reference_selector'],
       properties: {
         locale: { type: 'string' },
         kind: { type: 'string', enum: ['read', 'write'] },
@@ -179,6 +179,7 @@ const intentResponseFormat = {
           },
         },
         business_question: { type: ['string', 'null'] },
+        content_source: { type: 'string', enum: ['current_turn', 'conversation', 'missing'] },
         reference_selector: {
           anyOf: [
             {
@@ -274,6 +275,8 @@ function normalizedIntent(value, fallbackLocale = 'en') {
       name: text(entity?.name, 160),
       role: text(entity?.role, 80) || 'subject',
     })).filter(entity => entity.name),
+    content_source: ['current_turn', 'conversation', 'missing'].includes(value?.content_source)
+      ? value.content_source : 'missing',
     business_question: text(value?.business_question, 500) || null,
     reference_selector: value?.reference_selector && typeof value.reference_selector === 'object'
       ? {
@@ -674,13 +677,19 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
-Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,entities:[{name:string,role:string}],business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Extract every explicitly named person, organization, account, project, or record into entities with its semantic role such as recipient, sender, owner, or subject. Store every explicitly supplied action parameter in known_facts using concise semantic schema-style keys. Names remain evidence to resolve, never provider identifiers. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. For a write with missing substantive content or settings, set business_question to one concise user-facing question; never use it for provider identifiers or named-entity lookup. When the user refers to substantive prior assistant content present in conversation_context, treat that content as supplied and leave business_question null. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
+Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,entities:[{name:string,role:string}],content_source:"current_turn"|"conversation"|"missing",business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Extract every explicitly named person, organization, account, project, or record into entities with its semantic role such as recipient, sender, owner, or subject. Store every explicitly supplied action parameter in known_facts using concise semantic schema-style keys. Names remain evidence to resolve, never provider identifiers. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. For writes, classify where the substantive payload comes from: current_turn when supplied now, conversation when supplied by prior assistant context, or missing only when neither contains it. Ask one concise business_question only when content_source is missing; never use it for provider identifiers or named-entity lookup. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs.`,
       // Intent needs bounded conversational meaning, not raw connector rows.
       // Structured prior receipts remain available to planning/arguments for
       // evidence grounding after the outcome contract exists.
       input: { message, connected: state.connected, conversation_context: state.conversationContext, resolved_reference: state.resolvedReference },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
+    const hasPriorAssistantContent = state.conversationContext.some(turn => turn?.role === 'assistant' && text(turn?.content, 6000));
+    if (intent.kind === 'write' && intent.content_source === 'conversation' && hasPriorAssistantContent) {
+      intent.business_question = null;
+    } else if (intent.kind === 'write' && intent.content_source === 'current_turn') {
+      intent.business_question = null;
+    }
     const resolvedReference = state.resolvedReference
       || resolveGovernedConversationReferenceBySelector(intent.reference_selector, state.referenceEvidence);
     if (resolvedReference && intent.kind === 'read') {

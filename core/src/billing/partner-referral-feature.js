@@ -6,10 +6,6 @@ const DEFAULT_TIMEOUT_MS = 2_000;
 let cachedEvaluation = null;
 let pendingEvaluation = null;
 
-function explicitTrue(value) {
-  return String(value || '').trim().toLowerCase() === 'true';
-}
-
 function boundedNumber(value, fallback, min, max) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
@@ -43,9 +39,6 @@ async function fetchFlag(endpoint, fetchImpl, timeoutMs) {
 }
 
 export async function partnerReferralsEnabled(env = process.env, options = {}) {
-  // This remains an emergency, fail-closed master switch on the application host.
-  if (!explicitTrue(env?.PARTNER_REFERRALS_ENABLED)) return false;
-
   const endpoint = String(env?.CLOUDFLARE_FEATURE_FLAGS_URL || DEFAULT_FLAG_URL).trim();
   if (!endpoint) return false;
 

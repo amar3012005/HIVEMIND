@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  isUseToolsDurableAgentEnvEnabled,
   isUseToolsDurableAgentEnabled,
   USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY,
 } from '../../src/agent/use-tools-durable-agent-flag.js';
@@ -377,16 +376,10 @@ test('write-tool subject is rewritten when the model copies the user request', a
   assert.equal(args.body.includes('Here is what I found'), false);
 });
 
-test('durable agent env gate is fail-closed', () => {
-  assert.equal(isUseToolsDurableAgentEnvEnabled({}), false);
-  assert.equal(isUseToolsDurableAgentEnvEnabled({ USE_TOOLS_DURABLE_AGENT: 'false' }), false);
-  assert.equal(isUseToolsDurableAgentEnvEnabled({ USE_TOOLS_DURABLE_AGENT: 'true' }), true);
-});
-
-test('durable agent requires Flagship enabled:true from cloudflare-flagship', async () => {
-  const env = { USE_TOOLS_DURABLE_AGENT: 'true', USE_TOOLS_DURABLE_AGENT_FLAG_URL: 'https://flags.test/use-tools-durable-agent' };
+test('durable agent is controlled only by Flagship and fails closed', async () => {
+  const env = { USE_TOOLS_DURABLE_AGENT: 'false', USE_TOOLS_DURABLE_AGENT_FLAG_URL: 'https://flags.test/use-tools-durable-agent' };
   assert.equal(await isUseToolsDurableAgentEnabled(env, { flagshipEnabled: false }), false);
-  assert.equal(await isUseToolsDurableAgentEnabled(env, { flagshipEnabled: true }), true);
+  assert.equal(await isUseToolsDurableAgentEnabled({}, { flagshipEnabled: true }), true);
   const off = await isUseToolsDurableAgentEnabled(env, {
     fetchImpl: async () => ({ ok: true, json: async () => ({ key: USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY, enabled: false, source: 'cloudflare-flagship' }) }),
   });
@@ -395,7 +388,7 @@ test('durable agent requires Flagship enabled:true from cloudflare-flagship', as
     fetchImpl: async () => ({ ok: true, json: async () => ({ key: USE_TOOLS_DURABLE_AGENT_FLAGSHIP_KEY, enabled: true, source: 'cloudflare-flagship' }) }),
   });
   assert.equal(on, true);
-  const missing = await isUseToolsDurableAgentEnabled({ USE_TOOLS_DURABLE_AGENT: 'true' }, {
+  const missing = await isUseToolsDurableAgentEnabled({}, {
     fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
   });
   assert.equal(missing, false);

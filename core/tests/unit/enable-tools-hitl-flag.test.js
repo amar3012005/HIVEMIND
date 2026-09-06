@@ -3,19 +3,12 @@ import assert from 'node:assert/strict';
 import {
   ENABLE_TOOLS_HITL_FLAGSHIP_KEY,
   isEnableToolsHitlEnabled,
-  isEnableToolsHitlEnvEnabled,
 } from '../../src/agent/enable-tools-hitl-flag.js';
 
-test('enable-tools HITL env gate is fail-closed', () => {
-  assert.equal(isEnableToolsHitlEnvEnabled({}), false);
-  assert.equal(isEnableToolsHitlEnvEnabled({ ENABLE_TOOLS_HITL: 'false' }), false);
-  assert.equal(isEnableToolsHitlEnvEnabled({ ENABLE_TOOLS_HITL: 'true' }), true);
-});
-
-test('enable-tools HITL requires Flagship enabled:true from cloudflare-flagship', async () => {
-  const env = { ENABLE_TOOLS_HITL: 'true', ENABLE_TOOLS_HITL_FLAG_URL: 'https://flags.test/enable-tools-hitl' };
+test('enable-tools HITL is controlled only by Flagship and fails closed', async () => {
+  const env = { ENABLE_TOOLS_HITL: 'false', ENABLE_TOOLS_HITL_FLAG_URL: 'https://flags.test/enable-tools-hitl' };
   assert.equal(await isEnableToolsHitlEnabled(env, { flagshipEnabled: false }), false);
-  assert.equal(await isEnableToolsHitlEnabled(env, { flagshipEnabled: true }), true);
+  assert.equal(await isEnableToolsHitlEnabled({}, { flagshipEnabled: true }), true);
   const off = await isEnableToolsHitlEnabled(env, {
     fetchImpl: async () => ({
       ok: true,
@@ -30,7 +23,7 @@ test('enable-tools HITL requires Flagship enabled:true from cloudflare-flagship'
     }),
   });
   assert.equal(on, true);
-  const missing = await isEnableToolsHitlEnabled({ ENABLE_TOOLS_HITL: 'true' }, {
+  const missing = await isEnableToolsHitlEnabled({}, {
     fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
   });
   assert.equal(missing, false);

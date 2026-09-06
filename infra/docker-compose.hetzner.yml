@@ -84,9 +84,9 @@ services:
       # supplies it today, but Core must retain this dependency if env loading
       # is narrowed in a later production compose change.
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
-      ENABLE_TOOLS_HITL: ${ENABLE_TOOLS_HITL:-false}
+      # Rollout authority is Cloudflare Flagship. The URL is deployment
+      # configuration, not a host-side boolean feature switch.
       ENABLE_TOOLS_HITL_FLAG_URL: ${ENABLE_TOOLS_HITL_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/enable-tools-hitl}
-      USE_TOOLS_DURABLE_AGENT: ${USE_TOOLS_DURABLE_AGENT:-false}
       USE_TOOLS_DURABLE_AGENT_FLAG_URL: ${USE_TOOLS_DURABLE_AGENT_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/use-tools-durable-agent}
       # Structural, metadata-only traces for the governed LangGraph runtime.
       # The API key remains in the host secret env and is never baked into the
@@ -131,9 +131,8 @@ services:
       BYOD_BROKER_URL: http://byod-broker:8790
       BYOD_BROKER_INTERNAL_TOKEN: ${BYOD_BROKER_INTERNAL_TOKEN:?BYOD_BROKER_INTERNAL_TOKEN is required}
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
-      # Runtime kill switch for the named partner-referral lifecycle. Keep
-      # disabled unless the matching frontend has been released and verified.
-      PARTNER_REFERRALS_ENABLED: ${PARTNER_REFERRALS_ENABLED:-false}
+      # Cloudflare Flagship owns enablement. This URL remains deployment
+      # configuration so dev/staging can use their own flag surface.
       CLOUDFLARE_FEATURE_FLAGS_URL: ${CLOUDFLARE_FEATURE_FLAGS_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/partner-referrals}
       PARTNER_REFERRALS_FLAG_CACHE_MS: ${PARTNER_REFERRALS_FLAG_CACHE_MS:-5000}
       # Company onboarding is latency-sensitive and Groq is currently failing

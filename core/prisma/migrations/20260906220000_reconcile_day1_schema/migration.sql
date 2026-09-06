@@ -500,151 +500,151 @@ CREATE TABLE "schema_migrations_applied" (
 );
 
 -- CreateIndex
-CREATE INDEX "nango_connections_user_id_provider_key_idx" ON "nango_connections"("user_id", "provider_key");
+CREATE INDEX IF NOT EXISTS "nango_connections_user_id_provider_key_idx" ON "nango_connections"("user_id", "provider_key");
 
 -- CreateIndex
-CREATE INDEX "nango_connections_org_id_idx" ON "nango_connections"("org_id");
+CREATE INDEX IF NOT EXISTS "nango_connections_org_id_idx" ON "nango_connections"("org_id");
 
 -- CreateIndex
-CREATE INDEX "nango_connections_status_idx" ON "nango_connections"("status");
+CREATE INDEX IF NOT EXISTS "nango_connections_status_idx" ON "nango_connections"("status");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "nango_connections_user_id_provider_key_org_id_key" ON "nango_connections"("user_id", "provider_key", "org_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "nango_connections_user_id_provider_key_org_id_key" ON "nango_connections"("user_id", "provider_key", "org_id");
 
 -- CreateIndex
-CREATE INDEX "memory_outbox_org_status_next_idx" ON "memory_outbox"("org_id", "status", "next_attempt_at");
+CREATE INDEX IF NOT EXISTS "memory_outbox_org_status_next_idx" ON "memory_outbox"("org_id", "status", "next_attempt_at");
 
 -- CreateIndex
-CREATE INDEX "memory_outbox_record_seq_idx" ON "memory_outbox"("record_id", "seq");
+CREATE INDEX IF NOT EXISTS "memory_outbox_record_seq_idx" ON "memory_outbox"("record_id", "seq");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "enterprise_onboarding_codes_code_hash_key" ON "enterprise_onboarding_codes"("code_hash");
+CREATE UNIQUE INDEX IF NOT EXISTS "enterprise_onboarding_codes_code_hash_key" ON "enterprise_onboarding_codes"("code_hash");
 
 -- CreateIndex
-CREATE INDEX "enterprise_onboarding_codes_expires_at_idx" ON "enterprise_onboarding_codes"("expires_at");
+CREATE INDEX IF NOT EXISTS "enterprise_onboarding_codes_expires_at_idx" ON "enterprise_onboarding_codes"("expires_at");
 
 -- CreateIndex
-CREATE INDEX "enterprise_onboarding_codes_used_at_idx" ON "enterprise_onboarding_codes"("used_at");
+CREATE INDEX IF NOT EXISTS "enterprise_onboarding_codes_used_at_idx" ON "enterprise_onboarding_codes"("used_at");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "promotion_codes_code_hash_key" ON "promotion_codes"("code_hash");
+CREATE UNIQUE INDEX IF NOT EXISTS "promotion_codes_code_hash_key" ON "promotion_codes"("code_hash");
 
 -- CreateIndex
-CREATE INDEX "promotion_codes_audience_idx" ON "promotion_codes"("audience");
+CREATE INDEX IF NOT EXISTS "promotion_codes_audience_idx" ON "promotion_codes"("audience");
 
 -- CreateIndex
-CREATE INDEX "promotion_codes_expires_at_idx" ON "promotion_codes"("expires_at");
+CREATE INDEX IF NOT EXISTS "promotion_codes_expires_at_idx" ON "promotion_codes"("expires_at");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "PageIndexNode_user_id_path_key" ON "PageIndexNode"("user_id", "path");
+CREATE UNIQUE INDEX IF NOT EXISTS "PageIndexNode_user_id_path_key" ON "PageIndexNode"("user_id", "path");
 
 -- CreateIndex
-CREATE INDEX "access_applications_account_type_status_created_at_idx" ON "access_applications"("account_type", "status", "created_at");
+CREATE INDEX IF NOT EXISTS "access_applications_account_type_status_created_at_idx" ON "access_applications"("account_type", "status", "created_at");
 
 -- CreateIndex
-CREATE INDEX "activation_lifecycles_stage_next_reminder_at_idx" ON "activation_lifecycles"("stage", "next_reminder_at");
+CREATE INDEX IF NOT EXISTS "activation_lifecycles_stage_next_reminder_at_idx" ON "activation_lifecycles"("stage", "next_reminder_at");
 
 -- CreateIndex
-CREATE INDEX "activation_lifecycles_email_hash_created_at_idx" ON "activation_lifecycles"("email_hash", "created_at" DESC);
+CREATE INDEX IF NOT EXISTS "activation_lifecycles_email_hash_created_at_idx" ON "activation_lifecycles"("email_hash", "created_at" DESC);
 
 -- CreateIndex
-CREATE INDEX "agent_trust_org_id_trust_score_idx" ON "agent_trust"("org_id", "trust_score");
+CREATE INDEX IF NOT EXISTS "agent_trust_org_id_trust_score_idx" ON "agent_trust"("org_id", "trust_score");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "campaign_runs_turn_id_key" ON "campaign_runs"("turn_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "campaign_runs_turn_id_key" ON "campaign_runs"("turn_id");
 
 -- CreateIndex
-CREATE INDEX "campaigns_room_id_idx" ON "campaigns"("room_id");
+CREATE INDEX IF NOT EXISTS "campaigns_room_id_idx" ON "campaigns"("room_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "campaigns_legacy_source_key" ON "campaigns"("org_id", "source_type", "source_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "campaigns_legacy_source_key" ON "campaigns"("org_id", "source_type", "source_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "campaigns_creation_key" ON "campaigns"("org_id", "owner_user_id", "creation_key");
+CREATE UNIQUE INDEX IF NOT EXISTS "campaigns_creation_key" ON "campaigns"("org_id", "owner_user_id", "creation_key");
 
 -- CreateIndex
-CREATE INDEX "canonical_entities_org_kind_normalized_idx" ON "canonical_entities"("organization_id", "entity_kind", "normalized_name");
+CREATE INDEX IF NOT EXISTS "canonical_entities_org_kind_normalized_idx" ON "canonical_entities"("organization_id", "entity_kind", "normalized_name");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "canonical_entities_org_identity_key" ON "canonical_entities"("organization_id", "identity_key");
+CREATE UNIQUE INDEX IF NOT EXISTS "canonical_entities_org_identity_key" ON "canonical_entities"("organization_id", "identity_key");
 
 -- CreateIndex
-CREATE INDEX "cluster_index_organization_id_dirty_count_idx" ON "cluster_index"("organization_id", "dirty_count" DESC);
+CREATE INDEX IF NOT EXISTS "cluster_index_organization_id_dirty_count_idx" ON "cluster_index"("organization_id", "dirty_count" DESC);
 
 -- CreateIndex
-CREATE INDEX "idx_connector_sync_jobs_org" ON "connector_sync_jobs"("org_id", "connector_id", "created_at");
+CREATE INDEX IF NOT EXISTS "idx_connector_sync_jobs_org" ON "connector_sync_jobs"("org_id", "connector_id", "created_at");
 
 -- CreateIndex
-CREATE INDEX "contacts_org_id_idx" ON "contacts"("org_id");
+CREATE INDEX IF NOT EXISTS "contacts_org_id_idx" ON "contacts"("org_id");
 
 -- CreateIndex
-CREATE INDEX "decisions_outcome_tracked_outcome_resolves_at_idx" ON "decisions"("outcome_tracked", "outcome_resolves_at");
+CREATE INDEX IF NOT EXISTS "decisions_outcome_tracked_outcome_resolves_at_idx" ON "decisions"("outcome_tracked", "outcome_resolves_at");
 
 -- CreateIndex
-CREATE INDEX "entitlement_grants_org_id_status_starts_at_idx" ON "entitlement_grants"("org_id", "status", "starts_at");
+CREATE INDEX IF NOT EXISTS "entitlement_grants_org_id_status_starts_at_idx" ON "entitlement_grants"("org_id", "status", "starts_at");
 
 -- CreateIndex
-CREATE INDEX "entitlement_versions_grant_id_effective_from_idx" ON "entitlement_versions"("grant_id", "effective_from");
+CREATE INDEX IF NOT EXISTS "entitlement_versions_grant_id_effective_from_idx" ON "entitlement_versions"("grant_id", "effective_from");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "governance_action_log_idempotent_idx" ON "governance_action_log"("target_memory_id", "action_type", "batch_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "governance_action_log_idempotent_idx" ON "governance_action_log"("target_memory_id", "action_type", "batch_id");
 
 -- CreateIndex
-CREATE INDEX "growth_delegations_org_id_status_idx" ON "growth_delegations"("org_id", "status");
+CREATE INDEX IF NOT EXISTS "growth_delegations_org_id_status_idx" ON "growth_delegations"("org_id", "status");
 
 -- CreateIndex
-CREATE INDEX "growth_delegations_room_id_idx" ON "growth_delegations"("room_id");
+CREATE INDEX IF NOT EXISTS "growth_delegations_room_id_idx" ON "growth_delegations"("room_id");
 
 -- CreateIndex
-CREATE INDEX "growth_goals_owner_user_id_created_at_idx" ON "growth_goals"("owner_user_id", "created_at" DESC);
+CREATE INDEX IF NOT EXISTS "growth_goals_owner_user_id_created_at_idx" ON "growth_goals"("owner_user_id", "created_at" DESC);
 
 -- CreateIndex
-CREATE INDEX "growth_hypotheses_org_id_status_idx" ON "growth_hypotheses"("org_id", "status");
+CREATE INDEX IF NOT EXISTS "growth_hypotheses_org_id_status_idx" ON "growth_hypotheses"("org_id", "status");
 
 -- CreateIndex
-CREATE INDEX "growth_journal_growth_stage_id_created_at_idx" ON "growth_journal"("growth_stage_id", "created_at" DESC);
+CREATE INDEX IF NOT EXISTS "growth_journal_growth_stage_id_created_at_idx" ON "growth_journal"("growth_stage_id", "created_at" DESC);
 
 -- CreateIndex
-CREATE INDEX "growth_stages_growth_goal_id_created_at_idx" ON "growth_stages"("growth_goal_id", "created_at" DESC);
+CREATE INDEX IF NOT EXISTS "growth_stages_growth_goal_id_created_at_idx" ON "growth_stages"("growth_goal_id", "created_at" DESC);
 
 -- CreateIndex
-CREATE UNIQUE INDEX "hyper_work_orders_hq_cycle_id_order_key_key" ON "hyper_work_orders"("hq_cycle_id", "order_key");
+CREATE UNIQUE INDEX IF NOT EXISTS "hyper_work_orders_hq_cycle_id_order_key_key" ON "hyper_work_orders"("hq_cycle_id", "order_key");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "knowledge_documents_org_canonical_key_uq" ON "knowledge_documents"("org_id", "canonical_ingest_key");
+CREATE UNIQUE INDEX IF NOT EXISTS "knowledge_documents_org_canonical_key_uq" ON "knowledge_documents"("org_id", "canonical_ingest_key");
 
 -- CreateIndex
-CREATE INDEX "memories_synthesis_cluster_hash_idx" ON "memories"("synthesis_cluster_hash");
+CREATE INDEX IF NOT EXISTS "memories_synthesis_cluster_hash_idx" ON "memories"("synthesis_cluster_hash");
 
 -- CreateIndex
-CREATE INDEX "memories_cognitive_layer_role_idx" ON "memories"("cognitive_layer_role");
+CREATE INDEX IF NOT EXISTS "memories_cognitive_layer_role_idx" ON "memories"("cognitive_layer_role");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "memory_projection_attempt_workflow_key" ON "memory_projection_attempts"("workflow_instance_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "memory_projection_attempt_workflow_key" ON "memory_projection_attempts"("workflow_instance_id");
 
 -- CreateIndex
-CREATE INDEX "organization_entitlements_org_id_effective_from_effective_u_idx" ON "organization_entitlements"("org_id", "effective_from", "effective_until");
+CREATE INDEX IF NOT EXISTS "organization_entitlements_org_id_effective_from_effective_u_idx" ON "organization_entitlements"("org_id", "effective_from", "effective_until");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "organizations_stripe_customer_id_key" ON "organizations"("stripe_customer_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "organizations_stripe_customer_id_key" ON "organizations"("stripe_customer_id");
 
 -- CreateIndex
-CREATE INDEX "plan_catalog_versions_plan_id_created_at_idx" ON "plan_catalog_versions"("plan_id", "created_at");
+CREATE INDEX IF NOT EXISTS "plan_catalog_versions_plan_id_created_at_idx" ON "plan_catalog_versions"("plan_id", "created_at");
 
 -- CreateIndex
-CREATE INDEX "promotion_redemptions_org_id_redeemed_at_idx" ON "promotion_redemptions"("org_id", "redeemed_at");
+CREATE INDEX IF NOT EXISTS "promotion_redemptions_org_id_redeemed_at_idx" ON "promotion_redemptions"("org_id", "redeemed_at");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "tara_call_attempts_action_key_key" ON "tara_call_attempts"("action_key");
+CREATE UNIQUE INDEX IF NOT EXISTS "tara_call_attempts_action_key_key" ON "tara_call_attempts"("action_key");
 
 -- CreateIndex
-CREATE INDEX "team_tasks_slack_channel_slack_thread_ts_idx" ON "team_tasks"("slack_channel", "slack_thread_ts");
+CREATE INDEX IF NOT EXISTS "team_tasks_slack_channel_slack_thread_ts_idx" ON "team_tasks"("slack_channel", "slack_thread_ts");
 
 -- CreateIndex
-CREATE INDEX "web_intel_jobs_org_id_user_id_idempotency_key_idx" ON "web_intel_jobs"("org_id", "user_id", "idempotency_key");
+CREATE INDEX IF NOT EXISTS "web_intel_jobs_org_id_user_id_idempotency_key_idx" ON "web_intel_jobs"("org_id", "user_id", "idempotency_key");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "x_ads_campaigns_org_id_x_campaign_id_key" ON "x_ads_campaigns"("org_id", "x_campaign_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "x_ads_campaigns_org_id_x_campaign_id_key" ON "x_ads_campaigns"("org_id", "x_campaign_id");
 
 -- RenameForeignKey
 ALTER TABLE "durable_chat_checkpoints" RENAME CONSTRAINT "durable_chat_checkpoints_turn_fkey" TO "durable_chat_checkpoints_turn_id_fkey";

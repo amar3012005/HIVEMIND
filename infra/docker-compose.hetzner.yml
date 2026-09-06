@@ -160,6 +160,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      # Never inherit a stale public hostname from the host env. Employee
+      # bootstrap is private service-to-service traffic on the Compose network.
+      HIVEMIND_CP_URL: http://control-plane:3000
+      # Third-party websockets emits import-time deprecation warnings that are
+      # not actionable lifecycle events and otherwise pollute every restart.
+      PYTHONWARNINGS: ignore::DeprecationWarning
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
       GROQ_API_KEY: ${GROQ_API_KEY}
       CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}

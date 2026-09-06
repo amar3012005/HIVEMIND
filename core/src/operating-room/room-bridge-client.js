@@ -7,13 +7,13 @@ function bridgeConfig(env = process.env) {
   };
 }
 
-async function request(path, { method = 'POST', body, env, fetchImpl = fetch } = {}) {
+async function request(path, { method = 'POST', body, env, fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
   const cfg = bridgeConfig(env);
   const response = await fetchImpl(`${cfg.baseUrl}${path}`, {
     method,
     headers: { Authorization: `Bearer ${cfg.token}`, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error(payload.error || `Operating Room bridge failed (${response.status})`), { code: 'operating_room_bridge_failed', status: 503 });
@@ -33,4 +33,13 @@ export function closeOperatingRoomBridge({ roomId, env, fetchImpl } = {}) {
 
 export function getOperatingRoomBridge({ roomId, env, fetchImpl } = {}) {
   return request(`/${encodeURIComponent(roomId)}`, { method: 'GET', env, fetchImpl });
+}
+
+export function speakOperatingRoomBridge({ roomId, turnId, answer, env, fetchImpl } = {}) {
+  return request(`/${encodeURIComponent(roomId)}/speak`, {
+    env,
+    fetchImpl,
+    timeoutMs: 45_000,
+    body: { turn_id: turnId, answer: String(answer || '').slice(0, 4000) },
+  });
 }

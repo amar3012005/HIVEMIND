@@ -128,7 +128,7 @@ async function startRoomBridge(input) {
 
 const ROOM_BRIDGE_HTML = `<!doctype html><meta charset="utf-8"><script type="module">
 import RealtimeKitClient from '/internal/realtimekit.js';
-let meeting; let audioContext; let destination; let queue = Promise.resolve();
+let meeting; let audioContext; let destination; let queue = Promise.resolve(); const spokenTurns = new Map();
 window.__RealtimeKitClient = RealtimeKitClient;
 window.__roomBridgeState = { status: 'loading' };
 async function speak(answer) {
@@ -138,17 +138,29 @@ async function speak(answer) {
   const source = audioContext.createBufferSource(); source.buffer = buffer; source.connect(destination); source.start();
   await new Promise(resolve => { source.onended = resolve; });
 }
+window.__speakRoomBridge = (answer, turnId = '') => {
+  if (!turnId) throw new Error('turn_id_required');
+  if (spokenTurns.has(turnId)) return spokenTurns.get(turnId);
+  const job = queue.catch(() => {}).then(async () => {
+    window.__roomBridgeState.activity = 'speaking';
+    await meeting.chat.sendTextMessage('HIVEMIND · ' + answer);
+    await speak(answer);
+    window.__roomBridgeState.last_spoken_at = new Date().toISOString();
+    window.__roomBridgeState.last_turn_id = turnId || null;
+    return { spoken: true, replayed: false, turn_id: turnId, spoken_at: window.__roomBridgeState.last_spoken_at };
+  }).finally(() => { window.__roomBridgeState.activity = 'listening'; });
+  spokenTurns.set(turnId, job);
+  queue = job.catch(() => {});
+  return job;
+};
 window.__startRoomBridge = async ({ authToken, roomId, meetingId }) => {
   meeting = await RealtimeKitClient.init({ authToken, roomName: meetingId, defaults: { audio: false, video: false } });
   audioContext = new AudioContext({ sampleRate: 48000 }); destination = audioContext.createMediaStreamDestination();
   const oscillator = audioContext.createOscillator(); const silence = audioContext.createGain(); silence.gain.value = 0;
   oscillator.connect(silence).connect(destination); oscillator.start();
   await meeting.self.enableAudio(destination.stream.getAudioTracks()[0]);
-  meeting.participants.on('broadcastedMessage', ({ type, payload }) => {
-    if (type !== 'hivemind.response.v1' || payload?.room_id !== roomId || !payload?.answer) return;
-    const answer = String(payload.answer).slice(0, 4000);
-    queue = queue.then(async () => { await meeting.chat.sendTextMessage('HIVEMIND · ' + answer); await speak(answer); window.__roomBridgeState.last_spoken_at = new Date().toISOString(); }).catch(() => {});
-  });
+  // Speech is accepted only through the authenticated server endpoint. Room
+  // participants cannot broadcast arbitrary content in the facilitator voice.
   await meeting.join(); window.__roomBridgeState = { status: 'ready' };
 };
 window.__leaveRoomBridge = async () => meeting?.leave?.();
@@ -689,12 +701,22 @@ const server = http.createServer(async (req, res) => {
   const isSessionsRoute = req.url === '/v1/sessions' || actionMatch || sessionIdMatch;
   const isCrawlRoute = req.url === '/v1/crawl';
   const isPdfRoute = req.url === '/v1/pdf';
-  const roomBridgeMatch = req.url.match(/^\/v1\/room-bridges\/([0-9a-f-]{36})$/i);
+  const roomBridgeMatch = req.url.match(/^\/v1\/room-bridges\/([0-9a-f-]{36})(?:\/(speak))?$/i);
   if (!isSessionsRoute && !isCrawlRoute && !isPdfRoute && !roomBridgeMatch) return send(res, 404, { error: 'not_found' });
   if (!secureEqual(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''), TOKEN)) return send(res, 401, { error: 'unauthorized' });
 
   if (roomBridgeMatch) {
     try {
+      if (roomBridgeMatch[2] === 'speak') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'method_not_allowed' });
+        const entry = roomBridges.get(roomBridgeMatch[1]);
+        if (!entry) return send(res, 404, { error: 'room_bridge_not_found' });
+        const payload = await readJson(req);
+        const answer = String(payload?.answer || '').trim().slice(0, 4000);
+        const turnId = String(payload?.turn_id || '').trim().slice(0, 120);
+        if (!answer) return send(res, 400, { error: 'answer_required' });
+        return send(res, 200, await entry.page.evaluate(({ answer: text, turnId: id }) => window.__speakRoomBridge(text, id), { answer, turnId }));
+      }
       if (req.method === 'POST') return send(res, 200, await startRoomBridge(await readJson(req)));
       if (req.method === 'GET') {
         const entry = roomBridges.get(roomBridgeMatch[1]);

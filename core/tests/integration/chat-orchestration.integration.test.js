@@ -7,6 +7,9 @@ test('direct multilingual turn uses one structured parser call and one event con
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (_url, options) => {
+    if (String(_url).includes('/__hivemind/feature-flags/')) {
+      return { ok: true, async json() { return { source: 'cloudflare-flagship', enabled: false }; } };
+    }
     const request = JSON.parse(options.body);
     calls.push(request);
     if (!request.tool_choice) {
@@ -66,7 +69,10 @@ test('direct multilingual turn uses one structured parser call and one event con
 test('complete aggregate uses one parser call, scoped entity executor, and no answer model', async () => {
   const originalFetch = globalThis.fetch;
   let modelCalls = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_url) => {
+    if (String(_url).includes('/__hivemind/feature-flags/')) {
+      return { ok: true, async json() { return { source: 'cloudflare-flagship', enabled: false }; } };
+    }
     modelCalls++;
     return {
       ok: true,
@@ -110,6 +116,9 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
   const draftRows = [];
   let modelCalls = 0;
   globalThis.fetch = async (_url, options) => {
+    if (String(_url).includes('/__hivemind/feature-flags/')) {
+      return { ok: true, async json() { return { source: 'cloudflare-flagship', enabled: false }; } };
+    }
     modelCalls++;
     const body = JSON.parse(options.body);
     const isIntent = body.tool_choice?.function?.name === 'route_chat_turn';

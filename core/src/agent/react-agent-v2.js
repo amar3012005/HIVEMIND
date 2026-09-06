@@ -1306,7 +1306,9 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ...(plan.time?.range ? { date_range: plan.time.range } : {}),
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
-    ...(plan.source?.kind ? { source_kind: plan.source.kind } : {}),
+    ...(plan.source?.kind && !plan.source?.title && !plan.source?.document_id
+      ? { source_kind: plan.source.kind }
+      : {}),
     // A descriptive source label (for example "the pitch deck") is a semantic
     // hint, not a verified filename boundary. Permit this same recall pass to
     // continue through authorized hybrid evidence when no unique document

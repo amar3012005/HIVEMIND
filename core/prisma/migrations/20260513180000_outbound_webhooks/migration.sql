@@ -16,9 +16,9 @@
 -- Backoff: 1m → 5m → 15m → 1h → 6h → 24h (6 attempts), then dead-letter.
 -- Receivers respond 2xx within 10s = success; anything else = retry.
 
-CREATE TABLE IF NOT EXISTS public.webhook_subscriptions (
+CREATE TABLE IF NOT EXISTS hivemind.webhook_subscriptions (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id       UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  org_id       UUID NOT NULL REFERENCES hivemind.organizations(id) ON DELETE CASCADE,
   url          TEXT NOT NULL,
   description  VARCHAR(255),
   -- Empty array = subscribe to ALL event types. Specific types like
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS public.webhook_subscriptions (
   -- after creation (only the first response carries it).
   secret_hash  VARCHAR(255) NOT NULL,
   enabled      BOOLEAN NOT NULL DEFAULT TRUE,
-  created_by   UUID REFERENCES public.users(id) ON DELETE SET NULL,
+  created_by   UUID REFERENCES hivemind.users(id) ON DELETE SET NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_success_at TIMESTAMPTZ,
@@ -37,15 +37,15 @@ CREATE TABLE IF NOT EXISTS public.webhook_subscriptions (
 );
 
 CREATE INDEX IF NOT EXISTS webhook_subscriptions_org_idx
-  ON public.webhook_subscriptions (org_id, enabled);
+  ON hivemind.webhook_subscriptions (org_id, enabled);
 CREATE INDEX IF NOT EXISTS webhook_subscriptions_event_types_idx
-  ON public.webhook_subscriptions USING GIN (event_types);
+  ON hivemind.webhook_subscriptions USING GIN (event_types);
 
 
-CREATE TABLE IF NOT EXISTS public.webhook_deliveries (
+CREATE TABLE IF NOT EXISTS hivemind.webhook_deliveries (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  subscription_id UUID NOT NULL REFERENCES public.webhook_subscriptions(id) ON DELETE CASCADE,
-  org_id          UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  subscription_id UUID NOT NULL REFERENCES hivemind.webhook_subscriptions(id) ON DELETE CASCADE,
+  org_id          UUID NOT NULL REFERENCES hivemind.organizations(id) ON DELETE CASCADE,
   event_id        VARCHAR(64) NOT NULL,
   event_type      VARCHAR(64) NOT NULL,
   payload         JSONB NOT NULL,
@@ -61,15 +61,15 @@ CREATE TABLE IF NOT EXISTS public.webhook_deliveries (
 
 -- Worker query: SELECT WHERE status='pending' AND next_attempt_at <= NOW()
 CREATE INDEX IF NOT EXISTS webhook_deliveries_pending_idx
-  ON public.webhook_deliveries (next_attempt_at)
+  ON hivemind.webhook_deliveries (next_attempt_at)
   WHERE status = 'pending';
 
 CREATE INDEX IF NOT EXISTS webhook_deliveries_subscription_idx
-  ON public.webhook_deliveries (subscription_id, created_at DESC);
+  ON hivemind.webhook_deliveries (subscription_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS webhook_deliveries_org_idx
-  ON public.webhook_deliveries (org_id, created_at DESC);
+  ON hivemind.webhook_deliveries (org_id, created_at DESC);
 
 -- Idempotency: receivers can de-dup on event_id.
 CREATE INDEX IF NOT EXISTS webhook_deliveries_event_id_idx
-  ON public.webhook_deliveries (event_id);
+  ON hivemind.webhook_deliveries (event_id);

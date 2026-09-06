@@ -7,8 +7,8 @@ ALTER TABLE "hivemind"."memories"
   ADD COLUMN IF NOT EXISTS "actionable"        boolean,
   ADD COLUMN IF NOT EXISTS "provenance"        jsonb;
 
--- Audit index for HyperAgents provenance queries (per-tenant). CONCURRENTLY so it never
--- blocks writes; run outside a txn if the runner wraps migrations in one.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "memories_produced_by_turn_idx"
+-- Prisma runs migration SQL in a transaction, so a concurrent index cannot be
+-- used here. This is an additive index on a fresh/release migration path.
+CREATE INDEX IF NOT EXISTS "memories_produced_by_turn_idx"
   ON "hivemind"."memories" ("org_id", "produced_by_turn")
   WHERE "produced_by_turn" IS NOT NULL;

@@ -14,17 +14,17 @@
 -- We do NOT drop the policy_rules JSONB — other settings still live
 -- there (rate_limit_per_min, etc.).
 
-ALTER TABLE public.digital_employees
+ALTER TABLE hivemind.digital_employees
   ADD COLUMN IF NOT EXISTS role_archetype       VARCHAR(40),
   ADD COLUMN IF NOT EXISTS peer_review_targets  TEXT[] DEFAULT ARRAY[]::TEXT[];
 
 -- Backfill existing rows from policy_rules JSONB where available.
-UPDATE public.digital_employees
+UPDATE hivemind.digital_employees
    SET role_archetype = COALESCE(role_archetype, policy_rules->>'role_archetype')
  WHERE role_archetype IS NULL
    AND policy_rules ? 'role_archetype';
 
-UPDATE public.digital_employees
+UPDATE hivemind.digital_employees
    SET peer_review_targets = COALESCE(
        peer_review_targets,
        ARRAY(SELECT jsonb_array_elements_text(policy_rules->'peer_review_targets'))
@@ -34,5 +34,5 @@ UPDATE public.digital_employees
 
 -- Index used by reviewer-pool queries in the sidecar.
 CREATE INDEX IF NOT EXISTS digital_employees_role_archetype_idx
-  ON public.digital_employees (role_archetype)
+  ON hivemind.digital_employees (role_archetype)
   WHERE role_archetype IS NOT NULL;

@@ -4,6 +4,6 @@
 -- each employee appears with a distinct display name + avatar emoji,
 -- even though they share a single Slack app registration.
 
-ALTER TABLE public.digital_employees
+ALTER TABLE hivemind.digital_employees
   ADD COLUMN IF NOT EXISTS slack_display_name TEXT,
   ADD COLUMN IF NOT EXISTS slack_avatar_emoji TEXT;

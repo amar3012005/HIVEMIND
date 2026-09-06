@@ -4,12 +4,12 @@
 -- team_task_messages per phase output (investigate findings, claims,
 -- reviews, revisions, syntheses, plus 'system' annotations from TeamRoom).
 
-CREATE TABLE IF NOT EXISTS public.team_tasks (
+CREATE TABLE IF NOT EXISTS hivemind.team_tasks (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id          UUID        NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  team_id         UUID        REFERENCES public.teams(id) ON DELETE SET NULL,
+  org_id          UUID        NOT NULL REFERENCES hivemind.organizations(id) ON DELETE CASCADE,
+  team_id         UUID        REFERENCES hivemind.teams(id) ON DELETE SET NULL,
   brief           TEXT        NOT NULL,
-  requested_by    UUID        REFERENCES public.users(id) ON DELETE SET NULL,
+  requested_by    UUID        REFERENCES hivemind.users(id) ON DELETE SET NULL,
   -- Slack provenance: where the task came from + where to post outcome
   slack_channel   VARCHAR(64),
   slack_thread_ts VARCHAR(32),
@@ -35,17 +35,17 @@ CREATE TABLE IF NOT EXISTS public.team_tasks (
   error           TEXT
 );
 
-CREATE INDEX IF NOT EXISTS team_tasks_org_idx        ON public.team_tasks (org_id);
-CREATE INDEX IF NOT EXISTS team_tasks_team_idx       ON public.team_tasks (team_id);
-CREATE INDEX IF NOT EXISTS team_tasks_status_idx     ON public.team_tasks (status);
-CREATE INDEX IF NOT EXISTS team_tasks_created_at_idx ON public.team_tasks (created_at DESC);
+CREATE INDEX IF NOT EXISTS team_tasks_org_idx        ON hivemind.team_tasks (org_id);
+CREATE INDEX IF NOT EXISTS team_tasks_team_idx       ON hivemind.team_tasks (team_id);
+CREATE INDEX IF NOT EXISTS team_tasks_status_idx     ON hivemind.team_tasks (status);
+CREATE INDEX IF NOT EXISTS team_tasks_created_at_idx ON hivemind.team_tasks (created_at DESC);
 CREATE INDEX IF NOT EXISTS team_tasks_slack_idx
-  ON public.team_tasks (slack_channel, slack_thread_ts)
+  ON hivemind.team_tasks (slack_channel, slack_thread_ts)
   WHERE slack_thread_ts IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS public.team_task_messages (
+CREATE TABLE IF NOT EXISTS hivemind.team_task_messages (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_id         UUID        NOT NULL REFERENCES public.team_tasks(id) ON DELETE CASCADE,
+  task_id         UUID        NOT NULL REFERENCES hivemind.team_tasks(id) ON DELETE CASCADE,
   -- sender_id is either a digital_employees.id OR the literal string 'system'.
   -- We store it as TEXT (not UUID FK) so phase-boundary system rows fit.
   sender_id       TEXT        NOT NULL,
@@ -61,9 +61,9 @@ CREATE TABLE IF NOT EXISTS public.team_task_messages (
 );
 
 CREATE INDEX IF NOT EXISTS team_task_messages_task_idx
-  ON public.team_task_messages (task_id, ts);
+  ON hivemind.team_task_messages (task_id, ts);
 CREATE INDEX IF NOT EXISTS team_task_messages_kind_idx
-  ON public.team_task_messages (task_id, kind);
+  ON hivemind.team_task_messages (task_id, kind);
 CREATE INDEX IF NOT EXISTS team_task_messages_sender_idx
-  ON public.team_task_messages (sender_id)
+  ON hivemind.team_task_messages (sender_id)
   WHERE sender_id != 'system';

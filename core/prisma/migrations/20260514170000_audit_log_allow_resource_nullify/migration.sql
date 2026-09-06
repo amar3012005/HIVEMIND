@@ -7,9 +7,9 @@
 -- All other UPDATEs (changing event_type, user_id, payload, etc.) remain
 -- silently rejected via DO INSTEAD NOTHING.
 
-DROP RULE IF EXISTS audit_logs_no_update ON public.audit_logs;
+DROP RULE IF EXISTS audit_logs_no_update ON hivemind.audit_logs;
 
 CREATE RULE audit_logs_no_update AS
-  ON UPDATE TO public.audit_logs
+  ON UPDATE TO hivemind.audit_logs
   WHERE NOT (NEW.resource_id IS NULL AND OLD.resource_id IS NOT NULL)
   DO INSTEAD NOTHING;

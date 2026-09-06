@@ -4,10 +4,10 @@
 ALTER TABLE hivemind.organizations
   ADD COLUMN IF NOT EXISTS account_type VARCHAR(32);
 
-UPDATE hivemind.organizations
+UPDATE hivemind.organizations AS organization
 SET account_type = CASE
-  WHEN hosting_mode = 'self_host' THEN 'enterprise_self_hosted'
-  WHEN COALESCE(plan, 'free') IN ('enterprise', 'managed') THEN 'enterprise_managed'
+  WHEN to_jsonb(organization)->>'hosting_mode' = 'self_host' THEN 'enterprise_self_hosted'
+  WHEN COALESCE(to_jsonb(organization)->>'plan', 'free') IN ('enterprise', 'managed') THEN 'enterprise_managed'
   ELSE 'personal'
 END
 WHERE account_type IS NULL;

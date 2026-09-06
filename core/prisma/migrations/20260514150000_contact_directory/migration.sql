@@ -2,7 +2,7 @@
 -- Replaces "Fact: email of X is Y@z.com" garbage fact-memories with a
 -- proper contact graph queryable by email, name, or domain.
 
-CREATE TABLE IF NOT EXISTS public.contacts (
+CREATE TABLE IF NOT EXISTS hivemind.contacts (
   id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         UUID            NOT NULL,
   org_id          UUID,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS public.contacts (
   CONSTRAINT contacts_user_email_unique UNIQUE (user_id, email, source_platform)
 );
 
-CREATE INDEX IF NOT EXISTS idx_contacts_user_email ON public.contacts(user_id, email);
-CREATE INDEX IF NOT EXISTS idx_contacts_org ON public.contacts(org_id) WHERE org_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_contacts_domain ON public.contacts(domain);
-CREATE INDEX IF NOT EXISTS idx_contacts_last_seen ON public.contacts(last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contacts_user_email ON hivemind.contacts(user_id, email);
+CREATE INDEX IF NOT EXISTS idx_contacts_org ON hivemind.contacts(org_id) WHERE org_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_contacts_domain ON hivemind.contacts(domain);
+CREATE INDEX IF NOT EXISTS idx_contacts_last_seen ON hivemind.contacts(last_seen_at DESC);

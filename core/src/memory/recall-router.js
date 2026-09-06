@@ -2747,6 +2747,13 @@ export class RecallRouter {
       if (v2 && Array.isArray(v2.memories)) {
         deliverMemories = dedupeMemoriesById(v2.memories);
         finalEvidence = v2.evidence || evidenceWithLineage;
+        // Hydrated rows are already authorized by the exact document boundary.
+        // A broad source question may give those rows no semantic score, so the
+        // cross-lane ranker can otherwise discard every passage and falsely
+        // report that a fully ingested document is absent.
+        if (explicitSourceDocuments.length && evidenceWithLineage.length && !finalEvidence.length) {
+          finalEvidence = evidenceWithLineage.slice(0, HOP2_DOC_LIMIT);
+        }
         rankedCandidates = v2.ranked_candidates || [];
         hybridRankingMode = v2.ranking_mode || 'unknown';
         hybridRerankPasses = Number(v2.rerank_passes) || 0;

@@ -660,7 +660,13 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
     mode: 'explain',
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
-    ...(plan.source?.kind ? { source_kind: plan.source.kind } : {}),
+    // A named source is already bounded by its resolved title/id. Historical
+    // promoted memories often predate `kind:*` provenance, so combining the
+    // exact title with a generic kind such as "document" creates a false
+    // negative. Keep kind as the authority only for kind-only selectors.
+    ...(plan.source?.kind && !plan.source?.title && !plan.source?.document_id
+      ? { source_kind: plan.source.kind }
+      : {}),
     ...(plan.time?.kind === 'latest' || plan.time?.kind === 'earliest'
       ? { temporal_selector: plan.time.kind, temporal_axis: plan.time.axis || 'known_time' }
       : {}),

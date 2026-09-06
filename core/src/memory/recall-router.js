@@ -213,6 +213,21 @@ async function resolveSourceMemoryAnchors(store, ctx, { title = null, kind = nul
   return matches;
 }
 
+async function resolveDocumentMemoryAnchors(prisma, ctx, documents = [], timeoutMs = 1200) {
+  const documentIds = documents.map((document) => document?.id).filter(Boolean);
+  if (!prisma?.memory || !documentIds.length) return [];
+  return withTimeout(prisma.memory.findMany({
+    where: {
+      orgId: ctx.orgId,
+      deletedAt: null,
+      isLatest: true,
+      tags: { hasSome: documentIds.map((id) => `doc-id:${id}`) },
+    },
+    orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }],
+    take: 100,
+  }), timeoutMs, []);
+}
+
 function entityQueryForms(query) {
   if (!query) return [];
   const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
@@ -2184,6 +2199,16 @@ export class RecallRouter {
         kind: recallPlan.source.kind,
         selector: recallPlan.time.selector,
       }, 2500);
+      // Canonical document promotions carry `doc-id:<uuid>`. Once the source
+      // document has passed the authorization resolver above, use that durable
+      // provenance edge as the primary bridge to its memories. This avoids
+      // depending on semantic ranking or optional historical kind metadata to
+      // rediscover already-linked facts.
+      const linked = await resolveDocumentMemoryAnchors(this.prisma, ctx, explicitSourceDocuments);
+      const byId = new Map([...explicitSourceMemoryAnchors, ...linked]
+        .filter((memory) => memory?.id)
+        .map((memory) => [memory.id, memory]));
+      explicitSourceMemoryAnchors = [...byId.values()];
     }
     // A requested source is an authorization boundary, not a ranking hint.
     // Never replace an unresolved source request with tenant-wide memories.

@@ -182,6 +182,8 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }
+    ports:
+      - "127.0.0.1:${EMPLOYEES_PORT:-8060}:8060"
 
   postgres:
     build: { context: ./postgres, dockerfile: Dockerfile.age }   # Postgres 15 + Apache AGE
@@ -250,7 +252,10 @@ services:
     memswap_limit: 1152m
     cpus: 0.5
     environment:
-      NANGO_DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=nango
+      # Nango owns its tables in public. The application schema remains
+      # isolated in `hivemind`; using a private search path here hides the
+      # public uuid-ossp functions required by Nango's bootstrap migrations.
+      NANGO_DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
       NANGO_SERVER_URL: ${NANGO_PUBLIC_URL:-http://nango:3003}
     depends_on:

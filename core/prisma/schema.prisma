@@ -7,7 +7,10 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  extensions = [uuid_ossp(map: "uuid-ossp", schema: "hivemind")]
+  // uuid-ossp remains in its standard public schema because the co-located
+  // Nango service runs its own upstream migrations and calls
+  // uuid_generate_v4() without a schema qualifier.
+  extensions = [uuid_ossp(map: "uuid-ossp", schema: "public")]
 }
 
 /// User accounts with ZITADEL IAM integration and HYOK encryption keys

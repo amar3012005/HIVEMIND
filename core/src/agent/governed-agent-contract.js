@@ -310,6 +310,15 @@ export function verifyPlanCandidate(state = {}, candidate = {}) {
   if (plan.action === 'draft') {
     if (!selected) return { ok: false, code: 'tool_not_discovered', repair: 'Select only a discovered mutation capability.' };
     if (selected.authority !== 'write') return { ok: false, code: 'write_authority_denied', repair: 'A draft action requires a discovered write capability.' };
+    const requestedApps = new Set((state.intent?.apps || []).map(value => normalized(value).replace(/[^a-z0-9]/g, '')).filter(Boolean));
+    const requestsExternalDestination = [...requestedApps].some(app => !['hivemind', 'core', 'local'].includes(app));
+    if (requestsExternalDestination && selected.source === 'core') {
+      return {
+        ok: false,
+        code: 'draft_destination_authority_mismatch',
+        repair: 'The requested mutation targets a connected application. Select a discovered write capability from that application; a Core memory write cannot satisfy an external delivery outcome.',
+      };
+    }
     const outcomeIds = plan.outcome_ids.length ? plan.outcome_ids : unresolved;
     const invalidOutcome = outcomeIds.find(id => state.intent?.outcomes?.find(outcome => outcome.id === id)?.kind !== 'draft');
     if (invalidOutcome) return { ok: false, code: 'draft_cannot_complete_read', repair: 'A draft may only complete a requested mutation outcome.' };

@@ -87,3 +87,16 @@ test('hydrating the next user turn preserves replaceable source context', async 
   assert.equal(hydrated.sourceContext.answer, 'The answer came from the pricing page.');
   assert.equal(hydrated.sourceContext.refs[0].url, 'https://example.com/pricing');
 });
+
+test('the shared checkpoint retains context across capability toggles', async () => {
+  const graph = createCompactContextGraph({ checkpointer: new MemorySaver() });
+  const identity = { orgId: 'org', userId: 'user', threadId: 'shared-toggle' };
+  await recordCompactAssistantTurn({
+    ...identity,
+    userMessage: 'What do you know about Richards, Sullivan?',
+    response: 'Richards, Sullivan, Brock & Associates was the design firm for the competition.',
+  }, { graph });
+  const connectedTurn = await hydrateCompactContext({ ...identity, history: [] }, { graph });
+  assert.equal(connectedTurn.history.at(-1).role, 'assistant');
+  assert.match(connectedTurn.history.at(-1).content, /design firm for the competition/);
+});

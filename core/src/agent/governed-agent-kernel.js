@@ -37,6 +37,7 @@ import {
 import { GovernedAgentEventLedger, safeEventEnvelope } from './governed-agent-event-ledger.js';
 import { createGovernedTrace } from './governed-agent-observability.js';
 import { executeGovernedCoreRead, executeGovernedCoreWrite, loadGovernedCoreCapabilities } from './governed-agent-core-tools.js';
+import { hydrateCompactContext } from './v2/compact-context.js';
 import {
   compileExecutionPlan,
   markPlanNodeRunning,
@@ -625,11 +626,23 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       conversationId: ctx.threadId || ctx.conversationId,
       turns: ctx.historyTurns,
     });
+    // `use_tools` is a capability latch, not a conversation boundary. Native
+    // and connected turns append to this same tenant-scoped checkpoint.
+    const sharedConversation = await hydrateCompactContext({
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      threadId: ctx.threadId || ctx.conversationId,
+      history: [],
+    }, { graph: ctx.sharedConversationGraph });
     const suppliedConversationContext = (Array.isArray(ctx.conversationHistory) ? ctx.conversationHistory : [])
       .filter(turn => ['user', 'assistant'].includes(turn?.role) && text(turn?.content, 6000))
       .slice(-Math.max(0, Math.min(12, Number(ctx.historyTurns) || 6)))
       .map(turn => ({ role: turn.role, content: text(turn.content, 6000) }));
-    const conversationContext = [...persistedConversationContext, ...suppliedConversationContext]
+    const conversationContext = [
+      ...(sharedConversation.history || []),
+      ...persistedConversationContext,
+      ...suppliedConversationContext,
+    ]
       .filter((turn, index, rows) => index === rows.findIndex(item => item.role === turn.role && item.content === turn.content))
       .slice(-12);
     const referenceEvidence = await loadGovernedConversationEvidence({

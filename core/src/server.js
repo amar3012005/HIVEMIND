@@ -25041,7 +25041,7 @@ exit \$RC
                       const tot = Number(result?.usage?.total_tokens) || 0;
                       if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
                     } catch { /* metering never breaks the stream */ }
-                    if (!useTools && (body?.thread_id || body?.conversation_id)) {
+                    if (body?.thread_id || body?.conversation_id) {
                       const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
                       await recordCompactAssistantTurn({
                         orgId, userId, threadId: body.thread_id || body.conversation_id,
@@ -25148,7 +25148,7 @@ exit \$RC
                     events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
                   };
                 }
-                if (!useTools && (body?.thread_id || body?.conversation_id)) {
+                if (body?.thread_id || body?.conversation_id) {
                   const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
                   await recordCompactAssistantTurn({
                     orgId, userId, threadId: body.thread_id || body.conversation_id,

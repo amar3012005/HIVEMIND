@@ -15,6 +15,7 @@ import {
 } from '../../src/agent/governed-agent-contract.js';
 import { GovernedAgentEventLedger } from '../../src/agent/governed-agent-event-ledger.js';
 import { resumeGovernedProviderEvent, runGovernedAgentRuntime } from '../../src/agent/governed-agent-runtime.js';
+import { createCompactContextGraph, recordCompactAssistantTurn } from '../../src/agent/v2/compact-context.js';
 
 function fakePrisma() {
   const runs = new Map();
@@ -294,6 +295,26 @@ test('verifier rejects a write selected as a read and premature clarification', 
   assert.deepEqual(missingRequiredFields({ required: ['post_id'], properties: { post_id: { type: 'string' } } }, {}), [{ field: 'post_id', schema: { type: 'string' } }]);
 });
 
+test('an external delivery outcome cannot be settled by a Core memory write', () => {
+  const state = {
+    intent: {
+      apps: ['gmail'],
+      outcomes: [{ id: 'deliver', kind: 'draft', description: 'deliver the prior answer to the recipient' }],
+    },
+    capabilities: [
+      { slug: 'hivemind_log_decision', source: 'core', authority: 'write', toolkit: 'hivemind' },
+      { slug: 'GMAIL_SEND_EMAIL', source: 'composio', authority: 'write', toolkit: 'gmail' },
+    ],
+    receipts: [], searchQueries: [], discoveryAttempts: 1,
+  };
+  assert.equal(verifyPlanCandidate(state, {
+    action: 'draft', tool_slug: 'hivemind_log_decision', outcome_ids: ['deliver'],
+  }).code, 'draft_destination_authority_mismatch');
+  assert.equal(verifyPlanCandidate(state, {
+    action: 'draft', tool_slug: 'GMAIL_SEND_EMAIL', outcome_ids: ['deliver'],
+  }).ok, true);
+});
+
 test('provider event ledger deduplicates by provider event id, not delivery count', async () => {
   const prisma = fakePrisma();
   const ledger = new GovernedAgentEventLedger({ prisma });
@@ -405,6 +426,46 @@ test('a schema-valid, evidence-grounded write becomes a draft and never executes
   assert.deepEqual(result.draftIds, ['draft-1']);
   assert.equal(prisma.drafts.length, 1);
   assert.equal(executeCalls, 0);
+});
+
+test('a connected draft consumes the prior native answer from the shared graph session', async () => {
+  const prisma = fakePrisma();
+  const sharedConversationGraph = createCompactContextGraph({ checkpointer: new MemorySaver() });
+  const priorAnswer = 'Richards, Sullivan, Brock & Associates was the design firm for the 1980 competition.';
+  await recordCompactAssistantTurn({
+    orgId: 'org', userId: 'user', threadId: 'cross-toggle',
+    userMessage: 'What do you know about Richards, Sullivan?', response: priorAnswer,
+  }, { graph: sharedConversationGraph });
+  const send = tool('GMAIL_SEND_EMAIL', {
+    type: 'object', properties: {
+      recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' },
+    }, required: ['recipient_email', 'subject', 'body'], additionalProperties: false,
+  });
+  const result = await runGovernedAgentRuntime({
+    message: 'Send the above information to rama@example.com.',
+    ctx: {
+      orgId: 'org', userId: 'user', language: 'en', threadId: 'cross-toggle', historyTurns: 6,
+      sharedConversationGraph,
+      governedDecision: async ({ stage, input }) => {
+        if (stage === 'intent') {
+          assert.match(input.conversation_context.at(-1).content, /design firm for the 1980 competition/);
+          return {
+            locale: 'en', kind: 'write', apps: ['gmail'], discovery_query: 'prepare an email draft from prior conversation content',
+            outcomes: [{ id: 'deliver', kind: 'draft', description: 'deliver prior conversation content by email' }],
+            known_facts: { recipient_email: 'rama@example.com' }, business_question: null,
+          };
+        }
+        if (stage === 'planning') return { action: 'draft', tool_slug: 'GMAIL_SEND_EMAIL', outcome_ids: ['deliver'], reason: 'create the requested external draft' };
+        if (stage === 'arguments') return { recipient_email: 'rama@example.com', subject: 'Richards, Sullivan', body: priorAnswer };
+        throw new Error(`unexpected stage ${stage}`);
+      },
+    },
+    composio: composioWith([send]), prisma, checkpointer: new MemorySaver(),
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(prisma.drafts[0].toolName, 'GMAIL_SEND_EMAIL');
+  assert.equal(prisma.drafts[0].provider, 'composio');
+  assert.match(prisma.drafts[0].toolArgs.body, /Richards, Sullivan/);
 });
 
 test('Core evidence is a first-class prerequisite and an approved draft executes once before sealing', async () => {

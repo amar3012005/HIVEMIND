@@ -129,6 +129,7 @@ async function startRoomBridge(input) {
 const ROOM_BRIDGE_HTML = `<!doctype html><meta charset="utf-8"><script type="module">
 import RealtimeKitClient from '/internal/realtimekit.js';
 let meeting; let audioContext; let destination; let queue = Promise.resolve();
+window.__RealtimeKitClient = RealtimeKitClient;
 window.__roomBridgeState = { status: 'loading' };
 async function speak(answer) {
   const base64 = await window.hivemindRoomTts(answer);
@@ -146,7 +147,7 @@ window.__startRoomBridge = async ({ authToken, roomId, meetingId }) => {
   meeting.participants.on('broadcastedMessage', ({ type, payload }) => {
     if (type !== 'hivemind.response.v1' || payload?.room_id !== roomId || !payload?.answer) return;
     const answer = String(payload.answer).slice(0, 4000);
-    queue = queue.then(async () => { await meeting.chat.sendTextMessage('HIVEMIND · ' + answer); await speak(answer); }).catch(() => {});
+    queue = queue.then(async () => { await meeting.chat.sendTextMessage('HIVEMIND · ' + answer); await speak(answer); window.__roomBridgeState.last_spoken_at = new Date().toISOString(); }).catch(() => {});
   });
   await meeting.join(); window.__roomBridgeState = { status: 'ready' };
 };
@@ -697,7 +698,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') return send(res, 200, await startRoomBridge(await readJson(req)));
       if (req.method === 'GET') {
         const entry = roomBridges.get(roomBridgeMatch[1]);
-        return send(res, entry ? 200 : 404, entry ? { status: 'ready', room_id: roomBridgeMatch[1], participant_id: entry.participantId, started_at: entry.startedAt } : { error: 'room_bridge_not_found' });
+        const bridgeState = entry ? await entry.page.evaluate(() => window.__roomBridgeState).catch(() => null) : null;
+        return send(res, entry && bridgeState?.status === 'ready' ? 200 : 404, entry && bridgeState?.status === 'ready' ? { ...bridgeState, room_id: roomBridgeMatch[1], participant_id: entry.participantId, started_at: entry.startedAt } : { error: 'room_bridge_not_found' });
       }
       if (req.method === 'DELETE') { await closeRoomBridge(roomBridgeMatch[1]); return send(res, 200, { closed: true }); }
       return send(res, 405, { error: 'method_not_allowed' });

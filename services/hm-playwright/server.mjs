@@ -24,7 +24,7 @@ const NAVIGATION_TIMEOUT_MS = Math.max(3_000, Number(process.env.PLAYWRIGHT_NAVI
 const TARA_KEY = String(process.env.TARA_DG_API_KEY || '');
 const TARA_TTS_URL = String(process.env.TARA_ROOM_TTS_URL || 'http://tara-deepgram:8091/room-speak');
 const ROOM_BRIDGE_MAX_MS = Math.max(60_000, Number(process.env.PLAYWRIGHT_ROOM_BRIDGE_MAX_MS || 8 * 60 * 60_000));
-const realtimeKitModule = '/app/node_modules/@cloudflare/realtimekit/dist/index.es.js';
+const realtimeKitModule = '/app/realtimekit.bundle.js';
 
 // Named, pre-captured sessions (storageState JSON: cookies + localStorage) for
 // platforms that gate anonymous access — e.g. LinkedIn/X/Instagram. Captured

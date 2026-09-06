@@ -455,6 +455,8 @@ services:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
       PLAYWRIGHT_SESSIONS_DIR: /app/sessions
       PLAYWRIGHT_CRAWL_CONCURRENCY: "4"
+      TARA_DG_API_KEY: ${TARA_DG_API_KEY:?TARA_DG_API_KEY is required}
+      TARA_ROOM_TTS_URL: http://tara-deepgram:8091/room-speak
     volumes:
       # Captured storageState files are credentials: host-managed, never baked
       # into an image, and mounted read-only into the browser service.

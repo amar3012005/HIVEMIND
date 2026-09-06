@@ -43,6 +43,8 @@ export function roomProjection(room) {
     status: state.status || 'open',
     media_provider: state.media_provider || 'cloudflare-realtimekit',
     meeting_id: state.meeting_id || null,
+    facilitator: state.facilitator || null,
+    facilitator_status: state.facilitator_status || 'unavailable',
     participants: Array.isArray(state.participants) ? state.participants : [],
     created_at: room.createdAt,
     updated_at: room.updatedAt,

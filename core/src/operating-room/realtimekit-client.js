@@ -40,6 +40,10 @@ export async function createRealtimeMeeting({ title, env, fetchImpl } = {}) {
   return request('/meetings', { env, fetchImpl, body: { title } });
 }
 
+export async function deleteRealtimeMeeting({ meetingId, env, fetchImpl } = {}) {
+  return request(`/meetings/${encodeURIComponent(meetingId)}`, { method: 'DELETE', env, fetchImpl });
+}
+
 export async function addRealtimeParticipant({ meetingId, userId, name, isHost = false, env, fetchImpl } = {}) {
   const cfg = config(env);
   return request(`/meetings/${encodeURIComponent(meetingId)}/participants`, {

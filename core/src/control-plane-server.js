@@ -101,7 +101,8 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { queueMeetingFinalization } from './knowledge/meeting-finalization-worker.js';
-import { addRealtimeParticipant, createRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
+import { addRealtimeParticipant, createRealtimeMeeting, deleteRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
+import { closeOperatingRoomBridge, getOperatingRoomBridge, startOperatingRoomBridge } from './operating-room/room-bridge-client.js';
 import { compactRoomContext, normalizeRoomText, roomProjection, wakeIntent } from './operating-room/room-contract.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
@@ -9024,9 +9025,22 @@ const server = http.createServer(async (req, res) => {
     const name = normalizeRoomText(body.name || 'Company Operating Room', 120);
     const goal = normalizeRoomText(body.goal || 'Understand the company and coordinate the next best actions.', 1200);
     try {
+      const roomId = crypto.randomUUID();
       const meeting = await createRealtimeMeeting({ title: name });
+      const facilitatorParticipant = await addRealtimeParticipant({
+        meetingId: meeting.id,
+        userId: roomId,
+        name: 'HIVEMIND · TARA',
+        isHost: true,
+      });
+      const facilitator = {
+        name: 'HIVEMIND · TARA',
+        role: 'admin',
+        participant_id: facilitatorParticipant.id,
+      };
       const room = await prisma.hyperRoom.create({
         data: {
+          id: roomId,
           userId: current.session.userId,
           orgId: current.session.orgId,
           name,
@@ -9039,12 +9053,27 @@ const server = http.createServer(async (req, res) => {
             status: 'open',
             media_provider: 'cloudflare-realtimekit',
             meeting_id: meeting.id,
+            facilitator,
+            facilitator_status: 'provisioning',
             participants: [],
             transcript: [],
           },
         },
       });
-      return jsonResponse(res, { room: roomProjection(room) }, 201);
+      try {
+        await startOperatingRoomBridge({
+          roomId,
+          meetingId: meeting.id,
+          authToken: facilitatorParticipant.token || facilitatorParticipant.auth_token,
+          participantId: facilitatorParticipant.id,
+        });
+      } catch (bridgeError) {
+        await prisma.hyperRoom.delete({ where: { id: roomId } }).catch(() => {});
+        await deleteRealtimeMeeting({ meetingId: meeting.id }).catch(() => {});
+        throw bridgeError;
+      }
+      const readyRoom = await prisma.hyperRoom.update({ where: { id: roomId }, data: { roomPlaybook: { ...room.roomPlaybook, facilitator_status: 'ready' } } });
+      return jsonResponse(res, { room: roomProjection(readyRoom) }, 201);
     } catch (error) {
       return jsonResponse(res, { error: error.code || 'operating_room_create_failed', message: error.message }, error.status || 500);
     }
@@ -9068,6 +9097,13 @@ const server = http.createServer(async (req, res) => {
     if (action === 'join' && req.method === 'POST') {
       if (!state.meeting_id) return jsonResponse(res, { error: 'operating_room_media_unavailable' }, 503);
       try {
+        if (!state.facilitator?.participant_id) return jsonResponse(res, { error: 'operating_room_facilitator_unavailable' }, 503);
+        const bridgeReady = state.facilitator_status === 'ready'
+          && await getOperatingRoomBridge({ roomId: room.id }).then((bridge) => bridge.status === 'ready').catch(() => false);
+        if (!bridgeReady) {
+          const facilitatorToken = await refreshRealtimeParticipant({ meetingId: state.meeting_id, participantId: state.facilitator.participant_id });
+          await startOperatingRoomBridge({ roomId: room.id, meetingId: state.meeting_id, authToken: facilitatorToken.token || facilitatorToken.auth_token, participantId: state.facilitator.participant_id });
+        }
         const verifiedName = normalizeRoomText(membership.user?.displayName || membership.user?.email?.split('@')[0] || 'Member', 120);
         const existingParticipant = await prisma.operatingRoomParticipant.findUnique({
           where: { roomId_userId: { roomId: room.id, userId: current.session.userId } },
@@ -9103,7 +9139,7 @@ const server = http.createServer(async (req, res) => {
         const participants = durableRoster.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role }));
         await prisma.hyperRoom.update({
           where: { id: room.id },
-          data: { roomPlaybook: { ...state, participants, status: 'live' } },
+          data: { roomPlaybook: { ...state, participants, status: 'live', facilitator_status: 'ready' } },
         });
         return jsonResponse(res, {
           room: { ...roomProjection(room), status: 'live', participants },
@@ -9229,6 +9265,7 @@ const server = http.createServer(async (req, res) => {
         where: { id: room.id },
         data: { roomPlaybook: { ...state, status: 'finalizing', meeting_session_id: room.id, closed_at: new Date().toISOString() }, archivedAt: new Date() },
       });
+      await closeOperatingRoomBridge({ roomId: room.id }).catch(() => {});
       return jsonResponse(res, { room: roomProjection(updated) });
     }
 

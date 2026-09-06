@@ -6,7 +6,7 @@ FROM mcr.microsoft.com/playwright:v1.49.1-noble
 WORKDIR /app
 ARG PLAYWRIGHT_MCP_VERSION=0.0.78
 RUN npm init -y >/dev/null 2>&1 \
-    && npm i "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+    && npm i "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "@cloudflare/realtimekit@2.0.2" \
     && npx "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" install-browser chrome-for-testing
 COPY server.mjs /app/server.mjs
 RUN mkdir -p /app/sessions

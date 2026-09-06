@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compactRoomContext, normalizeRoomText, wakeIntent } from './room-contract.js';
 import { addRealtimeParticipant, createRealtimeMeeting, refreshRealtimeParticipant } from './realtimekit-client.js';
+import { closeOperatingRoomBridge, startOperatingRoomBridge } from './room-bridge-client.js';
 
 test('wake phrase is deterministic and strips the address', () => {
   assert.deepEqual(wakeIntent('HIVEMIND, what do you think?'), { addressed: true, query: 'what do you think?' });
@@ -25,10 +26,27 @@ test('RealtimeKit calls use server credentials and stable user identity', async 
   const env = { CLOUDFLARE_ACCOUNT_ID: 'account', CLOUDFLARE_REALTIMEKIT_APP_ID: 'app', CLOUDFLARE_REALTIMEKIT_API_TOKEN: 'token', CLOUDFLARE_REALTIMEKIT_HOST_PRESET: 'host', CLOUDFLARE_REALTIMEKIT_MEMBER_PRESET: 'member' };
   await createRealtimeMeeting({ title: 'Company Room', env, fetchImpl });
   await addRealtimeParticipant({ meetingId: 'meeting-1', userId: 'user-uuid', name: 'Verified User', isHost: false, env, fetchImpl });
+  await addRealtimeParticipant({ meetingId: 'meeting-1', userId: 'room-uuid', name: 'HIVEMIND · TARA', isHost: true, env, fetchImpl });
   await refreshRealtimeParticipant({ meetingId: 'meeting-1', participantId: 'participant-1', env, fetchImpl });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.equal(calls[0].url, 'https://api.cloudflare.com/client/v4/accounts/account/realtime/kit/app/meetings');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer token');
   assert.deepEqual(JSON.parse(calls[1].options.body), { name: 'Verified User', preset_name: 'member', custom_participant_id: 'user-uuid' });
-  assert.match(calls[2].url, /participants\/participant-1\/token$/);
+  assert.deepEqual(JSON.parse(calls[2].options.body), { name: 'HIVEMIND · TARA', preset_name: 'host', custom_participant_id: 'room-uuid' });
+  assert.match(calls[3].url, /participants\/participant-1\/token$/);
+});
+
+test('Operating Room bridge calls are authenticated, bounded, and idempotent by room id', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, json: async () => ({ status: 'ready' }) };
+  };
+  const env = { PLAYWRIGHT_SERVICE_TOKEN: 'internal-token', OPERATING_ROOM_BRIDGE_URL: 'http://bridge/v1/room-bridges/' };
+  await startOperatingRoomBridge({ roomId: '11111111-1111-1111-1111-111111111111', meetingId: 'meeting-1', participantId: 'bot-1', authToken: 'bot-token', env, fetchImpl });
+  await closeOperatingRoomBridge({ roomId: '11111111-1111-1111-1111-111111111111', env, fetchImpl });
+  assert.equal(calls[0].url, 'http://bridge/v1/room-bridges/11111111-1111-1111-1111-111111111111');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer internal-token');
+  assert.equal(JSON.parse(calls[0].options.body).auth_token, 'bot-token');
+  assert.equal(calls[1].options.method, 'DELETE');
 });

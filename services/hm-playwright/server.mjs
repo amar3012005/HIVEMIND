@@ -21,6 +21,10 @@ const MAX_PDF_BYTES = 4 * 1024 * 1024;
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.PLAYWRIGHT_CRAWL_CONCURRENCY || 2));
 const IDLE_CLOSE_MS = Math.max(10_000, Number(process.env.PLAYWRIGHT_BROWSER_IDLE_MS || 60_000));
 const NAVIGATION_TIMEOUT_MS = Math.max(3_000, Number(process.env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS || 15_000));
+const TARA_KEY = String(process.env.TARA_DG_API_KEY || '');
+const TARA_TTS_URL = String(process.env.TARA_ROOM_TTS_URL || 'http://tara-deepgram:8091/room-speak');
+const ROOM_BRIDGE_MAX_MS = Math.max(60_000, Number(process.env.PLAYWRIGHT_ROOM_BRIDGE_MAX_MS || 8 * 60 * 60_000));
+const realtimeKitModule = '/app/node_modules/@cloudflare/realtimekit/dist/index.es.js';
 
 // Named, pre-captured sessions (storageState JSON: cookies + localStorage) for
 // platforms that gate anonymous access — e.g. LinkedIn/X/Instagram. Captured
@@ -69,6 +73,74 @@ const MAX_INTERACTIVE_SESSIONS = Math.max(1, Number(process.env.PLAYWRIGHT_MAX_I
 const SESSION_ID_RE = /^[a-f0-9-]{36}$/i;
 
 const interactiveSessions = new Map(); // id -> { orgId, context, page, idleTimer, hardTimer }
+const roomBridges = new Map();
+
+async function closeRoomBridge(roomId) {
+  const entry = roomBridges.get(roomId);
+  if (!entry) return;
+  roomBridges.delete(roomId);
+  clearTimeout(entry.hardTimer);
+  await entry.page.evaluate(() => window.__leaveRoomBridge?.()).catch(() => {});
+  await entry.context.close().catch(() => {});
+}
+
+async function startRoomBridge(input) {
+  const roomId = String(input?.room_id || '');
+  const meetingId = String(input?.meeting_id || '');
+  const authToken = String(input?.auth_token || '');
+  if (!ORG_ID_RE.test(roomId) || !meetingId || !authToken || authToken.length > 4096) throw Object.assign(new Error('invalid_room_bridge_request'), { status: 400 });
+  if (!TARA_KEY) throw Object.assign(new Error('tara_room_speech_not_configured'), { status: 503 });
+  await closeRoomBridge(roomId);
+  const browser = await browserInstance();
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  const page = await context.newPage();
+  page.on('close', () => {
+    const current = roomBridges.get(roomId);
+    if (current?.page === page) roomBridges.delete(roomId);
+  });
+  await page.exposeFunction('hivemindRoomTts', async (text) => {
+    const response = await fetch(TARA_TTS_URL, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-tara-key': TARA_KEY },
+      body: JSON.stringify({ text: String(text || '').slice(0, 4000) }), signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`tara_room_speech_failed:${response.status}`);
+    return Buffer.from(await response.arrayBuffer()).toString('base64');
+  });
+  await page.goto(`http://127.0.0.1:${PORT}/internal/room-bridge`, { waitUntil: 'load' });
+  await page.evaluate((config) => window.__startRoomBridge(config), { authToken, roomId, meetingId });
+  await page.waitForFunction(() => window.__roomBridgeState?.status === 'ready', null, { timeout: 15_000 });
+  const hardTimer = setTimeout(() => closeRoomBridge(roomId), ROOM_BRIDGE_MAX_MS);
+  hardTimer.unref();
+  roomBridges.set(roomId, { context, page, hardTimer, participantId: String(input?.participant_id || ''), startedAt: new Date().toISOString() });
+  return { status: 'ready', room_id: roomId, participant_id: String(input?.participant_id || '') };
+}
+
+const ROOM_BRIDGE_HTML = `<!doctype html><meta charset="utf-8"><script type="module">
+import RealtimeKitClient from '/internal/realtimekit.js';
+let meeting; let audioContext; let destination; let queue = Promise.resolve();
+window.__roomBridgeState = { status: 'loading' };
+async function speak(answer) {
+  const base64 = await window.hivemindRoomTts(answer);
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const buffer = await audioContext.decodeAudioData(bytes.buffer);
+  const source = audioContext.createBufferSource(); source.buffer = buffer; source.connect(destination); source.start();
+  await new Promise(resolve => { source.onended = resolve; });
+}
+window.__startRoomBridge = async ({ authToken, roomId, meetingId }) => {
+  meeting = await RealtimeKitClient.init({ authToken, roomName: meetingId, defaults: { audio: false, video: false } });
+  audioContext = new AudioContext({ sampleRate: 48000 }); destination = audioContext.createMediaStreamDestination();
+  const oscillator = audioContext.createOscillator(); const silence = audioContext.createGain(); silence.gain.value = 0;
+  oscillator.connect(silence).connect(destination); oscillator.start();
+  await meeting.self.enableAudio(destination.stream.getAudioTracks()[0]);
+  meeting.participants.on('broadcastedMessage', ({ type, payload }) => {
+    if (type !== 'hivemind.response.v1' || payload?.room_id !== roomId || !payload?.answer) return;
+    const answer = String(payload.answer).slice(0, 4000);
+    queue = queue.then(async () => { await meeting.chat.sendTextMessage('HIVEMIND · ' + answer); await speak(answer); }).catch(() => {});
+  });
+  await meeting.join(); window.__roomBridgeState = { status: 'ready' };
+};
+window.__leaveRoomBridge = async () => meeting?.leave?.();
+</script>`;
 
 function touchInteractiveSession(entry, id) {
   clearTimeout(entry.idleTimer);
@@ -181,7 +253,7 @@ async function acquire() {
 function release() {
   active = Math.max(0, active - 1);
   waiters.shift()?.();
-  if (!active) {
+  if (!active && roomBridges.size === 0) {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(async () => {
       const browser = await browserPromise?.catch(() => null);
@@ -195,7 +267,7 @@ function release() {
 async function browserInstance() {
   clearTimeout(idleTimer);
   if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true }).catch((error) => {
+    browserPromise = chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] }).catch((error) => {
       browserPromise = null;
       throw error;
     });
@@ -588,12 +660,15 @@ async function renderPdf(input) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/internal/realtimekit.js') return sendBinary(res, 200, fs.readFileSync(realtimeKitModule), 'text/javascript');
+  if (req.method === 'GET' && req.url === '/internal/room-bridge') return sendBinary(res, 200, Buffer.from(ROOM_BRIDGE_HTML), 'text/html; charset=utf-8');
   if (req.method === 'GET' && req.url === '/health') {
     const mcpRunning = mcp.exitCode === null;
     return send(res, mcpRunning ? 200 : 503, {
       status: mcpRunning ? 'ok' : 'degraded', browser: browserPromise ? 'warm' : 'idle',
       active, queued: waiters.length, mcp: mcpRunning ? 'running' : 'stopped',
       interactive_sessions: interactiveSessions.size,
+      room_bridges: roomBridges.size,
     });
   }
 
@@ -602,8 +677,21 @@ const server = http.createServer(async (req, res) => {
   const isSessionsRoute = req.url === '/v1/sessions' || actionMatch || sessionIdMatch;
   const isCrawlRoute = req.url === '/v1/crawl';
   const isPdfRoute = req.url === '/v1/pdf';
-  if (!isSessionsRoute && !isCrawlRoute && !isPdfRoute) return send(res, 404, { error: 'not_found' });
+  const roomBridgeMatch = req.url.match(/^\/v1\/room-bridges\/([0-9a-f-]{36})$/i);
+  if (!isSessionsRoute && !isCrawlRoute && !isPdfRoute && !roomBridgeMatch) return send(res, 404, { error: 'not_found' });
   if (!secureEqual(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''), TOKEN)) return send(res, 401, { error: 'unauthorized' });
+
+  if (roomBridgeMatch) {
+    try {
+      if (req.method === 'POST') return send(res, 200, await startRoomBridge(await readJson(req)));
+      if (req.method === 'GET') {
+        const entry = roomBridges.get(roomBridgeMatch[1]);
+        return send(res, entry ? 200 : 404, entry ? { status: 'ready', room_id: roomBridgeMatch[1], participant_id: entry.participantId, started_at: entry.startedAt } : { error: 'room_bridge_not_found' });
+      }
+      if (req.method === 'DELETE') { await closeRoomBridge(roomBridgeMatch[1]); return send(res, 200, { closed: true }); }
+      return send(res, 405, { error: 'method_not_allowed' });
+    } catch (error) { return send(res, error.status || 500, { error: String(error.message || error).slice(0, 500) }); }
+  }
 
   if (isCrawlRoute) {
     if (req.method !== 'POST') return send(res, 404, { error: 'not_found' });
@@ -671,6 +759,7 @@ server.listen(PORT, HOST, () => console.log(`[hm-playwright] crawl API listening
 
 async function shutdown() {
   server.close();
+  await Promise.all([...roomBridges.keys()].map(closeRoomBridge));
   mcp.kill('SIGTERM');
   const browser = await browserPromise?.catch(() => null);
   await browser?.close().catch(() => {});

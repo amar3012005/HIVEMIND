@@ -107,6 +107,7 @@ async function startRoomBridge(input) {
     return Buffer.from(await response.arrayBuffer()).toString('base64');
   });
   await page.goto(`http://127.0.0.1:${PORT}/internal/room-bridge`, { waitUntil: 'load' });
+  await page.waitForFunction(() => typeof window.__startRoomBridge === 'function', null, { timeout: 10_000 });
   await page.evaluate((config) => window.__startRoomBridge(config), { authToken, roomId, meetingId });
   await page.waitForFunction(() => window.__roomBridgeState?.status === 'ready', null, { timeout: 15_000 });
   const hardTimer = setTimeout(() => closeRoomBridge(roomId), ROOM_BRIDGE_MAX_MS);

@@ -30,7 +30,11 @@ export function compileNativePlan(plan, message, context = {}) {
     response_depth: plan.response.depth, retrieval_shape: plan.response.shape,
     answer_objective: plan.response.objective,
     retrieval: plan.retrieval || null,
-    recall_mode: plan.response.scope === 'bounded' ? 'fact' : 'explain',
+    // A source read must expand canonical document evidence even when the
+    // answer itself is bounded. `fact` skips that evidence lane and can turn a
+    // fully ingested named document into a false "not found" response.
+    recall_mode: plan.operation === 'source_read' ? 'explain'
+      : plan.response.scope === 'bounded' ? 'fact' : 'explain',
     tool_groups: Object.keys(HIVEMIND_TOOL_GROUPS),
     side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',
     source: descriptiveSourceHint ? null : plan.references.source,

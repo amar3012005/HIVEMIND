@@ -88,6 +88,7 @@ test('list_memories maps onto the native list tool', () => {
 
 test('named source and latest upload preserve source/time semantics', () => {
   const named = compileNativePlan(validateNativePlan(makePlan({ operation: 'source_read', query: 'Solvis products', source: { title: 'Whitepaper_Transformation.pdf', document_id: null, kind: 'pdf', selection: null } })), 'file');
+  assert.equal(named.recall_mode, 'explain');
   assert.equal(named.source.title, 'Whitepaper_Transformation.pdf');
   const latest = compileNativePlan(validateNativePlan(makePlan({ query: 'latest uploaded image visual contents', source: { title: null, document_id: null, kind: 'image', selection: 'latest' }, time: { semantics: 'latest', axis: 'known_time' } })), 'recent image');
   assert.equal(latest.time.kind, 'latest'); assert.equal(latest.source.kind, 'image');

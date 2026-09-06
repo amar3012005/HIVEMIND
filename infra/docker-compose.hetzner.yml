@@ -24,7 +24,7 @@ x-common-env: &common-env
   # BYOD: per-org remote agents. Inert until an agent enrolls (file empty). Shared with the broker.
   MNEME_AGENT_REGISTRY_FILE: ${MNEME_AGENT_REGISTRY_FILE:-/app/data/byod-agents.json}
   # ── model providers (egress) ──
-  GROQ_API_KEY: ${GROQ_API_KEY}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
   OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -167,7 +167,7 @@ services:
       # not actionable lifecycle events and otherwise pollute every restart.
       PYTHONWARNINGS: ignore::DeprecationWarning
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
-      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
       CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
       CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
@@ -374,7 +374,7 @@ services:
       ZERNIO_AMD: ${ZERNIO_AMD:-false}
       # Live-listen: core SIGNS a session-scoped token, this service VERIFIES it,
       # so the browser never holds the privileged dial key. Value from ../.env.
-      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET}
+      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET:-}
       CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
       CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
       CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
@@ -413,7 +413,7 @@ services:
       HIVEMIND_CORE_EVENTS_URL: http://core:3000/internal/v1/tara/calls
       # Live-listen: verify Core-minted session-scoped tokens (same key core signs
       # with) so the dashboard can hear Grok PSTN calls without the dial key.
-      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET}
+      TARA_DG_LISTEN_SECRET: ${TARA_DG_LISTEN_SECRET:-}
       # Dial gate — same shared secret + `x-tara-key` contract as tara-deepgram.
       # NOTE: the destination allowlist deliberately is NOT set here. Compose
       # `environment` OVERRIDES env_file, so listing it would blank the value from
@@ -443,7 +443,7 @@ services:
     restart: unless-stopped
     environment:
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
-      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}
       HERMES_MGMT_KEY: ${HERMES_MGMT_KEY:-}

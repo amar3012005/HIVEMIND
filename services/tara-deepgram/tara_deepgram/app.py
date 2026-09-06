@@ -18,6 +18,7 @@ import re
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from . import campaigns, config, telephony
 from .agent_session import run_bridge
@@ -35,6 +36,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(think_router)
+
+
+def _service_auth_ok(request: Request) -> bool:
+    import hmac
+    expected = (os.environ.get("TARA_DG_API_KEY") or "").strip()
+    supplied = (request.headers.get("x-tara-key") or "").strip()
+    return bool(expected and supplied) and hmac.compare_digest(supplied, expected)
+
+
+class RoomSpeakRequest(BaseModel):
+    text: str
+    language: str = "en"
+    voice_id: str | None = None
+
+
+@app.post("/room-speak")
+async def room_speak(body: RoomSpeakRequest, request: Request):
+    """Authenticated, bounded TARA speech for the internal Operating Room bridge."""
+    from fastapi.responses import Response
+    if not _service_auth_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    text = body.text.strip()[:4000]
+    if not text:
+        return JSONResponse({"error": "text_required"}, status_code=400)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            from .ai_gateway import request as gateway_request
+            if config.SPEAK_PROVIDER == "cartesia" and config.CARTESIA_API_KEY:
+                response = await gateway_request(
+                    client, "POST", config.CARTESIA_TTS_URL,
+                    headers={"Authorization": f"Bearer {config.CARTESIA_API_KEY}", "Cartesia-Version": "2025-04-16", "Content-Type": "application/json"},
+                    json={"model_id": config.CARTESIA_MODEL, "transcript": text,
+                          "voice": {"mode": "id", "id": body.voice_id or config.CARTESIA_VOICE_ID},
+                          "language": (body.language or "en").split("-")[0],
+                          "output_format": {"container": "mp3", "sample_rate": 44100, "bit_rate": 64000}},
+                )
+            elif config.DEEPGRAM_API_KEY:
+                response = await gateway_request(
+                    client, "POST", f"https://api.deepgram.com/v1/speak?model={body.voice_id or config.DEEPGRAM_SPEAK_MODEL}",
+                    headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}", "Content-Type": "application/json"},
+                    json={"text": text},
+                )
+            else:
+                return JSONResponse({"error": "tts_unavailable"}, status_code=503)
+        if response.status_code != 200:
+            return JSONResponse({"error": "tts_failed"}, status_code=502)
+        return Response(content=response.content, media_type="audio/mpeg")
+    except Exception:  # noqa: BLE001
+        log.exception("room speech failed")
+        return JSONResponse({"error": "tts_failed"}, status_code=502)
 
 _BASE_PROMPT = (
     "You are TARA, a professional, warm phone agent for {company}. "

@@ -1,7 +1,7 @@
 # HIVEMIND — portable single-box stack (fresh Hetzner / any Docker host).
 # Distilled from the live Coolify deployment (docker-compose.coolify.yml) into a Coolify-independent
 # compose: clone the repo, fill .env, `docker compose -f infra/docker-compose.hetzner.yml up -d`.
-# Internal DNS (postgres/qdrant/redis/nango/docling) — no host ports needed except the public edge.
+# Internal DNS (postgres/qdrant/redis/nango) — no host ports needed except the public edge.
 #
 # .amr (mneme) memory engine: per-org storage backend selected by MNEME_ORGS. The .amr files live on
 # the host-persisted `hivemind-data` volume at /app/data/mneme — BACK THIS UP (it is the sole copy for
@@ -63,7 +63,7 @@ services:
     build: { context: .., dockerfile: Dockerfile.production }
     image: hivemind/core-api:${VERSION:-latest}
     container_name: hm-core
-    env_file: [../.env]
+    env_file: ["${HIVEMIND_SERVICE_ENV_FILE:-../.env}"]
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 3g
@@ -71,7 +71,9 @@ services:
     environment:
       <<: *common-env
       HOSTNAME: hm-core
-      DOCLING_URL: http://docling:5001
+      # Day-1 uses hm-extract plus the specialized PDF/sheet/image/audio paths.
+      # Docling is retained only behind the explicit legacy-parser profile.
+      DOCLING_URL: ""
       # Container-to-container traffic must use Nango's listening port (8080).
       # NANGO_URL in the host .env is the public/host-bound endpoint and is not
       # reliably reachable from Core through the host firewall/NAT path.
@@ -88,6 +90,31 @@ services:
       # configuration, not a host-side boolean feature switch.
       ENABLE_TOOLS_HITL_FLAG_URL: ${ENABLE_TOOLS_HITL_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/enable-tools-hitl}
       USE_TOOLS_DURABLE_AGENT_FLAG_URL: ${USE_TOOLS_DURABLE_AGENT_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/use-tools-durable-agent}
+      # Stable Day-1 behavior belongs to the versioned release, not a pile of
+      # host booleans. Per-tenant rollout remains owned by Cloudflare Flagship.
+      ENABLE_DOCUMENT_FIRST_INGEST: "true"
+      ENABLE_EVIDENCE_RECALL: "true"
+      ENABLE_ENTITY_EXTRACTION: "true"
+      CANONICAL_KNOWLEDGE_ENABLED: "true"
+      CANONICAL_KNOWLEDGE_MODE: full
+      ENABLE_HIVE_MIND: "true"
+      KB_CURATED_MEMORY_CAP: "15"
+      KB_UNIFIED_EXTRACT: "true"
+      KB_INGEST_VERBOSE: "false"
+      RUNTIME_PROGRESS_VERBOSE: "false"
+      EMBED_RECONCILE_ENABLED: "false"
+      GMAIL_WATCHER_ENABLED: "false"
+      CONNECTOR_RUNTIME_ENABLED: "false"
+      CONNECTOR_RUNTIME_CHAT: "false"
+      CONNECTOR_RUNTIME_MCP: "false"
+      CONNECTOR_RUNTIME_HYPER: "false"
+      CONNECTOR_RUNTIME_SYNC: "false"
+      ENABLE_COGNITION_LOOP: "false"
+      ENABLE_GOVERNANCE_SCHEDULER: "false"
+      ENABLE_PROFILE_DREAM_CRON: "false"
+      CAMPAIGNS_V2_WORKER_ENABLED: "false"
+      HQ_AUTO_EXECUTE: "false"
+      HQ_ALLOW_UNATTENDED_EXTERNAL: "false"
       # Structural, metadata-only traces for the governed LangGraph runtime.
       # The API key remains in the host secret env and is never baked into the
       # image. Core refuses to start tracing unless both payload guards are on.
@@ -117,7 +144,7 @@ services:
     build: { context: .., dockerfile: Dockerfile.control-plane }
     image: hivemind/control-plane:${VERSION:-latest}
     container_name: hm-control
-    env_file: [../.env]
+    env_file: ["${HIVEMIND_SERVICE_ENV_FILE:-../.env}"]
     restart: unless-stopped
     mem_limit: 768m
     memswap_limit: 1152m
@@ -138,6 +165,11 @@ services:
       # Company onboarding is latency-sensitive and Groq is currently failing
       # over on this host. Prefer OpenRouter here; groqFetch still falls back.
       LLM_PRIMARY: ${CONTROL_LLM_PRIMARY:-openrouter}
+      CONNECTOR_RUNTIME_ENABLED: "false"
+      CONNECTOR_RUNTIME_CHAT: "false"
+      CONNECTOR_RUNTIME_MCP: "false"
+      CONNECTOR_RUNTIME_HYPER: "false"
+      CONNECTOR_RUNTIME_SYNC: "false"
     volumes:
       - hivemind-data:/app/data        # share the BYOD registry file with core (selfhost/register writes it)
     depends_on:
@@ -151,7 +183,7 @@ services:
     build: { context: ../employees-service }
     image: hivemind/employees:${VERSION:-latest}
     container_name: hm-employees
-    env_file: [../.env]
+    env_file: ["${HIVEMIND_SERVICE_ENV_FILE:-../.env}"]
     restart: unless-stopped
     mem_limit: 1g
     memswap_limit: 1536m
@@ -177,6 +209,11 @@ services:
       CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS:-}
       HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-openai/gpt-oss-20b:nitro}
       VISUAL_PATH_IN_HYPERROOMS: ${VISUAL_PATH_IN_HYPERROOMS:-true}
+      CONNECTOR_RUNTIME_ENABLED: "false"
+      CONNECTOR_RUNTIME_CHAT: "false"
+      CONNECTOR_RUNTIME_MCP: "false"
+      CONNECTOR_RUNTIME_HYPER: "false"
+      CONNECTOR_RUNTIME_SYNC: "false"
       CLAUDE_ADS_RESOURCE_ROOT: /opt/hivemind-resources/claude-ads
       # Employees sidecar MUST listen on 8060 — control-plane calls http://hm-employees:8060
       # (control-plane-server.js _hyperSidecar default). The global .env sets PORT=3000 (for core), so
@@ -272,6 +309,7 @@ services:
   docling:
     image: ghcr.io/docling-project/docling-serve:latest
     container_name: hm-docling
+    profiles: ["legacy-parser"]
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 3g

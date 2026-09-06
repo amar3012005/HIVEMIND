@@ -86,11 +86,18 @@ export class KnowledgeUploadService {
     let useCloudflare = false;
     try {
       useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId, userId);
-    } catch {
-      return { ok: false, status: 503, body: {
-        error: 'workflow_admission_unavailable',
-        message: 'Durable ingestion admission is temporarily unavailable. No fallback job was created.',
-      } };
+    } catch (error) {
+      // Flagship is authoritative when reachable. A control-plane outage must
+      // not turn a locally durable upload into a 503: select the one supported
+      // fallback before a job or source object exists, then latch that choice
+      // on the durable job. This cannot duplicate work because admission has
+      // not persisted or enqueued anything yet.
+      if (KB_INGEST_VERBOSE) {
+        console.warn('[upload] Cloudflare Workflow admission unavailable; using BullMQ fallback', {
+          code: error?.code || 'WORKFLOW_ADMISSION_UNAVAILABLE',
+        });
+      }
+      useCloudflare = false;
     }
     const selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
     const orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';

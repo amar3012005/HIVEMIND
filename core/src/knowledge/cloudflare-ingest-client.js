@@ -7,16 +7,10 @@ function sleep(ms) {
 }
 
 export function knowledgeWorkflowEnvironment() {
-  if (process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED !== 'true') return null;
   const requested = String(process.env.KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT || '').trim().toLowerCase();
-  const localMode = process.env.HIVEMIND_LOCAL_MODE === 'true';
-  if ((requested === '' || requested === 'local') && localMode) return 'local';
-  if (requested === 'production'
-    && !localMode
-    && process.env.NODE_ENV === 'production'
-    && process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK === 'enable-cloudflare-workflow-v1') {
-    return 'production';
-  }
+  if (requested === 'local' || requested === 'production') return requested;
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true') return 'local';
+  if (process.env.NODE_ENV === 'production') return 'production';
   return null;
 }
 

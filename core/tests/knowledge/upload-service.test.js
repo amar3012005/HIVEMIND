@@ -196,6 +196,24 @@ test('disabled or failed-closed Workflow flag preserves the legacy BullMQ path',
   assert.equal(deps.created[0].orchestrationMode, 'bullmq');
 });
 
+test('unavailable Flagship admission deterministically falls back to BullMQ', async () => {
+  const deps = dependencies();
+  let persisted = false;
+  let queued = false;
+  deps.cloudflareQueue = {
+    isEnabled: async () => { throw new Error('flag transport unavailable'); },
+  };
+  deps.queue.persistFile = async () => { persisted = true; return '/tmp/bullmq-source'; };
+  deps.queue.enqueue = async () => { queued = true; return { queue_job_id: 'bullmq-fallback-1' }; };
+
+  const result = await new KnowledgeUploadService(deps).admit(request());
+
+  assert.equal(result.ok, true);
+  assert.equal(persisted, true);
+  assert.equal(queued, true);
+  assert.equal(deps.created[0].orchestrationMode, 'bullmq');
+});
+
 test('evidence mode persists through the durable job and queue metadata', async () => {
   const deps = dependencies();
   let queued;

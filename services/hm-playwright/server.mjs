@@ -94,6 +94,11 @@ async function startRoomBridge(input) {
   const browser = await browserInstance();
   const context = await browser.newContext({ serviceWorkers: 'block' });
   const page = await context.newPage();
+  const diagnostics = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error' || message.type() === 'warning') diagnostics.push(message.text().slice(0, 500));
+  });
+  page.on('pageerror', (error) => diagnostics.push(String(error.message || error).slice(0, 500)));
   page.on('close', () => {
     const current = roomBridges.get(roomId);
     if (current?.page === page) roomBridges.delete(roomId);
@@ -108,7 +113,12 @@ async function startRoomBridge(input) {
   });
   await page.goto(`http://127.0.0.1:${PORT}/internal/room-bridge`, { waitUntil: 'load' });
   await page.waitForFunction(() => typeof window.__startRoomBridge === 'function', null, { timeout: 10_000 });
-  await page.evaluate((config) => window.__startRoomBridge(config), { authToken, roomId, meetingId });
+  try {
+    await page.evaluate((config) => window.__startRoomBridge(config), { authToken, roomId, meetingId });
+  } catch (error) {
+    await context.close().catch(() => {});
+    throw Object.assign(new Error(`room_bridge_join_failed:${diagnostics.join(' | ') || String(error.message || error)}`.slice(0, 1000)), { status: 502 });
+  }
   await page.waitForFunction(() => window.__roomBridgeState?.status === 'ready', null, { timeout: 15_000 });
   const hardTimer = setTimeout(() => closeRoomBridge(roomId), ROOM_BRIDGE_MAX_MS);
   hardTimer.unref();

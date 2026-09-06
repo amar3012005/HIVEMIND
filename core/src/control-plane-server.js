@@ -102,8 +102,9 @@ import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSyste
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { queueMeetingFinalization } from './knowledge/meeting-finalization-worker.js';
 import { addRealtimeParticipant, createRealtimeMeeting, deleteRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
-import { closeOperatingRoomBridge, getOperatingRoomBridge, startOperatingRoomBridge } from './operating-room/room-bridge-client.js';
-import { compactRoomContext, normalizeRoomText, roomProjection, wakeIntent } from './operating-room/room-contract.js';
+import { closeOperatingRoomBridge, getOperatingRoomBridge, speakOperatingRoomBridge, startOperatingRoomBridge } from './operating-room/room-bridge-client.js';
+import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, roomProjection, wakeIntent } from './operating-room/room-contract.js';
+import { advanceRoomBrief, claimRoomResponse, patchRoomState, releaseRoomResponse, synthesizeRoomResponse, transcriptEventId } from './operating-room/conversation-state.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
@@ -1388,14 +1389,18 @@ const runtimeWaitlistAttempts = new Map();
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
-async function callCoreChatAsUser({ userId, orgId, message, history = [] }) {
+async function callCoreChatAsUser({ userId, orgId, message, history = [], request = {}, idempotencyKey = null }) {
   const response = await internalFetch(`${CONFIG.coreApiBaseUrl}/api/chat`, {
     service: 'hm-core',
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: { message, history },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : {}),
+    },
+    body: { message, history, ...request },
     userId: userId || '',
     orgId: orgId || '',
+    retryOnConnectFailure: true,
   });
 
   const payload = await response.json().catch(() => ({}));
@@ -1403,6 +1408,37 @@ async function callCoreChatAsUser({ userId, orgId, message, history = [] }) {
     throw new Error(payload.error || `Core chat failed with ${response.status}`);
   }
   return payload;
+}
+
+const operatingRoomResponseLocks = new Map();
+
+async function withOperatingRoomResponseLock(roomId, work) {
+  if (operatingRoomResponseLocks.has(roomId)) throw Object.assign(new Error('HIVEMIND is answering another participant; your saved request can be retried'), {code:'operating_room_busy',status:409});
+  const previous = operatingRoomResponseLocks.get(roomId) || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const queued = previous.catch(() => {}).then(() => gate);
+  operatingRoomResponseLocks.set(roomId, queued);
+  await previous.catch(() => {});
+  try {
+    return await work();
+  } finally {
+    release();
+    if (operatingRoomResponseLocks.get(roomId) === queued) operatingRoomResponseLocks.delete(roomId);
+  }
+}
+
+async function deliverOperatingRoomSpeech({ room, state, turnId, answer }) {
+  const healthy = await getOperatingRoomBridge({roomId:room.id}).then(result=>result.status === 'ready').catch(()=>false);
+  if (!healthy) {
+    // A bridge may have crossed its hard lifetime or restarted. Repair it from
+    // the server-held facilitator identity, then replay the idempotent turn.
+    if (!state.meeting_id || !state.facilitator?.participant_id) throw Object.assign(new Error('Operating Room facilitator is unavailable'), { code: 'operating_room_facilitator_unavailable', status: 503 });
+    const facilitatorToken = await refreshRealtimeParticipant({ meetingId: state.meeting_id, participantId: state.facilitator.participant_id });
+    await startOperatingRoomBridge({ roomId: room.id, meetingId: state.meeting_id, authToken: facilitatorToken.token || facilitatorToken.auth_token, participantId: state.facilitator.participant_id });
+  }
+  // Never restart after a speech timeout: the audio may already be playing.
+  return speakOperatingRoomBridge({ roomId: room.id, turnId, answer });
 }
 
 async function waitForWhatsAppHandshake(bridge, timeoutMs = 15000) {
@@ -9055,6 +9091,7 @@ const server = http.createServer(async (req, res) => {
             meeting_id: meeting.id,
             facilitator,
             facilitator_status: 'provisioning',
+            agenda: ['Understand the current situation', 'Discuss priorities and open questions', 'Agree next actions'],
             participants: [],
             transcript: [],
           },
@@ -9079,7 +9116,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  const operatingRoomMatch = pathname.match(/^\/v1\/operating-rooms\/([0-9a-f-]{36})(?:\/(join|transcript|close))?$/i);
+  const operatingRoomMatch = pathname.match(/^\/v1\/operating-rooms\/([0-9a-f-]{36})(?:\/(join|transcript|respond|agenda|close))?$/i);
   if (operatingRoomMatch) {
     const current = await requireSession(req, res);
     if (!current) return;
@@ -9093,6 +9130,15 @@ const server = http.createServer(async (req, res) => {
     const state = room.roomPlaybook && typeof room.roomPlaybook === 'object' ? room.roomPlaybook : {};
 
     if (!action && req.method === 'GET') return jsonResponse(res, { room: roomProjection(room) });
+    if (action && ['closed','finalizing','ready'].includes(state.status)) return jsonResponse(res,{error:'operating_room_closed'},409);
+
+    if (action === 'agenda' && req.method === 'POST') {
+      if (!['owner','admin'].includes(membership.role)) return jsonResponse(res,{error:'admin_required'},403);
+      const body = await parseBody(req);
+      const agenda = (Array.isArray(body.agenda) ? body.agenda : []).slice(0,12).map(item=>normalizeRoomText(item,200)).filter(Boolean);
+      const next = await patchRoomState(prisma,room,{agenda});
+      return jsonResponse(res,{room:roomProjection({...room,roomPlaybook:next})});
+    }
 
     if (action === 'join' && req.method === 'POST') {
       if (!state.meeting_id) return jsonResponse(res, { error: 'operating_room_media_unavailable' }, 503);
@@ -9137,10 +9183,7 @@ const server = http.createServer(async (req, res) => {
           orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }],
         });
         const participants = durableRoster.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role }));
-        await prisma.hyperRoom.update({
-          where: { id: room.id },
-          data: { roomPlaybook: { ...state, participants, status: 'live', facilitator_status: 'ready' } },
-        });
+        await patchRoomState(prisma,room,{participants,status:'live',facilitator_status:'ready'});
         return jsonResponse(res, {
           room: { ...roomProjection(room), status: 'live', participants },
           participant: identity,
@@ -9160,6 +9203,7 @@ const server = http.createServer(async (req, res) => {
       const durableSpeaker = await prisma.operatingRoomParticipant.findUnique({
         where: { roomId_userId: { roomId: room.id, userId: current.session.userId } },
       });
+      if (!durableSpeaker || durableSpeaker.orgId !== room.orgId) return jsonResponse(res,{error:'join_room_before_speaking'},403);
       const verified = durableSpeaker ? {
         user_id: durableSpeaker.userId,
         name: durableSpeaker.name,
@@ -9169,8 +9213,11 @@ const server = http.createServer(async (req, res) => {
         name: normalizeRoomText(membership.user?.displayName || 'Member', 120),
         role: membership.role || 'member',
       };
-      const persisted = await prisma.operatingRoomEvent.create({
-        data: {
+      const clientId = normalizeRoomText(body.event_id || crypto.randomUUID(),200);
+      const eventId = transcriptEventId(room.id, verified.user_id, clientId);
+      const persisted = await prisma.operatingRoomEvent.upsert({
+        where: {id:eventId}, update:{}, create: {
+          id:eventId,
           roomId: room.id,
           orgId: room.orgId,
           speakerUserId: verified.user_id,
@@ -9180,37 +9227,135 @@ const server = http.createServer(async (req, res) => {
           addressed: wake.addressed,
         },
       });
+      const persistedWake = wakeIntent(persisted.text);
       const [durableRoster, recentDesc] = await Promise.all([
         prisma.operatingRoomParticipant.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }] }),
-        prisma.operatingRoomEvent.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 10 }),
+        prisma.operatingRoomEvent.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 24 }),
       ]);
       const roster = durableRoster.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role }));
-      const transcript = recentDesc.reverse().map((entry) => ({ speaker_name: entry.speakerName, speaker_role: entry.speakerRole, text: entry.text, at: entry.createdAt }));
-      await prisma.hyperRoom.update({ where: { id: room.id }, data: { roomPlaybook: { ...state, participants: roster, status: 'live' } } });
-      const turn = { id: persisted.id, speaker_user_id: verified.user_id, speaker_name: verified.name, speaker_role: verified.role, text, at: persisted.createdAt };
+      const transcript = recentDesc.reverse().map((entry) => ({ id: entry.id, speaker_user_id: entry.speakerUserId, speaker_name: entry.speakerName, speaker_role: entry.speakerRole, text: entry.text, at: entry.createdAt }));
+      const turn = { id: persisted.id, speaker_user_id: verified.user_id, speaker_name: verified.name, speaker_role: verified.role, text:persisted.text, at: persisted.createdAt };
       return jsonResponse(res, {
         accepted: true,
         turn,
-        addressed_to_hivemind: wake.addressed,
-        query: wake.query,
+        addressed_to_hivemind: persisted.addressed,
+        query: persistedWake.query,
         context: wake.addressed ? compactRoomContext({ room, roster, transcript, speaker: verified }) : undefined,
       });
+    }
+
+    if (action === 'respond' && req.method === 'POST') {
+      const body = await parseBody(req);
+      const turnId = String(body.turn_id || '').trim();
+      if (!/^[0-9a-f-]{36}$/i.test(turnId)) return jsonResponse(res, { error: 'operating_room_turn_id_required' }, 400);
+      try {
+        const result = await withOperatingRoomResponseLock(room.id, async () => {
+          const liveRoom = await prisma.hyperRoom.findFirst({
+            where: { id: room.id, orgId: room.orgId, roomMode: 'operating', archivedAt: null },
+          });
+          if (!liveRoom) throw Object.assign(new Error('Operating Room is no longer available'), { code: 'operating_room_not_found', status: 404 });
+          const liveState = liveRoom.roomPlaybook && typeof liveRoom.roomPlaybook === 'object' ? liveRoom.roomPlaybook : {};
+          const addressedTurn = await prisma.operatingRoomEvent.findFirst({where:{id:turnId,roomId:room.id,orgId:room.orgId,speakerUserId:current.session.userId}});
+          if (!addressedTurn) throw Object.assign(new Error('Transcript turn does not belong to this speaker'),{code:'operating_room_turn_not_found',status:404});
+          if (!addressedTurn.addressed) throw Object.assign(new Error('This turn did not address HIVEMIND'),{code:'operating_room_turn_not_addressed',status:409});
+          const lease = await claimRoomResponse(prisma,liveRoom,turnId);
+          if (!lease) throw Object.assign(new Error('HIVEMIND is answering another participant'),{code:'operating_room_busy',status:409});
+          try {
+          const storedResponses = Array.isArray(liveState.facilitator_responses) ? liveState.facilitator_responses : [];
+          const existing = storedResponses.find((entry) => entry?.turn_id === turnId && entry?.answer);
+          if (existing) {
+            const speech = existing.speech || await deliverOperatingRoomSpeech({ room: liveRoom, state: liveState, turnId, answer: existing.answer });
+            existing.speech = speech;
+            await patchRoomState(prisma,liveRoom,{facilitator_responses:storedResponses});
+            return { ...existing, replayed: true, speech };
+          }
+          try { liveState.session_brief = await advanceRoomBrief(prisma,liveRoom); }
+          catch (error) { console.warn('[operating-room] brief retained', {room_id:room.id,error:error.message}); }
+
+          const [durableRoster, recentDesc] = await Promise.all([
+            prisma.operatingRoomParticipant.findMany({ where: { roomId: liveRoom.id, orgId: liveRoom.orgId }, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }] }),
+            prisma.operatingRoomEvent.findMany({ where: { roomId: liveRoom.id, orgId: liveRoom.orgId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 24 }),
+          ]);
+          const roster = durableRoster.map((entry) => ({ user_id: entry.userId, name: entry.name, role: entry.role }));
+          const humanTurns = recentDesc.reverse().map((entry) => ({ id: entry.id, speaker_user_id: entry.speakerUserId, speaker_name: entry.speakerName, speaker_role: entry.speakerRole, text: entry.text, at: entry.createdAt }));
+          const assistantTurns = storedResponses.slice(-12).map((entry) => ({
+            id: `facilitator:${entry.turn_id}`,
+            speaker_user_id: null,
+            speaker_name: 'HIVEMIND · TARA',
+            speaker_role: 'ai_facilitator',
+            text: entry.answer,
+            at: entry.at,
+          }));
+          const transcript = [...humanTurns, ...assistantTurns]
+            .sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime())
+            .slice(-24);
+          const speaker = { user_id: addressedTurn.speakerUserId, name: addressedTurn.speakerName, role: addressedTurn.speakerRole };
+          const query = wakeIntent(addressedTurn.text).query || addressedTurn.text;
+          const turn = {
+            id: addressedTurn.id,
+            speaker_user_id: addressedTurn.speakerUserId,
+            speaker_name: addressedTurn.speakerName,
+            speaker_role: addressedTurn.speakerRole,
+            text: addressedTurn.text,
+            query,
+          };
+          const context = compactRoomContext({ room: liveRoom, roster, transcript, speaker });
+          const chatRequest = buildRoomChatRequest({ room: liveRoom, turn, context });
+          const chat = await callCoreChatAsUser({
+            userId: addressedTurn.speakerUserId,
+            orgId: liveRoom.orgId,
+            message: query,
+            history: [],
+            request: {...chatRequest,message:query},
+            idempotencyKey: chatRequest.idempotency_key,
+          }).catch(error=>({sources:[],recall_error:error.message}));
+          const answer = await synthesizeRoomResponse({context,query,knowledge:chat,traceId:turnId});
+          if (!answer) throw Object.assign(new Error('HIVEMIND returned an empty room response'), { code: 'operating_room_empty_response', status: 502 });
+          const receipt = {
+            turn_id: turnId,
+            addressed_user_id: addressedTurn.speakerUserId,
+            addressed_name: addressedTurn.speakerName,
+            answer,
+            at: new Date().toISOString(),
+            sources: (chat.sources || []).slice(0,8),
+          };
+          const latestRoom = await prisma.hyperRoom.findUnique({ where: { id: liveRoom.id } });
+          const latestState = latestRoom?.roomPlaybook && typeof latestRoom.roomPlaybook === 'object' ? latestRoom.roomPlaybook : liveState;
+          const latestResponses = Array.isArray(latestState.facilitator_responses) ? latestState.facilitator_responses : [];
+          const responses = [...latestResponses.filter(entry=>entry?.turn_id !== turnId),receipt];
+          await patchRoomState(prisma,liveRoom,{facilitator_responses:responses,facilitator_activity:'speaking'});
+          const speech = await deliverOperatingRoomSpeech({ room: liveRoom, state: liveState, turnId, answer });
+          receipt.speech = speech;
+          await patchRoomState(prisma,liveRoom,{facilitator_responses:responses});
+          return { ...receipt, replayed: false, speech, sources: chat.sources || [] };
+          } finally { await releaseRoomResponse(prisma,liveRoom,lease); }
+        });
+        return jsonResponse(res, result);
+      } catch (error) {
+        return jsonResponse(res, { error: error.code || 'operating_room_response_failed', message: error.message }, error.status || 502);
+      }
     }
 
     if (action === 'close' && req.method === 'POST') {
       const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
       if (!admin) return;
+      const closeLease = await claimRoomResponse(prisma,room,'finalization');
+      if (!closeLease) return jsonResponse(res,{error:'operating_room_busy',message:'Wait for the current response before ending the room.'},409);
+      try {
       const [transcriptRows, participantRows] = await Promise.all([
         prisma.operatingRoomEvent.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
         prisma.operatingRoomParticipant.findMany({ where: { roomId: room.id, orgId: room.orgId }, orderBy: [{ joinedAt: 'asc' }, { userId: 'asc' }] }),
       ]);
-      const transcript = transcriptRows.map((entry) => ({
+      const humanTranscript = transcriptRows.map((entry) => ({
         speaker_user_id: entry.speakerUserId,
         speaker_name: entry.speakerName,
         speaker_role: entry.speakerRole,
         text: entry.text,
         at: entry.createdAt,
       }));
+      const latestCloseRoom = await prisma.hyperRoom.findUnique({where:{id:room.id}});
+      const aiTranscript = (latestCloseRoom?.roomPlaybook?.facilitator_responses || []).map(entry=>({speaker_user_id:null,speaker_name:'HIVEMIND · TARA',speaker_role:'ai_facilitator',text:entry.answer,at:entry.at}));
+      const transcript = [...humanTranscript,...aiTranscript].sort((a,b)=>new Date(a.at)-new Date(b.at));
       if (!transcript.length) return jsonResponse(res, { error: 'operating_room_transcript_empty' }, 409);
       const transcriptText = transcript.map((turn) => `${turn.speaker_name}: ${turn.text}`).join('\n');
       const speakers = transcript.map((turn) => ({
@@ -9267,6 +9412,7 @@ const server = http.createServer(async (req, res) => {
       });
       await closeOperatingRoomBridge({ roomId: room.id }).catch(() => {});
       return jsonResponse(res, { room: roomProjection(updated) });
+      } finally { await releaseRoomResponse(prisma,room,closeLease); }
     }
 
     return jsonResponse(res, { error: 'method_not_allowed' }, 405);

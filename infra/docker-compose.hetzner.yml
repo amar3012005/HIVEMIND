@@ -350,8 +350,10 @@ services:
     mem_limit: 768m
     memswap_limit: 1152m
     cpus: 0.75
+    profiles: ["voice"]
     env_file:
-      - ${TARA_DEEPGRAM_ENV_FILE:-/opt/tara-deepgram/.env}
+      - path: ${TARA_DEEPGRAM_ENV_FILE:-/opt/tara-deepgram/.env}
+        required: false
     environment:
       HIVEMIND_API_KEY: ${HIVEMIND_MASTER_API_KEY}
       HIVEMIND_TARA_STREAM_URL: http://core:3000/api/tara/stream
@@ -407,8 +409,10 @@ services:
     mem_limit: 768m
     memswap_limit: 1152m
     cpus: 0.75
+    profiles: ["voice"]
     env_file:
-      - ${TARA_GROK_ENV_FILE:-/opt/tara-grok/.env}
+      - path: ${TARA_GROK_ENV_FILE:-/opt/tara-grok/.env}
+        required: false
     environment:
       HIVEMIND_CORE_EVENTS_URL: http://core:3000/internal/v1/tara/calls
       # Live-listen: verify Core-minted session-scoped tokens (same key core signs

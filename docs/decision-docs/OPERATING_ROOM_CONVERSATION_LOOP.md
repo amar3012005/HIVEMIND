@@ -21,11 +21,15 @@ Plane authentication and the durable room participant row, not client names.
 4. Control verifies turn ownership and takes a PostgreSQL response lease.
    Busy requests retry their original turn; they do not create another answer.
 5. Context contains the shared goal/agenda, verified roster/current speaker,
-   a bounded rolling brief and the last 24 human/AI turns. Core receives the
-   current speaker's authority with organization scope and connected tools off.
+   a bounded rolling brief and the last 24 human/AI turns. Core receives only
+   the actual participant query, under that speaker's authority with organization scope and connected tools off.
    Native knowledge recall remains available. Private personal facts must not
    be exposed to the room merely because the speaker can access them privately.
-6. The answer is persisted before speech. Only the authenticated bridge service
+6. Room-specific synthesis combines the actual live transcript with cited Core
+   knowledge. An empty company recall does not suppress facts in the meeting.
+   The first live canary exposed the old no-match guard treating the entire
+   room-context block as a retrieval query; this separation fixes that without
+   modifying general chat. The answer is persisted before speech. Only the authenticated bridge service
    can make TARA speak; participant broadcasts cannot inject facilitator audio.
    Speech is serialized and deduplicated by turn ID for the bridge lifetime.
 7. The FE polls shared state every 2.5 seconds and shows activity, agenda, brief,

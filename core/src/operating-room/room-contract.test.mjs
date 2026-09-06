@@ -3,7 +3,19 @@ import assert from 'node:assert/strict';
 import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, wakeIntent } from './room-contract.js';
 import { addRealtimeParticipant, createRealtimeMeeting, refreshRealtimeParticipant } from './realtimekit-client.js';
 import { closeOperatingRoomBridge, speakOperatingRoomBridge, startOperatingRoomBridge } from './room-bridge-client.js';
-import { transcriptEventId, normalizeSessionBrief, advanceRoomBrief, patchRoomState, claimRoomResponse, releaseRoomResponse } from './conversation-state.js';
+import { transcriptEventId, normalizeSessionBrief, advanceRoomBrief, patchRoomState, claimRoomResponse, releaseRoomResponse, synthesizeRoomResponse } from './conversation-state.js';
+
+test('room synthesis keeps live discussion evidence even when company recall has no matches',async()=>{
+ const context={current_speaker:{name:'Bea',user_id:'b'},recent_transcript:[{speaker:'Alex',text:'The confirmed budget is 700 euros.'}]};
+ let input;
+ const answer=await synthesizeRoomResponse({context,query:'What budget did Alex confirm?',knowledge:{response:'No matching sources',sources:[]},fetchCompletion:async(model,options)=>{input=JSON.parse(options.body);return {ok:true,json:async()=>({choices:[{message:{content:'Bea, Alex confirmed 700 euros.'}}]})};}});
+ const payload=JSON.parse(input.messages[1].content);
+ assert.deepEqual(payload.room_context,context);
+ assert.equal(payload.current_request,'What budget did Alex confirm?');
+ assert.equal(payload.company_knowledge,null);
+ assert.match(input.messages[0].content,/recall miss does not invalidate/);
+ assert.match(answer,/700/);
+});
 
 test('five speakers retain distinct stable transcript IDs across retries and rooms', () => {
   const ids = Array.from({length:5},(_,i)=>transcriptEventId('room',`user-${i}`,'event'));

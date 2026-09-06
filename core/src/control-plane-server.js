@@ -104,7 +104,7 @@ import { queueMeetingFinalization } from './knowledge/meeting-finalization-worke
 import { addRealtimeParticipant, createRealtimeMeeting, deleteRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
 import { closeOperatingRoomBridge, getOperatingRoomBridge, speakOperatingRoomBridge, startOperatingRoomBridge } from './operating-room/room-bridge-client.js';
 import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, roomProjection, wakeIntent } from './operating-room/room-contract.js';
-import { advanceRoomBrief, claimRoomResponse, patchRoomState, releaseRoomResponse, transcriptEventId } from './operating-room/conversation-state.js';
+import { advanceRoomBrief, claimRoomResponse, patchRoomState, releaseRoomResponse, synthesizeRoomResponse, transcriptEventId } from './operating-room/conversation-state.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
@@ -9304,12 +9304,12 @@ const server = http.createServer(async (req, res) => {
           const chat = await callCoreChatAsUser({
             userId: addressedTurn.speakerUserId,
             orgId: liveRoom.orgId,
-            message: chatRequest.message,
+            message: query,
             history: [],
-            request: chatRequest,
+            request: {...chatRequest,message:query},
             idempotencyKey: chatRequest.idempotency_key,
-          });
-          const answer = normalizeRoomText(chat.response || chat.answer, 6000);
+          }).catch(error=>({sources:[],recall_error:error.message}));
+          const answer = await synthesizeRoomResponse({context,query,knowledge:chat,traceId:turnId});
           if (!answer) throw Object.assign(new Error('HIVEMIND returned an empty room response'), { code: 'operating_room_empty_response', status: 502 });
           const receipt = {
             turn_id: turnId,

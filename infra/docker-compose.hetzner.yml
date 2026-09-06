@@ -459,7 +459,10 @@ services:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
       PLAYWRIGHT_SESSIONS_DIR: /app/sessions
       PLAYWRIGHT_CRAWL_CONCURRENCY: "4"
-      TARA_DG_API_KEY: ${TARA_DG_API_KEY:?TARA_DG_API_KEY is required}
+      # Browser extraction is independent of voice. Keep the optional room-TTS
+      # bridge inert when TARA is not installed instead of making every Compose
+      # operation require an unrelated voice credential.
+      TARA_DG_API_KEY: ${TARA_DG_API_KEY:-}
       TARA_ROOM_TTS_URL: http://tara-deepgram:8091/room-speak
     volumes:
       # Captured storageState files are credentials: host-managed, never baked

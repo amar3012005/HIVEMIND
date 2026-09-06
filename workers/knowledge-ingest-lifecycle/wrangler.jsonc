@@ -57,7 +57,7 @@
       "name": "hivemind-knowledge-ingest-local",
       "vars": {
         "ENVIRONMENT": "local",
-        "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com",
+        "HIVEMIND_CORE_URL": "https://core.dev.next.singulancelabs.com",
         "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
       },
       "flagship": [

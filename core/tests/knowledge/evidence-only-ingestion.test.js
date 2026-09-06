@@ -204,6 +204,45 @@ test('default promotion curation caps atomic memories at fourteen', async () => 
   assert.equal(result.coverage.promotion_failed, true, 'zero-yield both-mode promotion is an explicit failure state');
 });
 
+test('legacy configured cap cannot exceed the fifteen-memory document contract', async () => {
+  const caps = [];
+  const service = new DocumentFirstIngestionService({
+    db: {}, memoryGraphEngine: { vectorStore: null }, smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._extractUnifiedReliable = async () => Array.from({ length: 20 }, (_, index) => ({
+    t: `Fact ${index}`, f: `A durable fact ${index}.`, memory_type: 'fact', claim_kind: 'fact',
+    importance: 0.9, source_quote: `A durable fact ${index}.`, entities: [], rels: [],
+  }));
+  service._curateDocumentClaims = async (_candidates, options) => {
+    caps.push(options.maxMemories);
+    return [];
+  };
+  service._attachDocumentParent = async () => null;
+  const previousCap = process.env.KB_CURATED_MEMORY_CAP;
+  const previousConcurrency = process.env.KB_UNIFIED_CONCURRENCY;
+  process.env.KB_CURATED_MEMORY_CAP = '15';
+  process.env.KB_UNIFIED_CONCURRENCY = '1';
+  try {
+    await service._promoteMemories({
+      documentId: '33333333-3333-4333-8333-333333333333',
+      userId: '11111111-1111-4111-8111-111111111111',
+      orgId: '22222222-2222-4222-8222-222222222222',
+      metadata: { filename: 'dense.txt', scope: 'organization' },
+      segments: [{
+        id: '55555555-5555-4555-8555-555555555555',
+        content: 'A durable source sentence. '.repeat(400), metadata: {},
+      }],
+    });
+  } finally {
+    if (previousCap === undefined) delete process.env.KB_CURATED_MEMORY_CAP;
+    else process.env.KB_CURATED_MEMORY_CAP = previousCap;
+    if (previousConcurrency === undefined) delete process.env.KB_UNIFIED_CONCURRENCY;
+    else process.env.KB_UNIFIED_CONCURRENCY = previousConcurrency;
+  }
+  assert.deepEqual(caps, [14]);
+});
+
 test('one document parent completes a fourteen-memory promotion and keeps child provenance', async () => {
   const parentWrites = [];
   const relationships = [];

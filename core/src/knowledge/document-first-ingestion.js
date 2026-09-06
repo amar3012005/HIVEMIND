@@ -5704,12 +5704,15 @@ Every item must include a non-empty content field and one or more valid support_
         // document. Keep the curator adaptive for short/thin documents, but
         // bound the default durable output to 14 high-salience atomic memories;
         // the canonical document-summary parent added below makes 15 total. An
-        // explicit deployment override remains available for controlled
-        // backfills; it is parsed and bounded here so a malformed value cannot
-        // accidentally create an unbounded promotion run.
+        // A deployment may lower this child-memory budget, but it cannot raise
+        // it above 14: `_attachDocumentParent` appends one canonical summary,
+        // and the public `both` contract caps the complete projection at 15.
+        // Historical `KB_CURATED_MEMORY_CAP=15` used to create 15 children plus
+        // that parent (16 total), violating the contract while reporting a
+        // successful job.
         const _configuredCuratedCap = Number(process.env.KB_CURATED_MEMORY_CAP);
         const _curatedCap = Number.isFinite(_configuredCuratedCap) && _configuredCuratedCap > 0
-          ? Math.max(3, Math.min(30, Math.floor(_configuredCuratedCap)))
+          ? Math.max(3, Math.min(14, Math.floor(_configuredCuratedCap), _dynamicCap))
           : Math.min(14, _dynamicCap);
         const _tCurate = Date.now();
         // `let`: the duplicate-claim collapse below narrows this list, and every downstream

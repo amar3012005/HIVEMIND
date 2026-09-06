@@ -88,3 +88,36 @@ Release only affected Control and Playwright services from the canonical clean
 release runner, then deploy the pinned frontend Worker. Never build from the
 shared dirty server checkout. Verify a live disposable canary before declaring
 the feature accepted. No new database migration is required.
+
+## Release and acceptance receipt — 2026-09-07 Europe/Berlin
+
+- Parent runtime source: `b761147b4c91e660371e9b2ce3b0edd0de3c8c9a` (PRs 673/674).
+- Frontend: `0de55c543a76` (Da-vinci PR 105), Worker version
+  `8ef9a79c-2ece-4407-a055-ec03d8a34416`.
+- Control image: `hivemind/control-plane:sha-b761147b`, image ID
+  `sha256:7d66da5893c8a49f0e2449133d9161424015ef86cd8b2f88cabbb9ae24193441`.
+- Bridge image: `hivemind/hm-playwright:sha-333f17dc`, image ID
+  `sha256:7d1db9a6ed049548a2b6c265f586bbb350e991cd66c61dcb1cbd012144d9817c`.
+- Canonical deployment manifests on SINGULANCE:
+  `/root/releases/manifests/333f17dc/20260906T220705Z/RELEASE_MANIFEST.json`
+  and `/root/releases/manifests/b761147b/20260906T221430Z/RELEASE_MANIFEST.json`.
+  The manifests retain previous image references for rollback. Unrelated dirty
+  server work was preserved; Core, Employees, TARA and data services were not
+  rebuilt or replaced by this change.
+- Ten focused tests passed; frontend production build passed. Public Operating
+  Rooms route and API health returned 200; deployed lazy chunk contains the
+  shared-agenda and transcription-capability changes.
+- Disposable canary at `2026-09-06T22:17:04Z`: five authenticated participants,
+  spoofed speaker rejection, duplicate transcript idempotency, shared agenda,
+  cross-speaker synthesis, authenticated TARA audio receipt and replay passed.
+  The answer correctly preserved the 700-euro budget and unapproved launch
+  date. Test participants were registered through the API, not five physical
+  microphones; speech receipt proves bridge playback, not every receiver's
+  audio device. Test tenant, users, sessions, room and vector collection were
+  cleaned up. No new Control/bridge error/fatal/uncaught/unhandled log matches
+  were observed after the corrective release.
+- Still requires physical-device acceptance: simultaneous speakers, wake-word
+  STT accuracy, headphones/echo, mobile backgrounding, reconnect and a real
+  uninterrupted one-hour call. Do not represent the accelerated transcript
+  test as that soak. Current autonomous steering happens in responses when
+  addressed, not an always-running agenda scheduler or barge-in system.

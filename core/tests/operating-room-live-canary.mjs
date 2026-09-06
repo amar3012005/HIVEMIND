@@ -9,6 +9,7 @@ import { deleteRealtimeMeeting } from '/app/src/operating-room/realtimekit-clien
 if(process.env.RUN_OPERATING_ROOM_CANARY!=='1') throw new Error('Explicit canary opt-in required');
 const prisma=new PrismaClient();
 const orgId=crypto.randomUUID();const users=[];const sessions=[];let room;
+console.log(JSON.stringify({canary_started:true,org_id:orgId}));
 const config={redisUrl:process.env.HIVEMIND_CONTROL_PLANE_REDIS_URL||process.env.REDIS_URL,redisHost:process.env.REDIS_HOST,redisPort:Number(process.env.REDIS_PORT||6379),redisPassword:process.env.REDIS_PASSWORD,sessionTtlSeconds:600};
 const store=new ControlPlaneSessionStore(config);
 const redis=await getRedisClient(config);if(!redis) throw new Error('Canary requires shared session store');
@@ -48,7 +49,10 @@ try{
  for(const session of sessions)await redis.del(`cp:session:${session}`);
  await prisma.userOrganization.deleteMany({where:{orgId}});
  await prisma.organization.deleteMany({where:{id:orgId}});
- await prisma.user.deleteMany({where:{id:{in:users}}});
+  await prisma.user.deleteMany({where:{id:{in:users}}});
+ const qdrant=process.env.QDRANT_URL||'http://hm-qdrant:6333';
+ const deletion=await fetch(`${qdrant}/collections/org_${orgId}`,{method:'DELETE',headers:{'api-key':process.env.QDRANT_API_KEY||''}});
+ if(!deletion.ok&&deletion.status!==404)throw new Error(`Canary vector cleanup failed:${deletion.status}`);
  await prisma.$disconnect();await redis.quit();
  console.log(JSON.stringify({canary_cleanup:true}));
 }

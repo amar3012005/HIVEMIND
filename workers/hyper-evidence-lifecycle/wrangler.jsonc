@@ -1,0 +1,6 @@
+{
+  "name": "hivemind-hyper-evidence-lifecycle",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-30",
+  "workflows": [{ "name": "hyper-evidence-lifecycle", "binding": "EVIDENCE_WORKFLOW", "class_name": "HyperEvidenceWorkflow" }]
+}

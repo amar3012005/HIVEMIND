@@ -3,6 +3,7 @@ import inspect
 import json
 
 from hivemind_employees.hyper.engine import Director, _work_order_activity, run_director
+from hivemind_employees.hyper.governed_contracts import normalize_prospecting_request
 from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
@@ -105,6 +106,83 @@ def test_artifact_only_profile_cannot_silently_degrade_to_text(monkeypatch):
     assert director.artifact_intent["kind"] == "interactive_document"
     assert plan["artifact_intent"] == director.artifact_intent
     assert plan["execution_engine"] == "debate"
+
+
+def _planner_payload(**updates):
+    payload = {
+        "recall_queries": [], "history_turns_back": 0, "connector_calls": [],
+        "web_query": None, "seo_audit_url": None, "seo_audit_scope": "none",
+        "seo_task": "none", "places_query": None, "needs_debate": False,
+        "method_skills": [], "campaign_method_assignments": [], "work_orders": [],
+        "turn_plan": [], "turn_mode": "task", "execution_engine": "debate",
+        "collaboration_intensity": "standard", "response_depth": "focused",
+        "output_family": "report", "evidence_mode": "standard", "post_output_actions": [],
+        "outreach_request": None, "campaign_request": None, "artifact_intent": None,
+    }
+    payload.update(updates)
+    return payload
+
+
+def test_explicit_email_cannot_become_visual_report(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(message="Write a cold email to Alex")
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(_planner_payload(artifact_intent={
+            "kind": "interactive_document", "medium": "html", "purpose": "report",
+            "audience": "Alex", "quality_profile": "editorial", "creative_freedom": "high",
+            "requirements": [],
+        }))}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["output_family"] == "text"
+    assert plan["artifact_intent"] is None
+    assert director.artifact_intent is None
+    assert plan["outreach_request"]["draft"] is True
+    assert plan["outreach_request"]["deliver"] is False
+
+
+def test_explicit_send_survives_planner_and_remains_approval_gated(monkeypatch):
+    director, _events = _director(
+        message="Send an email to nobody-canary@example.invalid. Do not execute without explicit approval."
+    )
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(_planner_payload())}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["outreach_request"]["draft"] is True
+    assert plan["outreach_request"]["deliver"] is True
+    assert plan["post_output_actions"] == [{
+        "capability": "gmail.send_email", "connector": "gmail",
+        "operation": "send_email", "artifact_kind": "email",
+        "target_hint": "nobody-canary@example.invalid", "explicit": True,
+        "connected": False,
+    }]
+
+
+def test_explicit_output_family_overrides_visual_planner_label(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(message="Generate a launch poster")
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(_planner_payload(artifact_intent={
+            "kind": "interactive_document", "medium": "html", "purpose": "poster",
+            "audience": "buyers", "quality_profile": "editorial", "creative_freedom": "high",
+            "requirements": [],
+        }))}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+    contract = director._build_turn_contract(plan)
+
+    assert plan["output_family"] == "image"
+    assert contract["output_contract"]["output_family"] == "image"
+    assert contract["output_contract"]["formats"] == ["html", "pdf"]
 
 
 def test_source_evidence_excludes_skills_and_agent_work_results():
@@ -295,7 +373,7 @@ def test_outreach_director_preserves_full_compound_lifecycle(monkeypatch):
     monkeypatch.setattr(director, "_groq", plan_call)
     plan = asyncio.run(director._plan_gather())
 
-    assert plan["outreach_request"] == payload["outreach_request"]
+    assert plan["outreach_request"] == normalize_prospecting_request(payload["outreach_request"])
     assert plan["post_output_actions"][0]["capability"] == "gmail.send_email"
 
 
@@ -343,7 +421,7 @@ def test_runtime_outreach_keeps_room_selected_lifecycle_and_action(monkeypatch):
     monkeypatch.setattr(director, "_groq", plan_call)
     plan = asyncio.run(director._plan_gather())
 
-    assert plan["outreach_request"] == payload["outreach_request"]
+    assert plan["outreach_request"] == normalize_prospecting_request(payload["outreach_request"])
     assert plan["post_output_actions"][0]["capability"] == "gmail.create_draft"
     assert plan["places_query"] == "regulated companies in Hannover"
     assert plan["needs_debate"] is False

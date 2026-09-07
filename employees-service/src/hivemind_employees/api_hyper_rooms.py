@@ -106,6 +106,7 @@ from .db import (
 )
 from .hivemind_client import (
     connector_exec_emulated,
+    get_org_profile_emulated,
     google_exec_emulated,
     list_canon_emulated,
     org_members_emulated,
@@ -2253,12 +2254,29 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
     # the same gather: tag-filtered PINNED company canon (identity/mission/
     # positioning/ICP/team filed by onboarding) that is GUARANTEED into the
     # brief regardless of vector scores — a dense KB corpus can't bury it.
-    probe_results_and_canon = await asyncio.gather(
+    profile_and_recall = await asyncio.gather(
+        get_org_profile_emulated(user_id=user_id, org_id=org_id, api_key=api_key),
         list_canon_emulated(user_id=user_id, org_id=org_id, api_key=api_key, limit=8),
         *[_probe(p) for p in probes],
     )
-    canon_rows = probe_results_and_canon[0] or []
-    probe_results = probe_results_and_canon[1:]
+    profile_payload = profile_and_recall[0] if isinstance(profile_and_recall[0], dict) else {}
+    canon_rows = profile_and_recall[1] or []
+    probe_results = profile_and_recall[2:]
+    organization = profile_payload.get("organization") if isinstance(profile_payload.get("organization"), dict) else {}
+    company_profile = organization.get("company_profile") if isinstance(organization.get("company_profile"), dict) else {}
+    company_name = str(company_profile.get("name") or organization.get("name") or "").strip()
+    profile_lines = [f"Company: {company_name}"] if company_name else []
+    profile_labels = {
+        "website": "Website", "industry": "Industry", "description": "Description",
+        "audience": "Audience", "mission": "Mission",
+    }
+    for key, label in profile_labels.items():
+        value = str(company_profile.get(key) or "").strip()
+        if value:
+            profile_lines.append(f"{label}: {value}")
+    verified_domains = [str(value).strip() for value in (profile_payload.get("verified_domains") or []) if str(value).strip()]
+    if verified_domains:
+        profile_lines.append("Verified domains: " + ", ".join(verified_domains))
     canon_lines: List[str] = []
     for r in canon_rows:
         mid = str(r.get("id") or r.get("memory_id") or "")
@@ -2287,7 +2305,7 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
             if key_title:
                 seen_titles.add(key_title)
             collected.append(r)
-    if not collected and not canon_lines:
+    if not collected and not canon_lines and not profile_lines:
         return ""
     # Highest-scored first so the budget keeps the strongest signal.
     collected.sort(key=lambda r: float(r.get("score", 0)), reverse=True)
@@ -2300,7 +2318,7 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
         snippet = content[:220] + ("…" if len(content) > 220 else "")
         prefix = f'"{title}" — ' if title else ""
         lines_out.append(f"- {prefix}{snippet}")
-    if not lines_out and not canon_lines:
+    if not lines_out and not canon_lines and not profile_lines:
         return ""
     log.info("[brief] built company context: %d memories from %d probes + %d canon",
              len(lines_out), len(probes), len(canon_lines))
@@ -2309,7 +2327,13 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
         "(mission, positioning, ICP, team), filed at onboarding. This overrides "
         "any conflicting stray fact below:\n" + "\n".join(canon_lines) + "\n\n"
     ) if canon_lines else ""
+    _profile_block = (
+        "ORGANIZATION PROFILE — authoritative workspace identity loaded from the authenticated "
+        "organization profile. Use it to disambiguate the company; verified domains are the first-party "
+        "boundary for company claims:\n" + "\n".join(profile_lines) + "\n\n"
+    ) if profile_lines else ""
     _brief = (
+        _profile_block +
         _canon_block +
         "COMPANY CONTEXT — standing facts about this business, its people, "
         "products, customers and goals. Ground every claim in these; this is "
@@ -2381,7 +2405,8 @@ _ARTIFACT_URL_RE = re.compile(
 
 
 def _apply_outreach_contract(
-    verdict: Dict[str, Any], plan: Dict[str, Any], pending: List[Dict[str, Any]],
+    verdict: Dict[str, Any], plan: Dict[str, Any], pending: List[Dict[str, Any]], *,
+    text_draft_ready: bool = False,
 ) -> Dict[str, Any]:
     outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else None
     if not outreach:
@@ -2391,6 +2416,9 @@ def _apply_outreach_contract(
         max(1, min(50, int(raw_requested)))
         if raw_requested is not None else None
     )
+    draft_only = bool(outreach.get("draft")) and not bool(outreach.get("deliver")) and not bool(outreach.get("discover"))
+    if draft_only:
+        requested = 1
     metrics = plan.get("outreach_metrics") if isinstance(plan.get("outreach_metrics"), dict) else {}
     pending_count = sum(
         1 for item in pending
@@ -2400,7 +2428,7 @@ def _apply_outreach_contract(
         "discover": int(metrics.get("prospects_discovered") or 0),
         "persist": int(metrics.get("prospects_persisted") or 0),
         # A body printed in a report is not a durable email draft or delivery.
-        "draft": pending_count,
+        "draft": max(pending_count, 1 if text_draft_ready and draft_only else 0),
         # Pending approval proves preparation, never delivery. Delivery requires
         # a durable provider receipt owned by the checkpointed lifecycle.
         "deliver": 0,
@@ -2416,6 +2444,8 @@ def _apply_outreach_contract(
             missing.append(f"outreach lifecycle {phase} produced no verified result")
     verdict["outreach_contract"] = outreach
     verdict["outreach_observed"] = observed
+    if text_draft_ready and draft_only:
+        verdict["artifact_kind"] = "room_text_draft"
     if missing:
         verdict["met"] = False
         verdict["artifact_ok"] = False
@@ -2450,15 +2480,26 @@ async def _verify_turn(
     produced = sorted(set(
         _ARTIFACT_URL_RE.findall(final_text or "")
         + [a.get("url") for a in drain_artifacts() if a.get("url")]
+        + ([str((plan.get("artifact_receipt") or {}).get("url"))]
+           if (plan.get("artifact_receipt") or {}).get("ok")
+           and (plan.get("artifact_receipt") or {}).get("url") else [])
     ))
     evidence = {
         "intended_output": plan.get("intended_output"),
         "done_criterion": plan.get("done_criterion"),
-        "assignments": list((plan.get("assignments") or {}).keys()),
-        "assignments_executed": [c.get("owner") for c in (plan.get("execution") or [])],
+        "assignments": (
+            list((plan.get("assignments") or {}).keys())
+            if str((plan.get("debate_contract") or {}).get("mode") or "legacy") != "none" else []
+        ),
+        "assignments_executed": (
+            [c.get("owner") for c in (plan.get("execution") or [])]
+            if str((plan.get("debate_contract") or {}).get("mode") or "legacy") != "none" else []
+        ),
         "tools_used": {str(k): int(v) for k, v in (tool_call_counts or {}).items()},
         "writes_pending_approval": [p.get("label") for p in pending],
+        "outreach_request": plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else None,
         "produced_artifacts": produced,
+        "artifact_receipt": plan.get("artifact_receipt") if isinstance(plan.get("artifact_receipt"), dict) else None,
         "source_evidence_count": len((blackboard or {}).get("facts") or []),
         "company_name": company_name or None,
         "company_context_missing": bool(company_context_missing),
@@ -2499,6 +2540,10 @@ async def _verify_turn(
         "written-out email body with no actual send/draft is artifact_ok=false. When artifact_ok is "
         "false, say so in gaps.\n"
         "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true.\n"
+        "- EMAIL DRAFT-ONLY exception: when outreach_request has draft=true and deliver is not true, "
+        "the persisted Room final_excerpt itself is the requested editable draft. Set artifact_ok=true "
+        "when it contains a substantive email; do not require Gmail or a pending send approval. This "
+        "exception never proves delivery and never permits sending.\n"
         "- met RULE (do NOT over-demand): met=true when the deliverable SUBSTANTIVELY satisfies the "
         "user's ACTUAL request — i.e. grounded_ok=true AND artifact_ok=true AND assignments_ok=true "
         "AND there is no BLOCKING gap. A BLOCKING gap is: a fabrication/invented fact, a MISSING "
@@ -2615,7 +2660,30 @@ async def _verify_turn(
         "done_criterion": plan.get("done_criterion"),
         "verification_available": True,
     }
-    _apply_outreach_contract(verdict, plan, pending)
+    debate_mode = str((plan.get("debate_contract") or {}).get("mode") or "legacy")
+    if debate_mode == "none":
+        assignment_terms = ("assign", "employee", "agent contribution", "owner contribution")
+        remaining_gaps = [gap for gap in verdict["gaps"]
+                          if not any(term in gap.casefold() for term in assignment_terms)]
+        only_assignment_failure = not verdict["assignments_ok"] and not remaining_gaps
+        verdict["assignments_ok"] = True
+        verdict["gaps"] = remaining_gaps
+        if only_assignment_failure and verdict["artifact_ok"] and verdict["grounded_ok"]:
+            verdict["met"] = True
+    outreach = plan.get("outreach_request") if isinstance(plan.get("outreach_request"), dict) else {}
+    text_draft_ready = bool(
+        str(plan.get("intended_output") or "").lower() == "email"
+        and outreach.get("draft") is True and outreach.get("deliver") is not True
+        and str(final_text or "").strip()
+    )
+    if text_draft_ready:
+        email_artifact_terms = ("missing produced artifact", "no email artifact", "queued for approval")
+        verdict["gaps"] = [gap for gap in verdict["gaps"]
+                           if not any(term in gap.casefold() for term in email_artifact_terms)]
+        verdict["artifact_ok"] = True
+        if verdict["assignments_ok"] and verdict["grounded_ok"] and not verdict["gaps"]:
+            verdict["met"] = True
+    _apply_outreach_contract(verdict, plan, pending, text_draft_ready=text_draft_ready)
     # ── Deterministic company-grounding gate (does NOT trust the LLM verdict) ──
     # A company-scoped turn with NO company context cannot be grounded: the room
     # had nothing real to stand on, so a plausible-sounding deliverable is exactly
@@ -3216,12 +3284,64 @@ async def _verify_and_emit(
             receipt = plan.get("artifact_receipt")
             artifact_ok = bool(isinstance(receipt, dict) and receipt.get("ok") and receipt.get("artifact_id"))
             verdict["artifact_ok"] = artifact_ok
-            verdict["met"] = bool(verdict.get("met")) and artifact_ok
             if artifact_ok:
+                # The model verifier runs from the textual synthesis and can
+                # report a missing artifact even though the deterministic
+                # renderer has already persisted and validated it. Remove only
+                # that narrow stale failure; evidence and content gaps remain.
+                artifact_gap_terms = (
+                    "missing produced artifact",
+                    "artifact was not produced",
+                    "artifact has not been produced",
+                    "no produced artifact",
+                    "no artifact was produced",
+                )
+                artifact_nouns = (
+                    "artifact", "deck", "presentation", "report", "document",
+                    "spreadsheet", "image", "poster", "pdf",
+                )
+                original_gaps = [str(gap) for gap in (verdict.get("gaps") or [])]
+                verdict["gaps"] = [
+                    gap for gap in (verdict.get("gaps") or [])
+                    if not (
+                        any(term in str(gap).casefold() for term in artifact_gap_terms)
+                        or (
+                            str(gap).casefold().startswith("missing produced ")
+                            and any(noun in str(gap).casefold() for noun in artifact_nouns)
+                        )
+                    )
+                ]
+                existence_only = bool(original_gaps) and all(
+                    (
+                        "existence" in gap.casefold()
+                        or "missing produced" in gap.casefold()
+                        or "not produced" in gap.casefold()
+                        or "no artifact" in gap.casefold()
+                    )
+                    and any(noun in gap.casefold() for noun in artifact_nouns)
+                    for gap in original_gaps
+                )
+                if existence_only and "no artifact" in str(verdict.get("note") or "").casefold():
+                    # A receipt is authoritative evidence that the deck exists.
+                    # This changes no judgment about claims inside the deck; it
+                    # only corrects a verifier that never saw the receipt.
+                    verdict["unsupported_claims"] = [
+                        claim for claim in (verdict.get("unsupported_claims") or [])
+                        if str(claim).strip() != str(final_text or "").strip()
+                    ]
+                    if not verdict["unsupported_claims"]:
+                        verdict["grounded_ok"] = True
                 produced = list(verdict.get("produced_artifacts") or [])
                 produced.append(str(receipt.get("artifact_id")))
                 verdict["produced_artifacts"] = list(dict.fromkeys(produced))
+                verdict["met"] = bool(
+                    verdict.get("grounded_ok")
+                    and verdict.get("assignments_ok")
+                    and not verdict.get("gaps")
+                    and not verdict.get("unsupported_claims")
+                )
             else:
+                verdict["met"] = False
                 gaps = list(verdict.get("gaps") or [])
                 gaps.append("The requested interactive artifact did not pass production rendering checks.")
                 verdict["gaps"] = list(dict.fromkeys(gaps))
@@ -3630,7 +3750,11 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
         "chosen specialist engine. Prefer general.answer.v1 whenever the request is a "
         "question, a direct answer, or does not clearly justify a specialist engine. A "
         "message merely containing a word like 'campaign' or 'lead' is NOT sufficient "
-        "grounds on its own — judge the actual intent of the request."
+        "grounds on its own — judge the actual intent of the request. The fundraising "
+        "profile is only for explicitly investor-facing or capital-raising material; a "
+        "financial projection outline, scenario, explanation, or assumptions framework "
+        "with no investor-facing deliverable is general.answer.v1. Never infer a visual "
+        "artifact merely because the subject is financial, marketing, product, or design."
     )
     user = json.dumps({
         "user_message": str(req.user_message or "")[:4000],
@@ -4533,6 +4657,7 @@ async def _orchestrate_single_agent(
         "work_results": result.get("work_results") or [],
         "outreach_request": result.get("outreach_request"),
         "outreach_metrics": result.get("outreach_metrics") or {},
+        "debate_contract": result.get("debate_contract") or {},
         "verified_contacts": _vc,
         "enabled_connectors": conns,
         "sender_email": _sender_email,
@@ -4716,7 +4841,12 @@ async def _orchestrate_single_agent(
                        f"{', '.join(_work_room_profile.get('required_artifacts') or [])} — a report alone cannot "
                        "satisfy it. The prepared work and exact gaps are shown; nothing was silently accepted.",
         })
-    elif (req.room_mode or "").strip().lower() == "work" and final_text.strip():
+    elif (req.room_mode or "").strip().lower() == "work" and final_text.strip() and (
+        not _gv or (
+            _gv.get("grounded_ok") is True
+            and _gv.get("verification_available", True) is True
+        )
+    ):
         # Human answers degrade honestly instead of disappearing. Runtime and
         # provider effects retain their strict, predicate-owned status above.
         caveated = bool(_gv) and (not _gv.get("met") or not _gv.get("verification_available", True))
@@ -4741,6 +4871,30 @@ async def _orchestrate_single_agent(
                 "gaps": list((_gv or {}).get("gaps") or [])[:8],
                 "message": "The best grounded result is available; unresolved evidence or verification limits are shown explicitly.",
             })
+    elif (req.room_mode or "").strip().lower() == "work" and final_text.strip():
+        # Prose may remain visible as a candidate, but failed grounding or an
+        # unavailable verifier can never be relabelled as complete.
+        status = "blocked" if _gv else status
+        await persist_work_room_progress(
+            turn_id=req.turn_id,
+            phase="RESPONDING",
+            identity=req.execution_identity or {},
+            candidate={
+                "contract": "work-room-candidate.v1",
+                "content": final_text,
+                "intended_output": intended_output,
+                "quality": "needs_evidence",
+            },
+            verification=_gv if isinstance(_gv, dict) else {},
+            terminal_reason="grounding_or_verification_failed",
+        )
+        await _emit({
+            "t": "completion_caveat",
+            "status": "needs_evidence",
+            "gaps": list((_gv or {}).get("gaps") or [])[:8],
+            "message": "The candidate was retained for audit but withheld as the final deliverable because grounding or verification failed.",
+        })
+        final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
     elif _should_withhold_ungrounded_answer(req.room_mode, status, final_text):
         final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
 

@@ -1,4 +1,5 @@
-import { executeTool, getToolkitTools } from './composio-service.js';
+import crypto from 'node:crypto';
+import { discoverSessionTools, executeSessionTool, executeTool, getToolkitTools } from './composio-service.js';
 import { toComposioToolkit } from '../runtime-provider-policy.js';
 
 const LEGACY_TOOL_SLUGS = Object.freeze({
@@ -15,6 +16,132 @@ const LEGACY_TOOL_SLUGS = Object.freeze({
   docs_create: 'GOOGLEDOCS_CREATE_DOCUMENT',
   docs_append: 'GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT',
 });
+
+const WRITE_TOOL_MARKERS = /(?:^|_)(?:SEND|CREATE|UPDATE|DELETE|REMOVE|ARCHIVE|PUBLISH|POST|UPLOAD|INVITE|ADD|CANCEL|MOVE|COPY|REPLY|FORWARD|DRAFT)(?:_|$)/i;
+const READ_TOOL_MARKERS = /(?:^|_)(?:GET|LIST|SEARCH|FETCH|FIND|RETRIEVE|LOOKUP|QUERY|READ|CHECK|DESCRIBE|EXTRACT|VIEW|DOWNLOAD)(?:_|$)/i;
+const GOVERNED_READ_GRANT_TTL_MS = Math.max(30_000, Number(process.env.HYPER_COMPOSIO_READ_GRANT_TTL_MS || 300_000));
+
+function governedGrantKey(secret) {
+  const material = String(secret || process.env.HIVEMIND_MASTER_API_KEY || '').trim();
+  if (!material) throw new Error('governed_session_grant_secret_missing');
+  return crypto.createHash('sha256').update(`hyper-composio-read-grant.v1:${material}`).digest();
+}
+
+export function isGovernedReadTool(tool) {
+  const slug = String(tool?._composio?.slug || tool?.slug || tool?.function?.name || '').trim();
+  if (!slug || WRITE_TOOL_MARKERS.test(slug) || !READ_TOOL_MARKERS.test(slug)) return false;
+  const description = String(tool?.function?.description || tool?.description || '');
+  return !/\b(?:send|create|update|delete|remove|publish|post|upload|invite|modify|write)\b/i.test(description);
+}
+
+export function issueGovernedReadGrant(
+  { orgId, userId, toolkit, sessionId, toolSlug },
+  { now = Date.now(), secret } = {},
+) {
+  if (![orgId, userId, toolkit, sessionId, toolSlug].every((value) => String(value || '').trim())
+      || !isGovernedReadTool({ slug: toolSlug })) {
+    throw new Error('governed_session_grant_denied');
+  }
+  const grant = {
+    orgId: String(orgId), userId: String(userId), toolkit: String(toolkit).toLowerCase(),
+    sessionId: String(sessionId), toolSlug: String(toolSlug), expiresAt: now + GOVERNED_READ_GRANT_TTL_MS,
+  };
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', governedGrantKey(secret), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(grant), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    grantId: `v1.${iv.toString('base64url')}.${encrypted.toString('base64url')}.${tag.toString('base64url')}`,
+    expiresAt: grant.expiresAt,
+  };
+}
+
+export function resolveGovernedReadGrant(
+  { grantId, orgId, userId, toolSlug },
+  { now = Date.now(), secret } = {},
+) {
+  let grant;
+  try {
+    const [version, ivRaw, encryptedRaw, tagRaw] = String(grantId || '').split('.');
+    if (version !== 'v1' || !ivRaw || !encryptedRaw || !tagRaw) throw new Error('invalid grant');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', governedGrantKey(secret), Buffer.from(ivRaw, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(encryptedRaw, 'base64url')), decipher.final(),
+    ]).toString('utf8');
+    grant = JSON.parse(plaintext);
+  } catch {
+    throw new Error('governed_session_grant_invalid');
+  }
+  if (!grant || Number(grant.expiresAt) <= now) throw new Error('governed_session_grant_expired');
+  if (grant.orgId !== String(orgId) || grant.userId !== String(userId)
+      || grant.toolSlug !== String(toolSlug) || !isGovernedReadTool({ slug: grant.toolSlug })) {
+    throw new Error('governed_session_grant_scope_denied');
+  }
+  return { ...grant };
+}
+
+/** Reuse the same tenant-scoped COMPOSIO_SEARCH_TOOLS + schema path as
+ * use_tools:true chat, but return only conservative read capabilities. */
+export async function discoverGovernedSessionReads(orgId, { toolkits, useCases } = {}, deps = {}) {
+  const discover = deps.discoverSessionTools || discoverSessionTools;
+  const result = await discover(orgId, { toolkits, useCases });
+  const tools = (result.tools || []).filter(isGovernedReadTool).map((tool) => ({
+    name: tool.function?.name,
+    description: tool.function?.description || '',
+    inputSchema: tool.function?.parameters || { type: 'object', properties: {} },
+    sessionId: result.sessionId,
+    toolSlug: tool._composio?.slug,
+    toolkit: tool._composio?.toolkit,
+    effect: 'read',
+  })).filter((tool) => tool.name && tool.sessionId && tool.toolSlug);
+  return { sessionId: result.sessionId, tools, searchedLogId: result.searchedLogId || null,
+    schemaLogId: result.schemaLogId || null, sessionCacheHit: Boolean(result.sessionCacheHit),
+    discoveryCacheHit: Boolean(result.discoveryCacheHit) };
+}
+
+export async function executeGovernedSessionRead({ sessionId, toolSlug, args = {} }, deps = {}) {
+  if (!sessionId || !toolSlug || !isGovernedReadTool({ slug: toolSlug })) {
+    throw new Error(`governed_session_read_denied:${toolSlug || 'missing'}`);
+  }
+  const execute = deps.executeSessionTool || executeSessionTool;
+  const result = await execute(sessionId, toolSlug, args && typeof args === 'object' ? args : {});
+  if (!result?.successful) throw new Error(result?.error || `Composio ${toolSlug} failed`);
+  return { successful: true, data: result.data, receipt: {
+    provider: 'composio', transport: 'tool_router_session', tool_slug: toolSlug,
+    session_log_id: result.session_log_id || null, effect: 'read',
+  } };
+}
+
+export const GOVERNED_RESEARCH_CAPABILITIES = Object.freeze({
+  parallel_search: Object.freeze({ toolkit: 'parallel', tool: 'PARALLEL_SEARCH', effect: 'read' }),
+  parallel_findall: Object.freeze({ toolkit: 'parallel', tool: 'PARALLEL_FIND_ALL', effect: 'research_compute' }),
+  parallel_findall_status: Object.freeze({ toolkit: 'parallel', tool: 'PARALLEL_RETRIEVE_FIND_ALL_RUN_STATUS', effect: 'read' }),
+  parallel_findall_result: Object.freeze({ toolkit: 'parallel', tool: 'PARALLEL_GET_FIND_ALL_RUN_RESULT', effect: 'read' }),
+  parallel_task: Object.freeze({ toolkit: 'parallel', tool: 'PARALLEL_CREATE_TASK_RUN', effect: 'research_compute' }),
+  parallel_enrichment: Object.freeze({ toolkit: 'parallel', tool: 'PARALLEL_ADD_ENRICHMENT_TO_FIND_ALL_RUN', effect: 'research_compute' }),
+});
+
+export function governedResearchCapability(name) {
+  const capability = GOVERNED_RESEARCH_CAPABILITIES[String(name || '').trim()];
+  if (!capability) throw new Error(`governed_research_capability_denied:${name || 'missing'}`);
+  return capability;
+}
+
+/** Execute only the fixed Parallel research surface through Composio's
+ * tenant-bound user_id. Shadow callers are contractually unable to spend or
+ * mutate even the research provider's run state. */
+export async function executeGovernedResearchTool(orgId, name, args = {}, { mode = 'shadow' } = {}) {
+  const capability = governedResearchCapability(name);
+  if (mode === 'shadow') {
+    return { shadow: true, capability: name, toolkit: capability.toolkit, tool: capability.tool, effect: capability.effect };
+  }
+  if (!String(orgId || '').trim()) throw new Error('governed_research_org_required');
+  return executeComposioConnector(orgId, capability.toolkit, {
+    name: capability.tool,
+    arguments: args && typeof args === 'object' ? args : {},
+  });
+}
 
 function translateLegacyArguments(tool, args) {
   const translated = { ...(args || {}) };

@@ -1,0 +1,1 @@
+{"name":"hivemind-hyper-prospect-lifecycle","private":true,"type":"module","scripts":{"check":"tsc --noEmit","dev":"wrangler dev --local"},"devDependencies":{"@cloudflare/workers-types":"^5.20260830.1","typescript":"^5.9.2","wrangler":"^4.32.0"}}

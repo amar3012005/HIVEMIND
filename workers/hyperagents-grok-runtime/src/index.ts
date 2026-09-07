@@ -12,10 +12,14 @@ interface Env {
   ENVIRONMENT: string;
   HIVEMIND_CORE_URL: string;
   HYPER_GROK_FLAG?: string;
+  HYPER_GOVERNED_ROOM_FLAG?: string;
   HYPER_GROK_WORKFLOW_SECRET: string;
   FLAGS: {
     getStringDetails(key: string, fallback: string, context: Record<string, string>): Promise<{
       value: string; reason?: string; variant?: string;
+    }>;
+    getBooleanDetails(key: string, fallback: boolean, context: Record<string, string>): Promise<{
+      value: boolean; reason?: string; variant?: string;
     }>;
   };
   HIRED_HYPER_AGENT: DurableObjectNamespace<HiredHyperAgent>;
@@ -400,6 +404,31 @@ async function decision(env: Env, orgId: string, userId: string): Promise<{ mode
   };
 }
 
+async function governedRoomDecision(env: Env, orgId: string, userId: string, email: string): Promise<{
+  enabled: boolean; processing_version: number; reason: string; variant?: string;
+}> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!env.FLAGS || !orgId || !userId || !normalizedEmail) {
+    return { enabled: false, processing_version: 1, reason: 'invalid_context' };
+  }
+  const details = await env.FLAGS.getBooleanDetails(
+    env.HYPER_GOVERNED_ROOM_FLAG || 'hyperagents_governed_room_v1', false,
+    {
+      targetingKey: userId,
+      org_id: orgId,
+      user_id: userId,
+      email: normalizedEmail,
+      environment: env.ENVIRONMENT,
+    },
+  );
+  return {
+    enabled: details.value === true,
+    processing_version: 1,
+    reason: String(details.reason || 'flagship'),
+    variant: details.variant,
+  };
+}
+
 async function core(env: Env, params: TurnParams, action: 'prepare' | 'execute' | 'reconcile'): Promise<string> {
   const response = await fetch(
     `${env.HIVEMIND_CORE_URL.replace(/\/$/, '')}/internal/hyper-grok/v1/turns/${params.turn_id}/${action}`,
@@ -509,6 +538,14 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/decision' && request.method === 'GET') {
       return Response.json(await decision(env, url.searchParams.get('org_id') || '', url.searchParams.get('user_id') || ''));
+    }
+    if (url.pathname === '/governed-room-decision' && request.method === 'GET') {
+      return Response.json(await governedRoomDecision(
+        env,
+        url.searchParams.get('org_id') || '',
+        url.searchParams.get('user_id') || '',
+        url.searchParams.get('email') || '',
+      ));
     }
     if (url.pathname === '/rooms/publish' && request.method === 'POST') {
       const body = await request.json<{ room_instance_id?: string; event?: Record<string, unknown> }>()

@@ -74,6 +74,31 @@ function configuration() {
     : null;
 }
 
+function governedRoomConfiguration() {
+  const baseUrl = String(
+    process.env.HYPER_GOVERNED_ROOM_FLAG_URL
+      || process.env.HYPER_GROK_WORKFLOW_URL
+      || '',
+  ).replace(/\/$/, '');
+  const secret = String(
+    process.env.HYPER_GOVERNED_ROOM_FLAG_SECRET
+      || process.env.HYPER_GROK_WORKFLOW_SECRET
+      || '',
+  );
+  return baseUrl && secret ? { baseUrl, secret } : null;
+}
+
+async function governedRoomRequest(pathname, timeoutMs = 10_000) {
+  const config = governedRoomConfiguration();
+  if (!config) throw Object.assign(new Error('Governed room flag evaluation is disabled'), {
+    code: 'GOVERNED_ROOM_FLAG_DISABLED',
+  });
+  return fetch(`${config.baseUrl}${pathname}`, {
+    headers: { authorization: `Bearer ${config.secret}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+
 async function request(pathname, init = {}, timeoutMs = 10_000) {
   const config = configuration();
   if (!config) throw Object.assign(new Error('Grok HyperAgents runtime is disabled'), { code: 'GROK_RUNTIME_DISABLED' });
@@ -100,6 +125,25 @@ export async function evaluateGrokRuntime({ orgId, userId }) {
   } catch (error) {
     console.warn('[grok-hyperagents] Flagship decision failed closed:', error.message);
     return { mode: 'off', version: 1, reason: 'decision_unavailable' };
+  }
+}
+
+export async function evaluateGovernedRoomCanary({ orgId, userId, email }) {
+  if (!orgId || !userId || !email) return { enabled: false, version: 1, reason: 'invalid_context' };
+  try {
+    const query = new URLSearchParams({ org_id: orgId, user_id: userId, email: String(email).trim().toLowerCase() });
+    const response = await governedRoomRequest(`/governed-room-decision?${query.toString()}`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) return { enabled: false, version: 1, reason: `decision_http_${response.status}` };
+    return {
+      enabled: body.enabled === true,
+      version: Math.max(1, Number(body.processing_version) || 1),
+      reason: String(body.reason || 'flagship'),
+      variant: body.variant || null,
+    };
+  } catch (error) {
+    console.warn('[governed-hyperagents] Flagship decision failed closed:', error.message);
+    return { enabled: false, version: 1, reason: 'decision_unavailable' };
   }
 }
 

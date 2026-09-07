@@ -119,6 +119,22 @@ import {
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
+import {
+  createOutputJob, prepareOutputJob, renderOutputJob, validateOutputJob,
+  persistOutputJob, readOutputJob, OUTPUT_SKILLS,
+} from './artifacts/hyper-output-lifecycle.js';
+import {
+  createProspectJob, prepareProspectJob, discoverProspectJob, normalizeProspectJob,
+  verifyProspectJob, enrichProspectJob, qualifyProspectJob, prepareProspectOutreach,
+  gateProspectApproval, compareProspectJob, persistProspectJob,
+  readProspectJob,
+} from './artifacts/hyper-prospect-lifecycle.js';
+import {
+  createEvidenceJob, prepareEvidenceJob, acquireEvidenceJob, persistEvidenceJob, readEvidenceJob,
+} from './artifacts/hyper-evidence-lifecycle.js';
+import { discoverGovernedSessionReads, executeGovernedResearchTool,
+  executeGovernedSessionRead, issueGovernedReadGrant,
+  resolveGovernedReadGrant } from './connectors/composio/runtime-adapter.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
@@ -776,8 +792,11 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
         } catch { /* org-wide re-kick is acceptable for recovery */ }
         _sweepKicked.add(t.id);
         console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
-        internalFetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
-          service: 'hm-employees',
+        const _sweepCanary = governedRoomCanaryFromLines(t.lines);
+        const _sweepCanaryUrl = String(process.env.HYPERAGENTS_GOVERNED_CANARY_URL || '').replace(/\/$/, '');
+        const _sweepSidecar = _sweepCanary && _sweepCanaryUrl ? _sweepCanaryUrl : _hyperSidecar();
+        internalFetch(`${_sweepSidecar}/internal/hyper/room-turn`, {
+          service: _sweepCanary && _sweepCanaryUrl ? 'hm-employees-hyper-canary' : 'hm-employees',
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: {
@@ -786,6 +805,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
             room_goal: _sweepGoal,
             room_mode: _sweepRoomMode,
             task_tag: `ROOM_${String(_sweepRoomTag).toUpperCase()}`,
+            governed_room_canary: governedRoomCanaryFromLines(t.lines),
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           },
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
@@ -1299,8 +1319,11 @@ function dispatchHyperRoomTurn(body) {
   if (payload?.room_mode === 'work' && !payload.execution_identity) {
     payload = { ...payload, execution_identity: buildWorkRoomExecutionIdentity(payload) };
   }
-  return internalFetch(`${HYPER_SIDECAR_BASE_URL}/internal/hyper/room-turn`, {
-    service: 'hm-employees',
+  const canaryUrl = String(process.env.HYPERAGENTS_GOVERNED_CANARY_URL || '').replace(/\/$/, '');
+  const useGovernedCanary = payload?.governed_room_canary === true && canaryUrl;
+  const sidecarUrl = useGovernedCanary ? canaryUrl : HYPER_SIDECAR_BASE_URL;
+  return internalFetch(`${sidecarUrl}/internal/hyper/room-turn`, {
+    service: useGovernedCanary ? 'hm-employees-hyper-canary' : 'hm-employees',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: payload,
@@ -1308,6 +1331,12 @@ function dispatchHyperRoomTurn(body) {
       ? 30 * 60 * 1000
       : 90_000,
   });
+}
+
+function governedRoomCanaryFromLines(lines) {
+  if (!Array.isArray(lines)) return false;
+  const receipt = [...lines].reverse().find((event) => event?.t === 'governed_room_canary');
+  return receipt?.enabled === true;
 }
 
 // A Room's execution boundary is durable data, not an inference from its title
@@ -3308,6 +3337,137 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       const retryable = ['day1_turn_not_ready', 'day1_turn_not_complete', 'day1_delivery_in_progress'].includes(error.message);
       return jsonResponse(res, { error: error.message, retryable }, retryable ? 409 : 422);
+    }
+  }
+
+  if (pathname.startsWith('/internal/hyper-output/')) {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    const expected = process.env.HIVEMIND_OUTPUT_WORKFLOW_SECRET || process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    const ids = {
+      outputJobId: String(body.output_job_id || ''), orgId: String(body.org_id || ''),
+      userId: String(body.user_id || ''), roomId: String(body.room_id || ''), turnId: String(body.turn_id || ''),
+    };
+    if (Object.values(ids).some((value) => !/^[0-9a-f-]{36}$/i.test(value))) {
+      return jsonResponse(res, { error: 'scoped UUID identifiers are required', retryable: false }, 400);
+    }
+    try {
+      if (pathname === '/internal/hyper-output/prepare') return jsonResponse(res, await prepareOutputJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-output/render') return jsonResponse(res, await renderOutputJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-output/validate') return jsonResponse(res, await validateOutputJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-output/persist') return jsonResponse(res, await persistOutputJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-output/deliver') {
+        const job = await readOutputJob({ prisma, orgId: ids.orgId, userId: ids.userId, outputJobId: ids.outputJobId });
+        if (!job?.receipt?.delivery?.approval_bound_to || body.approved_digest !== job.receipt.delivery.approval_bound_to) {
+          return jsonResponse(res, { error: 'artifact_digest_approval_required', retryable: false }, 403);
+        }
+        return jsonResponse(res, { error: 'delivery_connector_not_selected', retryable: false }, 422);
+      }
+      return jsonResponse(res, { error: 'Not found' }, 404);
+    } catch (error) {
+      const nonRetryable = /(?:unsupported|scope_mismatch|not_found|not_sealed|missing|invalid|renderer_not_available)/.test(error.message);
+      return jsonResponse(res, { error: error.message, retryable: !nonRetryable }, nonRetryable ? 422 : 409);
+    }
+  }
+
+  if (pathname.startsWith('/internal/hyper-prospect/')) {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    const expected = process.env.HIVEMIND_PROSPECT_WORKFLOW_SECRET || process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    const ids = {
+      prospectJobId: String(body.prospect_job_id || ''), orgId: String(body.org_id || ''),
+      userId: String(body.user_id || ''), roomId: String(body.room_id || ''), turnId: String(body.turn_id || ''),
+    };
+    if (Object.values(ids).some((value) => !/^[0-9a-f-]{36}$/i.test(value))) {
+      return jsonResponse(res, { error: 'scoped UUID identifiers are required', retryable: false }, 400);
+    }
+    try {
+      if (pathname === '/internal/hyper-prospect/prepare') return jsonResponse(res, await prepareProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/discover') return jsonResponse(res, await discoverProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/normalize') return jsonResponse(res, await normalizeProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/verify') return jsonResponse(res, await verifyProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/enrich') return jsonResponse(res, await enrichProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/qualify') return jsonResponse(res, await qualifyProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/prepare-outreach') return jsonResponse(res, await prepareProspectOutreach({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/approval') return jsonResponse(res, await gateProspectApproval({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/compare') return jsonResponse(res, await compareProspectJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-prospect/persist') return jsonResponse(res, await persistProspectJob({ prisma, ...ids }));
+      return jsonResponse(res, { error: 'Not found' }, 404);
+    } catch (error) {
+      const nonRetryable = /(?:scope_mismatch|not_found|not_sealed|missing|invalid|denied|required)/.test(error.message);
+      return jsonResponse(res, { error: error.message, retryable: !nonRetryable }, nonRetryable ? 422 : 409);
+    }
+  }
+
+  if (pathname.startsWith('/internal/hyper-evidence/')) {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    const expected = process.env.HIVEMIND_EVIDENCE_WORKFLOW_SECRET || process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    if (pathname === '/internal/hyper-evidence/request') {
+      const baseIds = { orgId: String(body.org_id || ''), userId: String(body.user_id || ''),
+        roomId: String(body.room_id || ''), turnId: String(body.turn_id || '') };
+      if (Object.values(baseIds).some((value) => !/^[0-9a-f-]{36}$/i.test(value))) {
+        return jsonResponse(res, { error: 'scoped UUID identifiers are required', retryable: false }, 400);
+      }
+      try {
+        const job = await createEvidenceJob({ prisma, ...baseIds, request: {
+          route: body.route, query: body.query, claim_id: body.claim_id,
+        } });
+        const workflowRequest = { evidence_job_id: job.id, org_id: baseIds.orgId,
+          user_id: baseIds.userId, room_id: baseIds.roomId, turn_id: baseIds.turnId };
+        const mode = String(body.mode || 'shadow');
+        let workflow = { status: 'not_started_shadow' };
+        if (mode === 'canary' && process.env.HYPER_EVIDENCE_WORKFLOW_URL) {
+          const response = await fetch(`${process.env.HYPER_EVIDENCE_WORKFLOW_URL.replace(/\/$/, '')}/start`, {
+            method: 'POST', headers: { authorization: `Bearer ${expected}`, 'content-type': 'application/json' },
+            body: JSON.stringify(workflowRequest),
+          });
+          workflow = { status: response.ok ? 'started' : 'start_failed', http_status: response.status };
+          if (!response.ok) throw new Error(`evidence_workflow_start_${response.status}`);
+        }
+        return jsonResponse(res, { ok: true, evidence_job_id: job.id, state: job.payload?.state,
+          workflow_request: workflowRequest, workflow }, 202);
+      } catch (error) {
+        const nonRetryable = /(?:not_found|invalid|required|scope)/.test(error.message);
+        return jsonResponse(res, { error: error.message, retryable: !nonRetryable }, nonRetryable ? 422 : 409);
+      }
+    }
+    const ids = {
+      evidenceJobId: String(body.evidence_job_id || ''), orgId: String(body.org_id || ''),
+      userId: String(body.user_id || ''), roomId: String(body.room_id || ''), turnId: String(body.turn_id || ''),
+    };
+    if (Object.values(ids).some((value) => !/^[0-9a-f-]{36}$/i.test(value))) {
+      return jsonResponse(res, { error: 'scoped UUID identifiers are required', retryable: false }, 400);
+    }
+    try {
+      if (pathname === '/internal/hyper-evidence/prepare') return jsonResponse(res, await prepareEvidenceJob({ prisma, ...ids }));
+      if (pathname === '/internal/hyper-evidence/acquire') {
+        return jsonResponse(res, await acquireEvidenceJob({ prisma, ...ids, executeResearch: async (request) => {
+          const route = request.route === 'parallel_task' ? 'parallel_task'
+            : request.route === 'parallel_findall' ? 'parallel_findall' : 'parallel_search';
+          const executed = await executeGovernedResearchTool(ids.orgId, route,
+            route === 'parallel_search' ? { search_queries: [request.query], objective: request.query }
+              : { input: request.query, task_spec: { output_schema: { type: 'object' } } },
+            { mode: 'canary' });
+          if (executed?.successful === false) throw new Error(String(executed.error || 'evidence_provider_failed'));
+          const data = executed?.data || executed || {};
+          return { sources: data.sources || data.results || data.citations || [] };
+        } }));
+      }
+      if (pathname === '/internal/hyper-evidence/persist') return jsonResponse(res, await persistEvidenceJob({ prisma, ...ids }));
+      return jsonResponse(res, { error: 'Not found' }, 404);
+    } catch (error) {
+      const nonRetryable = /(?:scope_mismatch|not_found|invalid|denied|required|no_url_receipts)/.test(error.message);
+      return jsonResponse(res, { error: error.message, retryable: !nonRetryable }, nonRetryable ? 422 : 409);
     }
   }
 
@@ -5458,7 +5618,7 @@ const server = http.createServer(async (req, res) => {
       if (!companyProfile || typeof companyProfile !== 'object' || Array.isArray(companyProfile)) {
         return jsonResponse(res, { error: 'company_profile object is required' }, 400);
       }
-      const allowedKeys = new Set(['website', 'industry', 'description', 'audience', 'mission']);
+      const allowedKeys = new Set(['name', 'website', 'industry', 'description', 'audience', 'mission']);
       const entries = Object.entries(companyProfile)
         .filter(([key]) => allowedKeys.has(key))
         .map(([key, value]) => [key, typeof value === 'string' ? value.trim() : '']);
@@ -9069,6 +9229,324 @@ Write the persona now.`;
   // workspace WS at boot. App-level tokens (xapp-) remain admin-managed
   // via env (SLACK_APP_TOKEN_<team_id>) since Slack issues them per-app,
   // not per-OAuth-grant.
+  // Tenant-scoped, read-only web evidence lane for HyperAgents. The caller
+  // cannot choose a connector or tool: this boundary only exposes Composio's
+  // no-auth search tool and only returns URL-backed citations. Provider prose
+  // is kept separate from evidence so it cannot silently become a sourced fact.
+  if (pathname === '/v1/hyper-output-skills' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    return jsonResponse(res, { contract: 'hyper.output-skills.v1', skills: OUTPUT_SKILLS });
+  }
+
+  const outputJobMatch = pathname.match(/^\/v1\/hyper-output-jobs(?:\/([0-9a-f-]{36}))?$/);
+  if (outputJobMatch) {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (req.method === 'GET' && outputJobMatch[1]) {
+      const job = await readOutputJob({
+        prisma, orgId: current.session.orgId, userId: current.session.userId, outputJobId: outputJobMatch[1],
+      });
+      return job ? jsonResponse(res, { job }) : jsonResponse(res, { error: 'Output job not found' }, 404);
+    }
+    if (req.method === 'POST' && !outputJobMatch[1]) {
+      const body = await parseBody(req).catch(() => ({}));
+      const roomId = String(body.room_id || ''); const turnId = String(body.turn_id || '');
+      if (!/^[0-9a-f-]{36}$/i.test(roomId) || !/^[0-9a-f-]{36}$/i.test(turnId)) {
+        return jsonResponse(res, { error: 'room_id and turn_id are required' }, 400);
+      }
+      try {
+        const job = await createOutputJob({
+          prisma, orgId: current.session.orgId, userId: current.session.userId, roomId, turnId,
+          request: {
+            family: String(body.output_family || 'report'),
+            formats: Array.isArray(body.formats) ? body.formats : undefined,
+            audience: body.audience, purpose: body.purpose,
+            deliveryRequested: body.delivery_requested === true,
+          },
+        });
+        return jsonResponse(res, {
+          job: { id: job.id, ...(job.payload || {}) },
+          workflow_request: {
+            output_job_id: job.id, org_id: current.session.orgId, user_id: current.session.userId,
+            room_id: roomId, turn_id: turnId,
+          },
+        }, 202);
+      } catch (error) {
+        return jsonResponse(res, { error: error.message }, 422);
+      }
+    }
+    return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
+  const prospectJobMatch = pathname.match(/^\/v1\/hyper-prospect-jobs(?:\/([0-9a-f-]{36}))?$/);
+
+  const evidenceJobMatch = pathname.match(/^\/v1\/hyper-evidence-jobs(?:\/([0-9a-f-]{36}))?$/);
+  if (evidenceJobMatch) {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (req.method === 'GET' && evidenceJobMatch[1]) {
+      const job = await readEvidenceJob({ prisma, orgId: current.session.orgId,
+        userId: current.session.userId, evidenceJobId: evidenceJobMatch[1] });
+      return job ? jsonResponse(res, { job }) : jsonResponse(res, { error: 'Evidence job not found' }, 404);
+    }
+    if (req.method === 'POST' && !evidenceJobMatch[1]) {
+      const body = await parseBody(req).catch(() => ({}));
+      const roomId = String(body.room_id || ''); const turnId = String(body.turn_id || '');
+      try {
+        const job = await createEvidenceJob({ prisma, orgId: current.session.orgId,
+          userId: current.session.userId, roomId, turnId, request: {
+            route: body.route, query: body.query, claim_id: body.claim_id,
+          } });
+        return jsonResponse(res, { job: { id: job.id, ...(job.payload || {}) }, workflow_request: {
+          evidence_job_id: job.id, org_id: current.session.orgId, user_id: current.session.userId,
+          room_id: roomId, turn_id: turnId,
+        } }, 202);
+      } catch (error) { return jsonResponse(res, { error: error.message }, 422); }
+    }
+    return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
+  if (prospectJobMatch) {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (req.method === 'GET' && prospectJobMatch[1]) {
+      const job = await readProspectJob({ prisma, orgId: current.session.orgId, userId: current.session.userId, prospectJobId: prospectJobMatch[1] });
+      return job ? jsonResponse(res, { job }) : jsonResponse(res, { error: 'Prospect job not found' }, 404);
+    }
+    if (req.method === 'POST' && !prospectJobMatch[1]) {
+      const body = await parseBody(req).catch(() => ({}));
+      const roomId = String(body.room_id || ''); const turnId = String(body.turn_id || '');
+      try {
+        const job = await createProspectJob({ prisma, orgId: current.session.orgId, userId: current.session.userId, roomId, turnId });
+        return jsonResponse(res, { job: { id: job.id, ...(job.payload || {}) }, workflow_request: { prospect_job_id: job.id, org_id: current.session.orgId, user_id: current.session.userId, room_id: roomId, turn_id: turnId } }, 202);
+      } catch (error) { return jsonResponse(res, { error: error.message }, 422); }
+    }
+    return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
+  if (pathname === '/internal/hyper/org-profile' && req.method === 'GET') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const orgId = String(url.searchParams.get('org_id') || '');
+    const userId = String(url.searchParams.get('user_id') || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)) {
+      return jsonResponse(res, { error: 'org_id and user_id are required' }, 400);
+    }
+    const membership = await getActiveOrganizationMembership(prisma, { userId, orgId });
+    if (!membership) return jsonResponse(res, { error: 'Resource not found' }, 404);
+    const [organization, facts] = await Promise.all([
+      prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { id: true, name: true, slug: true, plan: true, dataResidencyRegion: true },
+      }),
+      prisma.organizationProfile.findMany({
+        where: { orgId, deletedAt: null },
+        orderBy: [{ category: 'asc' }, { key: 'asc' }],
+      }),
+    ]);
+    if (!organization) return jsonResponse(res, { error: 'Resource not found' }, 404);
+    const companyProfile = Object.fromEntries(facts.map((fact) => [
+      fact.key.replace(/^company\./, ''), fact.value,
+    ]));
+    let verifiedDomain = null;
+    try {
+      const website = String(companyProfile.website || '').trim();
+      if (website) verifiedDomain = new URL(/^https?:\/\//i.test(website) ? website : `https://${website}`).hostname;
+    } catch { /* malformed profile value remains visible but is not a verified domain */ }
+    return jsonResponse(res, {
+      organization: {
+        id: organization.id, name: organization.name, slug: organization.slug,
+        plan: organization.plan || 'free', hosting_mode: 'managed',
+        data_residency_region: organization.dataResidencyRegion || 'eu-central',
+        company_profile: companyProfile,
+      },
+      profile_status: facts.length ? 'configured' : 'identity_only',
+      verified_domains: verifiedDomain ? [verifiedDomain] : [],
+      source: 'organization_profile',
+    });
+  }
+
+  if (pathname === '/internal/hyper/brand-dna' && req.method === 'GET') {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const orgId = String(url.searchParams.get('org_id') || '');
+    const userId = String(url.searchParams.get('user_id') || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)) {
+      return jsonResponse(res, { error: 'org_id and user_id are required' }, 400);
+    }
+    const membership = await getActiveOrganizationMembership(prisma, { userId, orgId });
+    if (!membership) return jsonResponse(res, { error: 'Resource not found' }, 404);
+    const run = await prisma.visualIntelligenceRun.findFirst({
+      where: { orgId, status: 'completed', deliverable: 'brand_dna_v1' },
+      orderBy: [{ processingVersion: 'desc' }, { finishedAt: 'desc' }],
+      select: { id: true, processingVersion: true, finishedAt: true, artifact: true },
+    });
+    const artifact = run?.artifact && typeof run.artifact === 'object' ? run.artifact : null;
+    const analysis = artifact?.analysis && typeof artifact.analysis === 'object' ? artifact.analysis : {};
+    const brief = artifact?.visual_generation_brief && typeof artifact.visual_generation_brief === 'object'
+      ? artifact.visual_generation_brief : null;
+    if (!run || artifact?.artifact_type !== 'brand_dna' || !brief || !Object.keys(brief).length) {
+      return jsonResponse(res, { available: false, reason: 'not_ready' }, 404);
+    }
+    const evidenceRefs = (Array.isArray(artifact.evidence) ? artifact.evidence : []).slice(0, 24).map((row) => ({
+      page_url: String(row?.page_url || row?.page?.url || '').slice(0, 500),
+      r2_key: String(row?.r2_key || '').slice(0, 500),
+      title: String(row?.page?.title || '').slice(0, 240),
+    })).filter((row) => row.page_url || row.r2_key);
+    return jsonResponse(res, {
+      available: true,
+      contract: 'hyper.brand-dna-skill-reference.v1',
+      reference: {
+        artifact_type: 'brand_dna', run_id: run.id,
+        version: String(artifact.version || `visual-intelligence-v${run.processingVersion}`).slice(0, 120),
+        verified_at: run.finishedAt,
+        evidence_count: evidenceRefs.length,
+      },
+      identity: analysis.identity || {}, voice: analysis.voice || {}, palette: analysis.palette || {},
+      typography: analysis.typography || {}, layout: analysis.layout || {}, imagery: analysis.imagery || {},
+      visual_generation_brief: brief,
+      evidence_refs: evidenceRefs,
+    });
+  }
+
+  if (pathname === '/internal/hyper/composio-read-tools' && req.method === 'POST') {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(body.org_id || ''); const userId = String(body.user_id || '');
+    const toolkit = String(body.toolkit || '').trim().toLowerCase();
+    const useCase = String(body.use_case || '').trim().slice(0, 1200);
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId) || !toolkit || !useCase) {
+      return jsonResponse(res, { error: 'org_id, user_id, toolkit and use_case are required' }, 400);
+    }
+    if (!await getActiveOrganizationMembership(prisma, { userId, orgId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      const discovered = await discoverGovernedSessionReads(orgId, { toolkits: [toolkit], useCases: [useCase] });
+      const tools = (discovered.tools || []).map((tool) => {
+        const grant = issueGovernedReadGrant({
+          orgId, userId, toolkit: tool.toolkit || toolkit,
+          sessionId: tool.sessionId, toolSlug: tool.toolSlug,
+        });
+        const { sessionId: _sessionId, ...publicTool } = tool;
+        return { ...publicTool, grantId: grant.grantId, grantExpiresAt: grant.expiresAt };
+      });
+      return jsonResponse(res, {
+        tools, searchedLogId: discovered.searchedLogId, schemaLogId: discovered.schemaLogId,
+        sessionCacheHit: discovered.sessionCacheHit, discoveryCacheHit: discovered.discoveryCacheHit,
+        authority: 'read', use_case: useCase,
+      });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message, fallback: 'legacy_connector_inspect' }, 502);
+    }
+  }
+
+  if (pathname === '/internal/hyper/composio-read-exec' && req.method === 'POST') {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(body.org_id || ''); const userId = String(body.user_id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)) {
+      return jsonResponse(res, { error: 'org_id and user_id are required' }, 400);
+    }
+    if (!await getActiveOrganizationMembership(prisma, { userId, orgId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      const toolSlug = String(body.tool_slug || '');
+      const grant = resolveGovernedReadGrant({
+        grantId: String(body.grant_id || ''), orgId, userId, toolSlug,
+      });
+      return jsonResponse(res, await executeGovernedSessionRead({
+        sessionId: grant.sessionId, toolSlug,
+        args: body.arguments && typeof body.arguments === 'object' ? body.arguments : {},
+      }));
+    } catch (error) {
+      const denied = /(?:read_denied|grant_(?:denied|expired|invalid|scope_denied))/.test(String(error.message));
+      return jsonResponse(res, { error: error.message }, denied ? 403 : 502);
+    }
+  }
+
+  if (pathname === '/internal/hyper/web-search' && req.method === 'POST') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(body?.org_id || '');
+    const userId = String(body?.user_id || '');
+    const query = String(body?.query || '').trim().slice(0, 1200);
+    const limit = Math.max(1, Math.min(Number(body?.limit || 6), 10));
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId) || query.length < 3) {
+      return jsonResponse(res, { error: 'org_id, user_id and query are required' }, 400);
+    }
+    try {
+      const executed = await composioService.executeTool(orgId, 'COMPOSIO_SEARCH_WEB', { query });
+      if (!executed?.successful) {
+        return jsonResponse(res, { error: 'composio search failed', detail: String(executed?.error || '').slice(0, 300) }, 502);
+      }
+      const data = executed.data && typeof executed.data === 'object' ? executed.data : {};
+      const citations = Array.isArray(data.citations) ? data.citations : [];
+      let results = citations.map((citation, index) => {
+        const row = citation && typeof citation === 'object' ? citation : { url: citation };
+        const urlValue = String(row.url || row.link || row.source_url || '').trim();
+        if (!/^https?:\/\//i.test(urlValue)) return null;
+        return {
+          title: String(row.title || row.name || `Source ${index + 1}`).slice(0, 500),
+          url: urlValue.slice(0, 2048),
+          snippet: String(row.snippet || row.text || row.description || '').slice(0, 3000),
+          score: Number.isFinite(Number(row.score)) ? Number(row.score) : null,
+        };
+      }).filter(Boolean).slice(0, limit);
+      if (!results.length) {
+        return jsonResponse(res, { error: 'search returned no URL-backed citations', provider: 'composio_search' }, 502);
+      }
+      // Search citations can be URL-only. Fetch the cited pages in one bounded
+      // read call so downstream agents receive source text, not provider prose.
+      const extracted = await composioService.executeTool(orgId, 'COMPOSIO_SEARCH_FETCH_URL_CONTENT', {
+        urls: results.map((row) => row.url), max_chars_per_url: 3000,
+      });
+      const extractedRows = extracted?.successful && Array.isArray(extracted?.data?.results)
+        ? extracted.data.results : [];
+      const contentByUrl = new Map(extractedRows.map((row) => [
+        String(row?.url || row?.id || '').trim(),
+        String(row?.text || row?.content || '').trim().slice(0, 3000),
+      ]));
+      results = results.map((row) => ({
+        ...row,
+        snippet: row.snippet || contentByUrl.get(row.url) || '',
+      }));
+      if (!results.some((row) => row.snippet)) {
+        return jsonResponse(res, {
+          error: 'search citations could not be extracted', provider: 'composio_search',
+        }, 502);
+      }
+      return jsonResponse(res, {
+        status: 'succeeded', provider: 'composio_search', tool: 'COMPOSIO_SEARCH_WEB',
+        extraction_tool: 'COMPOSIO_SEARCH_FETCH_URL_CONTENT',
+        results, answer: String(data.answer || '').slice(0, 12000),
+        evidence_policy: 'citations_only',
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: 'composio search unavailable', detail: String(err?.message || err).slice(0, 300) }, 502);
+    }
+  }
+
   if (pathname === '/internal/hyper/prospects' && req.method === 'GET') {
     const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
       || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
@@ -13225,6 +13703,7 @@ Write the persona now.`;
             task_tag: roomExecutionTag(room),
             flyby_decision: decision,
             flyby_spec: flybySpec,
+            governed_room_canary: governedRoomCanaryFromLines(turn.lines),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
           }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
 
@@ -13255,9 +13734,14 @@ Write the persona now.`;
       // Fail-closed, cumulative Flagship decision. The value is latched on the
       // turn before any execution begins; a later flag change cannot move an
       // in-flight turn between the legacy and durable runtimes.
-      const { evaluateGrokRuntime, grokModeAtLeast, grokWorkflowId } = await import('./hyperagents/grok-runtime-client.js');
+      const { evaluateGrokRuntime, evaluateGovernedRoomCanary, grokModeAtLeast, grokWorkflowId } = await import('./hyperagents/grok-runtime-client.js');
       const grokDecision = await evaluateGrokRuntime({
         orgId: current.session.orgId, userId: current.session.userId,
+      });
+      const governedRoomDecision = await evaluateGovernedRoomCanary({
+        orgId: current.session.orgId,
+        userId: current.session.userId,
+        email: current.session.email,
       });
       const grokWorkflowInstanceId = grokModeAtLeast(grokDecision.mode, 'durable_assignments')
         ? grokWorkflowId(meteredTurnId, grokDecision.version)
@@ -13292,7 +13776,14 @@ Write the persona now.`;
               userMessage,
               status: 'live',
               idempotencyKey: key,
-              lines: [],
+              lines: [{
+                t: 'governed_room_canary',
+                enabled: governedRoomDecision.enabled,
+                processing_version: governedRoomDecision.version,
+                reason: governedRoomDecision.reason,
+                variant: governedRoomDecision.variant || null,
+                ts: Date.now(),
+              }],
               grokRuntimeMode: grokDecision.mode,
               grokRuntimeVersion: grokDecision.version,
               grokWorkflowInstanceId,
@@ -13425,6 +13916,8 @@ Write the persona now.`;
             grok_runtime_mode: grokDecision.mode,
             grok_runtime_version: grokDecision.version,
             grok_workflow_instance_id: grokWorkflowInstanceId,
+            governed_room_canary: governedRoomDecision.enabled,
+            governed_room_canary_version: governedRoomDecision.version,
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -13726,6 +14219,7 @@ Write the persona now.`;
           grok_runtime_mode: turn.grokRuntimeMode,
           grok_runtime_version: turn.grokRuntimeVersion,
           grok_workflow_instance_id: turn.grokWorkflowInstanceId,
+          governed_room_canary: governedRoomCanaryFromLines(turn.lines),
           callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
         });
         return jsonResponse(res, { ok: true, dispatched: true, response: response || null });
@@ -13843,6 +14337,35 @@ Write the persona now.`;
         const { handleCampaignRoomEvent } = await import('./campaigns/pipeline.js');
         await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
         if (body.event.t === 'seal') {
+          // Default-off shadow bridge. The current Room remains authoritative;
+          // only turns carrying a typed generalized prospecting contract create
+          // a candidate job. Cloudflare receives opaque IDs and cannot perform
+          // outreach while the contract mode is shadow.
+          if (String(process.env.HYPER_PROSPECT_SHADOW_AUTO || '').toLowerCase() === 'true') {
+            try {
+              const scoped = await prisma.hyperTurn.findUnique({
+                where: { id: body.turn_id },
+                select: { roomId: true, room: { select: { orgId: true, userId: true } } },
+              });
+              if (scoped?.room) {
+                const job = await createProspectJob({ prisma, orgId: scoped.room.orgId, userId: scoped.room.userId, roomId: scoped.roomId, turnId: body.turn_id });
+                const workflowUrl = String(process.env.HYPER_PROSPECT_WORKFLOW_URL || '').replace(/\/$/, '');
+                if (workflowUrl) {
+                  const response = await fetch(`${workflowUrl}/start`, {
+                    method: 'POST', headers: {
+                      authorization: `Bearer ${process.env.HIVEMIND_PROSPECT_WORKFLOW_SECRET || process.env.HIVEMIND_MASTER_API_KEY || ''}`,
+                      'content-type': 'application/json',
+                    }, body: JSON.stringify({ prospect_job_id: job.id, org_id: scoped.room.orgId, user_id: scoped.room.userId, room_id: scoped.roomId, turn_id: body.turn_id }),
+                    signal: AbortSignal.timeout(5000),
+                  });
+                  if (!response.ok) throw new Error(`shadow_workflow_http_${response.status}`);
+                }
+                await appendTurnEvent(prisma, body.turn_id, { t: 'prospect_shadow_scheduled', job_id: job.id, workflow_dispatched: Boolean(workflowUrl) });
+              }
+            } catch (shadowError) {
+              if (shadowError.message !== 'prospecting_contract_missing') console.warn('[hyper-prospect-shadow] schedule failed:', shadowError.message);
+            }
+          }
           // Reconcile product usage at the one lifecycle boundary shared by
           // every execution path. This is idempotent with the manual-turn
           // admission path and covers task/HQ/runtime-created turns that never
@@ -13960,6 +14483,62 @@ Write the persona now.`;
                 await prisma.hyperClaim.create({
                   data: { refId: _stableRef, turnId: turn_id, roomId, orgId, agentSlug: ev.agent, kind: ev.kind, text: ev.content || '', round },
                 });
+              } else if (['blind_position', 'claim_normalized', 'position_revised', 'minority_report'].includes(ev.t)) {
+                const refId = ev.claim_id || ev.contribution_id || _stableRef;
+                const evidenceRefs = (ev.evidence_refs || []).filter(_isUuid);
+                const claimData = {
+                    refId,
+                    turnId: turn_id,
+                    roomId,
+                    orgId,
+                    agentSlug: ev.agent_id || ev.agent || null,
+                    lane: ev.role || null,
+                    kind: ev.t,
+                    text: ev.statement || '',
+                    confidence: ev.confidence ?? null,
+                    round,
+                    evidenceMemoryIds: evidenceRefs,
+                };
+                const existingClaim = await prisma.hyperClaim.findFirst({
+                  where: { turnId: turn_id, refId, kind: ev.t }, select: { id: true },
+                });
+                if (existingClaim) await prisma.hyperClaim.update({ where: { id: existingClaim.id }, data: claimData });
+                else await prisma.hyperClaim.create({ data: claimData });
+                for (const evidenceRef of evidenceRefs) {
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType: 'derived_from', fromRef: refId, toRef: evidenceRef } }).catch(() => {});
+                }
+                for (const targetRef of (ev.target_claim_ids || [])) {
+                  const relationType = ev.t === 'position_revised' ? 'updates' : 'relates_to';
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType, fromRef: refId, toRef: String(targetRef) } }).catch(() => {});
+                }
+              } else if (['debate_contract', 'targeted_challenge', 'evidence_requested', 'evidence_received', 'roundtable_verdict', 'roundtable_shadow_comparison'].includes(ev.t)) {
+                const verdict = ev.t === 'roundtable_verdict'
+                  ? (ev.verdict?.status || null)
+                  : (ev.status || ev.kind || null);
+                const targetRef = ev.target_claim_id || (ev.target_claim_ids || [])[0] || null;
+                const eventRef = ev.contribution_id || ev.claim_id || ev.request_id
+                  || ev.debate_contract?.version || ev.protocol_version || _stableRef;
+                const trialData = {
+                    turnId: turn_id,
+                    roomId,
+                    orgId,
+                    trialKind: ev.t,
+                    reviewerSlug: ev.agent_id || ev.agent || null,
+                    targetRef: targetRef || String(eventRef).slice(0, 120),
+                    verdict,
+                    confidence: ev.confidence ?? null,
+                    content: JSON.stringify(ev).slice(0, 12000),
+                    round,
+                };
+                const existingTrial = await prisma.hyperTrial.findFirst({
+                  where: { turnId: turn_id, trialKind: ev.t, targetRef: trialData.targetRef,
+                           reviewerSlug: trialData.reviewerSlug }, select: { id: true },
+                });
+                if (existingTrial) await prisma.hyperTrial.update({ where: { id: existingTrial.id }, data: trialData });
+                else await prisma.hyperTrial.create({ data: trialData });
+                if (ev.t === 'targeted_challenge' && (ev.agent_id || ev.agent) && targetRef) {
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType: 'contradicts', fromRef: ev.agent_id || ev.agent, toRef: String(targetRef) } }).catch(() => {});
+                }
               } else if (ev.t === 'peer_review') {
                 await prisma.hyperTrial.create({
                   data: { turnId: turn_id, roomId, orgId, trialKind: 'peer_review', reviewerSlug: ev.reviewer ?? null, targetRef: ev.target_hypothesis_id ?? null, verdict: ev.agreement ?? null, content: ev.content ?? null, round },

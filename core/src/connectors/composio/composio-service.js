@@ -565,15 +565,21 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
   const authConfigId = getAuthConfigId(toolkitSlug) || await (async () => {
     const data = await composioPost('/api/v3.1/auth_configs', {
       toolkit: { slug: toolkitSlug },
-      auth_config: { type: 'use_custom_auth', auth_scheme: 'API_KEY', name: `${toolkitSlug}-api-key` },
+      auth_config: {
+        type: 'use_custom_auth',
+        authScheme: 'API_KEY',
+        name: `${toolkitSlug}-api-key`,
+        credentials: {},
+        is_enabled_for_tool_router: true,
+      },
     });
     return data?.auth_config?.id || null;
   })();
   if (!authConfigId) throw new Error(`Could not resolve an auth config for "${toolkitSlug}"`);
 
-  const data = await composioPost('/api/v3.1/connected_accounts', {
+  const data = await composioPost('/api/v3/connected_accounts', {
     auth_config: { id: authConfigId },
-    connection: { user_id: orgId, state: { authScheme: 'API_KEY', val: { status: 'INITIALIZED', api_key: apiKey } } },
+    connection: { user_id: orgId, state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } } },
   });
   return { id: data?.id, status: data?.status };
 }

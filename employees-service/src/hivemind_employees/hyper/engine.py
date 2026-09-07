@@ -5241,6 +5241,15 @@ class Director:
                 "No regulatory certification or market figure is inferred from missing evidence",
             ]
         elif profile_id == "legal_finance.review.v1":
+            legal_query = str(
+                self.execution_profile.get("external_evidence_query")
+                or plan.get("web_query")
+                or "GDPR marketing claims"
+            ).strip()
+            amended["web_query"] = (
+                f"{legal_query[:700]} authoritative GDPR guidance "
+                "site:edpb.europa.eu OR site:commission.europa.eu"
+            )[:900]
             context_urls = [value.rstrip(".,;") for value in re.findall(
                 r"https?://[^\s<>\]\[\)\(\"']+", f"{self.user_message}\n{self.company_brief}", re.I,
             )]

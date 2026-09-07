@@ -1121,13 +1121,16 @@ def test_legal_review_floor_requires_rendered_public_sources_mailbox_and_review(
         "gmail_search": ("google", "gmail", "gmail_search"),
     }
     plan = director._apply_research_floor({
-        "turn_mode": "task", "web_query": None, "connector_calls": [],
+        "turn_mode": "task", "web_query": "generic GDPR blog advice", "connector_calls": [],
         "seo_audit_url": None, "needs_debate": False,
         "response_depth": "focused", "collaboration_intensity": "standard",
     })
 
     assert plan["research_floor"] == "legal_finance.review.v1"
-    assert plan["web_query"] == "GDPR marketing claim requirements regulator guidance"
+    assert plan["web_query"] == (
+        "GDPR marketing claim requirements regulator guidance authoritative GDPR guidance "
+        "site:edpb.europa.eu OR site:commission.europa.eu"
+    )
     assert plan["extract_urls"] == [
         "https://singulancelabs.com", "https://instagram.com/singulancelabs",
     ]

@@ -1,6 +1,15 @@
 {
-  "name": "hivemind-hyper-evidence-lifecycle",
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-hyper-evidence-lifecycle-local",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-30",
-  "workflows": [{ "name": "hyper-evidence-lifecycle", "binding": "EVIDENCE_WORKFLOW", "class_name": "HyperEvidenceWorkflow" }]
+  "vars": { "HIVEMIND_CONTROL_URL": "https://preview-api.singulancelabs.com" },
+  "workflows": [{ "name": "hivemind-hyper-evidence-lifecycle-local", "binding": "EVIDENCE_WORKFLOW", "class_name": "HyperEvidenceWorkflow" }],
+  "env": {
+    "production": {
+      "name": "hivemind-hyper-evidence-lifecycle-production",
+      "vars": { "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com" },
+      "workflows": [{ "name": "hivemind-hyper-evidence-lifecycle-production", "binding": "EVIDENCE_WORKFLOW", "class_name": "HyperEvidenceWorkflow" }]
+    }
+  }
 }

@@ -1,8 +1,22 @@
-name = "hivemind-hyper-prospect-lifecycle"
+name = "hivemind-hyper-prospect-lifecycle-local"
 main = "src/index.ts"
 compatibility_date = "2026-09-06"
 
+[vars]
+HIVEMIND_CONTROL_URL = "https://preview-api.singulancelabs.com"
+
 [[workflows]]
-name = "hyper-prospect-lifecycle"
+name = "hivemind-hyper-prospect-lifecycle-local"
+binding = "PROSPECT_WORKFLOW"
+class_name = "ProspectLifecycleWorkflow"
+
+[env.production]
+name = "hivemind-hyper-prospect-lifecycle-production"
+
+[env.production.vars]
+HIVEMIND_CONTROL_URL = "https://api.singulancelabs.com"
+
+[[env.production.workflows]]
+name = "hivemind-hyper-prospect-lifecycle-production"
 binding = "PROSPECT_WORKFLOW"
 class_name = "ProspectLifecycleWorkflow"

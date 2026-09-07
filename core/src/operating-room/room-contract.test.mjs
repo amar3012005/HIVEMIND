@@ -17,6 +17,23 @@ test('room synthesis keeps live discussion evidence even when company recall has
  assert.match(answer,/700/);
 });
 
+test('room synthesis uses the streamed GPT-OSS path by default and forwards deltas',async()=>{
+ const deltas=[];
+ const answer=await synthesizeRoomResponse({
+  context:{current_speaker:{name:'Bea',user_id:'b'}},query:'What is next?',knowledge:{sources:[]},
+  onContent:async delta=>deltas.push(delta),
+  streamCompletion:async(model,options,{onContent})=>{
+   assert.equal(model,'openai/gpt-oss-20b:nitro');
+   assert.equal(JSON.parse(options.body).max_tokens,180);
+   await onContent('Bea, ');
+   await onContent('sales is next.');
+   return {ok:true,status:200,content:'Bea, sales is next.'};
+  },
+ });
+ assert.equal(answer,'Bea, sales is next.');
+ assert.deepEqual(deltas,['Bea, ','sales is next.']);
+});
+
 test('five speakers retain distinct stable transcript IDs across retries and rooms', () => {
   const ids = Array.from({length:5},(_,i)=>transcriptEventId('room',`user-${i}`,'event'));
   assert.equal(new Set(ids).size,5);

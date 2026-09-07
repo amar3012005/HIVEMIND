@@ -16,8 +16,8 @@ before forwarding, and emits content-free start/completion/failure events.
 
 ## Client contract
 
-Each external agent receives its own revocable Cloudflare Access service token
-and the independently rotated Playwright origin token:
+Each external agent receives the independently rotated external Playwright MCP
+token. Cloudflare Access service-token headers are added when Access is enabled:
 
 ```json
 {
@@ -27,7 +27,7 @@ and the independently rotated Playwright origin token:
       "headers": {
         "CF-Access-Client-Id": "${CF_ACCESS_CLIENT_ID}",
         "CF-Access-Client-Secret": "${CF_ACCESS_CLIENT_SECRET}",
-        "Authorization": "Bearer ${PLAYWRIGHT_MCP_ORIGIN_TOKEN}"
+        "Authorization": "Bearer ${PLAYWRIGHT_EXTERNAL_MCP_TOKEN}"
       }
     }
   }

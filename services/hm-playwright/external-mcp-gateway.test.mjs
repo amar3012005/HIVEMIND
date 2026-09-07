@@ -75,6 +75,7 @@ test('production Compose exposes only the Playwright gateway on host loopback', 
   const withoutPlaywright = compose.replace(`\n  playwright:\n${playwright}`, '');
   assert.match(playwright, /127\.0\.0\.1:8932:8932/);
   assert.match(playwright, /PLAYWRIGHT_EXTERNAL_MCP_ENABLED/);
+  assert.match(playwright, /PLAYWRIGHT_EXTERNAL_MCP_TOKEN/);
   assert.doesNotMatch(withoutPlaywright, /127\.0\.0\.1:8932:8932/);
   assert.doesNotMatch(withoutPlaywright, /PLAYWRIGHT_EXTERNAL_MCP_ENABLED/);
 });

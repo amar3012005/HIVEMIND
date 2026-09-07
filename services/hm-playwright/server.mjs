@@ -14,6 +14,7 @@ const HOST = '0.0.0.0';
 const PORT = Number(process.env.PLAYWRIGHT_CRAWL_PORT || 8932);
 const TOKEN = String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '');
 const EXTERNAL_MCP_ENABLED = String(process.env.PLAYWRIGHT_EXTERNAL_MCP_ENABLED || '').toLowerCase() === 'true';
+const EXTERNAL_MCP_TOKEN = String(process.env.PLAYWRIGHT_EXTERNAL_MCP_TOKEN || '');
 const MAX_BODY_BYTES = 64 * 1024;
 // A verified Day-2 Brand DNA report carries a bounded five-image evidence
 // mosaic as data URIs. 180 KiB rejects that legitimate artifact before the
@@ -266,7 +267,7 @@ const mcp = spawn('npx', [
 
 const externalMcpGateway = createExternalMcpGateway({
   enabled: EXTERNAL_MCP_ENABLED,
-  token: TOKEN,
+  token: EXTERNAL_MCP_TOKEN,
   maxConnections: Math.max(1, Number(process.env.PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS || 12)),
 });
 
@@ -865,6 +866,11 @@ const server = http.createServer(async (req, res) => {
 
 if (!TOKEN) {
   console.error('[hm-playwright] PLAYWRIGHT_SERVICE_TOKEN is required');
+  mcp.kill('SIGTERM');
+  process.exit(1);
+}
+if (EXTERNAL_MCP_ENABLED && !EXTERNAL_MCP_TOKEN) {
+  console.error('[hm-playwright] PLAYWRIGHT_EXTERNAL_MCP_TOKEN is required when external MCP is enabled');
   mcp.kill('SIGTERM');
   process.exit(1);
 }

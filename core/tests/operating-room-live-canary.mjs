@@ -44,6 +44,15 @@ try{
  const projection=(await call(0,`/v1/operating-rooms/${room.id}`)).room;
  assert.equal(projection.participants.length,5);assert.deepEqual(projection.agenda,['Confirm budget','Choose launch date']);
  assert.equal(projection.recent_responses.length,1);
+ assert.equal(turns[4].context.conversation_style.first_response_to_speaker,true);
+ const followup=await call(4,`/v1/operating-rooms/${room.id}/transcript`,{text:'What decision do we still need to make?',event_id:'canary-followup'});
+ assert.equal(followup.context.conversation_style.first_response_to_speaker,false);
+ const continued=await call(4,`/v1/operating-rooms/${room.id}/respond`,{turn_id:followup.turn.id});
+ assert.ok(continued.speech?.spoken);
+ assert.doesNotMatch(continued.answer,/^\s*(hi|hello|hey|welcome|good morning|good afternoon|good evening)\b/i);
+ const other=await call(1,`/v1/operating-rooms/${room.id}/transcript`,{text:'I can confirm that budget.',event_id:'canary-other-participant'});
+ assert.equal(other.context.conversation_style.first_response_to_speaker,true);
+ console.log(JSON.stringify({natural_address:true,followup:continued.answer,separate_participant_first_response:true}));
  console.log(JSON.stringify({ok:true,participants:5,identity_verified:true,deduplicated:true,unauthorized_speaker_rejected:true,grounded_budget:true,tara_audio:answer.speech,replay:true,room_id:room.id,answer:answer.answer}));
 } finally {
  if(room){await closeOperatingRoomBridge({roomId:room.id}).catch(()=>{});await deleteRealtimeMeeting({meetingId:room.meeting_id}).catch(()=>{});await prisma.operatingRoomEvent.deleteMany({where:{roomId:room.id,orgId}});await prisma.operatingRoomParticipant.deleteMany({where:{roomId:room.id,orgId}});await prisma.hyperRoom.deleteMany({where:{id:room.id,orgId}});}

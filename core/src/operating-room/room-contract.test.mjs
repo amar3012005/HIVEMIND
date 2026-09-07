@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, wakeIntent } from './room-contract.js';
+import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, wakeIntent, roomAddressInstruction } from './room-contract.js';
 import { addRealtimeParticipant, createRealtimeMeeting, refreshRealtimeParticipant } from './realtimekit-client.js';
 import { closeOperatingRoomBridge, speakOperatingRoomBridge, startOperatingRoomBridge } from './room-bridge-client.js';
 import { transcriptEventId, normalizeSessionBrief, advanceRoomBrief, patchRoomState, claimRoomResponse, releaseRoomResponse, synthesizeRoomResponse } from './conversation-state.js';
@@ -22,6 +22,29 @@ test('five speakers retain distinct stable transcript IDs across retries and roo
   assert.equal(new Set(ids).size,5);
   assert.equal(ids[0],transcriptEventId('room','user-0','event'));
   assert.notEqual(ids[0],transcriptEventId('other-room','user-0','event'));
+});
+
+test('greeting eligibility follows durable user identity beyond transcript compaction', () => {
+  const room={id:'room',roomPlaybook:{facilitator_responses:[{addressed_user_id:'a',answer:'The budget is confirmed.'}]}};
+  const contextFor=(user_id,name)=>compactRoomContext({room,speaker:{user_id,name},transcript:[]});
+  assert.equal(contextFor('a','Renamed participant').conversation_style.first_response_to_speaker,false);
+  assert.equal(contextFor('b','Renamed participant').conversation_style.first_response_to_speaker,true);
+  assert.equal(contextFor('c','李明').conversation_style.first_response_to_speaker,true);
+  assert.equal(contextFor(null,'Unknown').conversation_style.first_response_to_speaker,false);
+  const continuing=roomAddressInstruction(contextFor('a','Alex'));
+  assert.match(continuing,/do not greet/);
+  assert.match(continuing,/do not force it into every reply/);
+  assert.match(roomAddressInstruction(contextFor('b','Alex')),/acknowledge them once/);
+});
+
+test('room synthesis receives ongoing-conversation policy instead of repeated name greeting',async()=>{
+  let system;
+  await synthesizeRoomResponse({context:{conversation_style:{first_response_to_speaker:false}},query:'What remains?',fetchCompletion:async(model,options)=>{
+    system=JSON.parse(options.body).messages[0].content;
+    return {ok:true,json:async()=>({choices:[{message:{content:'The launch date remains open.'}}]})};
+  }});
+  assert.match(system,/Start directly with the substance/);
+  assert.doesNotMatch(system,/Address the current verified speaker naturally by name/);
 });
 
 test('rolling brief rejects invented references and retains earlier unresolved items', () => {

@@ -321,6 +321,33 @@ test('central evidence returns tenant-scoped lexical results when vector search 
   }
 });
 
+test('central evidence keeps lexical results when Qdrant rejects without a feature flag', async () => {
+  const segment = {
+    id: 'segment-qdrant-down', documentId: 'document-allowed', userId: 'user-1', orgId: 'org-1',
+    content: 'LumenCore capacity remains lexically searchable.', segmentType: 'paragraph',
+    segmentIndex: 0, wordCount: 5, metadata: {}, entityMentions: [], memoryLinks: [],
+    document: { id: 'document-allowed', title: 'LumenCore.pdf', tags: ['scope-key:org:org-1'] },
+  };
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeDocument: { async findMany() { return [{ id: 'document-allowed' }]; } },
+      knowledgeSegment: {
+        async findMany(args) {
+          if (args.where?.id?.in) return [];
+          return [segment];
+        },
+      },
+    },
+    qdrantClient: { async searchMemories() { throw new Error('qdrant unavailable'); } },
+  });
+  const results = await service.retrieveEvidence({
+    query: 'LumenCore capacity', userId: 'user-1', orgId: 'org-1',
+    documentIds: ['document-allowed'], depth: 5, deliver: 5, reliabilityV1: false,
+  });
+  assert.equal(results[0].segmentId, 'segment-qdrant-down');
+  assert.equal(results[0]._lexical, true);
+});
+
 test('source metadata resolution is tenant-scoped and does not require an LLM filename extraction', async () => {
   let where;
   const service = new EvidenceRetrievalService({

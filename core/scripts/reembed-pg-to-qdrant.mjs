@@ -104,6 +104,7 @@ async function main() {
 
   console.log(`[reembed] DONE: embedded=${embedded} skipped=${skipped} failed=${failed} of ${total}`);
   await prisma.$disconnect();
+  if (failed > 0) process.exitCode = 1;
 }
 
 main().catch((e) => { console.error('[reembed] fatal:', e); process.exit(1); });

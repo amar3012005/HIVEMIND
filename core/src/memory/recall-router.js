@@ -1963,13 +1963,8 @@ export class RecallRouter {
     const queryVectorPromise = this.evidence?.qdrantClient?.generateEmbedding
       ? this.evidence.qdrantClient.generateEmbedding(query, {
           workload: 'interactive', tenantId: ctx.orgId,
-        }).catch((error) => {
-          if (options.reliability_v1 === true) return null;
-          throw error;
-        })
-      : (options.reliability_v1 === true
-        ? Promise.resolve(null)
-        : Promise.reject(new Error('unified recall embedding service unavailable')));
+        }).catch(() => null)
+      : Promise.resolve(null);
     const [implicitSource, canonicalEntities, queryVector] = await Promise.all([
       allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,
@@ -1987,9 +1982,10 @@ export class RecallRouter {
       ),
       queryVectorPromise,
     ]);
-    if ((!Array.isArray(queryVector) || queryVector.length === 0) && options.reliability_v1 !== true) {
-      throw new Error('unified recall query embedding unavailable');
-    }
+    // Embeddings and Qdrant improve ranking, but PostgreSQL lexical/entity/time
+    // lanes remain the availability floor. Never turn an embedding outage into
+    // a total recall outage; lane telemetry below reports the degradation when
+    // reliability tracing is enabled.
     if (stageTiming) stageTiming.entity_resolution_ms = Date.now() - startedAt;
     if (implicitSource) {
       recallPlan = resolveRecallPlan({

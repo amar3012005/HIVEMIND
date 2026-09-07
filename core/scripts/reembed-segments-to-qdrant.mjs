@@ -8,6 +8,7 @@
 import { PrismaClient } from "@prisma/client";
 import { getEmbedService } from "/app/src/embeddings/factory.js";
 import { resolveCollectionForOrg } from "/app/src/vector/container-router.js";
+import { getQdrantClient } from "/app/src/vector/qdrant-client.js";
 
 const COMMIT = process.argv.includes("--commit");
 const ORG = process.env.ORG_ID || null;
@@ -15,10 +16,13 @@ const CONC = Number(process.env.CONCURRENCY || 8);
 const QURL = process.env.QDRANT_URL, QKEY = process.env.QDRANT_API_KEY;
 const prisma = new PrismaClient();
 const emb = getEmbedService();
+const qc = getQdrantClient();
 
 async function upsert(col, pts){
+  const ready = await qc.ensureCollection(col);
+  if (ready === false) throw new Error(`collection ${col} unavailable`);
   const r = await fetch(`${QURL}/collections/${encodeURIComponent(col)}/points?wait=true`,{
-    method:"PUT", headers:{"api-key":QKEY,"Content-Type":"application/json"},
+    method:"PUT", headers:{"Content-Type":"application/json",...(QKEY?{"api-key":QKEY}:{})},
     body:JSON.stringify({points:pts})});
   if(!r.ok) throw new Error(`upsert ${col} ${r.status}: ${(await r.text()).slice(0,200)}`);
 }
@@ -33,7 +37,7 @@ async function main(){
   let off=0, done=0, ok=0, fail=0;
   const BATCH=300;
   while(off<total){
-    const rows = await prisma.knowledgeSegment.findMany({ where, skip:off, take:BATCH,
+    const rows = await prisma.knowledgeSegment.findMany({ where, skip:off, take:BATCH, orderBy:{id:"asc"},
       select:{id:true,content:true,documentId:true,userId:true,orgId:true,segmentType:true} });
     if(!rows.length) break;
     // group by org → collection
@@ -41,6 +45,7 @@ async function main(){
       const chunk = rows.slice(i,i+CONC);
       const pts = await Promise.all(chunk.map(async s=>{
         try{
+          if (!s.content || !s.content.trim()) return null;
           const vec = await emb.embedOne(s.content);
           if(!colCache.has(s.orgId)) colCache.set(s.orgId, await resolveCollectionForOrg(s.orgId));
           return { col: colCache.get(s.orgId), pt:{ id:s.id, vector:vec, payload:{
@@ -50,12 +55,17 @@ async function main(){
       }));
       // group points by collection then upsert
       const byCol={}; for(const p of pts){ if(!p)continue; (byCol[p.col]=byCol[p.col]||[]).push(p.pt); }
-      for(const [col,arr] of Object.entries(byCol)){ try{ await upsert(col,arr); ok+=arr.length; }catch(e){ fail+=arr.length; console.error(e.message); } }
+      for(const [col,arr] of Object.entries(byCol)){ try{
+        await upsert(col,arr);
+        await prisma.knowledgeSegment.updateMany({where:{id:{in:arr.map((point)=>point.id)}},data:{vectorStored:true}});
+        ok+=arr.length;
+      }catch(e){ fail+=arr.length; console.error(e.message); } }
     }
     done+=rows.length; off+=BATCH;
     if(done % 900 === 0 || done>=total) console.log(`  …${done}/${total} ok=${ok} fail=${fail}`);
   }
   console.log(`[seg] DONE ok=${ok} fail=${fail} of ${total}`);
   await prisma.$disconnect();
+  if(fail>0) process.exitCode=1;
 }
 main().catch(e=>{console.error(e);process.exit(1)});

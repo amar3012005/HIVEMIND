@@ -1729,20 +1729,27 @@ async function _recallPersistedMemoriesImpl(store, {
     return source_platforms.includes(sourcePlatform);
   });
 
-  // Consume the base vector lane started concurrently with the lexical fetch
-  // above (overlapped, not serialized). Any vector-fetch error propagates here
-  // exactly as it did when this was a direct `await`.
+  // Consume the base vector lane started concurrently with the lexical fetch.
+  // Qdrant is a rebuildable candidate index, not the availability authority:
+  // its failure must never discard an already-completed PostgreSQL lexical
+  // result. Reliability mode adds explicit lane telemetry, but the fallback is
+  // a baseline invariant and therefore cannot depend on a remote feature flag.
   let vectorCandidates;
-  if (reliability_v1) {
-    try {
-      vectorCandidates = await _vectorCandidatesPromise;
+  try {
+    vectorCandidates = await _vectorCandidatesPromise;
+    if (reliability_v1) {
       laneStates.memory_vector = { status: 'complete', candidates: vectorCandidates.length };
-    } catch {
-      vectorCandidates = [];
+    }
+  } catch (error) {
+    vectorCandidates = [];
+    if (reliability_v1) {
       laneStates.memory_vector = { status: 'failed', candidates: 0, error_code: 'memory_vector_unavailable' };
     }
-  } else {
-    vectorCandidates = await _vectorCandidatesPromise;
+    if (process.env.RECALL_LAP === 'true') {
+      console.warn('[recall] vector lane unavailable; serving PostgreSQL lexical candidates', {
+        org_id, error: error?.code || error?.message || 'vector_unavailable',
+      });
+    }
   }
 
   // Cross-lingual / sparse rescue: a THIN primary recall is the signature of a

@@ -100,6 +100,7 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/ap
 # OpenRouter credential and Cloudflare AI Gateway route as the existing turn
 # strategist; STT, turn-taking, and phone/browser voice continue on Deepgram.
 FISH_OPENROUTER_MODEL = os.getenv("TARA_DG_FISH_OPENROUTER_MODEL", "fish-audio/s2.1-pro")
+FISH_OPENROUTER_VOICE_ID = os.getenv("TARA_DG_FISH_OPENROUTER_VOICE", "").strip()
 FISH_OPENROUTER_TTS_URL = os.getenv(
     "TARA_DG_FISH_OPENROUTER_TTS_URL", f"{OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
 )

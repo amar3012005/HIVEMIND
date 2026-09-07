@@ -18,7 +18,7 @@ import re
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import campaigns, config, telephony
@@ -61,13 +61,21 @@ async def _room_deepgram_speech(client: httpx.AsyncClient, *, text: str, voice_i
     )
 
 
-async def _room_fish_speech(client: httpx.AsyncClient, *, text: str):
+async def _room_fish_speech(client: httpx.AsyncClient, *, text: str, response_format: str = "mp3"):
     """Use OpenRouter's raw-audio endpoint; AI Gateway routes it as /openrouter/audio/speech."""
     from .ai_gateway import request as gateway_request
     return await gateway_request(
         client, "POST", config.FISH_OPENROUTER_TTS_URL,
         headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-        json={"model": config.FISH_OPENROUTER_MODEL, "input": text, "response_format": "mp3"},
+        json={
+            "model": config.FISH_OPENROUTER_MODEL,
+            "input": text,
+            # A configured Fish voice is TARA's persistent identity. An empty
+            # string explicitly selects Fish's stable default voice; do not
+            # mix vendor preset names or alternate providers per room turn.
+            "voice": config.FISH_OPENROUTER_VOICE_ID,
+            "response_format": response_format,
+        },
     )
 
 
@@ -128,6 +136,67 @@ async def room_speak(body: RoomSpeakRequest, request: Request):
     except Exception:  # noqa: BLE001
         log.exception("room speech failed")
         return JSONResponse({"error": "tts_failed"}, status_code=502)
+
+
+@app.post("/room-speak-stream")
+async def room_speak_stream(body: RoomSpeakRequest, request: Request):
+    """Return Fish PCM as it arrives; never buffer a full MP3 for a room turn."""
+    if not _service_auth_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    text = body.text.strip()[:4000]
+    if not text:
+        return JSONResponse({"error": "text_required"}, status_code=400)
+    if config.SPEAK_PROVIDER != "fish_openrouter" or not config.OPENROUTER_API_KEY:
+        # A single Operating Room voice is intentional. Falling back to a
+        # different voice while participants are listening is worse than an
+        # explicit, recoverable failure.
+        return JSONResponse({"error": "fish_stream_unavailable"}, status_code=503)
+
+    started = time.monotonic()
+
+    timeout = httpx.Timeout(30.0, connect=5.0)
+    client = httpx.AsyncClient(timeout=timeout)
+    from .ai_gateway import route as gateway_route
+    routed_url, routed_headers = gateway_route(
+        config.FISH_OPENROUTER_TTS_URL,
+        {"Authorization": f"Bearer {config.OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+    )
+    payload = {
+        "model": config.FISH_OPENROUTER_MODEL,
+        "input": text,
+        "voice": config.FISH_OPENROUTER_VOICE_ID,
+        "response_format": "pcm",
+    }
+    response = await client.send(client.build_request("POST", routed_url, headers=routed_headers, json=payload), stream=True)
+    if response.status_code != 200:
+        body_text = (await response.aread()).decode("utf-8", errors="replace")[:400]
+        await response.aclose()
+        await client.aclose()
+        log.warning("tara.room_tts_stream.failed provider=fish_openrouter status=%s detail=%s", response.status_code, body_text)
+        return JSONResponse({"error": "tts_failed"}, status_code=502)
+
+    async def audio_chunks():
+        first = True
+        try:
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    if first:
+                        first = False
+                        log.info("tara.room_tts_stream.first_audio provider=fish_openrouter latency_ms=%s", round((time.monotonic() - started) * 1000))
+                    yield chunk
+            log.info("tara.room_tts_stream.completed provider=fish_openrouter latency_ms=%s", round((time.monotonic() - started) * 1000))
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        audio_chunks(), media_type="audio/pcm",
+        headers={
+            "X-Tara-TTS-Provider": "fish_openrouter",
+            "X-Tara-TTS-Voice": config.FISH_OPENROUTER_VOICE_ID or "default",
+            "Cache-Control": "no-store",
+        },
+    )
 
 _BASE_PROMPT = (
     "You are TARA, a professional, warm phone agent for {company}. "

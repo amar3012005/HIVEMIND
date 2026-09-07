@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { chromium } from 'playwright';
 
 const HOST = '0.0.0.0';
@@ -103,27 +104,11 @@ async function startRoomBridge(input) {
     const current = roomBridges.get(roomId);
     if (current?.page === page) roomBridges.delete(roomId);
   });
-  await page.exposeFunction('hivemindRoomTts', async (text) => {
-    const response = await fetch(TARA_TTS_URL, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-tara-key': TARA_KEY },
-      body: JSON.stringify({ text: String(text || '').slice(0, 4000) }), signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) throw new Error(`tara_room_speech_failed:${response.status}`);
-    return {
-      audio: Buffer.from(await response.arrayBuffer()).toString('base64'),
-      telemetry: {
-        requested_provider: String(response.headers.get('x-tara-tts-requested-provider') || ''),
-        provider: String(response.headers.get('x-tara-tts-provider') || ''),
-        fallback_from: String(response.headers.get('x-tara-tts-fallback-from') || ''),
-        latency_ms: Number(response.headers.get('x-tara-tts-latency-ms') || 0) || null,
-        generation_id: String(response.headers.get('x-tara-tts-generation-id') || ''),
-      },
-    };
-  });
+  const bridgeToken = crypto.randomUUID();
   await page.goto(`http://127.0.0.1:${PORT}/internal/room-bridge`, { waitUntil: 'load' });
   await page.waitForFunction(() => typeof window.__startRoomBridge === 'function', null, { timeout: 10_000 });
   try {
-    await page.evaluate((config) => window.__startRoomBridge(config), { authToken, roomId, meetingId });
+    await page.evaluate((config) => window.__startRoomBridge(config), { authToken, roomId, meetingId, bridgeToken });
   } catch (error) {
     await context.close().catch(() => {});
     throw Object.assign(new Error(`room_bridge_join_failed:${diagnostics.join(' | ') || String(error.message || error)}`.slice(0, 1000)), { status: 502 });
@@ -131,40 +116,62 @@ async function startRoomBridge(input) {
   await page.waitForFunction(() => window.__roomBridgeState?.status === 'ready', null, { timeout: 15_000 });
   const hardTimer = setTimeout(() => closeRoomBridge(roomId), ROOM_BRIDGE_MAX_MS);
   hardTimer.unref();
-  roomBridges.set(roomId, { context, page, hardTimer, participantId: String(input?.participant_id || ''), startedAt: new Date().toISOString() });
+  roomBridges.set(roomId, { context, page, hardTimer, bridgeToken, participantId: String(input?.participant_id || ''), startedAt: new Date().toISOString() });
   return { status: 'ready', room_id: roomId, participant_id: String(input?.participant_id || '') };
 }
 
 const ROOM_BRIDGE_HTML = `<!doctype html><meta charset="utf-8"><script type="module">
 import RealtimeKitClient from '/internal/realtimekit.js';
-let meeting; let audioContext; let destination; let queue = Promise.resolve(); const spokenTurns = new Map();
+let meeting; let audioContext; let destination; let bridgeToken = ''; let speechEpoch = 0; let activeAbort; let nextStart = 0; const activeSources = new Set(); const spokenTurns = new Map();
 window.__RealtimeKitClient = RealtimeKitClient;
 window.__roomBridgeState = { status: 'loading' };
+function stopSpeech() {
+  speechEpoch += 1; activeAbort?.abort(); activeAbort = null;
+  for (const source of activeSources) { try { source.stop(); } catch {} }
+  activeSources.clear(); nextStart = audioContext?.currentTime || 0;
+}
+function schedulePcm(bytes, epoch) {
+  if (epoch !== speechEpoch || bytes.length < 2) return;
+  const samples = new Float32Array(Math.floor(bytes.length / 2));
+  const view = new DataView(bytes.buffer, bytes.byteOffset, samples.length * 2);
+  for (let i = 0; i < samples.length; i += 1) samples[i] = view.getInt16(i * 2, true) / 32768;
+  const buffer = audioContext.createBuffer(1, samples.length, 44100);
+  buffer.copyToChannel(samples, 0);
+  const source = audioContext.createBufferSource(); source.buffer = buffer; source.connect(destination);
+  const at = Math.max(nextStart, audioContext.currentTime + 0.025); nextStart = at + buffer.duration;
+  activeSources.add(source); source.onended = () => activeSources.delete(source); source.start(at);
+}
 async function speak(answer) {
-  const speech = await window.hivemindRoomTts(answer);
-  const base64 = speech.audio;
-  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-  const buffer = await audioContext.decodeAudioData(bytes.buffer);
-  const source = audioContext.createBufferSource(); source.buffer = buffer; source.connect(destination); source.start();
-  await new Promise(resolve => { source.onended = resolve; });
-  return speech.telemetry;
+  const epoch = speechEpoch; const aborter = new AbortController(); activeAbort = aborter;
+  const response = await fetch('/internal/room-tts-stream', { method: 'POST', headers: { 'content-type': 'application/json', 'x-room-bridge-token': bridgeToken }, body: JSON.stringify({ text: answer }), signal: aborter.signal });
+  if (!response.ok || !response.body) throw new Error('tara_room_speech_failed:' + response.status);
+  const reader = response.body.getReader(); let carry = new Uint8Array();
+  while (epoch === speechEpoch) {
+    const { done, value } = await reader.read(); if (done) break;
+    const merged = new Uint8Array(carry.length + value.length); merged.set(carry); merged.set(value, carry.length);
+    const usable = merged.length - (merged.length % 2); if (usable) schedulePcm(merged.subarray(0, usable), epoch); carry = merged.subarray(usable);
+  }
+  if (epoch !== speechEpoch) { reader.cancel().catch(() => {}); return { cancelled: true }; }
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, (nextStart - audioContext.currentTime) * 1000)));
+  return { provider: response.headers.get('x-tara-tts-provider') || 'fish_openrouter', voice: response.headers.get('x-tara-tts-voice') || 'default' };
 }
 window.__speakRoomBridge = (answer, turnId = '') => {
   if (!turnId) throw new Error('turn_id_required');
   if (spokenTurns.has(turnId)) return spokenTurns.get(turnId);
-  const job = queue.catch(() => {}).then(async () => {
+  stopSpeech();
+  const job = (async () => {
     window.__roomBridgeState.activity = 'speaking';
     await meeting.chat.sendTextMessage('HIVEMIND · ' + answer);
     const telemetry = await speak(answer);
     window.__roomBridgeState.last_spoken_at = new Date().toISOString();
     window.__roomBridgeState.last_turn_id = turnId || null;
     return { spoken: true, replayed: false, turn_id: turnId, spoken_at: window.__roomBridgeState.last_spoken_at, tts: telemetry };
-  }).finally(() => { window.__roomBridgeState.activity = 'listening'; });
+  })().finally(() => { window.__roomBridgeState.activity = 'listening'; });
   spokenTurns.set(turnId, job);
-  queue = job.catch(() => {});
   return job;
 };
-window.__startRoomBridge = async ({ authToken, roomId, meetingId }) => {
+window.__startRoomBridge = async ({ authToken, roomId, meetingId, bridgeToken: token }) => {
+  bridgeToken = token;
   meeting = await RealtimeKitClient.init({ authToken, roomName: meetingId, defaults: { audio: false, video: false } });
   audioContext = new AudioContext({ sampleRate: 48000 }); destination = audioContext.createMediaStreamDestination();
   const oscillator = audioContext.createOscillator(); const silence = audioContext.createGain(); silence.gain.value = 0;
@@ -174,7 +181,7 @@ window.__startRoomBridge = async ({ authToken, roomId, meetingId }) => {
   // participants cannot broadcast arbitrary content in the facilitator voice.
   await meeting.join(); window.__roomBridgeState = { status: 'ready' };
 };
-window.__leaveRoomBridge = async () => meeting?.leave?.();
+window.__leaveRoomBridge = async () => { stopSpeech(); await meeting?.leave?.(); };
 </script>`;
 
 function touchInteractiveSession(entry, id) {
@@ -331,6 +338,30 @@ async function readJson(req, maxBytes = MAX_BODY_BYTES) {
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
   catch { throw Object.assign(new Error('invalid_json'), { status: 400 }); }
+}
+
+async function streamRoomPcm(req, res) {
+  const token = String(req.headers['x-room-bridge-token'] || '');
+  const entry = [...roomBridges.values()].find(candidate => secureEqual(token, candidate.bridgeToken));
+  if (!entry) return send(res, 401, { error: 'unauthorized_room_bridge' });
+  const payload = await readJson(req);
+  const text = String(payload?.text || '').trim().slice(0, 4000);
+  if (!text) return send(res, 400, { error: 'text_required' });
+  const upstream = await fetch(`${TARA_TTS_URL.replace(/\/room-speak$/, '/room-speak-stream')}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-tara-key': TARA_KEY },
+    body: JSON.stringify({ text }), signal: AbortSignal.timeout(30_000),
+  });
+  if (!upstream.ok || !upstream.body) {
+    return send(res, upstream.status === 503 ? 503 : 502, { error: `tara_room_speech_failed:${upstream.status}` });
+  }
+  res.writeHead(200, {
+    'content-type': upstream.headers.get('content-type') || 'audio/pcm',
+    'cache-control': 'no-store',
+    'x-tara-tts-provider': upstream.headers.get('x-tara-tts-provider') || 'fish_openrouter',
+    'x-tara-tts-voice': upstream.headers.get('x-tara-tts-voice') || 'default',
+  });
+  Readable.fromWeb(upstream.body).on('error', () => res.destroy()).pipe(res);
 }
 
 // NOT YET WIRED — no `action === 'click'` branch exists in runInteractiveAction
@@ -695,6 +726,13 @@ async function renderPdf(input) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // The headless facilitator page is the sole caller. Its per-bridge,
+  // unguessable capability is validated by streamRoomPcm; the TARA service key
+  // never reaches a participant browser or the Realtime room.
+  if (req.method === 'POST' && req.url === '/internal/room-tts-stream') {
+    try { return await streamRoomPcm(req, res); }
+    catch (error) { return send(res, error.status || 502, { error: String(error.message || error).slice(0, 500) }); }
+  }
   if (req.method === 'GET' && req.url === '/internal/realtimekit.js') return sendBinary(res, 200, fs.readFileSync(realtimeKitModule), 'text/javascript');
   if (req.method === 'GET' && req.url === '/internal/room-bridge') return sendBinary(res, 200, Buffer.from(ROOM_BRIDGE_HTML), 'text/html; charset=utf-8');
   if (req.method === 'GET' && req.url === '/health') {

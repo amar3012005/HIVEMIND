@@ -6,8 +6,10 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { getPrismaClient } from './db/prisma.js';
 import {
+  authenticatePersistedApiKey,
   createPersistedApiKey,
   listPersistedApiKeys,
+  resolveKeyAccess,
   revokePersistedApiKey
 } from './auth/api-keys.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
@@ -9725,6 +9727,83 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { employees: enrichedEmployees });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // GET /v1/hyperagents/profiles — API-key authenticated, tenant-derived
+  // digital-employee roster for governed external agents. The caller cannot
+  // select a user or organization, and no employee/runtime credentials leave
+  // this boundary. Existing ICARUS integration keys carry the `mcp` scope.
+  if (pathname === '/v1/hyperagents/profiles' && req.method === 'GET') {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const rawKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    if (!rawKey) return jsonResponse(res, { error: 'API key required' }, 401);
+    try {
+      const keyRecord = await authenticatePersistedApiKey(prisma, rawKey);
+      if (!keyRecord?.userId || !keyRecord?.orgId) {
+        return jsonResponse(res, { error: 'Invalid or unscoped API key' }, 401);
+      }
+      const declaredScopes = Array.isArray(keyRecord.scopes) ? keyRecord.scopes : [];
+      if (!declaredScopes.includes('*')
+          && !declaredScopes.includes('mcp')) {
+        return jsonResponse(res, { error: 'mcp scope required' }, 403);
+      }
+
+      const ts = await _getTeamStore();
+      const accessibleTeamIds = ts
+        ? await ts.store.accessibleTeamIds({ userId: keyRecord.userId, orgId: keyRecord.orgId })
+        : [];
+      const principal = await resolveKeyAccess(prisma, keyRecord, {
+        projectIds: [],
+        teamIds: accessibleTeamIds,
+      });
+      const membership = await getOrgMembership(principal.userId, principal.orgId);
+      if (!membership) return jsonResponse(res, { error: 'Organization membership required' }, 403);
+
+      const store = await _getEmployeeStore();
+      if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+      const isOrgAdmin = membership.role === 'owner' || membership.role === 'admin';
+      const employees = isOrgAdmin && !principal.teamId
+        ? await store.listForOrg({ orgId: principal.orgId })
+        : await store.listForUserScope({
+            userId: principal.userId,
+            orgId: principal.orgId,
+            teamIds: principal.teamId ? [principal.teamId] : principal.teamIds,
+          });
+      const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+      const enriched = await enrichEmployeesWithHyperState(employees);
+      const profiles = enriched.map((employee) => ({
+        id: employee.id,
+        name: employee.name,
+        slug: employee.slug,
+        avatar_url: employee.avatarUrl || null,
+        team_id: employee.teamId || null,
+        scope: employee.scope,
+        status: employee.status,
+        persona: employee.persona,
+        role_archetype: employee.roleArchetype || null,
+        peer_review_targets: employee.peerReviewTargets || [],
+        tools: employee.tools || [],
+        policy_rules: employee.policyRules || {},
+        persona_contract: employee.persona_contract || employee.hyper?.persona_contract || null,
+        active_prompt_version: employee.active_prompt_version || employee.hyper?.active_prompt_version || null,
+      }));
+      return jsonResponse(res, {
+        ok: true,
+        contract: 'hivemind.hyperagent-profiles.v1',
+        scope: {
+          user_id: principal.userId,
+          org_id: principal.orgId,
+          authority: 'server-derived-from-api-key',
+        },
+        profiles,
+        count: profiles.length,
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('[hyperagents.profiles] failed:', err.message);
+      return jsonResponse(res, { error: 'Unable to load HyperAgent profiles' }, 500);
     }
   }
 

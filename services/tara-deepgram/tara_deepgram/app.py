@@ -70,11 +70,11 @@ async def _room_fish_speech(client: httpx.AsyncClient, *, text: str, response_fo
         json={
             "model": config.FISH_OPENROUTER_MODEL,
             "input": text,
-            # A configured Fish voice is TARA's persistent identity. An empty
-            # string explicitly selects Fish's stable default voice; do not
-            # mix vendor preset names or alternate providers per room turn.
-            "voice": config.FISH_OPENROUTER_VOICE_ID,
+            # A configured Fish voice is TARA's persistent identity. When no
+            # voice ID is configured, omit the field so OpenRouter selects
+            # Fish's default voice; do not mix vendor presets or providers.
             "response_format": response_format,
+            **({"voice": config.FISH_OPENROUTER_VOICE_ID} if config.FISH_OPENROUTER_VOICE_ID else {}),
         },
     )
 
@@ -164,8 +164,8 @@ async def room_speak_stream(body: RoomSpeakRequest, request: Request):
     payload = {
         "model": config.FISH_OPENROUTER_MODEL,
         "input": text,
-        "voice": config.FISH_OPENROUTER_VOICE_ID,
         "response_format": "pcm",
+        **({"voice": config.FISH_OPENROUTER_VOICE_ID} if config.FISH_OPENROUTER_VOICE_ID else {}),
     }
     response = await client.send(client.build_request("POST", routed_url, headers=routed_headers, json=payload), stream=True)
     if response.status_code != 200:

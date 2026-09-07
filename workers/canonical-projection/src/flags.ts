@@ -8,6 +8,32 @@ type RecallFlagEnv = FlagEnv & {
 };
 
 type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
+type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
+
+export async function evaluateGovernedRoomCanary(
+  env: GovernedRoomFlagEnv, orgId: string, userId: string, email: string,
+): Promise<boolean> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!validUuid(orgId) || !validUuid(userId) || !normalizedEmail) return false;
+  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return false;
+  try {
+    const details = await env.FLAGS.getBooleanDetails(
+      env.HYPER_GOVERNED_ROOM_FLAG || 'hyperagents_governed_room_v1', false,
+      {
+        targetingKey: `${orgId}:${userId}`,
+        org_id: orgId,
+        user_id: userId,
+        email: normalizedEmail,
+        environment: env.ENVIRONMENT,
+      },
+    );
+    return details.value === true;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'governed_room_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
 
 export async function evaluateHyperPlannerMode(
   env: HyperPlannerFlagEnv, orgId: string, userId: string,

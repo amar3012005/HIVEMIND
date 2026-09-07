@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from '../src/flags';
+import { evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from '../src/flags';
 
 const org = '22222222-2222-4222-8222-222222222222';
 const user = '33333333-3333-4333-8333-333333333333';
@@ -62,5 +62,21 @@ describe('hyper planner gate', () => {
     expect(await evaluateHyperPlannerMode(env, 'invalid', user)).toBe('off');
     env.FLAGS.getStringDetails = vi.fn(async () => { throw new Error('unavailable'); });
     expect(await evaluateHyperPlannerMode(env, org, user)).toBe('off');
+  });
+});
+
+describe('governed room email canary', () => {
+  it('passes normalized authenticated email context and fails closed', async () => {
+    const getBooleanDetails = vi.fn(async () => ({ value: true, variant: 'on', reason: 'TARGETING_MATCH' }));
+    const env = { ENVIRONMENT: 'production', HYPER_GOVERNED_ROOM_FLAG: 'hyperagents_governed_room_v1',
+      FLAGS: { getBooleanDetails } } as unknown as Parameters<typeof evaluateGovernedRoomCanary>[0];
+    expect(await evaluateGovernedRoomCanary(env, org, user, 'AmarSai2005@Gmail.Com')).toBe(true);
+    expect(getBooleanDetails).toHaveBeenCalledWith('hyperagents_governed_room_v1', false, {
+      targetingKey: `${org}:${user}`, org_id: org, user_id: user,
+      email: 'amarsai2005@gmail.com', environment: 'production',
+    });
+    expect(await evaluateGovernedRoomCanary(env, org, user, '')).toBe(false);
+    env.FLAGS.getBooleanDetails = vi.fn(async () => { throw new Error('unavailable'); });
+    expect(await evaluateGovernedRoomCanary(env, org, user, 'amarsai2005@gmail.com')).toBe(false);
   });
 });

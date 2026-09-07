@@ -1,0 +1,8 @@
+name = "hivemind-hyper-prospect-lifecycle"
+main = "src/index.ts"
+compatibility_date = "2026-09-06"
+
+[[workflows]]
+name = "hyper-prospect-lifecycle"
+binding = "PROSPECT_WORKFLOW"
+class_name = "ProspectLifecycleWorkflow"

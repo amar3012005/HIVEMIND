@@ -51,16 +51,28 @@ from .visual_artifact_renderer import (
     normalize_presentation_spec,
     render_presentation,
 )
+from .governed_contracts import (
+    OUTPUT_SKILLS,
+    build_debate_contract,
+    build_prospecting_contract,
+    build_task_skills,
+    normalize_prospecting_request,
+)
+from .evidence_roundtable import run_evidence_roundtable
 from ..hivemind_client import (
     campaign_create_emulated,
+    composio_session_read_exec_emulated,
+    composio_session_reads_emulated,
     connector_exec_emulated,
     connector_inspect_emulated,
     google_exec_emulated,
+    get_brand_dna_emulated,
     get_tara_call_emulated,
     list_prospects_emulated,
     org_members_emulated,
     recall_emulated,
     report_llm_usage,
+    request_evidence_job_emulated,
     save_prospects_bulk_emulated,
     seo_audit_emulated,
     web_search_emulated,
@@ -262,15 +274,13 @@ def _fallback_model_for(model: str) -> Optional[str]:
     return None
 
 
-# Set True the first time Groq returns a billing-block error → gpt-oss/llama then
-# route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
-# on process restart (re-probes Groq once), so funding Groq self-heals.
+# Retained for compatibility with historical metrics. Direct Groq is prohibited,
+# so this flag is never used to trigger a provider probe.
 _GROQ_DEAD = False
-# HyperAgent model traffic must not use Groq, either directly or as an
-# OpenRouter fallback. An explicit emergency rollback can opt back in.
-_GROQ_PROVIDER_DISABLED = os.environ.get("HYPER_DISABLE_GROQ_PROVIDER", "1").lower() not in (
-    "0", "false", "no", "off",
-)
+# Direct Groq is a code-level invariant, not an environment preference. A
+# deployment cannot accidentally restore api.groq.com traffic with an env var.
+# Groq may still serve a request behind OpenRouter, through Cloudflare Gateway.
+_GROQ_PROVIDER_DISABLED = True
 _BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
 
 # Leading meta-planning cues that mark reasoning-model chain-of-thought
@@ -379,10 +389,8 @@ def _or_provider_routing(model: str) -> Tuple[Optional[List[str]], List[str]]:
     pool leaks measured 9-36s per 20b debate call."""
     pin = _or_provider_pin(model)
     ignore = [s.strip() for s in os.environ.get(
-        "HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Mancer,SiliconFlow,Phala,Groq"
+        "HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Mancer,SiliconFlow,Phala"
     ).split(",") if s.strip()]
-    if _GROQ_PROVIDER_DISABLED and "groq" not in {p.lower() for p in ignore}:
-        ignore.append("Groq")
     if pin:
         pinned = {p.lower() for p in pin}
         ignore = [p for p in ignore if p.lower() not in pinned]
@@ -402,6 +410,22 @@ def _normalize_openrouter_parameters(body: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _openrouter_available() -> bool:
+    """OpenRouter is usable either with a direct key or Gateway-owned BYOK.
+
+    The latter is the preferred governed deployment: the employee container
+    never receives the provider credential, only the Cloudflare Gateway token
+    and a server-owned alias.
+    """
+    return bool(os.environ.get("OPENROUTER_API_KEY", "").strip()) or bool(
+        os.environ.get("CLOUDFLARE_AI_GATEWAY_ENABLED", "").lower() == "true"
+        and os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        and os.environ.get("CLOUDFLARE_AI_GATEWAY_ID", "").strip()
+        and os.environ.get("CLOUDFLARE_AI_GATEWAY_TOKEN", "").strip()
+        and os.environ.get("CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS", "").strip()
+    )
+
+
 async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> Optional[Dict[str, Any]]:
     """Replay a Groq chat body against OpenRouter when Groq is unavailable.
 
@@ -412,7 +436,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     """
     or_key = os.environ.get("OPENROUTER_API_KEY", "")
     or_model = _or_model(canonical_hyper_model(str(body.get("model") or "")))
-    if not or_key or not or_model:
+    if not _openrouter_available() or not or_model:
         return None
     or_body = _normalize_openrouter_parameters(body)
     or_body["model"] = or_model
@@ -1327,26 +1351,40 @@ def _flatten_for_text(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # any gathering. Cache the tool list per connector so only the first turn pays it;
 # every later turn (within the TTL) skips the inspect entirely and starts instantly.
 _INSPECT_CACHE: Dict[str, tuple] = {}
-# Tool lists change ~never — 1h TTL so sporadic rooms (turns >15min apart) stay warm.
-_INSPECT_TTL = float(os.environ.get("HYPER_CONNECTOR_INSPECT_TTL", "3600") or "3600")
+# Session grants are deliberately short-lived. Cache only inside that authority
+# window; schemas without a grant may still use the same bounded TTL.
+_INSPECT_TTL = float(os.environ.get("HYPER_CONNECTOR_INSPECT_TTL", "240") or "240")
 
 
-async def _inspect_connector_tools(norm: str, *, user_id: str, org_id: str) -> List[Dict[str, Any]]:
+async def _inspect_connector_tools(norm: str, *, user_id: str, org_id: str,
+                                   use_case: str = "") -> List[Dict[str, Any]]:
     """Cached connector tool-list inspect. Returns the raw tools list. Caches only a
     non-empty success (an empty/failed inspect — e.g. a not-connected connector or a
     cold timeout — is retried next turn rather than cached as 'no tools')."""
     now = time.time()
-    cached = _INSPECT_CACHE.get(norm)
+    cache_key = f"{org_id}:{user_id}:{norm}:{str(use_case or '').casefold()[:240]}"
+    cached = _INSPECT_CACHE.get(cache_key)
     if cached and cached[0] > now:
         return cached[1]
     try:
-        insp = await connector_inspect_emulated(norm, user_id=user_id, org_id=org_id)
+        insp = await composio_session_reads_emulated(
+            norm, use_case, user_id=user_id, org_id=org_id)
     except Exception:  # noqa: BLE001
         insp = {}
+    raw = (insp or {}).get("tools") or []
+    if not raw:
+        try:
+            insp = await connector_inspect_emulated(norm, user_id=user_id, org_id=org_id)
+        except Exception:  # noqa: BLE001
+            insp = {}
     raw = (((insp or {}).get("inspection") or {}).get("tools")
            or (insp or {}).get("tools") or [])
     if isinstance(raw, list) and raw:
-        _INSPECT_CACHE[norm] = (now + _INSPECT_TTL, raw)
+        grant_expiries = [float(row.get("grantExpiresAt")) / 1000.0 for row in raw
+                          if isinstance(row, dict) and row.get("grantExpiresAt")]
+        expires_at = min([now + _INSPECT_TTL, *grant_expiries]) if grant_expiries else now + _INSPECT_TTL
+        if expires_at > now:
+            _INSPECT_CACHE[cache_key] = (expires_at, raw)
     return raw if isinstance(raw, list) else []
 
 
@@ -1449,7 +1487,9 @@ class Director:
         self.intended_output = str(intended_output or "answer").strip().lower()
         self.post_output_actions: List[Dict[str, Any]] = []
         self.artifact_intent: Optional[Dict[str, Any]] = None
+        self.brand_dna: Optional[Dict[str, Any]] = None
         self.work_results: List[Dict[str, Any]] = []
+        self._roundtable_shadow: Optional[Dict[str, Any]] = None
         # The persisted room kind is authoritative. Legacy callers without one use
         # the compatibility resolver; active turn intent is still decided by the
         # structured Director below rather than lexical routing.
@@ -1503,6 +1543,7 @@ class Director:
         self.debate_max_rounds = max(1, min(3, debate_max_rounds))
         # per-turn state (NOT module globals)
         self.blackboard: List[str] = []
+        self._connector_evidence: List[Dict[str, Any]] = []
         self._retained_prospect_rows: List[Dict[str, Any]] = []
         self.transcript: List[Dict[str, Any]] = []
         self._debate_disagreement_note: str = ""
@@ -1791,7 +1832,7 @@ class Director:
         at a lower temperature per Groq's guidance. Returns the message dict or
         None on a hard failure (the caller treats None as 'stop')."""
         key = _groq_key()
-        if not key and not os.environ.get("OPENROUTER_API_KEY"):
+        if not key and not _openrouter_available():
             log.error("[hyper-engine] no governed model provider configured")
             return None
         # force_text: OMIT tools AND flatten the tool-call transcript to plain text.
@@ -1888,7 +1929,14 @@ class Director:
                 return (j.get("choices") or [{}])[0].get("message") or None
             return None
         if _GROQ_PROVIDER_DISABLED:
-            log.error("[hyper-engine] Groq provider is disabled and no governed route is available model=%s",
+            # Direct Groq is forbidden, but OpenRouter through Cloudflare
+            # Gateway remains the canonical governed route.
+            j = await _openrouter_chat(body, timeout=httpx.Timeout(max(45.0, _to), connect=5.0))
+            if j is not None:
+                usage = j.get("usage") or {}
+                self._record_model_usage(body.get("model"), usage, bucket)
+                return (j.get("choices") or [{}])[0].get("message") or None
+            log.error("[hyper-engine] direct Groq disabled and governed Gateway/OpenRouter unavailable model=%s",
                       body.get("model"))
             return None
         max_attempts = 3
@@ -1995,7 +2043,8 @@ class Director:
         _pre: Dict[str, list] = {}
         if _need:
             _res = await asyncio.gather(
-                *[_inspect_connector_tools(n, user_id=self.user_id, org_id=self.org_id) for n in _need],
+                *[_inspect_connector_tools(n, user_id=self.user_id, org_id=self.org_id,
+                                           use_case=self.user_message) for n in _need],
                 return_exceptions=True)
             _pre = {n: (r if isinstance(r, list) else []) for n, r in zip(_need, _res)}
 
@@ -2024,7 +2073,11 @@ class Director:
                 public = f"{norm.replace('-', '_')}__{tname}"
                 desc = (str((tspec or {}).get("description") or tname)[:180]
                         + f" (live read from the {norm} connector).")
-                _add(public, desc, props, req, "mcp", norm, tname)
+                grant_id = str((tspec or {}).get("grantId") or "")
+                tool_slug = str((tspec or {}).get("toolSlug") or "")
+                _add(public, desc, props, req,
+                     "composio_session" if grant_id and tool_slug else "mcp",
+                     norm, f"{grant_id}|{tool_slug}" if grant_id and tool_slug else tname)
                 count += 1
         self._connector_routes = routes
         if routes:
@@ -2035,12 +2088,16 @@ class Director:
         try:
             if bridge == "google":
                 r = await google_exec_emulated(tool, args or {}, user_id=self.user_id, org_id=self.org_id)
+            elif bridge == "composio_session":
+                grant_id, tool_slug = tool.split("|", 1)
+                r = await composio_session_read_exec_emulated(
+                    grant_id, tool_slug, args or {}, user_id=self.user_id, org_id=self.org_id)
             else:
                 r = await connector_exec_emulated(provider, tool, args or {}, user_id=self.user_id, org_id=self.org_id)
         except Exception as exc:  # noqa: BLE001
             return json.dumps({"error": str(exc)[:200], "is_error": True})
         res = r.get("result") if isinstance(r, dict) and isinstance(r.get("result"), dict) else (r or {})
-        out = json.dumps(res)[:1500] if isinstance(res, (dict, list)) else str(res)[:1500]
+        out = json.dumps(res, ensure_ascii=False)[:12000] if isinstance(res, (dict, list)) else str(res)[:12000]
         # Connector AUTH failure (expired/revoked token → 401/403). Surface a clean
         # "reconnect" signal instead of feeding the raw error to the agents as if it were
         # data — otherwise the room debates "API error logs" pointlessly. Tell the director
@@ -2061,7 +2118,26 @@ class Director:
                 f"{provider} is unavailable this turn.")
             self.gather_count += 1
             return json.dumps({"error": f"{provider} not authorized — reconnect required", "reconnect": provider})
-        self.blackboard.append(f"- {provider}/{tool}: {out[:300]}")
+        receipt = r.get("receipt") if isinstance(r, dict) and isinstance(r.get("receipt"), dict) else None
+        data = r.get("data") if isinstance(r, dict) and "data" in r else res
+        if receipt:
+            evidence = {
+                "provider_receipt": str(receipt.get("session_log_id") or ""),
+                "source": provider,
+                "title": f"{provider} {receipt.get('tool_slug') or tool}",
+                "tool_slug": str(receipt.get("tool_slug") or tool),
+                "content": json.dumps(data, ensure_ascii=False)[:12000],
+                "receipt": receipt,
+            }
+            self._connector_evidence.append(evidence)
+            await self.emit({"t": "evidence_received", "shadow": False,
+                             "source": provider, "tool_slug": evidence["tool_slug"],
+                             "receipt": receipt})
+            self.blackboard.append(
+                f"CONNECTOR_EVIDENCE[{evidence['tool_slug']} receipt={evidence['provider_receipt']}]: "
+                f"{evidence['content']}")
+        else:
+            self.blackboard.append(f"- {provider}/{tool}: {out[:6000]}")
         self.gather_count += 1
         # Harvest email addresses from gmail reads (result + the search args) so a
         # "send to <name>" task can resolve a real recipient the director already found.
@@ -2416,11 +2492,9 @@ class Director:
                 await self._enrich_one_impressum(x)
         await asyncio.gather(*[_guard(x) for x in targets], return_exceptions=True)
 
-    # ── live web search (HIVEMIND core Tavily-backed) ────────────────────────
+    # ── live governed web search ─────────────────────────────────────────────
     async def _web_search(self, query: str) -> str:
-        """Search the live public web using HIVEMIND core's Tavily-backed web-intel — the
-        SAME engine behind the hivemind_web_search MCP tool. Provider-independent, survives
-        a Groq outage, and inherits core's dedup / rate-limit / quota. Bounded per turn."""
+        """Search the live public web through the governed read boundary. Bounded per turn."""
         query = (query or "").strip()
         if not query:
             return json.dumps({"error": "empty query"})
@@ -2429,9 +2503,6 @@ class Director:
         self._web_calls += 1
         prospect = self.evidence_mode == "prospecting"
         keep = 3000 if prospect else 1500
-        # Reuse HIVEMIND core's Tavily-backed web-intel (the SAME engine behind the
-        # hivemind_web_search MCP tool) — provider-independent, survives a Groq outage,
-        # and inherits core's dedup / rate-limit / quota. No bespoke Tavily client here.
         try:
             res = await web_search_emulated(query, user_id=self.user_id, org_id=self.org_id,
                                             limit=8 if prospect else 5,
@@ -2443,6 +2514,8 @@ class Director:
             log.warning("[hyper-engine] web_search: %s", res.get("error"))
             return json.dumps({"error": str(res.get("error"))[:200], "is_error": True})
         results = res.get("results") or []
+        provider = str(res.get("provider") or "hivemind_core")[:80]
+        provider_tool = str(res.get("tool") or "hivemind_web_search")[:120]
         sources: List[Dict[str, str]] = [
             {"title": str(x.get("title") or "")[:120], "url": str(x.get("url") or "")}
             for x in results[:5] if x.get("url")
@@ -2467,8 +2540,11 @@ class Director:
             f"internal facts): {answer[:keep]}")
         self.gather_count += 1
         await self.emit({"t": "web_intel", "query": query[:200], "count": len(sources),
-                         "sources": sources[:5], "summary": answer[:400]})
-        return json.dumps({"answer": answer, "sources": sources[:5]})
+                         "sources": sources[:5], "summary": answer[:400],
+                         "provider": provider, "tool": provider_tool,
+                         "evidence_policy": str(res.get("evidence_policy") or "")[:80]})
+        return json.dumps({"answer": answer, "sources": sources[:5],
+                           "provider": provider, "tool": provider_tool})
 
     async def _seo_audit(self, url: str, page_limit: int = 25) -> str:
         """Place deterministic website evidence on the SEO Room board."""
@@ -4766,6 +4842,355 @@ class Director:
             log.warning("[hyper-engine] places query composer failed: %s", exc)
             return []
 
+    def _build_turn_contract(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize the Director plan into a stable, auditable turn contract.
+
+        The planner may choose tactics, but this envelope is deterministic and is
+        emitted before any research or execution begins.  Later phases can therefore
+        prove what the room intended to deliver, which authority scope it inherited,
+        and which governance gates applied without reconstructing model prose.
+        """
+        # The planner supports both the current dependency-aware ``turn_plan``
+        # and the older flat ``work_orders`` field.  Contract extraction must
+        # follow the plan that will actually execute; otherwise a valid
+        # ``turn_plan`` silently loses its evidence and acceptance obligations.
+        raw_orders = plan.get("turn_plan") or plan.get("work_orders") or []
+        work_orders = [item for item in raw_orders if isinstance(item, dict)]
+        profile_claims = [
+            str(claim).strip() for claim in (plan.get("research_claims") or []) if str(claim).strip()
+        ]
+        order_claims = [
+            str(claim).strip()
+            for order in work_orders
+            for claim in (order.get("required_evidence") or [])
+            if str(claim).strip()
+        ]
+        required_claims = list(dict.fromkeys(profile_claims + order_claims))[:16]
+        connector_calls = [
+            str(item.get("name") or "").strip()
+            for item in (plan.get("connector_calls") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ][:8]
+        web_requested = bool(str(plan.get("web_query") or "").strip())
+        external_research = web_requested or bool(connector_calls) or bool(plan.get("seo_audit_url"))
+        deep_research = bool(plan.get("research_floor")) or len(required_claims) >= 3 or len(work_orders) >= 3
+        side_effects = [
+            str(item.get("capability") or "").strip()
+            for item in (plan.get("post_output_actions") or [])
+            if isinstance(item, dict) and item.get("explicit") is True
+        ][:4]
+        verified_domains_match = re.search(
+            r"(?:^|\n)Verified domains:\s*([^\n]+)", self.company_brief or "", re.I,
+        )
+        verified_domains = [
+            value.strip() for value in (verified_domains_match.group(1).split(",") if verified_domains_match else [])
+            if value.strip()
+        ][:4]
+        artifact_kind = str((self.artifact_intent or {}).get("kind") or "").strip().lower()
+        profile_id = str(self.execution_profile.get("profile_id") or "")
+        planned_output_family = str(plan.get("output_family") or "").strip().lower()
+        # The deterministic artifact classifier is authoritative for rendered
+        # media. A planner may describe a deck as a "report", but downstream
+        # renderers, skills and receipts must still agree that it is a
+        # presentation.
+        output_family = (
+            "presentation" if artifact_kind == "presentation" else
+            planned_output_family if artifact_kind in {"report", "interactive_document", "dashboard"}
+                and planned_output_family in {"report", "document", "spreadsheet", "image"} else
+            "report" if artifact_kind in {"report", "interactive_document", "dashboard"} else
+            planned_output_family if planned_output_family in {
+                "text", "report", "presentation", "document", "spreadsheet", "image", "data",
+            } else
+            "report" if profile_id in {
+                "research.decision.v1", "fundraising.artifact.v1", "seo.audit.v1",
+                "legal_finance.review.v1",
+            } else "text"
+        )
+        output_formats = (
+            ["html", "pdf"] if output_family in {"report", "presentation", "document", "image"}
+            else ["csv", "xlsx"] if output_family == "spreadsheet"
+            else ["json"] if output_family == "data" else ["md"]
+        )
+        output_skill = OUTPUT_SKILLS[output_family]
+        output_contract = {
+            "contract": "hyper.output-contract.v1",
+            "output_family": output_family,
+            "formats": output_formats,
+            "audience": str((self.artifact_intent or {}).get("audience") or "workspace members")[:240],
+            "purpose": str((self.artifact_intent or {}).get("purpose") or self.intended_output or "company work")[:240],
+            "output_skill": output_skill,
+            "skill_id": output_skill["id"],
+            "skill_version": output_skill["version"],
+            "template": {"id": "portrait-report" if output_family == "report" else output_family, "version": "1"},
+            "evidence_requirements": {
+                "citations_required": output_family != "image",
+                "claim_ledger_required": output_family in {"report", "presentation", "document"},
+                "assumptions_separated": True,
+                "missing_evidence_policy": "block_claim",
+            },
+            "delivery": {
+                "requested": bool(side_effects),
+                "approval_required": bool(side_effects),
+            },
+            "brand_reference": (
+                dict(self.brand_dna.get("reference") or {})
+                if isinstance(self.brand_dna, dict) and self.brand_dna.get("available") else None
+            ),
+        }
+        known_urls = [value.rstrip(".,;") for value in re.findall(
+            r"https?://[^\s<>\]\[\)\(\"']+", f"{self.user_message}\n{self.company_brief}", re.I,
+        )][:12]
+        prospecting_contract = build_prospecting_contract(
+            plan=plan,
+            room_kind=self.room_kind,
+            room_mode=self.room_mode,
+            room_instructions=self.room_instructions,
+            known_urls=known_urls,
+            places_available=bool(os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY")),
+            web_available=self._web_budget > 0,
+            deep_research=deep_research,
+        )
+        debate_contract = build_debate_contract(
+            plan=plan,
+            participants=self.participants,
+            user_message=self.user_message,
+            room_kind=self.room_kind,
+            intended_output=self.intended_output,
+            execution_profile=self.execution_profile,
+            room_instructions=self.room_instructions,
+        )
+        return {
+            "contract_version": "hyper.turn-contract.v2",
+            "turn_id": self.turn_id,
+            "room_id": self.room_id,
+            "scope": {
+                "org_id": self.org_id,
+                "user_id": self.user_id,
+                "project_id": self.project_id,
+            },
+            "intent": {
+                "turn_mode": str(plan.get("turn_mode") or "task"),
+                "execution_engine": str(plan.get("execution_engine") or "debate"),
+                "intended_output": self.intended_output,
+                "response_depth": str(plan.get("response_depth") or "focused"),
+            },
+            "research": {
+                "required": external_research,
+                "depth": "deep" if deep_research else ("focused" if external_research else "none"),
+                "freshness_required": web_requested,
+                "connector_reads": connector_calls,
+                "web_requested": web_requested,
+                "forced_by_profile": str(plan.get("research_floor") or "") or None,
+                "verified_company_domains": verified_domains,
+            },
+            "required_claims": required_claims,
+            "task_skills": build_task_skills(plan, output_family),
+            "governance": {
+                "debate_required": bool(plan.get("needs_debate")),
+                "approval_required": bool(side_effects),
+                "external_side_effects": side_effects,
+                "evidence_mode": str(plan.get("evidence_mode") or "standard"),
+            },
+            "acceptance_criteria": list(dict.fromkeys([
+                str(criterion).strip() for criterion in (plan.get("research_acceptance_criteria") or [])
+                if str(criterion).strip()
+            ] + [
+                str(criterion).strip()
+                for order in work_orders
+                for criterion in (order.get("acceptance_criteria") or [])
+                if str(criterion).strip()
+            ]))[:16],
+            "output_contract": output_contract,
+            "prospecting_contract": prospecting_contract,
+            "debate_contract": debate_contract,
+        }
+
+    async def _run_evidence_roundtable_shadow(
+        self, contract: Dict[str, Any], output_contract: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Execute the candidate protocol without changing synthesis or external state."""
+        # The outer goalkeeper may replay the established production engine to
+        # repair its final answer.  The candidate roundtable is observational and
+        # already produced a complete transcript on the immutable first attempt;
+        # rerunning it here would spend model budget and append duplicate public
+        # contributions without adding evidence.  Durable restarts of the original
+        # attempt remain safe because roundtable IDs are stable and persistence is
+        # idempotent.
+        if "[GOALKEEPER round" in str(self.user_message or ""):
+            return None
+        if (not isinstance(contract, dict)
+                or contract.get("execution_mode") != "shadow"
+                or contract.get("mode") == "none"):
+            return None
+        if contract.get("execution_blocked_reason"):
+            verdict = {
+                "status": "failed", "accepted_claim_ids": [], "rejected_claim_ids": [],
+                "unresolved_claim_ids": list(contract.get("critical_claims") or []),
+                "material_conflicts": [], "minority_objection": {},
+                "additional_round_required": False,
+                "stop_reason": str(contract["execution_blocked_reason"]), "scores": {},
+            }
+            await self.emit({"t": "roundtable_verdict", "shadow": True, "verdict": verdict})
+            self._roundtable_shadow = {"protocol_version": "evidence_roundtable.v1", "verdict": verdict,
+                                       "contributions": [], "claims": [], "usage": {"consults": 0, "refills": 0}}
+            return self._roundtable_shadow
+
+        sources = [*self._connector_evidence, *self._source_evidence_snapshot(), *self._verified_work_evidence()]
+        source_ledger = [
+            {
+                "ref": str(row.get("provider_receipt") or row.get("url") or f"source-{index}"),
+                "title": str(row.get("title") or row.get("source") or "")[:240],
+                "url": str(row.get("url") or "")[:1000],
+                "excerpt": str(row.get("content") or "")[:1200],
+            }
+            for index, row in enumerate(sources[:40]) if isinstance(row, dict)
+        ]
+        common = {
+            "turn_id": self.turn_id,
+            "company": self.company_brief[:6000],
+            "project_id": self.project_id,
+            "room_goal": self.room_goal,
+            "room_instructions": self.room_instructions,
+            "session_history": self._journal_block[:5000],
+            "output_contract": dict(output_contract or {}),
+        }
+        role_contexts: Dict[str, Dict[str, Any]] = {}
+        for participant in contract.get("participants") or []:
+            role = str(participant.get("role") or "")
+            access = set(participant.get("evidence_access") or [])
+            role_contexts[role] = {
+                "evidence_access": sorted(access),
+                "evidence": source_ledger if "source_ledger" in access else [],
+            }
+
+        async def consult(participant: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+            role = str(participant.get("role") or "participant")
+            employee = self.roster.get(str(participant.get("agent_id") or "")) or {}
+            employee_name, employee_lane, employee_persona = _persona_fields(employee)
+            profile = participant.get("model_profile") if isinstance(participant.get("model_profile"), dict) else {}
+            model = str(os.environ.get(f"HYPER_ROUNDTABLE_{role.upper()}_MODEL") or self.persona_model)
+            if "/" not in model:
+                model = "openai/gpt-oss-120b"
+            system = (
+                f"You are {employee_name}, the organization's assigned Digital Employee. "
+                f"Your established lane is {employee_lane}. Your current roundtable role is {role}. "
+                f"Preserve this character and operating perspective: {employee_persona} "
+                "You are a public Evidence Roundtable contributor. Return one JSON object only. "
+                "Never reveal private reasoning. Never claim evidence not present in the supplied pack. "
+                "Use the contribution schema for participant phases and the verdict schema for validity_judgment."
+            )
+            message = await self._groq(
+                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                model=model,
+                temp=float(profile.get("temperature") or 0.2),
+                force_text=True,
+                json_object=True,
+                bucket="debate",
+                max_tokens=900,
+            )
+            return _first_json_object(str((message or {}).get("content") or "")) or {
+                "kind": "abstain", "statement": "No valid structured contribution was returned.",
+                "confidence": 0.0, "information_gain": 0.0,
+            }
+
+        async def refill(request: Dict[str, Any]) -> Dict[str, Any]:
+            # Shadow mode may reuse existing receipts, but may not launch providers.
+            query = str(request.get("query") or request.get("claim") or "")
+            terms = {term for term in re.findall(r"[a-z0-9]{4,}", query.casefold())}
+            matches = [row["ref"] for row in source_ledger
+                       if terms and terms.intersection(re.findall(r"[a-z0-9]{4,}",
+                                                                  f"{row['title']} {row['excerpt']}".casefold()))]
+            if matches:
+                return {"status": "completed", "evidence_refs": matches[:6], "reason": None}
+            lifecycle_mode = str(os.environ.get("HYPER_EVIDENCE_WORKFLOW_MODE", "off")).strip().lower()
+            if lifecycle_mode in {"shadow", "canary"}:
+                requested_route = str(request.get("route") or request.get("requested_action") or "parallel_search")
+                route = requested_route if requested_route in {"parallel_search", "parallel_findall", "parallel_task"} else "parallel_search"
+                target_ids = request.get("target_claim_ids") or []
+                claim_id = str(request.get("claim_id") or (target_ids[0] if target_ids else "unresolved-claim"))
+                job = await request_evidence_job_emulated(
+                    user_id=self.user_id, org_id=self.org_id, room_id=self.room_id,
+                    turn_id=self.turn_id, route=route, query=query, claim_id=claim_id,
+                    mode=lifecycle_mode,
+                )
+                if job.get("evidence_job_id"):
+                    return {"status": "pending", "evidence_refs": [],
+                            "evidence_job_id": job["evidence_job_id"],
+                            "provider_receipt": job["evidence_job_id"],
+                            "reason": "durable_evidence_job_created"}
+                return {"status": "unavailable", "evidence_refs": [],
+                        "reason": str(job.get("error") or "evidence_job_creation_failed")}
+            return {"status": "unavailable", "evidence_refs": [],
+                    "reason": "no_existing_receipt_matches_shadow_request"}
+
+        try:
+            self._roundtable_shadow = await run_evidence_roundtable(
+                contract=contract,
+                common_context=common,
+                role_contexts=role_contexts,
+                consult=consult,
+                emit=self.emit,
+                evidence_refill=refill,
+                timeout_seconds=float(os.environ.get("HYPER_ROUNDTABLE_TIMEOUT_S", "120") or 120),
+            )
+            return self._roundtable_shadow
+        except Exception as exc:  # candidate failure cannot affect the current engine
+            log.warning("[hyper-engine] shadow evidence roundtable failed: %s", exc)
+            await self.emit({"t": "roundtable_verdict", "shadow": True, "verdict": {
+                "status": "failed", "accepted_claim_ids": [], "rejected_claim_ids": [],
+                "unresolved_claim_ids": [], "material_conflicts": [], "minority_objection": {},
+                "additional_round_required": False, "stop_reason": "shadow_runtime_failure",
+                "scores": {},
+            }})
+            return None
+
+    def _apply_research_floor(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Prevent high-evidence profiles from silently planning zero research.
+
+        Profile selection is already the structured, language-independent intent
+        classifier. Once it selects a research or fundraising evidence profile,
+        the model may choose the query but may not erase the evidence stage. The
+        fallback query is the user's own text, so the runtime never invents a
+        company domain or legal-page URL.
+        """
+        profile_id = str(self.execution_profile.get("profile_id") or "")
+        governed_profiles = {"research.decision.v1", "fundraising.artifact.v1"}
+        if profile_id not in governed_profiles or self._web_budget <= 0:
+            return plan
+        if re.search(r"\b(?:do not|don't|without|no)\s+(?:use\s+)?(?:the\s+)?web(?:\s+search)?\b",
+                     self.user_message or "", re.IGNORECASE):
+            return plan
+        has_external_read = bool(
+            str(plan.get("web_query") or "").strip()
+            or plan.get("connector_calls")
+            or plan.get("seo_audit_url")
+        )
+        if has_external_read:
+            return plan
+        amended = dict(plan)
+        amended["web_query"] = str(self.user_message or "").strip()[:1200]
+        amended["turn_mode"] = "task"
+        amended["research_floor"] = profile_id
+        if profile_id == "fundraising.artifact.v1":
+            amended["research_claims"] = [
+                "Company compliance and data-residency claims from verified first-party pages",
+                "Current market-demand evidence from authoritative independent sources",
+                "Financial projections separated from historical facts with explicit assumptions",
+            ]
+            amended["research_acceptance_criteria"] = [
+                "Every factual claim has a source URL",
+                "Company claims, independent evidence, assumptions, and projections are labeled separately",
+                "No regulatory certification or market figure is inferred from missing evidence",
+            ]
+        else:
+            amended["research_claims"] = ["Current external facts required by the requested decision"]
+            amended["research_acceptance_criteria"] = [
+                "Every externally verifiable factual claim has a source URL",
+                "Missing evidence is reported instead of invented",
+            ]
+        log.warning("[hyper-engine] enforced governed research floor profile=%s", profile_id)
+        return amended
+
     async def _plan_gather(self) -> Dict[str, Any]:
         """ONE structured-output call that plans the gather: which company-brain recalls,
         which connector reads, whether web + debate are needed. JSON schema, NOT native
@@ -4851,6 +5276,7 @@ class Director:
                 "execution_engine": {"type": "string", "enum": ["debate", "agentic"]},
                 "collaboration_intensity": {"type": "string", "enum": ["light", "standard", "deep"]},
                 "response_depth": {"type": "string", "enum": ["direct", "focused", "operating"]},
+                "output_family": {"type": "string", "enum": ["text", "report", "presentation", "document", "spreadsheet", "image", "data"]},
                 "evidence_mode": {"type": "string", "enum": ["standard", "prospecting"]},
                 "post_output_actions": {"type": "array", "items": {"type": "object", "properties": {
                     "capability": {"type": "string"},
@@ -4863,10 +5289,13 @@ class Director:
                     "sector": {"type": ["string", "null"]},
                     "audience": {"type": ["string", "null"]},
                     "offer": {"type": ["string", "null"]},
+                    "entity_type": {"type": ["string", "null"]},
+                    "known_entities": {"type": "array", "items": {"type": "string"}},
                     "discover": {"type": "boolean"},
                     "persist": {"type": "boolean"},
                     "draft": {"type": "boolean"},
                     "deliver": {"type": "boolean"},
+                    "call": {"type": "boolean"},
                     "monitor": {"type": "boolean"},
                 }, "required": ["requested_count", "geography", "sector", "audience", "offer", "discover", "persist", "draft", "deliver", "monitor"], "additionalProperties": False},
                 "campaign_request": {"type": ["object", "null"], "properties": {
@@ -4879,7 +5308,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "execution_engine", "collaboration_intensity", "response_depth", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
+            "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "execution_engine", "collaboration_intensity", "response_depth", "output_family", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
             "additionalProperties": False,
         }
         if _visual_artifacts_enabled():
@@ -4948,13 +5377,14 @@ class Director:
             "user explicitly asks to draft, compose, or prepare a draft without delivery. Choose gmail.send_email "
             "for send/reply/forward/deliver requests and for requests to write/email/message a stated recipient; "
             "the centralized write gate will still require approval before delivery.\n"
-            "- outreach_request: in an Outreach Room, represent the COMPLETE requested lifecycle instead of treating "
+            "- outreach_request: in ANY Room, represent a requested prospect/client/lead lifecycle instead of treating "
             "a compound request as one report. Set discover when new prospects are requested, persist whenever accepted "
             "prospects must enter the shared lead book, draft when personalized copy is requested, deliver only when the "
             "user explicitly asks to send, and monitor whenever delivery requires reply/follow-up tracking. Preserve an "
             "exact count only when the assignment explicitly states one; otherwise requested_count must be null and the "
             "Room should return every relevant result it can verify plus the actual count. Preserve geography, sector, "
-            "audience, and offer. Use null outside Outreach Rooms or for non-operational "
+            "audience, offer, entity_type (companies or people), and already-known entity names. Set call=true only "
+            "when call briefs or calls are explicitly requested. Use null for non-operational "
             "questions. This contract is checked deterministically; a sample email or shorter prospect list cannot finish "
             "a larger request.\n"
             "- campaign_request: when this is NOT already a Campaign Room and the user explicitly asks to CREATE, "
@@ -4995,8 +5425,8 @@ class Director:
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
-            "- places_query: a Google-Maps business search — set it whenever THIS turn asks to FIND, "
-            "DISCOVER, or SOURCE new real firms/prospects/contacts, EVEN WHEN the same request ALSO asks "
+            "- places_query: a Google-Maps business search — set it only when THIS turn asks to FIND, "
+            "DISCOVER, or SOURCE physical/local firms in an explicit city or region, EVEN WHEN the same request ALSO asks "
             "to draft/send outreach for them. 'Find leads in Hannover and email them' or 'discover "
             "prospects near Hannover and draft personalized emails' are BOTH discovery+drafting in one "
             "request — set places_query for the discovery half; do NOT skip it just because email/outreach "
@@ -5013,10 +5443,14 @@ class Director:
             "decision task with zero new-prospect-finding component. REUSE-FIRST still applies within that: "
             "the company keeps a shared LEAD BOOK — assume existing leads are already in recall context; "
             "don't re-discover leads the company already has UNLESS the user explicitly asks to find NEW/"
-            "more ones. When in doubt about whether new discovery is being asked for, prefer setting "
-            "places_query — a wasted Maps call is cheap; a fabricated contact is not.\n"
+            "more ones. Use NULL for worldwide/anywhere searches, people/entity searches, known-entity enrichment, "
+            "or multi-hop research; the governed research contract routes those to Parallel or web search. Never "
+            "fabricate a contact when a provider lane is unavailable.\n"
             "- web_query: a single query ONLY for genuinely EXTERNAL/public facts the company brain would not "
             "hold; otherwise null.\n"
+            "- output_family: the user's requested deliverable medium, independent of whether its renderer is currently enabled. "
+            "Choose report for reports/briefs, presentation for decks/slides, document for editable documents, spreadsheet for workbooks/models, "
+            "image for a visual image, data for JSON/CSV datasets, and text only for ordinary conversational answers.\n"
             "- needs_debate: false for light work. For standard work, true only when independent specialist "
             "judgment or a material trade-off improves the answer; mechanical remediation of an already measured "
             "issue does not need debate. For deep work, true when strategy, sequencing, budget, channel, risk, or "
@@ -5167,6 +5601,35 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
+        # A user-named medium is an immutable output constraint. Reconcile it
+        # before visual routing so planning cannot silently substitute formats.
+        message = self.user_message or ""
+        explicit_family = None
+        if re.search(r"\b(?:pitch\s+deck|slide\s*deck|slides?|presentation)\b", message, re.I):
+            explicit_family = "presentation"
+        elif re.search(r"\b(?:poster|banner|social\s+(?:graphic|image)|generate\s+(?:an?\s+)?image)\b", message, re.I):
+            explicit_family = "image"
+        elif re.search(r"\b(?:spreadsheet|workbook|\.csv\b|csv\s+(?:file|table)|xlsx)\b", message, re.I):
+            explicit_family = "spreadsheet"
+        elif re.search(r"\b(?:editable\s+document|word\s+document|google\s+doc|one[\s-]?page\s+document)\b", message, re.I):
+            explicit_family = "document"
+        elif re.search(r"\b(?:e-?mail|emailing|cold[\s-]?mail)\b", message, re.I):
+            explicit_family = "text"
+        if explicit_family:
+            plan["output_family"] = explicit_family
+        if explicit_family in {"text", "spreadsheet"}:
+            plan["artifact_intent"] = None
+        elif explicit_family in {"presentation", "image", "document"} and _visual_artifacts_enabled():
+            raw = plan.get("artifact_intent") if isinstance(plan.get("artifact_intent"), dict) else {}
+            plan["artifact_intent"] = {
+                "kind": "presentation" if explicit_family == "presentation" else "interactive_document",
+                "medium": "html",
+                "purpose": str(raw.get("purpose") or message or "visual deliverable")[:240],
+                "audience": str(raw.get("audience") or "intended reader")[:160],
+                "quality_profile": str(raw.get("quality_profile") or "editorial"),
+                "creative_freedom": str(raw.get("creative_freedom") or "high"),
+                "requirements": [str(item)[:240] for item in (raw.get("requirements") or [])][:12],
+            }
         profile_controls_visual = (self.fast_planner_mode == "glm_no_reasoning"
                                    and bool(self.execution_profile.get("profile_id")))
         profile_requires_visual = self.execution_profile.get("visual_artifact_required") is True
@@ -5205,9 +5668,17 @@ class Director:
         if (_visual_artifacts_enabled() and self.artifact_intent is None
                 and required_artifacts and allowed_outputs == {"artifact"}
                 and (not profile_controls_visual or profile_requires_visual)):
+            requested_medium = str(plan.get("output_family") or "").strip().lower()
+            if requested_medium not in {"presentation", "image"}:
+                requested_medium = (
+                    "presentation" if re.search(
+                        r"\b(?:pitch\s+deck|slide\s*deck|deck|slides?|presentation)\b",
+                        self.user_message or "", re.IGNORECASE,
+                    ) else "interactive_document"
+                )
             self.artifact_intent = {
                 "contract": "artifact-intent.v1",
-                "kind": "interactive_document",
+                "kind": requested_medium,
                 "medium": "html",
                 "purpose": str(self.user_message or "visual deliverable")[:240],
                 "audience": "intended user",
@@ -5269,27 +5740,45 @@ class Director:
                 "connected": any(_norm_connector(alias) in connected for alias in spec["aliases"]),
             })
         plan["post_output_actions"] = actions
-        outreach = plan.get("outreach_request") if self.room_kind == "outreach" else None
-        if isinstance(outreach, dict):
-            raw_requested_count = outreach.get("requested_count")
-            requested_count = (
-                max(1, min(50, int(raw_requested_count)))
-                if raw_requested_count is not None else None
-            )
-            plan["outreach_request"] = {
-                "requested_count": requested_count,
-                "geography": str(outreach.get("geography") or "").strip()[:160] or None,
-                "sector": str(outreach.get("sector") or "").strip()[:240] or None,
-                "audience": str(outreach.get("audience") or "").strip()[:240] or None,
-                "offer": str(outreach.get("offer") or "").strip()[:240] or None,
-                "discover": bool(outreach.get("discover")),
-                "persist": bool(outreach.get("persist")),
-                "draft": bool(outreach.get("draft")),
-                "deliver": bool(outreach.get("deliver")),
-                "monitor": bool(outreach.get("monitor")),
-            }
-        else:
-            plan["outreach_request"] = None
+        # Prospect/client/lead work is a generalized capability. The room kind
+        # shapes the method and room instructions shape policy, but neither may
+        # erase a valid structured request or grant side-effect authority.
+        plan["outreach_request"] = normalize_prospecting_request(plan.get("outreach_request"))
+        # Explicit delivery intent must survive model planning, but never bypasses
+        # the centralized approval gate. Draft-only language remains non-delivery.
+        explicit_email = bool(re.search(r"\b(?:e-?mail|send|deliver|reply|forward)\b", message, re.I))
+        draft_only = bool(re.search(
+            r"\b(?:do\s+not|don't|dont|never)\s+(?:send|deliver)\b|\bdraft\s+only\b",
+            message, re.I,
+        ))
+        composing_only = bool(re.search(
+            r"\b(?:write|draft|compose|prepare)\b[^.\n]{0,40}\be-?mail\b",
+            message, re.I,
+        ))
+        delivery_requested = bool(re.search(
+            r"\b(?:send|deliver|reply|forward)\b|^\s*e-?mail\s+(?:it|this|them|him|her|to|[\w.+-]+@)",
+            message, re.I,
+        )) and not draft_only and not (composing_only and not re.search(r"\b(?:send|deliver)\b", message, re.I))
+        if explicit_email:
+            outreach = dict(plan.get("outreach_request") or {})
+            outreach.update({"draft": True, "deliver": delivery_requested})
+            plan["outreach_request"] = normalize_prospecting_request(outreach)
+            recipient_match = re.search(r"[\w.+-]+@[\w.-]+\.\w+", message)
+            if recipient_match:
+                capability = "gmail.send_email" if delivery_requested else "gmail.create_draft"
+                spec = _POST_OUTPUT_CAPABILITIES[capability]
+                deterministic_action = {
+                    "capability": capability,
+                    "connector": spec["connector"],
+                    "operation": spec["operation"],
+                    "artifact_kind": spec["artifact_kind"],
+                    "target_hint": recipient_match.group(0),
+                    "explicit": True,
+                    "connected": any(_norm_connector(alias) in connected for alias in spec["aliases"]),
+                }
+                actions = [item for item in actions if item.get("artifact_kind") != "email"]
+                actions.append(deterministic_action)
+                plan["post_output_actions"] = actions[:4]
         rq = [q for q in (plan.get("recall_queries") or []) if isinstance(q, str) and q.strip()][:3]
         if self.room_kind == "campaign":
             rq = [q for q in rq if self._campaign_recall_query_is_grounded(q)]
@@ -5314,6 +5803,20 @@ class Director:
         if (plan["web_query"] is None and self._web_budget > 0
                 and isinstance(profile_web_query, str) and profile_web_query.strip()):
             plan["web_query"] = profile_web_query.strip()[:500]
+        if plan["web_query"]:
+            company = self._company_identity_block()
+            website_match = re.search(r"(?:^|\n)Website:\s*([^\n]+)", self.company_brief or "", re.I)
+            domains_match = re.search(r"(?:^|\n)Verified domains:\s*([^\n]+)", self.company_brief or "", re.I)
+            identity = "\n".join(value for value in [
+                company.strip(),
+                f"Website: {website_match.group(1).strip()}" if website_match else "",
+                f"Verified domains: {domains_match.group(1).strip()}" if domains_match else "",
+            ] if value)
+            if identity:
+                plan["web_query"] = (
+                    f"{plan['web_query'][:750]}\n\nVERIFIED COMPANY IDENTITY:\n{identity[:400]}\n"
+                    "Use the verified company domain for first-party company claims. Do not substitute a same-named entity."
+                )[:1200]
         if self.room_kind == "campaign" and plan["web_query"]:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
@@ -6212,6 +6715,7 @@ class Director:
             f"{transcript_json[:8000]}"
             if forced_debate else ""
         )
+        brand_reference = self._brand_dna_prompt_block()
         system = (
             "You are an exacting digital art director. Create a concrete visual direction for one "
             "self-contained HTML artifact. Work inside the HIVEMIND editorial house system: warm-white "
@@ -6221,7 +6725,7 @@ class Director:
             "audience, and decision. Do not write HTML. Do not invent facts, metrics, sources, or brand "
             "constraints. Reject generic dashboards, slide-template chrome, stacked report cards, and "
             "decoration without explanatory value. Reject dark hero bands, gradients, neon panels, and loud "
-            "colored closing scenes. Return JSON only."
+            "colored closing scenes. Return JSON only." + brand_reference
         )
         if (self.artifact_intent or {}).get("kind") == "presentation":
             system += (
@@ -6283,6 +6787,7 @@ class Director:
         except OSError:
             skill = "Create a polished, self-contained, responsive HTML artifact from the supplied evidence."
         board = self._synthesis_context(10000)
+        brand_reference = self._brand_dna_prompt_block()
         debate = (
             "\n\nTEAM ANALYSIS (narrative options and objections only; never copy claims, numbers, "
             f"dates, or sources unless independently present in SOURCE EVIDENCE):\n{transcript_json[:10000]}"
@@ -6311,6 +6816,7 @@ class Director:
                   "legal conclusion, or completed result. Unknown inputs remain lane=unknown; proposals and "
                   "scenarios use lane=target or assumption. source_refs must copy only compact source labels "
                   "that appear verbatim in SOURCE EVIDENCE."
+                + brand_reference
                 + self._room_instr_block
                 + self._lang_directive()
             )
@@ -6337,7 +6843,7 @@ class Director:
                 html = render_presentation(spec)
             except (TypeError, ValueError, KeyError) as exc:
                 log.warning("[hyper-engine] typed presentation render failed: %s", exc)
-                return None
+                return self._fallback_presentation_candidate()
             source_refs = []
             for slide in spec.get("slides") or []:
                 for ref in slide.get("source_refs") or []:
@@ -6366,6 +6872,7 @@ class Director:
             + "\n\nYou are the final artifact designer. Return JSON only, matching the schema. "
               "The html field is the finished artifact, not a specification or explanation.\n\n"
             + skill
+            + brand_reference
             + self._room_instr_block
             + self._lang_directive()
         )
@@ -6417,6 +6924,55 @@ class Director:
             "source_refs": [str(item).strip()[:240] for item in (artifact.get("source_refs") or []) if str(item).strip()][:24],
         }
 
+    def _fallback_presentation_candidate(self) -> Dict[str, Any]:
+        """Produce a real, conservative deck when structured generation fails.
+
+        This is intentionally an evidence-gap deck, not invented investor copy.
+        Unknown market, traction, compliance, and financial inputs remain visibly
+        unknown so artifact availability never weakens grounding.
+        """
+        company_name = "Singulance" if "singulance" in (self.user_message or "").lower() else "Company"
+        unknown = lambda label, detail: {  # noqa: E731 - compact deck fixture
+            "label": label, "value": "Unknown", "detail": detail, "lane": "unknown",
+        }
+        spec = normalize_presentation_spec({
+            "contract": "visual-presentation.v1",
+            "title": f"{company_name} — Evidence-bounded investor brief",
+            "summary": "A five-slide investor deck was generated; missing diligence inputs are marked explicitly.",
+            "visual_mode": "editorial", "accent": "cobalt",
+            "slides": [
+                {"composition": "hero", "eyebrow": "Investor brief", "headline": company_name,
+                 "body": "A decision-ready deck constrained to verified room context. Missing evidence is shown rather than inferred.",
+                 "items": [unknown("Verified company thesis", "No source-backed thesis was available to this turn."),
+                           unknown("Fundraising objective", "Round size and use of funds were not supplied.")], "source_refs": []},
+                {"composition": "thesis", "eyebrow": "Market", "headline": "Demand must be evidenced",
+                 "body": "The market narrative is reserved until authoritative, current sources are attached.",
+                 "items": [unknown("TAM / SAM / SOM", "No verified sizing evidence was available."),
+                           unknown("Buyer urgency", "No sourced customer research was available."),
+                           unknown("Competitive set", "No independently verified comparison was available.")], "source_refs": []},
+                {"composition": "comparison", "eyebrow": "Product and trust", "headline": "Claims stay inside proof",
+                 "body": "Product, sovereignty, privacy, and compliance statements require first-party or regulator evidence before circulation.",
+                 "items": [unknown("Product proposition", "Attach verified product documentation."),
+                           unknown("Regulatory advantage", "Attach legal pages or regulator evidence."),
+                           unknown("Customer proof", "Attach attributable case studies or receipts.")], "source_refs": []},
+                {"composition": "matrix", "eyebrow": "Economics", "headline": "Assumptions are not history",
+                 "body": "Financial scenarios should be added only as labeled assumptions with owner-approved inputs.",
+                 "items": [unknown("Historical revenue", "No finance-system receipt was supplied."),
+                           unknown("Forecast", "No approved model assumptions were supplied."),
+                           unknown("Use of funds", "No allocation or runway target was supplied.")], "source_refs": []},
+                {"composition": "decision", "eyebrow": "Diligence gate", "headline": "Complete evidence, then circulate",
+                 "body": "The artifact exists now, but the investor narrative remains gated by the missing evidence listed here.",
+                 "items": [unknown("Company evidence", "Verify product and legal claims."),
+                           unknown("Market evidence", "Add authoritative independent sources."),
+                           unknown("Financial evidence", "Add approved assumptions and historical receipts.")], "source_refs": []},
+            ],
+        })
+        return {
+            "contract": "artifact-candidate.v1", "intent": dict(self.artifact_intent or {}),
+            "title": spec["title"], "summary": spec["summary"], "html": render_presentation(spec),
+            "source_refs": [], "_visual_spec": spec, "fallback_reason": "structured_generation_failed",
+        }
+
     async def _produce_visual_artifact(
         self,
         forced_debate: bool,
@@ -6428,6 +6984,8 @@ class Director:
         if not candidate:
             return None
         public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+        if isinstance(self.brand_dna, dict) and self.brand_dna.get("available"):
+            public_candidate["brand_reference"] = dict(self.brand_dna.get("reference") or {})
         delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
         result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
         if isinstance(result, dict) and result.get("ok") is False:
@@ -6442,11 +7000,108 @@ class Director:
             if not candidate:
                 return None
             public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+            if isinstance(self.brand_dna, dict) and self.brand_dna.get("available"):
+                public_candidate["brand_reference"] = dict(self.brand_dna.get("reference") or {})
+            delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
+            result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
+        if (
+            isinstance(result, dict) and result.get("ok") is False
+            and (self.artifact_intent or {}).get("kind") == "presentation"
+            and candidate.get("fallback_reason") != "structured_generation_failed"
+        ):
+            # A model repair can still violate deterministic layout checks.
+            # Preserve the artifact promise with the conservative governed
+            # deck, whose unknown lanes cannot manufacture company evidence.
+            candidate = self._fallback_presentation_candidate()
+            public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+            if isinstance(self.brand_dna, dict) and self.brand_dna.get("available"):
+                public_candidate["brand_reference"] = dict(self.brand_dna.get("reference") or {})
             delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
             result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
         if isinstance(result, dict) and result.get("ok") is True:
             return {"candidate": public_candidate, "receipt": result}
         return None
+
+    def _brand_dna_prompt_block(self) -> str:
+        if not isinstance(self.brand_dna, dict) or not self.brand_dna.get("available"):
+            return "\n\nBRAND DNA: No verified Brand DNA artifact is ready. Use the governed house fallback and do not invent company brand rules."
+        compact = {
+            "reference": self.brand_dna.get("reference"),
+            "identity": self.brand_dna.get("identity"),
+            "voice": self.brand_dna.get("voice"),
+            "palette": self.brand_dna.get("palette"),
+            "typography": self.brand_dna.get("typography"),
+            "layout": self.brand_dna.get("layout"),
+            "imagery": self.brand_dna.get("imagery"),
+            "visual_generation_brief": self.brand_dna.get("visual_generation_brief"),
+            "evidence_refs": self.brand_dna.get("evidence_refs"),
+        }
+        return ("\n\nVERIFIED BRAND DNA SKILL REFERENCE: Apply this evidence-backed visual system "
+                "unless it conflicts with accessibility or artifact safety. Do not extrapolate beyond it.\n"
+                + json.dumps(compact, ensure_ascii=False)[:10000])
+
+    async def _load_brand_dna_for_visual_output(self) -> None:
+        """Progressively load Brand DNA only after a visual output is selected."""
+        if not self.artifact_intent:
+            return
+        payload = await get_brand_dna_emulated(user_id=self.user_id, org_id=self.org_id)
+        if isinstance(payload, dict) and payload.get("available"):
+            self.brand_dna = payload
+            await self.emit({
+                "t": "brand_dna_loaded",
+                "agent": self.participants[0].get("slug") if self.participants else "director",
+                "reference": payload.get("reference") or {},
+                "evidence_count": len(payload.get("evidence_refs") or []),
+            })
+        else:
+            self.brand_dna = None
+            await self.emit({"t": "brand_dna_unavailable", "reason": (payload or {}).get("reason", "not_ready")})
+
+    async def _emit_turn_ack(self) -> None:
+        """Emit a tiny intent acknowledgement in parallel with planning.
+
+        It may describe intended work, but must never claim that a tool, employee,
+        or external action has already run. Failure is silent because the immediate
+        deterministic typing event remains the zero-latency fallback.
+        """
+        lead = self.participants[0] if self.participants else {}
+        body = {
+            "model": canonical_hyper_model(os.environ.get("HYPER_ACK_MODEL", HYPER_FAST_MODEL)),
+            "temperature": 0.2,
+            "max_tokens": 140,
+            "messages": [
+                {"role": "system", "content": (
+                    "You are the lead digital employee acknowledging a new company-work request. "
+                    "Reply in the user's language in 1-4 short sentences. This is only an acknowledgement: "
+                    "do not answer, solve, calculate, rewrite, recommend, or produce the requested deliverable. "
+                    "Use prospective language such as 'I’ll' or 'We’ll'. Confirm the intended outcome "
+                    "and say what the team will check. You may say appropriate specialists will be selected, "
+                    "but never claim agents were spawned, tools ran, evidence was found, or work completed. "
+                    "No headings, bullets, hype, or invented facts.")},
+                {"role": "user", "content": (self.user_message or "")[:1800]},
+            ],
+        }
+        try:
+            response = await _openrouter_chat(body, timeout=httpx.Timeout(10.0, connect=3.0))
+            if not response:
+                return
+            content = str((((response.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
+            refusal = re.search(
+                r"(?:\bsorry\b|\bi\s+can(?:not|['’]t)\b|\bunable\s+to\b|\bcannot\s+assist\b)",
+                content, re.I,
+            )
+            prospective = re.search(r"\b(?:i|we)(?:['’]ll|\s+will)\b", content, re.I)
+            fallback = bool(not content or refusal or not prospective)
+            if fallback:
+                content = ("I’ve understood the requested outcome. I’ll identify the relevant company context, "
+                           "select the right specialists, and keep unsupported claims or missing inputs explicit "
+                           "while the team prepares the result.")
+            self._record_model_usage(body["model"], response.get("usage") or {}, "ack")
+            await self.emit({"t": "turn_ack", "agent": lead.get("slug") or "director",
+                             "content": content[:700], "generated": not fallback,
+                             "fallback": fallback})
+        except Exception as exc:  # noqa: BLE001
+            log.info("[hyper-engine] early acknowledgement unavailable: %s", exc)
 
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
@@ -7051,6 +7706,9 @@ class Director:
         # never looks frozen right after the query is sent.
         _lead = self.participants[0].get("slug") if self.participants else "director"
         await self.emit({"t": "typing", "agent": _lead, "note": "Reading the goal and gathering context…"})
+        # Do not await: the acknowledgement races planning and tool initialization,
+        # giving the user meaningful first text without extending critical-path latency.
+        asyncio.create_task(self._emit_turn_ack())
         _required = [item for item in (self.execution_profile.get("required_artifacts") or []) if item]
         _allowed = {
             str(item).strip().lower()
@@ -7104,7 +7762,15 @@ class Director:
         # PHASE 1 — STRUCTURED GATHER PLAN. One JSON-schema call (NOT native tool-calling)
         # decides what to recall / which connectors to read / web + debate. Replaces the
         # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
-        plan = await self._plan_gather()
+        plan = self._apply_research_floor(await self._plan_gather())
+        await self._load_brand_dna_for_visual_output()
+        turn_contract = self._build_turn_contract(plan)
+        await self.emit({"t": "turn_contract", **turn_contract})
+        await self.emit({
+            "t": "debate_contract",
+            "shadow": bool((turn_contract.get("debate_contract") or {}).get("shadow")),
+            "debate_contract": turn_contract.get("debate_contract") or {},
+        })
         log.info("[hyper-engine] planner picked execution_engine=%s turn_mode=%s room_kind=%s",
                  plan.get("execution_engine"), plan.get("turn_mode"), self.room_kind)
         await self.emit({
@@ -7278,6 +7944,11 @@ class Director:
                                      "title": "Strategic decisions resolved", "detail": "Material disagreements and the selected recommendation are recorded for the final contract."})
             except Exception as exc:  # noqa: BLE001
                 log.warning("[hyper-engine] debate failed: %s", exc)
+        # Candidate protocol is observational only: it emits a separate transcript
+        # and verdict, but the established debate/synthesis remains authoritative.
+        await self._run_evidence_roundtable_shadow(
+            turn_contract.get("debate_contract") or {}, turn_contract.get("output_contract") or {},
+        )
         # PHASE 3.5 — TASK-COMPLETION PASS. If the task's deliverable is prospects/
         # contacts and the board is thin, the room FINISHES the job itself instead of
         # sealing a report full of "[to be sourced]" and fictional research assignees:
@@ -7413,6 +8084,26 @@ class Director:
             final_text = ("(The room could not produce a grounded answer this turn — "
                           "the model was unreachable. Please retry, or add more context.)")
 
+        if self._roundtable_shadow:
+            contributions = list(self._roundtable_shadow.get("contributions") or [])
+            verdict = dict(self._roundtable_shadow.get("verdict") or {})
+            await self.emit({
+                "t": "roundtable_shadow_comparison",
+                "shadow": True,
+                "protocol_version": "evidence_roundtable.v1",
+                "current_output_digest": hashlib.sha256(final_text.encode("utf-8")).hexdigest(),
+                "candidate_status": verdict.get("status"),
+                "candidate_scores": verdict.get("scores") or {},
+                "unsupported_high_risk_claims": len(verdict.get("unresolved_claim_ids") or []),
+                "repetition_rate": (
+                    sum(1 for row in contributions if row.get("duplicate")) / len(contributions)
+                    if contributions else 0.0
+                ),
+                "duration_ms": int(self._roundtable_shadow.get("duration_ms") or 0),
+                "external_actions": 0,
+                "human_rubric_pending": True,
+            })
+
         await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
                          "kind": "synthesis", "content": final_text})
         log.info("[hyper-engine] done plan+gather=%d rounds=%d tokens=%d ms=%d gather=%d tok_by=%s iters=%s",
@@ -7474,6 +8165,8 @@ class Director:
             "room_phase_result": room_phase_result,
             "artifact_intent": dict(self.artifact_intent) if self.artifact_intent else None,
             "artifact_receipt": artifact_receipt,
+            "debate_contract": turn_contract.get("debate_contract") or {},
+            "roundtable_shadow": self._roundtable_shadow,
         }
 
 

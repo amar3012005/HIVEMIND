@@ -19,3 +19,20 @@ export async function hyperPlannerModeFor({ orgId, userId, fetchImpl = fetch, lo
     return 'off';
   }
 }
+
+export async function governedRoomCanaryFor({ orgId, userId, email, fetchImpl = fetch, logger = console }) {
+  const config = configuration();
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!config || !orgId || !userId || !normalizedEmail) return false;
+  try {
+    const query = new URLSearchParams({ org_id: orgId, user_id: userId, email: normalizedEmail });
+    const response = await fetchImpl(`${config.baseUrl}/governed-room-enabled?${query.toString()}`, {
+      headers: { authorization: `Bearer ${config.secret}` }, signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return false;
+    return (await response.json())?.enabled === true;
+  } catch (error) {
+    logger.warn?.(`[governed-hyperagents] Flagship evaluation failed closed: ${error.message}`);
+    return false;
+  }
+}

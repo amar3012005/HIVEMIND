@@ -309,23 +309,130 @@ async def list_canon_emulated(*, user_id: Optional[str], org_id: Optional[str],
         return []
 
 
+async def get_org_profile_emulated(*, user_id: Optional[str], org_id: Optional[str],
+                                   api_key: str = "") -> Dict[str, Any]:
+    """Load the authenticated caller's organization profile through the private
+    control-plane boundary. This is the authoritative identity lane used before
+    room planning; identifiers come from the active turn, never from model text."""
+    if not user_id or not org_id:
+        return {"error": "user_id and org_id are required"}
+    settings = get_settings()
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL")
+            or settings.hivemind_cp_url).rstrip("/")
+    headers = {"Authorization": f"Bearer {key}", "X-API-Key": key}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0)) as client:
+            response = await client.get(f"{base}/internal/hyper/org-profile", headers=headers,
+                                        params={"org_id": org_id, "user_id": user_id})
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[org.profile] failed: %s", exc)
+        return {"error": str(exc)[:200]}
+
+
+async def get_brand_dna_emulated(*, user_id: Optional[str], org_id: Optional[str],
+                                 api_key: str = "") -> Dict[str, Any]:
+    """Load the latest verified org Brand DNA through the private control plane.
+
+    The response is a compact skill reference: it never contains screenshot bytes,
+    tenant credentials, or unverified in-progress extraction state.
+    """
+    if not user_id or not org_id:
+        return {"available": False, "reason": "scope_missing"}
+    settings = get_settings()
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL")
+            or settings.hivemind_cp_url).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0)) as client:
+            response = await client.get(
+                f"{base}/internal/hyper/brand-dna",
+                headers={"Authorization": f"Bearer {key}", "X-API-Key": key},
+                params={"org_id": org_id, "user_id": user_id},
+            )
+        if response.status_code == 404:
+            return {"available": False, "reason": "not_ready"}
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"available": False, "reason": "invalid_response"}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[brand.dna] load failed: %s", exc)
+        return {"available": False, "reason": "load_failed"}
+
+
+async def request_evidence_job_emulated(*, user_id: Optional[str], org_id: Optional[str],
+                                        room_id: str, turn_id: str, route: str,
+                                        query: str, claim_id: str, mode: str = "shadow",
+                                        api_key: str = "") -> Dict[str, Any]:
+    """Persist one tenant-scoped refill request. Raw research intent stops at
+    the control plane; a Cloudflare Workflow receives only opaque identifiers."""
+    if not user_id or not org_id or not room_id or not turn_id:
+        return {"error": "scoped identifiers are required"}
+    settings = get_settings()
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL")
+            or settings.hivemind_cp_url).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=4.0)) as client:
+            response = await client.post(f"{base}/internal/hyper-evidence/request",
+                headers={"Authorization": f"Bearer {key}", "X-API-Key": key}, json={
+                    "org_id": org_id, "user_id": user_id, "room_id": room_id, "turn_id": turn_id,
+                    "route": str(route)[:80], "query": str(query)[:1200],
+                    "claim_id": str(claim_id)[:160], "mode": mode,
+                })
+        if response.status_code not in (200, 202):
+            return {"error": f"evidence request {response.status_code}", "detail": response.text[:200]}
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"error": "invalid evidence response"}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[evidence.job] request failed: %s", exc)
+        return {"error": str(exc)[:200]}
+
+
 async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
                               api_key: str = "", limit: int = 6, timeout_s: float = 45.0) -> Dict[str, Any]:
-    """Live web search via HIVEMIND core's Tavily-backed web-intel — the SAME engine
-    behind the hivemind_web_search MCP tool (so the director reuses it, not a bespoke
-    Tavily client). Submits a job, polls until terminal, returns the succeeded payload
+    """Live web search through the tenant-scoped Composio read boundary, falling
+    back to HIVEMIND core's Tavily-backed web-intel when that provider is unavailable.
+    The Composio boundary only returns URL-backed citations; its generated answer is
+    metadata, not evidence. Returns the succeeded payload
     {status, results:[{title,url,snippet,score}], ...}. Best-effort: returns
     {"error": ...} instead of raising (web is optional gathering, never fatal)."""
     import asyncio
     settings = get_settings()
     headers = _emulated_headers(api_key, user_id, org_id)
+    bounded_limit = max(1, min(int(limit or 6), 10))
+    if user_id and org_id:
+        control_plane_base = (os.environ.get("HIVEMIND_CP_URL")
+                              or os.environ.get("HIVEMIND_CONTROL_PLANE_URL")
+                              or settings.hivemind_cp_url).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=5.0)) as client:
+                response = await client.post(
+                    f"{control_plane_base}/internal/hyper/web-search",
+                    headers=headers,
+                    json={"query": str(query or "")[:1200], "limit": bounded_limit,
+                          "org_id": org_id, "user_id": user_id},
+                )
+            if response.status_code == 200:
+                payload = response.json()
+                if payload.get("status") == "succeeded" and payload.get("results"):
+                    return payload
+            log.warning("[web.search] Composio lane unavailable (%s); falling back to core", response.status_code)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[web.search] Composio lane failed (%s); falling back to core", str(exc)[:160])
     try:
         async with httpx.AsyncClient(
             base_url=settings.hivemind_core_url,
             timeout=httpx.Timeout(timeout_s, connect=5.0),
             headers=headers,
         ) as c:
-            sub = await c.post("/api/web/search/jobs", json={"query": query, "limit": max(1, min(int(limit or 6), 10))})
+            sub = await c.post("/api/web/search/jobs", json={"query": query, "limit": bounded_limit})
             if sub.status_code not in (200, 202):
                 return {"error": f"web submit {sub.status_code}", "detail": sub.text[:200]}
             job_id = (sub.json() or {}).get("job_id")
@@ -492,6 +599,62 @@ async def connector_inspect_emulated(
             return r.json()
     except Exception:  # noqa: BLE001
         return {}
+
+
+async def composio_session_reads_emulated(
+    name: str, use_case: str, *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """Use the same tenant-scoped Composio Tool Router discovery as
+    use_tools:true chat. The control plane removes every write capability before
+    returning compact schemas to HyperAgents."""
+    if not user_id or not org_id:
+        return {"error": "user_id and org_id are required"}
+    settings = get_settings()
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL")
+            or settings.hivemind_cp_url).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            response = await client.post(f"{base}/internal/hyper/composio-read-tools",
+                headers={"Authorization": f"Bearer {key}", "X-API-Key": key}, json={
+                    "org_id": org_id, "user_id": user_id, "toolkit": name,
+                    "use_case": str(use_case or "read connected account data")[:1200],
+                })
+        if response.status_code != 200:
+            return {"error": f"session discovery {response.status_code}", "fallback": True}
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"error": "invalid session discovery"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200], "fallback": True}
+
+
+async def composio_session_read_exec_emulated(
+    grant_id: str, tool_slug: str, arguments: Dict[str, Any], *,
+    user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """Execute one previously discovered read through its Composio Session."""
+    if not user_id or not org_id:
+        return {"error": "user_id and org_id are required"}
+    settings = get_settings()
+    key = api_key or os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+    base = (os.environ.get("HIVEMIND_CP_URL")
+            or os.environ.get("HIVEMIND_CONTROL_PLANE_URL")
+            or settings.hivemind_cp_url).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as client:
+            response = await client.post(f"{base}/internal/hyper/composio-read-exec",
+                headers={"Authorization": f"Bearer {key}", "X-API-Key": key}, json={
+                    "org_id": org_id, "user_id": user_id, "grant_id": grant_id,
+                    "tool_slug": tool_slug, "arguments": arguments or {},
+                })
+        payload = response.json() if response.content else {}
+        if response.status_code != 200:
+            return {"error": str(payload.get("error") or f"session read {response.status_code}")[:300],
+                    "status": response.status_code}
+        return payload if isinstance(payload, dict) else {"error": "invalid session execution"}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
 
 
 async def connector_exec_emulated(

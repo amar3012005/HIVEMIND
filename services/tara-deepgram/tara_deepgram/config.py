@@ -31,7 +31,8 @@ DEEPGRAM_AGENT_URL = os.getenv(
 DEEPGRAM_SPEAK_MODEL = os.getenv("DEEPGRAM_SPEAK_MODEL", "aura-2-thalia-en")
 DEEPGRAM_LISTEN_MODEL = os.getenv("DEEPGRAM_LISTEN_MODEL", "nova-3")
 
-# ── Speak provider: "deepgram" (Aura-2, default) | "cartesia" (Sonic, BYO key).
+# ── Speak provider: "deepgram" (Aura-2, default) | "cartesia" (Sonic, BYO key)
+# | "fish_openrouter" (Fish Audio S2.1 Pro through OpenRouter + AI Gateway).
 # Cartesia rides the SAME Deepgram agent as a BYO speak endpoint (tts/bytes) —
 # STT/turn-taking/barge-in unchanged; also drops the agent to the BYO-TTS tier.
 SPEAK_PROVIDER = os.getenv("TARA_DG_SPEAK_PROVIDER", "deepgram").lower()
@@ -95,6 +96,14 @@ TELNYX_ALLOWED_NUMBERS = ALLOWED_NUMBERS  # alias
 VOICE_STRATEGY = os.getenv("TARA_DG_STRATEGY", "router")  # "router" | "legacy"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+# Fish is deliberately a TTS-only Operating Room candidate.  It uses the same
+# OpenRouter credential and Cloudflare AI Gateway route as the existing turn
+# strategist; STT, turn-taking, and phone/browser voice continue on Deepgram.
+FISH_OPENROUTER_MODEL = os.getenv("TARA_DG_FISH_OPENROUTER_MODEL", "fish-audio/s2.1-pro")
+FISH_OPENROUTER_TTS_URL = os.getenv(
+    "TARA_DG_FISH_OPENROUTER_TTS_URL", f"{OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
+)
+FISH_FALLBACK_TO_DEEPGRAM = os.getenv("TARA_DG_FISH_FALLBACK_TO_DEEPGRAM", "true").lower() == "true"
 # Strategist model. The whole deepgram path runs on Cerebras gpt-oss-120b —
 # same model as the direct answer and spoken recall, so one engine reasons about
 # the call and one engine talks. The router previously ran gemini-2.5-flash-lite,

@@ -1,4 +1,5 @@
 export const CANONICAL_PUBLIC_FRONTEND = 'https://next.singulancelabs.com';
+export const DEVELOPMENT_PUBLIC_FRONTEND = 'https://dev.next.singulancelabs.com';
 
 const LEGACY_FRONTEND_HOSTS = new Set(['hivemind.davinciai.eu']);
 
@@ -15,7 +16,21 @@ export function resolvePublicFrontendBaseUrl(value = process.env.HIVEMIND_FRONTE
 }
 
 export function resolveInvitationBaseUrl(env = process.env) {
-  return resolvePublicFrontendBaseUrl(env.HIVEMIND_INVITATION_BASE_URL || env.HIVEMIND_FRONTEND_URL);
+  // The invitation token exists only in the database of the Control Plane that
+  // issued it. A known issuing server is authoritative even if a generic or
+  // stale frontend override was copied from another environment.
+  try {
+    const controlPlane = new URL(String(env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || '').trim());
+    const hostname = controlPlane.hostname.toLowerCase();
+    if (hostname === 'api.dev.next.singulancelabs.com') return DEVELOPMENT_PUBLIC_FRONTEND;
+    if (hostname === 'api.singulancelabs.com') return CANONICAL_PUBLIC_FRONTEND;
+  } catch {
+    // Missing/invalid issuer URL falls through to the configured frontend.
+  }
+  if (String(env.HIVEMIND_INVITATION_BASE_URL || '').trim()) {
+    return resolvePublicFrontendBaseUrl(env.HIVEMIND_INVITATION_BASE_URL);
+  }
+  return resolvePublicFrontendBaseUrl(env.HIVEMIND_FRONTEND_URL);
 }
 
 export function resolvePublicAppUrl(env = process.env) {

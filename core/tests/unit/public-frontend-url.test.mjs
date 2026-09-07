@@ -25,3 +25,24 @@ test('valid preview and self-hosted overrides remain available', () => {
   assert.equal(resolveInvitationBaseUrl({ HIVEMIND_INVITATION_BASE_URL: 'https://next.preview.singulancelabs.com/' }), 'https://next.preview.singulancelabs.com');
   assert.equal(resolvePublicFrontendBaseUrl('http://localhost:3000/hivemind'), 'http://localhost:3000');
 });
+
+test('invitation links stay in the environment of the issuing control plane', () => {
+  assert.equal(resolveInvitationBaseUrl({
+    HIVEMIND_CONTROL_PLANE_PUBLIC_URL: 'https://api.dev.next.singulancelabs.com',
+  }), 'https://dev.next.singulancelabs.com');
+  assert.equal(resolveInvitationBaseUrl({
+    HIVEMIND_CONTROL_PLANE_PUBLIC_URL: 'https://api.singulancelabs.com',
+  }), CANONICAL_PUBLIC_FRONTEND);
+});
+
+test('issuing control plane prevents copied frontend overrides from crossing environments', () => {
+  assert.equal(resolveInvitationBaseUrl({
+    HIVEMIND_CONTROL_PLANE_PUBLIC_URL: 'https://api.dev.next.singulancelabs.com',
+    HIVEMIND_FRONTEND_URL: CANONICAL_PUBLIC_FRONTEND,
+    HIVEMIND_INVITATION_BASE_URL: CANONICAL_PUBLIC_FRONTEND,
+  }), 'https://dev.next.singulancelabs.com');
+  assert.equal(resolveInvitationBaseUrl({
+    HIVEMIND_CONTROL_PLANE_PUBLIC_URL: 'https://api.singulancelabs.com',
+    HIVEMIND_INVITATION_BASE_URL: 'https://dev.next.singulancelabs.com',
+  }), CANONICAL_PUBLIC_FRONTEND);
+});

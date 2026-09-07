@@ -11,6 +11,7 @@ RUN npm init -y >/dev/null 2>&1 \
     && npx "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" install-browser chrome-for-testing
 COPY server.mjs /app/server.mjs
 COPY external-mcp-gateway.mjs /app/external-mcp-gateway.mjs
+COPY playwright-meta-toolkit.mjs /app/playwright-meta-toolkit.mjs
 RUN mkdir -p /app/sessions
 EXPOSE 8931 8932
 # The stock MCP child binds only to loopback. Authenticated external MCP and

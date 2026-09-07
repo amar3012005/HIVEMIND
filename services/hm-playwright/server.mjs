@@ -15,6 +15,9 @@ const PORT = Number(process.env.PLAYWRIGHT_CRAWL_PORT || 8932);
 const TOKEN = String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '');
 const EXTERNAL_MCP_ENABLED = String(process.env.PLAYWRIGHT_EXTERNAL_MCP_ENABLED || '').toLowerCase() === 'true';
 const EXTERNAL_MCP_TOKEN = String(process.env.PLAYWRIGHT_EXTERNAL_MCP_TOKEN || '');
+const EXTERNAL_MCP_META_MODE = String(process.env.PLAYWRIGHT_EXTERNAL_MCP_META_MODE || 'read').toLowerCase() === 'interactive'
+  ? 'interactive'
+  : 'read';
 const MAX_BODY_BYTES = 64 * 1024;
 // A verified Day-2 Brand DNA report carries a bounded five-image evidence
 // mosaic as data URIs. 180 KiB rejects that legitimate artifact before the
@@ -268,6 +271,7 @@ const mcp = spawn('npx', [
 const externalMcpGateway = createExternalMcpGateway({
   enabled: EXTERNAL_MCP_ENABLED,
   token: EXTERNAL_MCP_TOKEN,
+  metaMode: EXTERNAL_MCP_META_MODE,
   maxConnections: Math.max(1, Number(process.env.PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS || 12)),
 });
 

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
+import { planMetaMcpRequest, renderCapabilitySearchResponse } from './playwright-meta-toolkit.mjs';
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_MAX_CONNECTIONS = 12;
@@ -51,10 +52,16 @@ function upstreamHeaders(headers, bodyLength, upstreamHost) {
   return result;
 }
 
+function parseUpstreamRpc(body) {
+  const text = body.toString('utf8');
+  const data = text.split(/\r?\n/).find((line) => line.startsWith('data:'));
+  return JSON.parse(data ? data.slice(5).trim() : text);
+}
+
 export function isExternalMcpPath(value) {
   try {
     const pathname = new URL(value, 'http://localhost').pathname;
-    return pathname === '/mcp' || pathname.startsWith('/mcp/');
+    return pathname === '/mcp' || pathname.startsWith('/mcp/') || pathname === '/meta/mcp';
   } catch {
     return false;
   }
@@ -67,6 +74,7 @@ export function createExternalMcpGateway({
   upstreamPort = 8931,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   maxConnections = DEFAULT_MAX_CONNECTIONS,
+  metaMode = 'read',
   logger = (event) => console.log(JSON.stringify(event)),
 } = {}) {
   let active = 0;
@@ -89,14 +97,57 @@ export function createExternalMcpGateway({
     logger({ event: 'playwright.mcp.started', request_id: requestId, client });
     try {
       const body = await readBoundedBody(req, maxBodyBytes);
+      const metaRequest = new URL(req.url, 'http://localhost').pathname === '/meta/mcp';
+      let upstreamBody = body;
+      let capabilitySearch = null;
+      if (metaRequest && body.length) {
+        try {
+          const request = JSON.parse(body.toString('utf8'));
+          const plan = planMetaMcpRequest(request, { mode: metaMode });
+          if (plan.local) {
+            send(res, 200, plan.local);
+            logger({ event: 'playwright.mcp.completed', request_id: requestId, client, duration_ms: Date.now() - startedAt });
+            return;
+          }
+          capabilitySearch = plan.capabilitySearch || null;
+          upstreamBody = Buffer.from(JSON.stringify(capabilitySearch?.request || plan.upstream));
+        } catch (error) {
+          send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'invalid_json' } });
+          return;
+        }
+      }
       await new Promise((resolve) => {
         const upstream = http.request({
           host: upstreamHost,
           port: upstreamPort,
           method: req.method,
-          path: req.url,
-          headers: upstreamHeaders(req.headers, body.length, upstreamHost),
+          path: metaRequest ? '/mcp' : req.url,
+          headers: upstreamHeaders(req.headers, upstreamBody.length, upstreamHost),
         }, (upstreamResponse) => {
+          if (capabilitySearch) {
+            const chunks = [];
+            upstreamResponse.on('data', (chunk) => chunks.push(chunk));
+            upstreamResponse.once('end', () => {
+              try {
+                const upstreamRpc = parseUpstreamRpc(Buffer.concat(chunks));
+                send(res, 200, renderCapabilitySearchResponse(
+                  capabilitySearch.request.id,
+                  upstreamRpc,
+                  capabilitySearch,
+                  { mode: metaMode },
+                ));
+              } catch {
+                send(res, 502, { error: 'mcp_upstream_invalid_response' });
+              }
+              resolve();
+            });
+            upstreamResponse.once('error', () => {
+              if (!res.headersSent) send(res, 502, { error: 'mcp_upstream_failed' });
+              else res.destroy();
+              resolve();
+            });
+            return;
+          }
           res.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
           upstreamResponse.pipe(res);
           upstreamResponse.once('end', resolve);
@@ -112,7 +163,7 @@ export function createExternalMcpGateway({
           else res.destroy();
           resolve();
         });
-        if (body.length) upstream.write(body);
+        if (upstreamBody.length) upstream.write(upstreamBody);
         upstream.end();
       });
       logger({ event: 'playwright.mcp.completed', request_id: requestId, client, duration_ms: Date.now() - startedAt });

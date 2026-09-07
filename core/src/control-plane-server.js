@@ -9238,7 +9238,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, {
         accepted: true,
         turn,
-        addressed_to_hivemind: persisted.addressed,
+        addressed_to_hivemind: persistedWake.addressed,
         query: persistedWake.query,
         context: wake.addressed ? compactRoomContext({ room, roster, transcript, speaker: verified }) : undefined,
       });
@@ -9257,7 +9257,9 @@ const server = http.createServer(async (req, res) => {
           const liveState = liveRoom.roomPlaybook && typeof liveRoom.roomPlaybook === 'object' ? liveRoom.roomPlaybook : {};
           const addressedTurn = await prisma.operatingRoomEvent.findFirst({where:{id:turnId,roomId:room.id,orgId:room.orgId,speakerUserId:current.session.userId}});
           if (!addressedTurn) throw Object.assign(new Error('Transcript turn does not belong to this speaker'),{code:'operating_room_turn_not_found',status:404});
-          if (!addressedTurn.addressed) throw Object.assign(new Error('This turn did not address HIVEMIND'),{code:'operating_room_turn_not_addressed',status:409});
+          // Legacy turns may have addressed=false from the retired wake-word
+          // gate. Verified, non-empty human speech is now eligible as well.
+          if (!wakeIntent(addressedTurn.text).addressed) throw Object.assign(new Error('Transcript turn is empty'),{code:'transcript_text_required',status:400});
           const lease = await claimRoomResponse(prisma,liveRoom,turnId);
           if (!lease) throw Object.assign(new Error('HIVEMIND is answering another participant'),{code:'operating_room_busy',status:409});
           try {

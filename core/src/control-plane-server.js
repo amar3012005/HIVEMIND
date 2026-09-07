@@ -23,6 +23,7 @@ import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { createZitadelEmailIdentity } from './control-plane/zitadel-email-identity.js';
 import { createEmailIdentityService, EMAIL_AUTH_PUBLIC_RESPONSE, normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from './auth/email-identity-service.js';
+import { cleanIdentityName, isGenericDisplayName, providerDisplayNameForExisting } from './identity/canonical-profile.js';
 import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/email-turnstile.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
@@ -2498,7 +2499,8 @@ async function upsertUserFromZitadel(userInfo) {
     const wasScimSeed = typeof existing.zitadelUserId === 'string' && existing.zitadelUserId.startsWith('scim:');
     const updated = await prisma.$transaction(async (tx) => {
       const user = await tx.user.update({ where: { id: existing.id }, data: {
-        email: normalizedEmail || existing.email, displayName: userInfo.name || existing.displayName,
+        email: normalizedEmail || existing.email,
+        displayName: providerDisplayNameForExisting(existing.displayName, userInfo.name),
         avatarUrl: userInfo.picture || existing.avatarUrl, locale: userInfo.locale || existing.locale, lastActiveAt: new Date(),
       } });
       await tx.userIdentity.upsert({
@@ -5685,6 +5687,21 @@ const server = http.createServer(async (req, res) => {
     if (!body.name) {
       return jsonResponse(res, { error: 'name is required' }, 400);
     }
+    const submittedUserName = cleanIdentityName(body.user_name || body.userName);
+    const submittedBrainName = cleanIdentityName(body.hivemind_name || body.hivemindName);
+    const currentUserIdentity = await prisma.user.findUnique({
+      where: { id: current.session.userId },
+      select: { displayName: true },
+    });
+    // Older trusted clients created workspaces with only `name`. Preserve that
+    // compatibility while making the current account-creation contract explicit.
+    const canonicalUserName = !isGenericDisplayName(submittedUserName)
+      ? submittedUserName
+      : providerDisplayNameForExisting(currentUserIdentity?.displayName, null);
+    const canonicalBrainName = submittedBrainName || cleanIdentityName(body.name);
+    if (!canonicalUserName || isGenericDisplayName(canonicalUserName)) {
+      return jsonResponse(res, { error: 'user_name is required' }, 400);
+    }
     // Plans are commercial state. A browser cannot self-assign a paid plan;
     // referrals and Stripe webhooks create time-bound entitlements server-side.
     // EXCEPTION: a valid enterprise ACCESS CODE unlocks the standard 14-day
@@ -5820,6 +5837,29 @@ const server = http.createServer(async (req, res) => {
             roles: ['org_owner'],
             joinedAt: new Date(),
           },
+        });
+        // The values explicitly confirmed on the account-creation form are the
+        // identity authority. OAuth claims may prefill that form, but cannot
+        // overwrite these durable values on a later login.
+        await tx.user.update({
+          where: { id: current.session.userId },
+          data: { displayName: canonicalUserName },
+        });
+        await tx.userProfile.upsert({
+          where: { userId_orgId_key: { userId: current.session.userId, orgId: newOrg.id, key: 'name' } },
+          update: {
+            value: canonicalUserName, category: 'static', confidence: 1,
+            confirmedCount: { increment: 1 }, lastConfirmedAt: new Date(), deletedAt: null,
+          },
+          create: {
+            userId: current.session.userId, orgId: newOrg.id, key: 'name',
+            value: canonicalUserName, category: 'static', confidence: 1,
+          },
+        });
+        await tx.organizationProfile.upsert({
+          where: { orgId_key: { orgId: newOrg.id, key: 'hivemind.name' } },
+          update: { value: canonicalBrainName, category: 'identity', version: { increment: 1 }, updatedByUserId: current.session.userId, deletedAt: null },
+          create: { orgId: newOrg.id, key: 'hivemind.name', value: canonicalBrainName, category: 'identity', updatedByUserId: current.session.userId },
         });
         // Enterprise access code → seed the standard 14-day onboarding → runway
         // entitlement atomically with org creation. activateOffer writes the

@@ -1461,12 +1461,28 @@ const TOOL_HANDLERS = {
     if (!ctx.prisma) return { facts: [], context: '', error: 'profile_store_unavailable' };
     try {
       const { getSharedProfileStore } = await import('../memory/profile-store.js');
+      const { canonicalProfileFacts } = await import('../identity/canonical-profile.js');
       const store = getSharedProfileStore(ctx.prisma);
-      const [facts, context] = await Promise.all([
+      const [storedFacts, identity, workspaceIdentity, organization] = await Promise.all([
         store.getProfile(ctx.userId, ctx.orgId, ctx.projectId || null),
-        store.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null),
+        ctx.prisma.user.findUnique({ where: { id: ctx.userId }, select: { displayName: true } }),
+        ctx.orgId ? ctx.prisma.organizationProfile.findUnique({
+          where: { orgId_key: { orgId: ctx.orgId, key: 'hivemind.name' } },
+          select: { value: true, deletedAt: true },
+        }) : null,
+        ctx.orgId ? ctx.prisma.organization.findUnique({
+          where: { id: ctx.orgId }, select: { name: true },
+        }) : null,
       ]);
-      return { facts: facts || [], context: context || '', fact_count: (facts || []).length };
+      const facts = canonicalProfileFacts({
+        facts: storedFacts,
+        userName: identity?.displayName,
+        brainName: workspaceIdentity?.deletedAt ? organization?.name : (workspaceIdentity?.value || organization?.name),
+      });
+      const context = facts.length
+        ? `Authenticated user profile (authoritative):\n${facts.map((fact) => `- ${fact.key}: ${fact.value}`).join('\n')}`
+        : '';
+      return { facts, context, fact_count: facts.length };
     } catch (err) {
       return { facts: [], context: '', error: `profile_read_failed: ${err.message}` };
     }

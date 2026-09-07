@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
 import test from 'node:test';
 
@@ -66,4 +67,14 @@ test('external MCP gateway is fail-closed unless explicitly enabled', async (t) 
     headers: { authorization: 'Bearer secret' },
   });
   assert.equal(response.status, 404);
+});
+
+test('production Compose exposes only the Playwright gateway on host loopback', () => {
+  const compose = fs.readFileSync(new URL('../../infra/docker-compose.hetzner.yml', import.meta.url), 'utf8');
+  const playwright = compose.match(/\n  playwright:\n([\s\S]*?)(?=\n  [a-z][a-z0-9-]+:|\nvolumes:)/)?.[1] || '';
+  const withoutPlaywright = compose.replace(`\n  playwright:\n${playwright}`, '');
+  assert.match(playwright, /127\.0\.0\.1:8932:8932/);
+  assert.match(playwright, /PLAYWRIGHT_EXTERNAL_MCP_ENABLED/);
+  assert.doesNotMatch(withoutPlaywright, /127\.0\.0\.1:8932:8932/);
+  assert.doesNotMatch(withoutPlaywright, /PLAYWRIGHT_EXTERNAL_MCP_ENABLED/);
 });

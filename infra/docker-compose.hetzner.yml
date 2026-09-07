@@ -84,8 +84,6 @@ services:
       # supplies it today, but Core must retain this dependency if env loading
       # is narrowed in a later production compose change.
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
-      PLAYWRIGHT_EXTERNAL_MCP_ENABLED: ${PLAYWRIGHT_EXTERNAL_MCP_ENABLED:-false}
-      PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS: ${PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS:-12}
       ENABLE_TOOLS_HITL: ${ENABLE_TOOLS_HITL:-false}
       ENABLE_TOOLS_HITL_FLAG_URL: ${ENABLE_TOOLS_HITL_FLAG_URL:-https://admin.hivemind.singulancelabs.com/__hivemind/feature-flags/enable-tools-hitl}
       USE_TOOLS_DURABLE_AGENT: ${USE_TOOLS_DURABLE_AGENT:-false}
@@ -194,11 +192,6 @@ services:
     mem_limit: 2g
     memswap_limit: 3g
     cpus: 1.5
-    ports:
-      # Optional external MCP ingress terminates through Cloudflare Access and
-      # Tunnel, then reaches only this host-loopback binding. Never publish it
-      # on 0.0.0.0 or expose the unauthenticated MCP child on port 8931.
-      - "127.0.0.1:8932:8932"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hivemind_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -458,8 +451,15 @@ services:
     mem_limit: 2560m
     memswap_limit: 3328m
     cpus: 1.5
+    ports:
+      # Optional external MCP ingress terminates through Cloudflare Access and
+      # Tunnel, then reaches only this host-loopback binding. Never publish it
+      # on 0.0.0.0 or expose the unauthenticated MCP child on port 8931.
+      - "127.0.0.1:8932:8932"
     environment:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+      PLAYWRIGHT_EXTERNAL_MCP_ENABLED: ${PLAYWRIGHT_EXTERNAL_MCP_ENABLED:-false}
+      PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS: ${PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS:-12}
       PLAYWRIGHT_SESSIONS_DIR: /app/sessions
       PLAYWRIGHT_CRAWL_CONCURRENCY: "4"
       TARA_DG_API_KEY: ${TARA_DG_API_KEY:?TARA_DG_API_KEY is required}

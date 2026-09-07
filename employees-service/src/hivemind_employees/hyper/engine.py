@@ -1544,6 +1544,7 @@ class Director:
         self.debate_max_rounds = max(1, min(3, debate_max_rounds))
         # per-turn state (NOT module globals)
         self.blackboard: List[str] = []
+        self._source_receipts: List[Dict[str, Any]] = []
         self._connector_evidence: List[Dict[str, Any]] = []
         self._retained_prospect_rows: List[Dict[str, Any]] = []
         self.transcript: List[Dict[str, Any]] = []
@@ -1635,7 +1636,16 @@ class Director:
         it is not an evidence transport. The final model re-derives its answer
         from the same authoritative inputs instead of copying worker claims.
         """
-        sources = "\n".join(self._source_evidence_snapshot())[:source_limit]
+        evidence_items = self._source_evidence_snapshot()
+        # One verbose crawler result must not crowd regulator guidance, mailbox
+        # receipts, or independent search evidence out of the final context.
+        # Fair-share every observed lane, then use any remaining budget in order.
+        if evidence_items:
+            fair_share = max(400, min(1800, source_limit // len(evidence_items)))
+            selected = [item[:fair_share] for item in evidence_items]
+            sources = "\n".join(selected)[:source_limit]
+        else:
+            sources = ""
         methods = "\n".join(
             str(item) for item in self.blackboard if str(item).startswith("SKILL[")
         )[:4000]
@@ -2525,6 +2535,7 @@ class Director:
             {"title": str(x.get("title") or "")[:120], "url": str(x.get("url") or "")}
             for x in results[:5] if x.get("url")
         ]
+        self._source_receipts.extend({**source, "kind": "web_search"} for source in sources)
         parts: List[str] = []
         for x in results[:(8 if prospect else 5)]:
             snip = str(x.get("snippet") or x.get("content") or x.get("raw_content") or "")[:500]
@@ -2554,7 +2565,7 @@ class Director:
     async def _url_extract(self, urls: List[str], page_limit: int = 12) -> str:
         """Read known public URLs with rendered Playwright evidence and receipts."""
         targets = list(dict.fromkeys(
-            str(value or "").strip().rstrip(".,;") for value in (urls or [])
+            str(value or "").strip().rstrip(".,;…") for value in (urls or [])
             if str(value or "").strip().startswith(("http://", "https://"))
         ))[:3]
         if not targets:
@@ -2578,6 +2589,7 @@ class Director:
                 "content": content[:5000], "rendered": bool(row.get("rendered")),
                 "status": row.get("status"),
             })
+        self._source_receipts.extend({**receipt, "kind": "rendered_page"} for receipt in receipts)
         if not board_pages:
             return json.dumps({"error": "URL extraction returned no readable pages",
                                "job_id": result.get("job_id"), "is_error": True})
@@ -5250,7 +5262,7 @@ class Director:
                 f"{legal_query[:700]} authoritative GDPR guidance "
                 "site:edpb.europa.eu OR site:commission.europa.eu"
             )[:900]
-            context_urls = [value.rstrip(".,;") for value in re.findall(
+            context_urls = [value.rstrip(".,;…") for value in re.findall(
                 r"https?://[^\s<>\]\[\)\(\"']+", f"{self.user_message}\n{self.company_brief}", re.I,
             )]
             # Prefer the verified company website, then explicitly supplied public
@@ -5268,9 +5280,9 @@ class Director:
             requested_channels = (self.user_message or "").casefold()
             connector_calls = list(amended.get("connector_calls") or [])
             if (re.search(r"\b(?:gmail|e-?mail|emails)\b", requested_channels)
-                    and "gmail_search" in self._connector_routes
-                    and not any(call.get("name") == "gmail_search" for call in connector_calls
-                                if isinstance(call, dict))):
+                    and "gmail_search" in self._connector_routes):
+                connector_calls = [call for call in connector_calls
+                                   if not (isinstance(call, dict) and call.get("name") == "gmail_search")]
                 connector_calls.append({
                     "name": "gmail_search",
                     "args": {"query": "in:sent (GDPR OR privacy OR compliance OR data)", "max": 20},
@@ -7801,6 +7813,7 @@ class Director:
             "tok_by": dict(self.tok_by),
             "io": dict(self.io),
             "gather_facts": self._source_evidence_snapshot(),
+            "source_receipts": list(self._source_receipts),
             "sim_report": None,
             "evo_playbooks": self.evo_playbooks,
             "skills_used": list(self.skills_used),
@@ -8263,6 +8276,7 @@ class Director:
             # verifier may ground claims only in retained inputs or actual tool
             # observations from this source-only snapshot.
             "gather_facts": self._source_evidence_snapshot(),
+            "source_receipts": list(self._source_receipts),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
             "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)

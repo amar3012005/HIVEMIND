@@ -4599,6 +4599,12 @@ async def _orchestrate_single_agent(
                        f"{', '.join(_work_room_profile.get('required_artifacts') or [])} — a report alone cannot "
                        "satisfy it. The prepared work and exact gaps are shown; nothing was silently accepted.",
         })
+        if _gv and not _gv.get("grounded_ok"):
+            # Preserve the rejected candidate in the work-room checkpoint for
+            # audit, but never render unsupported legal/numeric claims as the
+            # user-facing final report merely because this is an operational
+            # profile. The receipt list below still shows what was actually read.
+            final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
     elif (req.room_mode or "").strip().lower() == "work" and final_text.strip() and (
         not _gv or (
             _gv.get("grounded_ok") is True
@@ -4674,6 +4680,8 @@ async def _orchestrate_single_agent(
         status=status,
         lead=lead,
         action_items=action_items,
+        sources=result.get("source_receipts") or [],
+        web_intel_used=bool(result.get("source_receipts")),
     ))
 
     # Persist compact episodic continuity for every run after the final report exists.

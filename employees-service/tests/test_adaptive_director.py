@@ -1121,7 +1121,9 @@ def test_legal_review_floor_requires_rendered_public_sources_mailbox_and_review(
         "gmail_search": ("google", "gmail", "gmail_search"),
     }
     plan = director._apply_research_floor({
-        "turn_mode": "task", "web_query": "generic GDPR blog advice", "connector_calls": [],
+        "turn_mode": "task", "web_query": "generic GDPR blog advice", "connector_calls": [{
+            "name": "gmail_search", "args": {"query": "generic outreach search", "max": 5},
+        }],
         "seo_audit_url": None, "needs_debate": False,
         "response_depth": "focused", "collaboration_intensity": "standard",
     })
@@ -1144,6 +1146,21 @@ def test_legal_review_floor_requires_rendered_public_sources_mailbox_and_review(
     assert len(plan["research_acceptance_criteria"]) == 4
     assert any("regulator" in criterion for criterion in plan["research_acceptance_criteria"])
     assert any("invented" in criterion for criterion in plan["research_acceptance_criteria"])
+
+
+def test_synthesis_context_fairly_keeps_distinct_evidence_lanes():
+    director, _events = _director(message="Audit our claims")
+    director.blackboard = [
+        "PUBLIC_URL_EVIDENCE[rendered]: " + ("website " * 2000),
+        "WEB[regulator]: EDPB authoritative guidance",
+        "CONNECTOR[gmail]: exact sent-mail evidence",
+    ]
+
+    context = director._synthesis_context(1800)
+
+    assert "PUBLIC_URL_EVIDENCE" in context
+    assert "EDPB authoritative guidance" in context
+    assert "exact sent-mail evidence" in context
 
 
 def test_rendered_url_extract_persists_source_receipt_on_the_board(monkeypatch):

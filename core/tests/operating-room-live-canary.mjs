@@ -30,9 +30,10 @@ try{
  room=(await call(0,'/v1/operating-rooms',{name:'Disposable five-person voice canary',goal:'Agree a launch date and budget without inventing facts'})).room;
  for(let i=0;i<5;i++)await call(i,`/v1/operating-rooms/${room.id}/join`,{});
  await call(0,`/v1/operating-rooms/${room.id}/agenda`,{agenda:['Confirm budget','Choose launch date']});
- const speech=['I propose Monday for launch.','The confirmed budget is 700 euros.','I can prepare the launch checklist.','The date is still a proposal, not approved.','HIVEMIND, what budget did Canary 2 confirm and what is still undecided?'];
+ const speech=['I propose Monday for launch.','The confirmed budget is 700 euros.','I can prepare the launch checklist.','The date is still a proposal, not approved.','What budget did Canary 2 confirm and what is still undecided?'];
  const turns=await Promise.all(speech.map((text,i)=>call(i,`/v1/operating-rooms/${room.id}/transcript`,{text,event_id:`canary-${i}`,speaker_user_id:users[0],speaker_name:'Spoofed'})));
  for(let i=0;i<5;i++)assert.equal(turns[i].turn.speaker_user_id,users[i]);
+ assert.ok(turns.every(turn=>turn.addressed_to_hivemind), 'Every verified human turn is eligible without a wake word');
  const retry=await call(4,`/v1/operating-rooms/${room.id}/transcript`,{text:speech[4],event_id:'canary-4'});
  assert.equal(retry.turn.id,turns[4].turn.id);
  assert.equal(await prisma.operatingRoomEvent.count({where:{roomId:room.id,orgId}}),5);

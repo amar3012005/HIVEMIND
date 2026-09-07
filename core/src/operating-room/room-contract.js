@@ -1,17 +1,12 @@
-const WAKE_PHRASE = /(?:^|[\s,.:;!?])(hive[\s-]*mind|tara)(?=[\s,.:;!?]|$)/i;
-
 export function normalizeRoomText(value, max = 4000) {
   return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, max);
 }
 
 export function wakeIntent(text) {
   const clean = normalizeRoomText(text);
-  const match = clean.match(WAKE_PHRASE);
-  if (!match) return { addressed: false, query: '' };
-  return {
-    addressed: true,
-    query: clean.slice((match.index || 0) + match[0].length).replace(/^[\s,.:;!?-]+/, '') || clean,
-  };
+  // Retain the wire contract for existing room clients, but no wake word is
+  // required. Preserve the full utterance, including mentions in its middle.
+  return { addressed: Boolean(clean), query: clean };
 }
 
 export function compactRoomContext({ room, roster = [], transcript = [], speaker }) {

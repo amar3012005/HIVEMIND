@@ -60,9 +60,11 @@ test('one hour of five-person speech is compacted in bounded batches without ski
   assert.equal(queries[2].where.OR[1].id.gt,'0063');
 });
 
-test('wake phrase is deterministic and strips the address', () => {
-  assert.deepEqual(wakeIntent('HIVEMIND, what do you think?'), { addressed: true, query: 'what do you think?' });
-  assert.equal(wakeIntent('I think the plan is ready').addressed, false);
+test('room speech needs no wake word and preserves the complete utterance', () => {
+  for (const query of ['What do you think?', 'I think the plan is ready', 'HIVEMIND, what do you think?', 'Compare our plan with HIVEMIND and explain the difference', 'Was bleibt noch offen?']) {
+    assert.deepEqual(wakeIntent(query), { addressed: true, query });
+  }
+  assert.deepEqual(wakeIntent(' \u0000 '), { addressed: false, query: '' });
 });
 
 test('room context stays bounded and removes control bytes', () => {

@@ -9420,6 +9420,17 @@ const server = http.createServer(async (req, res) => {
           // Legacy turns may have addressed=false from the retired wake-word
           // gate. Verified, non-empty human speech is now eligible as well.
           if (!wakeIntent(addressedTurn.text).addressed) throw Object.assign(new Error('Transcript turn is empty'),{code:'transcript_text_required',status:400});
+          // Browser/STT final fragments can arrive after this request starts.
+          // Only the speaker's latest eligible thought may consume synthesis or
+          // audio capacity; older fragments are durable transcript evidence but
+          // must never drain later as a queue of stale TARA questions.
+          const latestSpeakerTurn = await prisma.operatingRoomEvent.findFirst({
+            where:{roomId:room.id,orgId:room.orgId,speakerUserId:current.session.userId,addressed:true},
+            orderBy:[{createdAt:'desc'},{id:'desc'}],
+          });
+          if (latestSpeakerTurn?.id !== addressedTurn.id) {
+            throw Object.assign(new Error('A newer participant utterance superseded this turn'),{code:'operating_room_turn_superseded',status:409});
+          }
           const lease = await claimRoomResponse(prisma,liveRoom,turnId);
           if (!lease) throw Object.assign(new Error('HIVEMIND is answering another participant'),{code:'operating_room_busy',status:409});
           try {
@@ -9473,6 +9484,15 @@ const server = http.createServer(async (req, res) => {
           }).catch(error=>({sources:[],recall_error:error.message}));
           const answer = await synthesizeRoomResponse({context,query,knowledge:chat,traceId:turnId});
           if (!answer) throw Object.assign(new Error('HIVEMIND returned an empty room response'), { code: 'operating_room_empty_response', status: 502 });
+          // Do the same check immediately before audio. A new human utterance
+          // may have arrived while recall/synthesis was running.
+          const newestBeforeSpeech = await prisma.operatingRoomEvent.findFirst({
+            where:{roomId:room.id,orgId:room.orgId,speakerUserId:addressedTurn.speakerUserId,addressed:true},
+            orderBy:[{createdAt:'desc'},{id:'desc'}],
+          });
+          if (newestBeforeSpeech?.id !== addressedTurn.id) {
+            throw Object.assign(new Error('A newer participant utterance superseded this response'),{code:'operating_room_turn_superseded',status:409});
+          }
           const receipt = {
             turn_id: turnId,
             addressed_user_id: addressedTurn.speakerUserId,

@@ -11,6 +11,7 @@ import asyncio
 import json as _json_mod
 import logging
 import os
+import time
 
 import httpx
 import re
@@ -51,6 +52,25 @@ class RoomSpeakRequest(BaseModel):
     voice_id: str | None = None
 
 
+async def _room_deepgram_speech(client: httpx.AsyncClient, *, text: str, voice_id: str | None):
+    from .ai_gateway import request as gateway_request
+    return await gateway_request(
+        client, "POST", f"https://api.deepgram.com/v1/speak?model={voice_id or config.DEEPGRAM_SPEAK_MODEL}",
+        headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}", "Content-Type": "application/json"},
+        json={"text": text},
+    )
+
+
+async def _room_fish_speech(client: httpx.AsyncClient, *, text: str):
+    """Use OpenRouter's raw-audio endpoint; AI Gateway routes it as /openrouter/audio/speech."""
+    from .ai_gateway import request as gateway_request
+    return await gateway_request(
+        client, "POST", config.FISH_OPENROUTER_TTS_URL,
+        headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+        json={"model": config.FISH_OPENROUTER_MODEL, "input": text, "response_format": "mp3"},
+    )
+
+
 @app.post("/room-speak")
 async def room_speak(body: RoomSpeakRequest, request: Request):
     """Authenticated, bounded TARA speech for the internal Operating Room bridge."""
@@ -60,10 +80,22 @@ async def room_speak(body: RoomSpeakRequest, request: Request):
     text = body.text.strip()[:4000]
     if not text:
         return JSONResponse({"error": "text_required"}, status_code=400)
+    requested_provider = config.SPEAK_PROVIDER
+    provider = requested_provider
+    fallback_from = None
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             from .ai_gateway import request as gateway_request
-            if config.SPEAK_PROVIDER == "cartesia" and config.CARTESIA_API_KEY:
+            if requested_provider == "fish_openrouter" and config.OPENROUTER_API_KEY:
+                response = await _room_fish_speech(client, text=text)
+                # A failed candidate must never make a live room go silent. Do
+                # one immediate Deepgram attempt rather than retrying Fish.
+                if response.status_code != 200 and config.FISH_FALLBACK_TO_DEEPGRAM and config.DEEPGRAM_API_KEY:
+                    fallback_from = "fish_openrouter"
+                    provider = "deepgram"
+                    response = await _room_deepgram_speech(client, text=text, voice_id=body.voice_id)
+            elif requested_provider == "cartesia" and config.CARTESIA_API_KEY:
                 response = await gateway_request(
                     client, "POST", config.CARTESIA_TTS_URL,
                     headers={"Authorization": f"Bearer {config.CARTESIA_API_KEY}", "Cartesia-Version": "2025-04-16", "Content-Type": "application/json"},
@@ -73,16 +105,26 @@ async def room_speak(body: RoomSpeakRequest, request: Request):
                           "output_format": {"container": "mp3", "sample_rate": 44100, "bit_rate": 64000}},
                 )
             elif config.DEEPGRAM_API_KEY:
-                response = await gateway_request(
-                    client, "POST", f"https://api.deepgram.com/v1/speak?model={body.voice_id or config.DEEPGRAM_SPEAK_MODEL}",
-                    headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}", "Content-Type": "application/json"},
-                    json={"text": text},
-                )
+                provider = "deepgram"
+                response = await _room_deepgram_speech(client, text=text, voice_id=body.voice_id)
             else:
                 return JSONResponse({"error": "tts_unavailable"}, status_code=503)
         if response.status_code != 200:
+            log.warning("tara.room_tts.failed requested_provider=%s provider=%s status=%s latency_ms=%s", requested_provider, provider, response.status_code, round((time.monotonic() - started) * 1000))
             return JSONResponse({"error": "tts_failed"}, status_code=502)
-        return Response(content=response.content, media_type="audio/mpeg")
+        latency_ms = round((time.monotonic() - started) * 1000)
+        generation_id = str(response.headers.get("x-generation-id", "")).strip()[:128]
+        log.info("tara.room_tts.completed requested_provider=%s provider=%s fallback=%s latency_ms=%s generation_id=%s", requested_provider, provider, bool(fallback_from), latency_ms, generation_id or "-")
+        headers = {
+            "X-Tara-TTS-Requested-Provider": requested_provider,
+            "X-Tara-TTS-Provider": provider,
+            "X-Tara-TTS-Latency-Ms": str(latency_ms),
+        }
+        if fallback_from:
+            headers["X-Tara-TTS-Fallback-From"] = fallback_from
+        if generation_id:
+            headers["X-Tara-TTS-Generation-Id"] = generation_id
+        return Response(content=response.content, media_type="audio/mpeg", headers=headers)
     except Exception:  # noqa: BLE001
         log.exception("room speech failed")
         return JSONResponse({"error": "tts_failed"}, status_code=502)

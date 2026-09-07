@@ -109,7 +109,16 @@ async function startRoomBridge(input) {
       body: JSON.stringify({ text: String(text || '').slice(0, 4000) }), signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) throw new Error(`tara_room_speech_failed:${response.status}`);
-    return Buffer.from(await response.arrayBuffer()).toString('base64');
+    return {
+      audio: Buffer.from(await response.arrayBuffer()).toString('base64'),
+      telemetry: {
+        requested_provider: String(response.headers.get('x-tara-tts-requested-provider') || ''),
+        provider: String(response.headers.get('x-tara-tts-provider') || ''),
+        fallback_from: String(response.headers.get('x-tara-tts-fallback-from') || ''),
+        latency_ms: Number(response.headers.get('x-tara-tts-latency-ms') || 0) || null,
+        generation_id: String(response.headers.get('x-tara-tts-generation-id') || ''),
+      },
+    };
   });
   await page.goto(`http://127.0.0.1:${PORT}/internal/room-bridge`, { waitUntil: 'load' });
   await page.waitForFunction(() => typeof window.__startRoomBridge === 'function', null, { timeout: 10_000 });
@@ -132,11 +141,13 @@ let meeting; let audioContext; let destination; let queue = Promise.resolve(); c
 window.__RealtimeKitClient = RealtimeKitClient;
 window.__roomBridgeState = { status: 'loading' };
 async function speak(answer) {
-  const base64 = await window.hivemindRoomTts(answer);
+  const speech = await window.hivemindRoomTts(answer);
+  const base64 = speech.audio;
   const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
   const buffer = await audioContext.decodeAudioData(bytes.buffer);
   const source = audioContext.createBufferSource(); source.buffer = buffer; source.connect(destination); source.start();
   await new Promise(resolve => { source.onended = resolve; });
+  return speech.telemetry;
 }
 window.__speakRoomBridge = (answer, turnId = '') => {
   if (!turnId) throw new Error('turn_id_required');
@@ -144,10 +155,10 @@ window.__speakRoomBridge = (answer, turnId = '') => {
   const job = queue.catch(() => {}).then(async () => {
     window.__roomBridgeState.activity = 'speaking';
     await meeting.chat.sendTextMessage('HIVEMIND · ' + answer);
-    await speak(answer);
+    const telemetry = await speak(answer);
     window.__roomBridgeState.last_spoken_at = new Date().toISOString();
     window.__roomBridgeState.last_turn_id = turnId || null;
-    return { spoken: true, replayed: false, turn_id: turnId, spoken_at: window.__roomBridgeState.last_spoken_at };
+    return { spoken: true, replayed: false, turn_id: turnId, spoken_at: window.__roomBridgeState.last_spoken_at, tts: telemetry };
   }).finally(() => { window.__roomBridgeState.activity = 'listening'; });
   spokenTurns.set(turnId, job);
   queue = job.catch(() => {});

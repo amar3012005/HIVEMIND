@@ -52,3 +52,8 @@ service boundary itself may have been compromised.
 An acceptance run must prove: unauthenticated `401`, Access-only `401` at the
 origin gateway, complete authenticated MCP initialize/list-tools, one bounded
 browser navigation, sibling `/health`, and no fresh fatal service logs.
+
+The production connector unit is tracked at
+`infra/systemd/hivemind-playwright-mcp-tunnel.service` and installed with
+`scripts/install-playwright-mcp-tunnel-service.sh`. Its Cloudflare connector
+token is never stored in Git.

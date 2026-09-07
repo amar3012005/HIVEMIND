@@ -2582,17 +2582,20 @@ class Director:
             return json.dumps({"error": "URL extraction returned no readable pages",
                                "job_id": result.get("job_id"), "is_error": True})
         self.blackboard.insert(0, "PUBLIC_URL_EVIDENCE[rendered]:\n" + json.dumps({
-            "job_id": result.get("job_id"), "runtime": result.get("runtime_used"),
+            "job_id": result.get("job_id"), "job_ids": result.get("job_ids") or [],
+            "runtime": result.get("runtime_used"), "failures": result.get("failures") or [],
             "pages": board_pages,
         }, ensure_ascii=False)[:30000])
         self.gather_count += 1
         await self.emit({
             "t": "url_extract", "tool": "playwright_extract", "status": "complete",
             "job_id": result.get("job_id"), "runtime": result.get("runtime_used"),
-            "sources": receipts, "count": len(receipts),
+            "job_ids": result.get("job_ids") or [], "sources": receipts, "count": len(receipts),
+            "failures": result.get("failures") or [],
         })
         return json.dumps({"job_id": result.get("job_id"), "runtime": result.get("runtime_used"),
-                           "sources": receipts, "page_count": len(receipts)})
+                           "job_ids": result.get("job_ids") or [], "sources": receipts,
+                           "page_count": len(receipts), "failures": result.get("failures") or []})
 
     async def _seo_audit(self, url: str, page_limit: int = 25) -> str:
         """Place deterministic website evidence on the SEO Room board."""

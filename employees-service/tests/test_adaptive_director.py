@@ -1149,6 +1149,7 @@ def test_rendered_url_extract_persists_source_receipt_on_the_board(monkeypatch):
     async def crawl(*_args, **_kwargs):
         return {
             "status": "succeeded", "job_id": "job-1", "runtime_used": "playwright-service",
+            "job_ids": ["job-1"], "failures": [],
             "results": [{
                 "url": "https://example.test/privacy", "title": "Privacy",
                 "content": "We process personal data under documented purposes.",
@@ -1160,12 +1161,69 @@ def test_rendered_url_extract_persists_source_receipt_on_the_board(monkeypatch):
     result = json.loads(asyncio.run(director._url_extract(["https://example.test/privacy"], 5)))
 
     assert result["job_id"] == "job-1"
+    assert result["job_ids"] == ["job-1"]
     assert result["runtime"] == "playwright-service"
     assert result["page_count"] == 1
     assert "documented purposes" in director.blackboard[0]
     receipt = next(event for event in events if event.get("t") == "url_extract")
     assert receipt["tool"] == "playwright_extract"
+    assert receipt["job_ids"] == ["job-1"]
     assert receipt["sources"][0]["url"] == "https://example.test/privacy"
+
+
+def test_web_crawl_splits_cross_origin_targets_into_receipted_jobs(monkeypatch):
+    from types import SimpleNamespace
+    from hivemind_employees import hivemind_client
+
+    submissions = []
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, json):
+            submissions.append(json["urls"])
+            return Response(202, {"job_id": f"job-{len(submissions)}"})
+
+        async def get(self, path):
+            job_id = path.rsplit("/", 1)[-1]
+            index = int(job_id.rsplit("-", 1)[-1]) - 1
+            url = submissions[index][0]
+            return Response(200, {"status": "succeeded", "job_id": job_id,
+                                  "runtime_used": "playwright-service",
+                                  "results": [{"url": url, "content": "rendered"}]})
+
+    monkeypatch.setattr(hivemind_client, "get_settings",
+                        lambda: SimpleNamespace(hivemind_core_url="http://core.test"))
+    monkeypatch.setattr(hivemind_client.httpx, "AsyncClient", lambda **_kwargs: Client())
+    async def no_sleep(*_args):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    result = asyncio.run(hivemind_client.web_crawl_emulated(
+        ["https://example.test/privacy", "https://social.test/company"],
+        user_id="user", org_id="org", timeout_s=12,
+    ))
+
+    assert submissions == [["https://example.test/privacy"], ["https://social.test/company"]]
+    assert result["status"] == "succeeded"
+    assert result["job_ids"] == ["job-1", "job-2"]
+    assert [row["url"] for row in result["results"]] == [
+        "https://example.test/privacy", "https://social.test/company",
+    ]
 
 
 def test_worker_discussion_keeps_the_complete_bounded_note():

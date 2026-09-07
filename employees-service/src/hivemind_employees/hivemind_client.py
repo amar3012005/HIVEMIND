@@ -475,32 +475,55 @@ async def web_crawl_emulated(urls: List[str], *, user_id: Optional[str], org_id:
             timeout=httpx.Timeout(timeout_s, connect=5.0),
             headers=headers,
         ) as client:
-            submitted = await client.post("/api/web/crawl/jobs", json={
-                "urls": targets,
-                "depth": 2,
-                "page_limit": max(1, min(int(page_limit or 12), 25)),
-                "capture_screenshot": True,
-            })
-            if submitted.status_code not in (200, 202):
-                return {"error": f"web crawl submit {submitted.status_code}",
-                        "detail": submitted.text[:300]}
-            job_id = (submitted.json() or {}).get("job_id")
-            if not job_id:
-                return {"error": "no job_id"}
-            for _ in range(max(12, int(timeout_s))):
-                await asyncio.sleep(1)
-                try:
-                    response = await client.get(f"/api/web/jobs/{job_id}")
-                except (httpx.TimeoutException, httpx.TransportError) as exc:
-                    log.warning("Web crawl poll transient failure job=%s: %s", job_id, exc)
-                    continue
-                if response.status_code != 200:
-                    continue
-                payload = response.json() or {}
-                if payload.get("status") in ("succeeded", "failed", "completed", "error", "done"):
-                    payload["job_id"] = payload.get("job_id") or job_id
-                    return payload
-            return {"status": "timeout", "job_id": job_id}
+            async def crawl_one(target: str) -> Dict[str, Any]:
+                # Core deliberately rejects cross-origin crawl seeds. Keep each
+                # public origin in its own durable job, then combine receipts.
+                submitted = await client.post("/api/web/crawl/jobs", json={
+                    "urls": [target],
+                    "depth": 2,
+                    "page_limit": max(1, min(int(page_limit or 12), 25)),
+                    "capture_screenshot": True,
+                })
+                if submitted.status_code not in (200, 202):
+                    return {"status": "failed", "source_url": target,
+                            "error": f"web crawl submit {submitted.status_code}",
+                            "detail": submitted.text[:300]}
+                job_id = (submitted.json() or {}).get("job_id")
+                if not job_id:
+                    return {"status": "failed", "source_url": target, "error": "no job_id"}
+                for _ in range(max(12, int(timeout_s))):
+                    await asyncio.sleep(1)
+                    try:
+                        response = await client.get(f"/api/web/jobs/{job_id}")
+                    except (httpx.TimeoutException, httpx.TransportError) as exc:
+                        log.warning("Web crawl poll transient failure job=%s: %s", job_id, exc)
+                        continue
+                    if response.status_code != 200:
+                        continue
+                    payload = response.json() or {}
+                    if payload.get("status") in ("succeeded", "failed", "completed", "error", "done"):
+                        payload["job_id"] = payload.get("job_id") or job_id
+                        payload["source_url"] = target
+                        return payload
+                return {"status": "timeout", "job_id": job_id, "source_url": target}
+
+            jobs = await asyncio.gather(*(crawl_one(target) for target in targets))
+            results = [row for job in jobs for row in (job.get("results") or []) if isinstance(row, dict)]
+            failures = [{"source_url": job.get("source_url"), "job_id": job.get("job_id"),
+                         "status": job.get("status"), "error": job.get("error")}
+                        for job in jobs if job.get("status") in {"failed", "error", "timeout"}]
+            if not results:
+                return {"status": "failed", "error": "all URL extraction jobs failed",
+                        "jobs": jobs, "job_ids": [job.get("job_id") for job in jobs if job.get("job_id")],
+                        "failures": failures}
+            return {
+                "status": "partial" if failures else "succeeded",
+                "job_id": next((job.get("job_id") for job in jobs if job.get("job_id")), None),
+                "job_ids": [job.get("job_id") for job in jobs if job.get("job_id")],
+                "runtime_used": next((job.get("runtime_used") for job in jobs if job.get("runtime_used")), None),
+                "results": results,
+                "failures": failures,
+            }
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)[:200]}
 

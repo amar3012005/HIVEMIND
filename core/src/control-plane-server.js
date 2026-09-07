@@ -9807,6 +9807,86 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // GET /v1/company/context — immutable admission context for authenticated
+  // external agents. Company identity comes from the completed onboarding
+  // payload, never recall or model inference. Tenant scope comes only from the
+  // persisted API key; callers cannot select an organization or user.
+  if (pathname === '/v1/company/context' && req.method === 'GET') {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const rawKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    if (!rawKey) return jsonResponse(res, { error: 'API key required' }, 401);
+    try {
+      const keyRecord = await authenticatePersistedApiKey(prisma, rawKey);
+      if (!keyRecord?.userId || !keyRecord?.orgId) {
+        return jsonResponse(res, { error: 'Invalid or unscoped API key' }, 401);
+      }
+      const declaredScopes = Array.isArray(keyRecord.scopes) ? keyRecord.scopes : [];
+      if (!declaredScopes.includes('*') && !declaredScopes.includes('mcp')) {
+        return jsonResponse(res, { error: 'mcp scope required' }, 403);
+      }
+      const principal = await resolveKeyAccess(prisma, keyRecord, { projectIds: [], teamIds: [] });
+      const membership = await getOrgMembership(principal.userId, principal.orgId);
+      if (!membership) return jsonResponse(res, { error: 'Organization membership required' }, 403);
+
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT id, "agent_connectors"->'_company' AS company
+           FROM "hivemind"."hyper_rooms"
+          WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
+          ORDER BY created_at DESC LIMIT 1`,
+        principal.orgId,
+      );
+      const row = rows?.[0];
+      if (!row?.company) {
+        return jsonResponse(res, {
+          ok: true,
+          contract: 'hivemind.company-context.v1',
+          scope: { user_id: principal.userId, org_id: principal.orgId, authority: 'server-derived-from-api-key' },
+          onboarding_status: 'not_onboarded',
+          company: null,
+        });
+      }
+      const stored = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
+      const profile = stored?.profile && typeof stored.profile === 'object' ? stored.profile : {};
+      const website = String(stored?.website || '').trim();
+      let canonicalDomain = '';
+      try { canonicalDomain = new URL(website).hostname.toLowerCase().replace(/^www\./, ''); } catch { /* gap remains explicit */ }
+      const socialProfiles = Array.isArray(profile.social_profiles)
+        ? profile.social_profiles.filter((item) => item && typeof item.url === 'string').slice(0, 20)
+        : [];
+      const sourcePages = Array.isArray(stored?.source_pages)
+        ? stored.source_pages.filter((item) => item && typeof item.url === 'string').slice(0, 20)
+        : [];
+      return jsonResponse(res, {
+        ok: true,
+        contract: 'hivemind.company-context.v1',
+        scope: {
+          user_id: principal.userId,
+          org_id: principal.orgId,
+          authority: 'server-derived-from-api-key',
+        },
+        onboarding_status: 'complete',
+        company: {
+          name: stored.company || profile.name || '',
+          website,
+          canonical_domain: canonicalDomain,
+          location: stored.company_location || profile.location || '',
+          mission: stored.mission || '',
+          operating_context: stored.company_context || '',
+          profile,
+          social_profiles: socialProfiles,
+          source_pages: sourcePages,
+          onboarded_at: stored.onboarded_at || null,
+          authority: 'persisted_onboarding',
+        },
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('[company.context] failed:', err.message);
+      return jsonResponse(res, { error: 'Unable to load company context' }, 500);
+    }
+  }
+
   // ─── OAuth client registry (CRUD for org-admins) ─────────────
   // Backs the same prisma.metaParameter['oauth_client_registry'] row that
   // core/src/server.js reads. Used to register ChatGPT's callback URL,

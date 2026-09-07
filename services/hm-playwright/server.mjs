@@ -122,7 +122,7 @@ async function startRoomBridge(input) {
 
 const ROOM_BRIDGE_HTML = `<!doctype html><meta charset="utf-8"><script type="module">
 import RealtimeKitClient from '/internal/realtimekit.js';
-let meeting; let audioContext; let destination; let bridgeToken = ''; let speechEpoch = 0; let activeAbort; let nextStart = 0; const activeSources = new Set(); const spokenTurns = new Map();
+let meeting; let audioContext; let destination; let bridgeToken = ''; let speechEpoch = 0; let activeAbort; let nextStart = 0; let activeTurnId = ''; let chunkQueue = Promise.resolve(); const activeSources = new Set(); const spokenTurns = new Map();
 window.__RealtimeKitClient = RealtimeKitClient;
 window.__roomBridgeState = { status: 'loading' };
 function stopSpeech() {
@@ -169,6 +169,16 @@ window.__speakRoomBridge = (answer, turnId = '') => {
   })().finally(() => { window.__roomBridgeState.activity = 'listening'; });
   spokenTurns.set(turnId, job);
   return job;
+};
+window.__enqueueRoomBridgeSpeech = (text, turnId = '') => {
+  if (!turnId || !text) throw new Error('turn_id_and_text_required');
+  if (activeTurnId !== turnId) {
+    stopSpeech(); activeTurnId = turnId; chunkQueue = Promise.resolve();
+    window.__roomBridgeState.activity = 'speaking';
+  }
+  const job = chunkQueue.catch(() => {}).then(() => speak(text));
+  chunkQueue = job.catch(() => {});
+  return { queued: true, turn_id: turnId };
 };
 window.__startRoomBridge = async ({ authToken, roomId, meetingId, bridgeToken: token }) => {
   bridgeToken = token;
@@ -750,7 +760,7 @@ const server = http.createServer(async (req, res) => {
   const isSessionsRoute = req.url === '/v1/sessions' || actionMatch || sessionIdMatch;
   const isCrawlRoute = req.url === '/v1/crawl';
   const isPdfRoute = req.url === '/v1/pdf';
-  const roomBridgeMatch = req.url.match(/^\/v1\/room-bridges\/([0-9a-f-]{36})(?:\/(speak))?$/i);
+  const roomBridgeMatch = req.url.match(/^\/v1\/room-bridges\/([0-9a-f-]{36})(?:\/(speak|enqueue))?$/i);
   if (!isSessionsRoute && !isCrawlRoute && !isPdfRoute && !roomBridgeMatch) return send(res, 404, { error: 'not_found' });
   if (!secureEqual(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''), TOKEN)) return send(res, 401, { error: 'unauthorized' });
 
@@ -765,6 +775,16 @@ const server = http.createServer(async (req, res) => {
         const turnId = String(payload?.turn_id || '').trim().slice(0, 120);
         if (!answer) return send(res, 400, { error: 'answer_required' });
         return send(res, 200, await entry.page.evaluate(({ answer: text, turnId: id }) => window.__speakRoomBridge(text, id), { answer, turnId }));
+      }
+      if (roomBridgeMatch[2] === 'enqueue') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'method_not_allowed' });
+        const entry = roomBridges.get(roomBridgeMatch[1]);
+        if (!entry) return send(res, 404, { error: 'room_bridge_not_found' });
+        const payload = await readJson(req);
+        const text = String(payload?.text || '').trim().slice(0, 1200);
+        const turnId = String(payload?.turn_id || '').trim().slice(0, 120);
+        if (!text || !turnId) return send(res, 400, { error: 'text_and_turn_id_required' });
+        return send(res, 202, await entry.page.evaluate(({ text, turnId }) => window.__enqueueRoomBridgeSpeech(text, turnId), { text, turnId }));
       }
       if (req.method === 'POST') return send(res, 200, await startRoomBridge(await readJson(req)));
       if (req.method === 'GET') {

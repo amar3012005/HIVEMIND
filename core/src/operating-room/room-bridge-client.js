@@ -43,3 +43,15 @@ export function speakOperatingRoomBridge({ roomId, turnId, answer, env, fetchImp
     body: { turn_id: turnId, answer: String(answer || '').slice(0, 4000) },
   });
 }
+
+// Queues one completed sentence on the active facilitator turn. The bridge
+// returns after accepting it, allowing GPT-OSS generation to continue while
+// Fish starts PCM for that sentence.
+export function enqueueOperatingRoomSpeech({ roomId, turnId, text, env, fetchImpl } = {}) {
+  return request(`/${encodeURIComponent(roomId)}/enqueue`, {
+    env,
+    fetchImpl,
+    timeoutMs: 8_000,
+    body: { turn_id: turnId, text: String(text || '').slice(0, 1200) },
+  });
+}

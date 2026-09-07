@@ -103,7 +103,7 @@ import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSyste
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { queueMeetingFinalization } from './knowledge/meeting-finalization-worker.js';
 import { addRealtimeParticipant, createRealtimeMeeting, deleteRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
-import { closeOperatingRoomBridge, getOperatingRoomBridge, speakOperatingRoomBridge, startOperatingRoomBridge } from './operating-room/room-bridge-client.js';
+import { closeOperatingRoomBridge, enqueueOperatingRoomSpeech, getOperatingRoomBridge, speakOperatingRoomBridge, startOperatingRoomBridge } from './operating-room/room-bridge-client.js';
 import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, roomProjection, wakeIntent } from './operating-room/room-contract.js';
 import { advanceRoomBrief, claimRoomResponse, patchRoomState, releaseRoomResponse, synthesizeRoomResponse, transcriptEventId } from './operating-room/conversation-state.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
@@ -9522,7 +9522,23 @@ const server = http.createServer(async (req, res) => {
             request: {...chatRequest,message:query},
             idempotencyKey: chatRequest.idempotency_key,
           }).catch(error=>({sources:[],recall_error:error.message}));
-          const answer = await synthesizeRoomResponse({context,query,knowledge:chat,traceId:turnId});
+          const streamedSpeech = { pending:'', queued:false };
+          const queueSentence = async (value) => {
+            streamedSpeech.pending += String(value || '');
+            let match;
+            while ((match = streamedSpeech.pending.match(/^([\s\S]*?[.!?](?:\s|$))/))) {
+              streamedSpeech.pending = streamedSpeech.pending.slice(match[1].length);
+              const sentence = match[1].trim();
+              if (sentence.length < 4) continue;
+              await enqueueOperatingRoomSpeech({ roomId:liveRoom.id, turnId, text:sentence });
+              streamedSpeech.queued = true;
+            }
+          };
+          const answer = await synthesizeRoomResponse({context,query,knowledge:chat,traceId:turnId,onContent:queueSentence});
+          if (streamedSpeech.pending.trim()) {
+            await enqueueOperatingRoomSpeech({ roomId:liveRoom.id, turnId, text:streamedSpeech.pending.trim() });
+            streamedSpeech.queued = true;
+          }
           if (!answer) throw Object.assign(new Error('HIVEMIND returned an empty room response'), { code: 'operating_room_empty_response', status: 502 });
           // Do the same check immediately before audio. A new human utterance
           // may have arrived while recall/synthesis was running.
@@ -9546,7 +9562,12 @@ const server = http.createServer(async (req, res) => {
           const latestResponses = Array.isArray(latestState.facilitator_responses) ? latestState.facilitator_responses : [];
           const responses = [...latestResponses.filter(entry=>entry?.turn_id !== turnId),receipt];
           await patchRoomState(prisma,liveRoom,{facilitator_responses:responses,facilitator_activity:'speaking'});
-          const speech = await deliverOperatingRoomSpeech({ room: liveRoom, state: liveState, turnId, answer });
+          // Sentences are already playing through the authenticated PCM queue.
+          // Only retain the old complete-answer route if no sentence was ever
+          // accepted (for example, a non-punctuated provider response).
+          const speech = streamedSpeech.queued
+            ? { streamed:true, provider:'fish_openrouter', turn_id:turnId }
+            : await deliverOperatingRoomSpeech({ room: liveRoom, state: liveState, turnId, answer });
           receipt.speech = speech;
           await patchRoomState(prisma,liveRoom,{facilitator_responses:responses});
           return { ...receipt, replayed: false, speech, sources: chat.sources || [] };

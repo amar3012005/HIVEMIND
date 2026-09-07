@@ -9,6 +9,11 @@ export function wakeIntent(text) {
   return { addressed: Boolean(clean), query: clean };
 }
 
+export function roomAddressInstruction(context) {
+  const first = context?.conversation_style?.first_response_to_speaker === true;
+  return `${first ? 'This is your first response to this participant in this room: briefly acknowledge them once, without a long introduction.' : 'This is an ongoing conversation: do not greet, welcome, or reintroduce yourself to this participant again. Start directly with the substance.'} Use a participant name only when it helps clarify who you are addressing, attribute a point, or hand over the floor. A name may fit naturally at the start, middle, or end; do not force it into every reply or repeatedly use the same opening. Follow the conversation language. Never treat each turn as a new call.`;
+}
+
 export function compactRoomContext({ room, roster = [], transcript = [], speaker }) {
   const recent = transcript.slice(-24).map((turn) => ({
     turn_id: turn.id || turn.turn_id || null,
@@ -20,9 +25,16 @@ export function compactRoomContext({ room, roster = [], transcript = [], speaker
   }));
   const state = room?.roomPlaybook && typeof room.roomPlaybook === 'object' ? room.roomPlaybook : {};
   const brief = state.session_brief || {};
+  // Use durable response receipts, not the bounded transcript or display name:
+  // compaction, reconnects, and two people sharing a name must not reset this.
+  const priorResponses = Array.isArray(state.facilitator_responses) ? state.facilitator_responses : [];
+  const firstResponse = Boolean(speaker?.user_id) && !priorResponses.some(entry =>
+    entry?.addressed_user_id === speaker.user_id && typeof entry.answer === 'string' && entry.answer.trim()
+  );
   return {
     room: { id: room.id, name: room.name, goal: normalizeRoomText(room.goal, 800) },
     current_speaker: speaker,
+    conversation_style: { first_response_to_speaker: firstResponse },
     participants: roster.slice(0, 50).map((person) => ({
       user_id: person.user_id,
       name: normalizeRoomText(person.name, 120),
@@ -36,7 +48,7 @@ export function compactRoomContext({ room, roster = [], transcript = [], speaker
       next_focus: normalizeRoomText(brief.next_focus,400),
       agenda: (state.agenda || []).slice(0,12).map(item => normalizeRoomText(item,200)),
     },
-    instruction: 'You are HIVEMIND, the disclosed AI facilitator in a multi-person operating room. Answer the current verified speaker by name when natural, consider every recent speaker, use HIVEMIND recall for company facts, never invent missing facts, keep the room moving toward its goal, and distinguish decisions from unresolved items.',
+    instruction: 'You are HIVEMIND, the disclosed AI facilitator in a multi-person operating room. Answer the current verified speaker naturally, consider every recent speaker, use HIVEMIND recall for company facts, never invent missing facts, keep the room moving toward its goal, and distinguish decisions from unresolved items.',
   };
 }
 
@@ -59,6 +71,7 @@ export function buildRoomChatRequest({ room, turn, context }) {
     session.next_focus ? `Suggested next focus: ${session.next_focus}` : '',
     recent ? `Recent room transcript:\n${recent}` : '',
     '[RESPONSE CONTRACT]',
+    roomAddressInstruction(context),
     `Respond to ${turn.speaker_name}'s latest request below. Speak naturally for voice (normally 1-4 short sentences). Use the shared room context and grounded HIVEMIND recall when facts are needed. Do not expose internal tool traces. Do not claim a decision was made unless the transcript shows it. If the room is off track, briefly steer it toward the goal.`,
     `${turn.speaker_name}: ${normalizeRoomText(turn.query || turn.text, 4000)}`,
   ].filter(Boolean).join('\n\n');

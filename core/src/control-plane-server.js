@@ -14285,14 +14285,21 @@ Write the persona now.`;
       // Evaluate once and latch on the turn. Flagship/network failure is the
       // byte-compatible stable path; no user can drift models mid-turn.
       const { hyperPlannerModeFor, governedRoomCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
-      const fastPlannerMode = await hyperPlannerModeFor({
-        orgId: current.session.orgId, userId: current.session.userId,
+      // Older browser sessions may predate the email field in SessionStore.
+      // Resolve it from the authenticated user row, never from request input, so
+      // an account-only canary cannot silently fall back to the legacy runtime.
+      const authenticatedUser = await prisma.user.findUnique({
+        where: { id: current.session.userId }, select: { email: true },
       });
-      const governedRoomCanary = await governedRoomCanaryFor({
-        orgId: current.session.orgId,
-        userId: current.session.userId,
-        email: current.session.email,
-      });
+      const authenticatedEmail = String(authenticatedUser?.email || current.session.email || '').trim().toLowerCase();
+      const [fastPlannerMode, governedRoomCanary] = await Promise.all([
+        hyperPlannerModeFor({ orgId: current.session.orgId, userId: current.session.userId }),
+        governedRoomCanaryFor({
+          orgId: current.session.orgId,
+          userId: current.session.userId,
+          email: authenticatedEmail,
+        }),
+      ]);
 
       // Sequence is monotonic per room. Atomic via SELECT max + insert
       // wrapped in serializable transaction.
@@ -14323,12 +14330,24 @@ Write the persona now.`;
               userMessage,
               status: 'live',
               idempotencyKey: key,
-              lines: [{
-                t: 'governed_room_canary',
-                enabled: governedRoomCanary,
-                processing_version: 1,
-                ts: Date.now(),
-              }],
+              lines: [
+                {
+                  t: 'governed_room_canary',
+                  enabled: governedRoomCanary,
+                  processing_version: 1,
+                  selected_runtime: governedRoomCanary ? 'governed_candidate' : 'stable',
+                  identity_source: 'authenticated_user',
+                  ts: Date.now(),
+                },
+                {
+                  t: 'turn_ack',
+                  agent: 'director',
+                  content: 'Request received. The room is loading company context and the evidence required to complete it safely.',
+                  generated: false,
+                  immediate: true,
+                  ts: Date.now(),
+                },
+              ],
               fastPlannerMode,
             },
           });

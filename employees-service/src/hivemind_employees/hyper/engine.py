@@ -75,6 +75,7 @@ from ..hivemind_client import (
     request_evidence_job_emulated,
     save_prospects_bulk_emulated,
     seo_audit_emulated,
+    web_crawl_emulated,
     web_search_emulated,
 )
 
@@ -2166,6 +2167,7 @@ class Director:
             "recall": "Recalling the company brain…",
             "org_directory": "Reading the org directory…",
             "web_search": "Searching the web…",
+            "url_extract": "Reading the requested public pages…",
             "fetch_detail": "Fetching detail…",
         }.get(fn)
         if not note and fn in self._connector_routes:
@@ -2219,6 +2221,9 @@ class Director:
 
             if name == "web_search":
                 return await self._web_search(str(args.get("query", "")))
+
+            if name == "url_extract":
+                return await self._url_extract(list(args.get("urls") or []), int(args.get("page_limit", 12) or 12))
 
             if name == "seo_audit":
                 return await self._seo_audit(str(args.get("url", "")), int(args.get("page_limit", 25) or 25))
@@ -2545,6 +2550,49 @@ class Director:
                          "evidence_policy": str(res.get("evidence_policy") or "")[:80]})
         return json.dumps({"answer": answer, "sources": sources[:5],
                            "provider": provider, "tool": provider_tool})
+
+    async def _url_extract(self, urls: List[str], page_limit: int = 12) -> str:
+        """Read known public URLs with rendered Playwright evidence and receipts."""
+        targets = list(dict.fromkeys(
+            str(value or "").strip().rstrip(".,;") for value in (urls or [])
+            if str(value or "").strip().startswith(("http://", "https://"))
+        ))[:3]
+        if not targets:
+            return json.dumps({"error": "no public URLs supplied", "is_error": True})
+        result = await web_crawl_emulated(
+            targets, user_id=self.user_id, org_id=self.org_id,
+            page_limit=max(1, min(int(page_limit or 12), 25)), timeout_s=180.0,
+        )
+        if result.get("error") or result.get("status") in {"failed", "error", "timeout"}:
+            return json.dumps({"error": result.get("error") or result.get("status") or "URL extraction failed",
+                               "job_id": result.get("job_id"), "is_error": True})
+        pages = [row for row in (result.get("results") or []) if isinstance(row, dict) and row.get("url")]
+        receipts = []
+        board_pages = []
+        for row in pages[:25]:
+            content = str(row.get("content") or row.get("text") or "").strip()
+            receipts.append({"url": str(row.get("url")), "title": str(row.get("title") or "")[:160]})
+            board_pages.append({
+                "url": str(row.get("url")), "title": str(row.get("title") or "")[:200],
+                "description": str(row.get("description") or "")[:600],
+                "content": content[:5000], "rendered": bool(row.get("rendered")),
+                "status": row.get("status"),
+            })
+        if not board_pages:
+            return json.dumps({"error": "URL extraction returned no readable pages",
+                               "job_id": result.get("job_id"), "is_error": True})
+        self.blackboard.insert(0, "PUBLIC_URL_EVIDENCE[rendered]:\n" + json.dumps({
+            "job_id": result.get("job_id"), "runtime": result.get("runtime_used"),
+            "pages": board_pages,
+        }, ensure_ascii=False)[:30000])
+        self.gather_count += 1
+        await self.emit({
+            "t": "url_extract", "tool": "playwright_extract", "status": "complete",
+            "job_id": result.get("job_id"), "runtime": result.get("runtime_used"),
+            "sources": receipts, "count": len(receipts),
+        })
+        return json.dumps({"job_id": result.get("job_id"), "runtime": result.get("runtime_used"),
+                           "sources": receipts, "page_count": len(receipts)})
 
     async def _seo_audit(self, url: str, page_limit: int = 25) -> str:
         """Place deterministic website evidence on the SEO Room board."""
@@ -4872,7 +4920,8 @@ class Director:
             if isinstance(item, dict) and str(item.get("name") or "").strip()
         ][:8]
         web_requested = bool(str(plan.get("web_query") or "").strip())
-        external_research = web_requested or bool(connector_calls) or bool(plan.get("seo_audit_url"))
+        extracted_urls = [str(value) for value in (plan.get("extract_urls") or []) if str(value).strip()][:3]
+        external_research = web_requested or bool(connector_calls) or bool(plan.get("seo_audit_url")) or bool(extracted_urls)
         deep_research = bool(plan.get("research_floor")) or len(required_claims) >= 3 or len(work_orders) >= 3
         side_effects = [
             str(item.get("capability") or "").strip()
@@ -4980,6 +5029,8 @@ class Director:
                 "freshness_required": web_requested,
                 "connector_reads": connector_calls,
                 "web_requested": web_requested,
+                "url_extraction_requested": bool(extracted_urls),
+                "known_urls": extracted_urls,
                 "forced_by_profile": str(plan.get("research_floor") or "") or None,
                 "verified_company_domains": verified_domains,
             },
@@ -5154,8 +5205,8 @@ class Director:
         company domain or legal-page URL.
         """
         profile_id = str(self.execution_profile.get("profile_id") or "")
-        governed_profiles = {"research.decision.v1", "fundraising.artifact.v1"}
-        if profile_id not in governed_profiles or self._web_budget <= 0:
+        governed_profiles = {"research.decision.v1", "fundraising.artifact.v1", "legal_finance.review.v1"}
+        if profile_id not in governed_profiles:
             return plan
         if re.search(r"\b(?:do not|don't|without|no)\s+(?:use\s+)?(?:the\s+)?web(?:\s+search)?\b",
                      self.user_message or "", re.IGNORECASE):
@@ -5165,10 +5216,14 @@ class Director:
             or plan.get("connector_calls")
             or plan.get("seo_audit_url")
         )
-        if has_external_read:
-            return plan
         amended = dict(plan)
-        amended["web_query"] = str(self.user_message or "").strip()[:1200]
+        requires_independent_legal_source = profile_id == "legal_finance.review.v1"
+        if ((not has_external_read or requires_independent_legal_source)
+                and not str(plan.get("web_query") or "").strip()
+                and self._web_budget > 0):
+            amended["web_query"] = str(
+                self.execution_profile.get("external_evidence_query") or self.user_message or ""
+            ).strip()[:1200]
         amended["turn_mode"] = "task"
         amended["research_floor"] = profile_id
         if profile_id == "fundraising.artifact.v1":
@@ -5181,6 +5236,45 @@ class Director:
                 "Every factual claim has a source URL",
                 "Company claims, independent evidence, assumptions, and projections are labeled separately",
                 "No regulatory certification or market figure is inferred from missing evidence",
+            ]
+        elif profile_id == "legal_finance.review.v1":
+            context_urls = [value.rstrip(".,;") for value in re.findall(
+                r"https?://[^\s<>\]\[\)\(\"']+", f"{self.user_message}\n{self.company_brief}", re.I,
+            )]
+            # Prefer the verified company website, then explicitly supplied public
+            # channels. The bounded Core crawler enforces its own URL policy.
+            website_match = re.search(r"(?:^|\n)Website:\s*([^\n]+)", self.company_brief or "", re.I)
+            ordered_urls = []
+            if website_match:
+                ordered_urls.extend(re.findall(r"https?://[^\s,]+", website_match.group(1)))
+            ordered_urls.extend(context_urls)
+            amended["extract_urls"] = list(dict.fromkeys(ordered_urls))[:3]
+            amended["extract_page_limit"] = 25
+            amended["needs_debate"] = True
+            amended["response_depth"] = "operating"
+            amended["collaboration_intensity"] = "deep"
+            requested_channels = (self.user_message or "").casefold()
+            connector_calls = list(amended.get("connector_calls") or [])
+            if (re.search(r"\b(?:gmail|e-?mail|emails)\b", requested_channels)
+                    and "gmail_search" in self._connector_routes
+                    and not any(call.get("name") == "gmail_search" for call in connector_calls
+                                if isinstance(call, dict))):
+                connector_calls.append({
+                    "name": "gmail_search",
+                    "args": {"query": "in:sent (GDPR OR privacy OR compliance OR data)", "max": 20},
+                })
+            amended["connector_calls"] = connector_calls[:4]
+            amended["research_claims"] = [
+                "Exact public company claims captured from rendered first-party pages",
+                "Relevant public social claims captured from accessible source pages",
+                "Relevant sent outreach claims captured from the connected mailbox",
+                "Legal conclusions tied to authoritative GDPR or regulator evidence",
+            ]
+            amended["research_acceptance_criteria"] = [
+                "Each reviewed claim quotes or precisely identifies its source and channel",
+                "Every legal conclusion cites first-party law or regulator guidance",
+                "Unavailable or inaccessible channels are explicitly scoped as gaps",
+                "No dates, quantities, certifications, or legal assurances are invented",
             ]
         else:
             amended["research_claims"] = ["Current external facts required by the requested decision"]
@@ -5425,6 +5519,9 @@ class Director:
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
+            "For a legal/compliance audit, every explicitly named connected evidence channel must have a "
+            "corresponding read. In particular, when the user asks to review outreach emails and gmail_search "
+            "is available, select gmail_search; do not substitute a hypothetical email template.\n"
             "- places_query: a Google-Maps business search — set it only when THIS turn asks to FIND, "
             "DISCOVER, or SOURCE physical/local firms in an explicit city or region, EVEN WHEN the same request ALSO asks "
             "to draft/send outreach for them. 'Find leads in Hannover and email them' or 'discover "
@@ -6008,6 +6105,11 @@ class Director:
         if fn == "web_search":
             return (f"running a live web search for “{q}”…",
                     f"Brought back live web findings on “{q}” (sources on the board).")
+        if fn == "url_extract":
+            targets = [str(value)[:80] for value in (args.get("urls") or []) if str(value).strip()]
+            label = ", ".join(targets[:2])
+            return (f"reading the public pages at “{label}”…",
+                    f"Captured rendered public-page evidence from {len(targets)} source(s).")
         if fn == "seo_audit":
             site = str(args.get("url") or "")[:80]
             return (f"auditing the website evidence for “{site}”…",
@@ -6037,13 +6139,13 @@ class Director:
                 # A checkpointed stage must compile from the actual tool payload,
                 # not from the human-friendly activity bubble emitted above it.
                 self.blackboard.append(f"TOOL_RESULT[{fn}]:\n{str(result)[:12000]}")
-            if fn == "seo_audit":
+            if fn in {"seo_audit", "url_extract"}:
                 try:
                     audit_result = json.loads(result or "{}")
                 except Exception:
                     audit_result = {}
                 if audit_result.get("is_error"):
-                    raise RuntimeError(str(audit_result.get("error") or "SEO audit did not complete"))
+                    raise RuntimeError(str(audit_result.get("error") or f"{fn} did not complete"))
             if owner:
                 await self.emit({"t": "react", "agent": owner.get("slug"),
                                  "name": owner.get("name") or owner.get("slug"),
@@ -6131,6 +6233,11 @@ class Director:
         for c in plan["connector_calls"]:
             tasks.append(self._gather_one(c["name"], dict(c.get("args") or {}),
                                           owner=self._gather_owner(_i, c["name"]))); _i += 1
+        if plan.get("extract_urls"):
+            tasks.append(self._gather_one("url_extract", {
+                "urls": list(plan.get("extract_urls") or [])[:3],
+                "page_limit": int(plan.get("extract_page_limit") or 12),
+            }, owner=self._gather_owner(_i, "web_search"))); _i += 1
         if plan["web_query"]:
             tasks.append(self._gather_one("web_search", {"query": plan["web_query"]},
                                           owner=self._gather_owner(_i, "web_search"))); _i += 1
@@ -7497,7 +7604,8 @@ class Director:
         specialists = [name for name in specialists if name]
         evidence_work = bool(
             plan.get("recall_queries") or plan.get("connector_calls")
-            or plan.get("web_query") or plan.get("seo_audit_url") or plan.get("places_query")
+            or plan.get("web_query") or plan.get("seo_audit_url") or plan.get("extract_urls")
+            or plan.get("places_query")
         )
         needs_debate = bool(plan.get("needs_debate"))
         report_expected = (
@@ -7540,7 +7648,7 @@ class Director:
             return
         has_evidence_work = bool(
             plan.get("recall_queries") or plan.get("connector_calls")
-            or plan.get("web_query") or plan.get("seo_audit_url")
+            or plan.get("web_query") or plan.get("seo_audit_url") or plan.get("extract_urls")
         )
         notes = (
             "I’m narrowing this to the decision the user actually asked for.",
@@ -7706,9 +7814,10 @@ class Director:
         # never looks frozen right after the query is sent.
         _lead = self.participants[0].get("slug") if self.participants else "director"
         await self.emit({"t": "typing", "agent": _lead, "note": "Reading the goal and gathering context…"})
-        # Do not await: the acknowledgement races planning and tool initialization,
-        # giving the user meaningful first text without extending critical-path latency.
-        asyncio.create_task(self._emit_turn_ack())
+        # Control persisted the immediate ``turn_ack`` before returning 202. Do
+        # not race a second model-generated acknowledgement against planning:
+        # provider latency previously made that acknowledgement arrive after the
+        # answer, or disappear when the turn sealed first.
         _required = [item for item in (self.execution_profile.get("required_artifacts") or []) if item]
         _allowed = {
             str(item).strip().lower()

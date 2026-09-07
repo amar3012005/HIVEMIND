@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hyperPlannerModeFor } from '../../src/employees/cloudflare-hyper-planner-client.js';
+import { governedRoomCanaryFor, hyperPlannerModeFor } from '../../src/employees/cloudflare-hyper-planner-client.js';
 
 test('hyper planner mode is targeted through the authenticated worker and fails closed', async () => {
   const previous = {
@@ -22,6 +22,40 @@ test('hyper planner mode is targeted through the authenticated worker and fails 
       fetchImpl: async () => ({ ok: true, json: async () => ({ mode: 'unknown' }) }) }), 'off');
     assert.equal(await hyperPlannerModeFor({ orgId: 'org-1', userId: 'user-1',
       fetchImpl: async () => { throw new Error('down'); }, logger: { warn() {} } }), 'off');
+  } finally {
+    if (previous.url === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_URL;
+    else process.env.CANONICAL_PROJECTION_WORKFLOW_URL = previous.url;
+    if (previous.secret === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET;
+    else process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = previous.secret;
+  }
+});
+
+test('governed room canary sends normalized authenticated identity and fails closed', async () => {
+  const previous = {
+    url: process.env.CANONICAL_PROJECTION_WORKFLOW_URL,
+    secret: process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET,
+  };
+  process.env.CANONICAL_PROJECTION_WORKFLOW_URL = 'https://flags.example.test';
+  process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = 'test-secret';
+  try {
+    const calls = [];
+    const enabled = await governedRoomCanaryFor({
+      orgId: 'org-1', userId: 'user-1', email: '  AMARSAI2005@GMAIL.COM ',
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => ({ enabled: true }) };
+      },
+    });
+    assert.equal(enabled, true);
+    assert.match(calls[0].url, /email=amarsai2005%40gmail.com/);
+    assert.equal(calls[0].init.headers.authorization, 'Bearer test-secret');
+    assert.equal(await governedRoomCanaryFor({
+      orgId: 'org-1', userId: 'user-1', email: '', fetchImpl: async () => { throw new Error('must not call'); },
+    }), false);
+    assert.equal(await governedRoomCanaryFor({
+      orgId: 'org-1', userId: 'user-1', email: 'amar@example.test',
+      fetchImpl: async () => { throw new Error('down'); }, logger: { warn() {} },
+    }), false);
   } finally {
     if (previous.url === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_URL;
     else process.env.CANONICAL_PROJECTION_WORKFLOW_URL = previous.url;

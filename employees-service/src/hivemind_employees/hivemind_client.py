@@ -451,6 +451,60 @@ async def web_search_emulated(query: str, *, user_id: Optional[str], org_id: Opt
         return {"error": str(exc)[:200]}
 
 
+async def web_crawl_emulated(urls: List[str], *, user_id: Optional[str], org_id: Optional[str],
+                             api_key: str = "", page_limit: int = 12,
+                             timeout_s: float = 180.0) -> Dict[str, Any]:
+    """Extract rendered public-page content through the existing Core web boundary.
+
+    ``capture_screenshot`` deliberately selects Core's Playwright render path. The
+    screenshot itself is not copied into the Room; the returned URL, rendered text,
+    runtime and durable web-job identifier become candidate evidence receipts.
+    """
+    import asyncio
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    targets = list(dict.fromkeys(
+        str(value or "").strip() for value in (urls or [])
+        if str(value or "").strip().startswith(("http://", "https://"))
+    ))[:3]
+    if not targets:
+        return {"error": "no public URLs supplied"}
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(timeout_s, connect=5.0),
+            headers=headers,
+        ) as client:
+            submitted = await client.post("/api/web/crawl/jobs", json={
+                "urls": targets,
+                "depth": 2,
+                "page_limit": max(1, min(int(page_limit or 12), 25)),
+                "capture_screenshot": True,
+            })
+            if submitted.status_code not in (200, 202):
+                return {"error": f"web crawl submit {submitted.status_code}",
+                        "detail": submitted.text[:300]}
+            job_id = (submitted.json() or {}).get("job_id")
+            if not job_id:
+                return {"error": "no job_id"}
+            for _ in range(max(12, int(timeout_s))):
+                await asyncio.sleep(1)
+                try:
+                    response = await client.get(f"/api/web/jobs/{job_id}")
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    log.warning("Web crawl poll transient failure job=%s: %s", job_id, exc)
+                    continue
+                if response.status_code != 200:
+                    continue
+                payload = response.json() or {}
+                if payload.get("status") in ("succeeded", "failed", "completed", "error", "done"):
+                    payload["job_id"] = payload.get("job_id") or job_id
+                    return payload
+            return {"status": "timeout", "job_id": job_id}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[:200]}
+
+
 async def seo_audit_emulated(url: str, *, user_id: Optional[str], org_id: Optional[str],
                              api_key: str = "", page_limit: int = 25,
                              timeout_s: float = 180.0, on_progress=None) -> Dict[str, Any]:

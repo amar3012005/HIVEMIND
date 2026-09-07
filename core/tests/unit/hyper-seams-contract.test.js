@@ -7,6 +7,7 @@ import {
   buildWorkRoomExecutionIdentity,
   normalizeTurnEvent,
 } from '../../src/contracts/hyper-seams.js';
+import fs from 'node:fs';
 
 test('buildRoomTurnPayload stamps version + drops undefined/null', () => {
   const p = buildRoomTurnPayload({
@@ -67,4 +68,14 @@ test('normalizeTurnEvent preserves unknown event fields (forward-tolerant)', () 
   const e = normalizeTurnEvent({ turn_id: 't', event: { t: 'progress', future_metric: 42, cost_tokens: '150' } });
   assert.equal(e.event.future_metric, 42);
   assert.equal(e.event.cost_tokens, 150); // coerced number
+});
+
+test('room admission persists an immediate acknowledgement before sidecar planning', () => {
+  const source = fs.readFileSync(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8');
+  const createStart = source.indexOf("t: 'governed_room_canary'");
+  const ack = source.indexOf("t: 'turn_ack'", createStart);
+  const dispatch = source.indexOf('const dispatchSidecar = async () =>', createStart);
+  assert.ok(createStart >= 0 && ack > createStart && dispatch > ack);
+  assert.match(source.slice(ack, dispatch), /immediate:\s*true/);
+  assert.match(source.slice(createStart, dispatch), /identity_source:\s*'authenticated_user'/);
 });

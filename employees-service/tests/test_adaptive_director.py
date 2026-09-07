@@ -1104,6 +1104,70 @@ def test_gmail_connection_exposes_only_its_available_read_tools(monkeypatch):
     assert "docs_get" not in director._connector_routes
 
 
+def test_legal_review_floor_requires_rendered_public_sources_mailbox_and_review():
+    director, _events = _director(
+        message=("Audit public website, Instagram, and outreach emails against GDPR evidence. "
+                 "Identify overstated claims."),
+        room_kind="legal_finance",
+        company_brief=("Company: Singulance\nWebsite: https://singulancelabs.com\n"
+                       "Instagram: https://instagram.com/singulancelabs"),
+        execution_profile={
+            "profile_id": "legal_finance.review.v1",
+            "review_policy": "reviewer",
+            "external_evidence_query": "GDPR marketing claim requirements regulator guidance",
+        },
+    )
+    director._connector_routes = {
+        "gmail_search": ("google", "gmail", "gmail_search"),
+    }
+    plan = director._apply_research_floor({
+        "turn_mode": "task", "web_query": None, "connector_calls": [],
+        "seo_audit_url": None, "needs_debate": False,
+        "response_depth": "focused", "collaboration_intensity": "standard",
+    })
+
+    assert plan["research_floor"] == "legal_finance.review.v1"
+    assert plan["web_query"] == "GDPR marketing claim requirements regulator guidance"
+    assert plan["extract_urls"] == [
+        "https://singulancelabs.com", "https://instagram.com/singulancelabs",
+    ]
+    assert plan["extract_page_limit"] == 25
+    assert plan["needs_debate"] is True
+    assert plan["collaboration_intensity"] == "deep"
+    assert plan["connector_calls"] == [{
+        "name": "gmail_search",
+        "args": {"query": "in:sent (GDPR OR privacy OR compliance OR data)", "max": 20},
+    }]
+    assert len(plan["research_acceptance_criteria"]) == 4
+    assert any("regulator" in criterion for criterion in plan["research_acceptance_criteria"])
+    assert any("invented" in criterion for criterion in plan["research_acceptance_criteria"])
+
+
+def test_rendered_url_extract_persists_source_receipt_on_the_board(monkeypatch):
+    director, events = _director(message="Audit our public claims")
+
+    async def crawl(*_args, **_kwargs):
+        return {
+            "status": "succeeded", "job_id": "job-1", "runtime_used": "playwright-service",
+            "results": [{
+                "url": "https://example.test/privacy", "title": "Privacy",
+                "content": "We process personal data under documented purposes.",
+                "rendered": True, "status": 200,
+            }],
+        }
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.web_crawl_emulated", crawl)
+    result = json.loads(asyncio.run(director._url_extract(["https://example.test/privacy"], 5)))
+
+    assert result["job_id"] == "job-1"
+    assert result["runtime"] == "playwright-service"
+    assert result["page_count"] == 1
+    assert "documented purposes" in director.blackboard[0]
+    receipt = next(event for event in events if event.get("t") == "url_extract")
+    assert receipt["tool"] == "playwright_extract"
+    assert receipt["sources"][0]["url"] == "https://example.test/privacy"
+
+
 def test_worker_discussion_keeps_the_complete_bounded_note():
     note = (
         "Recommendation: prioritize compliance-led messaging. "

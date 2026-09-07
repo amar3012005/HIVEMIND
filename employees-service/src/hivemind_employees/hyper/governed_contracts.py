@@ -52,7 +52,7 @@ def build_task_skills(plan: Dict[str, Any], output_family: str) -> List[Dict[str
             skill_ids.append("cold.email")
         if prospecting.get("call"):
             skill_ids.append("cold.call")
-    if plan.get("web_query") or plan.get("seo_audit_url"):
+    if plan.get("web_query") or plan.get("seo_audit_url") or plan.get("extract_urls"):
         skill_ids.append("research.web")
     if output_family == "presentation":
         skill_ids.append("investor.deck")

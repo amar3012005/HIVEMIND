@@ -10,8 +10,9 @@ RUN npm init -y >/dev/null 2>&1 \
     && npx esbuild node_modules/@cloudflare/realtimekit/dist/index.es.js --bundle --format=esm --platform=browser --outfile=/app/realtimekit.bundle.js \
     && npx "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" install-browser chrome-for-testing
 COPY server.mjs /app/server.mjs
+COPY external-mcp-gateway.mjs /app/external-mcp-gateway.mjs
 RUN mkdir -p /app/sessions
 EXPOSE 8931 8932
-# server.mjs keeps the existing isolated MCP endpoint on :8931 and adds a
-# scoped, lazy-browser crawl API on :8932 for deterministic SEO capabilities.
+# The stock MCP child binds only to loopback. Authenticated external MCP and
+# the bounded crawl/session API are exposed through server.mjs on :8932.
 CMD ["node","/app/server.mjs"]

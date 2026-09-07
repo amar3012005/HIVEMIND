@@ -8,10 +8,12 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { chromium } from 'playwright';
+import { createExternalMcpGateway, isExternalMcpPath } from './external-mcp-gateway.mjs';
 
 const HOST = '0.0.0.0';
 const PORT = Number(process.env.PLAYWRIGHT_CRAWL_PORT || 8932);
 const TOKEN = String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '');
+const EXTERNAL_MCP_ENABLED = String(process.env.PLAYWRIGHT_EXTERNAL_MCP_ENABLED || '').toLowerCase() === 'true';
 const MAX_BODY_BYTES = 64 * 1024;
 // A verified Day-2 Brand DNA report carries a bounded five-image evidence
 // mosaic as data URIs. 180 KiB rejects that legitimate artifact before the
@@ -258,8 +260,15 @@ function requireInteractiveSession(id, orgId) {
 
 const mcp = spawn('npx', [
   '--no-install', '@playwright/mcp', '--headless', '--browser', 'chromium',
-  '--host', HOST, '--port', '8931', '--isolated', '--allowed-hosts', '*',
+  '--host', '127.0.0.1', '--port', '8931', '--isolated',
+  '--allowed-hosts', '127.0.0.1,localhost', '--block-service-workers',
 ], { stdio: 'inherit', env: process.env });
+
+const externalMcpGateway = createExternalMcpGateway({
+  enabled: EXTERNAL_MCP_ENABLED,
+  token: TOKEN,
+  maxConnections: Math.max(1, Number(process.env.PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS || 12)),
+});
 
 function secureEqual(left, right) {
   const a = Buffer.from(String(left || ''));
@@ -736,6 +745,7 @@ async function renderPdf(input) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (isExternalMcpPath(req.url)) return externalMcpGateway(req, res);
   // The headless facilitator page is the sole caller. Its per-bridge,
   // unguessable capability is validated by streamRoomPcm; the TARA service key
   // never reaches a participant browser or the Realtime room.

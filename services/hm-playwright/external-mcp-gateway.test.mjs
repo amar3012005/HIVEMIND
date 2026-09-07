@@ -26,6 +26,7 @@ test('external MCP gateway rejects missing origin authorization', async (t) => {
 
 test('external MCP gateway streams authenticated MCP responses and strips credentials', async (t) => {
   const upstream = http.createServer((req, res) => {
+    assert.equal(req.headers.host, '127.0.0.1');
     assert.equal(req.headers.authorization, undefined);
     assert.equal(req.headers['cf-access-client-secret'], undefined);
     assert.equal(req.headers['mcp-session-id'], 'session-1');

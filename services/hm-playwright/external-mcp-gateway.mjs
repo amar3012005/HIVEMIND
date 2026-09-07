@@ -36,8 +36,11 @@ async function readBoundedBody(req, limit) {
   return Buffer.concat(chunks);
 }
 
-function upstreamHeaders(headers, bodyLength, upstreamHost, upstreamPort) {
-  const result = { ...headers, host: `${upstreamHost}:${upstreamPort}` };
+function upstreamHeaders(headers, bodyLength, upstreamHost) {
+  // @playwright/mcp validates the Host header against --allowed-hosts without
+  // normalizing ports. Forward only the loopback hostname; the TCP port is
+  // already fixed independently on the request socket.
+  const result = { ...headers, host: upstreamHost };
   delete result.authorization;
   delete result.cookie;
   delete result['cf-access-client-secret'];
@@ -92,7 +95,7 @@ export function createExternalMcpGateway({
           port: upstreamPort,
           method: req.method,
           path: req.url,
-          headers: upstreamHeaders(req.headers, body.length, upstreamHost, upstreamPort),
+          headers: upstreamHeaders(req.headers, body.length, upstreamHost),
         }, (upstreamResponse) => {
           res.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
           upstreamResponse.pipe(res);

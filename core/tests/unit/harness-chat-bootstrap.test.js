@@ -28,13 +28,16 @@ test('bootstrap requires the existing authenticated control-plane session', asyn
 test('bootstrap derives tenant scope, mints admission, and never creates a session row', async () => {
   const res = responseCapture();
   const redisValues = new Map();
-  const prisma = new Proxy({}, { get() { throw new Error('bootstrap must not access session persistence'); } });
+  const prisma = {
+    userOrganization: { findUnique: async () => ({ userId }) },
+    harnessSession: new Proxy({}, { get() { throw new Error('bootstrap must not access session persistence'); } }),
+  };
   await handleHarnessChatBootstrapRoute({
     req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap', prisma,
     requireSession: async () => ({ session: { orgId, userId } }),
     parseBody: async () => ({}), jsonResponse,
     env: {
-      HIVE_HARNESS_TICKET_SECRET: 'test-harness-secret',
+      HIVE_HARNESS_TICKET_SECRET: 'test-harness-ticket-secret-at-least-32-bytes',
       HIVE_HARNESS_EDGE_EVAL_SECRET: 'test-edge-secret',
       HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag',
     },
@@ -57,7 +60,8 @@ test('bootstrap derives tenant scope, mints admission, and never creates a sessi
 test('bootstrap fails closed to legacy without a ticket when edge evaluation fails', async () => {
   const res = responseCapture();
   await handleHarnessChatBootstrapRoute({
-    req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap', prisma: {},
+    req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap',
+    prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
     requireSession: async () => ({ session: { orgId, userId } }), parseBody: async () => ({}), jsonResponse,
     env: { HIVE_HARNESS_EDGE_EVAL_SECRET: 'edge-secret', HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag' },
     fetchImpl: async () => { throw new Error('flagship unavailable'); },

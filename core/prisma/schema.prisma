@@ -44,6 +44,7 @@ model User {
   webhookSubscriptions      WebhookSubscription[]
   identities                UserIdentity[]
   authIdentityEvents        AuthIdentityEvent[]
+  harnessSessions           HarnessSession[]
 
   @@map("users")
 }
@@ -213,6 +214,7 @@ model Organization {
   pageIndexNodes               PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig                    OrgSsoConfig?      @relation("OrgSsoConfig")
   hyperRooms                   HyperRoom[]        @relation("OrgHyperRooms")
+  harnessSessions              HarnessSession[]
   seoSearchConsoleProperties   SeoSearchConsoleProperty[] @relation("OrgSeoSearchConsoleProperties")
   seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
   zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
@@ -5438,6 +5440,76 @@ model DurableChatContinuation {
   @@index([orgId, userId, status, expiresAt], map: "durable_chat_continuations_tenant_status_idx")
   @@index([status, leaseExpiresAt], map: "durable_chat_continuations_recovery_idx")
   @@map("durable_chat_continuations")
+}
+
+/// Session state owned and created by the native DeepSeek Harness Postgres
+/// provider. The control plane only mints short-lived admission tickets and
+/// must never create rows in this table.
+model HarnessSession {
+  id                    String                @id @db.VarChar(180)
+  orgId                 String                @map("org_id") @db.Uuid
+  userId                String                @map("user_id") @db.Uuid
+  projectId             String?               @map("project_id") @db.Uuid
+  profile               String                @default("hivemind-chat") @db.VarChar(64)
+  variation             String                @db.VarChar(16)
+  status                String                @default("active") @db.VarChar(24)
+  /// Exact native Harness SessionHeader JSON envelope.
+  header                Json                  @default("{}") @db.JsonB
+  title                 String?               @db.VarChar(500)
+  revision              BigInt                @default(0)
+  inheritedEventCount   BigInt                @default(0) @map("inherited_event_count")
+  eventCount            BigInt                @default(0) @map("event_count")
+  createdAt             DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  closedAt              DateTime?             @map("closed_at") @db.Timestamptz(6)
+  org                   Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user                  User                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  events                HarnessSessionEvent[]
+  leases                HarnessSessionLease[]
+
+  @@unique([id, orgId, userId], map: "harness_sessions_tenant_identity_key")
+  @@index([orgId, userId, updatedAt(sort: Desc)], map: "harness_sessions_tenant_updated_idx")
+  @@index([status, updatedAt(sort: Desc)], map: "harness_sessions_status_updated_idx")
+  @@index([orgId, projectId, updatedAt(sort: Desc)], map: "harness_sessions_project_updated_idx")
+  @@map("harness_sessions")
+}
+
+model HarnessSessionEvent {
+  id        BigInt         @id @default(autoincrement())
+  sessionId String         @map("session_id") @db.VarChar(180)
+  orgId     String         @map("org_id") @db.Uuid
+  userId    String         @map("user_id") @db.Uuid
+  sequence  BigInt
+  eventType String         @map("event_type") @db.VarChar(80)
+  /// Exact native Harness SessionEvent JSON envelope. The typed columns above
+  /// are indexed projections and must be verified against this source value.
+  payload   Json           @default("{}") @db.JsonB
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  session   HarnessSession @relation(fields: [sessionId, orgId, userId], references: [id, orgId, userId], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([sessionId, sequence], map: "harness_session_events_session_sequence_key")
+  @@index([sessionId, createdAt], map: "harness_session_events_session_created_idx")
+  @@index([orgId, userId, createdAt], map: "harness_session_events_tenant_created_idx")
+  @@map("harness_session_events")
+}
+
+model HarnessSessionLease {
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId    String         @unique(map: "harness_session_leases_session_key") @map("session_id") @db.VarChar(180)
+  orgId        String         @map("org_id") @db.Uuid
+  userId       String         @map("user_id") @db.Uuid
+  holderId     String         @map("holder_id") @db.Text
+  tokenHash    String         @unique @map("token_hash") @db.Char(64)
+  fencingToken BigInt         @default(0) @map("fencing_token")
+  acquiredAt   DateTime       @default(now()) @map("acquired_at") @db.Timestamptz(6)
+  heartbeatAt  DateTime       @default(now()) @map("heartbeat_at") @db.Timestamptz(6)
+  expiresAt    DateTime       @map("expires_at") @db.Timestamptz(6)
+  releasedAt   DateTime?      @map("released_at") @db.Timestamptz(6)
+  session      HarnessSession @relation(fields: [sessionId, orgId, userId], references: [id, orgId, userId], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expiresAt], map: "harness_session_leases_recovery_idx")
+  @@index([orgId, userId, expiresAt], map: "harness_session_leases_tenant_expiry_idx")
+  @@map("harness_session_leases")
 }
 
 model PromotionCode {

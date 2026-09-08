@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-harness-chat",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-08",
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "routes": [{ "pattern": "chat.singulancelabs.com", "custom_domain": true }],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "HIVE_HARNESS_CHAT_FLAG": "hivemind_harness_chat_v1"
+  },
+  "flagship": [{
+    "binding": "FLAGS",
+    "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+    "remote": true
+  }],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/__hivemind/*"]
+  }
+}

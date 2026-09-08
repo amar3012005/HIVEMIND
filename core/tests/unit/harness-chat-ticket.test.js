@@ -7,7 +7,7 @@ import {
   verifyHarnessAdmissionTicket,
 } from '../../src/harness-chat/admission-ticket.js';
 
-const secret = 'test-only-distinct-harness-ticket-secret';
+const secret = 'test-only-distinct-harness-ticket-secret-at-least-32-bytes';
 const orgId = '67503d34-97e9-49a8-8c52-8ee30cc7603e';
 const userId = '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
 const otherOrgId = '77503d34-97e9-49a8-8c52-8ee30cc7603e';

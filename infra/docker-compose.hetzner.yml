@@ -147,12 +147,14 @@ services:
     image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:local}
     profiles: ["harness-chat"]
     restart: unless-stopped
+    read_only: true
     mem_limit: 2g
     memswap_limit: 3g
     cpus: 2.0
     environment:
       NODE_ENV: production
       PORT: "3080"
+      DSH_HOME: /tmp/dsh
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}
       PGOPTIONS: -c search_path=hivemind,public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -170,6 +172,8 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     ports:
       - "127.0.0.1:${HIVE_HARNESS_PORT:-3080}:3080"
     healthcheck:

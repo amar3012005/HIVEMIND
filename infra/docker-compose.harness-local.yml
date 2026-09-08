@@ -23,6 +23,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3080"
+      DSH_HOME: /tmp/dsh
       DATABASE_URL: ${HIVEMIND_HARNESS_DATABASE_URL:?HIVEMIND_HARNESS_DATABASE_URL is required}
       PGOPTIONS: -c search_path=hivemind,public
       REDIS_URL: ${HIVEMIND_HARNESS_REDIS_URL:?HIVEMIND_HARNESS_REDIS_URL is required}

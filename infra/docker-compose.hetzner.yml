@@ -121,8 +121,8 @@ services:
       # HIVE Harness Chat admission. These two secrets are deliberately
       # distinct from session/master credentials and from one another.
       HIVE_HARNESS_FLAG_URL: ${HIVE_HARNESS_FLAG_URL:-https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat}
-      HIVE_HARNESS_EDGE_EVAL_SECRET: ${HIVE_HARNESS_EDGE_EVAL_SECRET:?HIVE_HARNESS_EDGE_EVAL_SECRET is required}
-      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?HIVE_HARNESS_TICKET_SECRET is required}
+      HIVE_HARNESS_EDGE_EVAL_SECRET: ${HIVE_HARNESS_EDGE_EVAL_SECRET:-}
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
       HIVE_HARNESS_EMBED_URL: ${HIVE_HARNESS_EMBED_URL:-https://chat.singulancelabs.com/embed}
       HIVE_HARNESS_PREVIEW_EMBED_URL: ${HIVE_HARNESS_PREVIEW_EMBED_URL:-https://chat.singulancelabs.com/preview}
       HIVE_HARNESS_LEGACY_EMBED_URL: ${HIVE_HARNESS_LEGACY_EMBED_URL:-https://next.singulancelabs.com/hivemind/app/chat}
@@ -144,8 +144,7 @@ services:
   # persistence stack is permitted.
   harness-runner:
     image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:local}
-    container_name: hm-harness-chat
-    env_file: [../.env]
+    profiles: ["harness-chat"]
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 3g
@@ -153,10 +152,14 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3080"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind&connection_limit=20&pool_timeout=30
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}
+      PGOPTIONS: -c search_path=hivemind,public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVE_HARNESS_PROFILE: hivemind-chat
-      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?HIVE_HARNESS_TICKET_SECRET is required}
+      # The opt-in runner rejects an empty secret at startup; keeping Compose
+      # interpolation optional means deployments without this profile remain valid.
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
+      HIVE_HARNESS_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-https://next.singulancelabs.com}
       HIVE_HARNESS_RLS_ORG_SETTING: app.hivemind_org_id
       HIVE_HARNESS_RLS_USER_SETTING: app.hivemind_user_id
     depends_on:

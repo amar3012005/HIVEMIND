@@ -7,7 +7,8 @@
   "routes": [{ "pattern": "chat.singulancelabs.com", "custom_domain": true }],
   "vars": {
     "ENVIRONMENT": "production",
-    "HIVE_HARNESS_CHAT_FLAG": "hivemind_harness_chat_v1"
+    "RUNNER_ORIGIN": "https://harness-chat-origin.singulancelabs.com",
+    "HIVE_HARNESS_PARENT_ORIGINS": "https://next.singulancelabs.com,https://hivemind.singulancelabs.com"
   },
   "flagship": [{
     "binding": "FLAGS",
@@ -18,6 +19,6 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/__hivemind/*"]
+    "run_worker_first": ["/__hivemind/*", "/api/*", "/health"]
   }
 }

@@ -14,11 +14,10 @@ export async function evaluateHarnessChatFlag({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const url = new URL(endpoint);
-    url.searchParams.set('org_id', orgId);
-    url.searchParams.set('user_id', userId);
-    const response = await fetchImpl(url, {
-      headers: { accept: 'application/json', authorization: `Bearer ${secret}` },
+    const response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json', authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ org_id: orgId, user_id: userId }),
       signal: controller.signal,
     });
     if (!response.ok) return legacy;

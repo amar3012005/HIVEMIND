@@ -28,4 +28,8 @@ test('canonical Compose uses the dedicated Harness image and existing Postgres a
   assert.match(service, /postgres: \{ condition: service_healthy \}/);
   assert.match(service, /redis: \{ condition: service_started \}/);
   assert.doesNotMatch(service, /^\s{2}(postgres|redis):/m);
+  assert.doesNotMatch(service, /container_name:/);
+  assert.doesNotMatch(service, /env_file:/);
+  assert.match(service, /profiles: \["harness-chat"\]/);
+  assert.match(service, /PGOPTIONS: -c search_path=hivemind,public/);
 });

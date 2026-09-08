@@ -133,6 +133,7 @@ import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
+import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import {
   createOutputJob, prepareOutputJob, renderOutputJob, validateOutputJob,
@@ -248,6 +249,7 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     'https://admin.hivemind.singulancelabs.com',
     'https://singulancelabs.com',
     'https://www.singulancelabs.com',
+    'https://chat.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -3543,6 +3545,17 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  if (await handleHarnessChatBootstrapRoute({
+    req,
+    res,
+    pathname,
+    prisma,
+    requireSession,
+    parseBody,
+    jsonResponse,
+    redisConfig: CONFIG,
+  })) return;
 
   // A lifecycle worker may reissue exactly one newer Day-0 renderer for an
   // existing owner. This is not a browser API: it requires the same service

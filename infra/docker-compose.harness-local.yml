@@ -1,0 +1,14 @@
+# Local source-build overlay for the native HIVE Harness runner.
+# Usage (from the HIVE repository root):
+#   HIVEMIND_HARNESS_SOURCE=/absolute/path/to/deepseek-harness \
+#   HIVEMIND_HARNESS_COMMIT_HASH=$(git -C "$HIVEMIND_HARNESS_SOURCE" rev-parse HEAD) \
+#   docker compose -p hivemind-dev -f infra/docker-compose.hetzner.yml \
+#     -f infra/docker-compose.harness-local.yml --profile harness-chat \
+#     up -d --build --no-deps harness-runner
+services:
+  harness-runner:
+    build:
+      context: ${HIVEMIND_HARNESS_SOURCE:-../../deepseek-harness-profile-persistence}
+      dockerfile: deploy/hivemind-chat/Dockerfile
+      args:
+        DSH_CLIENT_COMMIT_HASH: ${HIVEMIND_HARNESS_COMMIT_HASH:-local-development}

@@ -1,10 +1,12 @@
-# Local source-build overlay for the native HIVE Harness runner.
-# Usage (from the HIVE repository root):
+# Standalone local source-build for the native HIVE Harness runner. It joins
+# the existing HIVE network and creates no PostgreSQL or Redis service.
+#
+# Usage:
 #   HIVEMIND_HARNESS_SOURCE=/absolute/path/to/deepseek-harness \
 #   HIVEMIND_HARNESS_COMMIT_HASH=$(git -C "$HIVEMIND_HARNESS_SOURCE" rev-parse HEAD) \
-#   docker compose -p hivemind-dev -f infra/docker-compose.hetzner.yml \
-#     -f infra/docker-compose.harness-local.yml --profile harness-chat \
-#     up -d --build --no-deps harness-runner
+#   docker compose -f infra/docker-compose.harness-local.yml up -d --build
+name: hivemind-harness-local
+
 services:
   harness-runner:
     build:
@@ -12,3 +14,38 @@ services:
       dockerfile: deploy/hivemind-chat/Dockerfile
       args:
         DSH_CLIENT_COMMIT_HASH: ${HIVEMIND_HARNESS_COMMIT_HASH:-local-development}
+    image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:local}
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 2.0
+    environment:
+      NODE_ENV: production
+      PORT: "3080"
+      DATABASE_URL: ${HIVEMIND_HARNESS_DATABASE_URL:?HIVEMIND_HARNESS_DATABASE_URL is required}
+      PGOPTIONS: -c search_path=hivemind,public
+      REDIS_URL: ${HIVEMIND_HARNESS_REDIS_URL:?HIVEMIND_HARNESS_REDIS_URL is required}
+      HIVE_HARNESS_PROFILE: hivemind-chat
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?HIVE_HARNESS_TICKET_SECRET is required}
+      HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:?HIVE_HARNESS_RUNNER_SERVICE_SECRET is required}
+      HIVEMIND_CONTROL_PLANE_URL: ${HIVEMIND_HARNESS_CONTROL_PLANE_URL:?HIVEMIND_HARNESS_CONTROL_PLANE_URL is required}
+      HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-http://localhost:13081}
+      CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:?CLOUDFLARE_API_KEY is required}
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    networks:
+      - hive-runtime
+    ports:
+      - "127.0.0.1:${HIVE_HARNESS_PORT:-13081}:3080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+networks:
+  hive-runtime:
+    external: true
+    name: ${HIVEMIND_DOCKER_NETWORK:-hivemind-dev_default}

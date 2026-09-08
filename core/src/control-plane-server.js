@@ -133,6 +133,7 @@ import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
+import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import {
   createOutputJob, prepareOutputJob, renderOutputJob, validateOutputJob,
@@ -248,6 +249,7 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     'https://admin.hivemind.singulancelabs.com',
     'https://singulancelabs.com',
     'https://www.singulancelabs.com',
+    'https://chat.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -3633,6 +3635,16 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (await handleHarnessChatBootstrapRoute({
+    req,
+    res,
+    pathname,
+    prisma,
+    requireSession,
+    parseBody,
+    jsonResponse,
+    redisConfig: CONFIG,
+  })) return;
   // Cloudflare Workflows is the durable clock for Day 1. These endpoints are
   // deliberately service-token-only; browser sessions and generic API keys
   // cannot start complimentary autonomous work or deliver lifecycle mail.

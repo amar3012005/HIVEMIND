@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   consumeHarnessAdmissionTicket,
   mintHarnessAdmissionTicket,
@@ -44,4 +45,15 @@ test('registered ticket nonce is consumed exactly once with GETDEL semantics', a
   const claims = await consumeHarnessAdmissionTicket(redis, minted.ticket, { secret, nowMs, expectedOrgId: orgId });
   assert.equal(claims.variation, 'preview');
   await assert.rejects(() => consumeHarnessAdmissionTicket(redis, minted.ticket, { secret, nowMs }), /ticket_already_consumed/);
+});
+
+test('ticket encoding matches the cross-repository v1 vector', async () => {
+  const vector = JSON.parse(await readFile(new URL('../fixtures/harness-ticket-v1.json', import.meta.url), 'utf8'));
+  const minted = mintHarnessAdmissionTicket({
+    secret: vector.secret,
+    nowMs: vector.now_ms,
+    ...vector.input,
+  });
+  assert.equal(minted.ticket, vector.ticket);
+  assert.deepEqual(minted.claims, vector.claims);
 });

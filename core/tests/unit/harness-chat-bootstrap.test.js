@@ -41,9 +41,10 @@ test('bootstrap derives tenant scope, mints admission, and never creates a sessi
       HIVE_HARNESS_EDGE_EVAL_SECRET: 'test-edge-secret',
       HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag',
     },
-    fetchImpl: async (url) => {
-      assert.equal(url.searchParams.get('org_id'), orgId);
-      assert.equal(url.searchParams.get('user_id'), userId);
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'https://edge.example/flag');
+      assert.equal(init.method, 'POST');
+      assert.deepEqual(JSON.parse(init.body), { org_id: orgId, user_id: userId });
       return new Response(JSON.stringify({ key: 'hivemind_harness_chat_v1', source: 'cloudflare-flagship', variation: 'harness', evaluation_id: 'eval-1' }));
     },
     getRedis: async () => ({

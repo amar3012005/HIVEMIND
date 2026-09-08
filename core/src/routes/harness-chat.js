@@ -4,6 +4,8 @@ import {
   registerHarnessTicketNonce,
 } from '../harness-chat/admission-ticket.js';
 import { evaluateHarnessChatFlag } from '../harness-chat/flag-client.js';
+import { verifyHarnessRunnerServiceToken } from '../harness-chat/runner-service-token.js';
+import { getInternalApiKey } from '../security/internal-auth.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -15,6 +17,106 @@ function embedUrl(mode, env) {
 
 function legacyResponse(env, flagReceipt) {
   return { mode: 'legacy', embed_url: embedUrl('legacy', env), flag_receipt: flagReceipt };
+}
+
+const INTERNAL_PREFIX = '/internal/v1/harness-chat/core';
+const CORE_ROUTES = new Map([
+  ['/api/profile', new Set(['GET'])],
+  ['/api/profiles', new Set(['GET'])],
+  ['/api/profiles/context', new Set(['GET'])],
+  ['/api/recall', new Set(['POST'])],
+  ['/api/memories', new Set(['POST'])],
+]);
+
+async function readJsonBounded(response, maxBytes = 2 * 1024 * 1024) {
+  const text = await response.text();
+  if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('upstream_response_too_large');
+  try { return JSON.parse(text); } catch { throw new Error('upstream_invalid_json'); }
+}
+
+async function scopedHyperagentProfiles(prisma, claims) {
+  const membership = await prisma.userOrganization.findUnique({
+    where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } },
+    select: { role: true, isActive: true },
+  });
+  if (!membership?.isActive) return null;
+  const teamRows = await prisma.teamMember.findMany({
+    where: { userId: claims.sub, team: { orgId: claims.org_id } }, select: { teamId: true },
+  }).catch(() => []);
+  const admin = membership.role === 'owner' || membership.role === 'admin';
+  const rows = await prisma.digitalEmployee.findMany({
+    where: {
+      orgId: claims.org_id, archivedAt: null,
+      ...(admin ? {} : { OR: [
+        { scope: 'organization' },
+        { scope: 'team', teamId: { in: teamRows.map(row => row.teamId) } },
+        { createdBy: claims.sub },
+      ] }),
+    },
+    select: {
+      id: true, name: true, slug: true, avatarUrl: true, teamId: true, scope: true,
+      status: true, persona: true, roleArchetype: true, peerReviewTargets: true,
+      tools: true, policyRules: true,
+    },
+    orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+  });
+  return {
+    ok: true, contract: 'hivemind.hyperagent-profiles.v1',
+    scope: { user_id: claims.sub, org_id: claims.org_id, authority: 'server-derived-from-harness-ticket' },
+    profiles: rows.map(row => ({
+      id: row.id, name: row.name, slug: row.slug, avatar_url: row.avatarUrl || null,
+      team_id: row.teamId || null, scope: row.scope, status: row.status, persona: row.persona,
+      role_archetype: row.roleArchetype || null, peer_review_targets: row.peerReviewTargets || [],
+      tools: row.tools || [], policy_rules: row.policyRules || {}, persona_contract: null,
+      active_prompt_version: null,
+    })),
+    count: rows.length, generated_at: new Date().toISOString(),
+  };
+}
+
+async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl }) {
+  if (!pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
+  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  let claims;
+  try {
+    claims = verifyHarnessRunnerServiceToken(bearer, { secret: env.HIVE_HARNESS_RUNNER_SERVICE_SECRET });
+  } catch {
+    jsonResponse(res, { error: 'Unauthorized' }, 401); return true;
+  }
+  const membership = await prisma?.userOrganization?.findUnique?.({
+    where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
+  });
+  if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (claims.project_id) {
+    const project = await prisma?.project?.findFirst?.({ where: { id: claims.project_id, orgId: claims.org_id }, select: { id: true } });
+    if (!project) { jsonResponse(res, { error: 'Project not found' }, 404); return true; }
+  }
+  const corePath = pathname.slice(INTERNAL_PREFIX.length);
+  if (corePath === '/v1/hyperagents/profiles' && req.method === 'GET') {
+    const result = await scopedHyperagentProfiles(prisma, claims);
+    jsonResponse(res, result || { error: 'Organization membership required' }, result ? 200 : 403);
+    return true;
+  }
+  if (!CORE_ROUTES.get(corePath)?.has(req.method)) {
+    jsonResponse(res, { error: 'Harness core operation not allowed' }, 404); return true;
+  }
+  let body;
+  if (req.method !== 'GET') body = await parseBody(req).catch(() => null);
+  const target = new URL(corePath, redisConfig.coreApiBaseUrl);
+  if (corePath === '/api/memories') target.searchParams.set('sync', 'true');
+  const upstream = await fetchImpl(target, {
+    method: req.method,
+    headers: {
+      accept: 'application/json', authorization: `Bearer ${getInternalApiKey()}`,
+      'x-hm-user-id': claims.sub, 'x-hm-org-id': claims.org_id,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    redirect: 'manual', signal: AbortSignal.timeout(20_000),
+  });
+  const payload = await readJsonBounded(upstream);
+  jsonResponse(res, payload, upstream.status);
+  return true;
 }
 
 export async function handleHarnessChatBootstrapRoute({
@@ -30,6 +132,7 @@ export async function handleHarnessChatBootstrapRoute({
   env = process.env,
   fetchImpl = globalThis.fetch,
 } = {}) {
+  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl })) return true;
   if (pathname !== '/v1/harness-chat/bootstrap' || req.method !== 'POST') return false;
   const current = await requireSession(req, res);
   if (!current) return true;

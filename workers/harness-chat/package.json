@@ -1,0 +1,16 @@
+{
+  "name": "hivemind-harness-chat-edge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.1",
+    "wrangler": "^4.32.0"
+  }
+}

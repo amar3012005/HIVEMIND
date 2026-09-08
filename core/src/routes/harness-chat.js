@@ -38,6 +38,14 @@ export async function handleHarnessChatBootstrapRoute({
     jsonResponse(res, { error: 'Authenticated tenant scope required' }, 403);
     return true;
   }
+  const membership = await prisma?.userOrganization?.findUnique?.({
+    where: { userId_orgId: { userId, orgId } },
+    select: { userId: true },
+  });
+  if (!membership) {
+    jsonResponse(res, { error: 'Organization membership required' }, 403);
+    return true;
+  }
 
   const body = await parseBody(req).catch(() => ({}));
   const projectId = typeof body?.project_id === 'string' ? body.project_id : null;
@@ -67,8 +75,15 @@ export async function handleHarnessChatBootstrapRoute({
   }
 
   try {
+    const ticketSecret = env.HIVE_HARNESS_TICKET_SECRET;
+    if ([env.HIVEMIND_CONTROL_PLANE_SESSION_SECRET, env.SESSION_SECRET, env.HIVEMIND_MASTER_API_KEY]
+      .filter(Boolean).includes(ticketSecret)) {
+      const error = new Error('ticket_secret_not_distinct');
+      error.code = 'ticket_secret_not_distinct';
+      throw error;
+    }
     const minted = mintHarnessAdmissionTicket({
-      secret: env.HIVE_HARNESS_TICKET_SECRET,
+      secret: ticketSecret,
       userId,
       orgId,
       projectId,

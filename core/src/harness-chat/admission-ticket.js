@@ -48,6 +48,7 @@ export function mintHarnessAdmissionTicket({
   jti = crypto.randomUUID(),
 } = {}) {
   if (!secret) fail('ticket_secret_unavailable');
+  if (Buffer.byteLength(secret, 'utf8') < 32) fail('ticket_secret_too_short');
   if (!UUID_RE.test(userId) || !UUID_RE.test(orgId) || (projectId && !UUID_RE.test(projectId))) fail('invalid_ticket_scope');
   if (!VARIATIONS.has(variation)) fail('invalid_ticket_variation');
   const iat = Math.floor(nowMs / 1000);
@@ -75,6 +76,7 @@ export function verifyHarnessAdmissionTicket(ticket, {
   nowMs = Date.now(),
 } = {}) {
   if (!secret) fail('ticket_secret_unavailable');
+  if (Buffer.byteLength(secret, 'utf8') < 32) fail('ticket_secret_too_short');
   const parts = String(ticket || '').split('.');
   if (parts.length !== 3) fail('invalid_ticket');
   const [encodedHeader, encodedClaims, suppliedSignature] = parts;

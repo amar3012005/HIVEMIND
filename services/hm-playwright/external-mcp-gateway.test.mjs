@@ -120,6 +120,7 @@ test('capture discovery exposes navigation before capture unless the current pag
 
   const currentPageCapture = searchBrowserCapabilities({ intent: 'capture this page', family: 'capture', mode: 'read' });
   assert.ok(!currentPageCapture.some((tool) => tool.name === 'browser_navigate'));
+  assert.equal(currentPageCapture[0].name, 'browser_take_screenshot');
 });
 
 test('fact-finding page capture inspects the rendered page before taking its image', () => {

@@ -89,6 +89,10 @@ function captureNeedsNavigation(intent, family) {
  */
 function captureNeedsInspection(intent, family) {
   if (family !== 'capture') return false;
+  // A request to capture the already selected page has no discovery phase.
+  // Treating the word "current" as a fact query would add an unnecessary
+  // snapshot and encourage the caller to keep browsing after the image exists.
+  if (/\b(?:this|current|already[-\s]?open)\s+page\b/i.test(String(intent || ''))) return false;
   return /\b(?:find|identify|latest|newest|current|which|what|read|extract|details?|information)\b/i.test(String(intent || ''));
 }
 

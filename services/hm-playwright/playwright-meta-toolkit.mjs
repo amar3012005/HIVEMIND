@@ -78,7 +78,12 @@ function relevance(tool, intentWords) {
  */
 function captureNeedsNavigation(intent, family) {
   if (family !== 'capture') return false;
-  return !/\b(?:this|current|already[-\s]?open)\s+page\b/i.test(String(intent || ''));
+  const request = String(intent || '');
+  // An explicit absolute URL is an unambiguous page-selection instruction.
+  // It must take precedence over wording such as "current page" in requests
+  // like "Open https://example.com and capture the current page".
+  if (/\bhttps?:\/\/[^\s/$.?#][^\s]*/i.test(request)) return true;
+  return !/\b(?:this|current|already[-\s]?open)\s+page\b/i.test(request);
 }
 
 /**

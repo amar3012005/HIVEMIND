@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { planMetaMcpRequest, renderCapabilitySearchResponse } from './playwright-meta-toolkit.mjs';
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_MAX_CONNECTIONS = 12;
@@ -139,7 +138,7 @@ async function projectScreenshotAttachment(rpc, artifactRoot) {
 export function isExternalMcpPath(value) {
   try {
     const pathname = new URL(value, 'http://localhost').pathname;
-    return pathname === '/mcp' || pathname.startsWith('/mcp/') || pathname === '/meta/mcp';
+    return pathname === '/mcp' || pathname.startsWith('/mcp/');
   } catch {
     return false;
   }
@@ -152,7 +151,6 @@ export function createExternalMcpGateway({
   upstreamPort = 8931,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   maxConnections = DEFAULT_MAX_CONNECTIONS,
-  metaMode = 'read',
   artifactRoot = process.cwd(),
   logger = (event) => console.log(JSON.stringify(event)),
 } = {}) {
@@ -176,23 +174,17 @@ export function createExternalMcpGateway({
     logger({ event: 'playwright.mcp.started', request_id: requestId, client });
     try {
       const body = await readBoundedBody(req, maxBodyBytes);
-      const metaRequest = new URL(req.url, 'http://localhost').pathname === '/meta/mcp';
-      let upstreamBody = body;
-      let capabilitySearch = null;
+      // The gateway deliberately does not decide which Playwright action the
+      // model should take. It proxies the official server's schema and actions
+      // unchanged; the Harness progressive tool layer owns discovery. We only
+      // identify a screenshot call so its generated artifact can become a
+      // standard MCP image block for native Harness rendering.
       let screenshotExecution = false;
-      if (metaRequest && body.length) {
+      if (body.length) {
         try {
           const request = JSON.parse(body.toString('utf8'));
-          screenshotExecution = request?.params?.name === 'browser_execute'
-            && request?.params?.arguments?.action === 'browser_take_screenshot';
-          const plan = planMetaMcpRequest(request, { mode: metaMode });
-          if (plan.local) {
-            send(res, 200, plan.local);
-            logger({ event: 'playwright.mcp.completed', request_id: requestId, client, duration_ms: Date.now() - startedAt });
-            return;
-          }
-          capabilitySearch = plan.capabilitySearch || null;
-          upstreamBody = Buffer.from(JSON.stringify(capabilitySearch?.request || plan.upstream));
+          screenshotExecution = request?.method === 'tools/call'
+            && request?.params?.name === 'browser_take_screenshot';
         } catch (error) {
           send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'invalid_json' } });
           return;
@@ -203,23 +195,16 @@ export function createExternalMcpGateway({
           host: upstreamHost,
           port: upstreamPort,
           method: req.method,
-          path: metaRequest ? '/mcp' : req.url,
-          headers: upstreamHeaders(req.headers, upstreamBody.length, upstreamHost),
+          path: req.url,
+          headers: upstreamHeaders(req.headers, body.length, upstreamHost),
         }, (upstreamResponse) => {
-          if (capabilitySearch || screenshotExecution) {
+          if (screenshotExecution) {
             const chunks = [];
             upstreamResponse.on('data', (chunk) => chunks.push(chunk));
             upstreamResponse.once('end', async () => {
               try {
                 const upstreamRpc = parseUpstreamRpc(Buffer.concat(chunks));
-                const response = capabilitySearch
-                  ? renderCapabilitySearchResponse(
-                    capabilitySearch.request.id,
-                    upstreamRpc,
-                    capabilitySearch,
-                    { mode: metaMode },
-                  )
-                  : await projectScreenshotAttachment(upstreamRpc, artifactRoot);
+                const response = await projectScreenshotAttachment(upstreamRpc, artifactRoot);
                 send(res, 200, response);
               } catch {
                 send(res, 502, { error: 'mcp_upstream_invalid_response' });
@@ -248,7 +233,7 @@ export function createExternalMcpGateway({
           else res.destroy();
           resolve();
         });
-        if (upstreamBody.length) upstream.write(upstreamBody);
+        if (body.length) upstream.write(body);
         upstream.end();
       });
       logger({ event: 'playwright.mcp.completed', request_id: requestId, client, duration_ms: Date.now() - startedAt });

@@ -262,8 +262,11 @@ function requireInteractiveSession(id, orgId) {
   return entry;
 }
 
-const mcp = spawn('npx', [
-  '--no-install', '@playwright/mcp', '--headless', '--browser', 'chromium',
+const mcp = spawn('node', [
+  // `/app/cli.js` is supplied by the digest-pinned official `mcp/playwright`
+  // image. Avoid npx resolution so the running MCP implementation is exactly
+  // the audited image revision.
+  '/app/cli.js', '--headless', '--browser', 'chromium',
   '--host', '127.0.0.1', '--port', '8931', '--isolated',
   '--allowed-hosts', '127.0.0.1,localhost', '--block-service-workers',
 ], { stdio: 'inherit', env: process.env });
@@ -271,7 +274,6 @@ const mcp = spawn('npx', [
 const externalMcpGateway = createExternalMcpGateway({
   enabled: EXTERNAL_MCP_ENABLED,
   token: EXTERNAL_MCP_TOKEN,
-  metaMode: EXTERNAL_MCP_META_MODE,
   maxConnections: Math.max(1, Number(process.env.PLAYWRIGHT_EXTERNAL_MCP_MAX_CONNECTIONS || 12)),
 });
 

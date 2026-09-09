@@ -150,6 +150,9 @@ test('live capability response preserves the evidence-before-image plan order', 
   }, { intent: 'find the latest item and show a screenshot', family: 'capture' });
   const payload = JSON.parse(result.result.content[0].text);
   assert.deepEqual(payload.plan.ordered_actions, ['browser_navigate', 'browser_snapshot', 'browser_take_screenshot']);
+  assert.deepEqual(payload.execution.allowed_actions, payload.plan.ordered_actions);
+  assert.ok(payload.execution.rules.some((rule) => rule.includes('absolute HTTPS origin')));
+  assert.ok(payload.execution.rules.some((rule) => rule.includes('Do not call scripts')));
 });
 
 test('meta execution rewrites certified actions and blocks interactive or unsafe tools', () => {

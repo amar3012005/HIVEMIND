@@ -30,7 +30,7 @@ const CATALOG_BY_NAME = new Map(TOOL_CATALOG.map((tool) => [tool.name, tool]));
 export const META_TOOL_SCHEMAS = Object.freeze([
   Object.freeze({
     name: 'browser_capabilities',
-    description: 'Find the smallest relevant Playwright capability set for a browser task. Call this before browser_execute.',
+    description: 'Find the smallest relevant Playwright capability set for a browser task. Call this before browser_execute; follow the returned ordered plan exactly and do not invent browser actions or scripts.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -44,7 +44,7 @@ export const META_TOOL_SCHEMAS = Object.freeze([
   }),
   Object.freeze({
     name: 'browser_execute',
-    description: 'Execute one certified Playwright capability returned by browser_capabilities. Unsafe code tools are never available.',
+    description: 'Execute one certified Playwright capability returned by the most recent browser_capabilities result. Use only an exact returned action; never substitute a script, guessed browser action, or unlisted interaction. Unsafe code tools are never available.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -159,6 +159,24 @@ function toolResult(value) {
   return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
 }
 
+/**
+ * Compact, general execution contract carried with each capability receipt.
+ * This is not a website-specific route table: it tells the caller how to use
+ * the schemas it just received without wasting a turn on an unambiguous public
+ * website or hallucinating a browser primitive that was never granted.
+ */
+function executionContract(orderedActions) {
+  return {
+    allowed_actions: orderedActions,
+    rules: [
+      'Execute only an action in allowed_actions, in listed order. Do not call scripts or invent browser_* actions.',
+      'For an unambiguous named public website, navigate directly to its canonical absolute HTTPS origin; ask only when the site is ambiguous.',
+      'browser_navigate requires an absolute URL. Resolve a relative URL discovered in a snapshot against the current page URL before navigating.',
+      'Use browser_snapshot before drawing facts from a page. After a requested screenshot succeeds, stop unless further browser work is necessary to answer the request.',
+    ],
+  };
+}
+
 export function planMetaMcpRequest(request, { mode = 'read' } = {}) {
   if (request?.method === 'tools/list') {
     return { local: { jsonrpc: '2.0', id: request.id, result: { tools: META_TOOL_SCHEMAS } } };
@@ -208,9 +226,10 @@ export function renderCapabilitySearchResponse(requestId, upstreamResponse, sear
       plan: requiresNavigation
         ? {
           ordered_actions: orderedActions,
-          note: 'Navigate to the requested page before performing the requested capture.',
+          note: 'Follow this ordered plan before responding; it prevents blank captures and grounds page facts before an image is taken.',
         }
         : undefined,
+      execution: executionContract(orderedActions),
     }),
   };
 }

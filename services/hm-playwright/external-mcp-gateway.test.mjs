@@ -120,6 +120,13 @@ test('capture discovery exposes navigation before capture unless the current pag
   assert.ok(!currentPageCapture.some((tool) => tool.name === 'browser_navigate'));
 });
 
+test('fact-finding page capture inspects the rendered page before taking its image', () => {
+  const steps = searchBrowserCapabilities({
+    intent: 'find the latest item on the product page and show me a screenshot', family: 'capture', mode: 'read',
+  }).map((tool) => tool.name);
+  assert.deepEqual(steps.slice(0, 3), ['browser_navigate', 'browser_snapshot', 'browser_take_screenshot']);
+});
+
 test('capability response includes an ordered browser plan for page capture', () => {
   const result = renderCapabilitySearchResponse(12, {
     jsonrpc: '2.0', id: 12, result: { tools: [
@@ -129,6 +136,18 @@ test('capability response includes an ordered browser plan for page capture', ()
   }, { intent: 'capture the product page', family: 'capture' });
   const payload = JSON.parse(result.result.content[0].text);
   assert.deepEqual(payload.plan.ordered_actions, ['browser_navigate', 'browser_take_screenshot']);
+});
+
+test('live capability response preserves the evidence-before-image plan order', () => {
+  const result = renderCapabilitySearchResponse(13, {
+    jsonrpc: '2.0', id: 13, result: { tools: [
+      { name: 'browser_navigate', inputSchema: { type: 'object' } },
+      { name: 'browser_take_screenshot', inputSchema: { type: 'object' } },
+      { name: 'browser_snapshot', inputSchema: { type: 'object' } },
+    ] },
+  }, { intent: 'find the latest item and show a screenshot', family: 'capture' });
+  const payload = JSON.parse(result.result.content[0].text);
+  assert.deepEqual(payload.plan.ordered_actions, ['browser_navigate', 'browser_snapshot', 'browser_take_screenshot']);
 });
 
 test('meta execution rewrites certified actions and blocks interactive or unsafe tools', () => {

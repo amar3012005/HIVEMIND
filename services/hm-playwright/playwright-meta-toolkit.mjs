@@ -81,6 +81,30 @@ function captureNeedsNavigation(intent, family) {
   return !/\b(?:this|current|already[-\s]?open)\s+page\b/i.test(String(intent || ''));
 }
 
+/**
+ * When the request asks the browser to establish a fact, a screenshot alone
+ * is not evidence for the response. Put the structured page inspection ahead
+ * of the visual artifact so the caller can ground its answer in the rendered
+ * page, while leaving a simple "capture this page" request lightweight.
+ */
+function captureNeedsInspection(intent, family) {
+  if (family !== 'capture') return false;
+  return /\b(?:find|identify|latest|newest|current|which|what|read|extract|details?|information)\b/i.test(String(intent || ''));
+}
+
+function orderedCaptureCapabilities(capabilities, { intent, family }) {
+  if (family !== 'capture') return capabilities;
+  const byName = new Map(capabilities.map((tool) => [tool.name, tool]));
+  const ordered = [];
+  if (captureNeedsNavigation(intent, family)) ordered.push('browser_navigate');
+  if (captureNeedsInspection(intent, family)) ordered.push('browser_snapshot');
+  ordered.push('browser_take_screenshot');
+
+  const planned = ordered.map((name) => byName.get(name)).filter(Boolean);
+  const remaining = capabilities.filter((tool) => !planned.includes(tool));
+  return [...planned, ...remaining].slice(0, 8);
+}
+
 export function searchBrowserCapabilities({ intent, family, mode = 'read' } = {}) {
   const intentWords = words(intent);
   const selected = TOOL_CATALOG
@@ -93,18 +117,21 @@ export function searchBrowserCapabilities({ intent, family, mode = 'read' } = {}
     .slice(0, 8)
     .map(({ score: _score, ...tool }) => tool);
 
-  if (!captureNeedsNavigation(intent, family) || selected.some((tool) => tool.name === 'browser_navigate')) {
-    return selected;
-  }
-
   const navigate = CATALOG_BY_NAME.get('browser_navigate');
-  return navigate === undefined ? selected : [navigate, ...selected].slice(0, 8);
+  const withNavigation = captureNeedsNavigation(intent, family)
+    && !selected.some((tool) => tool.name === 'browser_navigate')
+    && navigate !== undefined
+    ? [navigate, ...selected].slice(0, 8)
+    : selected;
+  return orderedCaptureCapabilities(withNavigation, { intent, family });
 }
 
 export function selectLiveBrowserCapabilities(tools, { intent, family, mode = 'read' } = {}) {
-  const selected = new Set(searchBrowserCapabilities({ intent, family, mode }).map((tool) => tool.name));
-  return (Array.isArray(tools) ? tools : [])
-    .filter((tool) => selected.has(tool?.name))
+  const selected = searchBrowserCapabilities({ intent, family, mode });
+  const available = new Map((Array.isArray(tools) ? tools : []).map((tool) => [tool?.name, tool]));
+  return selected
+    .map(({ name }) => available.get(name))
+    .filter(Boolean)
     .map((tool) => {
       const policy = CATALOG_BY_NAME.get(tool.name);
       return {

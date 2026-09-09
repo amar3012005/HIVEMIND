@@ -1,0 +1,20 @@
+{
+  "name": "hivemind-browser-run-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.38.0"
+  },
+  "dependencies": {
+    "@cloudflare/playwright": "^1.3.6",
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "agents": "^0.0.109",
+    "zod": "^3.25.76"
+  }
+}

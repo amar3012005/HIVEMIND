@@ -180,6 +180,11 @@ test('current entity lookup requires one source resolution before browser naviga
   assert.equal(payload.execution.source_resolution.mode, 'resolve_before_navigation');
   assert.equal(payload.execution.source_resolution.required_before_navigation, true);
   assert.equal(payload.execution.source_resolution.query, 'find the cost of the latest DJI Avata from its official website');
+  assert.deepEqual(payload.execution.source_resolution.next_call, {
+    tool: 'web_search',
+    arguments: { queries: ['find the cost of the latest DJI Avata from its official website'] },
+    select: 'Choose the most relevant authoritative result, preserve its exact absolute URL, then call browser_capabilities again with that URL in the intent.',
+  });
   assert.ok(payload.execution.source_resolution.constraints.some((rule) => rule.includes('Do not repeatedly guess URL paths')));
 });
 
@@ -194,6 +199,7 @@ test('an explicit absolute URL can proceed without mandatory source resolution',
   assert.equal(payload.execution.source_resolution.mode, 'direct_when_unambiguous');
   assert.equal(payload.execution.source_resolution.required_before_navigation, false);
   assert.equal(payload.execution.source_resolution.query, undefined);
+  assert.equal(payload.execution.source_resolution.next_call, undefined);
 });
 
 test('meta execution rewrites certified actions and blocks interactive or unsafe tools', () => {

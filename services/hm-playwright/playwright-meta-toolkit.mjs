@@ -119,6 +119,13 @@ function sourceResolutionContract(intent) {
     mode: needsResolution ? 'resolve_before_navigation' : 'direct_when_unambiguous',
     required_before_navigation: needsResolution,
     query: needsResolution ? request : undefined,
+    next_call: needsResolution
+      ? {
+        tool: 'web_search',
+        arguments: { queries: [request] },
+        select: 'Choose the most relevant authoritative result, preserve its exact absolute URL, then call browser_capabilities again with that URL in the intent.',
+      }
+      : undefined,
     constraints: [
       'Use one focused natural-language web or research search when the current entity or authoritative absolute URL is uncertain.',
       'When the user requests an official source, prefer a result on the named organization domain and preserve the exact returned absolute URL.',

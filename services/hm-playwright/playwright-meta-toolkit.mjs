@@ -101,6 +101,33 @@ function captureNeedsInspection(intent, family) {
   return /\b(?:find|identify|latest|newest|current|which|what|read|extract|details?|information)\b/i.test(String(intent || ''));
 }
 
+function hasAbsoluteUrl(intent) {
+  return /\bhttps?:\/\/[^\s/$.?#][^\s]*/i.test(String(intent || ''));
+}
+
+/**
+ * Resolve changing entities and unknown destinations before browser execution.
+ * This remains provider-neutral: the caller may use any available web or
+ * research search tool, while Playwright remains the rendered-page evidence
+ * provider once an authoritative absolute URL is known.
+ */
+function sourceResolutionContract(intent) {
+  const request = String(intent || '').trim();
+  const currentEntity = /\b(?:latest|newest|current|price|cost|availability|version|model)\b/i.test(request);
+  const needsResolution = !hasAbsoluteUrl(request) && currentEntity;
+  return {
+    mode: needsResolution ? 'resolve_before_navigation' : 'direct_when_unambiguous',
+    required_before_navigation: needsResolution,
+    query: needsResolution ? request : undefined,
+    constraints: [
+      'Use one focused natural-language web or research search when the current entity or authoritative absolute URL is uncertain.',
+      'When the user requests an official source, prefer a result on the named organization domain and preserve the exact returned absolute URL.',
+      'Do not repeatedly guess URL paths. If navigation lands on a 404, support page, homepage, login page, irrelevant redirect, or a page without the requested fact, stop URL guessing and resolve once through search.',
+      'After resolution, use Playwright on the selected authoritative URL for rendered-page evidence. Treat the latest successful page receipt as authoritative over pretrained knowledge.',
+    ],
+  };
+}
+
 function orderedCaptureCapabilities(capabilities, { intent, family }) {
   if (family !== 'capture') return capabilities;
   const byName = new Map(capabilities.map((tool) => [tool.name, tool]));
@@ -174,9 +201,10 @@ function toolResult(value) {
  * the schemas it just received without wasting a turn on an unambiguous public
  * website or hallucinating a browser primitive that was never granted.
  */
-function executionContract(orderedActions) {
+function executionContract(orderedActions, intent) {
   return {
     allowed_actions: orderedActions,
+    source_resolution: sourceResolutionContract(intent),
     capture_defaults: orderedActions.includes('browser_take_screenshot')
       ? {
         type: 'png',
@@ -251,7 +279,7 @@ export function renderCapabilitySearchResponse(requestId, upstreamResponse, sear
           note: 'Follow this ordered plan before responding; it prevents blank captures and grounds page facts before an image is taken.',
         }
         : undefined,
-      execution: executionContract(orderedActions),
+      execution: executionContract(orderedActions, search.intent),
     }),
   };
 }

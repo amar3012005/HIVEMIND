@@ -169,6 +169,33 @@ test('live capability response preserves the evidence-before-image plan order', 
   assert.ok(payload.execution.rules.some((rule) => rule.includes('browser_session_reset')));
 });
 
+test('current entity lookup requires one source resolution before browser navigation', () => {
+  const result = renderCapabilitySearchResponse(14, {
+    jsonrpc: '2.0', id: 14, result: { tools: [
+      { name: 'browser_navigate', inputSchema: { type: 'object' } },
+      { name: 'browser_snapshot', inputSchema: { type: 'object' } },
+    ] },
+  }, { intent: 'find the cost of the latest DJI Avata from its official website', family: 'inspect' });
+  const payload = JSON.parse(result.result.content[0].text);
+  assert.equal(payload.execution.source_resolution.mode, 'resolve_before_navigation');
+  assert.equal(payload.execution.source_resolution.required_before_navigation, true);
+  assert.equal(payload.execution.source_resolution.query, 'find the cost of the latest DJI Avata from its official website');
+  assert.ok(payload.execution.source_resolution.constraints.some((rule) => rule.includes('Do not repeatedly guess URL paths')));
+});
+
+test('an explicit absolute URL can proceed without mandatory source resolution', () => {
+  const result = renderCapabilitySearchResponse(15, {
+    jsonrpc: '2.0', id: 15, result: { tools: [
+      { name: 'browser_navigate', inputSchema: { type: 'object' } },
+      { name: 'browser_snapshot', inputSchema: { type: 'object' } },
+    ] },
+  }, { intent: 'read the price at https://example.com/products/widget', family: 'inspect' });
+  const payload = JSON.parse(result.result.content[0].text);
+  assert.equal(payload.execution.source_resolution.mode, 'direct_when_unambiguous');
+  assert.equal(payload.execution.source_resolution.required_before_navigation, false);
+  assert.equal(payload.execution.source_resolution.query, undefined);
+});
+
 test('meta execution rewrites certified actions and blocks interactive or unsafe tools', () => {
   const allowed = planMetaMcpRequest({
     jsonrpc: '2.0', id: 8, method: 'tools/call',

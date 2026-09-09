@@ -111,6 +111,26 @@ test('meta capability search progressively selects a bounded relevant subset', (
   assert.ok(tools.every((tool) => tool.risk !== 'write' && tool.risk !== 'unsafe'));
 });
 
+test('capture discovery exposes navigation before capture unless the current page is explicit', () => {
+  const pageCapture = searchBrowserCapabilities({ intent: 'capture the product page', family: 'capture', mode: 'read' });
+  assert.equal(pageCapture[0].name, 'browser_navigate');
+  assert.ok(['browser_take_screenshot', 'browser_snapshot'].includes(pageCapture[1].name));
+
+  const currentPageCapture = searchBrowserCapabilities({ intent: 'capture this page', family: 'capture', mode: 'read' });
+  assert.ok(!currentPageCapture.some((tool) => tool.name === 'browser_navigate'));
+});
+
+test('capability response includes an ordered browser plan for page capture', () => {
+  const result = renderCapabilitySearchResponse(12, {
+    jsonrpc: '2.0', id: 12, result: { tools: [
+      { name: 'browser_navigate', inputSchema: { type: 'object' } },
+      { name: 'browser_take_screenshot', inputSchema: { type: 'object' } },
+    ] },
+  }, { intent: 'capture the product page', family: 'capture' });
+  const payload = JSON.parse(result.result.content[0].text);
+  assert.deepEqual(payload.plan.ordered_actions, ['browser_navigate', 'browser_take_screenshot']);
+});
+
 test('meta execution rewrites certified actions and blocks interactive or unsafe tools', () => {
   const allowed = planMetaMcpRequest({
     jsonrpc: '2.0', id: 8, method: 'tools/call',

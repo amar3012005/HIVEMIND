@@ -70,9 +70,20 @@ function relevance(tool, intentWords) {
   return score;
 }
 
+/**
+ * A capture is meaningful only after the relevant page has been selected.
+ * Keep the current-page case compact, but advertise navigation as an explicit
+ * prerequisite for a page capture so a meta-tool client cannot silently
+ * screenshot its initial blank page.
+ */
+function captureNeedsNavigation(intent, family) {
+  if (family !== 'capture') return false;
+  return !/\b(?:this|current|already[-\s]?open)\s+page\b/i.test(String(intent || ''));
+}
+
 export function searchBrowserCapabilities({ intent, family, mode = 'read' } = {}) {
   const intentWords = words(intent);
-  return TOOL_CATALOG
+  const selected = TOOL_CATALOG
     .filter((tool) => tool.risk !== 'unsafe')
     .filter((tool) => mode === 'interactive' || tool.risk !== 'write')
     .filter((tool) => !family || tool.family === family)
@@ -81,6 +92,13 @@ export function searchBrowserCapabilities({ intent, family, mode = 'read' } = {}
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
     .slice(0, 8)
     .map(({ score: _score, ...tool }) => tool);
+
+  if (!captureNeedsNavigation(intent, family) || selected.some((tool) => tool.name === 'browser_navigate')) {
+    return selected;
+  }
+
+  const navigate = CATALOG_BY_NAME.get('browser_navigate');
+  return navigate === undefined ? selected : [navigate, ...selected].slice(0, 8);
 }
 
 export function selectLiveBrowserCapabilities(tools, { intent, family, mode = 'read' } = {}) {
@@ -152,5 +170,20 @@ export function planMetaMcpRequest(request, { mode = 'read' } = {}) {
 export function renderCapabilitySearchResponse(requestId, upstreamResponse, search, { mode = 'read' } = {}) {
   if (upstreamResponse?.error) return { jsonrpc: '2.0', id: requestId, error: upstreamResponse.error };
   const capabilities = selectLiveBrowserCapabilities(upstreamResponse?.result?.tools, { ...search, mode });
-  return { jsonrpc: '2.0', id: requestId, result: toolResult({ mode, capabilities }) };
+  const orderedActions = capabilities.map((capability) => capability.name);
+  const requiresNavigation = orderedActions[0] === 'browser_navigate' && orderedActions.length > 1;
+  return {
+    jsonrpc: '2.0',
+    id: requestId,
+    result: toolResult({
+      mode,
+      capabilities,
+      plan: requiresNavigation
+        ? {
+          ordered_actions: orderedActions,
+          note: 'Navigate to the requested page before performing the requested capture.',
+        }
+        : undefined,
+    }),
+  };
 }

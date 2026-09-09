@@ -1,19 +1,19 @@
-# hm-playwright — server-side headless browser as an MCP server (@playwright/mcp).
-# The "web automation" backend that needs NO user install: agents use it for public
-# sites / research. (The other backend, Kimi WebBridge, drives the user's REAL
-# logged-in browser.) Internal-only; reached by the Hermes gateway on the docker net.
-FROM mcr.microsoft.com/playwright:v1.49.1-noble
+# hm-playwright — authenticated gateway over Docker's official Playwright MCP
+# image.  Pin the published image digest rather than reproducing the server
+# with an unrelated Playwright base and a floating npm install.
+FROM mcp/playwright@sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52d7d995f8d1492
+USER root
 WORKDIR /app
-ARG PLAYWRIGHT_MCP_VERSION=0.0.78
 RUN npm init -y >/dev/null 2>&1 \
-    && npm i "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "@cloudflare/realtimekit@2.0.2" esbuild \
+    && npm i "@cloudflare/realtimekit@2.0.2" esbuild \
     && npx esbuild node_modules/@cloudflare/realtimekit/dist/index.es.js --bundle --format=esm --platform=browser --outfile=/app/realtimekit.bundle.js \
-    && npx "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" install-browser chrome-for-testing
-COPY server.mjs /app/server.mjs
-COPY external-mcp-gateway.mjs /app/external-mcp-gateway.mjs
-COPY playwright-meta-toolkit.mjs /app/playwright-meta-toolkit.mjs
-RUN mkdir -p /app/sessions
+    && mkdir -p /app/sessions \
+    && chown -R node:node /app
+COPY --chown=node:node server.mjs /app/server.mjs
+COPY --chown=node:node external-mcp-gateway.mjs /app/external-mcp-gateway.mjs
+USER node
 EXPOSE 8931 8932
 # The stock MCP child binds only to loopback. Authenticated external MCP and
 # the bounded crawl/session API are exposed through server.mjs on :8932.
-CMD ["node","/app/server.mjs"]
+ENTRYPOINT []
+CMD ["node", "/app/server.mjs"]

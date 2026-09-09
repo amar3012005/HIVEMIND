@@ -35,19 +35,17 @@ token. Cloudflare Access service-token headers are added only when Access is ena
 When Access is enabled, add `CF-Access-Client-Id` and
 `CF-Access-Client-Secret` to the same headers object.
 
-For token-efficient agents, prefer the progressive meta-tool endpoint:
+The gateway deliberately exposes the official server's original MCP schemas
+at `/mcp`; it does not rewrite actions into a generic `browser_execute` tool
+or decide a browser plan. A consuming runtime that needs a compact first turn
+must perform progressive discovery in its own scoped tool layer, then reveal
+only the exact official tools needed for that task. This keeps native MCP
+receipts, approval annotations, and future Playwright tool additions intact.
 
-```text
-https://playwright-mcp.singulancelabs.com/meta/mcp
-```
-
-It advertises only `browser_capabilities` and `browser_execute`. The first
-returns a bounded relevant subset of the 24 underlying tools; the second
-executes exactly one returned capability. Its default `read` policy blocks
-form input, clicks, uploads, dialog handling, and every unsafe JavaScript/code
-surface. Set `PLAYWRIGHT_EXTERNAL_MCP_META_MODE=interactive` only for a
-separately approved client boundary. `browser_evaluate` and
-`browser_run_code_unsafe` remain forbidden in every meta mode.
+When the official screenshot tool returns a relative generated-file link, the
+gateway turns that bounded artifact into a standard MCP image block. Harness
+then persists and renders it in the chat natively; no vision-model request is
+required merely to display it.
 
 Never place these values in Git, shared chat, command history, screenshots, or
 logs. Store them in the consuming agent's secret manager. Revoke one Access

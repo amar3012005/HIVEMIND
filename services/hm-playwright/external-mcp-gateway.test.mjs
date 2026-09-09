@@ -144,6 +144,13 @@ test('capability response includes an ordered browser plan for page capture', ()
   }, { intent: 'capture the product page', family: 'capture' });
   const payload = JSON.parse(result.result.content[0].text);
   assert.deepEqual(payload.plan.ordered_actions, ['browser_navigate', 'browser_take_screenshot']);
+  assert.deepEqual(payload.execution.capture_defaults, {
+    type: 'png', scale: 'css', fullPage: false,
+    note: 'Use this render-safe viewport capture unless the user explicitly needs a full-page or device-scale image.',
+  });
+  assert.ok(payload.execution.rules.some((rule) => rule.includes('not a chat attachment')));
+  assert.ok(payload.execution.rules.some((rule) => rule.includes('Never guess a selector')));
+  assert.ok(payload.execution.rules.some((rule) => rule.includes('retry once as a viewport PNG at CSS scale')));
 });
 
 test('live capability response preserves the evidence-before-image plan order', () => {

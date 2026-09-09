@@ -177,11 +177,23 @@ function toolResult(value) {
 function executionContract(orderedActions) {
   return {
     allowed_actions: orderedActions,
+    capture_defaults: orderedActions.includes('browser_take_screenshot')
+      ? {
+        type: 'png',
+        scale: 'css',
+        fullPage: false,
+        note: 'Use this render-safe viewport capture unless the user explicitly needs a full-page or device-scale image.',
+      }
+      : undefined,
     rules: [
       'Execute only an action in allowed_actions, in listed order. Do not call scripts or invent browser_* actions.',
       'For an unambiguous named public website, navigate directly to its canonical absolute HTTPS origin; ask only when the site is ambiguous.',
       'browser_navigate requires an absolute URL. Resolve a relative URL discovered in a snapshot against the current page URL before navigating.',
       'A transport failure can replace the browser session. If browser_execute reports browser_session_reset, call browser_capabilities with the original intent and restart its ordered plan from browser_navigate; never treat an about:blank capture as task output.',
+      'A snapshot filename is browser-session evidence, not a chat attachment or general filesystem path. Use snapshot content and exact element references returned by the browser; never pass its filename to another file tool.',
+      'For an element action or element screenshot, use an exact target reference returned by the latest browser_snapshot. Never guess a selector. Omit target for a viewport screenshot.',
+      'Prefer type=png, scale=css, fullPage=false for an ordinary screenshot. Use fullPage or scale=device only when the request needs it and the resulting dimensions fit the renderer.',
+      'When a capture exceeds a renderer limit, retry once as a viewport PNG at CSS scale. Do not repeat discovery, save another snapshot, or guess an element target.',
       'Use browser_snapshot before drawing facts from a page. After a requested screenshot succeeds, stop unless further browser work is necessary to answer the request.',
     ],
   };

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { createExternalMcpGateway } from './external-mcp-gateway.mjs';
@@ -204,4 +206,43 @@ test('meta MCP endpoint serves compact discovery and rewrites execution upstream
   });
   assert.equal(execution.status, 200);
   assert.equal((await execution.json()).result.content[0].text, 'snapshot');
+});
+
+test('meta screenshot execution returns a native MCP image block for a bounded local artifact', async (t) => {
+  const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-playwright-artifact-'));
+  const image = Buffer.from('89504e470d0a1a0a', 'hex');
+  fs.writeFileSync(path.join(artifactRoot, 'capture.png'), image);
+  t.after(() => fs.rmSync(artifactRoot, { recursive: true, force: true }));
+
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    assert.equal(body.params.name, 'browser_take_screenshot');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      jsonrpc: '2.0', id: body.id,
+      result: { content: [{ type: 'text', text: '### Result\n- [Screenshot](./capture.png)' }] },
+    }));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const gateway = http.createServer(createExternalMcpGateway({
+    enabled: true, token: 'secret', upstreamPort, artifactRoot, logger: () => {},
+  }));
+  const port = await listen(gateway);
+  t.after(() => gateway.close());
+
+  const execution = await fetch(`http://127.0.0.1:${port}/meta/mcp`, {
+    method: 'POST', headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'browser_execute', arguments: { action: 'browser_take_screenshot', arguments: {} } },
+    }),
+  });
+  assert.equal(execution.status, 200);
+  const payload = await execution.json();
+  assert.deepEqual(payload.result.content.at(-1), {
+    type: 'image', mimeType: 'image/png', data: image.toString('base64'),
+  });
 });

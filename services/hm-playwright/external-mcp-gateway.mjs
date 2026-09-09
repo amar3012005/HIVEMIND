@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { planMetaMcpRequest, renderCapabilitySearchResponse } from './playwright-meta-toolkit.mjs';
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -58,6 +60,55 @@ function parseUpstreamRpc(body) {
   return JSON.parse(data ? data.slice(5).trim() : text);
 }
 
+/**
+ * The stock Playwright MCP server persists screenshots beside its process and
+ * returns a relative Markdown link.  That link is useful to an interactive
+ * terminal, but it is neither durable nor renderable by a remote MCP client.
+ *
+ * Turn only a certified screenshot result into the standard MCP image block.
+ * The path is deliberately constrained to a single relative filename beneath
+ * the configured artifact root: an upstream tool response must never become
+ * filesystem authority for the gateway.
+ */
+async function projectScreenshotAttachment(rpc, artifactRoot) {
+  const content = rpc?.result?.content;
+  if (!Array.isArray(content)) return rpc;
+  const link = content
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text.match(/\[[^\]]+\]\(\.\/([^/()\\]+\.(?:png|jpe?g|webp|gif))\)/i)?.[1])
+    .find(Boolean);
+  if (link === undefined) return rpc;
+
+  const resolvedRoot = path.resolve(artifactRoot);
+  const artifactPath = path.resolve(resolvedRoot, link);
+  if (!artifactPath.startsWith(`${resolvedRoot}${path.sep}`)) return rpc;
+
+  let data;
+  try {
+    data = await fs.readFile(artifactPath);
+  } catch {
+    return rpc;
+  }
+  // Keep the proxy's bounded-response contract even if an upstream tool is
+  // misconfigured to write a huge artifact.
+  if (data.length === 0 || data.length > 5 * 1024 * 1024) return rpc;
+  const extension = path.extname(link).toLowerCase();
+  const mimeType = extension === '.png'
+    ? 'image/png'
+    : extension === '.webp'
+      ? 'image/webp'
+      : extension === '.gif'
+        ? 'image/gif'
+        : 'image/jpeg';
+  return {
+    ...rpc,
+    result: {
+      ...rpc.result,
+      content: [...content, { type: 'image', data: data.toString('base64'), mimeType }],
+    },
+  };
+}
+
 export function isExternalMcpPath(value) {
   try {
     const pathname = new URL(value, 'http://localhost').pathname;
@@ -75,6 +126,7 @@ export function createExternalMcpGateway({
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   maxConnections = DEFAULT_MAX_CONNECTIONS,
   metaMode = 'read',
+  artifactRoot = process.cwd(),
   logger = (event) => console.log(JSON.stringify(event)),
 } = {}) {
   let active = 0;
@@ -100,9 +152,12 @@ export function createExternalMcpGateway({
       const metaRequest = new URL(req.url, 'http://localhost').pathname === '/meta/mcp';
       let upstreamBody = body;
       let capabilitySearch = null;
+      let screenshotExecution = false;
       if (metaRequest && body.length) {
         try {
           const request = JSON.parse(body.toString('utf8'));
+          screenshotExecution = request?.params?.name === 'browser_execute'
+            && request?.params?.arguments?.action === 'browser_take_screenshot';
           const plan = planMetaMcpRequest(request, { mode: metaMode });
           if (plan.local) {
             send(res, 200, plan.local);
@@ -124,18 +179,21 @@ export function createExternalMcpGateway({
           path: metaRequest ? '/mcp' : req.url,
           headers: upstreamHeaders(req.headers, upstreamBody.length, upstreamHost),
         }, (upstreamResponse) => {
-          if (capabilitySearch) {
+          if (capabilitySearch || screenshotExecution) {
             const chunks = [];
             upstreamResponse.on('data', (chunk) => chunks.push(chunk));
-            upstreamResponse.once('end', () => {
+            upstreamResponse.once('end', async () => {
               try {
                 const upstreamRpc = parseUpstreamRpc(Buffer.concat(chunks));
-                send(res, 200, renderCapabilitySearchResponse(
-                  capabilitySearch.request.id,
-                  upstreamRpc,
-                  capabilitySearch,
-                  { mode: metaMode },
-                ));
+                const response = capabilitySearch
+                  ? renderCapabilitySearchResponse(
+                    capabilitySearch.request.id,
+                    upstreamRpc,
+                    capabilitySearch,
+                    { mode: metaMode },
+                  )
+                  : await projectScreenshotAttachment(upstreamRpc, artifactRoot);
+                send(res, 200, response);
               } catch {
                 send(res, 502, { error: 'mcp_upstream_invalid_response' });
               }

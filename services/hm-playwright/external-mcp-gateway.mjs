@@ -73,6 +73,33 @@ function parseUpstreamRpc(body) {
 async function projectScreenshotAttachment(rpc, artifactRoot) {
   const content = rpc?.result?.content;
   if (!Array.isArray(content)) return rpc;
+  const text = content
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n');
+  // A recoverable 502/503/504 rotates the Harness MCP client generation. The
+  // replacement Playwright session begins at about:blank, so a later capture
+  // can be technically successful while containing no requested page. Refuse
+  // that artifact at the browser-provider boundary and give the autonomous
+  // runtime the compact recovery contract; native Harness Tool errors and
+  // receipts remain unchanged.
+  if (/\bPage URL:\s*about:blank\b/i.test(text)) {
+    return {
+      ...rpc,
+      result: {
+        content: [{
+          type: 'text',
+          text: 'browser_session_reset: the recovered browser is at about:blank, so no screenshot was admitted. Call browser_capabilities with the original intent and restart its ordered plan from browser_navigate.',
+        }],
+        isError: true,
+        structuredContent: {
+          code: 'browser_session_reset',
+          retryable: true,
+          restart_from: 'browser_capabilities',
+        },
+      },
+    };
+  }
   const link = content
     .filter((block) => block?.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.match(/\[[^\]]+\]\(\.\/([^/()\\]+\.(?:png|jpe?g|webp|gif))\)/i)?.[1])

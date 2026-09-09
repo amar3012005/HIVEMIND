@@ -181,6 +181,7 @@ function executionContract(orderedActions) {
       'Execute only an action in allowed_actions, in listed order. Do not call scripts or invent browser_* actions.',
       'For an unambiguous named public website, navigate directly to its canonical absolute HTTPS origin; ask only when the site is ambiguous.',
       'browser_navigate requires an absolute URL. Resolve a relative URL discovered in a snapshot against the current page URL before navigating.',
+      'A transport failure can replace the browser session. If browser_execute reports browser_session_reset, call browser_capabilities with the original intent and restart its ordered plan from browser_navigate; never treat an about:blank capture as task output.',
       'Use browser_snapshot before drawing facts from a page. After a requested screenshot succeeds, stop unless further browser work is necessary to answer the request.',
     ],
   };

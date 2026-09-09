@@ -159,6 +159,7 @@ test('live capability response preserves the evidence-before-image plan order', 
   assert.deepEqual(payload.execution.allowed_actions, payload.plan.ordered_actions);
   assert.ok(payload.execution.rules.some((rule) => rule.includes('absolute HTTPS origin')));
   assert.ok(payload.execution.rules.some((rule) => rule.includes('Do not call scripts')));
+  assert.ok(payload.execution.rules.some((rule) => rule.includes('browser_session_reset')));
 });
 
 test('meta execution rewrites certified actions and blocks interactive or unsafe tools', () => {
@@ -254,4 +255,43 @@ test('meta screenshot execution returns a native MCP image block for a bounded l
   assert.deepEqual(payload.result.content.at(-1), {
     type: 'image', mimeType: 'image/png', data: image.toString('base64'),
   });
+});
+
+test('meta screenshot execution rejects a blank page after browser session recovery', async (t) => {
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      jsonrpc: '2.0', id: body.id,
+      result: {
+        content: [{
+          type: 'text',
+          text: '### Result\n- [Screenshot](./blank.png)\n\n### Page\n- Page URL: about:blank',
+        }],
+      },
+    }));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const gateway = http.createServer(createExternalMcpGateway({
+    enabled: true, token: 'secret', upstreamPort, logger: () => {},
+  }));
+  const port = await listen(gateway);
+  t.after(() => gateway.close());
+
+  const execution = await fetch(`http://127.0.0.1:${port}/meta/mcp`, {
+    method: 'POST', headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 4, method: 'tools/call',
+      params: { name: 'browser_execute', arguments: { action: 'browser_take_screenshot', arguments: {} } },
+    }),
+  });
+  assert.equal(execution.status, 200);
+  const payload = await execution.json();
+  assert.equal(payload.result.isError, true);
+  assert.equal(payload.result.structuredContent.code, 'browser_session_reset');
+  assert.ok(payload.result.content[0].text.includes('restart its ordered plan from browser_navigate'));
+  assert.ok(!payload.result.content.some((block) => block.type === 'image'));
 });

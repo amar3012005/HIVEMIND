@@ -1,7 +1,8 @@
 /**
  * Browser Runtime Abstraction for Web Intelligence
  *
- * Primary: Tavily API (search, extract, crawl) - production-grade, no infrastructure
+ * Search primary: Parallel Search API (URL-bearing governed discovery)
+ * Crawl primary: Tavily API (existing extraction/crawl implementation)
  * Secondary: Lightpanda via CDP (local process or cloud websocket) - for edge cases
  * Fallback: Lightweight fetch-based runtime for resiliency
  *
@@ -16,6 +17,7 @@
 import fs from 'fs/promises';
 import { constants as fsConstants } from 'fs';
 import { getTavilyClient } from './tavily-client.js';
+import { getParallelSearchClient } from './parallel-search-client.js';
 import { PlaywrightServiceRuntime } from './playwright-service-runtime.js';
 
 const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
@@ -186,6 +188,8 @@ const _durations = [];
 
 const telemetry = {
   totalJobs: 0,
+  parallelSuccesses: 0,
+  parallelFailures: 0,
   tavilySuccesses: 0,
   tavilyFailures: 0,
   lightpandaSuccesses: 0,
@@ -198,6 +202,8 @@ const telemetry = {
   getSnapshot() {
     return {
       totalJobs: this.totalJobs,
+      parallelSuccesses: this.parallelSuccesses,
+      parallelFailures: this.parallelFailures,
       tavilySuccesses: this.tavilySuccesses,
       tavilyFailures: this.tavilyFailures,
       lightpandaSuccesses: this.lightpandaSuccesses,
@@ -1379,16 +1385,18 @@ class FetchFallbackRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// BrowserRuntime — public facade with Tavily primary + Lightpanda/fetch fallback
+// BrowserRuntime — Parallel discovery + existing crawl and resilient fallbacks
 // ---------------------------------------------------------------------------
 
 export class BrowserRuntime {
-  constructor() {
-    this.primary = new TavilyRuntime();
-    this.firecrawl = new FirecrawlRuntime();
-    this.lightpanda = new LightpandaRuntime();
-    this.playwrightService = new PlaywrightServiceRuntime();
-    this.fallback = new FetchFallbackRuntime();
+  constructor({ searchPrimary, crawlPrimary, firecrawl, lightpanda, playwrightService, fallback } = {}) {
+    this.searchPrimary = searchPrimary || new ParallelSearchRuntime();
+    this.primary = crawlPrimary || new TavilyRuntime();
+    this.firecrawl = firecrawl || new FirecrawlRuntime();
+    this.lightpanda = lightpanda || new LightpandaRuntime();
+    this.playwrightService = playwrightService || new PlaywrightServiceRuntime();
+    this.fallback = fallback || new FetchFallbackRuntime();
+    this._parallelUnavailable = false;
     this._tavilyUnavailable = false;
   }
 
@@ -1396,27 +1404,28 @@ export class BrowserRuntime {
     const start = Date.now();
     telemetry.totalJobs += 1;
     let fallbackApplied = false;
-    let runtimeUsed = this.primary.name;
+    let runtimeUsed = this.searchPrimary.name;
     let result;
-    let primaryError = null;
-    let lightpandaError = null;
+    let primaryErr;
+    let lpErr;
 
-    // Try Tavily first (primary)
-    if (!this._tavilyUnavailable) {
+    // Parallel is the governed discovery provider. It returns canonical URLs
+    // that later extraction or browser lanes can inspect.
+    if (!this._parallelUnavailable) {
       try {
-        result = await withJobTimeout(this.primary.search({ query, domains, limit }));
-        telemetry.tavilySuccesses = (telemetry.tavilySuccesses || 0) + 1;
+        result = await withJobTimeout(this.searchPrimary.search({ query, domains, limit }));
+        telemetry.parallelSuccesses += 1;
         return {
           ...result,
           fallback_applied: false,
           duration_ms: Date.now() - start,
         };
-      } catch (primaryErr) {
-        primaryError = primaryErr;
-        // Check if Tavily is unavailable (auth error or not configured)
+      } catch (error) {
+        primaryErr = error;
+        telemetry.parallelFailures += 1;
         if (primaryErr.isAuthError || primaryErr.message.includes('not configured')) {
-          this._tavilyUnavailable = true;
-          console.warn('[BrowserRuntime] Tavily unavailable, falling back to Lightpanda');
+          this._parallelUnavailable = true;
+          console.warn('[BrowserRuntime] Parallel unavailable, falling back to Lightpanda');
         } else if (primaryErr.isRateLimit || primaryErr.isQuotaExceeded) {
           // Rate limited or quota exceeded — try fallback
           fallbackApplied = true;
@@ -1429,9 +1438,8 @@ export class BrowserRuntime {
       }
     }
 
-    // Tavily is preferred for search; Firecrawl is the evidence-quality
-    // fallback before a browser-assisted approximation.
-    if (fallbackApplied || this._tavilyUnavailable) {
+    // Parallel unavailable or failed — retain existing resilient local fallback.
+    if (fallbackApplied || this._parallelUnavailable) {
       try {
         result = await withJobTimeout(this.firecrawl.search({ query, domains, limit }));
         return { ...result, fallback_applied: true, runtime_used: 'firecrawl', duration_ms: Date.now() - start };
@@ -1448,8 +1456,8 @@ export class BrowserRuntime {
           duration_ms: Date.now() - start,
           errors: result.errors || [],
         };
-      } catch (lpErr) {
-        lightpandaError = lpErr;
+      } catch (error) {
+        lpErr = error;
         if (lpErr._jobTimeout) {
           _recordDuration(Date.now() - start);
           return {
@@ -1483,7 +1491,7 @@ export class BrowserRuntime {
           errors: [classifyError(null, { jobTimeout: true })],
         };
       }
-      throw new Error(`All runtimes failed. Tavily: ${primaryError?.message || 'skipped'}; Lightpanda: ${lightpandaError?.message || 'skipped'}; Fallback: ${fallbackErr.message}`);
+      throw new Error(`All runtimes failed. Parallel: ${primaryErr?.message || 'skipped'}; Lightpanda: ${lpErr?.message || 'skipped'}; Fallback: ${fallbackErr.message}`);
     }
 
     _recordDuration(Date.now() - start);
@@ -1644,6 +1652,21 @@ export class BrowserRuntime {
    */
   isTavilyActive() {
     return !this._tavilyUnavailable && this.primary.client?.isAvailable();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ParallelSearchRuntime — governed URL discovery only
+// ---------------------------------------------------------------------------
+
+export class ParallelSearchRuntime {
+  constructor(client = getParallelSearchClient()) {
+    this.name = 'parallel-search';
+    this.client = client;
+  }
+
+  async search({ query, domains, limit = 10 }) {
+    return this.client.search({ query, domains, limit, objective: query });
   }
 }
 

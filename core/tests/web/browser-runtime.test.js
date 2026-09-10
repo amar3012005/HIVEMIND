@@ -89,4 +89,22 @@ describe('BrowserRuntime', () => {
     const rt = new BrowserRuntime();
     expect(rt).toBeTruthy();
   });
+
+  it('uses the Parallel search provider and preserves URL-bearing results', async () => {
+    const searchPrimary = {
+      name: 'parallel-search',
+      search: async () => ({
+        runtime_used: 'parallel-search',
+        results: [{ title: 'Official source', url: 'https://example.com/', snippet: 'Evidence' }],
+        errors: [],
+      }),
+    };
+    const rt = new BrowserRuntime({ searchPrimary });
+
+    await expect(rt.search({ query: 'current evidence', limit: 1 })).resolves.toMatchObject({
+      runtime_used: 'parallel-search',
+      fallback_applied: false,
+      results: [{ url: 'https://example.com/' }],
+    });
+  });
 });

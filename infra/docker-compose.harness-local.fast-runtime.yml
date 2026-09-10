@@ -1,0 +1,7 @@
+# Rebuild only the runner launcher layer on top of the existing local Harness
+# image. No database, Redis, control-plane, Core, or tunnel definitions live
+# here.
+services:
+  harness-runner:
+    build:
+      dockerfile: deploy/hivemind-chat/Dockerfile.runtime

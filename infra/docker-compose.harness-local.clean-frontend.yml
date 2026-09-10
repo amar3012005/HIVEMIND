@@ -1,0 +1,5 @@
+services:
+  harness-runner:
+    build:
+      context: /Users/amar/deepseek-harness-upstream-clean-preview
+      dockerfile: deploy/hivemind-chat/Dockerfile.frontend-runtime

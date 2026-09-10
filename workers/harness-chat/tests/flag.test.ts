@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateHarnessChatMode, HIVE_HARNESS_CHAT_FLAG_KEY, worker, type Env } from '../src/index';
+import { evaluateHarnessChatMode, worker, type Env } from '../src/index';
+
+const HIVE_HARNESS_CHAT_FLAG_KEY = 'hivemind_harness_chat_v1';
 
 const orgId = '67503d34-97e9-49a8-8c52-8ee30cc7603e';
 const userId = '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
@@ -28,9 +30,32 @@ describe('harness chat Flagship gate', () => {
     env.FLAGS.getStringDetails = vi.fn(async () => { throw new Error('unavailable'); });
     expect((await evaluateHarnessChatMode(env, orgId, userId)).variation).toBe('legacy');
   });
+
+  it('admits the full Harness only for a valid local tenant scope', async () => {
+    const env = { ENVIRONMENT: 'local', FLAGS: { getStringDetails: vi.fn() } } as unknown as Env;
+    expect((await evaluateHarnessChatMode(env, orgId, userId)).variation).toBe('harness');
+    expect((await evaluateHarnessChatMode(env, 'invalid', userId)).variation).toBe('legacy');
+    expect(env.FLAGS.getStringDetails).not.toHaveBeenCalled();
+  });
 });
 
 describe('runner and asset routing', () => {
+  it('serves an independent same-origin auth callback without booting protected Harness assets', async () => {
+    const assets = vi.fn();
+    const response = await worker.fetch(new Request('https://chat.preview.singulancelabs.com/auth/callback'), {
+      ASSETS: { fetch: assets },
+    } as unknown as Env);
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(html).toContain("location.hash.slice(1)");
+    expect(html).toContain("history.replaceState(null,'','/auth/callback')");
+    expect(html).toContain("fetch('/api/hivemind/embed/exchange'");
+    expect(html).toContain("location.replace('/')");
+    expect(assets).not.toHaveBeenCalled();
+  });
+
   it('proxies API paths to the configured private runner origin', async () => {
     const fetchMock = vi.fn(async (request: Request) => Response.json({ target: request.url }));
     vi.stubGlobal('fetch', fetchMock);
@@ -40,13 +65,80 @@ describe('runner and asset routing', () => {
     vi.unstubAllGlobals();
   });
 
+  it('keeps parent navigation origin and uses private same-origin JSON transport', async () => {
+    const received: Array<{ url: string; host: string | null; origin: string | null; contentType: string | null }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
+      received.push({
+        url: request.url,
+        host: request.headers.get('host'),
+        origin: request.headers.get('origin'),
+        contentType: request.headers.get('content-type'),
+      });
+      return new Response(null, { status: 303, headers: { location: '/' } });
+    }));
+    const env = { RUNNER_ORIGIN: 'https://private-runner.example' } as Env;
+    const exchangeUrl = 'https://next.preview.singulancelabs.com/api/hivemind/embed/exchange';
+
+    await worker.fetch(new Request(exchangeUrl, {
+      method: 'POST',
+      headers: {
+        origin: 'https://next.preview.singulancelabs.com',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+    }), env);
+    await worker.fetch(new Request(exchangeUrl, {
+      method: 'POST',
+      headers: {
+        origin: 'https://next.preview.singulancelabs.com',
+        'content-type': 'application/json',
+      },
+    }), env);
+
+    expect(received).toEqual([
+      {
+        url: 'https://private-runner.example/api/hivemind/embed/exchange',
+        host: null,
+        origin: 'https://next.preview.singulancelabs.com',
+        contentType: 'application/x-www-form-urlencoded',
+      },
+      {
+        url: 'https://private-runner.example/api/hivemind/embed/exchange',
+        host: null,
+        origin: 'https://private-runner.example',
+        contentType: 'application/json',
+      },
+    ]);
+    vi.unstubAllGlobals();
+  });
+
   it('adds an explicit frame ancestor policy to static assets', async () => {
     const env = {
       HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com,https://admin.singulancelabs.com',
-      ASSETS: { fetch: vi.fn(async () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } })) },
+      ASSETS: { fetch: vi.fn(async () => new Response('app', { headers: { 'content-type': 'application/javascript' } })) },
     } as unknown as Env;
-    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/'), env);
+    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/assets/app.js'), env);
     expect(response.headers.get('content-security-policy')).toContain('frame-ancestors https://next.singulancelabs.com https://admin.singulancelabs.com');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('serves the document from assets and injects the authenticated runner boot table', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ version: 1, injections: [
+      { kind: 'global', name: '__DSH_BOOT__', value: { plugins: [] } },
+    ] })));
+    const env = {
+      RUNNER_ORIGIN: 'https://private-runner.example',
+      HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com',
+      ASSETS: { fetch: vi.fn(async () => new Response('<html><head></head><body><div id="root"></div></body></html>', {
+        headers: { 'content-type': 'text/html' },
+      })) },
+    } as unknown as Env;
+    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/', {
+      headers: { cookie: '__Host-dsh=principal' },
+    }), env);
+    const html = await response.text();
+    expect(html).toContain('globalThis["__DSH_BOOT__"]');
+    expect(html).toContain('__DSH_BOOT_READY__');
+    expect(env.ASSETS.fetch).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
   });
 });

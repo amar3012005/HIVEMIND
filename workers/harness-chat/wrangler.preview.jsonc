@@ -1,14 +1,15 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "hivemind-harness-chat",
+  "name": "hivemind-harness-chat-preview",
+  "workers_dev": true,
   "main": "src/index.ts",
   "compatibility_date": "2026-09-08",
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "routes": [{ "pattern": "chat.singulancelabs.com", "custom_domain": true }],
+  "routes": [{ "pattern": "chat.preview.singulancelabs.com", "custom_domain": true }],
   "vars": {
-    "ENVIRONMENT": "production",
-    "RUNNER_ORIGIN": "https://harness-chat-origin.singulancelabs.com",
-    "HIVE_HARNESS_PARENT_ORIGINS": "https://next.singulancelabs.com,https://hivemind.singulancelabs.com"
+    "ENVIRONMENT": "local",
+    "RUNNER_ORIGIN": "https://harness-origin.preview.singulancelabs.com",
+    "HIVE_HARNESS_PARENT_ORIGINS": "https://next.preview.singulancelabs.com"
   },
   "flagship": [{
     "binding": "FLAGS",
@@ -19,6 +20,6 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/", "/index.html", "/hivemind/app/v1/overview", "/plugins/*", "/__hivemind/*", "/api/*", "/health"]
+    "run_worker_first": ["/", "/index.html", "/auth/callback", "/plugins/*", "/__hivemind/*", "/api/*", "/health"]
   }
 }

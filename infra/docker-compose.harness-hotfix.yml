@@ -1,0 +1,75 @@
+# Preview recovery: retain admitted backend and mount current browser/Composio packages.
+services:
+  harness-runner:
+    image: hivemind/harness-chat:backend-frozen
+    environment:
+      HIVEMIND_PARENT_ORIGINS: https://next.preview.singulancelabs.com
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: harness-origin-preview.singulancelabs.com
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+    volumes:
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/connection/lib/client.js:/opt/deepseek-harness/packages/client/connection/lib/client.js:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/file-upload/lib:/opt/deepseek-harness/packages/client/file-upload/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/hmr/lib:/opt/deepseek-harness/packages/client/hmr/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/locale/lib:/opt/deepseek-harness/packages/client/locale/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/modules/lib:/opt/deepseek-harness/packages/client/modules/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/resources/lib:/opt/deepseek-harness/packages/client/resources/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/store/lib:/opt/deepseek-harness/packages/client/store/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-agent-preset/lib:/opt/deepseek-harness/packages/client/ui-agent-preset/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-approval/lib:/opt/deepseek-harness/packages/client/ui-approval/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-attachment/lib:/opt/deepseek-harness/packages/client/ui-attachment/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-brand-official/lib:/opt/deepseek-harness/packages/client/ui-brand-official/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-chat/lib:/opt/deepseek-harness/packages/client/ui-chat/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-commands/lib:/opt/deepseek-harness/packages/client/ui-commands/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-conversation/lib:/opt/deepseek-harness/packages/client/ui-conversation/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-deliverables/lib:/opt/deepseek-harness/packages/client/ui-deliverables/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-directory-picker-browse/lib:/opt/deepseek-harness/packages/client/ui-directory-picker-browse/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-directory-picker-native/lib:/opt/deepseek-harness/packages/client/ui-directory-picker-native/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-dockkit/lib:/opt/deepseek-harness/packages/client/ui-dockkit/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-goal/lib:/opt/deepseek-harness/packages/client/ui-goal/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-hivemind-connect/lib:/opt/deepseek-harness/packages/client/ui-hivemind-connect/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-input-trigger/lib:/opt/deepseek-harness/packages/client/ui-input-trigger/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-jobs/lib:/opt/deepseek-harness/packages/client/ui-jobs/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-layout/lib:/opt/deepseek-harness/packages/client/ui-layout/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-model-selection/lib:/opt/deepseek-harness/packages/client/ui-model-selection/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-open-in-app/lib:/opt/deepseek-harness/packages/client/ui-open-in-app/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-permission-presets/lib:/opt/deepseek-harness/packages/client/ui-permission-presets/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-plan/lib:/opt/deepseek-harness/packages/client/ui-plan/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-primitives/lib:/opt/deepseek-harness/packages/client/ui-primitives/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-reference/lib:/opt/deepseek-harness/packages/client/ui-reference/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-renderer/lib:/opt/deepseek-harness/packages/client/ui-renderer/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-schedule/lib:/opt/deepseek-harness/packages/client/ui-schedule/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-session/lib:/opt/deepseek-harness/packages/client/ui-session/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-settings/lib:/opt/deepseek-harness/packages/client/ui-settings/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-settings-general/lib:/opt/deepseek-harness/packages/client/ui-settings-general/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-settings-models/lib:/opt/deepseek-harness/packages/client/ui-settings-models/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-settings-plugin-inventory/lib:/opt/deepseek-harness/packages/client/ui-settings-plugin-inventory/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-settings-plugins/lib:/opt/deepseek-harness/packages/client/ui-settings-plugins/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-sidebar/lib:/opt/deepseek-harness/packages/client/ui-sidebar/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-sidebar-documentpreview/lib:/opt/deepseek-harness/packages/client/ui-sidebar-documentpreview/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-sidebar-files/lib:/opt/deepseek-harness/packages/client/ui-sidebar-files/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-sidebar-right/lib:/opt/deepseek-harness/packages/client/ui-sidebar-right/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-skill/lib:/opt/deepseek-harness/packages/client/ui-skill/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-slots/lib:/opt/deepseek-harness/packages/client/ui-slots/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-subagent/lib:/opt/deepseek-harness/packages/client/ui-subagent/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-theme/lib:/opt/deepseek-harness/packages/client/ui-theme/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-tool/lib:/opt/deepseek-harness/packages/client/ui-tool/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-trajectory/lib:/opt/deepseek-harness/packages/client/ui-trajectory/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-user-questions/lib:/opt/deepseek-harness/packages/client/ui-user-questions/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-workflow-run/lib:/opt/deepseek-harness/packages/client/ui-workflow-run/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-workspace/lib:/opt/deepseek-harness/packages/client/ui-workspace/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/web/lib:/opt/deepseek-harness/packages/client/web/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/apps/web/dist:/opt/deepseek-harness/apps/web/dist:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/bundle/web-app/cordis.patch.yml:/opt/deepseek-harness/packages/bundle/web-app/cordis.patch.yml:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/bundle/hivemind-web-app/cordis.patch.yml:/opt/deepseek-harness/packages/bundle/hivemind-web-app/cordis.patch.yml:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/hivemind/connected-apps/lib:/opt/deepseek-harness/packages/hivemind/connected-apps/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/hivemind/connected-apps/package.json:/opt/deepseek-harness/packages/hivemind/connected-apps/package.json:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/preset/agent-presets/lib:/opt/deepseek-harness/packages/preset/agent-presets/lib:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/preset/agent-presets/presets/hivemind-chat:/opt/deepseek-harness/packages/preset/agent-presets/presets/hivemind-chat:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/preset/agent-presets/presets/hivemind:/opt/deepseek-harness/packages/preset/agent-presets/presets/hivemind:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/session/session-persistence-postgres/lib/index.js:/opt/deepseek-harness/packages/session/session-persistence-postgres/lib/index.js:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/api/session-controller/lib/client.js:/opt/deepseek-harness/packages/api/session-controller/lib/client.js:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/client/ui-hivemind-connect/package.json:/opt/deepseek-harness/packages/client/ui-hivemind-connect/package.json:ro
+      - /Users/amar/deepseek-harness-upstream-clean-preview/packages/hivemind/connected-apps:/opt/deepseek-harness/node_modules/@deepseek-ai/dsh-hivemind-connected-apps:ro
+networks:
+  hive-runtime:
+    name: hivemind-network

@@ -1,0 +1,7 @@
+# Deployment-only overlay for the private preview authority. Applied after the
+# HIVE profile bundle so native Connection admits the same-origin Worker proxy.
+- id: connection
+  config:
+    trustedHosts:
+      - next.preview.singulancelabs.com
+      - harness-origin.preview.singulancelabs.com

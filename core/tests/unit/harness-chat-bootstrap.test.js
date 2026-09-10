@@ -58,6 +58,47 @@ test('bootstrap derives tenant scope, mints admission, and never creates a sessi
   assert.equal(redisValues.size, 1);
 });
 
+test('bootstrap ignores client-supplied tenant ids and uses the session only', async () => {
+  const res = responseCapture();
+  const attacker = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const redisValues = new Map();
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap',
+    prisma: { userOrganization: { findUnique: async ({ where }) => (
+      where.userId_orgId.userId === userId && where.userId_orgId.orgId === orgId ? { userId, isActive: true } : null
+    ) } },
+    requireSession: async () => ({ session: { orgId, userId } }),
+    parseBody: async () => ({ user_id: attacker, org_id: attacker }),
+    jsonResponse,
+    env: {
+      HIVE_HARNESS_TICKET_SECRET: 'test-harness-ticket-secret-at-least-32-bytes',
+      HIVE_HARNESS_EDGE_EVAL_SECRET: 'test-edge-secret',
+      HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag',
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      key: 'hivemind_harness_chat_v1', source: 'cloudflare-flagship', variation: 'harness',
+    })),
+    getRedis: async () => ({ set: async (key, value) => { redisValues.set(key, value); return 'OK'; } }),
+  });
+  assert.equal(res.status, 200);
+  const payload = JSON.parse(Buffer.from(res.json.ticket.split('.')[1], 'base64url').toString('utf8'));
+  assert.equal(payload.sub, userId);
+  assert.equal(payload.org_id, orgId);
+});
+
+test('bootstrap denies inactive membership with a secret-free diagnostic', async () => {
+  const res = responseCapture();
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap',
+    prisma: { userOrganization: { findUnique: async () => ({ userId, isActive: false }) } },
+    requireSession: async () => ({ session: { orgId, userId } }),
+    parseBody: async () => ({}), jsonResponse,
+  });
+  assert.equal(res.status, 403);
+  assert.equal(res.json.diagnostic, 'membership_denied');
+  assert.equal(JSON.stringify(res.json).includes('test-harness'), false);
+});
+
 test('bootstrap fails closed to legacy without a ticket when edge evaluation fails', async () => {
   const res = responseCapture();
   await handleHarnessChatBootstrapRoute({

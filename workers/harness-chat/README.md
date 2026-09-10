@@ -5,10 +5,12 @@ flag receipt endpoint evaluates the string Flagship flag
 `hivemind_harness_chat_v1`; missing bindings, errors, invalid identities, and
 unknown variations resolve to `legacy`.
 
-`/api/*` (including the `/api/remote.mux` WebSocket upgrade) and `/health`
-proxy to `RUNNER_ORIGIN`, which must be the private Tunnel origin. Static
-responses receive a restrictive CSP; `HIVE_HARNESS_PARENT_ORIGINS` is the
-comma-separated allowlist used for `frame-ancestors`.
+The document, JavaScript, CSS, fonts, and SPA fallback are served entirely by
+Cloudflare Static Assets. `/api/*` (including the `/api/remote.mux` WebSocket
+upgrade), `/plugins/*`, and `/health` proxy to `RUNNER_ORIGIN`, which must be
+the private Tunnel origin. Static responses receive a restrictive CSP;
+`HIVE_HARNESS_PARENT_ORIGINS` is the comma-separated allowlist used for
+`frame-ancestors`.
 
 Before a release, the Harness web build pipeline copies its reviewed output
 into `public/`; generated assets are intentionally not committed here. A dry

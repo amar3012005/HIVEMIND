@@ -1,0 +1,6 @@
+# Ephemeral runner-only profile overlay. It intentionally does not define or
+# recreate Core, Control Plane, PostgreSQL, Redis, or the tunnel.
+services:
+  harness-runner:
+    volumes:
+      - ./hivemind-harness-runtime-trust.patch.yml:/tmp/dsh/cordis.patch.yml:ro

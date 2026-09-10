@@ -1,0 +1,29 @@
+# Local iteration overlay: profile composition is data loaded at runner boot,
+# so mount only the HIVE patch instead of rebuilding the full Harness image
+# when no TypeScript artifact changed. Production images remain self-contained.
+services:
+  harness-runner:
+    environment:
+      # Da-vinci owns the browser origin in local development.  The native
+      # Harness client still uses its normal /api and remote.mux transport,
+      # but the runner must recognize the local HIVE shell as its peer.
+      HIVE_HARNESS_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001}
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-localhost:3000,127.0.0.1:3000,localhost:3001,127.0.0.1:3001}
+    volumes:
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/client/ui-conversation/lib/client.js:/opt/deepseek-harness/packages/client/ui-conversation/lib/client.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/client/connection/lib/index.js:/opt/deepseek-harness/packages/client/connection/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/api/gateway/lib/index.js:/opt/deepseek-harness/packages/api/gateway/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/preset/agent-presets/presets/hivemind-chat/agent.cordis.yml:/opt/deepseek-harness/packages/preset/agent-presets/presets/hivemind-chat/agent.cordis.yml:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/hivemind/runtime/lib/index.js:/opt/deepseek-harness/packages/hivemind/runtime/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/hivemind/memory/lib/index.js:/opt/deepseek-harness/packages/hivemind/memory/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/hivemind/context/lib/index.js:/opt/deepseek-harness/packages/hivemind/context/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/bundle/hivemind-web-app/cordis.patch.yml:/opt/deepseek-harness/packages/bundle/hivemind-web-app/cordis.patch.yml:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/hivemind/virtual-workspace/lib/index.js:/opt/deepseek-harness/packages/hivemind/virtual-workspace/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/hivemind/web-runner/lib/index.js:/opt/deepseek-harness/packages/hivemind/web-runner/lib/index.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/client/ui-hivemind-connect/lib/client.js:/opt/deepseek-harness/packages/client/ui-hivemind-connect/lib/client.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/client/ui-sidebar/lib/client.js:/opt/deepseek-harness/packages/client/ui-sidebar/lib/client.js:ro
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/packages/client/ui-layout/lib/client.js:/opt/deepseek-harness/packages/client/ui-layout/lib/client.js:ro
+      # The Da-vinci Overview loads the exact native Harness shell in-place.
+      # Mounting this built static tree preserves Docker layer caching while
+      # making an intentional local UI rebuild visible after a quick restart.
+      - ${HIVEMIND_HARNESS_SOURCE:?HIVEMIND_HARNESS_SOURCE is required}/apps/web/dist:/opt/deepseek-harness/apps/web/dist:ro

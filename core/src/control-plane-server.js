@@ -1678,16 +1678,22 @@ async function enqueueAuthEmailOutbox(outboxId) {
 async function effectiveEmailIdentityMode() {
   const flagUrl = String(process.env.AUTH_EMAIL_FLAG_URL || '');
   const secret = String(process.env.AUTH_EMAIL_QUEUE_SECRET || '');
+  const localMode = process.env.HIVEMIND_LOCAL_MODE === 'true';
+  const configuredMode = resolveEmailIdentityMode();
   if (!flagUrl) return resolveEmailIdentityMode();
-  if (!secret) return 'off';
+  // A local preview may deliberately omit the Worker secret.  In that one
+  // explicitly marked environment, use its local feature configuration so the
+  // preview proves the email flow; every non-local environment remains
+  // fail-closed when Flagship cannot be reached or authenticated.
+  if (!secret) return localMode ? configuredMode : 'off';
   try {
     const response = await fetch(`${flagUrl.replace(/\/$/, '')}/mode`, {
       headers: { 'x-auth-email-secret': secret }, signal: AbortSignal.timeout(3000),
     });
-    if (!response.ok) return 'off';
+    if (!response.ok) return localMode ? configuredMode : 'off';
     const payload = await response.json();
     return ['off', 'shadow', 'primary', 'email_only'].includes(payload.mode) ? payload.mode : 'off';
-  } catch { return 'off'; }
+  } catch { return localMode ? configuredMode : 'off'; }
 }
 
 async function platformUserExists({ sub, email }) {
@@ -2308,6 +2314,19 @@ async function resolveCurrentOrg(userId, preferredOrgId = null) {
   });
   if (!membership) return { org: null, role: null };
   return { org: membership.org, role: membership.role || 'member' };
+}
+
+// Login admission needs only the tenant id. Keep this narrow so a future
+// Organization read-model column cannot make a valid identity session fail.
+async function resolveSessionOrg(userId) {
+  if (!isCanonicalUuid(userId)) return { org: null, role: null };
+  const membership = await prisma?.userOrganization.findFirst({
+    where: { userId, isActive: true },
+    select: { orgId: true, role: true },
+    orderBy: [{ joinedAt: 'desc' }, { invitedAt: 'desc' }],
+  });
+  if (!membership) return { org: null, role: null };
+  return { org: { id: membership.orgId }, role: membership.role || 'member' };
 }
 
 async function upsertUserFromZitadel(userInfo) {
@@ -4288,7 +4307,7 @@ const server = http.createServer(async (req, res) => {
         });
         user = await prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } });
       }
-      const membership = await resolveCurrentOrg(user.id);
+      const membership = await resolveSessionOrg(user.id);
       if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
       const redirectTo = safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);

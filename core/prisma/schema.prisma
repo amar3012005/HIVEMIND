@@ -5450,6 +5450,7 @@ model HarnessSession {
   orgId                 String                @map("org_id") @db.Uuid
   userId                String                @map("user_id") @db.Uuid
   projectId             String?               @map("project_id") @db.Uuid
+  scopeKind             String                @default("organization") @map("scope_kind") @db.VarChar(24)
   profile               String                @default("hivemind-chat") @db.VarChar(64)
   variation             String                @db.VarChar(16)
   status                String                @default("active") @db.VarChar(24)

@@ -133,7 +133,8 @@ export async function handleHarnessChatBootstrapRoute({
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl })) return true;
-  if (pathname !== '/v1/harness-chat/bootstrap' || req.method !== 'POST') return false;
+  const dedicatedNewSession = pathname === '/v1/harness-chat/new-session';
+  if ((!dedicatedNewSession && pathname !== '/v1/harness-chat/bootstrap') || req.method !== 'POST') return false;
   const current = await requireSession(req, res);
   if (!current) return true;
   const { userId, orgId } = current.session || {};
@@ -164,14 +165,23 @@ export async function handleHarnessChatBootstrapRoute({
     }
   }
 
-  const evaluation = await evaluateHarnessChatFlag({
-    endpoint: env.HIVE_HARNESS_FLAG_URL || 'https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat',
-    secret: env.HIVE_HARNESS_EDGE_EVAL_SECRET,
-    orgId,
-    userId,
-    fetchImpl,
-    timeoutMs: Number(env.HIVE_HARNESS_FLAG_TIMEOUT_MS || 2000),
-  });
+  const evaluation = dedicatedNewSession
+    ? {
+        mode: 'harness',
+        flagReceipt: {
+          key: 'hivemind_harness_chat_v1',
+          variation: 'harness',
+          source: 'dedicated-new-session-route',
+        },
+      }
+    : await evaluateHarnessChatFlag({
+        endpoint: env.HIVE_HARNESS_FLAG_URL || 'https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat',
+        secret: env.HIVE_HARNESS_EDGE_EVAL_SECRET,
+        orgId,
+        userId,
+        fetchImpl,
+        timeoutMs: Number(env.HIVE_HARNESS_FLAG_TIMEOUT_MS || 2000),
+      });
   if (evaluation.mode === 'legacy') {
     jsonResponse(res, legacyResponse(env, evaluation.flagReceipt));
     return true;

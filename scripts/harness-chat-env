@@ -14,6 +14,12 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
   HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:-$HARNESS_SOURCE}"
 fi
+# Preview email credentials are kept out of the repository and plaintext env
+# files. Prefer an explicit process/env-file value, then the local Keychain.
+if [[ -z "${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}" ]] && command -v security >/dev/null 2>&1; then
+  HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN="$(security find-generic-password -a "${USER}" -s singulance-preview-mailer-token -w 2>/dev/null || true)"
+  export HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN
+fi
 FILES=(-f "$ROOT/infra/docker-compose.hivemind-chat.yml")
 FOREIGN_CONTAINERS=(
   hm-core hm-control hm-postgres hm-redis hm-nango hm-playwright hm-employees
@@ -46,10 +52,16 @@ ensure_volumes() {
 }
 
 OWNED_CONTAINERS=(
-  hivemind-postgres hivemind-redis hivemind-qdrant hivemind-docling
+  hivemind-postgres hivemind-postgres-bootstrap hivemind-redis hivemind-qdrant hivemind-docling
   hivemind-core hivemind-control-plane hivemind-employees hivemind-nango
   hivemind-playwright hivemind-harness-runner hivemind-origin-gateway
   hivemind-cloudflared
+)
+
+REQUIRED_HEALTHY_CONTAINERS=(
+  hivemind-postgres hivemind-redis hivemind-qdrant hivemind-docling
+  hivemind-core hivemind-control-plane hivemind-employees hivemind-nango
+  hivemind-playwright hivemind-harness-runner hivemind-origin-gateway
 )
 
 container_exists() {
@@ -97,7 +109,7 @@ doctor() {
   actual="$(git -C "$ROOT" ls-tree HEAD frontend/Da-vinci | awk '{print $3}')"
   [[ "$actual" == "$expected" ]] || fail "Da-vinci SHA drift"
   [[ -f "$ENV_FILE" ]] || fail "missing $ENV_FILE"
-  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN; do
+  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN; do
     configured "$key" || fail "$key missing"
   done
   [[ "$(env_val HIVEMIND_HARNESS_COMMIT_HASH)" == "$(lock harnessCommit)" ]] || fail "env Harness SHA does not match lock"
@@ -119,8 +131,31 @@ doctor() {
   say OK "doctor passed"
 }
 
+verify_health() {
+  local name status bad=0
+  for name in "${REQUIRED_HEALTHY_CONTAINERS[@]}"; do
+    status="$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || printf missing)"
+    if [[ "$status" != healthy ]]; then
+      say RED "$name is $status"
+      bad=1
+    fi
+  done
+  [[ "$bad" -eq 0 ]] || return 1
+  say OK "all required services healthy"
+}
+
+wait_healthy() {
+  local deadline=$((SECONDS + 300))
+  until verify_health >/dev/null 2>&1; do
+    (( SECONDS < deadline )) || { verify_health; return 1; }
+    sleep 3
+  done
+  verify_health
+}
+
 test_all() {
   doctor
+  verify_health
   (cd "$HARNESS_SOURCE" && pnpm exec vitest run packages/hivemind/connected-apps/tests/connected-apps.spec.ts)
   (cd "$HARNESS_SOURCE" && pnpm dsh --profile hivemind-web --dump-config >/tmp/hivemind-chat-profile.json)
   grep -q '@deepseek-ai/dsh-hivemind-web-app' /tmp/hivemind-chat-profile.json
@@ -132,17 +167,18 @@ case "${1:-status}" in
   status) status ;;
   doctor) doctor ;;
   stop-foreign) stop_foreign ;;
-  up) doctor; compose up -d --build harness-runner; compose ps ;;
+  up) doctor; compose up -d --no-build; wait_healthy; compose ps ;;
   up-all)
     ensure_volumes
     stop_foreign
     doctor
-    compose up -d --build harness-runner
     compose up -d --no-build
+    wait_healthy
     compose ps
     ;;
   restart) compose up -d --no-build harness-runner ;;
+  health) verify_health ;;
   test) test_all ;;
   down) compose down ;;
-  *) echo "usage: $0 status|doctor|stop-foreign|up|up-all|restart|test|down"; exit 2 ;;
+  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|test|down"; exit 2 ;;
 esac

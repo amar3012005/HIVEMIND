@@ -2,18 +2,16 @@
 # Credentials stay on the host and are mounted at runtime. Do not commit them.
 # The browser stays on next.preview; the private Harness origin is transport only.
 
-tunnel: c5dbf395-9e2b-40aa-b033-bcf85bde0240
+tunnel: 56892994-584d-4ca7-8470-0b98de10c7fc
 credentials-file: /etc/cloudflared/credentials.json
 
 ingress:
-  - hostname: next.preview.singulancelabs.com
-    service: http://origin-gateway:80
   - hostname: preview-api.singulancelabs.com
     service: http://origin-gateway:80
   - hostname: preview.singulancelabs.com
     service: http://origin-gateway:80
-  - hostname: harness-origin.preview.singulancelabs.com
+  - hostname: harness-preview.singulancelabs.com
     service: http://origin-gateway:80
-  - hostname: nango.preview.singulancelabs.com
+  - hostname: nango-preview.singulancelabs.com
     service: http://origin-gateway:80
   - service: http_status:404

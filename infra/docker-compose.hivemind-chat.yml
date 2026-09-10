@@ -29,6 +29,28 @@ services:
     restart: unless-stopped
     networks: [hivemind-network]
 
+  postgres-bootstrap:
+    image: postgres:15-alpine
+    container_name: hivemind-postgres-bootstrap
+    environment:
+      PGPASSWORD: hivemind_dev_password
+    command:
+      - sh
+      - -ec
+      - |
+        psql -v ON_ERROR_STOP=1 -h postgres -U hivemind -d hivemind_app <<'SQL'
+        CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+        CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+        CREATE SCHEMA IF NOT EXISTS hivemind;
+        CREATE SCHEMA IF NOT EXISTS nango;
+        CREATE OR REPLACE FUNCTION nango.uuid_generate_v4()
+        RETURNS uuid LANGUAGE sql AS 'SELECT hivemind.uuid_generate_v4()';
+        SQL
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    networks: [hivemind-network]
+
   redis:
     image: redis:7-alpine
     container_name: hivemind-redis
@@ -90,11 +112,11 @@ services:
     image: nangohq/nango-server:hosted
     container_name: hivemind-nango
     environment:
-      NANGO_DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=nango
+      NANGO_DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=nango&options=-c%20search_path%3Dnango%2Cpublic
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY:?set NANGO_SECRET_KEY}
-      NANGO_SERVER_URL: ${NANGO_PUBLIC_URL:-https://nango.preview.singulancelabs.com}
+      NANGO_SERVER_URL: ${NANGO_PUBLIC_URL:-https://nango-preview.singulancelabs.com}
     depends_on:
-      postgres: { condition: service_healthy }
+      postgres-bootstrap: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:8080/health',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
       interval: 20s
@@ -144,7 +166,7 @@ services:
       REDIS_PORT: 6379
       DOCLING_URL: http://docling:5001
       NANGO_URL: http://nango:8080
-      NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-https://nango.preview.singulancelabs.com}
+      NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-https://nango-preview.singulancelabs.com}
       HIVEMIND_PLAYWRIGHT_CRAWL_URL: http://playwright:8932/v1/crawl
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
       HIVEMIND_LOCAL_MODE: "true"
@@ -193,6 +215,44 @@ services:
       HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
       HIVEMIND_LOCAL_MODE: "true"
       HIVEMIND_LOCAL_AUTH_BYPASS: "true"
+      EMAIL_IDENTITY_V1_ENABLED: "true"
+      EMAIL_IDENTITY_V1_MODE: email_only
+      EMAIL_AUTH_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
+      EMAIL_AUTH_ENCRYPTION_KEY: ${EMAIL_AUTH_ENCRYPTION_KEY:-${SESSION_SECRET:?set SESSION_SECRET}-email-auth-encryption-v1}
+      EMAIL_AUTH_TOKEN_SECRET: ${EMAIL_AUTH_TOKEN_SECRET:-${SESSION_SECRET:?set SESSION_SECRET}-email-auth-token-v1}
+      TURNSTILE_EMAIL_AUTH_SITE_KEY: ${TURNSTILE_EMAIL_AUTH_SITE_KEY:-1x00000000000000000000AA}
+      TURNSTILE_EMAIL_AUTH_SECRET: ${TURNSTILE_EMAIL_AUTH_SECRET:-1x0000000000000000000000000000000AA}
+      EMAIL_AUTH_TURNSTILE_BYPASS: "true"
+      AUTH_EMAIL_FLAG_URL: ${AUTH_EMAIL_FLAG_URL:-https://singulance-auth-email-local.amarsai2005.workers.dev}
+      AUTH_EMAIL_QUEUE_URL: ${AUTH_EMAIL_QUEUE_URL:-https://singulance-auth-email-local.amarsai2005.workers.dev}
+      AUTH_EMAIL_QUEUE_SECRET: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}
+      HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL:-https://singulance-preview-mailer.amarsai2005.workers.dev}
+      HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}
+      HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST: ${HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST:-}
+      API_MASTER_KEY: ${API_MASTER_KEY:-local-api-master-key-change-me}
+      ZITADEL_API_URL: ${ZITADEL_PREVIEW_API_URL:-}
+      ZITADEL_SERVICE_PAT: ${ZITADEL_PREVIEW_SERVICE_PAT:-}
+      ZITADEL_EMAIL_ORG_ID: ${ZITADEL_PREVIEW_EMAIL_ORG_ID:-}
+      KNOWLEDGE_INGEST_WORKFLOW_ENABLED: ${KNOWLEDGE_INGEST_WORKFLOW_ENABLED:-false}
+      KNOWLEDGE_INGEST_WORKFLOW_SECRET: ${KNOWLEDGE_INGEST_WORKFLOW_SECRET:-}
+      HYPER_GROK_RUNTIME_ENABLED: ${HYPER_GROK_RUNTIME_ENABLED:-false}
+      HYPER_GROK_RUNTIME_ENVIRONMENT: local
+      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-https://hivemind-hyperagents-grok-local.amarsai2005.workers.dev}
+      HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
+      CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
+      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
+      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
+      QDRANT_COLLECTION: hivemind_memories
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:?set HIVEMIND_ADMIN_SECRET}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
       HIVEMIND_PLATFORM_ADMIN_PASSCODE: ${HIVEMIND_PLATFORM_ADMIN_PASSCODE:?set HIVEMIND_PLATFORM_ADMIN_PASSCODE}
@@ -227,6 +287,36 @@ services:
       DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
       REDIS_URL: redis://redis:6379/0
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REPLICA_ID: ${REPLICA_ID:-local-1}
+      REPLICA_COUNT: ${REPLICA_COUNT:-1}
+      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-https://hivemind-hyperagents-grok-local.amarsai2005.workers.dev}
+      HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
+      HYPER_MODEL_BEST: ${HYPER_MODEL_BEST:-}
+      HYPER_MODEL_RECON: ${HYPER_MODEL_RECON:-}
+      HYPER_ROOM_MODEL: ${HYPER_ROOM_MODEL:-}
+      HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-}
+      HIVEMIND_AGENT_FINAL_MODEL: ${HIVEMIND_AGENT_FINAL_MODEL:-}
+      HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_PRIMARY: ${LLM_PRIMARY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
+      VISUAL_PATH_IN_HYPERROOMS: ${VISUAL_PATH_IN_HYPERROOMS:-true}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
+      CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
+      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
+      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8060/health"]
       interval: 15s
@@ -265,7 +355,7 @@ services:
       HIVEMIND_CONTROL_PLANE_URL: http://control-plane:3000
       HIVEMIND_SERVICE_HTTP_ORIGINS: http://control-plane:3000
       HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-https://next.preview.singulancelabs.com}
-      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-next.preview.singulancelabs.com,harness-origin.preview.singulancelabs.com}
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-next.preview.singulancelabs.com,harness-preview.singulancelabs.com}
       CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:-}
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
     tmpfs:

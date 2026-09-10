@@ -32,11 +32,11 @@ http://preview.singulancelabs.com {
 	reverse_proxy core:3000
 }
 
-http://harness-origin.preview.singulancelabs.com {
+http://harness-preview.singulancelabs.com {
 	reverse_proxy harness-runner:3080
 }
 
-http://nango.preview.singulancelabs.com {
+http://nango-preview.singulancelabs.com {
 	reverse_proxy nango:8080
 }
 

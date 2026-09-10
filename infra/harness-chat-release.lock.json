@@ -4,7 +4,7 @@
   "hivemindWorktree": "/Users/amar/HIVE-MIND-singulance-chat-local",
   "harnessRepo": "amar3012005/deepseek-harness-hivemind",
   "harnessBranch": "hivemind-chat",
-  "harnessCommit": "980a9d66e373d9c3a1a29f249968c44991280d18",
+  "harnessCommit": "165e6a5de5b8212e573ba50a004eca3eb6e77b6c",
   "davinciSubmodule": "frontend/Da-vinci",
   "davinciCommit": "c0032dd4de663476f8f55d061a847dbf9bfeb8ed",
   "harnessProfile": "hivemind-chat",
@@ -30,7 +30,7 @@
   "memoryAuthority": "core",
   "previewOrigin": "https://next.preview.singulancelabs.com",
   "nativeReferenceOrigin": "https://deepseek.singulancelabs.com",
-  "privateHarnessOrigin": "https://harness-origin.preview.singulancelabs.com",
+  "privateHarnessOrigin": "https://harness-preview.singulancelabs.com",
   "productionBranch": "singulance-main",
   "forbiddenDevelopmentOverlays": [
     "infra/docker-compose.harness-hotfix.yml",

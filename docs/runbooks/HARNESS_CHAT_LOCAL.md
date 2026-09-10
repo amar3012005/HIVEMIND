@@ -20,17 +20,18 @@ cd /Users/amar/HIVE-MIND-singulance-chat-local
 ./scripts/harness-chat-env doctor
 ```
 
-Bring the runner up with Docker layer cache. Rebuild only the changed service:
+Bring the complete origin stack up once, then rebuild only the runner:
 
 ```bash
 cp infra/.env.hivemind-chat.example infra/.env.hivemind-chat.local
 # Replace placeholders in the untracked local file; never commit secrets.
-./scripts/harness-chat-env up
+./scripts/harness-chat-env up-all
 ```
 
-Use `./scripts/harness-chat-env restart` when no image input changed. Use
-`./scripts/harness-chat-env up-all` only for first boot or when Core/Control
-Plane dependencies changed.
+Use `./scripts/harness-chat-env up` for a runner-only cached rebuild.
+Use `./scripts/harness-chat-env restart` when no image input changed.
+`stop-foreign` removes leftover `hm-*`, compat, and extra-tunnel containers
+without deleting volumes.
 
 Do not stack `infra/docker-compose.harness-hotfix.yml` on top unless recovering
 a previously admitted backend. That file bind-mounts package outputs and is how

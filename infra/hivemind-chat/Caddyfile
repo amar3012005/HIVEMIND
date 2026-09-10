@@ -1,0 +1,50 @@
+{
+	auto_https off
+	admin off
+}
+
+# Local origin gateway. Cloudflare Worker keeps Da-vinci static assets.
+# This file only routes host/path traffic that the named tunnel delivers.
+
+http://next.preview.singulancelabs.com {
+	handle /v1* {
+		reverse_proxy control-plane:3000
+	}
+	handle /api/hivemind/session* {
+		reverse_proxy harness-runner:3080
+	}
+	handle /api/remote.mux {
+		reverse_proxy harness-runner:3080
+	}
+	handle /health {
+		respond "ok" 200
+	}
+	handle {
+		respond "origin-gateway: static frontend is Cloudflare-deployed Da-vinci" 404
+	}
+}
+
+http://preview-api.singulancelabs.com {
+	reverse_proxy control-plane:3000
+}
+
+http://preview.singulancelabs.com {
+	reverse_proxy core:3000
+}
+
+http://harness-origin.preview.singulancelabs.com {
+	reverse_proxy harness-runner:3080
+}
+
+http://nango.preview.singulancelabs.com {
+	reverse_proxy nango:8080
+}
+
+:80 {
+	handle /health {
+		respond "ok" 200
+	}
+	handle {
+		respond "origin-gateway" 404
+	}
+}

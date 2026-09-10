@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+!.env.hivemind-chat.example
+!infra/.env.hivemind-chat.example
 .env.test
 .env.coolify
 *.env

@@ -49,30 +49,43 @@ When `data-dsh-mode="native"`, render stock Harness with no HIVE layout selector
 
 ## Local runtime shape
 
-The only supported local entrypoint is `./scripts/harness-chat-env`. It combines
-the existing Core stack, local service stack, and
-`infra/docker-compose.hivemind-chat.yml` under the single Compose project
-`hivemind-chat-local` and network `hivemind-network`. The runner is built from
-the locked Harness SHA with Docker layer cache and contains the whole resolved
-native profile. It reuses the same PostgreSQL and Redis services; it never
-creates a parallel persistence stack.
+The only supported local entrypoint is `./scripts/harness-chat-env`. It uses
+one Compose file, `infra/docker-compose.hivemind-chat.yml`, project
+`hivemind-chat-local`, network `hivemind-network`. Required services:
 
-Older development overlays that bind-mount individual Harness packages
-(`infra/docker-compose.harness-hotfix.yml` and sibling `*.fast-runtime.yml`,
-`*.clean-frontend.yml`, `*.runtime.yml`, `*.override.yml`) are recovery artifacts.
-They are recovery evidence, not supported inputs to the canonical command.
+origin-gateway, cloudflared, core, control-plane, harness-runner, postgres,
+redis, qdrant, nango, employees, playwright, docling.
+
+Internal calls use Compose DNS names. Persistent volumes are explicit:
+`hivemind-postgres-data`, `hivemind-qdrant-data`, `hivemind-docling-models`,
+`hivemind-redis-data`. The runner image is built from the locked Harness SHA
+and must contain the whole resolved native profile.
+
+`docker-compose.local-stack.yml`, `docker-compose.local-services.yml`, and
+Harness hotfix overlays are recovery evidence, not supported inputs.
 
 ## Ingress
 
-Repo files disagree, so do not assume Caddy from chat history:
+Browser stays on `https://next.preview.singulancelabs.com`. Cloudflare Worker
+serves Da-vinci static assets and same-origin routing. One named Cloudflare
+tunnel delivers remaining traffic to the local origin gateway (Caddy). Caddy
+is host/path routing only:
 
-- `infra/docker-compose.production.yml` uses Traefik.
-- Root `Caddyfile*` and `docker-compose.caddy.yml` still exist.
-- `infra/docker-compose.hetzner.yml` still mentions `hm-caddy` for `/voice2`.
+| Public hostname/path | Internal destination |
+| --- | --- |
+| `next.preview...` static | Cloudflare-deployed Da-vinci |
+| `next.preview.../v1/*` | `control-plane:3000` |
+| `next.preview.../api/hivemind/session/*` | `harness-runner:3080` |
+| `next.preview.../api/remote.mux` | `harness-runner:3080` (WebSocket) |
+| `preview-api.singulancelabs.com` | `control-plane:3000` |
+| `preview.singulancelabs.com` | `core:3000` |
+| private Harness origin | `harness-runner:3080` |
+| preview Nango hostname | `nango:8080` |
 
-Live production ingress must be confirmed with SSH before a production cutover.
-Until that check is recorded here, treat Traefik, Caddy, Cloudflare, and Coolify
-as coexisting documents, not one live fact.
+The private Harness origin is transport, not a second frontend.
+
+Live production (SSH `singulance`, 2026-09-10) still uses `hm-caddy` on the
+server. That production edge is out of scope for this local project.
 
 ## Agent start command
 

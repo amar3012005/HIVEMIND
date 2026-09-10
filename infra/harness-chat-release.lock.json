@@ -9,19 +9,50 @@
   "davinciCommit": "c0032dd4de663476f8f55d061a847dbf9bfeb8ed",
   "harnessProfile": "hivemind-chat",
   "composeProject": "hivemind-chat-local",
-  "composeFiles": ["docker-compose.local-stack.yml", "docker-compose.local-services.yml", "infra/docker-compose.hivemind-chat.yml"],
+  "composeFiles": ["infra/docker-compose.hivemind-chat.yml"],
+  "network": "hivemind-network",
+  "requiredServices": [
+    "origin-gateway",
+    "cloudflared",
+    "core",
+    "control-plane",
+    "harness-runner",
+    "postgres",
+    "redis",
+    "qdrant",
+    "nango",
+    "employees",
+    "playwright",
+    "docling"
+  ],
   "sessionAuthority": "postgres",
   "identityAuthority": "control-plane",
   "memoryAuthority": "core",
   "previewOrigin": "https://next.preview.singulancelabs.com",
   "nativeReferenceOrigin": "https://deepseek.singulancelabs.com",
+  "privateHarnessOrigin": "https://harness-origin.preview.singulancelabs.com",
   "productionBranch": "singulance-main",
   "forbiddenDevelopmentOverlays": [
     "infra/docker-compose.harness-hotfix.yml",
     "infra/docker-compose.harness-local.fast-runtime.yml",
     "infra/docker-compose.harness-local.clean-frontend.yml",
     "infra/docker-compose.harness-local.runtime.yml",
-    "infra/docker-compose.harness-local.override.yml"
+    "infra/docker-compose.harness-local.override.yml",
+    "docker-compose.local-stack.yml",
+    "docker-compose.local-services.yml"
   ],
-  "notes": "Development lock. Refresh only after accepting pushed SHAs; production promotion additionally requires immutable image digests."
+  "forbiddenContainerNames": [
+    "hm-core",
+    "hm-control",
+    "hm-postgres",
+    "hm-redis",
+    "hm-nango",
+    "hm-playwright",
+    "hivemind-api",
+    "hivemind-control-plane-local",
+    "hivemind-employees-local",
+    "hivemind-preview-core-compat",
+    "hivemind-local-preview-tunnel"
+  ],
+  "notes": "Development lock. One Compose file, one network, one backend generation. Production promotion additionally requires immutable image digests."
 }

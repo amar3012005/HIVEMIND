@@ -10,7 +10,12 @@ not inferred.
 - [ ] `./scripts/harness-chat-env doctor` exits 0.
 - [ ] No package-level bind mounts on the running runner container.
 - [ ] Exactly one Core, Control Plane, PostgreSQL, and Redis generation is running.
-- [ ] `docker compose` project is `hivemind-chat-local`; recovery overlays are absent.
+- [ ] `docker compose` project is `hivemind-chat-local` from
+      `infra/docker-compose.hivemind-chat.yml` only.
+- [ ] Required services are present: origin-gateway, cloudflared, core,
+      control-plane, harness-runner, postgres, redis, qdrant, nango,
+      employees, playwright, docling.
+- [ ] Public preview health routes return 200.
 - [ ] Uncommitted trees are not mixed across HIVEMIND, Da-vinci, and Harness.
 
 ## Admission

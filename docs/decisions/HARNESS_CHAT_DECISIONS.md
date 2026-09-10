@@ -46,13 +46,21 @@ explicitly changes one.
 - Treating a passing unit suite as proof of an authenticated browser session.
 
 11. **One local Compose entrypoint.** `scripts/harness-chat-env` is the only
-    supported command. It composes Core, Control Plane, PostgreSQL, Redis, and
-    the locked Harness runner into `hivemind-chat-local`. `up` rebuilds only the
-    runner with cache; `up-all` is reserved for first boot or dependency changes.
+    supported command. It uses `infra/docker-compose.hivemind-chat.yml` only.
+    `up` rebuilds only the runner with cache; `up-all` is first boot or
+    dependency changes; `restart` never builds.
+
+12. **Live production edge is Caddy.** SSH to `singulance` on 2026-09-10 showed
+    `hm-caddy` (`caddy:latest`, host network) and no Traefik. Production remains
+    untouched. Local preview uses Caddy as `origin-gateway` plus one named
+    Cloudflare tunnel in the same Compose project.
+
+13. **One backend generation.** No `hm-*` versus `hivemind-*` duplicates, no
+    `hivemind-preview-core-compat`, no extra Compose projects, no package
+    bind-mount hotfix graph.
 
 ## Open
 
-- Whether live production still uses Caddy, Traefik, Cloudflare Tunnel only, or
-  a mix. Repo files conflict. Confirm with SSH before production Compose work.
-- Production image registry/digest and final Caddy route are promotion-time
-  decisions. They do not change the local service contract.
+- Production image registry/digest and the exact Caddy route for a Harness
+  runner cutover. Those are promotion-time decisions. They do not change the
+  local service contract.

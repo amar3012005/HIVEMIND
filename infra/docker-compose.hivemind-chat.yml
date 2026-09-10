@@ -1,15 +1,248 @@
 name: hivemind-chat-local
 
-# Canonical overlay. Use only through scripts/harness-chat-env together with
-# docker-compose.local-stack.yml and docker-compose.local-services.yml.
+# Canonical complete local model. Use only through scripts/harness-chat-env.
+# Persistent data reuses existing named volumes. Do not add Harness package mounts.
+
+x-env: &env-file
+  env_file:
+    - path: ${HIVEMIND_CHAT_ENV_FILE:-.env.hivemind-chat.local}
+      required: true
+
 services:
-  control-plane:
+  postgres:
+    image: postgres:15-alpine
+    container_name: hivemind-postgres
     environment:
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind_dev_password
+      POSTGRES_DB: hivemind_app
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - hivemind-postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-age.sql:/docker-entrypoint-initdb.d/01-install-age.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind_app"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+    networks: [hivemind-network]
+
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - hivemind-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+    restart: unless-stopped
+    networks: [hivemind-network]
+    ports:
+      - "127.0.0.1:6380:6379"
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: hivemind-qdrant
+    environment:
+      QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+      QDRANT__SERVICE__API_KEY: dev_api_key_hivemind_2026
+    volumes:
+      - hivemind-qdrant-data:/qdrant/storage
+      - ./qdrant/config.yaml:/qdrant/config/production.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':18BD' /proc/net/tcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    restart: unless-stopped
+    networks: [hivemind-network]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  docling:
+    image: ghcr.io/docling-project/docling-serve@sha256:69f7c33dab7067be28d88bfe61b7be08e53c4f87d5571378001f853d9b95c34e
+    container_name: hivemind-docling
+    environment:
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: 3
+      OMP_NUM_THREADS: 2
+      DOCLING_SERVE_MAX_SYNC_WAIT: 180
+    volumes:
+      - hivemind-docling-models:/opt/app-root/src/.cache/docling/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/health', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+    networks: [hivemind-network]
+
+  nango:
+    <<: *env-file
+    image: nangohq/nango-server:hosted
+    container_name: hivemind-nango
+    environment:
+      NANGO_DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=nango
+      NANGO_SECRET_KEY: ${NANGO_SECRET_KEY:?set NANGO_SECRET_KEY}
+      NANGO_SERVER_URL: ${NANGO_PUBLIC_URL:-https://nango.preview.singulancelabs.com}
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:8080/health',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    networks: [hivemind-network]
+
+  playwright:
+    <<: *env-file
+    image: hivemind/hm-playwright:dev-fbc2caea4
+    container_name: hivemind-playwright
+    environment:
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+      PLAYWRIGHT_SESSIONS_DIR: /app/sessions
+      PLAYWRIGHT_CRAWL_CONCURRENCY: "4"
+    volumes:
+      - ../services/hm-playwright/sessions:/app/sessions:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8932/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks: [hivemind-network]
+
+  core:
+    <<: *env-file
+    env_file:
+      - path: ${HIVEMIND_CHAT_ENV_FILE:-.env.hivemind-chat.local}
+        required: true
+      - path: ../core/.env
+        required: false
+    image: hm-hyper-contract-api
+    container_name: hivemind-core
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: dev_api_key_hivemind_2026
+      QDRANT_COLLECTION: hivemind_memories
+      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DOCLING_URL: http://docling:5001
+      NANGO_URL: http://nango:8080
+      NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-https://nango.preview.singulancelabs.com}
+      HIVEMIND_PLAYWRIGHT_CRAWL_URL: http://playwright:8932/v1/crawl
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+      HIVEMIND_LOCAL_MODE: "true"
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-}
+      HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:?set HIVEMIND_ADMIN_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+    volumes:
+      - ../core/data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
+    restart: unless-stopped
+    networks: [hivemind-network]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+      docling: { condition: service_healthy }
+      nango: { condition: service_started }
+      playwright: { condition: service_healthy }
+
+  control-plane:
+    <<: *env-file
+    image: hivemind-control-plane-local:latest
+    container_name: hivemind-control-plane
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: dev_api_key_hivemind_2026
+      REDIS_URL: redis://redis:6379/0
+      HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      HIVEMIND_API_URL: http://core:3000
+      HIVEMIND_EMPLOYEES_URL: http://employees:8060
+      EMPLOYEES_SIDECAR_URL: http://employees:8060
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:3000
+      HIVEMIND_CORE_API_PUBLIC_URL: https://preview.singulancelabs.com
+      HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://preview-api.singulancelabs.com
+      HIVEMIND_FRONTEND_URL: https://next.preview.singulancelabs.com
+      HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://next.preview.singulancelabs.com/hivemind/app/overview
+      HIVEMIND_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
+      HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
+      HIVEMIND_LOCAL_MODE: "true"
+      HIVEMIND_LOCAL_AUTH_BYPASS: "true"
+      HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:?set HIVEMIND_ADMIN_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      HIVEMIND_PLATFORM_ADMIN_PASSCODE: ${HIVEMIND_PLATFORM_ADMIN_PASSCODE:?set HIVEMIND_PLATFORM_ADMIN_PASSCODE}
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?set a distinct 32+ byte ticket secret}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:?set a distinct 32+ byte runner secret}
       HIVE_HARNESS_PREVIEW_EMBED_URL: ${HIVE_HARNESS_PREVIEW_EMBED_URL:-https://next.preview.singulancelabs.com/hivemind/app/overview}
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+    networks: [hivemind-network]
+    depends_on:
+      core: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+
+  employees:
+    <<: *env-file
+    image: hivemind-employees-local:latest
+    container_name: hivemind-employees
+    environment:
+      PORT: 8060
+      HIVEMIND_CORE_URL: http://core:3000
+      HIVEMIND_CP_URL: http://control-plane:3000
+      HIVEMIND_PUBLIC_CORE_URL: https://preview.singulancelabs.com
+      HIVEMIND_PUBLIC_CP_URL: https://preview-api.singulancelabs.com
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
+      REDIS_URL: redis://redis:6379/0
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8060/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    restart: unless-stopped
+    networks: [hivemind-network]
+    depends_on:
+      core: { condition: service_healthy }
+      control-plane: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   harness-runner:
+    <<: *env-file
     build:
       context: ${HIVEMIND_HARNESS_SOURCE:?set the hivemind-chat Harness checkout}
       dockerfile: deploy/hivemind-chat/Dockerfile
@@ -31,19 +264,12 @@ services:
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET}
       HIVEMIND_CONTROL_PLANE_URL: http://control-plane:3000
       HIVEMIND_SERVICE_HTTP_ORIGINS: http://control-plane:3000
-      HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,https://next.preview.singulancelabs.com}
-      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-localhost:3000,127.0.0.1:3000,next.preview.singulancelabs.com}
+      HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-https://next.preview.singulancelabs.com}
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-next.preview.singulancelabs.com,harness-origin.preview.singulancelabs.com}
       CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:-}
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
-    depends_on:
-      control-plane: { condition: service_healthy }
-      api: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      redis: { condition: service_started }
     tmpfs:
       - /tmp:size=128m,mode=1777
-    ports:
-      - "127.0.0.1:${HIVE_HARNESS_PORT:-13081}:3080"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -51,4 +277,58 @@ services:
       retries: 12
       start_period: 20s
     networks: [hivemind-network]
+    depends_on:
+      control-plane: { condition: service_healthy }
+      core: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
+  origin-gateway:
+    image: caddy:2.8-alpine
+    container_name: hivemind-origin-gateway
+    restart: unless-stopped
+    volumes:
+      - ./hivemind-chat/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "127.0.0.1:18080:80"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+    networks: [hivemind-network]
+    depends_on:
+      control-plane: { condition: service_healthy }
+      core: { condition: service_healthy }
+      harness-runner: { condition: service_healthy }
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.3
+    container_name: hivemind-cloudflared
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes:
+      - ./hivemind-chat/cloudflared.yml:/etc/cloudflared/config.yml:ro
+      - ${CLOUDFLARED_CREDENTIALS_FILE:?set CLOUDFLARED_CREDENTIALS_FILE}:/etc/cloudflared/credentials.json:ro
+    depends_on:
+      origin-gateway: { condition: service_healthy }
+    networks: [hivemind-network]
+
+networks:
+  hivemind-network:
+    name: hivemind-network
+    external: true
+
+volumes:
+  hivemind-postgres-data:
+    name: hivemind-postgres-data
+    external: true
+  hivemind-qdrant-data:
+    name: hivemind-qdrant-data
+    external: true
+  hivemind-docling-models:
+    name: hivemind-docling-models
+    external: true
+  hivemind-redis-data:
+    name: hivemind-redis-data
+    external: true

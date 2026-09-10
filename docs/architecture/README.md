@@ -32,6 +32,7 @@ FRONTEND ──► ENGINE (control-plane + core)          ← SAME API for ALL o
 2. **FE→engine requests never change.** The per-org split is `engine→data` only.
 
 ## Related
+- [HARNESS_CHAT.md](HARNESS_CHAT.md) — native Harness in HIVE Overview; start here before chat/runner work.
 - `CHANGELOG/2026-06-26-mneme-amr-engine.md` — the `.amr` engine + driver arc.
 - `docs/BYOD-ARCHITECTURE.md` — the earlier recon + no-leak production plan.
 - `infra/` — clone-and-run for a fresh box. `byod/` (+ `byod` branch) — the customer data bundle.

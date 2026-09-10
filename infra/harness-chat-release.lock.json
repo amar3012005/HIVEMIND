@@ -1,0 +1,27 @@
+{
+  "hivemindBranch": "singulance-local",
+  "hivemindBaselineCommit": "0035027205b84e60e58fefa5ca0f1aa95cea2adc",
+  "hivemindWorktree": "/Users/amar/HIVE-MIND-singulance-chat-local",
+  "harnessRepo": "amar3012005/deepseek-harness-hivemind",
+  "harnessBranch": "hivemind-chat",
+  "harnessCommit": "980a9d66e373d9c3a1a29f249968c44991280d18",
+  "davinciSubmodule": "frontend/Da-vinci",
+  "davinciCommit": "c0032dd4de663476f8f55d061a847dbf9bfeb8ed",
+  "harnessProfile": "hivemind-chat",
+  "composeProject": "hivemind-chat-local",
+  "composeFiles": ["docker-compose.local-stack.yml", "docker-compose.local-services.yml", "infra/docker-compose.hivemind-chat.yml"],
+  "sessionAuthority": "postgres",
+  "identityAuthority": "control-plane",
+  "memoryAuthority": "core",
+  "previewOrigin": "https://next.preview.singulancelabs.com",
+  "nativeReferenceOrigin": "https://deepseek.singulancelabs.com",
+  "productionBranch": "singulance-main",
+  "forbiddenDevelopmentOverlays": [
+    "infra/docker-compose.harness-hotfix.yml",
+    "infra/docker-compose.harness-local.fast-runtime.yml",
+    "infra/docker-compose.harness-local.clean-frontend.yml",
+    "infra/docker-compose.harness-local.runtime.yml",
+    "infra/docker-compose.harness-local.override.yml"
+  ],
+  "notes": "Development lock. Refresh only after accepting pushed SHAs; production promotion additionally requires immutable image digests."
+}

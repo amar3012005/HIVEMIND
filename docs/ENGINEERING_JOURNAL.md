@@ -37,6 +37,21 @@ or uncommitted changes as completed work.
 
 ## Current Git Baseline
 
+## 2026-09-10 UTC - Canonical HIVE Harness chat environment started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/singulance-chat-local`
+- Base / commit: `0035027205b84e60e58fefa5ca0f1aa95cea2adc` -> `pending`
+- Scope: local-only Compose entrypoint, revision lock, drift doctor, architecture,
+  runbook, acceptance checklist, and handoff; no application or production change.
+- Verification: `bash -n scripts/harness-chat-env` and `git diff --check` passed;
+  Compose validation passed and doctor correctly detected two active backend generations.
+- Production: not deployed
+- Rollback: revert the eventual session-branch commit
+- Next: commit and push the session branch, then integrate through the permanent
+  `singulance-local` worktree before changing shared containers.
+
 ## 2026-07-19 UTC - SINGULANCE deployment governor started
 
 - State: Started

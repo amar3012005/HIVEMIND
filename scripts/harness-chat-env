@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT=hivemind-chat-local
+LOCK="$ROOT/infra/harness-chat-release.lock.json"
+ENV_FILE="${HIVEMIND_CHAT_ENV_FILE:-$ROOT/infra/.env.hivemind-chat.local}"
+HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:-/Users/amar/deepseek-harness-upstream-clean-preview}"
+FILES=(-f "$ROOT/docker-compose.local-stack.yml" -f "$ROOT/docker-compose.local-services.yml" -f "$ROOT/infra/docker-compose.hivemind-chat.yml")
+
+say() { printf '%-5s %s\n' "$1" "$2"; }
+sha() { git -C "$1" rev-parse HEAD 2>/dev/null || printf missing; }
+branch() { git -C "$1" branch --show-current 2>/dev/null || printf unknown; }
+lock() { node -e "const x=require(process.argv[1]);process.stdout.write(String(x[process.argv[2]]||''))" "$LOCK" "$1"; }
+compose() { local env=(); [[ -f "$ENV_FILE" ]] && env=(--env-file "$ENV_FILE"); docker compose -p "$PROJECT" "${env[@]}" "${FILES[@]}" "$@"; }
+configured() { [[ -n "${!1:-}" ]] || { [[ -f "$ENV_FILE" ]] && grep -Eq "^${1}=.+" "$ENV_FILE"; }; }
+
+status() {
+  say INFO "HIVEMIND $(branch "$ROOT") $(sha "$ROOT")"
+  say INFO "Da-vinci $(git -C "$ROOT" ls-tree HEAD frontend/Da-vinci | awk '{print $3}')"
+  say INFO "Harness $(branch "$HARNESS_SOURCE") $(sha "$HARNESS_SOURCE")"
+  say INFO "profile=hivemind-chat project=$PROJECT env=$([[ -f "$ENV_FILE" ]] && echo present || echo missing)"
+  say INFO "authority identity=control-plane session=postgres memory=core coordination=redis"
+  docker ps --format '{{.Names}} {{.Image}} {{.Status}} {{.Networks}}' 2>/dev/null | grep -E '^(hivemind-|hm-|.*harness)' || true
+}
+
+doctor() {
+  local bad=0 actual expected count mounts
+  fail() { say RED "$1"; bad=1; }
+  [[ "$(branch "$ROOT")" != singulance-main ]] || fail "refusing production branch"
+  expected="$(lock hivemindBaselineCommit)"; git -C "$ROOT" merge-base --is-ancestor "$expected" HEAD || fail "HIVEMIND is not based on locked singulance-local baseline"
+  expected="$(lock harnessCommit)"; actual="$(sha "$HARNESS_SOURCE")"; [[ "$actual" == "$expected" ]] || fail "Harness SHA drift"
+  expected="$(lock davinciCommit)"; actual="$(git -C "$ROOT" ls-tree HEAD frontend/Da-vinci | awk '{print $3}')"; [[ "$actual" == "$expected" ]] || fail "Da-vinci SHA drift"
+  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET; do configured "$key" || fail "$key missing"; done
+  [[ "${COMPOSE_FILE:-}" != *harness-hotfix* ]] || fail "hotfix overlay active"
+  rg -q 'packages/client.+:/opt/deepseek-harness' "$ROOT/infra/docker-compose.hivemind-chat.yml" && fail "package bind mount in canonical overlay"
+  compose config --quiet >/dev/null || fail "Compose model invalid"
+  count="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -Ec '^(hm-core|hm-control|hm-postgres|hm-redis|hivemind-api|hivemind-control-plane-local|hivemind-postgres|hivemind-redis)$' || true)"
+  [[ "$count" -le 4 ]] || fail "duplicate HIVE backend generations are running"
+  mounts="$(docker inspect hivemind-harness-runner --format '{{range .Mounts}}{{.Destination}} {{end}}' 2>/dev/null || true)"
+  [[ "$mounts" != *'/opt/deepseek-harness/packages/'* ]] || fail "runner has package bind mounts"
+  [[ "$bad" -eq 0 ]] || return 1
+  say OK "doctor passed"
+}
+
+test_all() {
+  doctor
+  (cd "$ROOT/workers/harness-chat" && npm test --silent)
+  (cd "$HARNESS_SOURCE" && pnpm exec vitest run packages/hivemind/connected-apps/tests/connected-apps.spec.ts)
+  (cd "$HARNESS_SOURCE" && pnpm dsh --profile hivemind-web --dump-config >/tmp/hivemind-chat-profile.json)
+  grep -q '@deepseek-ai/dsh-hivemind-web-app' /tmp/hivemind-chat-profile.json
+  (cd "$HARNESS_SOURCE/packages/preset/agent-presets" && node -e "console.log(require.resolve('@deepseek-ai/dsh-hivemind-connected-apps/package.json'))" >/dev/null)
+  say OK "static, edge worker, connected-apps, and resolved-profile checks passed"
+  say INFO "run authenticated acceptance in docs/acceptance/HARNESS_CHAT_E2E.md"
+}
+
+case "${1:-status}" in
+  status) status ;;
+  doctor) doctor ;;
+  up) doctor; compose up -d --build harness-runner; compose ps ;;
+  up-all) doctor; compose up -d --build; compose ps ;;
+  restart) compose up -d --no-build harness-runner ;;
+  test) test_all ;;
+  down) compose down ;;
+  *) echo "usage: $0 status|doctor|up|up-all|restart|test|down"; exit 2 ;;
+esac

@@ -1,0 +1,54 @@
+name: hivemind-chat-local
+
+# Canonical overlay. Use only through scripts/harness-chat-env together with
+# docker-compose.local-stack.yml and docker-compose.local-services.yml.
+services:
+  control-plane:
+    environment:
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?set a distinct 32+ byte ticket secret}
+      HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:?set a distinct 32+ byte runner secret}
+      HIVE_HARNESS_PREVIEW_EMBED_URL: ${HIVE_HARNESS_PREVIEW_EMBED_URL:-https://next.preview.singulancelabs.com/hivemind/app/overview}
+
+  harness-runner:
+    build:
+      context: ${HIVEMIND_HARNESS_SOURCE:?set the hivemind-chat Harness checkout}
+      dockerfile: deploy/hivemind-chat/Dockerfile
+      args:
+        DSH_CLIENT_COMMIT_HASH: ${HIVEMIND_HARNESS_COMMIT_HASH:?set the locked Harness SHA}
+    image: hivemind/harness-chat:${HIVEMIND_HARNESS_COMMIT_HASH}
+    container_name: hivemind-harness-runner
+    restart: unless-stopped
+    read_only: true
+    environment:
+      NODE_ENV: production
+      PORT: "3080"
+      DSH_HOME: /tmp/dsh
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app
+      PGOPTIONS: -c search_path=hivemind,public
+      REDIS_URL: redis://redis:6379/0
+      HIVE_HARNESS_PROFILE: hivemind-chat
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET}
+      HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET}
+      HIVEMIND_CONTROL_PLANE_URL: http://control-plane:3000
+      HIVEMIND_SERVICE_HTTP_ORIGINS: http://control-plane:3000
+      HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,https://next.preview.singulancelabs.com}
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-localhost:3000,127.0.0.1:3000,next.preview.singulancelabs.com}
+      CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:-}
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+    depends_on:
+      control-plane: { condition: service_healthy }
+      api: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    ports:
+      - "127.0.0.1:${HIVE_HARNESS_PORT:-13081}:3080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [hivemind-network]
+

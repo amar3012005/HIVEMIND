@@ -1,208 +1,98 @@
-# Meeting Notes v2 implementation handoff
+# HIVE native Harness chat handoff
 
-## Repository state
+## Authority and scope
 
-- Worktree: `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-meeting-v2`
-- Branch: `codex/meeting-lifecycle-v2`
-- Pushed backend implementation: `ced23852`
-- Pushed journal commit: `ae05531f`
-- Frontend worktree branch: `codex/meeting-lifecycle-v2-ui`
-- Pushed frontend commit: `b3b63e12369cbb52aa4642eceb2c10da9f5a4ee2`
-- Production was not touched.
-- Subsequent local-only rollout provisioned the `-local` Worker, Workflow,
-  Queues, DLQs, EU R2 bucket and Flagship local targeting rule. Production was
-  not mutated.
+- Development base: `origin/singulance-local` at `0035027205b84e60e58fefa5ca0f1aa95cea2adc`.
+- Harness: `amar3012005/deepseek-harness-hivemind`, branch `hivemind-chat`, commit `980a9d66e373d9c3a1a29f249968c44991280d18`.
+- Da-vinci gitlink: `c0032dd4de663476f8f55d061a847dbf9bfeb8ed`.
+- `singulance-main` and production were not changed and are forbidden until the acceptance checklist is green.
+- HyperAgents is outside this task.
 
-## Completed and verified
+## Canonical architecture
 
-1. Additive Meeting Notes v2 schema, policy/notice/participant/authorization
-   records, checkpoints, artifact receipts, outbox, restrictions, DSAR and
-   deletion receipts.
-2. Fail-closed, latched `meeting_lifecycle_v2` modes:
-   `off|shadow|consent|workflow|full`.
-3. Gateway-required v2 processing with Gateway payload logging and caching
-   suppressed.
-4. EU-jurisdiction local R2, identifier-only audio/email Queues and deterministic
-   finalization Workflow.
-5. Participant invitation-fragment exchange, OTP, append-only decision receipt,
-   withdrawal restriction, late-participant pause and authorization snapshots.
-6. Transactional invitation, OTP, confirmation, decline, withdrawal and ready
-   emails through the canonical email/platform-notification path.
-7. Public authorization page, privacy policy editor and recorder integration.
-8. BYOD/hybrid v2 fails closed instead of silently using central storage.
+Use `./scripts/harness-chat-env` only. It composes:
 
-### Pasted verification output
+1. `docker-compose.local-stack.yml` — Core, PostgreSQL, Redis, Qdrant.
+2. `docker-compose.local-services.yml` — Control Plane and local services.
+3. `infra/docker-compose.hivemind-chat.yml` — shared admission secrets and the complete native Harness runner.
+
+All services use project `hivemind-chat-local` and network `hivemind-network`.
+Control Plane owns identity/admission; PostgreSQL owns Harness session/events;
+Redis owns admission nonces/coordination; Core owns HIVE memory and governed
+business APIs. The runner image contains the complete native profile and may not
+use package-level bind mounts.
+
+## Completed setup
+
+- Added the canonical Compose overlay and an untracked environment template.
+- Locked Harness and Da-vinci commits plus the HIVE baseline.
+- Added `status`, `doctor`, `up`, `up-all`, `restart`, `test`, and `down` commands.
+- `up` rebuilds only the runner and uses Docker cache; `restart` uses no build.
+- Added architecture, decisions, local runbook, and E2E acceptance documents.
+- Doctor rejects production branch use, SHA drift, missing configuration,
+  recovery overlays, package bind mounts, invalid Compose, and duplicate backend generations.
+
+## Current runtime finding
+
+Two HIVE backend generations are running now:
+
+- `hivemind-api`, `hivemind-control-plane-local`, `hivemind-postgres`, `hivemind-redis` on `hivemind-network`.
+- `hm-core`, `hm-control`, `hm-postgres`, `hm-redis` on `hivemind-dev_default`.
+
+Therefore `./scripts/harness-chat-env doctor` intentionally fails with
+`duplicate HIVE backend generations are running`. Do not weaken this check.
+Resolve which generation owns the shared preview from the permanent local
+integration worktree before admission testing. Do not delete volumes.
+
+## Required local secrets
+
+Copy `infra/.env.hivemind-chat.example` to the ignored
+`infra/.env.hivemind-chat.local` and replace placeholders. The ticket and runner
+service secrets must be distinct and at least 32 bytes. Keep Composio and
+Cloudflare credentials server-side. Never paste their values into logs or git.
+
+## Verification evidence
 
 ```text
-> npx prisma validate
-Prisma schema loaded from prisma\schema.prisma
-The schema at prisma\schema.prisma is valid
+bash -n scripts/harness-chat-env
+exit 0
 
-> node --test tests/unit/meeting*.test.js
-tests 38
-pass 38
-fail 0
+git diff --check
+exit 0
 
-> npm run check  # workers/meeting-lifecycle
-Generating project types...
-Types written to worker-configuration.d.ts
-TypeScript exit 0
-
-> npm test  # workers/meeting-lifecycle
-Test Files  1 passed (1)
-Tests  6 passed (6)
-
-> npm run dry-run
-env.MEETING_WORKFLOW (MeetingFinalizationWorkflow) Workflow
-env.AUDIO_QUEUE (hivemind-meeting-audio-local) Queue
-env.EMAIL_QUEUE (hivemind-meeting-email-local) Queue
-env.AUDIO (hivemind-meeting-audio-local-eu (eu)) R2 Bucket
-env.FLAGS (...) Flagship
---dry-run: exiting now.
-
-> npm run build  # frontend/Da-vinci
-Compiled successfully.
+./scripts/harness-chat-env status
+HIVEMIND codex/singulance-chat-local 003502720...
+Da-vinci c0032dd4...
+Harness hivemind-chat 980a9d66...
 ```
 
-## Current step
-
-Build equivalent functional Meeting Notes v2 endpoints in the embedded/BYOD
-tenant agent and route Core's policy, session, authorization, checkpoint,
-artifact and rights operations through those endpoints. The additive tenant
-schema is already in `core/src/vector/mneme/embedded-agent.mjs`; only functional
-v2 parity is missing. Core's deliberate fail-closed guard is at
-`core/src/server.js` near the meeting session admission block containing
-`remote_meeting_v2_agent_upgrade_required`.
-
-Flagship now returns `full` for every `environment=local` context and `off` for
-production. The deployed local Worker also returns `full` from authenticated
-`/mode`. The running shared Core container has not loaded Meeting v2 code or
-environment variables because the permanent integration worktree remains dirty.
+Compose interpolation and model validation passed with temporary non-secret
+test values; doctor then stopped at the duplicate-generation gate as designed.
+The resolved `hivemind-web` profile dump contains the HIVE web-app patch. The
+connected-apps workspace package resolves from the owning agent-presets package;
+its focused suite passed 9/9. Worker tests were not run because that package's
+local dependencies are absent.
 
 ## Unmet acceptance criteria
 
-1. BYOD/hybrid agent functional parity for policy, authorization, durable
-   checkpoints, artifact receipts, publication receipts and DSAR state.
-2. Durable rights executor traversing audio, transcript segments, meeting,
-   insights, canonical documents/evidence, memories, entity/claim/relationship
-   projections, vectors, notifications and Gateway log identifiers. Current
-   `erase` immediately restricts and creates a pending DSAR only.
-3. Reminder, recovered-processing and DSAR-status notification triggers (the
-   templates and durable dispatch infrastructure exist).
-4. Isolated live PostgreSQL migration test and complete local
-   Worker/Queue/Workflow/R2/email runtime test with termination and replay.
-5. Managed, embedded, hybrid and BYOD semantic-count/citation parity.
-6. Integration into `singulance-local` and shared preview rebuild. The permanent
-   worktree currently has unrelated modifications:
-
-```text
- M core/data/mcp-connectors.json
- M docker-compose.local-stack.yml
-```
-
-   Per `docs/LOCAL_INTEGRATION_PROTOCOL.md`, do not clean, stash, overwrite,
-   merge, or rebuild there until its owner resolves those edits.
-7. Agent Memory record. The required MCP tools were not callable in this
-   session; Git, the decision document and engineering journal were updated.
+- Select one local backend generation and stop the other without deleting data.
+- Create the ignored local environment file with real development secrets.
+- Boot the canonical project from the permanent local integration worktree.
+- Prove bootstrap 200, establish 200, boot 200, cookie set, and WebSocket upgrade.
+- Complete authenticated native-renderer, session replay, Composio lifecycle,
+  failure retry/idempotency, and second-tenant isolation checks.
+- Pin immutable image digests before any production proposal.
 
 ## Decisions
 
-- Ambiguity: allow active v2 for BYOD using central control state, or block it.
-  Selected reversible default: block with
-  `remote_meeting_v2_agent_upgrade_required`; residency is more important than
-  partial functionality.
-- Ambiguity: treat an erasure request as immediate broad deletion, or restrict
-  first and await an auditable traversal. Selected reversible default: restrict
-  processing/publication immediately and leave the request pending until the
-  executor can verify every authoritative store.
-- Ambiguity: deploy local Cloudflare resources before shared runtime acceptance.
-  Selected reversible default: dry-run only. No remote resource mutation.
-- Ambiguity: integrate despite unrelated dirty files in the permanent worktree.
-  Selected reversible default: do not touch them and do not integrate.
+- Existing recovery overlays remain in git for forensic history but are never
+  part of the canonical command.
+- No running container was stopped from this feature worktree.
+- No UI, Core, Control Plane, Worker, or production code was changed here.
 
 ## Exact next action
 
-Implement `/v1/meeting-v2-control` in `core/src/vector/mneme/embedded-agent.mjs`, add typed remote-backend/driver wrappers, and replace the remote v2 fail-closed guard only after policy/session/authorization/checkpoint parity tests pass.
-
----
-
-# Visual Intelligence Workflow Handoff
-
-## Current state
-
-- Branch: `codex/visual-intelligence-workflow`
-- Worktree: `P:\HIVEMIND-worktrees\visual-intelligence-workflow`
-- Pushed commit: `35515ab7` (`feat: add durable visual intelligence workflow contract`)
-- Production: not deployed.
-
-## Completed and verified
-
-Created `workers/visual-intelligence-lifecycle` with:
-
-- tenant/user/job-scoped trigger contract;
-- deterministic `visual-{job_id}-v{processing_version}` Workflow identity;
-- fail-closed `visual_intelligence_workflow_v1` Flagship evaluation;
-- local/prod-separated Queue, DLQ, Workflow, and R2 binding names;
-- durable stages: `admit`, `discover`, `capture`, `store`, `extract`, `verify`, `publish`, `notify`;
-- publish gate requiring a cited `brand_dna` artifact and `visual_generation_brief`;
-- retryable versus non-retryable failures and terminal failure recording.
-
-Verified commands, run in `workers/visual-intelligence-lifecycle`:
-
-```text
-npm run check
-> tsc --noEmit
-
-npm test
-Test Files  1 passed (1)
-Tests  2 passed (2)
-```
-
-`npm run dry-run` was accidentally invoked from the repository root and failed
-with `Missing script: "dry-run"`; it has not yet been rerun from the Worker
-directory.
-
-## Required next implementation
-
-The Worker calls Core endpoints that do not yet exist:
-
-```text
-POST /internal/visual-intelligence/admit
-POST /internal/visual-intelligence/stage
-POST /internal/visual-intelligence/fail
-```
-
-Implement those in `core/src/control-plane-server.js` or a dedicated service,
-backed by additive Prisma models for run/stage/artifact receipts. Reuse:
-
-- `core/src/web/playwright-service-runtime.js` for capture;
-- `core/src/onboarding/company-research.js` for official-site discovery;
-- `core/src/artifacts/hyper-artifacts.js` and `gatewayFirstFetch` for AI Gateway
-  visual evaluation;
-- `core/src/lifecycle/day1-first-move.js` for the optional Day 2 notification
-  convention;
-- HyperRoom artifact persistence for Room consumption.
-
-Gemini 2.5 Flash Lite must receive selected R2 screenshot references/bytes via
-AI Gateway and return schema-constrained Brand DNA JSON. Its output is a
-candidate only; verified CSS/DOM/screenshot evidence must be linked before
-`publish` succeeds.
-
-## Decisions
-
-- Cloudflare Workflow orchestrates durability only; PostgreSQL owns run and
-  checkpoint state, R2 owns binary artifacts, HIVEMIND owns the cited reusable
-  Brand DNA semantic artifact.
-- The existing Playwright service remains the initial browser adapter. A
-  user-controlled authenticated session is required for private dashboard
-  inspection.
-- The generic worker is intentionally not Ravi-specific and can be called by
-  any authorized agent or lifecycle.
-- No deployment or Flagship enablement occurred.
-
-## Exact next action
-
-Implement the additive Core visual-intelligence run/stage executor and its
-focused tests, then run the Worker dry-run from
-`workers/visual-intelligence-lifecycle`.
-
+From the permanent clean `singulance-local` integration worktree, identify the
+backend generation serving preview, stop only the duplicate generation without
+deleting volumes, create `infra/.env.hivemind-chat.local`, and run
+`./scripts/harness-chat-env doctor` followed by `./scripts/harness-chat-env up`.

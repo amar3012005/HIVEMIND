@@ -69,16 +69,55 @@ function isRunnerRoute(pathname: string): boolean {
   return pathname === '/health' || pathname === '/api/remote.mux' || pathname.startsWith('/api/');
 }
 
+function isEstablishPath(pathname: string): boolean {
+  return pathname === '/api/hivemind/embed/exchange' || pathname === '/api/hivemind/session/establish';
+}
+
+function isWebSocketUpgrade(request: Request): boolean {
+  return (request.headers.get('upgrade') || '').toLowerCase() === 'websocket';
+}
+
 async function proxyRunner(request: Request, env: Env): Promise<Response> {
   if (!env.RUNNER_ORIGIN) return Response.json({ error: 'runner_unavailable' }, { status: 503 });
   const incoming = new URL(request.url);
   const target = new URL(`${incoming.pathname}${incoming.search}`, env.RUNNER_ORIGIN);
-  return fetch(new Request(target, {
+  const headers = new Headers(request.headers);
+  // Preserve the browser-visible authority for the runner's same-origin and
+  // authority-bound cookie checks while the upstream Host targets the tunnel.
+  headers.set('x-forwarded-host', incoming.host);
+  headers.set('x-forwarded-proto', incoming.protocol.slice(0, -1));
+  const contentType = (headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
+  const parentNavigation = isEstablishPath(incoming.pathname)
+    && contentType === 'application/x-www-form-urlencoded';
+  const keepBrowserOrigin = isEstablishPath(incoming.pathname)
+    || incoming.pathname === '/api/remote.mux'
+    || incoming.pathname === '/api/hivemind/boot';
+  if (!keepBrowserOrigin && !parentNavigation && headers.get('origin') === incoming.origin) {
+    headers.set('origin', target.origin);
+  }
+  if (incoming.pathname === '/api/remote.mux' && isWebSocketUpgrade(request)) {
+    headers.set('upgrade', 'websocket');
+    headers.set('connection', 'Upgrade');
+    return fetch(new Request(target, { method: 'GET', headers, redirect: 'manual' }));
+  }
+  const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
+  const upstream = await fetch(new Request(target, {
     method: request.method,
-    headers: request.headers,
-    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
+    headers,
+    body: hasBody ? request.body : undefined,
+    ...(hasBody ? { duplex: 'half' } : {}),
+    credentials: 'include',
     redirect: 'manual',
+  } as RequestInit));
+  console.log(JSON.stringify({
+    event: 'harness_runner_proxy',
+    path: incoming.pathname,
+    status: upstream.status,
+    upgrade: isWebSocketUpgrade(request),
+    request_cookie: headers.has('cookie'),
+    response_cookie: upstream.headers.has('set-cookie'),
   }));
+  return upstream;
 }
 
 export const worker = {

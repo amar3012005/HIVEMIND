@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   consumeHarnessAdmissionTicket,
+  HIVE_HARNESS_TICKET_NONCE_PREFIX,
   mintHarnessAdmissionTicket,
   registerHarnessTicketNonce,
   verifyHarnessAdmissionTicket,
@@ -17,6 +18,7 @@ const nowMs = Date.parse('2026-09-08T12:00:00.000Z');
 function fakeRedis() {
   const values = new Map();
   return {
+    values,
     async set(key, value, _ex, _ttl, _nx) {
       if (values.has(key)) return null;
       values.set(key, value);
@@ -28,6 +30,10 @@ function fakeRedis() {
       return value;
     },
   };
+}
+
+function redisKeys(redis) {
+  return redis.values.keys();
 }
 
 test('harness admission ticket rejects tampering, expiry, and tenant mismatch', () => {
@@ -42,6 +48,7 @@ test('registered ticket nonce is consumed exactly once with GETDEL semantics', a
   const redis = fakeRedis();
   const minted = mintHarnessAdmissionTicket({ secret, orgId, userId, variation: 'preview', nowMs });
   await registerHarnessTicketNonce(redis, minted.ticket, minted.claims, { nowMs });
+  assert.equal([...redisKeys(redis)][0]?.startsWith(HIVE_HARNESS_TICKET_NONCE_PREFIX), true);
   const claims = await consumeHarnessAdmissionTicket(redis, minted.ticket, { secret, nowMs, expectedOrgId: orgId });
   assert.equal(claims.variation, 'preview');
   await assert.rejects(() => consumeHarnessAdmissionTicket(redis, minted.ticket, { secret, nowMs }), /ticket_already_consumed/);

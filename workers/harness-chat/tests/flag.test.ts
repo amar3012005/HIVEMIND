@@ -40,6 +40,116 @@ describe('runner and asset routing', () => {
     vi.unstubAllGlobals();
   });
 
+  it('preserves WebSocket upgrade headers for /api/remote.mux', async () => {
+    const received: Array<{ url: string; upgrade: string | null; connection: string | null; origin: string | null; forwardedHost: string | null }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
+      received.push({
+        url: request.url,
+        upgrade: request.headers.get('upgrade'),
+        connection: request.headers.get('connection'),
+        origin: request.headers.get('origin'),
+        forwardedHost: request.headers.get('x-forwarded-host'),
+      });
+      return new Response(null, { status: 200, headers: { upgrade: 'websocket', connection: 'Upgrade' } });
+    }));
+    const env = { RUNNER_ORIGIN: 'https://private-runner.example' } as Env;
+    const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/api/remote.mux', {
+      headers: {
+        origin: 'https://next.preview.singulancelabs.com',
+        upgrade: 'websocket',
+        connection: 'Upgrade',
+      },
+    }), env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('upgrade')).toBe('websocket');
+    expect(received[0]).toEqual({
+      url: 'https://private-runner.example/api/remote.mux',
+      upgrade: 'websocket',
+      connection: 'Upgrade',
+      origin: 'https://next.preview.singulancelabs.com',
+      forwardedHost: 'next.preview.singulancelabs.com',
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps next.preview origin on session establish so the cookie is same-origin', async () => {
+    const received: Array<{ origin: string | null; forwardedHost: string | null; path: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
+      received.push({
+        origin: request.headers.get('origin'),
+        forwardedHost: request.headers.get('x-forwarded-host'),
+        path: new URL(request.url).pathname,
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'set-cookie': 'hm=1; Path=/; Secure; HttpOnly; SameSite=None' },
+      });
+    }));
+    const env = { RUNNER_ORIGIN: 'https://private-runner.example' } as Env;
+    const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/api/hivemind/session/establish', {
+      method: 'POST',
+      headers: {
+        origin: 'https://next.preview.singulancelabs.com',
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    }), env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('set-cookie')).toContain('Path=/');
+    expect(received[0]).toEqual({
+      origin: 'https://next.preview.singulancelabs.com',
+      forwardedHost: 'next.preview.singulancelabs.com',
+      path: '/api/hivemind/session/establish',
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps parent navigation origin and uses private same-origin JSON transport', async () => {
+    const received: Array<{ url: string; host: string | null; origin: string | null; contentType: string | null }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
+      received.push({
+        url: request.url,
+        host: request.headers.get('host'),
+        origin: request.headers.get('origin'),
+        contentType: request.headers.get('content-type'),
+      });
+      return new Response(null, { status: 303, headers: { location: '/' } });
+    }));
+    const env = { RUNNER_ORIGIN: 'https://private-runner.example' } as Env;
+    const exchangeUrl = 'https://next.preview.singulancelabs.com/api/hivemind/embed/exchange';
+
+    await worker.fetch(new Request(exchangeUrl, {
+      method: 'POST',
+      headers: {
+        origin: 'https://next.preview.singulancelabs.com',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+    }), env);
+    await worker.fetch(new Request(exchangeUrl, {
+      method: 'POST',
+      headers: {
+        origin: 'https://next.preview.singulancelabs.com',
+        'content-type': 'application/json',
+      },
+    }), env);
+
+    expect(received).toEqual([
+      {
+        url: 'https://private-runner.example/api/hivemind/embed/exchange',
+        host: null,
+        origin: 'https://next.preview.singulancelabs.com',
+        contentType: 'application/x-www-form-urlencoded',
+      },
+      {
+        url: 'https://private-runner.example/api/hivemind/embed/exchange',
+        host: null,
+        origin: 'https://next.preview.singulancelabs.com',
+        contentType: 'application/json',
+      },
+    ]);
+    vi.unstubAllGlobals();
+  });
+
   it('adds an explicit frame ancestor policy to static assets', async () => {
     const env = {
       HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com,https://admin.singulancelabs.com',

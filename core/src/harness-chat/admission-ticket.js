@@ -4,6 +4,7 @@ export const HIVE_HARNESS_TICKET_ISSUER = 'hivemind-control-plane';
 export const HIVE_HARNESS_TICKET_AUDIENCE = 'hivemind-harness-runner';
 export const HIVE_HARNESS_TICKET_PROFILE = 'hivemind-chat';
 export const HIVE_HARNESS_TICKET_TTL_SECONDS = 60;
+export const HIVE_HARNESS_TICKET_NONCE_PREFIX = 'hive:harness-ticket:';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const VARIATIONS = new Set(['preview', 'harness']);
@@ -99,7 +100,7 @@ export function verifyHarnessAdmissionTicket(ticket, {
 }
 
 function nonceKey(jti) {
-  return `hive:harness-ticket:${jti}`;
+  return `${HIVE_HARNESS_TICKET_NONCE_PREFIX}${jti}`;
 }
 
 export async function registerHarnessTicketNonce(redis, ticket, claims, { nowMs = Date.now() } = {}) {

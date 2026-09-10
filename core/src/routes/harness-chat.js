@@ -86,7 +86,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   const membership = await prisma?.userOrganization?.findUnique?.({
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
-  if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required', diagnostic: 'membership_denied' }, 403); return true; }
   if (claims.project_id) {
     const project = await prisma?.project?.findFirst?.({ where: { id: claims.project_id, orgId: claims.org_id }, select: { id: true } });
     if (!project) { jsonResponse(res, { error: 'Project not found' }, 404); return true; }
@@ -139,19 +139,20 @@ export async function handleHarnessChatBootstrapRoute({
   if (!current) return true;
   const { userId, orgId } = current.session || {};
   if (!UUID_RE.test(userId) || !UUID_RE.test(orgId)) {
-    jsonResponse(res, { error: 'Authenticated tenant scope required' }, 403);
+    jsonResponse(res, { error: 'Authenticated tenant scope required', diagnostic: 'membership_denied' }, 403);
     return true;
   }
   const membership = await prisma?.userOrganization?.findUnique?.({
     where: { userId_orgId: { userId, orgId } },
-    select: { userId: true },
+    select: { userId: true, isActive: true },
   });
-  if (!membership) {
-    jsonResponse(res, { error: 'Organization membership required' }, 403);
+  if (!membership || membership.isActive === false) {
+    jsonResponse(res, { error: 'Organization membership required', diagnostic: 'membership_denied' }, 403);
     return true;
   }
 
   const body = await parseBody(req).catch(() => ({}));
+  // Tenant identity is server-derived. Ignore any client-supplied user/org.
   const projectId = typeof body?.project_id === 'string' ? body.project_id : null;
   if (projectId && !UUID_RE.test(projectId)) {
     jsonResponse(res, { error: 'Invalid project scope' }, 400);
@@ -212,8 +213,9 @@ export async function handleHarnessChatBootstrapRoute({
       flag_receipt: evaluation.flagReceipt,
     });
   } catch (error) {
-    console.warn('[harness-chat.bootstrap] admission unavailable:', error?.code || error?.message || error);
-    jsonResponse(res, legacyResponse(env, evaluation.flagReceipt));
+    const diagnostic = error?.code || 'admission_unavailable';
+    console.warn('[harness-chat.bootstrap] admission unavailable', diagnostic);
+    jsonResponse(res, { ...legacyResponse(env, evaluation.flagReceipt), diagnostic });
   }
   return true;
 }

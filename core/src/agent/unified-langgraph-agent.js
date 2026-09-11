@@ -392,8 +392,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool));
+    const modelMessages = providerEvidenceReady ? [
+      { role: 'system', content: `Synthesize the final answer from verified provider receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.` },
+      { role: 'user', content: message },
+      { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool))).slice(0, 24000)}` },
+    ] : state.messages;
     const turn = await callModel({
-      messages: state.messages, tools: providerEvidenceReady ? [] : unifiedMetaTools({ useTools }), model: ctx.model,
+      messages: modelMessages, tools: providerEvidenceReady ? [] : unifiedMetaTools({ useTools }), model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
     });
     const assistant = turn.message || turn;

@@ -139,6 +139,27 @@ test('connected search reuses an authenticated organization-scoped connection wh
   assert.equal(discoveryScope, 'org');
 });
 
+test('the gateway grounds a contradictory model toolkit in the authenticated user request', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let selected = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'ground-toolkit'), checkpointer: new MemorySaver(),
+    modelStep: async () => (++turn === 1
+      ? { message: call('hivemind_connected_task', { action: 'search', toolkits: ['linkedin'], queries: [{ use_case: 'Read recent messages' }] }, 'g1') }
+      : { message: { role: 'assistant', content: 'No matching emails were returned.' } }),
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'linkedin', status: 'ACTIVE' }]; },
+      async discoverSessionTools(_org, input) {
+        selected = input.toolkits;
+        return { sessionId: 'session-ground', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } };
+      },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(selected, ['gmail']);
+});
+
 test('a connected write becomes a durable approval and executes exactly once after resume', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

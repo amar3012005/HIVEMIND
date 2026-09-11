@@ -172,22 +172,27 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
   if (action === 'search') {
     const queries = Array.isArray(args.queries) ? args.queries.slice(0, 8) : [];
     if (!queries.length) return { successful: false, error: 'connected_search_queries_required' };
-    const useCases = queries.map(row => compactText(row?.use_case, 900)).filter(Boolean);
+    const requestedTask = compactText(ctx.requestMessage, 1200);
+    const useCases = [...new Set([requestedTask, ...queries.map(row => compactText(row?.use_case, 900))].filter(Boolean))].slice(0, 8);
     let toolkits = Array.isArray(args.toolkits) ? args.toolkits.map(value => String(value).toLowerCase()).slice(0, 12) : [];
     let connectionScope = state.connectionScope || ctx.composioConnectionScope || ctx.connectionScope || 'user';
     if (typeof composio.listConnectedAccounts === 'function') {
       const userAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
-      const requestText = useCases.join(' ').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
+      const requestText = requestedTask.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
       let active = [...new Set((userAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+      const explicitlyNamed = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+      if (explicitlyNamed.length) toolkits = explicitlyNamed;
       if (!toolkits.length) toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
       if (!toolkits.length && active.length === 1) toolkits = active;
 
       // Existing tenants may still own connections under the authenticated
       // organization subject. Prefer user scope, but migrate transparently to
       // org scope when the requested app is active only there.
-      if (connectionScope === 'user' && (!toolkits.length || toolkits.some(toolkit => !active.includes(toolkit)))) {
+      if (connectionScope === 'user' && (!explicitlyNamed.length || !toolkits.length || toolkits.some(toolkit => !active.includes(toolkit)))) {
         const orgAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' });
         const orgActive = [...new Set((orgAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+        const explicitlyNamedOrg = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+        if (explicitlyNamedOrg.length) toolkits = explicitlyNamedOrg;
         if (!toolkits.length) toolkits = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
         if (toolkits.length && toolkits.every(toolkit => orgActive.includes(toolkit))) {
           connectionScope = 'org';
@@ -557,7 +562,7 @@ export async function runUnifiedMetaAgent({ message, useTools = false, ctx = {},
   const connector = composio || await import('../connectors/composio/composio-service.js');
   const graphThreadId = threadId(ctx);
   const runId = ctx.unifiedRunId || choice?.run_id || crypto.randomUUID();
-  const runtimeCtx = { ...ctx, prisma: db, unifiedRunId: runId, unifiedGraphThreadId: graphThreadId };
+  const runtimeCtx = { ...ctx, prisma: db, requestMessage: message, unifiedRunId: runId, unifiedGraphThreadId: graphThreadId };
   const runtime = graph || createUnifiedMetaAgentGraph({ checkpointer: checkpointer || await productionCheckpointer(), ctx: runtimeCtx, message, useTools, onEvent, composio: connector, prisma: db, modelStep, metaExecutor, connectedExecutor });
   const config = { configurable: { thread_id: graphThreadId }, recursionLimit: 64, tags: [UNIFIED_META_HARNESS_VERSION], metadata: { use_tools: useTools, locale: ctx.language || 'en' } };
   const output = choice ? await runtime.invoke(new Command({ resume: choice }), config) : await runtime.invoke({ runId }, config);

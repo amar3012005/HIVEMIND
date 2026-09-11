@@ -34,6 +34,7 @@ const State = Annotation.Root({
   sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   connectionScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  requestedToolkits: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   cycles: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   repairs: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   callFingerprints: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -71,6 +72,16 @@ Continue after every tool receipt as the same agent. If evidence is incomplete, 
 function safeHistory(history = [], limit = 3) {
   return (Array.isArray(history) ? history : []).filter(row => ['user', 'assistant'].includes(row?.role) && row?.content)
     .slice(-limit * 2).map(row => ({ role: row.role, content: compactText(row.content, 1400) }));
+}
+
+function toolkitMentions(message, accounts = []) {
+  const request = String(message || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  if (!request) return [];
+  return [...new Set((accounts || []).map(row => String(row?.toolkit || '').toLowerCase()).filter(Boolean))]
+    .filter(toolkit => {
+      const alias = toolkit.replace(/[-_]+/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      return alias && (` ${request} `).includes(` ${alias} `);
+    });
 }
 
 function publicToolResult(value) {
@@ -393,14 +404,24 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     await ensureRun(runId);
     let profile = '';
     try { profile = await getSharedProfileStore(prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null); } catch {}
+    let requestedToolkits = [];
+    if (useTools && typeof composio?.listConnectedAccounts === 'function') {
+      const preferredScope = ctx.composioConnectionScope || ctx.connectionScope || 'user';
+      const [userAccounts, orgAccounts] = await Promise.all([
+        composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: preferredScope }).catch(() => []),
+        preferredScope === 'org' ? Promise.resolve([]) : composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' }).catch(() => []),
+      ]);
+      requestedToolkits = toolkitMentions(message, [...userAccounts, ...orgAccounts]);
+    }
     const locale = ctx.language || 'en';
     const messages = [
       { role: 'system', content: systemPrompt({ useTools, locale }) },
+      ...(requestedToolkits.length ? [{ role: 'system', content: `The request explicitly names authenticated connected-app toolkit(s): ${requestedToolkits.join(', ')}. External app facts cannot be answered by hivemind_meta. Start or continue hivemind_connected_task search, then follow its connection, schema, and execution receipts before answering.` }] : []),
       ...(profile ? [{ role: 'system', content: `Authenticated compact profile:\n${compactText(profile, 1800)}` }] : []),
       ...safeHistory(ctx.conversationHistory, Math.max(1, Math.min(6, Number(ctx.historyTurns) || 3))),
       { role: 'user', content: message },
     ];
-    const patch = { runId, context: { locale, profile: compactText(profile, 1800) }, messages };
+    const patch = { runId, context: { locale, profile: compactText(profile, 1800) }, requestedToolkits, messages };
     return transition({ ...state, runId }, 'running', patch, { reason_code: 'turn_admitted' });
   };
 
@@ -422,17 +443,20 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const messages = [...state.messages, { role: 'assistant', content: assistant.content || null, ...(assistant.tool_calls?.length ? { tool_calls: assistant.tool_calls } : {}) }];
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     if (calls.length) return { messages, pendingTool: parseUnifiedToolCall(calls[0]), cycles: state.cycles + 1, usage };
+    const connectedDiscoveryMissing = useTools && state.requestedToolkits.length > 0 && state.selectedSlugs.length === 0;
     const connectedExecutionMissing = useTools && state.selectedSlugs.length > 0
       && !state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
-    if ((connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
+    if ((connectedDiscoveryMissing || connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
       return {
-        messages: [...messages, { role: 'system', content: state.selectedSlugs.length
+        messages: [...messages, { role: 'system', content: connectedDiscoveryMissing
+          ? `The original request names connected toolkit(s) (${state.requestedToolkits.join(', ')}), but no connected-app discovery receipt exists. Call hivemind_connected_task with action search now. Do not answer from hivemind_meta or claim that external access is unavailable.`
+          : state.selectedSlugs.length
           ? `Do not ask permission for a read or describe what you could do. Continue the connected workflow now: load schemas for the selected slugs (${state.selectedSlugs.join(', ')}), execute the required read, then answer from its receipt.`
           : 'Your proposed answer did not present the successful receipt evidence. Continue with the available gateway tools, then answer the original request directly from the receipts.' }],
         pendingTool: null, cycles: state.cycles + 1, repairs: state.repairs + 1, usage,
       };
     }
-    if (connectedExecutionMissing) {
+    if (connectedDiscoveryMissing || connectedExecutionMissing) {
       return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, 'I could not safely complete the connected task because no provider result was produced.', 'error') };
     }
     const response = markdownText(assistant.content, 24000);

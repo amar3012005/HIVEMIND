@@ -144,6 +144,34 @@ test('connected search generically infers an explicitly named active toolkit whe
   assert.deepEqual(discoveredToolkits, ['gmail']);
 });
 
+test('a named connected toolkit cannot seal from hivemind_meta without Composio discovery', async () => {
+  const prisma = fakePrisma();
+  const observed = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'What was my last message in Slack?', useTools: true, prisma, ctx: ctx(prisma, 'connected-obligation'), checkpointer: new MemorySaver(),
+    modelStep: async ({ messages }) => {
+      turn += 1;
+      observed.push(messages.at(-1)?.content || '');
+      if (turn === 1) return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'last Slack message' } }, 'co1') };
+      if (turn === 2) return { message: { role: 'assistant', content: "I don't have access to Slack." } };
+      return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['slack'], queries: [{ use_case: 'Find the authenticated user last Slack message with channel and timestamp' }] }, 'co2') };
+    },
+    metaExecutor: async () => ({ successful: true, data: { memories: [] } }),
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'slack', status: 'EXPIRED' }]; },
+      async discoverSessionTools() {
+        return { sessionId: 'slack-session', primaryToolSlugs: ['SLACK_SEARCH_MESSAGES'], relatedToolSlugs: [], toolkitConnectionStatuses: { slack: 'disconnected' } };
+      },
+      async manageSessionConnections() { return { redirectUrl: 'https://connect.example/slack' }; },
+    },
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.equal(result.inputRequests[0].toolkit, 'slack');
+  assert.match(result.inputRequests[0].prompt, /Connect slack/);
+  assert.ok(observed.some(value => /no connected-app discovery receipt exists/i.test(value)));
+});
+
 test('connected search reuses an authenticated organization-scoped connection when user scope has not migrated yet', async () => {
   const prisma = fakePrisma();
   let turn = 0;

@@ -10,7 +10,7 @@ export interface Env extends Cloudflare.Env {
   ENVIRONMENT: 'development' | 'local' | 'production';
   DURABLE_CHAT_FLAG: 'durable_chat_agent_v1';
   DURABLE_CHAT_AGENT_ENABLED: 'true' | 'false';
-  NATIVE_META_FLAG: 'hivemind-native-meta-tools-v1';
+  NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2';
   NATIVE_META_TOOLS_ENABLED: 'true' | 'false';
   DURABLE_CHAT_AGENT_SECRET: string;
   CHAT_TURN_WORKFLOW: Workflow;

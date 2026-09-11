@@ -657,6 +657,8 @@ export async function discoverSessionTools(orgId, {
   includeCustomToolkit = true,
   manageConnections = false,
   callbackUrl = null,
+  hydrateSchemas = true,
+  candidateLimit = 8,
 }) {
   const { formatComposioSearch, extractWorkflowSessionId } = await import('./composio-search-formatter.js');
   const session = await getToolRouterSession(orgId, toolkits, {
@@ -693,6 +695,8 @@ export async function discoverSessionTools(orgId, {
     cases: normalizedCases.map((item) => item.toLowerCase()),
     strategy: legalPayload.search_strategy,
     fields: legalPayload.queries,
+    hydrateSchemas: Boolean(hydrateSchemas),
+    candidateLimit: Math.max(1, Math.min(24, Number(candidateLimit) || 8)),
   })}`;
   const cached = TOOL_ROUTER_DISCOVERY_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.at < SESSION_DISCOVERY_TTL_MS) {
@@ -714,9 +718,11 @@ export async function discoverSessionTools(orgId, {
     primary = collectPrimaryToolSlugs(searched?.data, prefixes);
     slugs = [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))];
   }
-  slugs = slugs.slice(0, 24);
+  slugs = slugs.slice(0, Math.max(1, Math.min(24, Number(candidateLimit) || 8)));
   if (!slugs.length) throw new Error('Composio Session found no matching tools');
-  const schemaResult = await executeSessionMeta(session.id, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: slugs }, { timeoutMs: 10_000 });
+  const schemaResult = hydrateSchemas
+    ? await executeSessionMeta(session.id, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: slugs }, { timeoutMs: 10_000 })
+    : null;
   const schemas = schemaResult?.data?.tool_schemas || searched?.data?.tool_schemas || {};
   const tools = slugs.map((slug) => {
     const schema = schemas[slug] || {};
@@ -725,7 +731,7 @@ export async function discoverSessionTools(orgId, {
       function: {
         name: `composio_${slug}`.toLowerCase(),
         description: String(schema?.description || slug).slice(0, 1024),
-        parameters: schema?.input_schema || { type: 'object', properties: {} },
+        parameters: hydrateSchemas ? (schema?.input_schema || { type: 'object', properties: {} }) : null,
       },
       _composio: {
         toolkit: String(schema?.toolkit || slug.split('_')[0]).toLowerCase(),
@@ -752,6 +758,7 @@ export async function discoverSessionTools(orgId, {
     searchedLogId: searched?.log_id || null,
     schemaLogId: schemaResult?.log_id || null,
     toolSchemas: schemas,
+    schemasHydrated: Boolean(hydrateSchemas),
     customToolkitAttached: Boolean(session.customToolkitAttached),
     searchStrategy: legalPayload.search_strategy,
   };

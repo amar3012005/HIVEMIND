@@ -30,12 +30,16 @@ test('native meta admission fails closed and flag off preserves Native V2', asyn
   DURABLE_CHAT_AGENT_ENABLED: 'true', CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
 }, async () => {
   const enabled = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'session', native_meta_mode: 'native-meta-v1' }) });
+  const unified = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'full', native_meta_mode: 'unified-meta-v2' }) });
   const disabled = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'off', native_meta_mode: 'off' }) });
   const invalid = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'unexpected', native_meta_mode: 'unexpected' }) });
   assert.equal(await enabled.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'native-meta-v1');
+  assert.equal(await unified.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'unified-meta-v2');
   assert.equal(await disabled.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'off');
   assert.equal(await invalid.nativeMetaModeFor({ orgId: 'o', userId: 'u' }), 'off');
   assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'off' }), 'v2');
   assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'native-meta-v1' }), 'meta-v1');
   assert.equal(nativeOrchestratorFor({ useTools: true, nativeMetaMode: 'native-meta-v1' }), null);
+  assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'unified-meta-v2' }), 'unified-meta-v2');
+  assert.equal(nativeOrchestratorFor({ useTools: true, nativeMetaMode: 'unified-meta-v2' }), 'unified-meta-v2');
 }));

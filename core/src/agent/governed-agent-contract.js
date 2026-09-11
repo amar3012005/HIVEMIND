@@ -20,6 +20,33 @@ export function hashGovernedValue(value) {
   return crypto.createHash('sha256').update(String(value ?? '')).digest('hex');
 }
 
+/** One persisted receipt ledger can be much larger than one model context.
+ * Deduplicate equivalent observations and expose a depth-bounded window while
+ * retaining failures needed for honest status reporting. Raw receipts remain
+ * untouched in LangGraph/Postgres.
+ */
+export function progressiveReceiptWindow(receipts = [], depth = 'standard') {
+  const limit = ({ standard: 5, detailed: 10, comprehensive: 15 })[depth] || 5;
+  const seen = new Set();
+  const uniqueRows = [];
+  for (const receipt of Array.isArray(receipts) ? receipts : []) {
+    const projected = synthesisReceipt(receipt);
+    const key = hashGovernedValue(JSON.stringify({
+      slug: projected.slug,
+      successful: projected.successful,
+      data: projected.data,
+      error: projected.error,
+    }));
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueRows.push(projected);
+  }
+  const successful = uniqueRows.filter(row => row.successful);
+  const failures = uniqueRows.filter(row => !row.successful).slice(-2);
+  return [...successful.slice(-limit), ...failures]
+    .slice(-(limit + Math.min(2, failures.length)));
+}
+
 export function capabilityAuthority(slug = '') {
   const tokens = String(slug).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const operation = tokens.find(token => READ_OPERATIONS.has(token) || WRITE_OPERATIONS.has(token));
@@ -55,6 +82,7 @@ export function capabilityCard({ tool, schema, source = 'composio', authority = 
     schema: inputSchema,
     required: Array.isArray(inputSchema?.required) ? inputSchema.required.map(String) : [],
     fields: Object.keys(inputSchema?.properties || {}).slice(0, 48),
+    schema_hydrated: source === 'core' || Boolean(schema?.input_schema || schema?.inputSchema || tool?.function?.parameters),
   };
 }
 
@@ -67,6 +95,7 @@ export function compactCapability(card = {}) {
     description: asText(card.description, 360),
     required: card.required || [],
     fields: card.fields || Object.keys(card.schema?.properties || {}).slice(0, 48),
+    schema_hydrated: card.schema_hydrated !== false,
   };
 }
 

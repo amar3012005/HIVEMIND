@@ -51,11 +51,23 @@ describe('native meta Flagship admission', () => {
   it('uses a stable tenant-user targeting key and accepts only true', async () => {
     let context: Record<string, unknown> | undefined;
     const env = {
-      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-native-meta-tools-v1', ENVIRONMENT: 'production',
+      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
       FLAGS: { getBooleanDetails: async (_key: string, _fallback: boolean, ctx?: Record<string, string | number | boolean>) => { context = ctx; return { value: true }; } },
     } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
     expect(await evaluateNativeMetaMode(env, url)).toBe('native-meta-v1');
     expect(context?.targetingKey).toBe('org-1:user-1');
+  });
+  it('admits the unified graph through a string flag while rejecting unknown modes', async () => {
+    const env = {
+      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
+      FLAGS: {
+        getBooleanDetails: async () => ({ value: false }),
+        getStringDetails: async () => ({ value: 'unified-meta-v2' }),
+      },
+    } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
+    expect(await evaluateNativeMetaMode(env, url)).toBe('unified-meta-v2');
+    env.FLAGS.getStringDetails = async () => ({ value: 'unexpected' });
+    expect(await evaluateNativeMetaMode(env, url)).toBe('off');
   });
   it('fails closed on Flagship errors', async () => {
     const env = {

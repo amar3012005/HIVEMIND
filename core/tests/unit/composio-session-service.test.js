@@ -132,3 +132,30 @@ test('governed sessions resume the authenticated user session and use Meta conne
     else process.env.COMPOSIO_API_KEY = originalKey;
   }
 });
+
+test('Meta connection management exposes an already-active session account without requiring a redirect', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.COMPOSIO_API_KEY;
+  process.env.COMPOSIO_API_KEY = 'test-composio-key';
+  globalThis.fetch = async (_url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    if (body?.slug === 'COMPOSIO_MANAGE_CONNECTIONS') {
+      return new Response(JSON.stringify({ data: {
+        message: 'All connections are active',
+        results: { gmail: { toolkit: 'gmail', status: 'active', has_active_connection: true } },
+      } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('unexpected request', { status: 500 });
+  };
+  try {
+    const service = await import(`../../src/connectors/composio/composio-service.js?active-session-test=${Date.now()}`);
+    const connection = await service.manageSessionConnections('trs_active', ['gmail']);
+    assert.equal(connection.redirectUrl, null);
+    assert.deepEqual(connection.connectionStates, { gmail: 'active' });
+    assert.deepEqual(connection.activeToolkits, ['gmail']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;
+    else process.env.COMPOSIO_API_KEY = originalKey;
+  }
+});

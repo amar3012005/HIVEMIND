@@ -796,9 +796,18 @@ export async function manageSessionConnections(sessionId, toolkits, { reinitiate
   if (result?.successful === false || result?.data?.successful === false) {
     throw new Error(String(result?.error || result?.data?.error || 'Composio connection management failed').slice(0, 300));
   }
+  const connectionResults = result?.data?.results || result?.results || {};
+  const connectionStates = Object.fromEntries(Object.entries(connectionResults).map(([toolkit, value]) => [
+    String(toolkit).toLowerCase(),
+    String(value?.status || (value?.has_active_connection ? 'active' : 'unknown')).toLowerCase(),
+  ]));
   return {
     successful: true,
     redirectUrl: connectionRedirectUrl(result?.data || result),
+    connectionStates,
+    activeToolkits: Object.entries(connectionStates)
+      .filter(([, status]) => /^(?:active|connected|ready)$/.test(status))
+      .map(([toolkit]) => toolkit),
   };
 }
 

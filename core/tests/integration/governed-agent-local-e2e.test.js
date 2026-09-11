@@ -137,6 +137,50 @@ test('local E2E: one graph handles English, German, and French self-data reads w
   }
 });
 
+test('local E2E: an active account confirmed by the bound session resumes without an OAuth redirect', async () => {
+  const prisma = fakePrisma();
+  const profile = tool('gmail', 'GMAIL_GET_PROFILE', { type: 'object', properties: {} });
+  const composio = mockComposio({
+    toolkit: 'gmail', tools: [profile], accounts: [],
+    execute: () => ({ successful: true, data: { email: 'owner@example.test' } }),
+  });
+  composio.discoverSessionTools = async (_orgId, input) => {
+    composio.calls.push({ kind: 'discover', query: input.useCases?.[0] || null });
+    return {
+      sessionId: 'trs-active-gmail', workflowSessionId: 'workflow-active-gmail', tools: [profile],
+      toolSchemas: { GMAIL_GET_PROFILE: { toolkit: 'gmail', description: 'Get profile', input_schema: profile.function.parameters } },
+      toolkitConnectionStatuses: { gmail: { status: 'disconnected' } },
+      recommendedPlanSteps: [], nextStepsGuidance: null,
+      primaryToolSlugs: ['GMAIL_GET_PROFILE'], relatedToolSlugs: [], searchStrategy: 'auto',
+    };
+  };
+  composio.manageSessionConnections = async () => ({
+    successful: true, redirectUrl: null, connectionStates: { gmail: 'active' }, activeToolkits: ['gmail'],
+  });
+  const result = await runGovernedAgentRuntime({
+    message: 'What is my Gmail profile?',
+    ctx: {
+      orgId: '00000000-0000-4000-8000-000000000001', userId: '00000000-0000-4000-8000-000000000002',
+      language: 'en', threadId: 'active-session-reconcile', historyTurns: 2,
+      governedDecision: async ({ stage }) => {
+        if (stage === 'intent') return {
+          locale: 'en', kind: 'read', apps: ['gmail'], discovery_query: 'read authenticated Gmail profile',
+          outcomes: [{ id: 'profile', kind: 'read', description: 'authenticated Gmail profile', evidence: { min_records: 1, required_fields: ['email'] } }],
+          known_facts: {}, entities: [], content_source: 'missing', business_question: null, reference_selector: null,
+        };
+        if (stage === 'planning') return { action: 'read', tool_slug: 'GMAIL_GET_PROFILE', outcome_ids: ['profile'], reason: 'read it' };
+        if (stage === 'arguments') return {};
+        if (stage === 'synthesis') return { complete: true, response: 'The connected Gmail account is owner@example.test.' };
+        throw new Error(`unexpected stage ${stage}`);
+      },
+    },
+    composio, prisma, checkpointer: new MemorySaver(),
+  });
+  assert.equal(result.status, 'completed');
+  assert.match(result.response, /owner@example\.test/);
+  assert.equal(composio.calls.filter(call => call.kind === 'execute').length, 1);
+});
+
 test('local E2E: a dependent latest-post request resolves a provider identifier from a read receipt', async () => {
   const prisma = fakePrisma();
   const listPosts = tool('linkedin', 'LINKEDIN_LIST_POSTS', { type: 'object', properties: {} });

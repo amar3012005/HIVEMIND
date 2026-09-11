@@ -867,6 +867,20 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       throw new Error('governed_connection_session_unavailable');
     }
     const link = await trace('composio_manage_connections', { toolkit }, () => composio.manageSessionConnections(state.sessionId, [toolkit]));
+    const sessionState = normalizeConnectionState(link?.connectionStates?.[String(toolkit).toLowerCase()]);
+    if ((link?.activeToolkits || []).includes(String(toolkit).toLowerCase()) || sessionState === 'connected') {
+      const connected = unique([...(state.connected || []), toolkit]);
+      const executionPlan = revisePlanConnection(state.executionPlan, toolkit, 'connected');
+      const patch = await transition(state, 'resumed', {
+        connected,
+        executionPlan,
+        pendingInput: null,
+        connectionRequest: null,
+        decision: null,
+      }, { reason_code: 'session_connection_confirmed' });
+      await persist(state, patch);
+      return patch;
+    }
     if (!link?.redirectUrl) throw new Error('governed_connection_link_unavailable');
     const request = {
       kind: 'connect_account', toolkit, provider: toolkit, blocking: true,

@@ -160,6 +160,28 @@ test('the gateway grounds a contradictory model toolkit in the authenticated use
   assert.deepEqual(selected, ['gmail']);
 });
 
+test('provider schema loading always uses the durable graph session, never a model supplied id', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let schemaSession = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'session-authority'), checkpointer: new MemorySaver(),
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Fetch unread Gmail emails' }] }, 's1') };
+      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', session_id: 'model-invented', tool_slugs: ['GMAIL_FETCH_EMAILS'] }, 's2') };
+      return { message: { role: 'assistant', content: 'No matching emails were returned.' } };
+    },
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+      async discoverSessionTools() { return { sessionId: 'trusted-session', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } }; },
+      async getSessionToolSchemas(sessionId) { schemaSession = sessionId; return { GMAIL_FETCH_EMAILS: { input_schema: { type: 'object', properties: {} } } }; },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(schemaSession, 'trusted-session');
+});
+
 test('a connected write becomes a durable approval and executes exactly once after resume', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

@@ -243,13 +243,15 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
   if (action === 'schemas') {
     const slugs = [...new Set((args.tool_slugs || []).map(String))];
     if (!slugs.length || slugs.some(slug => !state.selectedSlugs.includes(slug))) return { successful: false, error: 'connected_schema_slug_not_selected' };
-    const schemas = await composio.getSessionToolSchemas(args.session_id || state.sessionId, slugs);
+    if (!state.sessionId) return { successful: false, error: 'connected_session_missing' };
+    const schemas = await composio.getSessionToolSchemas(state.sessionId, slugs);
     return { successful: true, data: { tool_schemas: schemas }, state: { schemas: { ...state.schemas, ...schemas } } };
   }
   if (action === 'manage_connection' || action === 'wait_connection') {
     const toolkits = Array.isArray(args.toolkits) ? args.toolkits : [];
     if (!toolkits.length) return { successful: false, error: 'connected_toolkits_required' };
-    const managed = await composio.manageSessionConnections(args.session_id || state.sessionId, toolkits, { reinitiateAll: action === 'manage_connection' });
+    if (!state.sessionId) return { successful: false, error: 'connected_session_missing' };
+    const managed = await composio.manageSessionConnections(state.sessionId, toolkits, { reinitiateAll: action === 'manage_connection' });
     return { successful: true, data: managed, connection: { toolkits, ...managed } };
   }
   if (action !== 'execute') return { successful: false, error: 'connected_action_invalid' };

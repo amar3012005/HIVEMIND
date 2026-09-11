@@ -396,13 +396,18 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const messages = [...state.messages, { role: 'assistant', content: assistant.content || null, ...(assistant.tool_calls?.length ? { tool_calls: assistant.tool_calls } : {}) }];
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     if (calls.length) return { messages, pendingTool: parseUnifiedToolCall(calls[0]), cycles: state.cycles + 1, usage };
-    if (invalidFinal(assistant.content, state.receipts) && state.repairs < 3) {
+    const connectedExecutionMissing = useTools && state.selectedSlugs.length > 0
+      && !state.receipts.some(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool));
+    if ((connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
       return {
         messages: [...messages, { role: 'system', content: state.selectedSlugs.length
           ? `Do not ask permission for a read or describe what you could do. Continue the connected workflow now: load schemas for the selected slugs (${state.selectedSlugs.join(', ')}), execute the required read, then answer from its receipt.`
           : 'Your proposed answer did not present the successful receipt evidence. Continue with the available gateway tools, then answer the original request directly from the receipts.' }],
         pendingTool: null, cycles: state.cycles + 1, repairs: state.repairs + 1, usage,
       };
+    }
+    if (connectedExecutionMissing) {
+      return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, 'I could not safely complete the connected task because no provider result was produced.', 'error') };
     }
     const response = markdownText(assistant.content, 24000);
     onEvent({ type: 'answer_delta', text: response });

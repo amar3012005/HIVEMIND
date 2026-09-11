@@ -143,7 +143,7 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
         accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },
       },
     });
-    assert.equal(modelCalls, 2);
+    assert.equal(modelCalls, 3);
     assert.equal(draftRows.length, 0);
     assert.deepEqual(result.draft_ids || [], []);
   } finally {

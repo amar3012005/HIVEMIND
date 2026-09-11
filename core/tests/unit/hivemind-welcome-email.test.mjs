@@ -12,8 +12,8 @@ test('new-account welcome renders the Cartesia product hero with a safe app link
   assert.match(rendered.html, /as an AI company/);
   assert.match(rendered.html, /SOVEREIGN MEMORY ENGINE · EU/);
   assert.match(rendered.html, /What was the deployment fix from last Tuesday/);
-  assert.match(rendered.html, /Welcome to HIVEMIND, &lt;Maya&gt;/);
-  assert.doesNotMatch(rendered.html, /Welcome to HIVEMIND, <Maya>/);
+  assert.match(rendered.html, /Welcome to your HIVEMIND, &lt;Maya&gt;/);
+  assert.doesNotMatch(rendered.html, /Welcome to your HIVEMIND, <Maya>/);
   assert.match(rendered.html, /https:\/\/next\.singulancelabs\.com\/hivemind\/app\?from=welcome&amp;safe=1/);
 });
 

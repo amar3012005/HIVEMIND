@@ -15,7 +15,13 @@ const REMINDER_HOURS = Object.freeze({
 });
 
 export function isActivationLifecycleEnabled() {
-  return process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED === 'true';
+  // Flagship is the rollout authority. Core still requires the private Worker
+  // transport to be configured, but it must not maintain a second enabled
+  // switch that can disagree with the tenant's Cloudflare admission.
+  return Boolean(
+    String(process.env.HIVEMIND_ACTIVATION_WORKFLOW_URL || '').trim()
+    && String(process.env.HIVEMIND_ACTIVATION_WORKFLOW_SECRET || '').trim(),
+  );
 }
 
 export function isAuthorizedActivationLifecycleRequest(req) {
@@ -39,25 +45,44 @@ function nextReminder(stage, reminderCount, now = new Date()) {
   return hours === undefined ? null : new Date(now.getTime() + hours * 60 * 60 * 1000);
 }
 
-export async function startInvitationActivation({ prisma, invite, metadata = {}, now = new Date() } = {}) {
-  if (!isActivationLifecycleEnabled() || !prisma || !invite?.id || !invite?.email) return { skipped: true };
+export async function startActivation({ prisma, email, inviteId = null, orgId = null, userId = null, metadata = {}, now = new Date() } = {}) {
+  if (!prisma || !email) return { skipped: true };
   const nextAt = nextReminder(ACTIVATION_STAGES.INVITED_PENDING_SIGNUP, 0, now);
   const rows = await prisma.$queryRawUnsafe(
     `INSERT INTO hivemind.activation_lifecycles
-       (invite_id, org_id, email_hash, email_hint, stage, next_reminder_at, metadata)
-     VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb)
-     ON CONFLICT (invite_id) WHERE invite_id IS NOT NULL DO UPDATE
-       SET metadata = hivemind.activation_lifecycles.metadata || EXCLUDED.metadata,
+       (invite_id, org_id, user_id, email_hash, email_hint, stage, next_reminder_at, metadata)
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8::jsonb)
+     ON CONFLICT (email_hash) WHERE stopped_at IS NULL DO UPDATE
+       SET invite_id = COALESCE(hivemind.activation_lifecycles.invite_id, EXCLUDED.invite_id),
+           org_id = COALESCE(EXCLUDED.org_id, hivemind.activation_lifecycles.org_id),
+           user_id = COALESCE(EXCLUDED.user_id, hivemind.activation_lifecycles.user_id),
+           metadata = hivemind.activation_lifecycles.metadata || EXCLUDED.metadata,
            updated_at = CURRENT_TIMESTAMP
      RETURNING id, generation, stage, next_reminder_at`,
-    invite.id, invite.orgId, emailHash(invite.email), emailHint(invite.email),
+    inviteId, orgId, userId, emailHash(email), emailHint(email),
     ACTIVATION_STAGES.INVITED_PENDING_SIGNUP, nextAt, JSON.stringify(metadata),
   );
   return rows?.[0] || null;
 }
 
+export async function startInvitationActivation({ prisma, invite, metadata = {}, now = new Date() } = {}) {
+  if (!invite?.id || !invite?.email) return { skipped: true };
+  return startActivation({
+    prisma,
+    inviteId: invite.id,
+    orgId: invite.orgId || null,
+    email: invite.email,
+    metadata,
+    now,
+  });
+}
+
+export async function startSignupActivation({ prisma, email, userId = null, metadata = {}, now = new Date() } = {}) {
+  return startActivation({ prisma, email, userId, metadata: { ...metadata, activation_source: metadata.activation_source || 'signup' }, now });
+}
+
 export async function advanceActivationForEmail({ prisma, email, userId = null, orgId = null, stage, reason, now = new Date() } = {}) {
-  if (!isActivationLifecycleEnabled() || !prisma || !email || !stage) return { skipped: true };
+  if (!prisma || !email || !stage) return [];
   const firstNext = nextReminder(stage, 0, now);
   const rows = await prisma.$queryRawUnsafe(
     `UPDATE hivemind.activation_lifecycles
@@ -75,7 +100,6 @@ export async function advanceActivationForEmail({ prisma, email, userId = null, 
 }
 
 export async function evaluateActivationReminder({ prisma, activationId, generation, now = new Date() } = {}) {
-  if (!isActivationLifecycleEnabled()) return { status: 'paused' };
   const rows = await prisma.$queryRawUnsafe(
     `SELECT a.id, a.org_id, a.user_id, a.email_hash, a.email_hint, a.stage, a.generation, a.reminder_count, a.next_reminder_at, a.delivery_lease_until, a.metadata,
             COALESCE(u.email, i.email) AS email
@@ -123,6 +147,11 @@ export async function scheduleActivationWorkflow({ activation, fetchImpl = globa
   const base = String(process.env.HIVEMIND_ACTIVATION_WORKFLOW_URL || '').replace(/\/$/, '');
   const secret = String(process.env.HIVEMIND_ACTIVATION_WORKFLOW_SECRET || '');
   if (!base || !secret) return { skipped: true, reason: 'workflow_not_configured' };
+  const admitted = await fetchImpl(`${base}/enabled?activation_id=${encodeURIComponent(activation.id)}`, {
+    headers: { authorization: `Bearer ${secret}` },
+    signal: AbortSignal.timeout(5_000),
+  }).then(async (response) => response.ok && (await response.json().catch(() => ({})))?.enabled === true).catch(() => false);
+  if (!admitted) return { skipped: true, reason: 'feature_disabled' };
   const response = await fetchImpl(`${base}/start`, {
     method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
     body: JSON.stringify({ activation_id: activation.id, generation: activation.generation, sequence: Number(activation.reminder_count || 0), target_at: new Date(activation.next_reminder_at).toISOString() }),
@@ -130,6 +159,27 @@ export async function scheduleActivationWorkflow({ activation, fetchImpl = globa
   });
   if (!response.ok) throw new Error(`activation_workflow_http_${response.status}`);
   return response.json().catch(() => ({ ok: true }));
+}
+
+/** Cloudflare's reconciliation cron receives only IDs and re-reads this state. */
+export async function listEligibleActivationLifecycles({ prisma, limit = 500 } = {}) {
+  if (!prisma) return [];
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id, generation, reminder_count, next_reminder_at
+       FROM hivemind.activation_lifecycles
+      WHERE stopped_at IS NULL
+        AND next_reminder_at IS NOT NULL
+        AND next_reminder_at <= CURRENT_TIMESTAMP
+      ORDER BY next_reminder_at ASC
+      LIMIT $1`,
+    Math.max(1, Math.min(500, Number(limit) || 500)),
+  ).catch(() => []);
+  return (rows || []).map((row) => ({
+    activation_id: String(row.id),
+    generation: Number(row.generation),
+    sequence: Number(row.reminder_count || 0),
+    target_at: new Date(row.next_reminder_at).toISOString(),
+  }));
 }
 
 export async function recordActivationReminder({ prisma, activationId, generation, delivery, now = new Date() } = {}) {

@@ -1,0 +1,22 @@
+services:
+  harness-runner:
+    volumes:
+      # Opt-in local development overlay. The canonical Compose file and release
+      # image remain immutable; only compiled HIVE packages and preset files are
+      # projected into the runner for rapid iteration.
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/hivemind/runtime/lib
+        target: /opt/deepseek-harness/packages/hivemind/runtime/lib
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/hivemind/connected-apps/lib
+        target: /opt/deepseek-harness/packages/hivemind/connected-apps/lib
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/preset/agent-presets/presets/hivemind
+        target: /opt/deepseek-harness/packages/preset/agent-presets/presets/hivemind
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/preset/agent-presets/presets/hivemind-chat
+        target: /opt/deepseek-harness/packages/preset/agent-presets/presets/hivemind-chat
+        read_only: true

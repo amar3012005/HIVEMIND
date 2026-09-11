@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="${HIVEMIND_CHAT_ENV_FILE:-$ROOT/infra/.env.hivemind-chat.local}"
+BASE="$ROOT/infra/docker-compose.hivemind-chat.yml"
+DEV="$ROOT/infra/docker-compose.hivemind-chat.dev.yml"
+
+[[ -f "$ENV_FILE" ]] || { echo "dev-refresh: missing $ENV_FILE" >&2; exit 2; }
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:?set HIVEMIND_HARNESS_SOURCE}"
+
+load_keychain() {
+  local variable="$1" service="$2"
+  [[ -n "${!variable:-}" ]] && return
+  command -v security >/dev/null 2>&1 || return
+  printf -v "$variable" '%s' "$(security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null || true)"
+  export "$variable"
+}
+
+load_keychain HIVEMIND_MASTER_API_KEY hivemind-chat-local-master-api-key
+load_keychain HIVE_HARNESS_EDGE_EVAL_SECRET hivemind-harness-edge-eval-secret
+load_keychain CLOUDFLARE_API_KEY hivemind-cloudflare-api-key
+load_keychain COMPOSIO_API_KEY hivemind-composio-api-key
+
+for key in HIVEMIND_MASTER_API_KEY HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARE_API_KEY COMPOSIO_API_KEY; do
+  [[ -n "${!key:-}" ]] || { echo "dev-refresh: required $key is unavailable" >&2; exit 2; }
+done
+
+cd "$HARNESS_SOURCE"
+pnpm exec tsc -b \
+  packages/hivemind/runtime/tsconfig.json \
+  packages/hivemind/connected-apps/tsconfig.json
+pnpm exec tsdown --config packages/hivemind/runtime/tsdown.config.ts --env.DSH_BUILD_FACE host
+pnpm exec tsdown --config packages/hivemind/connected-apps/tsdown.config.ts --env.DSH_BUILD_FACE host
+
+docker compose -p hivemind-chat-local --env-file "$ENV_FILE" \
+  -f "$BASE" -f "$DEV" up -d --no-build --no-deps --force-recreate harness-runner
+
+deadline=$((SECONDS + 90))
+until [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner 2>/dev/null || true)" == healthy ]]; do
+  (( SECONDS < deadline )) || { echo "dev-refresh: runner did not become healthy" >&2; exit 1; }
+  sleep 2
+done
+curl -fsS -H 'Host: next.preview.singulancelabs.com' http://127.0.0.1:18080/health >/dev/null
+echo "dev-refresh: targeted HIVE packages mounted; runner is healthy"

@@ -3803,10 +3803,11 @@ export async function runReactAgentV2({
       : (nativeV2Module?.nativeV2RoutingMode({ useTools, seed: ctx.userId || trace.traceId }) || 'off');
     const nativeV2Input = async () => ({
       message, history, language, apiKey, signal: abortCtrl.signal,
-      // Native V2 discovers profile values through the caller-scoped profile
-      // capability. Supplying values here would turn progressive discovery
-      // back into an always-on prompt preload.
-      profileContext: '', projectCatalog,
+      // The compact authenticated identity envelope is shared with the
+      // governed graph. It is bounded by TurnContext and prevents a trivial
+      // identity assertion from being planned without knowing the caller.
+      // Full profile and memory evidence remain progressively loaded.
+      profileContext: await getCompactProfileContext(), projectCatalog,
       orgId: ctx.orgId, userId: ctx.userId, threadId: ctx.threadId || null,
       timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
     });
@@ -4300,9 +4301,33 @@ export async function runReactAgentV2({
         : intentDecision.operation === 'update_profile' ? 'profile_updated'
         : intentDecision.operation === 'rename_assistant' ? 'assistant_renamed'
         : 'saved';
-      const response = succeeded
+      let response = succeeded
         ? (mutationConfirmation(confirmOp, intentDecision.response_language || language, result) || intentDecision.acknowledgement || 'Done.')
         : `${intentDecision.failure_response || 'That change could not be completed.'} (${result?.error || 'operation_failed'})`;
+      // A profile assertion is a conversational turn, not a settings-form
+      // toast. After the server-owned write receipt exists, let the same HIVE
+      // voice acknowledge it naturally from the current message and compact
+      // authenticated profile. The model cannot change or retry the mutation.
+      if (succeeded && intentDecision.operation === 'update_profile') {
+        try {
+          const natural = await answerDirectly({
+            message,
+            gateKind: 'general',
+            language: intentDecision.response_language || language,
+            assistantName,
+            orgName,
+            model,
+            apiKey,
+            signal: abortCtrl.signal,
+            profileContext: preloadedProfileContext,
+            plannerDraft: 'The authenticated profile reconciliation completed successfully. Acknowledge what the user just established in a warm, direct company-brain voice. Use only the user message and authenticated profile context. Do not mention tools, databases, schemas, or internal operations.',
+          });
+          if (natural.response) response = natural.response;
+          recordUsage('direct', natural.usage);
+        } catch {
+          // Provider degradation must not erase a successful write receipt.
+        }
+      }
       onEvent?.({ type: 'finish', text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: succeeded });
       return {

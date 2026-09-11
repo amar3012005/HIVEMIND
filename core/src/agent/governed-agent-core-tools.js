@@ -1,4 +1,4 @@
-import { capabilityCard } from './governed-agent-contract.js';
+import { capabilityCard, capabilityRelevance } from './governed-agent-contract.js';
 import { TOOL_SCHEMAS } from './tool-schemas.js';
 
 const CORE_WRITE_CAPABILITIES = new Set([
@@ -18,8 +18,8 @@ export function coreCapabilityAuthority(slug) {
 }
 
 /** Compile the canonical Core registry without initializing retrieval engines. */
-export function loadGovernedCoreCapabilities() {
-  return TOOL_SCHEMAS.map(tool => {
+export function loadGovernedCoreCapabilities({ intent = null, limit = 8 } = {}) {
+  const cards = TOOL_SCHEMAS.map(tool => {
     const parameters = tool.function.parameters || { type: 'object', properties: {} };
     const publicParameters = {
       ...parameters,
@@ -29,14 +29,24 @@ export function loadGovernedCoreCapabilities() {
     return capabilityCard({
       tool: { slug: tool.function.name, function: { ...tool.function, parameters: publicParameters } },
       schema: {
-      toolkit: 'hivemind',
-      description: tool.function.description,
-      input_schema: publicParameters,
-    },
-    source: 'core',
-    authority: coreCapabilityAuthority(tool.function.name),
+        toolkit: 'hivemind',
+        description: tool.function.description,
+        input_schema: publicParameters,
+      },
+      source: 'core',
+      authority: coreCapabilityAuthority(tool.function.name),
     });
   });
+  if (!intent) return cards;
+  const baseline = new Set(['hivemind_recall', 'get_user_profile']);
+  const selected = cards.filter(card => baseline.has(card.slug));
+  const ranked = cards
+    .filter(card => !baseline.has(card.slug))
+    .map(card => ({ card, score: capabilityRelevance(card, { intent }) }))
+    .sort((left, right) => right.score - left.score || left.card.slug.localeCompare(right.card.slug))
+    .slice(0, Math.max(0, limit - selected.length))
+    .map(row => row.card);
+  return [...selected, ...ranked].slice(0, Math.max(1, limit));
 }
 
 export async function executeGovernedCoreTool(slug, args, ctx, { authority = null } = {}) {

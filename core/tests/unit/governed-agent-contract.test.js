@@ -9,11 +9,13 @@ import {
   missingRequiredFields,
   renderStructuredReceiptEvidence,
   synthesisResponseCoversEvidence,
+  progressiveReceiptWindow,
   receiptSatisfiesEvidence,
   synthesisReceipt,
   validSynthesisResponse,
   verifyPlanCandidate,
 } from '../../src/agent/governed-agent-contract.js';
+import { loadGovernedCoreCapabilities } from '../../src/agent/governed-agent-core-tools.js';
 import { GovernedAgentEventLedger } from '../../src/agent/governed-agent-event-ledger.js';
 import { resumeGovernedProviderEvent, runGovernedAgentRuntime } from '../../src/agent/governed-agent-runtime.js';
 import { createCompactContextGraph, recordCompactAssistantTurn } from '../../src/agent/v2/compact-context.js';
@@ -86,11 +88,14 @@ function composioWith(tools) {
   return {
     async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
     async discoverSessionTools(_orgId, input) {
+      const exposedTools = input.hydrateSchemas === false
+        ? tools.map(row => ({ ...row, function: { ...row.function, parameters: null } }))
+        : tools;
       return {
         sessionId: 'trs-user-session',
         workflowSessionId: 'workflow-user-session',
-        tools,
-        toolSchemas: Object.fromEntries(tools.map(row => [row._composio.slug, { toolkit: 'gmail', description: row._composio.slug, input_schema: row.function.parameters }])),
+        tools: exposedTools,
+        toolSchemas: input.hydrateSchemas === false ? {} : Object.fromEntries(tools.map(row => [row._composio.slug, { toolkit: 'gmail', description: row._composio.slug, input_schema: row.function.parameters }])),
         toolkitConnectionStatuses: { gmail: { status: 'ACTIVE' } },
         recommendedPlanSteps: [{ action: 'resolve dependency before draft' }],
         nextStepsGuidance: 'Use a connected reader to resolve required factual identifiers.',
@@ -98,6 +103,10 @@ function composioWith(tools) {
         relatedToolSlugs: [],
         searchStrategy: input.searchPayload.search_strategy,
       };
+    },
+    async getSessionToolSchemas(_sessionId, slugs) {
+      return Object.fromEntries(tools.filter(row => slugs.includes(row._composio.slug))
+        .map(row => [row._composio.slug, { toolkit: 'gmail', description: row._composio.slug, input_schema: row.function.parameters }]));
     },
     async executeToolsParallel() { return [{ successful: true, data: { ok: true } }]; },
     async createConnectLink() { throw new Error('not expected'); },
@@ -108,6 +117,21 @@ test('authority uses the leading action rather than nouns in a tool slug', () =>
   assert.equal(capabilityAuthority('LINKEDIN_GET_POST_CONTENT'), 'read');
   assert.equal(capabilityAuthority('GMAIL_SEND_DRAFT'), 'write');
   assert.equal(capabilityAuthority('NOTION_CREATE_PAGE'), 'write');
+});
+
+test('progressive native capability and receipt windows stay bounded', () => {
+  const capabilities = loadGovernedCoreCapabilities({
+    intent: { discovery_query: 'recall company decisions', outcomes: [{ description: 'company decisions' }] },
+    limit: 4,
+  });
+  assert.equal(capabilities.length, 4);
+  assert.ok(capabilities.some(card => card.slug === 'hivemind_recall' || card.slug === 'hivemind_log_decision'));
+  const receipts = Array.from({ length: 12 }, (_, index) => ({
+    slug: `READ_${index}`, successful: true, data: { value: index },
+  }));
+  assert.equal(progressiveReceiptWindow(receipts, 'standard').length, 5);
+  assert.equal(progressiveReceiptWindow(receipts, 'detailed').length, 10);
+  assert.equal(progressiveReceiptWindow(receipts, 'comprehensive').length, 12);
 });
 
 test('schema descriptions cannot admit a plain name as an email destination', () => {

@@ -7,6 +7,15 @@ const SKILLS = Object.freeze({
   synthesis: 'Continue as the same agent after tool execution. Answer the exact objective in the user locale from successful typed receipts, using the requested depth without fixed-length padding. Lead with the proven outcome. Use a table for requested records when it improves clarity. A draft is not sent; failed or missing receipts are not evidence of absence.',
 });
 
+export const GOVERNED_SKILL_CATALOG = Object.freeze({
+  'hivemind-company-brain': 'Use focused Core profile, memory, document, relationship, project, or temporal capabilities.',
+  'composio-connected-workflows': 'Use Composio Meta Tools for current external-app reads and approval-governed writes.',
+});
+
+export function compactGovernedSkillCatalog() {
+  return Object.entries(GOVERNED_SKILL_CATALOG).map(([id, description]) => `${id}: ${description}`).join('\n');
+}
+
 export function loadGovernedSkill(stage) {
   const content = SKILLS[stage];
   if (!content) throw new Error(`unknown_governed_skill:${stage}`);

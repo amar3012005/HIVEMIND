@@ -3,7 +3,8 @@ import Ajv from 'ajv';
 import { Annotation, Command, END, START, StateGraph, interrupt } from '@langchain/langgraph';
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { normalizeSearchableFollowUps } from './chat-synthesis-prompt.js';
-import { loadGovernedSkill } from './governed-agent-skills.js';
+import { ORGANIZATIONAL_BRAIN_PERSONA } from './chat-persona-skill.js';
+import { compactGovernedSkillCatalog, loadGovernedSkill } from './governed-agent-skills.js';
 import { projectGovernedEvidence } from './governed-evidence-projection.js';
 import {
   loadGovernedConversationContext,
@@ -26,6 +27,7 @@ import {
   normalizePlanCandidate,
   outcomeIds,
   outcomesCovered,
+  progressiveReceiptWindow,
   safeReceiptSummary,
   serializeKnownFacts,
   synthesisReceipt,
@@ -108,6 +110,7 @@ const GraphState = Annotation.Root({
   activePlanNodeId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   dependencyRequirements: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   followUps: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  authenticatedContext: Annotation({ reducer: (_left, right) => right, default: () => '' }),
 });
 
 const compact = (value, limit = 18000) => {
@@ -631,7 +634,16 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
     const connectionScope = state.connectionScope === 'org' || governedConnectionScope(ctx) === 'org' ? 'org' : 'user';
     const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
     const connected = unique(accounts.filter(row => row?.status === 'ACTIVE').map(row => row?.toolkit));
-    const coreCapabilities = await loadGovernedCoreCapabilities();
+    let authenticatedContext = '';
+    try {
+      const { getSharedProfileStore } = await import('../memory/profile-store.js');
+      authenticatedContext = text(
+        await getSharedProfileStore(prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null),
+        1800,
+      );
+    } catch {
+      // Profile context improves identity and voice but never blocks the graph.
+    }
     const persistedConversationContext = await loadGovernedConversationContext({
       prisma,
       orgId: ctx.orgId,
@@ -675,7 +687,10 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       conversationContext,
       referenceEvidence,
       resolvedReference,
-      capabilities: coreCapabilities,
+      // Capability schemas are loaded only after intent is known. Admission
+      // carries identity/history, not the entire native tool registry.
+      capabilities: [],
+      authenticatedContext,
     });
     await persist({ ...state, runId }, patch);
     return patch;
@@ -687,13 +702,21 @@ export function createGovernedKernel({ checkpointer, ctx, message, onEvent = () 
       stage: 'intent',
       signal: ctx._signal,
       system: `Resolve language-neutral intent. Active skill: ${loadGovernedSkill('intent').content}
+Available progressive skills:\n${compactGovernedSkillCatalog()}
 Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:string,answer_objective:string,response_depth:"standard"|"detailed"|"comprehensive",outcomes:[{id:string,kind:"read"|"draft",description:string,evidence?:{min_records:number,required_fields:string[]}}],known_facts:object,entities:[{name:string,role:string}],content_source:"current_turn"|"conversation"|"missing",business_question?:string,reference_selector?:{position:number|"last",record_kind?:string}}. Extract every explicitly named person, organization, account, project, or record into entities with its semantic role such as recipient, sender, owner, or subject. Store every explicitly supplied action parameter in known_facts using concise semantic schema-style keys. Names remain evidence to resolve, never provider identifiers. Normalize ordinal references such as the first, second, or last previously shown record into reference_selector regardless of the user's language. Every read outcome must declare its minimum returned record count and user-requested factual fields. Use min_records=1 for a singleton or uncounted answer. A read includes summarization, comparison, formatting, and answering in chat. A draft outcome means only a requested external mutation requiring approval. For writes, classify where the substantive payload comes from: current_turn when supplied now, conversation when supplied by prior assistant context, or missing only when neither contains it. Ask one concise business_question only when content_source is missing; never use it for provider identifiers or named-entity lookup. Preserve requested counts, filters, order, and fields in the discovery query and outcome descriptions. discovery_query is one concise English capability request without private names, addresses, or provider IDs. answer_objective states exactly what the visible final answer must deliver. Choose response_depth semantically: standard for a bounded fact or short result, detailed for explanation, comparison, summary, or multi-record inventory, and comprehensive only when the user explicitly asks for exhaustive or complete treatment.`,
       // Intent needs bounded conversational meaning, not raw connector rows.
       // Structured prior receipts remain available to planning/arguments for
       // evidence grounding after the outcome contract exists.
-      input: { message, connected: state.connected, conversation_context: state.conversationContext, resolved_reference: state.resolvedReference },
+      input: {
+        message,
+        connected: state.connected,
+        authenticated_context: state.authenticatedContext,
+        conversation_context: state.conversationContext,
+        resolved_reference: state.resolvedReference,
+      },
     });
     const intent = normalizedIntent(raw, ctx.language || 'en');
+    const coreCapabilities = loadGovernedCoreCapabilities({ intent, limit: 8 });
     const hasPriorAssistantContent = state.conversationContext.some(turn => turn?.role === 'assistant' && text(turn?.content, 6000));
     if (intent.kind === 'write' && intent.content_source === 'conversation' && hasPriorAssistantContent) {
       intent.business_question = null;
@@ -706,7 +729,12 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       intent.discovery_query = 'Fetch the full content and metadata for one referenced record using a known provider identifier from a prior authenticated receipt.';
     }
     if (!intent.outcomes.length || !intent.discovery_query) throw new Error('governed_intent_contract');
-    const patch = await transition(state, 'intent_resolved', { intent, locale: intent.locale, resolvedReference }, { reason_code: 'intent_resolved' });
+    const patch = await transition(state, 'intent_resolved', {
+      intent,
+      locale: intent.locale,
+      resolvedReference,
+      capabilities: coreCapabilities,
+    }, { reason_code: 'intent_resolved' });
     await persist(state, patch);
     return patch;
   });
@@ -753,6 +781,8 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
       sessionId: sessionCompatible ? state.sessionId : null,
       includeCustomToolkit: false,
       manageConnections: true,
+      hydrateSchemas: false,
+      candidateLimit: 8,
       callbackUrl: callbackUrlFor(ctx),
       searchPayload: {
         queries: [{ use_case: query, known_fields: serializeKnownFacts({ ...state.intent?.known_facts, ...state.fieldValues }) }],
@@ -764,8 +794,8 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
     for (const tool of discovery.tools || []) {
       const slug = tool?._composio?.slug;
       const schema = discovery.toolSchemas?.[slug];
-      if (!slug || !schema?.input_schema) continue;
-      cards.set(slug, capabilityCard({ tool, schema }));
+      if (!slug) continue;
+      cards.set(slug, capabilityCard({ tool, schema: schema || null }));
     }
     const capabilities = [...cards.values()].slice(0, 48);
     const searchQueries = [...(state.searchQueries || []), query].slice(-4);
@@ -1201,6 +1231,23 @@ Return the argument object itself. Never use schema examples, fabricate identifi
     return patch;
   });
 
+  const hydrateSchemaNode = async state => trace('schema_hydration', { tool_slug: state.decision?.tool_slug || null }, async () => {
+    const slug = state.decision?.tool_slug;
+    const card = (state.capabilities || []).find(item => item.slug === slug);
+    if (!card || card.source === 'core' || card.schema_hydrated !== false) return {};
+    if (!state.sessionId || typeof composio.getSessionToolSchemas !== 'function') {
+      throw new Error('governed_schema_hydration_unavailable');
+    }
+    const schemas = await composio.getSessionToolSchemas(state.sessionId, [slug]);
+    const schema = schemas?.[slug];
+    if (!schema?.input_schema) throw new Error('governed_selected_schema_missing');
+    const hydrated = capabilityCard({
+      tool: { slug, function: { name: slug, description: schema.description, parameters: schema.input_schema } },
+      schema,
+    });
+    return { capabilities: (state.capabilities || []).map(item => item.slug === slug ? hydrated : item) };
+  });
+
   const executeNode = async state => trace('tool_execution', { tool_slug: state.decision?.tool_slug || null, authority: 'read' }, async () => {
     const card = (state.capabilities || []).find(item => item.slug === state.decision?.tool_slug);
     if (!card || card.authority !== 'read') throw new Error('governed_read_authority_denied');
@@ -1437,6 +1484,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
   });
 
   const synthNode = async state => trace('final_synthesis', { locale: state.locale }, async () => {
+    const receiptWindow = progressiveReceiptWindow(state.receipts, state.intent?.response_depth);
     const synthesisInput = {
       message,
       answer_contract: {
@@ -1445,8 +1493,9 @@ Return the argument object itself. Never use schema examples, fabricate identifi
         outcomes: state.intent?.outcomes || [],
       },
       conversation_context: (state.conversationContext || []).slice(-6),
+      authenticated_context: state.authenticatedContext,
       intent: state.intent,
-      receipts: (state.receipts || []).map(synthesisReceipt),
+      receipts: receiptWindow,
       steps: state.steps,
       capability_gap: state.capabilityGap,
     };
@@ -1455,7 +1504,9 @@ Return the argument object itself. Never use schema examples, fabricate identifi
       ctx,
       stage: 'synthesis',
       signal: ctx._signal,
-      system: `Synthesize the final response in ${state.locale}. Active skill: ${loadGovernedSkill('synthesis').content}
+      system: `${ORGANIZATIONAL_BRAIN_PERSONA}
+
+Synthesize the final response in ${state.locale}. Active skill: ${loadGovernedSkill('synthesis').content}
 Contract: {response:string,complete:boolean,missing_outcomes:string[],recovery_instruction?:string,follow_ups:string[]}. Check the actual request against receipt contents before answering. A successful list of IDs does not supply detail fields. If another read is needed, set complete=false, name the unresolved outcome IDs, and describe the needed read. The graph will continue. Use only successful receipts. Do not expose internal schema fields. Return up to three concise follow-up questions grounded in named entities or facts present in the successful receipts; return [] when no grounded follow-up is useful.
 
 Write response as the natural final chat answer, as the same agent continuing after its tool calls. Lead with the requested outcome rather than narrating tool use. Match answer_contract.depth: standard is focused, detailed covers every relevant supported facet with useful structure, and comprehensive reconciles every distinct supported finding without padding. Do not use a fixed sentence count. The original request and answer_contract.objective determine how much to answer; receipt volume alone does not. Conversation context resolves references and continuity but is not provider evidence.
@@ -1523,7 +1574,7 @@ Render requested records and fields as a Markdown table when appropriate, preser
     if (state.pendingInput || state.decision?.action === 'ask') return 'await_human';
     if (!state.decision) return 'plan';
     if (state.decision.action === 'discover') return 'discover';
-    if (state.decision.action === 'read' || state.decision.action === 'draft') return 'prepare';
+    if (state.decision.action === 'read' || state.decision.action === 'draft') return 'hydrate_schema';
     return 'synthesize';
   };
   const routeAfterPrepare = state => {
@@ -1549,6 +1600,7 @@ Render requested records and fields as a Markdown table when appropriate, preser
     .addNode('await_connection', awaitConnectionNode)
     .addNode('plan', planNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('verify', verifyNode)
+    .addNode('hydrate_schema', hydrateSchemaNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('prepare', prepareNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('execute', executeNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.4 } })
     .addNode('draft', draftNode)
@@ -1565,7 +1617,8 @@ Render requested records and fields as a Markdown table when appropriate, preser
     .addConditionalEdges('request_connection', routeAfterConnectionRequest, ['await_connection', 'discover'])
     .addConditionalEdges('await_connection', routeAfterConnection, ['request_connection', 'discover'])
     .addEdge('plan', 'verify')
-    .addConditionalEdges('verify', routeAfterVerify, ['plan', 'discover', 'prepare', 'request_connection', 'await_human', 'synthesize'])
+    .addConditionalEdges('verify', routeAfterVerify, ['plan', 'discover', 'hydrate_schema', 'request_connection', 'await_human', 'synthesize'])
+    .addEdge('hydrate_schema', 'prepare')
     .addConditionalEdges('prepare', routeAfterPrepare, ['verify', 'execute', 'draft', 'await_human'])
     .addEdge('execute', 'schedule_plan')
     .addEdge('draft', 'await_approval')

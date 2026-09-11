@@ -62,10 +62,18 @@ function mockComposio({ toolkit, tools, execute, accounts = null }) {
     calls,
     async listConnectedAccounts() { return accounts || [{ toolkit, status: 'ACTIVE' }]; },
     async discoverSessionTools(_orgId, input) {
-      calls.push({ kind: 'discover', query: input.useCases?.[0] || null });
+      calls.push({
+        kind: 'discover',
+        query: input.useCases?.[0] || null,
+        hydrateSchemas: input.hydrateSchemas,
+        candidateLimit: input.candidateLimit,
+      });
+      const exposedTools = input.hydrateSchemas === false
+        ? tools.map(item => ({ ...item, function: { ...item.function, parameters: null } }))
+        : tools;
       return {
-        sessionId: `trs-${toolkit}-user`, workflowSessionId: `workflow-${toolkit}-user`, tools,
-        toolSchemas: Object.fromEntries(tools.map(item => [item._composio.slug, {
+        sessionId: `trs-${toolkit}-user`, workflowSessionId: `workflow-${toolkit}-user`, tools: exposedTools,
+        toolSchemas: input.hydrateSchemas === false ? {} : Object.fromEntries(tools.map(item => [item._composio.slug, {
           toolkit, description: item._composio.slug, input_schema: item.function.parameters,
         }])),
         toolkitConnectionStatuses: { [toolkit]: { status: 'ACTIVE' } },
@@ -74,6 +82,12 @@ function mockComposio({ toolkit, tools, execute, accounts = null }) {
         primaryToolSlugs: tools.map(item => item._composio.slug), relatedToolSlugs: [],
         searchStrategy: input.searchPayload?.search_strategy || 'tool_search',
       };
+    },
+    async getSessionToolSchemas(_sessionId, slugs) {
+      calls.push({ kind: 'schema', slugs });
+      return Object.fromEntries(tools.filter(item => slugs.includes(item._composio.slug)).map(item => [item._composio.slug, {
+        toolkit, description: item._composio.slug, input_schema: item.function.parameters,
+      }]));
     },
     async executeToolsParallel(_orgId, callsInput) {
       return callsInput.map(call => {
@@ -129,6 +143,11 @@ test('local E2E: one graph handles English, German, and French self-data reads w
     assert.equal(result.locale, locale);
     assert.equal(result.inputRequests?.length || 0, 0);
     assert.ok(result.steps.some(step => step.slug === 'LINKEDIN_GET_MY_INFO' && step.status === 'completed'));
+    assert.deepEqual(
+      composio.calls.filter(call => call.kind === 'discover').map(call => [call.hydrateSchemas, call.candidateLimit]),
+      [[false, 8]],
+    );
+    assert.deepEqual(composio.calls.filter(call => call.kind === 'schema').map(call => call.slugs), [['LINKEDIN_GET_MY_INFO']]);
     assert.ok([...prisma.events.values()].some(event => event.payload?.state === 'sealed'));
     const scores = evaluateGovernedOutput({ status: result.status, locale: result.locale, response: result.response, trajectory: result.steps }, {
       locale, terminal: ['completed'], required_tools: ['COMPOSIO_SEARCH_TOOLS', 'LINKEDIN_GET_MY_INFO'], requires_receipt: true,

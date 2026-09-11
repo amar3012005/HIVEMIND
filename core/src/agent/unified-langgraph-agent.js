@@ -255,20 +255,28 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
     return { successful: true, data: managed, connection: { toolkits, ...managed } };
   }
   if (action !== 'execute') return { successful: false, error: 'connected_action_invalid' };
-  const slug = String(args.tool_slug || '');
-  if (!slug || !state.selectedSlugs.includes(slug)) return { successful: false, error: 'connected_execute_slug_not_selected' };
-  const schema = state.schemas[slug];
-  if (!schema?.input_schema) return { successful: false, error: 'connected_execute_schema_not_loaded' };
+  const requestedSlug = String(args.tool_slug || '');
+  const slug = state.selectedSlugs.find(value => String(value).toLowerCase() === requestedSlug.toLowerCase()) || '';
+  if (!slug) return { successful: false, error: 'connected_execute_slug_not_selected' };
+  if (!state.sessionId) return { successful: false, error: 'connected_session_missing' };
+  let schema = state.schemas[slug];
+  let loadedSchemas = {};
+  if (!schema?.input_schema) {
+    loadedSchemas = await composio.getSessionToolSchemas(state.sessionId, [slug]);
+    schema = loadedSchemas?.[slug];
+  }
+  if (!schema?.input_schema) return { successful: false, error: 'connected_execute_schema_unavailable' };
+  const schemaState = Object.keys(loadedSchemas).length ? { schemas: { ...state.schemas, ...loadedSchemas } } : {};
   const validate = new Ajv({ strict: false, allErrors: true }).compile(schema.input_schema);
   if (!validate(args.arguments || {})) {
     return { successful: false, error: 'schema_validation_failed', validation_errors: validate.errors?.slice(0, 8) || [] };
   }
   const authority = connectedToolAuthority(slug, schema);
-  if (authority === 'write') return { successful: true, approval: { slug, arguments: args.arguments || {}, schema: schema.input_schema } };
+  if (authority === 'write') return { successful: true, state: schemaState, approval: { slug, arguments: args.arguments || {}, schema: schema.input_schema } };
   const receipt = (await composio.executeToolsParallel(ctx.orgId, [{ slug, arguments: args.arguments || {} }], {
     sessionId: state.sessionId, allowDirectFallback: false,
   }))[0];
-  return { ...receipt, data: publicToolResult(receipt) };
+  return { ...receipt, state: schemaState, data: publicToolResult(receipt) };
 }
 
 async function createApproval(prisma, ctx, state, approval) {

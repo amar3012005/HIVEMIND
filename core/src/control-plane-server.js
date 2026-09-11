@@ -1987,6 +1987,59 @@ function platformLifecycleSummary(company, organization) {
   };
 }
 
+// Activation lifecycle records cover the period before an organization exists.
+// They contain a hash and a redacted address hint, never a second copy of the
+// recipient address. Keep this projection small and admin-only.
+function activationLifecycleTimeline(rows = []) {
+  const labels = {
+    invited_pending_signup: 'Invitation delivered · waiting for sign-in',
+    signed_in_pending_company: 'Signed in · waiting for company onboarding',
+    onboarding_in_progress: 'Company onboarding started',
+    day0_delivered: 'Day 0 report delivered',
+    stopped: 'Lifecycle stopped',
+  };
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    stage: String(row.stage || 'unknown'),
+    label: labels[row.stage] || String(row.stage || 'Unknown lifecycle state').replaceAll('_', ' '),
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+    last_reminder_at: row.last_reminder_at || null,
+    next_reminder_at: row.next_reminder_at || null,
+    stopped_at: row.stopped_at || null,
+    stop_reason: row.stop_reason || null,
+    reminder_count: Number(row.reminder_count || 0),
+    generation: Number(row.generation || 0),
+    email_hint: row.email_hint || null,
+  }));
+}
+
+async function findActivationLifecycles({ userId = null, email = null, invitationId = null } = {}) {
+  if (!prisma) return [];
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const hash = normalizedEmail ? crypto.createHash('sha256').update(normalizedEmail).digest('hex') : null;
+  const rows = invitationId
+    ? await prisma.$queryRawUnsafe(
+      `SELECT id, email_hint, stage, generation, reminder_count, next_reminder_at,
+              last_reminder_at, stopped_at, stop_reason, created_at, updated_at
+         FROM hivemind.activation_lifecycles
+        WHERE invite_id=$1::uuid
+        ORDER BY created_at ASC, id ASC`,
+      invitationId,
+    )
+    : await prisma.$queryRawUnsafe(
+      `SELECT id, email_hint, stage, generation, reminder_count, next_reminder_at,
+              last_reminder_at, stopped_at, stop_reason, created_at, updated_at
+         FROM hivemind.activation_lifecycles
+        WHERE ($1::uuid IS NOT NULL AND user_id=$1::uuid)
+           OR ($2::text IS NOT NULL AND email_hash=$2::text)
+        ORDER BY created_at ASC, id ASC`,
+      userId || null,
+      hash,
+    );
+  return activationLifecycleTimeline(rows);
+}
+
 async function getPlatformUserLifecycle(userId) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -2001,9 +2054,17 @@ async function getPlatformUserLifecycle(userId) {
     },
   });
   if (!user) return null;
+  // A user can have a durable pre-Day-0 lifecycle before it has an active
+  // organization. Return it even for a newly signed-in user.
+  const activation = await findActivationLifecycles({ userId: user.id, email: user.email }).catch(() => []);
   const organizations = user.organizations.map((membership) => membership.org).filter(Boolean);
   if (!organizations.length) {
-    return { user: { id: user.id, email: user.email, display_name: user.displayName || null }, organizations: [], totals: { organizations: 0, awakened: 0, lifecycle_count: 0, completed: 0, in_progress: 0, failed: 0 } };
+    return {
+      user: { id: user.id, email: user.email, display_name: user.displayName || null },
+      activation,
+      organizations: [],
+      totals: { organizations: 0, awakened: 0, lifecycle_count: 0, activation_count: activation.length, completed: 0, in_progress: 0, failed: 0 },
+    };
   }
   // An HQ room is the lifecycle authority.  Query only this selected user's
   // active organizations, rather than adding a costly lifecycle N+1 query to
@@ -2033,8 +2094,9 @@ async function getPlatformUserLifecycle(userId) {
   }, { organizations: 0, awakened: 0, lifecycle_count: 0, completed: 0, in_progress: 0, failed: 0 });
   return {
     user: { id: user.id, email: user.email, display_name: user.displayName || null },
+    activation,
     organizations: lifecycleOrganizations,
-    totals,
+    totals: { ...totals, activation_count: activation.length },
   };
 }
 
@@ -4313,11 +4375,12 @@ const server = http.createServer(async (req, res) => {
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     const invitation = await prisma?.enterpriseInvitation.findUnique({ where: { id: adminInvitationDetail[1] } });
     if (!invitation) return jsonResponse(res, { error: 'Not found' }, 404);
-    const [auditRows, grants] = await Promise.all([
+    const [auditRows, grants, activation] = await Promise.all([
       prisma.auditLog.findMany({ where: { resourceType: 'enterprise_invitation', resourceId: invitation.id }, orderBy: { createdAt: 'desc' }, take: 100 }),
       invitation.orgId ? prisma.entitlementGrant.findMany({ where: { orgId: invitation.orgId }, orderBy: { startsAt: 'desc' }, take: 20 }) : [],
+      findActivationLifecycles({ invitationId: invitation.id }).catch(() => []),
     ]);
-    return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), audit: auditRows, entitlement_grants: grants });
+    return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), activation, audit: auditRows, entitlement_grants: grants });
   }
 
   const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied|update-max-invites)$/i);

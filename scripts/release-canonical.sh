@@ -196,10 +196,12 @@ if [ -n "${REQUESTED[core]:-}" ]; then
   else
     echo "[migrate] guarded Prisma deploy via $CORE_TAG"
     "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase migrating:core
-    docker run --rm \
-      --network hivemind_default \
-      --env-file "$ENVF" \
-      "$CORE_TAG" node scripts/prisma-migrate-deploy.mjs
+    # The database URL is composed from POSTGRES_* values by the canonical
+    # Compose file; it is intentionally not duplicated in the host .env.
+    # Run the migration through that same resolved service environment rather
+    # than a bare docker run, which would omit DATABASE_URL on Enigma.
+    docker compose --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+      --env-file "$ENVF" run --rm --no-deps core node scripts/prisma-migrate-deploy.mjs
   fi
 fi
 

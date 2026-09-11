@@ -95,6 +95,30 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
+test('execute progressively hydrates its authorized schema when a weak model skips the schema step', async () => {
+  const prisma = fakePrisma();
+  const calls = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Find my last five emails from Rama', useTools: true, prisma, ctx: ctx(prisma, 'auto-schema'), checkpointer: new MemorySaver(),
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Find the last five Gmail emails from Rama' }] }, 'a1') };
+      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'gmail_fetch_emails', arguments: { query: 'from:Rama', max_results: 5 } }, 'a2') };
+      return { message: { role: 'assistant', content: '| Subject | Sender | Time |\n|---|---|---|\n| Hello | Rama | Today |' } };
+    },
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+      async discoverSessionTools() { return { sessionId: 'auto-session', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } }; },
+      async getSessionToolSchemas(session, slugs) { calls.push(['schemas', session, slugs]); return { GMAIL_FETCH_EMAILS: { read_only: true, input_schema: { type: 'object', required: ['query', 'max_results'], properties: { query: { type: 'string' }, max_results: { type: 'integer' } } } } }; },
+      async executeToolsParallel(_org, tools, options) { calls.push(['execute', tools, options]); return [{ successful: true, data: { messages: [{ subject: 'Hello', sender: 'Rama', time: 'Today' }] } }]; },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(calls[0], ['schemas', 'auto-session', ['GMAIL_FETCH_EMAILS']]);
+  assert.equal(calls[1][0], 'execute');
+});
+
 test('connected search generically infers an explicitly named active toolkit when the model omits toolkits', async () => {
   const prisma = fakePrisma();
   let turn = 0;

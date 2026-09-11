@@ -45,3 +45,18 @@ test('native meta admission fails closed and flag off preserves Native V2', asyn
   assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'unified-meta-v2' }), 'unified-meta-v2');
   assert.equal(nativeOrchestratorFor({ useTools: true, nativeMetaMode: 'unified-meta-v2' }), 'unified-meta-v2');
 }));
+
+test('one Flagship admission latches chat, compound, unified-DAG, and Meeting Notes modes', async () => withEnv({
+  CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
+}, async () => {
+  const client = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({
+    mode: 'workflow', native_meta_mode: 'unified-meta-v2', unified_dag: true,
+    chat_orchestrator_v2_mode: 'serve', compound_orchestrator: true,
+    meeting_lifecycle_mode: 'consent',
+  }) });
+  assert.deepEqual(await client.admissionFor({ orgId: 'org', userId: 'user' }), {
+    mode: 'workflow', nativeMetaMode: 'unified-meta-v2', unifiedDag: true,
+    orchestratorV2Mode: 'serve', compoundOrchestrator: true,
+    meetingLifecycleMode: 'consent',
+  });
+}));

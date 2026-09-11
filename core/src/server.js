@@ -6881,6 +6881,23 @@ exit \$RC
             message: 'Confirm recording consent before starting a meeting.',
           }, 400);
         }
+        // The existing recording-consent flow stays stable until a tenant is
+        // explicitly admitted to consent by Flagship. The decision is made
+        // once for this session creation request and failure is off.
+        const meetingLifecycleMode = await cloudflareChatSessionClient
+          .meetingLifecycleModeFor({ orgId: _mOrgId, userId: _mUserId })
+          .catch(() => 'off');
+        const consentRecordedAt = typeof body?.consent_recorded_at === 'string'
+          && Number.isFinite(Date.parse(body.consent_recorded_at))
+          ? new Date(body.consent_recorded_at).toISOString()
+          : null;
+        if (meetingLifecycleMode === 'consent'
+            && (body?.consent_version !== 'v2' || !consentRecordedAt)) {
+          return jsonResponse(res, {
+            error: 'recording_consent_v2_required',
+            message: 'Record the versioned consent acknowledgement before starting a meeting.',
+          }, 400);
+        }
         if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
         const usage = await planEnforcer.getUsageSummary(_mOrgId);
         const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
@@ -6923,14 +6940,16 @@ exit \$RC
         try {
           const rows = await prisma.$queryRawUnsafe(
             `INSERT INTO hivemind.meeting_sessions
-               (id, org_id, user_id, status, consent_recorded, expected_segment_ms)
-             VALUES ($1::uuid,$2::uuid,$3::uuid,'recording',true,$4)
+               (id, org_id, user_id, status, consent_recorded, expected_segment_ms, finalization_payload)
+             VALUES ($1::uuid,$2::uuid,$3::uuid,'recording',true,$4,
+               jsonb_build_object('consent', jsonb_build_object('version',$5::text,'recorded_at',$6::timestamptz)))
              ON CONFLICT (id) DO UPDATE
                SET updated_at=now()
              WHERE hivemind.meeting_sessions.org_id=EXCLUDED.org_id
                AND hivemind.meeting_sessions.user_id=EXCLUDED.user_id
              RETURNING id, status, consent_recorded, expected_segment_ms, created_at`,
             sessionId, _mOrgId, _mUserId, expectedSegmentMs,
+            meetingLifecycleMode === 'consent' ? 'v2' : 'v1', consentRecordedAt || new Date().toISOString(),
           );
           if (!rows?.[0]) return jsonResponse(res, { error: 'session_id_conflict' }, 409);
           return jsonResponse(res, {
@@ -13107,6 +13126,28 @@ exit \$RC
 
         case '/api/knowledge/upload-capabilities':
           if (req.method === 'GET') return jsonResponse(res, knowledgeUploadCapabilities());
+          break;
+
+        // A feature is never mounted or polled until the authenticated browser
+        // has a tenant-scoped capability decision. Flagship failure is safe:
+        // baseline Brain features remain available and every canary is off.
+        case '/api/brain/capabilities':
+          if (req.method === 'GET') {
+            const admission = await cloudflareChatSessionClient
+              .admissionFor({ orgId, userId })
+              .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false }));
+            return jsonResponse(res, {
+              capabilities: {
+                connectors: { enabled: true }, memories: { enabled: true },
+                meeting_notes: { enabled: true, consent_v2: admission.meetingLifecycleMode === 'consent' },
+                graph: { enabled: true }, knowledge: { enabled: true }, mcp: { enabled: true },
+                chat: { enabled: true, unified_dag: admission.unifiedDag === true,
+                  orchestrator_v2_mode: admission.orchestratorV2Mode || 'off',
+                  compound_orchestrator: admission.compoundOrchestrator === true },
+              },
+              source: 'cloudflare_flagship',
+            });
+          }
           break;
 
         // Cheap duplicate pre-check BEFORE the bytes go over the wire.
@@ -24886,7 +24927,7 @@ exit \$RC
                 // failures fail closed to the unchanged Chat V2 path.
                 const chatAdmission = await cloudflareChatSessionClient
                   .admissionFor({ orgId, userId })
-                  .catch(() => ({ mode: 'off', nativeMetaMode: 'off' }));
+                  .catch(() => ({ mode: 'off', nativeMetaMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false, meetingLifecycleMode: 'off' }));
                 let durableChatMode = chatAdmission.mode;
                 // Cloudflare latches one runtime for the authenticated turn.
                 // native-meta-v1 remains native-only; unified-meta-v2 uses the
@@ -25038,6 +25079,9 @@ exit \$RC
                         userId, orgId,
                         recallReliabilityV1,
                         nativeMetaMode,
+                        unifiedDag: chatAdmission.unifiedDag,
+                        orchestratorV2Mode: chatAdmission.orchestratorV2Mode,
+                        compoundOrchestrator: chatAdmission.compoundOrchestrator,
                         durableChatMode,
                         durableChatTurnId: durableChatTurn?.id || null,
                         historyTurns,
@@ -25130,6 +25174,9 @@ exit \$RC
                     userId, orgId,
                     recallReliabilityV1,
                     nativeMetaMode,
+                    unifiedDag: chatAdmission.unifiedDag,
+                    orchestratorV2Mode: chatAdmission.orchestratorV2Mode,
+                    compoundOrchestrator: chatAdmission.compoundOrchestrator,
                     durableChatMode,
                     durableChatTurnId: durableChatTurn?.id || null,
                     historyTurns,

@@ -120,13 +120,9 @@ function stableBucket(seed = '') {
   return (hash >>> 0) % 100;
 }
 
-export function nativeV2RoutingMode({ useTools, seed } = {}) {
+export function nativeV2RoutingMode({ useTools, orchestratorV2Mode = 'off' } = {}) {
   if (useTools === true) return 'off';
-  if (process.env.CHAT_ORCHESTRATOR_V2_ENABLED === 'true') return 'serve';
-  const percent = Math.max(0, Math.min(100, Number(process.env.CHAT_ORCHESTRATOR_V2_CANARY_PERCENT || 0)));
-  if (percent > 0 && stableBucket(seed) < percent) return 'serve';
-  if (process.env.CHAT_ORCHESTRATOR_V2_SHADOW === 'true') return 'shadow';
-  return 'off';
+  return ['serve', 'shadow'].includes(orchestratorV2Mode) ? orchestratorV2Mode : 'off';
 }
 
 export function nativeV2Eligible(input = {}) {

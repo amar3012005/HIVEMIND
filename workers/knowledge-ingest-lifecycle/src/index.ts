@@ -52,7 +52,9 @@ async function authorized(request: Request, env: RuntimeEnv): Promise<boolean> {
 }
 
 async function flagEnabled(env: RuntimeEnv, orgId: string, userId: string): Promise<boolean> {
-  const environment = env.ENVIRONMENT === 'production' ? 'production' : env.ENVIRONMENT === 'local' ? 'local' : null;
+  const environment = ['production', 'local', 'enigma'].includes(env.ENVIRONMENT)
+    ? env.ENVIRONMENT
+    : null;
   if (!environment || !validOrgId(orgId) || !validOrgId(userId) || !env.FLAGS) return false;
   const details = await env.FLAGS.getBooleanDetails(
     env.KNOWLEDGE_INGEST_FLAG || 'knowledge_ingest_workflow_v1',

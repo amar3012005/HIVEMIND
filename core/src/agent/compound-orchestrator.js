@@ -20,7 +20,6 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { isUseToolsUnifiedDagEnabled } from './use-tools-unified-flag.js';
 import { canonicalNativeToolGroup, isNativeHivemindGroup } from './native-tool-groups.js';
 
 async function chatCompletionFetch(...args) {
@@ -1272,7 +1271,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   const composioToolkit = composioToolkitFor(toolGroups);
   const unifiedDag = ctx && Object.prototype.hasOwnProperty.call(ctx, 'unifiedDag')
     ? ctx.unifiedDag === true
-    : isUseToolsUnifiedDagEnabled();
+    : false;
   let tools = [];
   let lookupTools = [];
   let composioSlugByTool = new Map();

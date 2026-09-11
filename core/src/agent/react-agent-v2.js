@@ -3858,7 +3858,7 @@ export async function runReactAgentV2({
       ? 'meta-v1'
       : nativeOrchestrator === 'v2' && useTools !== true
         ? 'serve'
-      : (nativeV2Module?.nativeV2RoutingMode({ useTools, seed: ctx.userId || trace.traceId }) || 'off');
+      : (nativeV2Module?.nativeV2RoutingMode({ useTools, orchestratorV2Mode: ctx?.orchestratorV2Mode }) || 'off');
     const nativeV2Input = async () => ({
       message, history, language, apiKey, signal: abortCtrl.signal,
       // The compact authenticated identity envelope is shared with the
@@ -3904,6 +3904,7 @@ export async function runReactAgentV2({
             apiKey,
             signal: abortCtrl.signal,
             orgId: ctx?.orgId,
+            unifiedDag: ctx?.unifiedDag === true,
           });
           intentParsed = {
             decision: {
@@ -3997,7 +3998,7 @@ export async function runReactAgentV2({
     // step. Route it through the same Composio-backed path as multi-step plans
     // so `use_tools:true` works for ordinary Gmail/Calendar/Docs reads too.
     if (useTools
-        && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
+        && ctx?.compoundOrchestrator === true
         && ['connector_read', 'connector_write'].includes(intentDecision.operation)
         && intentDecision.connector_provider) {
       const isWrite = intentDecision.operation === 'connector_write';
@@ -4105,7 +4106,7 @@ export async function runReactAgentV2({
       if (await isUseToolsDurableAgentEnabled()) return await serveDurableAgent();
     }
     if (intentDecision.operation === 'compound'
-        && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
+        && ctx?.compoundOrchestrator === true
         && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
       const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');

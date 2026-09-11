@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { escapeHtml, lifecycleEmailShell } from '../email/templates/cartesia-lifecycle.js';
 
 export const ACTIVATION_STAGES = Object.freeze({
   INVITED_PENDING_SIGNUP: 'invited_pending_signup',
@@ -216,4 +217,33 @@ export function activationReminderCopy(stage, companyName = 'your company') {
     body: 'Complete company onboarding to receive your Day 0 briefing and begin your lifecycle.',
     cta: 'Continue company setup', href: '/hivemind/app/employees/mycompany?onboard=1', type: 'lifecycle.onboarding.reminder',
   };
+}
+
+/**
+ * Render the pre-Day-0 message as a first-class lifecycle email rather than
+ * borrowing the generic announcement template.  The result is deliberately
+ * provider-neutral: the canonical email service owns transport, delivery
+ * receipts, and notification projection.
+ */
+export function renderActivationReminderEmail({ stage, companyName = 'your company', appUrl } = {}) {
+  const copy = activationReminderCopy(stage, companyName);
+  const destination = String(appUrl || '').trim();
+  if (!destination.startsWith('https://')) throw new Error('activation_reminder_requires_https_destination');
+
+  const company = String(companyName || 'your company').trim().slice(0, 160) || 'your company';
+  const lifecycleLabel = stage === ACTIVATION_STAGES.INVITED_PENDING_SIGNUP
+    ? 'INVITATION / NEXT STEP'
+    : stage === ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY
+      ? 'SIGN-IN COMPLETE / NEXT STEP'
+      : 'COMPANY SETUP / NEXT STEP';
+  const cta = escapeHtml(copy.cta || 'Continue');
+  const safeDestination = escapeHtml(destination);
+  const subject = copy.subject;
+  const text = `${copy.heading}\n\n${copy.body}\n\n${copy.cta}: ${destination}\n\n— The HIVEMIND team`;
+  const html = lifecycleEmailShell({
+    title: subject,
+    preheader: copy.body,
+    body: `<tr><td class="section" style="background:#faf9f4"><div class="eyebrow">${lifecycleLabel}</div><h1 class="h1">${escapeHtml(copy.heading)}</h1><p class="copy">${escapeHtml(copy.body)}</p><div style="margin-top:24px;padding:14px 16px;border-left:3px solid #117dff;background:#fff"><div style="font:700 8px/12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;color:#117dff">YOUR WORKSPACE</div><div style="margin-top:6px;font-size:14px;line-height:20px;font-weight:700;color:#090909">${escapeHtml(company)}</div></div><a class="action" href="${safeDestination}" style="margin-top:24px">${cta} &rarr;</a><p style="margin:20px 0 0;color:#8f8f8f;font-size:12px;line-height:18px">This is a transactional onboarding reminder. It is sent only while this setup step remains unfinished.</p></td></tr>`,
+  });
+  return { subject, text, html, cta: copy.cta, href: destination, templateVersion: 'activation-lifecycle-v1' };
 }

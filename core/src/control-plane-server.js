@@ -178,6 +178,7 @@ import {
   isAuthorizedActivationLifecycleRequest,
   listEligibleActivationLifecycles,
   recordActivationReminder,
+  renderActivationReminderEmail,
   releaseActivationReminderClaim,
   scheduleActivationWorkflow,
   startInvitationActivation,
@@ -3596,10 +3597,15 @@ const server = http.createServer(async (req, res) => {
       }
       const copy = activationReminderCopy(lifecycle.stage, lifecycle.metadata?.company_name || 'your company');
       const appUrl = `${String(process.env.APP_URL || 'https://next.singulancelabs.com').replace(/\/$/, '')}${copy.href}`;
-      const delivery = await sendSystemEmail({
-        templateId: 'announcement',
+      const rendered = renderActivationReminderEmail({
+        stage: lifecycle.stage,
+        companyName: lifecycle.metadata?.company_name || 'your company',
+        appUrl,
+      });
+      const delivery = await sendRenderedSystemEmail({
+        templateId: 'activation_lifecycle_reminder',
         to: lifecycle.email,
-        vars: { name: 'there', subject: copy.subject, preheader: copy.subject, heading: copy.heading, body: copy.body, appUrl },
+        rendered,
         notification: lifecycle.org_id && lifecycle.user_id ? {
           orgId: lifecycle.org_id,
           userId: lifecycle.user_id,

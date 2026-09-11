@@ -5,6 +5,7 @@ import {
   activationReminderCopy,
   advanceActivationForEmail,
   isActivationLifecycleEnabled,
+  renderActivationReminderEmail,
   scheduleActivationWorkflow,
   startSignupActivation,
 } from '../../src/lifecycle/activation-lifecycle.js';
@@ -116,4 +117,32 @@ test('reminder copy remains typed lifecycle communication', () => {
   assert.equal(invite.type, 'lifecycle.invitation.reminder');
   assert.equal(signup.type, 'lifecycle.signup.reminder');
   assert.match(signup.href, /onboard=1/);
+});
+
+test('each activation reminder has a dedicated, escaped, responsive email rendering', () => {
+  for (const stage of [
+    ACTIVATION_STAGES.INVITED_PENDING_SIGNUP,
+    ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY,
+    ACTIVATION_STAGES.ONBOARDING_IN_PROGRESS,
+  ]) {
+    const rendered = renderActivationReminderEmail({
+      stage,
+      companyName: 'Canary <Company>',
+      appUrl: 'https://dev.next.singulancelabs.com/hivemind/app/employees/mycompany?onboard=1',
+    });
+    assert.match(rendered.subject, /HIVEMIND|awaken/i);
+    assert.match(rendered.text, /https:\/\/dev\.next\.singulancelabs\.com/);
+    assert.match(rendered.html, /SINGULANCE/);
+    assert.match(rendered.html, /class="action"/);
+    assert.match(rendered.html, /@media only screen and \(max-width:620px\)/);
+    assert.match(rendered.html, /Canary &lt;Company&gt;/);
+    assert.doesNotMatch(rendered.html, /Canary <Company>/);
+  }
+});
+
+test('activation reminder refuses an unsafe or missing destination', () => {
+  assert.throws(
+    () => renderActivationReminderEmail({ stage: ACTIVATION_STAGES.INVITED_PENDING_SIGNUP, appUrl: 'http://example.test' }),
+    /activation_reminder_requires_https_destination/,
+  );
 });

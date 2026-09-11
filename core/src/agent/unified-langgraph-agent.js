@@ -102,7 +102,7 @@ function invalidFinal(text, receipts) {
   const answer = markdownText(text, 24000);
   if (!answer || /\[object Object\]/.test(answer)) return true;
   if (!(receipts || []).some(row => row.successful !== false && row.data != null)) return false;
-  return /(?:i can(?:not|'t) directly display|i can only confirm|i can show you(?:\.|$)|cannot retrieve the other)/i.test(answer);
+  return /(?:i can(?:not|'t) directly display|i can only confirm|i can show you(?:\.|$)|cannot retrieve the other|need to (?:access|connect to)|please confirm (?:that )?i can proceed|don[’']t have a direct connection)/i.test(answer);
 }
 
 async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
@@ -375,9 +375,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const messages = [...state.messages, { role: 'assistant', content: assistant.content || null, ...(assistant.tool_calls?.length ? { tool_calls: assistant.tool_calls } : {}) }];
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     if (calls.length) return { messages, pendingTool: parseUnifiedToolCall(calls[0]), cycles: state.cycles + 1, usage };
-    if (invalidFinal(assistant.content, state.receipts) && state.repairs < 1) {
+    if (invalidFinal(assistant.content, state.receipts) && state.repairs < 3) {
       return {
-        messages: [...messages, { role: 'system', content: 'Your proposed answer did not present the successful receipt evidence. Answer the original request directly from the receipts now. Do not describe what you could do.' }],
+        messages: [...messages, { role: 'system', content: state.selectedSlugs.length
+          ? `Do not ask permission for a read or describe what you could do. Continue the connected workflow now: load schemas for the selected slugs (${state.selectedSlugs.join(', ')}), execute the required read, then answer from its receipt.`
+          : 'Your proposed answer did not present the successful receipt evidence. Continue with the available gateway tools, then answer the original request directly from the receipts.' }],
         pendingTool: null, cycles: state.cycles + 1, repairs: state.repairs + 1, usage,
       };
     }

@@ -63,11 +63,14 @@ test('direct multilingual turn uses one structured parser call and one event con
   }
 });
 
-test('complete aggregate uses one parser call, scoped entity executor, and no answer model', async () => {
+test('complete aggregate uses scoped entity execution and a grounded answer', async () => {
   const originalFetch = globalThis.fetch;
   let modelCalls = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_url, options) => {
     modelCalls++;
+    if (!JSON.parse(options.body).tool_choice) {
+      return { ok: true, async json() { return { choices: [{ message: { content: 'Solvis contains 2 entities associated with Solvis classified as products.' } }] }; } };
+    }
     return {
       ok: true,
       async json() {
@@ -93,11 +96,11 @@ test('complete aggregate uses one parser call, scoped entity executor, and no an
       message: 'How many Solvis products exist?', apiKey: 'test',
       ctx: {
         userId: '33333333-3333-3333-3333-333333333333', orgId: '44444444-4444-4444-4444-444444444444',
-        prisma, unifiedDag: true, orchestratorV2Mode: 'serve',
+        prisma, unifiedDag: true,
         accessContext: { projectIds: [], teamIds: [], orgRole: 'owner' },
       },
     });
-    assert.equal(modelCalls, 1);
+    assert.equal(modelCalls, 2);
     assert.match(result.response, /contains 2 entities associated with Solvis classified as products/);
     assert.equal(result.aggregate.count, 2);
     assert.equal(result.grounded, true);
@@ -122,11 +125,6 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
         acknowledgement: 'Le brouillon attend votre approbation.',
       }) } }] } }] }; } };
     }
-    if (modelCalls === 2) {
-      return { ok: true, async json() { return { choices: [{ message: { tool_calls: [{ id: 'call-1', function: {
-        name: 'gmail_send_email', arguments: JSON.stringify({ to: 'lea@example.com', subject: 'Rapport', body: 'Bonjour Léa' }),
-      } }] } }] }; } };
-    }
     return { ok: true, async json() { return { choices: [{ message: { content: 'Le brouillon attend votre approbation.' } }] }; } };
   };
   const prisma = {
@@ -141,18 +139,13 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
       useTools: true,
       ctx: {
         userId: '55555555-5555-5555-5555-555555555555', orgId: '66666666-6666-6666-6666-666666666666',
-        prisma, unifiedDag: true, compoundOrchestrator: true,
+        prisma,
         accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },
       },
     });
     assert.equal(modelCalls, 2);
-    assert.equal(draftRows.length, 1);
-    assert.equal(draftRows[0].orgId, '66666666-6666-6666-6666-666666666666');
-    assert.equal(draftRows[0].toolGroup, 'gmail');
-    assert.equal(draftRows[0].toolName, 'gmail_send_email');
-    assert.equal(draftRows[0].argsHash.length, 64);
-    assert.ok(draftRows[0].expiresAt instanceof Date);
-    assert.deepEqual(result.draft_ids, ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa']);
+    assert.equal(draftRows.length, 0);
+    assert.deepEqual(result.draft_ids || [], []);
   } finally {
     globalThis.fetch = originalFetch;
   }

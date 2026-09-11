@@ -21,7 +21,7 @@ export async function evaluateNativeMetaMode(
     // boolean flag. Unknown values fail closed.
     if (typeof env.FLAGS.getStringDetails === 'function') {
       const details = await env.FLAGS.getStringDetails(
-        env.NATIVE_META_FLAG || 'hivemind-native-meta-tools-v1',
+        env.NATIVE_META_FLAG || 'hivemind-unified-meta-loop-v2',
         'off',
         context,
       );

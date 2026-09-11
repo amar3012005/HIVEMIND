@@ -707,7 +707,12 @@ Contract: {locale:string,kind:"read"|"write",apps:string[],discovery_query:strin
     const coreCanOwnOutcome = explicitCoreNamespace && (state.capabilities || [])
       .filter(card => card.source === 'core')
       .some(card => capabilityRelevance(card, { intent: state.intent }) >= 2);
-    const toolkits = (coreCanOwnOutcome ? [] : unique(state.intent?.apps?.length ? state.intent.apps : state.connected))
+    const requestedToolkits = coreCanOwnOutcome ? [] : unique(state.intent?.apps?.length ? state.intent.apps : state.connected);
+    const preferredToolkits = unique([...(state.sessionToolkits || []), ...(state.connected || [])]);
+    const resolvedToolkits = typeof composio.resolveToolkitConcepts === 'function'
+      ? await composio.resolveToolkitConcepts(requestedToolkits, { preferred: preferredToolkits })
+      : requestedToolkits;
+    const toolkits = resolvedToolkits
       .filter(toolkit => !['hivemind', 'local', 'core', 'composio']
         .includes(String(toolkit).toLowerCase().replace(/[^a-z0-9]/g, ''))).slice(0, 12);
     if (!toolkits.length) {

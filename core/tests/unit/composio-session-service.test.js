@@ -159,3 +159,24 @@ test('Meta connection management exposes an already-active session account witho
     else process.env.COMPOSIO_API_KEY = originalKey;
   }
 });
+
+test('human app concepts resolve through the catalog to a preferred bound toolkit', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.COMPOSIO_API_KEY;
+  process.env.COMPOSIO_API_KEY = 'test-composio-key';
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /toolkits\?.*search=email/);
+    return new Response(JSON.stringify({ items: [
+      { slug: 'outlook', name: 'Outlook' },
+      { slug: 'gmail', name: 'Gmail' },
+    ] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const service = await import(`../../src/connectors/composio/composio-service.js?toolkit-resolution-test=${Date.now()}`);
+    assert.deepEqual(await service.resolveToolkitConcepts(['email'], { preferred: ['gmail'] }), ['gmail']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;
+    else process.env.COMPOSIO_API_KEY = originalKey;
+  }
+});

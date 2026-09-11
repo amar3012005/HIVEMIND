@@ -913,6 +913,26 @@ export async function listToolkits({ search = '', cursor = null, limit = 40 } = 
   };
 }
 
+/** Resolve human app concepts to canonical Composio toolkit slugs. Existing
+ * session/connection slugs win when they appear in catalog search results;
+ * this keeps the resolution tenant-aware without a provider alias table. */
+export async function resolveToolkitConcepts(concepts = [], { preferred = [] } = {}) {
+  const preferredSet = new Set((preferred || []).map(value => String(value || '').trim().toLowerCase()).filter(Boolean));
+  const resolved = [];
+  for (const raw of concepts || []) {
+    const concept = String(raw || '').trim().toLowerCase();
+    if (!concept) continue;
+    if (preferredSet.has(concept)) { resolved.push(concept); continue; }
+    const catalog = await listToolkits({ search: concept, limit: 12 });
+    const candidates = (catalog.items || []).map(item => String(item?.slug || '').toLowerCase()).filter(Boolean);
+    const preferredMatch = candidates.find(slug => preferredSet.has(slug));
+    const exactMatch = candidates.find(slug => slug === concept);
+    const selected = preferredMatch || exactMatch || (candidates.length === 1 ? candidates[0] : null);
+    resolved.push(selected || concept);
+  }
+  return [...new Set(resolved)];
+}
+
 const TOOLKIT_CATALOG_TTL_MS = 10 * 60 * 1000;
 let toolkitCatalogCache = null;
 

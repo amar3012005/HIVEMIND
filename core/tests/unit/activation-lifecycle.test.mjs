@@ -41,6 +41,15 @@ test('state progression is persisted even while Flagship admission is disabled',
   assert.doesNotThrow(() => [...result]);
 });
 
+test('missing activation context always returns an iterable empty result', async () => {
+  const result = await advanceActivationForEmail({
+    email: 'person@example.test',
+    stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY,
+  });
+  assert.deepEqual(result, []);
+  assert.doesNotThrow(() => [...result]);
+});
+
 test('direct signup joins the same recipient lifecycle without retaining raw email', async () => {
   let query = '';
   const activation = await startSignupActivation({

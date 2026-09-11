@@ -83,6 +83,9 @@ export async function startSignupActivation({ prisma, email, userId = null, meta
 }
 
 export async function advanceActivationForEmail({ prisma, email, userId = null, orgId = null, stage, reason, now = new Date() } = {}) {
+  // State is authoritative even before the optional Worker admission is
+  // enabled. Keep the return contract iterable so authentication callers can
+  // schedule changed rows with `for…of` without a feature-rollout branch.
   if (!prisma || !email || !stage) return [];
   const firstNext = nextReminder(stage, 0, now);
   const rows = await prisma.$queryRawUnsafe(

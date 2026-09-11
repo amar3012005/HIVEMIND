@@ -65,7 +65,16 @@ export function dependencyDiscoveryQuery({ requirements = [], intent = {} } = {}
 }
 
 function namedEntityAddresses({ intent = {}, receipts = [] } = {}) {
-  const names = (intent.entities || []).map(entity => asText(entity?.name, 160).toLowerCase()).filter(Boolean);
+  const entities = (intent.entities || []).filter(entity => asText(entity?.name, 160));
+  const identityEntities = entities.filter(entity => (
+    /(?:recipient|destination|assignee|invitee|attendee|member|owner|customer|user|contact|person|account)/i
+      .test(asText(entity?.role, 80))
+  ));
+  // Intent may contain several semantic entities (for example, a recipient
+  // and a subject). Only identity-bearing roles may bind a destination.
+  // Preserve the single-entity fallback for providers that omit roles.
+  const names = (identityEntities.length ? identityEntities : entities.length === 1 ? entities : [])
+    .map(entity => asText(entity?.name, 160).toLowerCase()).filter(Boolean);
   if (names.length !== 1) return [];
   const matches = new Set();
   const addressPattern = /[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+/g;

@@ -279,6 +279,7 @@ test('local E2E: named-recipient draft resolves evidence, then approval and reje
       if (stage === 'intent') return {
         locale: 'en', kind: 'write', apps: ['gmail'], discovery_query: 'prepare an email draft for a named recipient about Singulance',
         outcomes: [{ id: 'draft', kind: 'draft', description: 'prepare the email draft' }], known_facts: { recipient_name: 'Rama' },
+        entities: [{ name: 'Rama', role: 'recipient' }, { name: 'Singulance', role: 'subject' }],
       };
       if (stage === 'planning') return input.receipts.some(row => row.slug === 'GMAIL_SEARCH_PEOPLE')
         ? { action: 'draft', tool_slug: 'GMAIL_SEND_EMAIL', outcome_ids: ['draft'], reason: 'draft with resolved evidence' }

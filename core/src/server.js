@@ -10305,7 +10305,7 @@ exit \$RC
           const draftId = pwEdit[1];
           const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId, status: 'draft' } });
           if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
-          if (row.toolArgs?._harness_version === 'langgraph-native-v1') {
+          if (['langgraph-native-v1', 'langgraph-meta-loop-v2'].includes(row.toolArgs?._harness_version)) {
             const incoming = body?.tool_args && typeof body.tool_args === 'object' ? body.tool_args : {};
             const nextArgs = { ...(row.toolArgs || {}) };
             for (const key of Object.keys(incoming)) if (!key.startsWith('_') && incoming[key] != null) nextArgs[key] = incoming[key];
@@ -10363,6 +10363,18 @@ exit \$RC
               });
               await projectProgressiveApproval(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }));
               return jsonResponse(res, { error: 'draft expired' }, 410);
+            }
+            if (row.toolArgs?._harness_version === 'langgraph-meta-loop-v2') {
+              const { resumeUnifiedMetaApproval } = await import('./agent/unified-langgraph-agent.js');
+              const result = await resumeUnifiedMetaApproval({ row, action, ctx: { userId, orgId, prisma }, prisma });
+              const final = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } });
+              return jsonResponse(res, {
+                ok: final?.status === 'sent' || final?.status === 'cancelled',
+                status: final?.status || result?.status,
+                text: result?.summary || result?.response || null,
+                draft: publicPendingWrite(final),
+                execution: { harness_version: 'langgraph-meta-loop-v2', run_id: result?.run?.id || row.traceId },
+              });
             }
             if (row.toolArgs?._harness_version === 'langgraph-native-v1') {
               const { resumeGovernedApproval } = await import('./agent/governed-agent-runtime.js');
@@ -24642,31 +24654,55 @@ exit \$RC
                     continuation,
                   };
                 }
-                if (['durable_agent', 'governed_langgraph'].includes(stored.resumeState?.kind)) {
-                  const { runGovernedToolsAgent } = await import('./agent/governed-agent-adapter.js');
-                  const durable = await runGovernedToolsAgent({
-                    message: stored.message,
-                    ctx: {
-                      language: stored.language,
-                      conversationHistory: stored.conversationHistory || [],
-                      historyTurns: stored.historyTurns ?? 6,
-                      durableChatMode: continuationMode,
-                      userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
-                      prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
-                      threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
-                      governedGraphThreadId: stored.resumeState.graph_thread_id || null,
-                      governedRunId: stored.resumeState.run_id || null,
-                      composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
-                        ? String(req.headers.origin)
-                        : process.env.HIVEMIND_FRONTEND_URL) || undefined,
-                      durableChoice: allowed
-                        ? { run_id: stored.resumeState.run_id, option_id: allowed.id, value: allowed.value, toolkit: allowed.toolkit || pending.toolkit }
-                        : { run_id: stored.resumeState.run_id, option_id: 'field-input', values: fieldValues },
-                      _trace: { traceId: crypto.randomUUID() },
-                    },
-                    onEvent: emit,
-                    prisma,
-                  });
+                if (['durable_agent', 'governed_langgraph', 'unified_langgraph'].includes(stored.resumeState?.kind)) {
+                  const resumeChoice = allowed
+                    ? { run_id: stored.resumeState.run_id, action: allowed.id, option_id: allowed.id, value: allowed.value, toolkit: allowed.toolkit || pending.toolkit }
+                    : { run_id: stored.resumeState.run_id, action: choice.action, option_id: 'field-input', values: fieldValues };
+                  const sharedContext = {
+                    language: stored.language,
+                    conversationHistory: stored.conversationHistory || [],
+                    historyTurns: stored.historyTurns ?? 6,
+                    durableChatMode: continuationMode,
+                    userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
+                    prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
+                    threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
+                    composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
+                      ? String(req.headers.origin)
+                      : process.env.HIVEMIND_FRONTEND_URL) || undefined,
+                    _trace: { traceId: crypto.randomUUID() },
+                  };
+                  const durable = stored.resumeState.kind === 'unified_langgraph'
+                    ? await (async () => {
+                        const { runUnifiedMetaAgent } = await import('./agent/unified-langgraph-agent.js');
+                        return runUnifiedMetaAgent({
+                          message: stored.message,
+                          useTools: stored.resumeState.use_tools === true,
+                          ctx: {
+                            ...sharedContext,
+                            unifiedGraphThreadId: stored.resumeState.graph_thread_id || null,
+                            unifiedRunId: stored.resumeState.run_id || null,
+                            model,
+                            _apiKey: groqKey,
+                          },
+                          choice: resumeChoice,
+                          onEvent: emit,
+                          prisma,
+                        });
+                      })()
+                    : await (async () => {
+                        const { runGovernedToolsAgent } = await import('./agent/governed-agent-adapter.js');
+                        return runGovernedToolsAgent({
+                          message: stored.message,
+                          ctx: {
+                            ...sharedContext,
+                            governedGraphThreadId: stored.resumeState.graph_thread_id || null,
+                            governedRunId: stored.resumeState.run_id || null,
+                            durableChoice: resumeChoice,
+                          },
+                          onEvent: emit,
+                          prisma,
+                        });
+                      })();
                   let continuation = null;
                   if (durable.status === 'needs_input' && durable.resumeState && durable.inputRequests?.length) {
                     const next = await createChatContinuation({
@@ -24852,10 +24888,12 @@ exit \$RC
                   .admissionFor({ orgId, userId })
                   .catch(() => ({ mode: 'off', nativeMetaMode: 'off' }));
                 let durableChatMode = chatAdmission.mode;
-                // Both Cloudflare decisions are evaluated in one edge request
-                // and latched for the authenticated turn. Connector turns can
-                // never enter the native-only Meta runtime.
-                const nativeMetaMode = !useTools ? chatAdmission.nativeMetaMode : 'off';
+                // Cloudflare latches one runtime for the authenticated turn.
+                // native-meta-v1 remains native-only; unified-meta-v2 uses the
+                // same graph and session in both capability-latch modes.
+                const nativeMetaMode = chatAdmission.nativeMetaMode === 'unified-meta-v2'
+                  ? 'unified-meta-v2'
+                  : (!useTools ? chatAdmission.nativeMetaMode : 'off');
                 let durableChatStore = null;
                 let durableChatTurn = null;
                 if (durableChatMode !== 'off') {

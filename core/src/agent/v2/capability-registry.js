@@ -10,6 +10,17 @@ export const NATIVE_CAPABILITY_FAMILIES = Object.freeze({
   direct: ['direct'],
 });
 
+export const PROGRESSIVE_SKILL_CATALOG = Object.freeze({
+  'hivemind-company-brain': 'Authenticated profile, company memory, documents, decisions, projects, structured data, relationships, and history.',
+  'composio-connected-workflows': 'Tenant-scoped current external-app reads and approval-governed external writes through Composio Meta Tools.',
+});
+
+export function compactSkillCatalog() {
+  return Object.entries(PROGRESSIVE_SKILL_CATALOG)
+    .map(([id, description]) => `${id}: ${description}`)
+    .join('\n');
+}
+
 export const NATIVE_OPERATION_TO_TOOL = Object.freeze({
   profile: 'get_user_profile',
   update_profile: 'update_user_profile',

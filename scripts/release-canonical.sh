@@ -10,8 +10,8 @@
 #
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
-#   * --sha MUST be an ancestor of origin/singulance-main (no unmerged code)
-#   * detached immutable worktree at /root/releases/builds/<full-sha>
+#   * --sha MUST be an ancestor of the selected release branch (no unmerged code)
+#   * detached immutable worktree at $RELEASE_WORKTREE_ROOT/builds/<full-sha>
 #   * manifests and generated Compose overrides live outside the source tree
 #   * compose validation before deploy
 #   * immutable image build tags (sha-<sha>) ONLY, from that worktree
@@ -39,10 +39,11 @@ esac; done
 git check-ref-format --branch "$RELEASE_BRANCH" >/dev/null \
   || { echo "FATAL: invalid --branch '$RELEASE_BRANCH'"; exit 2; }
 
-CANON=/root/hivemind-main
-HDIR=/root/hivemind
-ENVF="$HDIR/.env"
-PRESENCE="$HDIR/scripts/release-presence.sh"
+CANON="${RELEASE_CANON_ROOT:-/root/hivemind-main}"
+HDIR="${RELEASE_RUNTIME_ROOT:-/root/hivemind}"
+ENVF="${RELEASE_ENV_FILE:-$HDIR/.env}"
+PRESENCE="${RELEASE_PRESENCE_SCRIPT:-$HDIR/scripts/release-presence.sh}"
+WORKTREE_ROOT="${RELEASE_WORKTREE_ROOT:-/root/releases}"
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
@@ -128,7 +129,7 @@ elif [ "$coupled_requested" = 1 ]; then
 fi
 
 # ── detached immutable worktree ────────────────────────────────────────────
-REL="/root/releases/builds/$FULLSHA"
+REL="$WORKTREE_ROOT/builds/$FULLSHA"
 if [ ! -d "$REL/.git" ] && [ ! -f "$REL/.git" ]; then
   mkdir -p "$(dirname "$REL")"
   git -C "$CANON" worktree add --detach --force "$REL" "$FULLSHA" >/dev/null
@@ -140,7 +141,7 @@ echo "[worktree] $REL @ $(git -C "$REL" rev-parse --short HEAD)"
 # ── compose validation ─────────────────────────────────────────────────────
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 IMAGE_LABELS=(--label "org.opencontainers.image.revision=$SHA" --label "org.opencontainers.image.created=$TS")
-STATE_ROOT="${RELEASE_STATE_ROOT:-/root/releases/manifests/$SHORT/$TS}"
+STATE_ROOT="${RELEASE_STATE_ROOT:-$WORKTREE_ROOT/manifests/$SHORT/$TS}"
 mkdir -p "$STATE_ROOT"
 MANIFEST="$STATE_ROOT/RELEASE_MANIFEST.json"
 OVERRIDE="$STATE_ROOT/deploy-override.yml"

@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { isUseToolsUnifiedDagEnabled } from './use-tools-unified-flag.js';
 import { canonicalNativeToolGroup } from './native-tool-groups.js';
 
 const TOOLKIT_TO_PROVIDER = Object.freeze({
@@ -67,7 +66,7 @@ function validateGroups(groups, allowedGroups, { allowCatalogDisconnected = fals
   throw new Error(`planner_selected_unavailable_tool_group:${group}`);
 }
 
-export function decisionToHostedPlan(decision, { request, connectedProviders = [], unifiedDag = isUseToolsUnifiedDagEnabled() } = {}) {
+export function decisionToHostedPlan(decision, { request, connectedProviders = [], unifiedDag = false } = {}) {
   const allowedGroups = new Set([...NATIVE_GROUPS, ...connectedProviders]);
   let rawSteps = [];
   if (decision?.operation === 'compound') {
@@ -322,6 +321,7 @@ export async function planHostedComposioWorkflow({
   orgId,
   composio = null,
   parseIntent = null,
+  unifiedDag = false,
 } = {}) {
   if (!parseIntent) {
     const progressive = await import('./chat-progressive-router.js');
@@ -331,7 +331,7 @@ export async function planHostedComposioWorkflow({
   if (!message) throw new Error('request_required');
   if (!orgId) throw new Error('org_scope_required');
 
-  if (isUseToolsUnifiedDagEnabled()) {
+  if (unifiedDag === true) {
     try {
       return await planComposioIntentWorkflow({
         request: message, orgId, apiKey, signal, composio,
@@ -347,7 +347,7 @@ export async function planHostedComposioWorkflow({
   let parsed = null;
   let steps = null;
   let bestCandidate = null;
-  const unified = isUseToolsUnifiedDagEnabled();
+  const unified = unifiedDag === true;
   const maxAttempts = unified ? 1 : 2;
   let attempts = 0;
   let lastError = null;

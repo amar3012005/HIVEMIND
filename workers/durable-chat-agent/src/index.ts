@@ -7,11 +7,13 @@ export { ChatTurnWorkflow } from './workflow';
 export interface Env extends Cloudflare.Env {
   CHAT_SESSION: DurableObjectNamespace<HivemindChatSession>;
   FLAGS: Flagship;
-  ENVIRONMENT: 'development' | 'local' | 'production';
+  ENVIRONMENT: 'development' | 'local' | 'enigma' | 'production';
   DURABLE_CHAT_FLAG: 'durable_chat_agent_v1';
-  DURABLE_CHAT_AGENT_ENABLED: 'true' | 'false';
   NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2';
-  NATIVE_META_TOOLS_ENABLED: 'true' | 'false';
+  UNIFIED_DAG_FLAG: 'USE_TOOLS_UNIFIED_DAG';
+  CHAT_ORCHESTRATOR_V2_FLAG: 'chat_orchestrator_v2';
+  COMPOUND_ORCHESTRATOR_FLAG: 'compound_orchestrator_v1';
+  MEETING_LIFECYCLE_FLAG: 'meeting_lifecycle_v2';
   DURABLE_CHAT_AGENT_SECRET: string;
   CHAT_TURN_WORKFLOW: Workflow;
 }
@@ -90,15 +92,36 @@ function authorized(request: Request, env: Env): boolean {
   return mismatch === 0;
 }
 
-async function evaluateMode(env: Env, url: URL): Promise<ChatMode> {
+function targetingContext(env: Env, url: URL): Record<string, string> | null {
   const orgId = url.searchParams.get('org_id') || '';
   const userId = url.searchParams.get('user_id') || '';
-  if (env.DURABLE_CHAT_AGENT_ENABLED !== 'true' || !orgId || !userId) return 'off';
+  if (!orgId || !userId) return null;
+  return { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT };
+}
+
+async function evaluateMode(env: Env, url: URL): Promise<ChatMode> {
+  const context = targetingContext(env, url);
+  if (!context) return 'off';
   try {
     const details = await env.FLAGS.getStringDetails(env.DURABLE_CHAT_FLAG || 'durable_chat_agent_v1', 'off', {
-      targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT,
+      ...context,
     });
     return CHAT_MODES.includes(details.value as ChatMode) ? details.value as ChatMode : 'off';
+  } catch { return 'off'; }
+}
+
+async function evaluateBoolean(env: Env, url: URL, key: string): Promise<boolean> {
+  const context = targetingContext(env, url);
+  if (!context) return false;
+  try { return (await env.FLAGS.getBooleanDetails(key, false, context)).value === true; } catch { return false; }
+}
+
+async function evaluateVariant(env: Env, url: URL, key: string, allowed: readonly string[]): Promise<string> {
+  const context = targetingContext(env, url);
+  if (!context) return 'off';
+  try {
+    const details = await env.FLAGS.getStringDetails(key, 'off', context);
+    return allowed.includes(details.value) ? details.value : 'off';
   } catch { return 'off'; }
 }
 
@@ -108,8 +131,16 @@ export default {
     if (url.pathname === '/health') return Response.json({ ok: true, service: 'hivemind-durable-chat-agent', content_storage: false });
     if (!authorized(request, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
     if (url.pathname === '/mode' && request.method === 'GET') {
-      const [mode, nativeMetaMode] = await Promise.all([evaluateMode(env, url), evaluateNativeMetaMode(env, url)]);
-      return Response.json({ mode, native_meta_mode: nativeMetaMode });
+      const [mode, nativeMetaMode, unifiedDag, orchestratorV2Mode, compoundOrchestrator, meetingLifecycleMode] = await Promise.all([
+        evaluateMode(env, url), evaluateNativeMetaMode(env, url),
+        evaluateBoolean(env, url, env.UNIFIED_DAG_FLAG || 'USE_TOOLS_UNIFIED_DAG'),
+        evaluateVariant(env, url, env.CHAT_ORCHESTRATOR_V2_FLAG || 'chat_orchestrator_v2', ['shadow', 'serve']),
+        evaluateBoolean(env, url, env.COMPOUND_ORCHESTRATOR_FLAG || 'compound_orchestrator_v1'),
+        evaluateVariant(env, url, env.MEETING_LIFECYCLE_FLAG || 'meeting_lifecycle_v2', ['consent']),
+      ]);
+      return Response.json({ mode, native_meta_mode: nativeMetaMode, unified_dag: unifiedDag,
+        chat_orchestrator_v2_mode: orchestratorV2Mode, compound_orchestrator: compoundOrchestrator,
+        meeting_lifecycle_mode: meetingLifecycleMode });
     }
     if (url.pathname === '/native-meta-mode' && request.method === 'GET') {
       return Response.json({ mode: await evaluateNativeMetaMode(env, url) });

@@ -7,9 +7,11 @@
   "vars": {
     "ENVIRONMENT": "development",
     "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-    "DURABLE_CHAT_AGENT_ENABLED": "false",
     "NATIVE_META_FLAG": "hivemind-unified-meta-loop-v2",
-    "NATIVE_META_TOOLS_ENABLED": "false"
+    "UNIFIED_DAG_FLAG": "USE_TOOLS_UNIFIED_DAG",
+    "CHAT_ORCHESTRATOR_V2_FLAG": "chat_orchestrator_v2",
+    "COMPOUND_ORCHESTRATOR_FLAG": "compound_orchestrator_v1",
+    "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "durable_objects": {
@@ -30,9 +32,11 @@
       "vars": {
         "ENVIRONMENT": "local",
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-        "DURABLE_CHAT_AGENT_ENABLED": "true",
         "NATIVE_META_FLAG": "hivemind-unified-meta-loop-v2",
-        "NATIVE_META_TOOLS_ENABLED": "true"
+        "UNIFIED_DAG_FLAG": "USE_TOOLS_UNIFIED_DAG",
+        "CHAT_ORCHESTRATOR_V2_FLAG": "chat_orchestrator_v2",
+        "COMPOUND_ORCHESTRATOR_FLAG": "compound_orchestrator_v1",
+        "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "workflows": [{
@@ -49,13 +53,36 @@
       "vars": {
         "ENVIRONMENT": "production",
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-        "DURABLE_CHAT_AGENT_ENABLED": "true",
         "NATIVE_META_FLAG": "hivemind-unified-meta-loop-v2",
-        "NATIVE_META_TOOLS_ENABLED": "true"
+        "UNIFIED_DAG_FLAG": "USE_TOOLS_UNIFIED_DAG",
+        "CHAT_ORCHESTRATOR_V2_FLAG": "chat_orchestrator_v2",
+        "COMPOUND_ORCHESTRATOR_FLAG": "compound_orchestrator_v1",
+        "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "workflows": [{
         "name": "hivemind-chat-turn-workflow-production",
+        "binding": "CHAT_TURN_WORKFLOW",
+        "class_name": "ChatTurnWorkflow"
+      }]
+    },
+    "enigma": {
+      "name": "hivemind-durable-chat-agent-enigma",
+      "durable_objects": {
+        "bindings": [{ "name": "CHAT_SESSION", "class_name": "HivemindChatSession" }]
+      },
+      "vars": {
+        "ENVIRONMENT": "enigma",
+        "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
+        "NATIVE_META_FLAG": "hivemind-unified-meta-loop-v2",
+        "UNIFIED_DAG_FLAG": "USE_TOOLS_UNIFIED_DAG",
+        "CHAT_ORCHESTRATOR_V2_FLAG": "chat_orchestrator_v2",
+        "COMPOUND_ORCHESTRATOR_FLAG": "compound_orchestrator_v1",
+        "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "workflows": [{
+        "name": "hivemind-chat-turn-workflow-enigma",
         "binding": "CHAT_TURN_WORKFLOW",
         "class_name": "ChatTurnWorkflow"
       }]

@@ -391,6 +391,7 @@ async function executeSessionMeta(sessionId, slug, args, { timeoutMs = 6_500 } =
 /** Create or reuse a tenant-scoped Tool Router Session. */
 export async function getToolRouterSession(orgId, toolkits, {
   allowDisconnected = false,
+  unifiedDag = false,
   userId = null,
   connectionScope = null,
   sessionId = null,
@@ -430,12 +431,10 @@ export async function getToolRouterSession(orgId, toolkits, {
 
   const accounts = await listConnectedAccounts(orgId, { userId, connectionScope });
   const connectedAccounts = {};
-  const { isUseToolsUnifiedDagEnabled } = await import('../../agent/use-tools-unified-flag.js');
-  const unified = isUseToolsUnifiedDagEnabled();
   for (const toolkit of enabled) {
     const account = accounts.find((row) => row.toolkit === toolkit && row.status === 'ACTIVE');
     if (!account) {
-      if (unified || allowDisconnected) continue;
+      if (unifiedDag || allowDisconnected) continue;
       throw new Error(`No active Composio account for ${toolkit}`);
     }
     connectedAccounts[toolkit] = account.id;

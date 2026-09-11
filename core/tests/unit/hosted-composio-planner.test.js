@@ -182,8 +182,6 @@ test('unified DAG keeps a disconnected catalog app beside native recall', () => 
 });
 
 test('hosted planner lists accounts only and never searches Composio tools while disconnected', async () => {
-  const previous = process.env.USE_TOOLS_UNIFIED_DAG;
-  process.env.USE_TOOLS_UNIFIED_DAG = 'true';
   let searched = 0;
   let executed = 0;
   try {
@@ -191,6 +189,7 @@ test('hosted planner lists accounts only and never searches Composio tools while
       request: 'Go through HIVEMIND git repo and send important information about repo to rama via gmail',
       orgId: 'org-1',
       apiKey: 'test-key',
+      unifiedDag: true,
       parseIntent: async () => ({
         decision: {
           operation: 'compound',
@@ -211,10 +210,7 @@ test('hosted planner lists accounts only and never searches Composio tools while
     assert.equal(executed, 0);
     assert.deepEqual(result.steps.map((step) => step.tool_groups[0]), ['hivemind-recall', 'gmail']);
     assert.equal(result.steps[1].connection_required, true);
-  } finally {
-    if (previous === undefined) delete process.env.USE_TOOLS_UNIFIED_DAG;
-    else process.env.USE_TOOLS_UNIFIED_DAG = previous;
-  }
+  } finally {}
 });
 
 test('fail-closed flag is off unless USE_TOOLS_UNIFIED_DAG is the string true', () => {

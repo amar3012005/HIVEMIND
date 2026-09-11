@@ -12753,7 +12753,9 @@ Write the persona now.`;
 
     // GET /v1/hyper/company — the HyperAgents hero dashboard state. Reads the
     // company payload persisted on the newest HQ room (agent_connectors._company)
-    // and overlays live team + rooms. 404 when the org never onboarded.
+    // and overlays live team + rooms. A fresh org is a normal UI state, not a
+    // missing API resource: returning 200 prevents the Overview from logging a
+    // spurious failed network request before the onboarding surface renders.
     if (pathname === '/v1/hyper/company' && req.method === 'GET') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -12766,7 +12768,7 @@ Write the persona now.`;
           current.session.orgId,
         );
         const row = rows?.[0];
-        if (!row?.company) return jsonResponse(res, { onboarded: false }, 404);
+        if (!row?.company) return jsonResponse(res, { onboarded: false }, 200);
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const employees = await prisma.digitalEmployee.findMany({
           where: { orgId: current.session.orgId, archivedAt: null },

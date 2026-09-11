@@ -105,15 +105,26 @@ function invalidFinal(text, receipts) {
 }
 
 async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
-  const response = await chatCompletionFetch(resolveChatSynthesisModel(model), {
-    method: 'POST', signal,
-    body: JSON.stringify({ temperature: 0, max_tokens: 2400, tools, tool_choice: 'auto', messages }),
-  }, { fallbackApiKey: apiKey, useCase: 'chat', traceId: crypto.randomUUID() });
-  if (!response.ok) throw new Error(`unified_model_http_${response.status}`);
-  const payload = await response.json();
-  const message = payload?.choices?.[0]?.message;
-  if (!message || (!compactText(message.content) && !message.tool_calls?.length)) throw new Error('unified_model_empty_choice');
-  return { message, usage: payload.usage || null };
+  const primary = resolveChatSynthesisModel(model);
+  const fallback = process.env.UNIFIED_META_FALLBACK_MODEL || 'google/gemini-2.5-flash-lite';
+  const candidates = [...new Set([primary, fallback])];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const attemptMessages = index === 0 ? messages : [...messages, {
+      role: 'system', content: 'The prior model returned no usable assistant message. Continue the request now using only the available gateway tools or return the final answer.',
+    }];
+    const response = await chatCompletionFetch(candidates[index], {
+      method: 'POST', signal,
+      body: JSON.stringify({ temperature: 0, max_tokens: 2400, tools, tool_choice: 'auto', messages: attemptMessages }),
+    }, { fallbackApiKey: apiKey, useCase: 'chat', traceId: crypto.randomUUID() });
+    if (!response.ok) {
+      if (index + 1 < candidates.length) continue;
+      throw new Error(`unified_model_http_${response.status}`);
+    }
+    const payload = await response.json();
+    const message = payload?.choices?.[0]?.message;
+    if (message && (compactText(message.content) || message.tool_calls?.length)) return { message, usage: payload.usage || null };
+  }
+  throw new Error('unified_model_empty_choice');
 }
 
 function recallArgs(input = {}, ctx = {}) {
@@ -161,7 +172,19 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
     const queries = Array.isArray(args.queries) ? args.queries.slice(0, 8) : [];
     if (!queries.length) return { successful: false, error: 'connected_search_queries_required' };
     const useCases = queries.map(row => compactText(row?.use_case, 900)).filter(Boolean);
-    const toolkits = Array.isArray(args.toolkits) ? args.toolkits.slice(0, 12) : [];
+    let toolkits = Array.isArray(args.toolkits) ? args.toolkits.slice(0, 12) : [];
+    if (!toolkits.length && typeof composio.listConnectedAccounts === 'function') {
+      const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: ctx.connectionScope || 'user' });
+      const requestText = useCases.join(' ').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
+      const active = [...new Set((accounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+      toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+      if (!toolkits.length && active.length === 1) toolkits = active;
+    }
+    if (!toolkits.length) return {
+      successful: false,
+      error: 'connected_search_toolkits_required',
+      data: { instruction: 'Repeat search with the relevant app/toolkit names inferred from the user request.' },
+    };
     const discovery = await composio.discoverSessionTools(ctx.orgId, {
       userId: ctx.userId, connectionScope: ctx.connectionScope || 'user', toolkits, useCases,
       allowDisconnected: true, sessionId: state.sessionId || null, includeCustomToolkit: false,

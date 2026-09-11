@@ -95,6 +95,27 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
+test('connected search generically infers an explicitly named active toolkit when the model omits toolkits', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let discoveredToolkits = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'infer-toolkit'), checkpointer: new MemorySaver(),
+    modelStep: async () => (++turn === 1
+      ? { message: call('hivemind_connected_task', { action: 'search', queries: [{ use_case: 'Fetch unread Gmail emails' }] }, 'i1') }
+      : { message: { role: 'assistant', content: 'No matching emails were returned.' } }),
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'linkedin', status: 'ACTIVE' }]; },
+      async discoverSessionTools(_org, input) {
+        discoveredToolkits = input.toolkits;
+        return { sessionId: 'session-infer', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } };
+      },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(discoveredToolkits, ['gmail']);
+});
+
 test('a connected write becomes a durable approval and executes exactly once after resume', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

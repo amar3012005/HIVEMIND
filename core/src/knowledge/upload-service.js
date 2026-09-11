@@ -87,13 +87,15 @@ export class KnowledgeUploadService {
     try {
       useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId, userId);
     } catch {
-      return { ok: false, status: 503, body: {
-        error: 'workflow_admission_unavailable',
-        message: 'Durable ingestion admission is temporarily unavailable. No fallback job was created.',
-      } };
+      // Flagship is the rollout authority, but a temporary admission outage is
+      // before any Workflow dispatch.  Use the established durable BullMQ path
+      // with the same idempotency key rather than rejecting an otherwise valid
+      // upload.  We never do this after /start: a timed-out start may already
+      // have created the Workflow and falling back then could double-process.
+      useCloudflare = false;
     }
-    const selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
-    const orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';
+    let selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
+    let orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';
     if (!await selectedQueue?.isAvailable({ orgId, userId })) {
       return { ok: false, status: 503, body: { error: 'queue_unavailable', message: 'Durable ingestion is temporarily unavailable.' } };
     }
@@ -270,9 +272,27 @@ export class KnowledgeUploadService {
 
     try {
       const promotionOnly = promoteExistingEvidence && !!job.documentId;
-      const persisted = promotionOnly ? null : await selectedQueue.persistFile({
-        orgId, checksum, filename, fileBuffer: file.data,
-      });
+      let persisted;
+      // Persisting the raw source is still before Workflow dispatch.  If R2 is
+      // unavailable, switch the already-created job to BullMQ before writing
+      // the local durable copy.  This is the only post-admission fallback;
+      // enqueue/start errors intentionally remain workflow failures.
+      try {
+        persisted = promotionOnly ? null : await selectedQueue.persistFile({
+          orgId, checksum, filename, fileBuffer: file.data,
+        });
+      } catch (error) {
+        if (orchestrationMode !== 'cloudflare_workflow' || promotionOnly) throw error;
+        selectedQueue = this.queue;
+        orchestrationMode = 'bullmq';
+        await this.jobStore.updateOwned(job.id, orgId, {
+          orchestrationMode,
+          workflowInstanceId: null,
+          sourceObjectKey: null,
+          sourceObjectEtag: null,
+        });
+        persisted = await selectedQueue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
+      }
       const filePath = typeof persisted === 'string' ? persisted : null;
       const sourceObjectKey = persisted && typeof persisted === 'object' ? persisted.objectKey : null;
       const sourceObjectEtag = persisted && typeof persisted === 'object' ? persisted.etag : null;

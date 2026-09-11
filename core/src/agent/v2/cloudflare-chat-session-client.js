@@ -1,5 +1,7 @@
 function configuration() {
-  if (process.env.DURABLE_CHAT_AGENT_ENABLED !== 'true') return null;
+  // Cloudflare's tenant admission response selects the chat variant.  Core
+  // keeps only the protected Worker transport credentials; a local ENABLED
+  // switch must not override a latched Flagship decision for a user turn.
   const baseUrl = String(process.env.CLOUDFLARE_CHAT_AGENT_URL || '').replace(/\/$/, '');
   const secret = String(process.env.CLOUDFLARE_CHAT_AGENT_SECRET || '');
   return baseUrl && secret ? { baseUrl, secret } : null;

@@ -9,7 +9,7 @@ async function withEnv(values, fn) {
 }
 
 test('flag evaluation is fail-closed and accepts only known modes', async () => withEnv({
-  DURABLE_CHAT_AGENT_ENABLED: 'true', CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
+  CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
 }, async () => {
   const good = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'session' }) });
   const unknown = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'surprise' }) });
@@ -19,7 +19,9 @@ test('flag evaluation is fail-closed and accepts only known modes', async () => 
   assert.equal(await failed.modeFor({ orgId: 'o', userId: 'u' }), 'off');
 }));
 
-test('environment kill switch avoids any Cloudflare request', async () => withEnv({ DURABLE_CHAT_AGENT_ENABLED: 'false' }, async () => {
+test('missing protected Worker credentials avoids any Cloudflare request', async () => withEnv({
+  CLOUDFLARE_CHAT_AGENT_URL: '', CLOUDFLARE_CHAT_AGENT_SECRET: '',
+}, async () => {
   let called = false;
   const client = new CloudflareChatSessionClient({ fetchImpl: async () => { called = true; return Response.json({ mode: 'full' }); } });
   assert.equal(await client.modeFor({ orgId: 'o', userId: 'u' }), 'off');
@@ -27,7 +29,7 @@ test('environment kill switch avoids any Cloudflare request', async () => withEn
 }));
 
 test('native meta admission fails closed and flag off preserves Native V2', async () => withEnv({
-  DURABLE_CHAT_AGENT_ENABLED: 'true', CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
+  CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
 }, async () => {
   const enabled = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'session', native_meta_mode: 'native-meta-v1' }) });
   const unified = new CloudflareChatSessionClient({ fetchImpl: async () => Response.json({ mode: 'full', native_meta_mode: 'unified-meta-v2' }) });

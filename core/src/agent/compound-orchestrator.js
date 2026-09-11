@@ -1287,8 +1287,10 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         let raw;
         const messageWrite = subtask?.output_kind === 'message'
           && (subtask?.authority === 'write' || authorityForOperation(subtask?.operation) === 'write');
-        const sessionPrimary = process.env.COMPOSIO_SESSION_PRIMARY_ENABLED !== 'false'
-          && selectTool === defaultSelectTool
+        // Tool Router Session is the canonical connector path.  The service
+        // still has a side-effect-free discovery fallback, but an environment
+        // switch must not create a different per-user session model.
+        const sessionPrimary = selectTool === defaultSelectTool
           && typeof composioSvc.discoverSessionTools === 'function'
           && !messageWrite;
         if (sessionPrimary) {

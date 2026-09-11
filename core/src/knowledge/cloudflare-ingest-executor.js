@@ -5,7 +5,6 @@ import {
   requireCompleteEvidenceEmbedding,
 } from './kb-ingest-queue.js';
 import { sanitizeKnowledgeJson } from './upload-contract.js';
-import { knowledgeWorkflowEnabled } from './cloudflare-ingest-client.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STAGES = new Set(['acquire', 'materialize', 'reconcile']);
@@ -48,7 +47,10 @@ function safeEqual(left, right) {
 }
 
 export function isAuthorizedKnowledgeWorkflowRequest(req) {
-  if (!knowledgeWorkflowEnabled()) return false;
+  // This is a callback authorization boundary, not a rollout decision. The
+  // Worker has already evaluated Flagship and a valid HMAC-equivalent bearer
+  // secret is sufficient to authenticate its callback even if Core is unable
+  // to initiate a new outbound Workflow request at that moment.
   const expected = process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '';
   const actual = String(req?.headers?.authorization || '').replace(/^Bearer\s+/i, '');
   return safeEqual(actual, expected);

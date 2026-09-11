@@ -10,21 +10,22 @@ environment in this package.
 
 ## Required gates
 
-An upload selects this lifecycle only when all three gates are positive:
+An upload selects this lifecycle when protected Workflow transport credentials
+are configured and Flagship `knowledge_ingest_workflow_v1` evaluates true for
+the organization and user. Flagship is the product-rollout authority; local
+environment switches do not override a tenant decision.
 
-1. `HIVEMIND_LOCAL_MODE=true`
-2. `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`
-3. Flagship `knowledge_ingest_workflow_v1` evaluates true for the organization
-
-Missing configuration, an unreachable flag service, or a false decision fails
-closed to the existing BullMQ lifecycle. The selected orchestrator is stored on
-the job and cannot change during that processing version.
+A missing transport configuration or false decision uses BullMQ. An unavailable
+admission service or R2 source write also uses BullMQ only before Workflow
+start. After `/start` is attempted, the job remains Workflow-owned because an
+ambiguous timeout could already have created the Workflow. The selected
+orchestrator is stored on the job and cannot change during that processing
+version.
 
 Use one generated local secret in both the core API environment and Wrangler:
 
 ```powershell
 $env:KNOWLEDGE_INGEST_WORKFLOW_SECRET = '<local-only-random-secret>'
-$env:KNOWLEDGE_INGEST_WORKFLOW_ENABLED = 'true'
 docker compose -f docker-compose.local-stack.yml -f docker-compose.local-services.yml up -d --build
 .\scripts\start-knowledge-ingest-workflow-local.ps1
 ```

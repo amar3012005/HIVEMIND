@@ -196,6 +196,42 @@ test('disabled or failed-closed Workflow flag preserves the legacy BullMQ path',
   assert.equal(deps.created[0].orchestrationMode, 'bullmq');
 });
 
+test('Workflow admission transport failure falls back to BullMQ before a job is dispatched', async () => {
+  const deps = dependencies();
+  let legacyUsed = false;
+  deps.queue.persistFile = async () => { legacyUsed = true; return '/tmp/legacy'; };
+  deps.cloudflareQueue = {
+    isEnabled: async () => { throw Object.assign(new Error('flagship unavailable'), { code: 'WORKFLOW_ADMISSION_UNAVAILABLE' }); },
+  };
+
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.ok, true);
+  assert.equal(legacyUsed, true);
+  assert.equal(deps.created[0].orchestrationMode, 'bullmq');
+});
+
+test('Workflow source persistence failure changes the durable job to BullMQ before enqueue', async () => {
+  const deps = dependencies();
+  let workflowEnqueued = false;
+  let legacyEnqueued = false;
+  deps.cloudflareQueue = {
+    isEnabled: async () => true,
+    isAvailable: async () => true,
+    persistFile: async () => { throw Object.assign(new Error('R2 unavailable'), { code: 'SOURCE_OBJECT_STORE_FAILED' }); },
+    enqueue: async () => { workflowEnqueued = true; return {}; },
+  };
+  deps.queue.persistFile = async () => '/tmp/legacy';
+  deps.queue.enqueue = async () => { legacyEnqueued = true; return { queue_job_id: 'queue-1' }; };
+
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.ok, true);
+  assert.equal(workflowEnqueued, false);
+  assert.equal(legacyEnqueued, true);
+  assert.equal(deps.created[0].orchestrationMode, 'cloudflare_workflow');
+  assert.ok(deps.updates.some(([, , data]) => data?.orchestrationMode === 'bullmq'));
+  assert.equal(deps.updates.at(-1)[2].orchestrationMode, 'bullmq');
+});
+
 test('evidence mode persists through the durable job and queue metadata', async () => {
   const deps = dependencies();
   let queued;

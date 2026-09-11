@@ -1,5 +1,4 @@
 export type NativeMetaFlagEnv = {
-  NATIVE_META_TOOLS_ENABLED: 'true' | 'false';
   NATIVE_META_FLAG?: string;
   ENVIRONMENT: string;
   FLAGS: {
@@ -14,7 +13,9 @@ export async function evaluateNativeMetaMode(
 ): Promise<'off' | 'native-meta-v1' | 'unified-meta-v2'> {
   const orgId = url.searchParams.get('org_id') || '';
   const userId = url.searchParams.get('user_id') || '';
-  if (env.NATIVE_META_TOOLS_ENABLED !== 'true' || !orgId || !userId) return 'off';
+  // Flagship is the sole admission authority. A local ENABLED variable would
+  // make a tenant's rollout depend on which replica served the turn.
+  if (!orgId || !userId) return 'off';
   try {
     const context = { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT };
     // A string flag can canary the unified graph without changing the legacy

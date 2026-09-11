@@ -63,9 +63,10 @@ test('the same graph progressively searches, loads one selected schema, executes
   const events = [];
   const calls = [];
   let turn = 0;
-  const modelStep = async ({ tools }) => {
-    assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta', 'hivemind_connected_task']);
+  const modelStep = async ({ tools, messages }) => {
     turn += 1;
+    assert.deepEqual(tools.map(row => row.function.name), turn <= 3 ? ['hivemind_meta', 'hivemind_connected_task'] : []);
+    if (turn === 4) assert.deepEqual(messages.map(row => row.role), ['system', 'user', 'system']);
     if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', queries: [{ use_case: 'Fetch the five newest unread Gmail emails with subject sender and received timestamp' }], session: { generate_id: true }, toolkits: ['gmail'] }, 'c1') };
     if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', tool_slugs: ['GMAIL_FETCH_EMAILS'] }, 'c2') };
     if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'GMAIL_FETCH_EMAILS', arguments: { query: 'is:unread', max_results: 5 } }, 'c3') };
@@ -95,6 +96,33 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
+test('execute progressively hydrates its authorized schema and refuses empty provider defaults', async () => {
+  const prisma = fakePrisma();
+  const calls = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Find my last five emails from Rama', useTools: true, prisma, ctx: ctx(prisma, 'auto-schema'), checkpointer: new MemorySaver(),
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Find the last five Gmail emails from Rama' }] }, 'a1') };
+      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'gmail_fetch_emails', arguments: {} }, 'a2') };
+      if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'GMAIL_FETCH_EMAILS', arguments: { query: 'from:Rama', max_results: 5 } }, 'a3') };
+      return { message: { role: 'assistant', content: '| Subject | Sender | Time |\n|---|---|---|\n| Hello | Rama | Today |' } };
+    },
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+      async discoverSessionTools() { return { sessionId: 'auto-session', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } }; },
+      async getSessionToolSchemas(session, slugs) { calls.push(['schemas', session, slugs]); return { GMAIL_FETCH_EMAILS: { read_only: true, input_schema: { type: 'object', required: ['query', 'max_results'], properties: { query: { type: 'string' }, max_results: { type: 'integer' } } } } }; },
+      async executeToolsParallel(_org, tools, options) { calls.push(['execute', tools, options]); return [{ successful: true, data: { messages: [{ subject: 'Hello', sender: 'Rama', time: 'Today' }] } }]; },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(calls[0], ['schemas', 'auto-session', ['GMAIL_FETCH_EMAILS']]);
+  assert.equal(calls[1][0], 'execute');
+  assert.equal(calls.filter(row => row[0] === 'execute').length, 1);
+  assert.deepEqual(calls[1][1][0].arguments, { query: 'from:Rama', max_results: 5 });
+});
+
 test('connected search generically infers an explicitly named active toolkit when the model omits toolkits', async () => {
   const prisma = fakePrisma();
   let turn = 0;
@@ -112,8 +140,102 @@ test('connected search generically infers an explicitly named active toolkit whe
       },
     },
   });
-  assert.equal(result.status, 'completed');
+  assert.equal(result.status, 'error');
   assert.deepEqual(discoveredToolkits, ['gmail']);
+});
+
+test('a named connected toolkit cannot seal from hivemind_meta without Composio discovery', async () => {
+  const prisma = fakePrisma();
+  const observed = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'What was my last message in Slack?', useTools: true, prisma, ctx: ctx(prisma, 'connected-obligation'), checkpointer: new MemorySaver(),
+    modelStep: async ({ messages }) => {
+      turn += 1;
+      observed.push(messages.at(-1)?.content || '');
+      if (turn === 1) return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'last Slack message' } }, 'co1') };
+      if (turn === 2) return { message: { role: 'assistant', content: "I don't have access to Slack." } };
+      return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['slack'], queries: [{ use_case: 'Find the authenticated user last Slack message with channel and timestamp' }] }, 'co2') };
+    },
+    metaExecutor: async () => ({ successful: true, data: { memories: [] } }),
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'slack', status: 'EXPIRED' }]; },
+      async discoverSessionTools() {
+        return { sessionId: 'slack-session', primaryToolSlugs: ['SLACK_SEARCH_MESSAGES'], relatedToolSlugs: [], toolkitConnectionStatuses: { slack: 'disconnected' } };
+      },
+      async manageSessionConnections() { return { redirectUrl: 'https://connect.example/slack' }; },
+    },
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.equal(result.inputRequests[0].toolkit, 'slack');
+  assert.match(result.inputRequests[0].prompt, /Connect slack/);
+  assert.ok(observed.some(value => /no connected-app discovery receipt exists/i.test(value)));
+});
+
+test('connected search reuses an authenticated organization-scoped connection when user scope has not migrated yet', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let discoveryScope = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'org-scope'), checkpointer: new MemorySaver(),
+    modelStep: async () => (++turn === 1
+      ? { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Fetch unread Gmail emails' }] }, 'o1') }
+      : { message: { role: 'assistant', content: 'No matching emails were returned.' } }),
+    composio: {
+      async listConnectedAccounts(_org, options) {
+        return options.connectionScope === 'org' ? [{ toolkit: 'gmail', status: 'ACTIVE' }] : [{ toolkit: 'linkedin', status: 'ACTIVE' }];
+      },
+      async discoverSessionTools(_org, input) {
+        discoveryScope = input.connectionScope;
+        return { sessionId: 'session-org', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } };
+      },
+    },
+  });
+  assert.equal(result.status, 'error');
+  assert.equal(discoveryScope, 'org');
+});
+
+test('the gateway grounds a contradictory model toolkit in the authenticated user request', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let selected = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'ground-toolkit'), checkpointer: new MemorySaver(),
+    modelStep: async () => (++turn === 1
+      ? { message: call('hivemind_connected_task', { action: 'search', toolkits: ['linkedin'], queries: [{ use_case: 'Read recent messages' }] }, 'g1') }
+      : { message: { role: 'assistant', content: 'No matching emails were returned.' } }),
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }, { toolkit: 'linkedin', status: 'ACTIVE' }]; },
+      async discoverSessionTools(_org, input) {
+        selected = input.toolkits;
+        return { sessionId: 'session-ground', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } };
+      },
+    },
+  });
+  assert.equal(result.status, 'error');
+  assert.deepEqual(selected, ['gmail']);
+});
+
+test('provider schema loading always uses the durable graph session, never a model supplied id', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let schemaSession = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'session-authority'), checkpointer: new MemorySaver(),
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Fetch unread Gmail emails' }] }, 's1') };
+      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', session_id: 'model-invented', tool_slugs: ['GMAIL_FETCH_EMAILS'] }, 's2') };
+      return { message: { role: 'assistant', content: 'No matching emails were returned.' } };
+    },
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+      async discoverSessionTools() { return { sessionId: 'trusted-session', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } }; },
+      async getSessionToolSchemas(sessionId) { schemaSession = sessionId; return { GMAIL_FETCH_EMAILS: { input_schema: { type: 'object', properties: {} } } }; },
+    },
+  });
+  assert.equal(result.status, 'error');
+  assert.equal(schemaSession, 'trusted-session');
 });
 
 test('a connected write becomes a durable approval and executes exactly once after resume', async () => {

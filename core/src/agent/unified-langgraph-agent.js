@@ -29,9 +29,12 @@ const State = Annotation.Root({
   pendingConnection: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingApproval: Annotation({ reducer: (_left, right) => right, default: () => null }),
   selectedSlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  primarySlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   schemas: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
   sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  connectionScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  requestedToolkits: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   cycles: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   repairs: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   callFingerprints: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -71,6 +74,16 @@ function safeHistory(history = [], limit = 3) {
     .slice(-limit * 2).map(row => ({ role: row.role, content: compactText(row.content, 1400) }));
 }
 
+function toolkitMentions(message, accounts = []) {
+  const request = String(message || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  if (!request) return [];
+  return [...new Set((accounts || []).map(row => String(row?.toolkit || '').toLowerCase()).filter(Boolean))]
+    .filter(toolkit => {
+      const alias = toolkit.replace(/[-_]+/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      return alias && (` ${request} `).includes(` ${alias} `);
+    });
+}
+
 function publicToolResult(value) {
   if (value?.successful === false) return { successful: false, error: compactText(value.error || 'operation_failed', 400) };
   return projectGovernedEvidence(value?.data ?? value, 24000);
@@ -97,11 +110,27 @@ function resultSources(receipts = []) {
   return output.slice(0, 12);
 }
 
+function substantiveProviderReceipt(receipt, primarySlugs = []) {
+  if (!receipt || receipt.successful === false || receipt.action !== 'execute'
+    || receipt.status === 'schema_loaded_arguments_required' || !primarySlugs.includes(receipt.tool)) return false;
+  const data = receipt.data;
+  if (data == null) return false;
+  const collectionKeys = ['messages', 'items', 'results', 'records', 'emails', 'threads', 'events', 'posts', 'data'];
+  if (Array.isArray(data)) return data.length > 0;
+  if (typeof data !== 'object') return String(data).trim().length > 0;
+  for (const key of collectionKeys) {
+    if (Array.isArray(data[key])) return data[key].length > 0;
+  }
+  return Object.keys(data).some(key => !['nextPageToken', 'next_page_token', 'resultSizeEstimate', 'total', 'count', 'status', 'successful'].includes(key));
+}
+
 function invalidFinal(text, receipts) {
   const answer = markdownText(text, 24000);
-  if (!answer || /\[object Object\]/.test(answer)) return true;
+  if (!answer || /\[object Object\]/.test(answer)
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(answer)
+    || /(?:^|\s)call:(?:hivemind_|composio_)[a-z0-9_]*\s*\{/i.test(answer)) return true;
   if (!(receipts || []).some(row => row.successful !== false && row.data != null)) return false;
-  return /(?:i can(?:not|'t) directly display|i can only confirm|i can show you(?:\.|$)|cannot retrieve the other)/i.test(answer);
+  return /(?:i can(?:not|'t) directly display|i can only confirm|i can show you(?:\.|$)|cannot retrieve the other|need to (?:access|connect to)|please confirm (?:that )?i can proceed|don[’']t have a direct connection)/i.test(answer);
 }
 
 async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
@@ -112,9 +141,10 @@ async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
     const attemptMessages = index === 0 ? messages : [...messages, {
       role: 'system', content: 'The prior model returned no usable assistant message. Continue the request now using only the available gateway tools or return the final answer.',
     }];
+    const toolPayload = Array.isArray(tools) && tools.length ? { tools, tool_choice: 'auto' } : {};
     const response = await chatCompletionFetch(candidates[index], {
       method: 'POST', signal,
-      body: JSON.stringify({ temperature: 0, max_tokens: 2400, tools, tool_choice: 'auto', messages: attemptMessages }),
+      body: JSON.stringify({ temperature: 0, max_tokens: 2400, ...toolPayload, messages: attemptMessages }),
     }, { fallbackApiKey: apiKey, useCase: 'chat', traceId: crypto.randomUUID() });
     if (!response.ok) {
       if (index + 1 < candidates.length) continue;
@@ -171,14 +201,33 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
   if (action === 'search') {
     const queries = Array.isArray(args.queries) ? args.queries.slice(0, 8) : [];
     if (!queries.length) return { successful: false, error: 'connected_search_queries_required' };
-    const useCases = queries.map(row => compactText(row?.use_case, 900)).filter(Boolean);
-    let toolkits = Array.isArray(args.toolkits) ? args.toolkits.slice(0, 12) : [];
-    if (!toolkits.length && typeof composio.listConnectedAccounts === 'function') {
-      const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: ctx.connectionScope || 'user' });
-      const requestText = useCases.join(' ').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
-      const active = [...new Set((accounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
-      toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+    const requestedTask = compactText(ctx.requestMessage, 1200);
+    const useCases = [...new Set([requestedTask, ...queries.map(row => compactText(row?.use_case, 900))].filter(Boolean))].slice(0, 8);
+    let toolkits = Array.isArray(args.toolkits) ? args.toolkits.map(value => String(value).toLowerCase()).slice(0, 12) : [];
+    let connectionScope = state.connectionScope || ctx.composioConnectionScope || ctx.connectionScope || 'user';
+    if (typeof composio.listConnectedAccounts === 'function') {
+      const userAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
+      const requestText = requestedTask.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
+      let active = [...new Set((userAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+      const explicitlyNamed = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+      if (explicitlyNamed.length) toolkits = explicitlyNamed;
+      if (!toolkits.length) toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
       if (!toolkits.length && active.length === 1) toolkits = active;
+
+      // Existing tenants may still own connections under the authenticated
+      // organization subject. Prefer user scope, but migrate transparently to
+      // org scope when the requested app is active only there.
+      if (connectionScope === 'user' && (!explicitlyNamed.length || !toolkits.length || toolkits.some(toolkit => !active.includes(toolkit)))) {
+        const orgAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' });
+        const orgActive = [...new Set((orgAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+        const explicitlyNamedOrg = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+        if (explicitlyNamedOrg.length) toolkits = explicitlyNamedOrg;
+        if (!toolkits.length) toolkits = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+        if (toolkits.length && toolkits.every(toolkit => orgActive.includes(toolkit))) {
+          connectionScope = 'org';
+          active = orgActive;
+        }
+      }
     }
     if (!toolkits.length) return {
       successful: false,
@@ -186,7 +235,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
       data: { instruction: 'Repeat search with the relevant app/toolkit names inferred from the user request.' },
     };
     const discovery = await composio.discoverSessionTools(ctx.orgId, {
-      userId: ctx.userId, connectionScope: ctx.connectionScope || 'user', toolkits, useCases,
+      userId: ctx.userId, connectionScope, toolkits, useCases,
       allowDisconnected: true, sessionId: state.sessionId || null, includeCustomToolkit: false,
       manageConnections: false, hydrateSchemas: false, candidateLimit: 12,
       callbackUrl: ctx.composioCallbackOrigin,
@@ -212,9 +261,11 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
     return {
       successful: true, data: compact,
       state: {
+        primarySlugs: [...new Set(discovery.primaryToolSlugs || [])],
         selectedSlugs: [...new Set([...(discovery.primaryToolSlugs || []), ...(discovery.relatedToolSlugs || [])])],
         sessionId: discovery.sessionId || state.sessionId,
         workflowSessionId: workflowId(discovery) || state.workflowSessionId,
+        connectionScope,
       },
       disconnected: disconnectedToolkits(discovery.toolkitConnectionStatuses || compact.toolkit_connection_statuses),
     };
@@ -222,30 +273,53 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
   if (action === 'schemas') {
     const slugs = [...new Set((args.tool_slugs || []).map(String))];
     if (!slugs.length || slugs.some(slug => !state.selectedSlugs.includes(slug))) return { successful: false, error: 'connected_schema_slug_not_selected' };
-    const schemas = await composio.getSessionToolSchemas(args.session_id || state.sessionId, slugs);
+    if (!state.sessionId) return { successful: false, error: 'connected_session_missing' };
+    const schemas = await composio.getSessionToolSchemas(state.sessionId, slugs);
     return { successful: true, data: { tool_schemas: schemas }, state: { schemas: { ...state.schemas, ...schemas } } };
   }
   if (action === 'manage_connection' || action === 'wait_connection') {
     const toolkits = Array.isArray(args.toolkits) ? args.toolkits : [];
     if (!toolkits.length) return { successful: false, error: 'connected_toolkits_required' };
-    const managed = await composio.manageSessionConnections(args.session_id || state.sessionId, toolkits, { reinitiateAll: action === 'manage_connection' });
+    if (!state.sessionId) return { successful: false, error: 'connected_session_missing' };
+    const managed = await composio.manageSessionConnections(state.sessionId, toolkits, { reinitiateAll: action === 'manage_connection' });
     return { successful: true, data: managed, connection: { toolkits, ...managed } };
   }
   if (action !== 'execute') return { successful: false, error: 'connected_action_invalid' };
-  const slug = String(args.tool_slug || '');
-  if (!slug || !state.selectedSlugs.includes(slug)) return { successful: false, error: 'connected_execute_slug_not_selected' };
-  const schema = state.schemas[slug];
-  if (!schema?.input_schema) return { successful: false, error: 'connected_execute_schema_not_loaded' };
+  const requestedSlug = String(args.tool_slug || '');
+  const slug = state.selectedSlugs.find(value => String(value).toLowerCase() === requestedSlug.toLowerCase()) || '';
+  if (!slug) return { successful: false, error: 'connected_execute_slug_not_selected' };
+  if (!state.sessionId) return { successful: false, error: 'connected_session_missing' };
+  let schema = state.schemas[slug];
+  let loadedSchemas = {};
+  if (!schema?.input_schema) {
+    loadedSchemas = await composio.getSessionToolSchemas(state.sessionId, [slug]);
+    schema = loadedSchemas?.[slug];
+  }
+  if (!schema?.input_schema) return { successful: false, error: 'connected_execute_schema_unavailable' };
+  const schemaState = Object.keys(loadedSchemas).length ? { schemas: { ...state.schemas, ...loadedSchemas } } : {};
+  const suppliedArguments = args.arguments && typeof args.arguments === 'object' ? args.arguments : {};
+  if (Object.keys(loadedSchemas).length && Object.keys(schema.input_schema?.properties || {}).length && !Object.keys(suppliedArguments).length) {
+    return {
+      successful: true,
+      status: 'schema_loaded_arguments_required',
+      state: schemaState,
+      data: {
+        tool_slug: slug,
+        input_schema: schema.input_schema,
+        instruction: 'Bind the original user constraints to this schema, then call execute again with explicit arguments. Do not execute provider defaults.',
+      },
+    };
+  }
   const validate = new Ajv({ strict: false, allErrors: true }).compile(schema.input_schema);
-  if (!validate(args.arguments || {})) {
+  if (!validate(suppliedArguments)) {
     return { successful: false, error: 'schema_validation_failed', validation_errors: validate.errors?.slice(0, 8) || [] };
   }
   const authority = connectedToolAuthority(slug, schema);
-  if (authority === 'write') return { successful: true, approval: { slug, arguments: args.arguments || {}, schema: schema.input_schema } };
-  const receipt = (await composio.executeToolsParallel(ctx.orgId, [{ slug, arguments: args.arguments || {} }], {
+  if (authority === 'write') return { successful: true, state: schemaState, approval: { slug, arguments: suppliedArguments, schema: schema.input_schema } };
+  const receipt = (await composio.executeToolsParallel(ctx.orgId, [{ slug, arguments: suppliedArguments }], {
     sessionId: state.sessionId, allowDirectFallback: false,
   }))[0];
-  return { ...receipt, data: publicToolResult(receipt) };
+  return { ...receipt, state: schemaState, data: publicToolResult(receipt) };
 }
 
 async function createApproval(prisma, ctx, state, approval) {
@@ -330,21 +404,38 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     await ensureRun(runId);
     let profile = '';
     try { profile = await getSharedProfileStore(prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null); } catch {}
+    let requestedToolkits = [];
+    if (useTools && typeof composio?.listConnectedAccounts === 'function') {
+      const preferredScope = ctx.composioConnectionScope || ctx.connectionScope || 'user';
+      const [userAccounts, orgAccounts] = await Promise.all([
+        composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: preferredScope }).catch(() => []),
+        preferredScope === 'org' ? Promise.resolve([]) : composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' }).catch(() => []),
+      ]);
+      requestedToolkits = toolkitMentions(message, [...userAccounts, ...orgAccounts]);
+    }
     const locale = ctx.language || 'en';
     const messages = [
       { role: 'system', content: systemPrompt({ useTools, locale }) },
+      ...(requestedToolkits.length ? [{ role: 'system', content: `The request explicitly names authenticated connected-app toolkit(s): ${requestedToolkits.join(', ')}. External app facts cannot be answered by hivemind_meta. Start or continue hivemind_connected_task search, then follow its connection, schema, and execution receipts before answering.` }] : []),
       ...(profile ? [{ role: 'system', content: `Authenticated compact profile:\n${compactText(profile, 1800)}` }] : []),
       ...safeHistory(ctx.conversationHistory, Math.max(1, Math.min(6, Number(ctx.historyTurns) || 3))),
       { role: 'user', content: message },
     ];
-    const patch = { runId, context: { locale, profile: compactText(profile, 1800) }, messages };
+    const patch = { runId, context: { locale, profile: compactText(profile, 1800) }, requestedToolkits, messages };
     return transition({ ...state, runId }, 'running', patch, { reason_code: 'turn_admitted' });
   };
 
   const modelNode = async state => {
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
+    const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
+      && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
+    const modelMessages = providerEvidenceReady ? [
+      { role: 'system', content: `Synthesize the final answer from verified provider receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.` },
+      { role: 'user', content: message },
+      { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))).slice(0, 24000)}` },
+    ] : state.messages;
     const turn = await callModel({
-      messages: state.messages, tools: unifiedMetaTools({ useTools }), model: ctx.model,
+      messages: modelMessages, tools: providerEvidenceReady ? [] : unifiedMetaTools({ useTools }), model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
     });
     const assistant = turn.message || turn;
@@ -352,11 +443,21 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const messages = [...state.messages, { role: 'assistant', content: assistant.content || null, ...(assistant.tool_calls?.length ? { tool_calls: assistant.tool_calls } : {}) }];
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     if (calls.length) return { messages, pendingTool: parseUnifiedToolCall(calls[0]), cycles: state.cycles + 1, usage };
-    if (invalidFinal(assistant.content, state.receipts) && state.repairs < 1) {
+    const connectedDiscoveryMissing = useTools && state.requestedToolkits.length > 0 && state.selectedSlugs.length === 0;
+    const connectedExecutionMissing = useTools && state.selectedSlugs.length > 0
+      && !state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
+    if ((connectedDiscoveryMissing || connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
       return {
-        messages: [...messages, { role: 'system', content: 'Your proposed answer did not present the successful receipt evidence. Answer the original request directly from the receipts now. Do not describe what you could do.' }],
+        messages: [...messages, { role: 'system', content: connectedDiscoveryMissing
+          ? `The original request names connected toolkit(s) (${state.requestedToolkits.join(', ')}), but no connected-app discovery receipt exists. Call hivemind_connected_task with action search now. Do not answer from hivemind_meta or claim that external access is unavailable.`
+          : state.selectedSlugs.length
+          ? `Do not ask permission for a read or describe what you could do. Continue the connected workflow now: load schemas for the selected slugs (${state.selectedSlugs.join(', ')}), execute the required read, then answer from its receipt.`
+          : 'Your proposed answer did not present the successful receipt evidence. Continue with the available gateway tools, then answer the original request directly from the receipts.' }],
         pendingTool: null, cycles: state.cycles + 1, repairs: state.repairs + 1, usage,
       };
+    }
+    if (connectedDiscoveryMissing || connectedExecutionMissing) {
+      return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, 'I could not safely complete the connected task because no provider result was produced.', 'error') };
     }
     const response = markdownText(assistant.content, 24000);
     onEvent({ type: 'answer_delta', text: response });
@@ -430,14 +531,21 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     return {
       ...statePatch, pendingTool: null, callFingerprints: [...state.callFingerprints, fingerprint],
       messages: [...state.messages, toolMessage(call, exposed)],
-      receipts: [...state.receipts, { tool: underlying, successful: receipt?.successful !== false, data: exposed, error: receipt?.error || null }],
+      receipts: [...state.receipts, {
+        tool: underlying,
+        action: call.name === 'hivemind_connected_task' ? call.args.action : null,
+        status: receipt?.status || null,
+        successful: receipt?.successful !== false,
+        data: exposed,
+        error: receipt?.error || null,
+      }],
       steps: [...state.steps, { kind: 'tool', slug: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed' }],
     };
   };
 
   const connectionNode = async state => {
     interrupt({ run_id: state.runId, ...state.pendingConnection });
-    const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: ctx.connectionScope || 'user' });
+    const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: state.connectionScope || ctx.composioConnectionScope || ctx.connectionScope || 'user' });
     const toolkit = String(state.pendingConnection?.toolkit || '').toLowerCase();
     const connected = accounts.some(row => String(row?.toolkit || '').toLowerCase() === toolkit && row?.status === 'ACTIVE');
     if (!connected) return { pendingConnection: { ...state.pendingConnection, prompt: localized(ctx.language, 'waiting', toolkit) } };
@@ -479,7 +587,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     return {
       pendingApproval: null,
       messages: [...state.messages, { role: 'system', content: jsonText({ approval: successful ? 'executed_once' : 'execution_failed', receipt: exposed }) }],
-      receipts: [...state.receipts, { tool: row.toolName, successful, data: exposed, error: receipt?.error || null }],
+      receipts: [...state.receipts, { tool: row.toolName, action: 'execute', status: successful ? 'executed' : 'failed', successful, data: exposed, error: receipt?.error || null }],
       steps: [...state.steps, { kind: 'approval', slug: row.toolName, status: successful ? 'completed' : 'failed', summary: successful ? 'Approved action completed once' : 'Approved action failed' }],
     };
   };
@@ -541,7 +649,7 @@ export async function runUnifiedMetaAgent({ message, useTools = false, ctx = {},
   const connector = composio || await import('../connectors/composio/composio-service.js');
   const graphThreadId = threadId(ctx);
   const runId = ctx.unifiedRunId || choice?.run_id || crypto.randomUUID();
-  const runtimeCtx = { ...ctx, prisma: db, unifiedRunId: runId, unifiedGraphThreadId: graphThreadId };
+  const runtimeCtx = { ...ctx, prisma: db, requestMessage: message, unifiedRunId: runId, unifiedGraphThreadId: graphThreadId };
   const runtime = graph || createUnifiedMetaAgentGraph({ checkpointer: checkpointer || await productionCheckpointer(), ctx: runtimeCtx, message, useTools, onEvent, composio: connector, prisma: db, modelStep, metaExecutor, connectedExecutor });
   const config = { configurable: { thread_id: graphThreadId }, recursionLimit: 64, tags: [UNIFIED_META_HARNESS_VERSION], metadata: { use_tools: useTools, locale: ctx.language || 'en' } };
   const output = choice ? await runtime.invoke(new Command({ resume: choice }), config) : await runtime.invoke({ runId }, config);

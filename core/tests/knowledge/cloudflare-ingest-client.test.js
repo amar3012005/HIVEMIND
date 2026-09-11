@@ -15,7 +15,6 @@ async function withWorkflowEnv(fn) {
   ];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
-    HIVEMIND_LOCAL_MODE: 'true', KNOWLEDGE_INGEST_WORKFLOW_ENABLED: 'true',
     KNOWLEDGE_INGEST_WORKFLOW_URL: 'http://127.0.0.1:8788',
     KNOWLEDGE_INGEST_WORKFLOW_SECRET: 'local-test-secret',
   });
@@ -76,33 +75,29 @@ test('Flagship selection fails closed when either tenant identity is missing', a
   });
 });
 
-test('the client remains disabled unless both explicit local gates are true', async () => {
+test('the client needs only protected Workflow transport configuration', async () => {
   await withWorkflowEnv(async () => {
     const client = new CloudflareKnowledgeIngestClient({ fetchImpl: async () => Response.json({ enabled: true }) });
-    delete process.env.HIVEMIND_LOCAL_MODE;
+    assert.equal(client.configured(), true);
+    delete process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET;
     assert.equal(client.configured(), false);
-    assert.equal(await client.isEnabled(ORG_ID, USER_ID), false);
-    process.env.HIVEMIND_LOCAL_MODE = 'true';
-    process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED = 'false';
+    process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET = 'local-test-secret';
+    delete process.env.KNOWLEDGE_INGEST_WORKFLOW_URL;
     assert.equal(client.configured(), false);
   });
 });
 
-test('production mode requires the explicit environment and irreversible-looking acknowledgement', async () => {
+test('Cloudflare Flagship, not NODE_ENV or acknowledgement flags, selects the tenant', async () => {
   await withWorkflowEnv(async () => {
     const client = new CloudflareKnowledgeIngestClient({ fetchImpl: async () => Response.json({ enabled: true }) });
     Object.assign(process.env, {
       HIVEMIND_LOCAL_MODE: 'false', NODE_ENV: 'production',
       KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT: 'production',
-      KNOWLEDGE_INGEST_WORKFLOW_ENABLED: 'true',
+      KNOWLEDGE_INGEST_WORKFLOW_ENABLED: 'false',
     });
     delete process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK;
-    assert.equal(client.configured(), false);
-    process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK = 'enable-cloudflare-workflow-v1';
     assert.equal(client.configured(), true);
     assert.equal(await client.isEnabled(ORG_ID, USER_ID), true);
-    process.env.HIVEMIND_LOCAL_MODE = 'true';
-    assert.equal(client.configured(), false);
   });
 });
 

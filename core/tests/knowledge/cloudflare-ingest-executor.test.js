@@ -208,7 +208,7 @@ test('materialization dispatch returns immediately and exposes a durable polling
   assert.fail('background materialization did not complete');
 });
 
-test('internal Workflow authorization requires an explicit environment gate and exact secret', () => {
+test('internal Workflow authorization requires only the exact protected secret', () => {
   const previous = {
     local: process.env.HIVEMIND_LOCAL_MODE,
     enabled: process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED,
@@ -218,18 +218,10 @@ test('internal Workflow authorization requires an explicit environment gate and 
     nodeEnv: process.env.NODE_ENV,
   };
   try {
-    Object.assign(process.env, {
-      HIVEMIND_LOCAL_MODE: 'true', KNOWLEDGE_INGEST_WORKFLOW_ENABLED: 'true',
-      KNOWLEDGE_INGEST_WORKFLOW_SECRET: 'expected-secret',
-    });
+    process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET = 'expected-secret';
     assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer expected-secret' } }), true);
     assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer wrong' } }), false);
     process.env.HIVEMIND_LOCAL_MODE = 'false';
-    assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer expected-secret' } }), false);
-    Object.assign(process.env, {
-      NODE_ENV: 'production', KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT: 'production',
-      KNOWLEDGE_INGEST_PRODUCTION_ACK: 'enable-cloudflare-workflow-v1',
-    });
     assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer expected-secret' } }), true);
   } finally {
     if (previous.local === undefined) delete process.env.HIVEMIND_LOCAL_MODE; else process.env.HIVEMIND_LOCAL_MODE = previous.local;

@@ -361,9 +361,9 @@ test('LangGraph trajectory performs one planner call after deterministic context
   assert.equal(calls, 1); assert.equal(result.decision.operation, 'recall'); assert.equal(result.validation.status, 'valid');
 });
 
-test('routing flags never capture use_tools:true and canary is stable', () => {
-  const prior = { e: process.env.CHAT_ORCHESTRATOR_V2_ENABLED, s: process.env.CHAT_ORCHESTRATOR_V2_SHADOW, c: process.env.CHAT_ORCHESTRATOR_V2_CANARY_PERCENT };
-  process.env.CHAT_ORCHESTRATOR_V2_ENABLED = 'true';
-  try { assert.equal(nativeV2RoutingMode({ useTools: false, seed: 'u' }), 'serve'); assert.equal(nativeV2RoutingMode({ useTools: true, seed: 'u' }), 'off'); }
-  finally { for (const [key, value] of [['CHAT_ORCHESTRATOR_V2_ENABLED', prior.e], ['CHAT_ORCHESTRATOR_V2_SHADOW', prior.s], ['CHAT_ORCHESTRATOR_V2_CANARY_PERCENT', prior.c]]) value === undefined ? delete process.env[key] : process.env[key] = value; }
+test('Cloudflare-latched routing never captures use_tools:true and defaults off', () => {
+  assert.equal(nativeV2RoutingMode({ useTools: false }), 'off');
+  assert.equal(nativeV2RoutingMode({ useTools: false, orchestratorV2Mode: 'serve' }), 'serve');
+  assert.equal(nativeV2RoutingMode({ useTools: false, orchestratorV2Mode: 'shadow' }), 'shadow');
+  assert.equal(nativeV2RoutingMode({ useTools: true, orchestratorV2Mode: 'serve' }), 'off');
 });

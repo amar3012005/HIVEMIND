@@ -39,19 +39,19 @@ describe('metadata-only Workflow contract', () => {
 
 describe('native meta Flagship admission', () => {
   const url = new URL('https://worker/native-meta-mode?org_id=org-1&user_id=user-1');
-  it('fails closed when the local master switch is off', async () => {
+  it('uses Flagship as the only admission authority', async () => {
     let evaluated = false;
     const env = {
-      NATIVE_META_TOOLS_ENABLED: 'false', ENVIRONMENT: 'production',
+      ENVIRONMENT: 'production',
       FLAGS: { getBooleanDetails: async () => { evaluated = true; return { value: true }; } },
     } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
-    expect(await evaluateNativeMetaMode(env, url)).toBe('off');
-    expect(evaluated).toBe(false);
+    expect(await evaluateNativeMetaMode(env, url)).toBe('native-meta-v1');
+    expect(evaluated).toBe(true);
   });
   it('uses a stable tenant-user targeting key and accepts only true', async () => {
     let context: Record<string, unknown> | undefined;
     const env = {
-      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
+      NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
       FLAGS: { getBooleanDetails: async (_key: string, _fallback: boolean, ctx?: Record<string, string | number | boolean>) => { context = ctx; return { value: true }; } },
     } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
     expect(await evaluateNativeMetaMode(env, url)).toBe('native-meta-v1');
@@ -59,7 +59,7 @@ describe('native meta Flagship admission', () => {
   });
   it('admits the unified graph through a string flag while rejecting unknown modes', async () => {
     const env = {
-      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
+      NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
       FLAGS: {
         getBooleanDetails: async () => ({ value: false }),
         getStringDetails: async () => ({ value: 'unified-meta-v2' }),
@@ -71,7 +71,7 @@ describe('native meta Flagship admission', () => {
   });
   it('fails closed on Flagship errors', async () => {
     const env = {
-      NATIVE_META_TOOLS_ENABLED: 'true', ENVIRONMENT: 'production',
+      ENVIRONMENT: 'production',
       FLAGS: { getBooleanDetails: async () => { throw new Error('offline'); } },
     } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
     expect(await evaluateNativeMetaMode(env, url)).toBe('off');

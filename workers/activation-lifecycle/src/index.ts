@@ -2,6 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { NonRetryableError } from 'cloudflare:workflows';
 
 type Params = { activation_id: string; generation: number; sequence: number; target_at: string };
+type EligibleResponse = { activations?: Params[] };
 type Env = { ACTIVATION_WORKFLOW: Workflow<Params>; ACTIVATION_ADMISSION: Queue<Params>; FLAGS: Flagship; HIVEMIND_CONTROL_URL: string; HIVEMIND_ACTIVATION_WORKFLOW_SECRET: string };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -31,6 +32,25 @@ async function start(env: Env, params: Params) {
   catch { const instance = await env.ACTIVATION_WORKFLOW.get(id(params)); const state = await instance.status(); if (state.status === 'errored' || state.status === 'terminated') await instance.restart(); }
 }
 
+/**
+ * Re-admit persisted lifecycle clocks after a Flagship rule changes or a
+ * Worker/Queue outage.  The request contains IDs and timestamps only; Core
+ * remains the source of truth and every item is re-gated by Flagship in start.
+ */
+async function reconcile(env: Env) {
+  const response = await control<EligibleResponse>(env, '/internal/lifecycle/activation/eligible', { limit: 500 });
+  for (const candidate of response.activations || []) {
+    if (!valid(candidate)) continue;
+    try {
+      await start(env, candidate);
+    } catch (error) {
+      // A disabled Flagship rule is an expected no-op.  Other candidates keep
+      // reconciling so one stale record cannot block the lifecycle clock.
+      if (!(error instanceof NonRetryableError)) console.warn('activation_reconcile_failed', candidate.activation_id);
+    }
+  }
+}
+
 export class ActivationLifecycleWorkflow extends WorkflowEntrypoint<Env, Params> {
   async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
     if (!valid(event.payload)) throw new NonRetryableError('invalid_activation_payload');
@@ -45,7 +65,13 @@ export class ActivationLifecycleWorkflow extends WorkflowEntrypoint<Env, Params>
 export default {
   async fetch(request: Request, env: Env) {
     if (!authorized(request, env)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
-    if (request.method !== 'POST' || new URL(request.url).pathname !== '/start') return Response.json({ error: 'Not found' }, { status: 404 });
+    const pathname = new URL(request.url).pathname;
+    if (request.method === 'GET' && pathname === '/enabled') {
+      const activationId = new URL(request.url).searchParams.get('activation_id') || '';
+      if (!UUID.test(activationId)) return Response.json({ error: 'invalid_activation_id' }, { status: 400 });
+      return Response.json({ enabled: await enabled(env, activationId) });
+    }
+    if (request.method !== 'POST' || pathname !== '/start') return Response.json({ error: 'Not found' }, { status: 404 });
     const params = await request.json<Params>().catch(() => null);
     if (!valid(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
     await start(env, params);
@@ -57,5 +83,8 @@ export default {
       try { await start(env, message.body); message.ack(); }
       catch (error) { if (error instanceof NonRetryableError) message.ack(); else message.retry({ delaySeconds: 60 }); }
     }
+  },
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(reconcile(env));
   },
 };

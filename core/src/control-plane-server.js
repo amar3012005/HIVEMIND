@@ -175,12 +175,13 @@ import {
   advanceActivationForEmail,
   claimActivationReminder,
   evaluateActivationReminder,
-  isActivationLifecycleEnabled,
   isAuthorizedActivationLifecycleRequest,
+  listEligibleActivationLifecycles,
   recordActivationReminder,
   releaseActivationReminderClaim,
   scheduleActivationWorkflow,
   startInvitationActivation,
+  startSignupActivation,
 } from './lifecycle/activation-lifecycle.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -3414,7 +3415,24 @@ const server = http.createServer(async (req, res) => {
     const recorded = await markEnterpriseInvitationDelivery({
       prisma, invitationId: invitation.id, delivered: delivery.ok, error: delivery.error || null,
     });
-    return { delivery, invitation: recorded, activationUrl };
+    // Enterprise invites use the same pre-Day-0 lifecycle as workspace
+    // invitations. A delivery receipt, not a browser send click, is the only
+    // legitimate starting point for reminder eligibility.
+    let activation = null;
+    if (delivery.ok) {
+      activation = await startInvitationActivation({
+        prisma,
+        invite: { id: invitation.id, orgId: invitation.orgId || null, email: invitation.recipientEmail },
+        metadata: { company_name: invitation.companyName || null, invitation_kind: 'enterprise' },
+      }).catch((error) => {
+        console.warn('[activation-lifecycle] enterprise invitation persistence failed:', error.message);
+        return null;
+      });
+      if (activation && !activation.skipped) {
+        scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] enterprise invitation scheduling failed:', error.message));
+      }
+    }
+    return { delivery, invitation: recorded, activationUrl, activation };
   }
 
   function invitationTemplateVars({ kind, application, invitation = null, invitationUrl, accessCode = null }) {
@@ -3495,9 +3513,11 @@ const server = http.createServer(async (req, res) => {
   // a delayed workflow can never remind a user who has already progressed.
   if (pathname.startsWith('/internal/lifecycle/activation/')) {
     if (!isAuthorizedActivationLifecycleRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!isActivationLifecycleEnabled()) return jsonResponse(res, { error: 'activation_feature_disabled', retryable: false }, 403);
     if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
     const body = await parseBody(req).catch(() => ({}));
+    if (pathname === '/internal/lifecycle/activation/eligible') {
+      return jsonResponse(res, { activations: await listEligibleActivationLifecycles({ prisma, limit: body.limit }) });
+    }
     const activationId = String(body.activation_id || '');
     const generation = Number(body.generation);
     if (!/^[0-9a-f-]{36}$/i.test(activationId) || !Number.isInteger(generation)) {
@@ -4778,6 +4798,10 @@ const server = http.createServer(async (req, res) => {
       // A newly authenticated person without an organization has reached the
       // next activation stage. Generation invalidates any queued invite mail.
       if (!membership.org) {
+        await startSignupActivation({
+          prisma, email: user.email, userId: user.id,
+          metadata: { activation_source: 'email_signup' },
+        }).catch((error) => console.warn('[activation-lifecycle] email signup persistence failed:', error.message));
         const activations = await advanceActivationForEmail({
           prisma, email: user.email, userId: user.id,
           stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY,
@@ -5010,6 +5034,10 @@ const server = http.createServer(async (req, res) => {
         orgId: org?.id || null,
       });
       if (!org) {
+        await startSignupActivation({
+          prisma, email: user.email, userId: user.id,
+          metadata: { activation_source: 'google_signup' },
+        }).catch((error) => console.warn('[activation-lifecycle] google signup persistence failed:', error.message));
         const activations = await advanceActivationForEmail({
           prisma, email: user.email, userId: user.id,
           stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY, reason: 'authenticated_without_company',
@@ -5420,6 +5448,10 @@ const server = http.createServer(async (req, res) => {
         orgId: org?.id || null
       });
       if (!org) {
+        await startSignupActivation({
+          prisma, email: user.email, userId: user.id,
+          metadata: { activation_source: 'oauth_signup' },
+        }).catch((error) => console.warn('[activation-lifecycle] oauth signup persistence failed:', error.message));
         const activations = await advanceActivationForEmail({
           prisma, email: user.email, userId: user.id,
           stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY, reason: 'authenticated_without_company',
@@ -5974,6 +6006,10 @@ const server = http.createServer(async (req, res) => {
       ...current.session,
       orgId: org.id
     });
+    await startSignupActivation({
+      prisma, email: current.session.email, userId: current.session.userId,
+      metadata: { activation_source: 'organization_creation' },
+    }).catch((error) => console.warn('[activation-lifecycle] organization activation persistence failed:', error.message));
     const activations = await advanceActivationForEmail({
       prisma, email: current.session.email, userId: current.session.userId, orgId: org.id,
       stage: ACTIVATION_STAGES.ONBOARDING_IN_PROGRESS, reason: 'organization_created',

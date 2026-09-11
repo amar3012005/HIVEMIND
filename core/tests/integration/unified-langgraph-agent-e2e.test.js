@@ -63,9 +63,10 @@ test('the same graph progressively searches, loads one selected schema, executes
   const events = [];
   const calls = [];
   let turn = 0;
-  const modelStep = async ({ tools }) => {
+  const modelStep = async ({ tools, messages }) => {
     turn += 1;
     assert.deepEqual(tools.map(row => row.function.name), turn <= 3 ? ['hivemind_meta', 'hivemind_connected_task'] : []);
+    if (turn === 4) assert.deepEqual(messages.map(row => row.role), ['system', 'user', 'system']);
     if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', queries: [{ use_case: 'Fetch the five newest unread Gmail emails with subject sender and received timestamp' }], session: { generate_id: true }, toolkits: ['gmail'] }, 'c1') };
     if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', tool_slugs: ['GMAIL_FETCH_EMAILS'] }, 'c2') };
     if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'GMAIL_FETCH_EMAILS', arguments: { query: 'is:unread', max_results: 5 } }, 'c3') };

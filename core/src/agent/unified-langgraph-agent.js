@@ -29,6 +29,7 @@ const State = Annotation.Root({
   pendingConnection: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingApproval: Annotation({ reducer: (_left, right) => right, default: () => null }),
   selectedSlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
+  primarySlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   schemas: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
   sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
@@ -96,6 +97,19 @@ function resultSources(receipts = []) {
   };
   receipts.filter(row => row.successful !== false).forEach(row => visit(row.data));
   return output.slice(0, 12);
+}
+
+function substantiveProviderReceipt(receipt, primarySlugs = []) {
+  if (!receipt || receipt.successful === false || !primarySlugs.includes(receipt.tool)) return false;
+  const data = receipt.data;
+  if (data == null) return false;
+  const collectionKeys = ['messages', 'items', 'results', 'records', 'emails', 'threads', 'events', 'posts', 'data'];
+  if (Array.isArray(data)) return data.length > 0;
+  if (typeof data !== 'object') return String(data).trim().length > 0;
+  for (const key of collectionKeys) {
+    if (Array.isArray(data[key])) return data[key].length > 0;
+  }
+  return Object.keys(data).some(key => !['nextPageToken', 'next_page_token', 'resultSizeEstimate', 'total', 'count', 'status', 'successful'].includes(key));
 }
 
 function invalidFinal(text, receipts) {
@@ -235,6 +249,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
     return {
       successful: true, data: compact,
       state: {
+        primarySlugs: [...new Set(discovery.primaryToolSlugs || [])],
         selectedSlugs: [...new Set([...(discovery.primaryToolSlugs || []), ...(discovery.relatedToolSlugs || [])])],
         sessionId: discovery.sessionId || state.sessionId,
         workflowSessionId: workflowId(discovery) || state.workflowSessionId,
@@ -391,11 +406,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const modelNode = async state => {
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
-      && state.receipts.some(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool));
+      && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     const modelMessages = providerEvidenceReady ? [
       { role: 'system', content: `Synthesize the final answer from verified provider receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.` },
       { role: 'user', content: message },
-      { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool))).slice(0, 24000)}` },
+      { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))).slice(0, 24000)}` },
     ] : state.messages;
     const turn = await callModel({
       messages: modelMessages, tools: providerEvidenceReady ? [] : unifiedMetaTools({ useTools }), model: ctx.model,
@@ -407,7 +422,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     if (calls.length) return { messages, pendingTool: parseUnifiedToolCall(calls[0]), cycles: state.cycles + 1, usage };
     const connectedExecutionMissing = useTools && state.selectedSlugs.length > 0
-      && !state.receipts.some(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool));
+      && !state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     if ((connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
       return {
         messages: [...messages, { role: 'system', content: state.selectedSlugs.length

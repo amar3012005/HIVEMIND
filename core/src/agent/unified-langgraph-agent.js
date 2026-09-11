@@ -32,6 +32,7 @@ const State = Annotation.Root({
   schemas: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
   sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  connectionScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
   cycles: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   repairs: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
   callFingerprints: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -172,13 +173,27 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
     const queries = Array.isArray(args.queries) ? args.queries.slice(0, 8) : [];
     if (!queries.length) return { successful: false, error: 'connected_search_queries_required' };
     const useCases = queries.map(row => compactText(row?.use_case, 900)).filter(Boolean);
-    let toolkits = Array.isArray(args.toolkits) ? args.toolkits.slice(0, 12) : [];
-    if (!toolkits.length && typeof composio.listConnectedAccounts === 'function') {
-      const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: ctx.connectionScope || 'user' });
+    let toolkits = Array.isArray(args.toolkits) ? args.toolkits.map(value => String(value).toLowerCase()).slice(0, 12) : [];
+    let connectionScope = state.connectionScope || ctx.composioConnectionScope || ctx.connectionScope || 'user';
+    if (typeof composio.listConnectedAccounts === 'function') {
+      const userAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
       const requestText = useCases.join(' ').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
-      const active = [...new Set((accounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
-      toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+      let active = [...new Set((userAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+      if (!toolkits.length) toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
       if (!toolkits.length && active.length === 1) toolkits = active;
+
+      // Existing tenants may still own connections under the authenticated
+      // organization subject. Prefer user scope, but migrate transparently to
+      // org scope when the requested app is active only there.
+      if (connectionScope === 'user' && (!toolkits.length || toolkits.some(toolkit => !active.includes(toolkit)))) {
+        const orgAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' });
+        const orgActive = [...new Set((orgAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+        if (!toolkits.length) toolkits = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+        if (toolkits.length && toolkits.every(toolkit => orgActive.includes(toolkit))) {
+          connectionScope = 'org';
+          active = orgActive;
+        }
+      }
     }
     if (!toolkits.length) return {
       successful: false,
@@ -186,7 +201,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
       data: { instruction: 'Repeat search with the relevant app/toolkit names inferred from the user request.' },
     };
     const discovery = await composio.discoverSessionTools(ctx.orgId, {
-      userId: ctx.userId, connectionScope: ctx.connectionScope || 'user', toolkits, useCases,
+      userId: ctx.userId, connectionScope, toolkits, useCases,
       allowDisconnected: true, sessionId: state.sessionId || null, includeCustomToolkit: false,
       manageConnections: false, hydrateSchemas: false, candidateLimit: 12,
       callbackUrl: ctx.composioCallbackOrigin,
@@ -215,6 +230,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
         selectedSlugs: [...new Set([...(discovery.primaryToolSlugs || []), ...(discovery.relatedToolSlugs || [])])],
         sessionId: discovery.sessionId || state.sessionId,
         workflowSessionId: workflowId(discovery) || state.workflowSessionId,
+        connectionScope,
       },
       disconnected: disconnectedToolkits(discovery.toolkitConnectionStatuses || compact.toolkit_connection_statuses),
     };
@@ -437,7 +453,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
 
   const connectionNode = async state => {
     interrupt({ run_id: state.runId, ...state.pendingConnection });
-    const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: ctx.connectionScope || 'user' });
+    const accounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: state.connectionScope || ctx.composioConnectionScope || ctx.connectionScope || 'user' });
     const toolkit = String(state.pendingConnection?.toolkit || '').toLowerCase();
     const connected = accounts.some(row => String(row?.toolkit || '').toLowerCase() === toolkit && row?.status === 'ACTIVE');
     if (!connected) return { pendingConnection: { ...state.pendingConnection, prompt: localized(ctx.language, 'waiting', toolkit) } };

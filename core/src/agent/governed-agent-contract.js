@@ -439,13 +439,31 @@ function evidenceRows(data) {
   return firstCollection || [data];
 }
 
+function preferredEvidenceColumn(columns, requested) {
+  const wanted = fieldTokens(requested).join('');
+  return columns.filter(column => equivalentField(requested, column))
+    .sort((left, right) => {
+      const leftName = fieldTokens(left).join('');
+      const rightName = fieldTokens(right).join('');
+      const exact = Number(rightName === wanted) - Number(leftName === wanted);
+      if (exact) return exact;
+      const depth = left.split('.').length - right.split('.').length;
+      return depth || left.length - right.length;
+    })[0] || null;
+}
+
+function evidenceColumnLabel(field) {
+  const words = String(field || '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  return words.map(word => `${word[0]?.toUpperCase() || ''}${word.slice(1)}`).join(' ') || 'Value';
+}
+
 /**
  * Last-resort authenticated presentation for a successful structured read.
  * This is intentionally provider-neutral: it prevents malformed model output
  * from turning valid evidence into JavaScript object coercions while keeping
  * normal answer style model-driven.
  */
-export function renderStructuredReceiptEvidence(receipts = {}) {
+export function renderStructuredReceiptEvidence(receipts = {}, { requestedFields = [] } = {}) {
   const sections = [];
   for (const receipt of (Array.isArray(receipts) ? receipts : []).filter(row => row?.successful && row.data != null).slice(0, 4)) {
     const rows = evidenceRows(receipt.data).slice(0, 12).map(row => flattenEvidenceRecord(row));
@@ -454,12 +472,32 @@ export function renderStructuredReceiptEvidence(receipts = {}) {
       sections.push(`Results from ${receipt.slug}:\n\n${markdownCell(JSON.stringify(receipt.data).slice(0, 1200))}`);
       continue;
     }
-    const header = `| ${columns.join(' | ')} |`;
-    const divider = `| ${columns.map(() => '---').join(' | ')} |`;
-    const body = rows.map(row => `| ${columns.map(column => row[column] || '—').join(' | ')} |`).join('\n');
+    const requested = [...new Set(requestedFields.map(String).filter(Boolean))]
+      .map(field => ({ label: evidenceColumnLabel(field), column: preferredEvidenceColumn(Object.keys(rows[0] || {}), field) }))
+      .filter(item => item.column);
+    const selected = requested.length === requestedFields.length && requested.length
+      ? requested
+      : columns.map(column => ({ label: evidenceColumnLabel(column), column }));
+    const header = `| ${selected.map(item => item.label).join(' | ')} |`;
+    const divider = `| ${selected.map(() => '---').join(' | ')} |`;
+    const body = rows.map(row => `| ${selected.map(item => row[item.column] || '—').join(' | ')} |`).join('\n');
     sections.push(`Results from ${receipt.slug}:\n\n${header}\n${divider}\n${body}`);
   }
   return sections.join('\n\n');
+}
+
+export function synthesisResponseCoversEvidence(response, receipts = [], requestedFields = []) {
+  const fields = [...new Set((requestedFields || []).map(String).filter(Boolean))];
+  if (!fields.length) return true;
+  const answer = asText(response, 8000).toLowerCase();
+  if (!answer) return false;
+  const rows = (receipts || []).filter(row => row?.successful && row.data != null)
+    .flatMap(row => evidenceRows(row.data).slice(0, 24)).map(row => flattenEvidenceRecord(row));
+  return rows.some(row => fields.every(field => {
+    const column = preferredEvidenceColumn(Object.keys(row), field);
+    const value = column ? asText(row[column], 500).toLowerCase() : '';
+    return Boolean(value && answer.includes(value));
+  }));
 }
 
 export function validSynthesisResponse(value) {

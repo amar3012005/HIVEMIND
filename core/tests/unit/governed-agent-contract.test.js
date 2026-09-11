@@ -8,6 +8,7 @@ import {
   invalidSchemaValues,
   missingRequiredFields,
   renderStructuredReceiptEvidence,
+  synthesisResponseCoversEvidence,
   receiptSatisfiesEvidence,
   synthesisReceipt,
   validSynthesisResponse,
@@ -144,11 +145,28 @@ test('structured receipt fallback renders records and rejects object coercion', 
     slug: 'ANY_PROVIDER_LIST_ITEMS', successful: true,
     data: { items: [{ subject: 'First', sender: 'Ada', received_at: '2026-09-05T17:00:00Z' }] },
   }]);
-  assert.match(rendered, /\| subject \| sender \| received_at \|/);
+  assert.match(rendered, /\| Subject \| Sender \| Received At \|/);
   assert.match(rendered, /\| First \| Ada \| 2026-09-05T17:00:00Z \|/);
   assert.equal(validSynthesisResponse([{ subject: 'First' }]), null);
   assert.equal(validSynthesisResponse('[object Object]'), null);
   assert.equal(validSynthesisResponse('First returned item'), 'First returned item');
+});
+
+test('receipt synthesis rejects hollow list answers and renders requested equivalent fields', () => {
+  const receipts = [{
+    slug: 'ANY_PROVIDER_FETCH_MESSAGES', successful: true,
+    data: { messages: [{
+      sender: 'Rama <rama@example.test>', subject: 'Missing You', messageTimestamp: '2026-09-03T10:50:01Z',
+      preview: { body: 'A private preview that was not requested.' },
+    }] },
+  }];
+  const fields = ['from', 'subject', 'date'];
+  assert.equal(synthesisResponseCoversEvidence('Here are your recent emails from Rama:', receipts, fields), false);
+  const rendered = renderStructuredReceiptEvidence(receipts, { requestedFields: fields });
+  assert.match(rendered, /\| From \| Subject \| Date \|/);
+  assert.match(rendered, /Rama <rama@example\.test>.*Missing You.*2026-09-03T10:50:01Z/);
+  assert.doesNotMatch(rendered, /private preview/);
+  assert.equal(synthesisResponseCoversEvidence(rendered, receipts, fields), true);
 });
 
 test('provider success does not satisfy an unmet generic evidence contract', () => {

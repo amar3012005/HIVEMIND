@@ -30,6 +30,7 @@ import {
   serializeKnownFacts,
   synthesisReceipt,
   renderStructuredReceiptEvidence,
+  synthesisResponseCoversEvidence,
   receiptSatisfiesEvidence,
   validSynthesisResponse,
   verifyPlanCandidate,
@@ -1428,6 +1429,7 @@ Return the argument object itself. Never use schema examples, fabricate identifi
 
   const synthNode = async state => trace('final_synthesis', { locale: state.locale }, async () => {
     const synthesisInput = { message, intent: state.intent, receipts: (state.receipts || []).map(synthesisReceipt), steps: state.steps, capability_gap: state.capabilityGap };
+    const requestedFields = [...new Set((state.intent?.outcomes || []).flatMap(outcome => outcome?.evidence?.required_fields || []).map(String).filter(Boolean))];
     let raw = await jsonDecision({
       ctx,
       stage: 'synthesis',
@@ -1463,9 +1465,14 @@ Render requested records and fields as a Markdown table when appropriate, preser
       });
       summary = validSynthesisResponse(raw?.response);
     }
-    summary = summary || renderStructuredReceiptEvidence(state.receipts) || (state.capabilityGap ? capabilityGapQuestion() : 'I could not complete the request from available evidence.');
+    let usedReceiptFallback = false;
+    if (summary && !synthesisResponseCoversEvidence(summary, state.receipts, requestedFields)) {
+      summary = renderStructuredReceiptEvidence(state.receipts, { requestedFields });
+      usedReceiptFallback = Boolean(summary);
+    }
+    summary = summary || renderStructuredReceiptEvidence(state.receipts, { requestedFields }) || (state.capabilityGap ? capabilityGapQuestion() : 'I could not complete the request from available evidence.');
     const status = state.pendingApprovalId ? 'pending' : (raw?.complete === false ? 'partial' : 'completed');
-    const followUps = normalizeSearchableFollowUps(raw?.follow_ups, {
+    const followUps = usedReceiptFallback ? [] : normalizeSearchableFollowUps(raw?.follow_ups, {
       context: JSON.stringify(synthesisInput.receipts),
       language: state.locale,
     });

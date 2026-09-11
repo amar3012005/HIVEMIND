@@ -3651,6 +3651,59 @@ export async function runReactAgentV2({
         };
   };
 
+  const serveUnifiedMetaAgent = async () => {
+    const { runUnifiedMetaAgent } = await import('./unified-langgraph-agent.js');
+    const unified = await runUnifiedMetaAgent({
+      message,
+      useTools,
+      ctx: {
+        ...ctx,
+        model: answerModel,
+        language,
+        conversationHistory: history,
+        composioCallbackOrigin: ctx.composioCallbackOrigin || process.env.HIVEMIND_FRONTEND_URL || undefined,
+      },
+      onEvent,
+      prisma: ctx.prisma,
+    });
+    let continuation = null;
+    if (unified.status === 'needs_input' && unified.resumeState && unified.inputRequests?.length) {
+      const { createChatContinuation } = await import('./chat-continuation-store.js');
+      const stored = await createChatContinuation({
+        userId: ctx.userId, orgId: ctx.orgId, message, language,
+        conversationHistory: history,
+        historyTurns: ctx.historyTurns,
+        threadId: ctx.threadId || ctx.conversationId || ctx._conversationId || null,
+        resumeState: unified.resumeState,
+      }, {
+        prisma: ctx.prisma,
+        durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+        parentTurnId: ctx.durableChatTurnId || null,
+      });
+      continuation = { schema_version: 1, token: stored.token, expires_at: stored.expires_at, requests: unified.inputRequests };
+      onEvent?.({ type: 'orchestration_input_required', ...continuation });
+    }
+    onEvent?.({ type: 'turn_completed', grounded: unified.status === 'completed', operation: 'unified_meta_loop', success: unified.status !== 'error' });
+    return {
+      response: unified.response || unified.summary,
+      answer_mode: 'unified_meta_loop',
+      sources: unified.sources || [], citations: unified.citations || [], relationships: [], synthesis_chains: [], evidence_packets: [],
+      steps: unified.steps || [], evidence_used: unified.sources || [], claims: [], rejected_claims: [],
+      grounded: unified.status === 'completed', confidence: unified.status === 'completed' ? 1 : 0.5,
+      gaps: unified.status === 'error' ? ['unified_meta_loop_failed'] : [], scopes_found: [],
+      project_choice: null, aggregate: null, action_result: null, assistant_name: assistantName || null,
+      usage: unified.usage || sumUsage(usages), trace: finalizeTrace(trace, usages),
+      draft_ids: unified.draftIds || [], pending_actions: unified.pendingActions || [], follow_ups: unified.followUps || [],
+      compound_status: unified.status, harness_version: unified.run?.scratch?.harness_version || null, continuation,
+      execution: {
+        harness_version: unified.run?.scratch?.harness_version || null,
+        status: unified.status, steps: unified.steps || [], draft_ids: unified.draftIds || [],
+        pending_actions: unified.pendingActions || [], run_id: unified.run?.id || null,
+        session_id: unified.run?.composioSessionId || null,
+      },
+    };
+  };
+
   try {
     if (ctx.projectId) {
       const authorizedProjects = Array.isArray(ctx.accessContext?.projectIds)
@@ -3674,6 +3727,11 @@ export async function runReactAgentV2({
       authorized_project_count: ctx.accessContext?.projectIds?.length || 0,
     });
     onEvent?.({ type: 'turn_accepted', schema_version: 1, trace_id: trace.traceId });
+
+    // Cloudflare admits this once per authenticated turn. Both use_tools modes
+    // then share the same durable LangGraph loop; the latch changes only
+    // whether hivemind_connected_task is visible to the model.
+    if (nativeOrchestrator === 'unified-meta-v2') return await serveUnifiedMetaAgent();
 
     // The enabled harness plans once, progressively; avoid loading the legacy router/catalog.
     if (useTools === true) {

@@ -57,6 +57,18 @@ describe('native meta Flagship admission', () => {
     expect(await evaluateNativeMetaMode(env, url)).toBe('native-meta-v1');
     expect(context?.targetingKey).toBe('org-1:user-1');
   });
+  it('admits the unified graph through a string flag while rejecting unknown modes', async () => {
+    const env = {
+      NATIVE_META_TOOLS_ENABLED: 'true', NATIVE_META_FLAG: 'hivemind-native-meta-tools-v1', ENVIRONMENT: 'production',
+      FLAGS: {
+        getBooleanDetails: async () => ({ value: false }),
+        getStringDetails: async () => ({ value: 'unified-meta-v2' }),
+      },
+    } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
+    expect(await evaluateNativeMetaMode(env, url)).toBe('unified-meta-v2');
+    env.FLAGS.getStringDetails = async () => ({ value: 'unexpected' });
+    expect(await evaluateNativeMetaMode(env, url)).toBe('off');
+  });
   it('fails closed on Flagship errors', async () => {
     const env = {
       NATIVE_META_TOOLS_ENABLED: 'true', ENVIRONMENT: 'production',

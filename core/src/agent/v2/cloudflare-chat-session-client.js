@@ -8,6 +8,7 @@ function configuration() {
 const VALID_MODES = new Set(['off', 'shadow', 'session', 'workflow', 'full']);
 
 export function nativeOrchestratorFor({ useTools = false, nativeMetaMode = 'off' } = {}) {
+  if (nativeMetaMode === 'unified-meta-v2') return 'unified-meta-v2';
   if (useTools) return null;
   return nativeMetaMode === 'native-meta-v1' ? 'meta-v1' : 'v2';
 }
@@ -26,7 +27,9 @@ export class CloudflareChatSessionClient {
       const payload = await response.json();
       return {
         mode: VALID_MODES.has(payload?.mode) ? payload.mode : 'off',
-        nativeMetaMode: payload?.native_meta_mode === 'native-meta-v1' ? 'native-meta-v1' : 'off',
+        nativeMetaMode: ['native-meta-v1', 'unified-meta-v2'].includes(payload?.native_meta_mode)
+          ? payload.native_meta_mode
+          : 'off',
       };
     } catch (error) {
       this.logger.warn?.(`[durable-chat] Flagship evaluation failed closed: ${error.message}`);

@@ -27,6 +27,8 @@ function plan(overrides = {}) {
 test('flag off preserves the existing Native V2 orchestrator and tools mode remains isolated', () => {
   assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'off' }), 'v2');
   assert.equal(nativeOrchestratorFor({ useTools: true, nativeMetaMode: 'native-meta-v1' }), null);
+  assert.equal(nativeOrchestratorFor({ useTools: false, nativeMetaMode: 'unified-meta-v2' }), 'unified-meta-v2');
+  assert.equal(nativeOrchestratorFor({ useTools: true, nativeMetaMode: 'unified-meta-v2' }), 'unified-meta-v2');
 });
 
 test('meta planner schema progressively adds retrieval controls without changing legacy schema', () => {

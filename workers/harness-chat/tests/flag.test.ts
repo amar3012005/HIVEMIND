@@ -124,6 +124,7 @@ describe('runner and asset routing', () => {
   it('serves the document from assets and injects the authenticated runner boot table', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ version: 1, injections: [
       { kind: 'global', name: '__DSH_BOOT__', value: { plugins: [] } },
+      { kind: 'script', placement: 'head', text: 'globalThis.__ModuleLoader__={create(){}}' },
     ] })));
     const env = {
       RUNNER_ORIGIN: 'https://private-runner.example',
@@ -139,6 +140,26 @@ describe('runner and asset routing', () => {
     expect(html).toContain('globalThis["__DSH_BOOT__"]');
     expect(html).toContain('__DSH_BOOT_READY__');
     expect(env.ASSETS.fetch).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects a runner boot table that cannot install the native module loader', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ version: 1, injections: [
+      { kind: 'global', name: '__DSH_BOOT__', value: { plugins: [] } },
+    ] })));
+    const env = {
+      RUNNER_ORIGIN: 'https://private-runner.example',
+      HIVE_HARNESS_PARENT_ORIGINS: 'https://next.preview.singulancelabs.com',
+      ASSETS: { fetch: vi.fn(async () => new Response('<html><head></head><body></body></html>', {
+        headers: { 'content-type': 'text/html' },
+      })) },
+    } as unknown as Env;
+
+    const response = await worker.fetch(new Request('https://chat.preview.singulancelabs.com/'), env);
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.text()).toBe('HIVE-MIND boot unavailable');
     vi.unstubAllGlobals();
   });
 });

@@ -114,6 +114,11 @@ function renderBootIndex(html: string, rows: BootInjection[]): string {
     .replace(/<body([^>]*)>/i, match => `${match}${body}`);
 }
 
+function hasModuleLoaderBootstrap(rows: BootInjection[]): boolean {
+  return rows.some(row => row.kind === 'script'
+    && /(?:globalThis|window)\s*\.\s*__ModuleLoader__\s*=/.test(row.text));
+}
+
 function authCallback(request: Request): Response {
   const preview = new URL(request.url).hostname.includes('.preview.');
   const hiveOverview = preview
@@ -164,8 +169,12 @@ async function staticHarness(request: Request, env: Env): Promise<Response> {
     });
   }
   const payload = await boot.json() as { version?: number; injections?: BootInjection[] };
-  if (payload.version !== 1 || !Array.isArray(payload.injections)) {
-    return new Response('HIVE-MIND boot unavailable', { status: 503 });
+  if (payload.version !== 1 || !Array.isArray(payload.injections)
+    || !hasModuleLoaderBootstrap(payload.injections)) {
+    return new Response('HIVE-MIND boot unavailable', {
+      status: 503,
+      headers: { 'cache-control': 'no-store' },
+    });
   }
   const html = renderBootIndex(await asset.text(), payload.injections);
   const headers = new Headers(asset.headers);

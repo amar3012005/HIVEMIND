@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ACTIVATION_STAGES,
   activationReminderCopy,
+  advanceActivationForEmail,
   isActivationLifecycleEnabled,
   scheduleActivationWorkflow,
 } from '../../src/lifecycle/activation-lifecycle.js';
@@ -16,6 +17,23 @@ test('activation lifecycle backend gate is fail-closed', () => {
     assert.equal(isActivationLifecycleEnabled(), false);
     process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED = 'true';
     assert.equal(isActivationLifecycleEnabled(), true);
+  } finally {
+    if (previous === undefined) delete process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED;
+    else process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED = previous;
+  }
+});
+
+test('disabled activation lifecycle always returns an iterable empty result', async () => {
+  const previous = process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED;
+  try {
+    delete process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED;
+    const result = await advanceActivationForEmail({
+      prisma: { $queryRawUnsafe: async () => { throw new Error('must not query'); } },
+      email: 'person@example.test',
+      stage: ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY,
+    });
+    assert.deepEqual(result, []);
+    assert.doesNotThrow(() => [...result]);
   } finally {
     if (previous === undefined) delete process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED;
     else process.env.HIVEMIND_ACTIVATION_LIFECYCLE_ENABLED = previous;

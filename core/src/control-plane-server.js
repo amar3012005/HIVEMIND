@@ -3513,7 +3513,7 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, { error: 'activation_recipient_unavailable', retryable: false }, 422);
       }
       const copy = activationReminderCopy(lifecycle.stage, lifecycle.metadata?.company_name || 'your company');
-      const appUrl = `${String(process.env.APP_URL || 'https://next.singulancelabs.com').replace(/\/$/, '')}${copy.href}`;
+      const appUrl = `${resolvePublicAppUrl()}${copy.href}`;
       const delivery = await sendSystemEmail({
         templateId: 'announcement',
         to: lifecycle.email,

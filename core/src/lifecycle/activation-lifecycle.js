@@ -57,7 +57,12 @@ export async function startInvitationActivation({ prisma, invite, metadata = {},
 }
 
 export async function advanceActivationForEmail({ prisma, email, userId = null, orgId = null, stage, reason, now = new Date() } = {}) {
-  if (!isActivationLifecycleEnabled() || !prisma || !email || !stage) return { skipped: true };
+  // Callers schedule each changed activation with a simple `for…of`. Keep
+  // this helper's return contract stable when the optional lifecycle feature
+  // is disabled or lacks the required context: no rows changed is an empty
+  // collection, never a sentinel object. This makes authentication and
+  // onboarding independent of lifecycle rollout state.
+  if (!isActivationLifecycleEnabled() || !prisma || !email || !stage) return [];
   const firstNext = nextReminder(stage, 0, now);
   const rows = await prisma.$queryRawUnsafe(
     `UPDATE hivemind.activation_lifecycles

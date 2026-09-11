@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # release-canonical.sh — immutable, single-SHA production release.
 #
-#   release-canonical.sh --sha <merged-singulance-main-sha> \
+#   release-canonical.sh --sha <merged-release-sha> \
 #                        --services core,tara-grok,tara-deepgram,control-plane,employees \
+#                        [--branch singulance-main] \
 #                        [--canary-url https://next.singulancelabs.com/hivemind/app] \
 #                        [--skip-canary] [--skip-migrations] [--dry-run]
 #                        [--service-scoped] [--allow-divergence]
@@ -20,10 +21,11 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0
+SHA=""; SERVICES=""; CANARY_URL=""; RELEASE_BRANCH="${RELEASE_BRANCH:-singulance-main}"; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
+  --branch) RELEASE_BRANCH="$2"; shift 2;;
   --canary-url) CANARY_URL="$2"; shift 2;;
   --skip-canary) SKIP_CANARY=1; shift;;
   --skip-migrations) SKIP_MIGRATIONS=1; shift;;
@@ -34,6 +36,8 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
 [ -n "$SERVICES" ] || { echo "FATAL: --services required"; exit 2; }
+git check-ref-format --branch "$RELEASE_BRANCH" >/dev/null \
+  || { echo "FATAL: invalid --branch '$RELEASE_BRANCH'"; exit 2; }
 
 CANON=/root/hivemind-main
 HDIR=/root/hivemind
@@ -82,13 +86,14 @@ CANON_REMOTE=origin
 if git -C "$CANON" remote get-url github >/dev/null 2>&1; then
   CANON_REMOTE=github
 fi
-git -C "$CANON" -c fetch.recurseSubmodules=false fetch "$CANON_REMOTE" singulance-main -q
+git -C "$CANON" -c fetch.recurseSubmodules=false fetch "$CANON_REMOTE" \
+  "refs/heads/$RELEASE_BRANCH:refs/remotes/$CANON_REMOTE/$RELEASE_BRANCH" -q
 FULLSHA=$(git -C "$CANON" rev-parse "$SHA^{commit}" 2>/dev/null) || { echo "FATAL: sha $SHA not found"; exit 1; }
-git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/singulance-main" \
-  || { echo "FATAL: $SHA is NOT an ancestor of origin/singulance-main — refusing (unmerged code)"; exit 1; }
+git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/$RELEASE_BRANCH" \
+  || { echo "FATAL: $SHA is NOT an ancestor of $CANON_REMOTE/$RELEASE_BRANCH — refusing (unmerged code)"; exit 1; }
 SHORT=$(git -C "$CANON" rev-parse --short "$FULLSHA")
 SHA="$FULLSHA"
-echo "[gate] $SHORT is on canonical ✓"
+echo "[gate] $SHORT is on $CANON_REMOTE/$RELEASE_BRANCH ✓"
 
 # Core, Control Plane, and Employees share Runtime/Room contracts. A
 # partial release is safe only when every omitted member is already running the

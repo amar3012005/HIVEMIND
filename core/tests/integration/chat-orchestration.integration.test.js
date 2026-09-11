@@ -93,7 +93,8 @@ test('complete aggregate uses one parser call, scoped entity executor, and no an
       message: 'How many Solvis products exist?', apiKey: 'test',
       ctx: {
         userId: '33333333-3333-3333-3333-333333333333', orgId: '44444444-4444-4444-4444-444444444444',
-        prisma, accessContext: { projectIds: [], teamIds: [], orgRole: 'owner' },
+        prisma, unifiedDag: true,
+        accessContext: { projectIds: [], teamIds: [], orgRole: 'owner' },
       },
     });
     assert.equal(modelCalls, 1);
@@ -140,7 +141,8 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
       useTools: true,
       ctx: {
         userId: '55555555-5555-5555-5555-555555555555', orgId: '66666666-6666-6666-6666-666666666666',
-        prisma, accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },
+        prisma, unifiedDag: true, compoundOrchestrator: true,
+        accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },
       },
     });
     assert.equal(modelCalls, 3);

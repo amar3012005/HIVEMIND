@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build and replace only the immutable Harness runner.  Core, Control Plane,
+# databases, ingress, and all other Compose services are deliberately excluded.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="${HIVEMIND_CHAT_ENV_FILE:-$ROOT/infra/.env.hivemind-chat.local}"
+LOCK="$ROOT/infra/harness-chat-release.lock.json"
+COMPOSE=(docker compose -p hivemind-chat-local --env-file "$ENV_FILE" -f "$ROOT/infra/docker-compose.hivemind-chat.yml")
+
+[[ -f "$ENV_FILE" && -f "$LOCK" ]] || { echo "release: local environment or lock is missing" >&2; exit 2; }
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+load_keychain() {
+  local variable="$1" service="$2"
+  [[ -n "${!variable:-}" ]] && return
+  command -v security >/dev/null 2>&1 || return
+  printf -v "$variable" '%s' "$(security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null || true)"
+  export "$variable"
+}
+
+load_keychain HIVEMIND_MASTER_API_KEY hivemind-chat-local-master-api-key
+load_keychain HIVE_HARNESS_EDGE_EVAL_SECRET hivemind-harness-edge-eval-secret
+load_keychain CLOUDFLARE_API_KEY hivemind-cloudflare-api-key
+load_keychain COMPOSIO_API_KEY hivemind-composio-api-key
+
+for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVEMIND_MASTER_API_KEY HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARE_API_KEY COMPOSIO_API_KEY; do
+  [[ -n "${!key:-}" ]] || { echo "release: required $key is unavailable" >&2; exit 2; }
+done
+
+source_root="$HIVEMIND_HARNESS_SOURCE"
+target="$(git -C "$source_root" rev-parse HEAD)"
+locked="$(node -e "process.stdout.write(require(process.argv[1]).harnessCommit)" "$LOCK")"
+[[ "$target" == "$locked" && "$HIVEMIND_HARNESS_COMMIT_HASH" == "$locked" ]] || {
+  echo "release: source, environment, and release lock must name the same Harness commit" >&2
+  exit 2
+}
+[[ -z "$(git -C "$source_root" status --porcelain)" ]] || { echo "release: Harness source is dirty" >&2; exit 2; }
+
+"$ROOT/scripts/harness-chat-env" doctor
+
+image="hivemind/harness-chat:$locked"
+rollback="${image}-rollback-$(date +%Y%m%d%H%M%S)"
+current="$(docker inspect -f '{{.Config.Image}}' hivemind-harness-runner 2>/dev/null || true)"
+[[ -n "$current" ]] && docker tag "$current" "$rollback"
+
+rollback_runner() {
+  echo "release: restoring runner image $rollback" >&2
+  docker tag "$rollback" "$image"
+  "${COMPOSE[@]}" up -d --no-build --no-deps --force-recreate harness-runner
+}
+trap 'rollback_runner' ERR
+
+docker build --pull=false --tag "$image" \
+  --build-arg "DSH_CLIENT_COMMIT_HASH=$locked" \
+  --file "$source_root/deploy/hivemind-chat/Dockerfile" "$source_root"
+"${COMPOSE[@]}" up -d --no-build --no-deps --force-recreate harness-runner
+
+deadline=$((SECONDS + 180))
+until [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner)" == healthy ]]; do
+  (( SECONDS < deadline )) || { echo "release: runner did not become healthy" >&2; exit 1; }
+  sleep 3
+done
+
+curl -fsS -H 'Host: next.preview.singulancelabs.com' http://127.0.0.1:18080/health >/dev/null
+trap - ERR
+echo "release: runner $locked is healthy; authenticate in next.preview for admission, model, turn, and replay acceptance"

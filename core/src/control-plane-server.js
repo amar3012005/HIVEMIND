@@ -7084,7 +7084,10 @@ const server = http.createServer(async (req, res) => {
         const orgId = current.session.orgId || current.session.org_id;
         if (orgId) {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
-          const accounts = await composioService.listConnectedAccounts(orgId);
+          const accounts = await composioService.listConnectedAccounts(orgId, {
+            userId: current.session.userId,
+            includeLegacyOrg: true,
+          });
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
             const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
@@ -7161,6 +7164,7 @@ const server = http.createServer(async (req, res) => {
       // it passes it along so a toolkit with no ops-curated auth config yet
       // gets one auto-provisioned instead of 400ing.
       const link = await composioService.createConnectLink(toolkitSlug, orgId, {
+        userId: current.session.userId,
         callbackUrl,
         toolkitMeta: body.toolkit_meta && typeof body.toolkit_meta === 'object' ? {
           composioManagedAuthSchemes: Array.isArray(body.toolkit_meta.composio_managed_auth_schemes) ? body.toolkit_meta.composio_managed_auth_schemes : [],
@@ -7201,7 +7205,9 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req).catch(() => ({}));
       const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
       if (!apiKey) return jsonResponse(res, { error: 'api_key is required' }, 400);
-      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey);
+      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey, {
+        userId: current.session.userId,
+      });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_connect_started', eventCategory: 'connectors', action: 'create',
@@ -7230,7 +7236,10 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
-      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug);
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, {
+        userId: current.session.userId,
+        includeLegacyOrg: true,
+      });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
@@ -7265,7 +7274,10 @@ const server = http.createServer(async (req, res) => {
         });
       const [page, accounts] = await Promise.all([
         pagePromise,
-        orgId ? composioService.listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
+        orgId ? composioService.listConnectedAccounts(orgId, {
+          userId: current.session.userId,
+          includeLegacyOrg: true,
+        }).catch(() => []) : Promise.resolve([]),
       ]);
       // Real per-org connection state, not something the FE has to remember
       // client-side across reloads — the "connected" flag here reflects
@@ -7648,7 +7660,10 @@ const server = http.createServer(async (req, res) => {
       const orgId = current.session.orgId || current.session.org_id;
       if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
       try {
-        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id);
+        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id, {
+          userId: current.session.userId,
+          includeLegacyOrg: true,
+        });
         return jsonResponse(res, { success: removed > 0, provider: providerId });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);

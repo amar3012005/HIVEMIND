@@ -20,6 +20,25 @@ if [[ -z "${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}" ]] && command -v security >
   HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN="$(security find-generic-password -a "${USER}" -s singulance-preview-mailer-token -w 2>/dev/null || true)"
   export HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN
 fi
+if [[ -z "${HIVEMIND_MASTER_API_KEY:-}" || "${HIVEMIND_MASTER_API_KEY:-}" == "hm_master_key_99228811" ]] && command -v security >/dev/null 2>&1; then
+  HIVEMIND_MASTER_API_KEY="$(security find-generic-password -a "${USER}" -s hivemind-chat-local-master-api-key -w 2>/dev/null || true)"
+  export HIVEMIND_MASTER_API_KEY
+fi
+if [[ -z "${HIVE_HARNESS_EDGE_EVAL_SECRET:-}" ]] && command -v security >/dev/null 2>&1; then
+  HIVE_HARNESS_EDGE_EVAL_SECRET="$(security find-generic-password -a "${USER}" -s hivemind-harness-edge-eval-secret -w 2>/dev/null || true)"
+  export HIVE_HARNESS_EDGE_EVAL_SECRET
+fi
+if [[ -z "${CLOUDFLARE_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
+  CLOUDFLARE_API_KEY="$(security find-generic-password -a "${USER}" -s hivemind-cloudflare-api-key -w 2>/dev/null || true)"
+  if [[ -z "$CLOUDFLARE_API_KEY" ]]; then
+    CLOUDFLARE_API_KEY="$(security find-generic-password -s deepseek-harness-cloudflare-ai-gateway -w 2>/dev/null || true)"
+  fi
+  export CLOUDFLARE_API_KEY
+fi
+if [[ -z "${COMPOSIO_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
+  COMPOSIO_API_KEY="$(security find-generic-password -a "${USER}" -s hivemind-composio-api-key -w 2>/dev/null || true)"
+  export COMPOSIO_API_KEY
+fi
 FILES=(-f "$ROOT/infra/docker-compose.hivemind-chat.yml")
 FOREIGN_CONTAINERS=(
   hm-core hm-control hm-postgres hm-redis hm-nango hm-playwright hm-employees
@@ -109,9 +128,10 @@ doctor() {
   actual="$(git -C "$ROOT" ls-tree HEAD frontend/Da-vinci | awk '{print $3}')"
   [[ "$actual" == "$expected" ]] || fail "Da-vinci SHA drift"
   [[ -f "$ENV_FILE" ]] || fail "missing $ENV_FILE"
-  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN; do
+  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN HIVEMIND_MASTER_API_KEY CLOUDFLARE_API_KEY; do
     configured "$key" || fail "$key missing"
   done
+  [[ "$(env_val HIVEMIND_MASTER_API_KEY)" != "hm_master_key_99228811" ]] || fail "placeholder HIVEMIND_MASTER_API_KEY is forbidden"
   [[ "$(env_val HIVEMIND_HARNESS_COMMIT_HASH)" == "$(lock harnessCommit)" ]] || fail "env Harness SHA does not match lock"
   creds="$(env_val CLOUDFLARED_CREDENTIALS_FILE)"
   [[ -n "$creds" && -f "$creds" ]] || fail "cloudflared credentials file missing"
@@ -153,6 +173,23 @@ wait_healthy() {
   verify_health
 }
 
+refresh_core_auth() {
+  # The Control Plane and Core must always receive the same non-placeholder
+  # internal key. Run this through this wrapper so Keychain hydration happens
+  # before Compose evaluates its ${...:?required} substitutions.
+  doctor
+  compose up -d --no-build --no-deps --force-recreate core control-plane
+  local deadline=$((SECONDS + 180)) state
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-core 2>/dev/null || printf missing)" == healthy \
+      && "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-control-plane 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Core or Control Plane did not become healthy"; return 1; }
+    sleep 3
+  done
+  docker exec hivemind-control-plane node -e 'import("./src/security/internal-auth.js").then(({getInternalApiKey}) => { const value = getInternalApiKey({ allowDevFallback: false }); if (value === "hm_master_key_99228811") process.exit(1); console.log("internal auth key accepted"); })'
+  docker exec hivemind-core node -e 'import("./src/embeddings/factory.js").then(async ({getEmbedService}) => { const value = await getEmbedService().embedOne("hivemind local readiness", { workload: "interactive" }); if (!Array.isArray(value) || value.length !== 1024) process.exit(1); console.log("embedding provider accepted (1024 dimensions)"); })'
+  say OK "Core and Control Plane share an accepted internal auth key"
+}
+
 test_all() {
   doctor
   verify_health
@@ -176,9 +213,10 @@ case "${1:-status}" in
     wait_healthy
     compose ps
     ;;
-  restart) compose up -d --no-build harness-runner ;;
+  restart) doctor; compose up -d --no-build --no-deps --force-recreate harness-runner; wait_healthy ;;
+  refresh-core-auth) refresh_core_auth ;;
   health) verify_health ;;
   test) test_all ;;
   down) compose down ;;
-  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|test|down"; exit 2 ;;
+  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|refresh-core-auth|test|down"; exit 2 ;;
 esac

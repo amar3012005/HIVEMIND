@@ -32,7 +32,7 @@ export function runtimeConnectorConnectPath(capability, provider = getHyperagent
 export async function listRuntimeConnectedCapabilities({ prisma, orgId, userId, provider = getHyperagentsRuntimeConnectorProvider() }) {
   if (provider === 'composio') {
     const { listConnectedAccounts } = await import('./composio/composio-service.js');
-    const rows = await listConnectedAccounts(orgId).catch(() => []);
+    const rows = await listConnectedAccounts(orgId, { userId, includeLegacyOrg: true }).catch(() => []);
     return rows.filter((row) => row.status === 'ACTIVE').map((row) => String(row.toolkit || '').toLowerCase());
   }
   if (!prisma?.nangoConnection) return [];

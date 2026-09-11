@@ -85,17 +85,31 @@ function composioPost(path, body) { return _composioRequest('POST', path, body);
 function composioDelete(path) { return _composioRequest('DELETE', path); }
 
 /**
+ * Canonical Composio owner for a personal connected app. The authenticated
+ * HIVE user id is resolved by Core/Control Plane and is never accepted from
+ * browser input. Omitting userId intentionally retains the legacy org scope.
+ */
+export function composioConnectionSubject(orgId, { userId = null } = {}) {
+  return userId ? `hivemind:${userId}` : String(orgId || '');
+}
+
+function composioConnectionSubjects(orgId, opts = {}) {
+  const subject = composioConnectionSubject(orgId, opts);
+  return opts.includeLegacyOrg && subject !== String(orgId)
+    ? [subject, String(orgId)]
+    : [subject];
+}
+
+/**
  * Delete every connected account an org has for one toolkit (disconnect).
  * Returns the number of accounts removed.
  */
-export async function disconnectToolkit(orgId, toolkitSlug) {
-  const accountData = await _composioRequest(
-    'GET',
-    `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(orgId)}`,
-    null,
+export async function disconnectToolkit(orgId, toolkitSlug, opts = {}) {
+  const accountPages = await Promise.all(composioConnectionSubjects(orgId, opts).map((subject) => _composioRequest(
+    'GET', `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}`, null,
     { retries: 0, timeoutMs: 3_000 },
-  );
-  const accounts = (accountData?.items || []).map((item) => ({
+  )));
+  const accounts = accountPages.flatMap((page) => page?.items || []).map((item) => ({
     id: item.id,
     toolkit: item.toolkit?.slug,
     status: item.status,
@@ -125,9 +139,15 @@ export async function disconnectToolkit(orgId, toolkitSlug) {
  * @param {string} orgId — used as Composio's user_id (tenant key)
  * @returns {Promise<Array<{ id, toolkit, status }>>}
  */
-export async function listConnectedAccounts(orgId) {
-  const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(orgId)}`);
-  return (data?.items || []).map((it) => ({
+export async function listConnectedAccounts(orgId, opts = {}) {
+  const subjects = composioConnectionSubjects(orgId, opts);
+  const pages = await Promise.all(subjects.map((owner) => composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(owner)}`)));
+  const seen = new Set();
+  return pages.flatMap((data) => data?.items || []).filter((it) => {
+    if (!it?.id || seen.has(it.id)) return false;
+    seen.add(it.id);
+    return true;
+  }).map((it) => ({
     id: it.id,
     toolkit: it.toolkit?.slug,
     status: it.status, // ACTIVE | INITIATED | EXPIRED | FAILED
@@ -238,7 +258,7 @@ export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
   }
   const body = {
     auth_config_id: authConfigId,
-    user_id: orgId,
+    user_id: composioConnectionSubject(orgId, opts),
     ...(opts.callbackUrl ? { callback_url: opts.callbackUrl } : {}),
   };
   const data = await composioPost('/api/v3/connected_accounts/link', body);
@@ -561,7 +581,7 @@ export async function getOrCreateAuthConfigId(toolkitSlug, toolkitMeta) {
  * @param {string} toolkitSlug
  * @param {string} apiKey
  */
-export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
+export async function createApiKeyConnection(orgId, toolkitSlug, apiKey, opts = {}) {
   const authConfigId = getAuthConfigId(toolkitSlug) || await (async () => {
     const data = await composioPost('/api/v3.1/auth_configs', {
       toolkit: { slug: toolkitSlug },
@@ -573,7 +593,7 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
 
   const data = await composioPost('/api/v3.1/connected_accounts', {
     auth_config: { id: authConfigId },
-    connection: { user_id: orgId, state: { authScheme: 'API_KEY', val: { status: 'INITIALIZED', api_key: apiKey } } },
+    connection: { user_id: composioConnectionSubject(orgId, opts), state: { authScheme: 'API_KEY', val: { status: 'INITIALIZED', api_key: apiKey } } },
   });
   return { id: data?.id, status: data?.status };
 }

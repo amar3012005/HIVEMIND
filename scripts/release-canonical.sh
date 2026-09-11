@@ -44,6 +44,9 @@ HDIR="${RELEASE_RUNTIME_ROOT:-/root/hivemind}"
 ENVF="${RELEASE_ENV_FILE:-$HDIR/.env}"
 PRESENCE="${RELEASE_PRESENCE_SCRIPT:-$HDIR/scripts/release-presence.sh}"
 WORKTREE_ROOT="${RELEASE_WORKTREE_ROOT:-/root/releases}"
+RELEASE_COMPOSE_PROJECT_NAME="${RELEASE_COMPOSE_PROJECT_NAME:-}"
+COMPOSE_PROJECT_ARGS=()
+[ -z "$RELEASE_COMPOSE_PROJECT_NAME" ] || COMPOSE_PROJECT_ARGS=(--project-name "$RELEASE_COMPOSE_PROJECT_NAME")
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
@@ -158,7 +161,7 @@ OVERRIDE="$STATE_ROOT/deploy-override.yml"
 # --project-directory. No secret value is copied into this artifact.
 HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
 sed "s#env_file: \[../.env\]#env_file: [$ENVF]#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
-docker compose --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
+docker compose "${COMPOSE_PROJECT_ARGS[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
   && echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()
 
@@ -204,7 +207,7 @@ if [ -n "${REQUESTED[core]:-}" ]; then
     # Compose file; it is intentionally not duplicated in the host .env.
     # Run the migration through that same resolved service environment rather
     # than a bare docker run, which would omit DATABASE_URL on Enigma.
-    docker compose --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+    docker compose "${COMPOSE_PROJECT_ARGS[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
       --env-file "$ENVF" run --rm --no-deps core node scripts/prisma-migrate-deploy.mjs
   fi
 fi
@@ -213,7 +216,7 @@ fi
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
-  docker compose --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+  docker compose "${COMPOSE_PROJECT_ARGS[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
 done
 

@@ -100,7 +100,8 @@ function resultSources(receipts = []) {
 }
 
 function substantiveProviderReceipt(receipt, primarySlugs = []) {
-  if (!receipt || receipt.successful === false || !primarySlugs.includes(receipt.tool)) return false;
+  if (!receipt || receipt.successful === false || receipt.action !== 'execute'
+    || receipt.status === 'schema_loaded_arguments_required' || !primarySlugs.includes(receipt.tool)) return false;
   const data = receipt.data;
   if (data == null) return false;
   const collectionKeys = ['messages', 'items', 'results', 'records', 'emails', 'threads', 'events', 'posts', 'data'];
@@ -506,7 +507,14 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     return {
       ...statePatch, pendingTool: null, callFingerprints: [...state.callFingerprints, fingerprint],
       messages: [...state.messages, toolMessage(call, exposed)],
-      receipts: [...state.receipts, { tool: underlying, successful: receipt?.successful !== false, data: exposed, error: receipt?.error || null }],
+      receipts: [...state.receipts, {
+        tool: underlying,
+        action: call.name === 'hivemind_connected_task' ? call.args.action : null,
+        status: receipt?.status || null,
+        successful: receipt?.successful !== false,
+        data: exposed,
+        error: receipt?.error || null,
+      }],
       steps: [...state.steps, { kind: 'tool', slug: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed' }],
     };
   };
@@ -555,7 +563,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     return {
       pendingApproval: null,
       messages: [...state.messages, { role: 'system', content: jsonText({ approval: successful ? 'executed_once' : 'execution_failed', receipt: exposed }) }],
-      receipts: [...state.receipts, { tool: row.toolName, successful, data: exposed, error: receipt?.error || null }],
+      receipts: [...state.receipts, { tool: row.toolName, action: 'execute', status: successful ? 'executed' : 'failed', successful, data: exposed, error: receipt?.error || null }],
       steps: [...state.steps, { kind: 'approval', slug: row.toolName, status: successful ? 'completed' : 'failed', summary: successful ? 'Approved action completed once' : 'Approved action failed' }],
     };
   };

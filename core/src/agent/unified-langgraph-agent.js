@@ -348,6 +348,23 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       return { pendingTool: null, messages: [...state.messages, toolMessage(call, receipt)], receipts: [...state.receipts, receipt] };
     }
     onEvent({ type: 'tool_start', name: call.name, arguments: call.args, run_id: state.runId });
+    if (call.name === '__invalid_tool__') {
+      const receipt = {
+        successful: false,
+        error: 'tool_not_available',
+        requested_tool: compactText(call.requestedName, 120),
+        available_tools: unifiedMetaTools({ useTools }).map(tool => tool.function.name),
+        instruction: 'Choose one available gateway tool and continue the original request.',
+      };
+      onEvent({ type: 'tool_result', name: call.requestedName || call.name, status: 'error', summary: receipt.error, run_id: state.runId });
+      return {
+        pendingTool: null,
+        callFingerprints: [...state.callFingerprints, fingerprint],
+        messages: [...state.messages, toolMessage(call, receipt)],
+        receipts: [...state.receipts, { tool: call.requestedName || call.name, successful: false, data: receipt, error: receipt.error }],
+        steps: [...state.steps, { kind: 'tool', slug: call.requestedName || call.name, status: 'error', summary: receipt.error }],
+      };
+    }
     let receipt = call.name === 'hivemind_meta'
       ? await runMeta(call.args, ctx, state)
       : await runConnected(call.args, state, ctx, composio);

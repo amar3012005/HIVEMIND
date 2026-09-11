@@ -38,8 +38,16 @@ test('tool-call parsing and authority validation remain server owned', () => {
   assert.deepEqual(parseUnifiedToolCall({ id: 'c1', function: { name: 'hivemind_meta', arguments: '{"operation":"context"}' } }), {
     id: 'c1', name: 'hivemind_meta', args: { operation: 'context' },
   });
-  assert.throws(() => parseUnifiedToolCall({ function: { name: 'GMAIL_FETCH_EMAILS', arguments: '{}' } }), /not_allowed/);
+  assert.equal(parseUnifiedToolCall({ function: { name: 'GMAIL_FETCH_EMAILS', arguments: '{}' } }).name, '__invalid_tool__');
   assert.equal(connectedToolAuthority('GMAIL_GET_POST_CONTENT'), 'read');
   assert.equal(connectedToolAuthority('GMAIL_SEND_EMAIL'), 'write');
   assert.equal(connectedToolAuthority('ODD_PROVIDER_ACTION', { read_only: true }), 'read');
+});
+
+test('tool-call parsing normalizes harmless provider variants and returns an unknown-tool repair observation', () => {
+  const normalized = parseUnifiedToolCall({ id: '1', function: { name: 'functions.HIVEMIND_CONNECTED_TASK', arguments: '{"action":"search"}' } });
+  assert.equal(normalized.name, 'hivemind_connected_task');
+  const invalid = parseUnifiedToolCall({ id: '2', function: { name: 'COMPOSIO_SEARCH_TOOLS', arguments: '{}' } });
+  assert.equal(invalid.name, '__invalid_tool__');
+  assert.equal(invalid.requestedName, 'COMPOSIO_SEARCH_TOOLS');
 });

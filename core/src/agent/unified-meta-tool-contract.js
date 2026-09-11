@@ -76,11 +76,14 @@ export function unifiedMetaTools({ useTools = false } = {}) {
 }
 
 export function parseUnifiedToolCall(call) {
-  const name = String(call?.function?.name || '').trim();
-  if (!['hivemind_meta', 'hivemind_connected_task'].includes(name)) throw new Error('unified_tool_not_allowed');
+  const requestedName = String(call?.function?.name || '').trim();
+  const name = requestedName.replace(/^functions\./i, '').toLowerCase();
   let args;
   try { args = JSON.parse(call?.function?.arguments || '{}'); } catch { throw new Error('unified_tool_arguments_invalid_json'); }
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('unified_tool_arguments_invalid');
+  if (!['hivemind_meta', 'hivemind_connected_task'].includes(name)) {
+    return { id: String(call?.id || `call-${Date.now()}`), name: '__invalid_tool__', args: {}, requestedName };
+  }
   return { id: String(call?.id || `call-${Date.now()}`), name, args };
 }
 

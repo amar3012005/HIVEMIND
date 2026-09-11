@@ -220,10 +220,16 @@ test('graph recovers missing detail evidence before returning all five records',
   const result = await runGovernedAgentRuntime({
     message: 'Show the latest five records with subject, sender, and time.',
     ctx: { orgId: 'org', userId: 'user', governedDecision: async ({ stage, input }) => {
-      if (stage === 'intent') return { locale: 'en', apps: ['gmail'], discovery_query: 'retrieve five latest records with subject sender time', outcomes: [{ id: 'read', kind: 'read', description: 'five records and fields' }] };
+      if (stage === 'intent') return {
+        locale: 'en', apps: ['gmail'], discovery_query: 'retrieve five latest records with subject sender time',
+        answer_objective: 'Show the five latest records with subject, sender, and time.', response_depth: 'detailed',
+        outcomes: [{ id: 'read', kind: 'read', description: 'five records and fields' }],
+      };
       if (stage === 'planning') return { action: 'read', tool_slug: input.receipts.length ? 'APP_FETCH_ITEMS' : 'APP_LIST_ITEMS', purpose: 'outcome', outcome_ids: ['read'] };
       if (stage === 'arguments') return {};
       if (stage === 'synthesis') {
+        assert.equal(input.answer_contract.depth, 'detailed');
+        assert.equal(input.answer_contract.objective, 'Show the five latest records with subject, sender, and time.');
         const data = input.receipts.at(-1).data.records;
         if (!data[0].subject) return { complete: false, response: 'More detail required.', missing_outcomes: ['read'], recovery_instruction: 'Fetch the details for these IDs.' };
         assert.equal(data.length, 5);

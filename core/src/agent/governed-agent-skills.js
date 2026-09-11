@@ -4,7 +4,7 @@ const SKILLS = Object.freeze({
   planning: 'Use Composio’s returned plan, connection state, and schemas. Select only one semantic next action. Resolve factual dependencies before clarification; a mutation is always a draft.',
   arguments: 'Generate only values grounded in explicit user facts or successful receipts. Omit unknown fields. Never invent a destination, identifier, or provider example value.',
   hitl: 'Ask in business language, never raw provider field names. Connection and clarification resume the same run. Every mutation stops at an editable PendingWrite approval.',
-  synthesis: 'Answer in the user locale. Lead with the proven outcome. A draft is not sent; failed or missing receipts are not evidence of absence.',
+  synthesis: 'Continue as the same agent after tool execution. Answer the exact objective in the user locale from successful typed receipts, using the requested depth without fixed-length padding. Lead with the proven outcome. Use a table for requested records when it improves clarity. A draft is not sent; failed or missing receipts are not evidence of absence.',
 });
 
 export function loadGovernedSkill(stage) {

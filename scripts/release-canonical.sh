@@ -82,7 +82,12 @@ CANON_REMOTE=origin
 if git -C "$CANON" remote get-url github >/dev/null 2>&1; then
   CANON_REMOTE=github
 fi
-git -C "$CANON" -c fetch.recurseSubmodules=false fetch "$CANON_REMOTE" singulance-main -q
+# Fetch into the exact tracking ref used by the ancestor gate.  A named fetch
+# can update only FETCH_HEAD when an operator's remote refspec is restrictive,
+# which made a newly merged canonical SHA look unmerged and safely blocked a
+# valid release.  Keeping the target explicit preserves the fail-closed gate.
+git -C "$CANON" -c fetch.recurseSubmodules=false fetch "$CANON_REMOTE" \
+  "refs/heads/singulance-main:refs/remotes/$CANON_REMOTE/singulance-main" -q
 FULLSHA=$(git -C "$CANON" rev-parse "$SHA^{commit}" 2>/dev/null) || { echo "FATAL: sha $SHA not found"; exit 1; }
 git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/singulance-main" \
   || { echo "FATAL: $SHA is NOT an ancestor of origin/singulance-main — refusing (unmerged code)"; exit 1; }

@@ -131,9 +131,12 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
     // rather than its position among all process-level fetch calls.
     if (Array.isArray(body.tools) && body.tools.some((tool) => tool.function?.name === 'gmail_send_email')) {
       actionCalls++;
-      return { ok: true, async json() { return { choices: [{ message: { tool_calls: [{ id: 'call-1', function: {
-        name: 'gmail_send_email', arguments: JSON.stringify({ to: 'lea@example.com', subject: 'Rapport', body: 'Bonjour Léa' }),
-      } }] } }] }; } };
+      if (actionCalls === 1) {
+        return { ok: true, async json() { return { choices: [{ message: { tool_calls: [{ id: 'call-1', function: {
+          name: 'gmail_send_email', arguments: JSON.stringify({ to: 'lea@example.com', subject: 'Rapport', body: 'Bonjour Léa' }),
+        } }] } }] }; } };
+      }
+      return { ok: true, async json() { return { choices: [{ message: { content: 'Le brouillon attend votre approbation.' } }] }; } };
     }
     return { ok: true, async json() { return { choices: [{ message: { content: 'Le brouillon attend votre approbation.' } }] }; } };
   };
@@ -153,7 +156,7 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
       },
     });
     assert.equal(plannerCalls, 1);
-    assert.equal(actionCalls, 1);
+    assert.equal(actionCalls, 2);
     assert.equal(draftRows.length, 1);
     assert.equal(draftRows[0].orgId, '66666666-6666-6666-6666-666666666666');
     assert.equal(draftRows[0].toolGroup, 'gmail');

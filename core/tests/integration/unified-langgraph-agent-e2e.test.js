@@ -116,6 +116,29 @@ test('connected search generically infers an explicitly named active toolkit whe
   assert.deepEqual(discoveredToolkits, ['gmail']);
 });
 
+test('connected search reuses an authenticated organization-scoped connection when user scope has not migrated yet', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  let discoveryScope = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show my unread Gmail emails', useTools: true, prisma, ctx: ctx(prisma, 'org-scope'), checkpointer: new MemorySaver(),
+    modelStep: async () => (++turn === 1
+      ? { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Fetch unread Gmail emails' }] }, 'o1') }
+      : { message: { role: 'assistant', content: 'No matching emails were returned.' } }),
+    composio: {
+      async listConnectedAccounts(_org, options) {
+        return options.connectionScope === 'org' ? [{ toolkit: 'gmail', status: 'ACTIVE' }] : [{ toolkit: 'linkedin', status: 'ACTIVE' }];
+      },
+      async discoverSessionTools(_org, input) {
+        discoveryScope = input.connectionScope;
+        return { sessionId: 'session-org', primaryToolSlugs: ['GMAIL_FETCH_EMAILS'], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } };
+      },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(discoveryScope, 'org');
+});
+
 test('a connected write becomes a durable approval and executes exactly once after resume', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

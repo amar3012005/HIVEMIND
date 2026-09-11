@@ -100,7 +100,9 @@ function resultSources(receipts = []) {
 
 function invalidFinal(text, receipts) {
   const answer = markdownText(text, 24000);
-  if (!answer || /\[object Object\]/.test(answer)) return true;
+  if (!answer || /\[object Object\]/.test(answer)
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(answer)
+    || /(?:^|\s)call:(?:hivemind_|composio_)[a-z0-9_]*\s*\{/i.test(answer)) return true;
   if (!(receipts || []).some(row => row.successful !== false && row.data != null)) return false;
   return /(?:i can(?:not|'t) directly display|i can only confirm|i can show you(?:\.|$)|cannot retrieve the other|need to (?:access|connect to)|please confirm (?:that )?i can proceed|don[’']t have a direct connection)/i.test(answer);
 }
@@ -113,9 +115,10 @@ async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
     const attemptMessages = index === 0 ? messages : [...messages, {
       role: 'system', content: 'The prior model returned no usable assistant message. Continue the request now using only the available gateway tools or return the final answer.',
     }];
+    const toolPayload = Array.isArray(tools) && tools.length ? { tools, tool_choice: 'auto' } : {};
     const response = await chatCompletionFetch(candidates[index], {
       method: 'POST', signal,
-      body: JSON.stringify({ temperature: 0, max_tokens: 2400, tools, tool_choice: 'auto', messages: attemptMessages }),
+      body: JSON.stringify({ temperature: 0, max_tokens: 2400, ...toolPayload, messages: attemptMessages }),
     }, { fallbackApiKey: apiKey, useCase: 'chat', traceId: crypto.randomUUID() });
     if (!response.ok) {
       if (index + 1 < candidates.length) continue;
@@ -387,8 +390,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
 
   const modelNode = async state => {
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
+    const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
+      && state.receipts.some(receipt => receipt?.successful !== false && state.selectedSlugs.includes(receipt?.tool));
     const turn = await callModel({
-      messages: state.messages, tools: unifiedMetaTools({ useTools }), model: ctx.model,
+      messages: state.messages, tools: providerEvidenceReady ? [] : unifiedMetaTools({ useTools }), model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
     });
     const assistant = turn.message || turn;

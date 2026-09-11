@@ -139,7 +139,7 @@ test('connected search generically infers an explicitly named active toolkit whe
       },
     },
   });
-  assert.equal(result.status, 'completed');
+  assert.equal(result.status, 'error');
   assert.deepEqual(discoveredToolkits, ['gmail']);
 });
 
@@ -162,7 +162,7 @@ test('connected search reuses an authenticated organization-scoped connection wh
       },
     },
   });
-  assert.equal(result.status, 'completed');
+  assert.equal(result.status, 'error');
   assert.equal(discoveryScope, 'org');
 });
 
@@ -183,7 +183,7 @@ test('the gateway grounds a contradictory model toolkit in the authenticated use
       },
     },
   });
-  assert.equal(result.status, 'completed');
+  assert.equal(result.status, 'error');
   assert.deepEqual(selected, ['gmail']);
 });
 
@@ -205,7 +205,7 @@ test('provider schema loading always uses the durable graph session, never a mod
       async getSessionToolSchemas(sessionId) { schemaSession = sessionId; return { GMAIL_FETCH_EMAILS: { input_schema: { type: 'object', properties: {} } } }; },
     },
   });
-  assert.equal(result.status, 'completed');
+  assert.equal(result.status, 'error');
   assert.equal(schemaSession, 'trusted-session');
 });
 

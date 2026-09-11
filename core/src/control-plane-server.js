@@ -295,7 +295,11 @@ const CONFIG = {
   zitadelClientId: process.env.ZITADEL_CLIENT_ID || null,
   zitadelClientSecret: process.env.ZITADEL_CLIENT_SECRET || null,
   zitadelRedirectUri: process.env.ZITADEL_REDIRECT_URI || null,
-  postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || `${defaultFrontendBaseUrl}/hivemind/login`,
+  // The configured public frontend is the sole authority for built-in auth
+  // redirects. A separate environment override can silently send a dev
+  // callback to production; explicit request return_to values are still
+  // validated by safeReturnTo at their use sites.
+  postLoginRedirect: `${defaultFrontendBaseUrl}/hivemind/login`,
   allowedOrigins: defaultAllowedOrigins
 };
 

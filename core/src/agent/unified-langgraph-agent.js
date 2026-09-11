@@ -267,13 +267,26 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
   }
   if (!schema?.input_schema) return { successful: false, error: 'connected_execute_schema_unavailable' };
   const schemaState = Object.keys(loadedSchemas).length ? { schemas: { ...state.schemas, ...loadedSchemas } } : {};
+  const suppliedArguments = args.arguments && typeof args.arguments === 'object' ? args.arguments : {};
+  if (Object.keys(loadedSchemas).length && Object.keys(schema.input_schema?.properties || {}).length && !Object.keys(suppliedArguments).length) {
+    return {
+      successful: true,
+      status: 'schema_loaded_arguments_required',
+      state: schemaState,
+      data: {
+        tool_slug: slug,
+        input_schema: schema.input_schema,
+        instruction: 'Bind the original user constraints to this schema, then call execute again with explicit arguments. Do not execute provider defaults.',
+      },
+    };
+  }
   const validate = new Ajv({ strict: false, allErrors: true }).compile(schema.input_schema);
-  if (!validate(args.arguments || {})) {
+  if (!validate(suppliedArguments)) {
     return { successful: false, error: 'schema_validation_failed', validation_errors: validate.errors?.slice(0, 8) || [] };
   }
   const authority = connectedToolAuthority(slug, schema);
-  if (authority === 'write') return { successful: true, state: schemaState, approval: { slug, arguments: args.arguments || {}, schema: schema.input_schema } };
-  const receipt = (await composio.executeToolsParallel(ctx.orgId, [{ slug, arguments: args.arguments || {} }], {
+  if (authority === 'write') return { successful: true, state: schemaState, approval: { slug, arguments: suppliedArguments, schema: schema.input_schema } };
+  const receipt = (await composio.executeToolsParallel(ctx.orgId, [{ slug, arguments: suppliedArguments }], {
     sessionId: state.sessionId, allowDirectFallback: false,
   }))[0];
   return { ...receipt, state: schemaState, data: publicToolResult(receipt) };

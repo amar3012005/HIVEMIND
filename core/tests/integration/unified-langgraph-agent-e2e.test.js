@@ -95,7 +95,7 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
-test('execute progressively hydrates its authorized schema when a weak model skips the schema step', async () => {
+test('execute progressively hydrates its authorized schema and refuses empty provider defaults', async () => {
   const prisma = fakePrisma();
   const calls = [];
   let turn = 0;
@@ -104,7 +104,8 @@ test('execute progressively hydrates its authorized schema when a weak model ski
     modelStep: async () => {
       turn += 1;
       if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Find the last five Gmail emails from Rama' }] }, 'a1') };
-      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'gmail_fetch_emails', arguments: { query: 'from:Rama', max_results: 5 } }, 'a2') };
+      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'gmail_fetch_emails', arguments: {} }, 'a2') };
+      if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'GMAIL_FETCH_EMAILS', arguments: { query: 'from:Rama', max_results: 5 } }, 'a3') };
       return { message: { role: 'assistant', content: '| Subject | Sender | Time |\n|---|---|---|\n| Hello | Rama | Today |' } };
     },
     composio: {
@@ -117,6 +118,8 @@ test('execute progressively hydrates its authorized schema when a weak model ski
   assert.equal(result.status, 'completed');
   assert.deepEqual(calls[0], ['schemas', 'auto-session', ['GMAIL_FETCH_EMAILS']]);
   assert.equal(calls[1][0], 'execute');
+  assert.equal(calls.filter(row => row[0] === 'execute').length, 1);
+  assert.deepEqual(calls[1][1][0].arguments, { query: 'from:Rama', max_results: 5 });
 });
 
 test('connected search generically infers an explicitly named active toolkit when the model omits toolkits', async () => {

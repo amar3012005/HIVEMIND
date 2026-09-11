@@ -88,9 +88,62 @@ async function getPg() {
   return pg;
 }
 
+// Tables such as document_tables and memory_evidence_links have foreign keys to
+// the document projection.  This must run before the wider schema bootstrap:
+// PostgreSQL resolves foreign keys immediately, so relying on the later
+// CREATE TABLE IF NOT EXISTS statements made a fresh central AMR installation
+// fail permanently at its first request.
+async function ensureKnowledgeProjectionDependencies(db) {
+  await db.query(`
+    CREATE SCHEMA IF NOT EXISTS hm;
+    CREATE TABLE IF NOT EXISTS hm.knowledge_documents (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      user_id uuid,
+      filename text,
+      content_type text,
+      status text DEFAULT 'ready',
+      checksum text,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      deleted_at timestamptz
+    );
+    ALTER TABLE hm.knowledge_documents
+      ADD COLUMN IF NOT EXISTS ingest_mode varchar(16) NOT NULL DEFAULT 'both';
+    CREATE INDEX IF NOT EXISTS kbdoc_org_idx
+      ON hm.knowledge_documents(org_id) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS kbdoc_org_mode_idx
+      ON hm.knowledge_documents(org_id, ingest_mode);
+
+    CREATE TABLE IF NOT EXISTS hm.knowledge_segments (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      user_id uuid,
+      document_id uuid NOT NULL,
+      content text,
+      content_hash text,
+      segment_type text,
+      segment_index int NOT NULL DEFAULT 0,
+      previous_segment_id uuid,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      vector_synced boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      start_page int,
+      end_page int,
+      word_count int,
+      content_tsv tsvector GENERATED ALWAYS AS
+        (to_tsvector('simple', coalesce(content,''))) STORED
+    );
+    CREATE INDEX IF NOT EXISTS kbseg_org_idx ON hm.knowledge_segments(org_id);
+    CREATE INDEX IF NOT EXISTS kbseg_doc_idx ON hm.knowledge_segments(document_id);
+    CREATE INDEX IF NOT EXISTS kbseg_tsv_idx ON hm.knowledge_segments USING gin(content_tsv);
+  `);
+}
+
 // Ported verbatim from agent/server.mjs ensureSchema() — same DDL, same schema `hm`.
 async function ensureSchema() {
   const db = await getPg();
+  await ensureKnowledgeProjectionDependencies(db);
   await db.query(`
     CREATE SCHEMA IF NOT EXISTS hm;
     CREATE TABLE IF NOT EXISTS hm.memories (

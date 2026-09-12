@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateHarnessChatMode, worker, type Env } from '../src/index';
+import { evaluateHarnessChatMode, evaluateUiShell, worker, type Env } from '../src/index';
 
 const HIVE_HARNESS_CHAT_FLAG_KEY = 'hivemind_harness_chat_v1';
 
@@ -36,6 +36,15 @@ describe('harness chat Flagship gate', () => {
     expect((await evaluateHarnessChatMode(env, orgId, userId)).variation).toBe('harness');
     expect((await evaluateHarnessChatMode(env, 'invalid', userId)).variation).toBe('legacy');
     expect(env.FLAGS.getStringDetails).not.toHaveBeenCalled();
+  });
+});
+
+describe('HIVE shell Flagship gate', () => {
+  it('enables compact preview chrome and fails production closed to full chrome', async () => {
+    const local = { ENVIRONMENT: 'local', FLAGS: { getStringDetails: vi.fn(async () => { throw new Error('missing'); }) } } as unknown as Env;
+    expect((await evaluateUiShell(local)).variation).toBe('compact');
+    const production = { ENVIRONMENT: 'production', FLAGS: { getStringDetails: vi.fn(async () => { throw new Error('missing'); }) } } as unknown as Env;
+    expect((await evaluateUiShell(production)).variation).toBe('full');
   });
 });
 
@@ -219,6 +228,17 @@ describe('runner and asset routing', () => {
       expect(response.headers.get('vary')).toContain('Cookie');
       expect(response.headers.get('etag')).toBe('"plugin-v1"');
       expect(response.headers.get('content-security-policy')).toContain("script-src 'self'");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('keeps revision-addressed plugin bundles in the private browser cache', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin')));
+    try {
+      const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/plugins/hivemind/client.js?rev=7144fb92', {
+        headers: { cookie: '__Host-dsh=principal' },
+      }), { RUNNER_ORIGIN: 'https://private-runner.example' } as Env);
+      expect(response.headers.get('cache-control')).toBe('private, max-age=31536000, immutable');
+      expect(response.headers.get('vary')).toContain('Cookie');
     } finally { vi.unstubAllGlobals(); }
   });
 

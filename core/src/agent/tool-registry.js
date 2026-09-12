@@ -540,6 +540,7 @@ const TOOL_HANDLERS = {
     const strictAnswerTypes = new Set(['decision', 'event', 'goal', 'preference', 'lesson', 'relationship']);
     const strictAnswerType = strictAnswerTypes.has(requestedAnswerType) ? requestedAnswerType : null;
     let selectedEntities = Array.isArray(args.entities) ? args.entities : [];
+    let selectedEntityNames = [];
     if (Array.isArray(args.entity_ids) && args.entity_ids.length) {
       const selected = await resolveAuthorizedEntityIds({
         prisma: ctx.prisma,
@@ -553,7 +554,8 @@ const TOOL_HANDLERS = {
       if (selected.degraded) {
         return { memories: [], evidence: [], relationships: [], degradation: { status: 'DEGRADED', reason: selected.degraded } };
       }
-      selectedEntities = [...new Set([...selectedEntities, ...selected.entities.map((entity) => entity.canonicalName)])];
+      selectedEntityNames = selected.entities.map((entity) => entity.canonicalName);
+      selectedEntities = [...new Set([...selectedEntities, ...selectedEntityNames])];
     }
     // The planner's answer_type is a retrieval contract, not merely a ranking
     // hint. Compile it into the canonical memory_types predicate once so the
@@ -601,6 +603,9 @@ const TOOL_HANDLERS = {
         ? args.query_canonical_en
         : null,
       named_entities: selectedEntities,
+      // Entity IDs come from the tenant-scoped chooser. Keep them as a strict
+      // selection boundary instead of letting query extraction widen `must`.
+      selected_entity_names: selectedEntityNames,
       include_full_memory_content: args._include_full_memory_content === true,
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,

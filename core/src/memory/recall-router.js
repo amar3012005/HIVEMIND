@@ -1997,12 +1997,24 @@ export class RecallRouter {
         source: implicitSource,
       });
     }
+    const selectedEntityNames = [...new Set((Array.isArray(options.selected_entity_names)
+      ? options.selected_entity_names
+      : [])
+      .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
     const plannedEntities = [
       ...(Array.isArray(recallPlan.entities) ? recallPlan.entities : []),
       ...(Array.isArray(options.named_entities) ? options.named_entities : []),
     ];
-    const mergedCanonicalEntities = [...new Set([...plannedEntities, ...canonicalEntities]
-      .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
+    // An entity chooser result is an explicit authorization-like predicate.
+    // Do not widen it with names heuristically extracted from the query: doing
+    // so silently turned a selected "Uwe Berger + Maya Chen" request into a
+    // four-entity ALL predicate once "Atlas" was recognized, excluding the
+    // records the caller had selected. Free-text recall retains the additive
+    // canonical-entity expansion below.
+    const mergedCanonicalEntities = selectedEntityNames.length
+      ? selectedEntityNames
+      : [...new Set([...plannedEntities, ...canonicalEntities]
+        .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
     // Preserve the user's full natural-language question for the semantic lane,
     // while giving the lexical lane the exact tenant-registry entity phrase as
     // an additive query. This is deliberately deterministic: a conversational
@@ -2023,6 +2035,13 @@ export class RecallRouter {
     const requestedDeliveryLimit = recallPlan.max_memories;
     const temporalInventory = ['latest', 'earliest'].includes(recallPlan.time.selector)
       || recallPlan.operation === 'timeline';
+    // Hard entity/tag predicates must be evaluated against an authorized
+    // inventory before final ranking. Hybrid candidate generation is bounded
+    // and relevance-first; relying on it alone can omit a valid exact match
+    // before the predicate ever runs, especially for agent-backed tenants.
+    const strictFilteredInventory = (recallPlan.entity_filter_mode === 'must'
+        && mergedCanonicalEntities.length > 0)
+      || (Array.isArray(options.tags) && options.tags.length > 0);
     options = {
       ...options,
       source_document_id: recallPlan.source.document_id,
@@ -2045,7 +2064,9 @@ export class RecallRouter {
       canonical_entities: mergedCanonicalEntities,
       alternate_lexical_query: options.alternate_lexical_query || exactEntityLexicalQuery,
       query_vector: queryVector,
-      limit: temporalInventory ? Math.max(50, Number(options.limit) || 0) : options.limit,
+      limit: (temporalInventory || strictFilteredInventory)
+        ? Math.max(50, Number(options.limit) || 0)
+        : options.limit,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     // THE RERANKER GETS A FLOOR, NOT A SLICE OF SOMEONE ELSE'S BUDGET.
@@ -2321,7 +2342,8 @@ export class RecallRouter {
         ({ memories } = restrictTimelineCandidates([...memories, ...prepared], [], chain));
       }
     }
-    if (temporalInventory && !recallPlan.target_memory_id && this.store?.listMemories) {
+    if ((temporalInventory || strictFilteredInventory)
+        && !recallPlan.target_memory_id && this.store?.listMemories) {
       try {
         const inventoryArgs = {
           user_id: ctx.userId,
@@ -2479,6 +2501,9 @@ export class RecallRouter {
     memories = filterMemoriesByEntities(memories, recallPlan.entities, {
       mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode,
     });
+    if (Array.isArray(options.tags) && options.tags.length) {
+      memories = memories.filter((memory) => memoryMatchesTags(memory, options.tags));
+    }
 
     let relationshipEdges = [];
     if (recallPlan.relationships?.requested) {

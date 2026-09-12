@@ -112,6 +112,48 @@ test('memory entity and relationship predicates are hard filters before delivery
   assert.deepEqual(related.map((row) => row.id), ['m1']);
 });
 
+test('issued entity selections and explicit tags hydrate authorized matches before ranking', async () => {
+  const correction = {
+    id: 'correction', title: 'Atlas correction',
+    content: 'Uwe Berger and Maya Chen changed the review milestone.',
+    tags: ['entity:uwe-berger', 'entity:maya-chen', 'scenario:correction'],
+    memory_type: 'fact', user_id: 'user-1', org_id: 'org-1', is_latest: true,
+    created_at: '2026-09-05T10:00:00.000Z',
+  };
+  const decision = {
+    id: 'decision', title: 'Atlas decision',
+    content: 'Uwe Berger and Maya Chen approved the pilot.',
+    tags: ['entity:uwe-berger', 'entity:maya-chen', 'scenario:decision'],
+    memory_type: 'fact', user_id: 'user-1', org_id: 'org-1', is_latest: true,
+    created_at: '2026-09-01T10:00:00.000Z',
+  };
+  const unrelated = {
+    id: 'unrelated', title: 'Other', content: 'Maya Chen note.',
+    tags: ['entity:maya-chen', 'scenario:correction'], memory_type: 'fact',
+    user_id: 'user-1', org_id: 'org-1', is_latest: true,
+  };
+  const router = new RecallRouter({
+    persistentMemoryStore: emptyStore({
+      recall: async () => ({ memories: [] }),
+      listMemories: async () => ({ memories: [correction, decision, unrelated], total: 3 }),
+    }),
+    evidenceRetrieval: embeddingEvidence(),
+    prisma: null,
+  });
+
+  const result = await router.recall('Atlas review correction', {
+    mode: 'fact', explicit_mode: true, reliability_v1: true,
+    entity_filter_mode: 'must',
+    selected_entity_names: ['Uwe Berger', 'Maya Chen'],
+    // Simulates the heuristic registry finding an extra name in the query.
+    named_entities: ['Uwe Berger', 'Maya Chen', 'Atlas'],
+    tags: ['scenario:correction'], limit: 5,
+  }, { userId: 'user-1', orgId: 'org-1', accessContext: { orgRole: 'member' } });
+
+  assert.deepEqual(result.trace.recall_plan.entities, ['Uwe Berger', 'Maya Chen']);
+  assert.deepEqual(result.memories.map((memory) => memory.id), ['correction']);
+});
+
 test('typed relationship predicates are compiled into the graph query before its cap', async () => {
   let captured = null;
   await loadTypedGraphEvidence({

@@ -211,6 +211,7 @@ export async function handleRecallRoute(ctx = {}) {
     // back to canonical names before compiling the one existing RetrievalSpec;
     // this keeps memory and evidence lanes on identical hard filters.
     let resolvedEntityNames = Array.isArray(body.entities) ? body.entities : [];
+    let selectedEntityNames = [];
     if (Array.isArray(body.entity_ids) && body.entity_ids.length) {
       const selected = await resolveAuthorizedEntityIds({
         prisma, orgId, userId, entityIds: body.entity_ids,
@@ -220,7 +221,8 @@ export async function handleRecallRoute(ctx = {}) {
       if (selected.degraded) {
         return jsonResponse(res, { error: 'entity_index_unavailable', degradation: { status: 'DEGRADED', reason: selected.degraded } }, 503);
       }
-      resolvedEntityNames = [...new Set([...resolvedEntityNames, ...selected.entities.map((entity) => entity.canonicalName)])];
+      selectedEntityNames = selected.entities.map((entity) => entity.canonicalName);
+      resolvedEntityNames = [...new Set([...resolvedEntityNames, ...selectedEntityNames])];
     }
 
     const query = rawRecallQuery;
@@ -284,6 +286,10 @@ export async function handleRecallRoute(ctx = {}) {
           named_entities: Array.isArray(recallPlan.entities)
             ? recallPlan.entities
             : (Array.isArray(body.entities) ? body.entities : []),
+          // An issued entity ID is an explicit user selection. Preserve that
+          // boundary through the router so query-time entity extraction cannot
+          // accidentally add another ALL-required predicate.
+          selected_entity_names: selectedEntityNames,
           // Scope, source, time and canonical entities were already compiled
           // into recallPlan above. Treat that plan as authoritative so hop1
           // does not launch another recall-time LLM for entity extraction or

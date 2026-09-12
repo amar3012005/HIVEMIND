@@ -130,6 +130,33 @@ function memoryMatchesTags(memory, tags = []) {
   return wanted.every((tag) => available.has(tag));
 }
 
+function memoryIsValidAt(memory, at) {
+  const stored = memory?.memory || {};
+  const metadata = memory?.metadata || stored?.metadata || {};
+  const boundary = new Date(at).getTime();
+  if (!Number.isFinite(boundary)) return true;
+  const from = memory?.valid_from || memory?.validFrom || stored?.valid_from || stored?.validFrom
+    || memory?.document_date || memory?.documentDate || stored?.document_date || stored?.documentDate
+    || metadata?.valid_from || metadata?.document_date
+    || memory?.created_at || memory?.createdAt || stored?.created_at || stored?.createdAt;
+  const to = memory?.valid_to || memory?.validTo || stored?.valid_to || stored?.validTo
+    || metadata?.valid_to || null;
+  const fromMs = from ? new Date(from).getTime() : Number.NEGATIVE_INFINITY;
+  const toMs = to ? new Date(to).getTime() : Number.POSITIVE_INFINITY;
+  return (!Number.isFinite(fromMs) || fromMs <= boundary)
+    && (!Number.isFinite(toMs) || boundary < toMs);
+}
+
+function memoryIsKnownAt(memory, at) {
+  const stored = memory?.memory || {};
+  const boundary = new Date(at).getTime();
+  if (!Number.isFinite(boundary)) return true;
+  const known = memory?.known_at || memory?.knownAt || stored?.known_at || stored?.knownAt
+    || memory?.created_at || memory?.createdAt || stored?.created_at || stored?.createdAt;
+  const knownMs = known ? new Date(known).getTime() : Number.NEGATIVE_INFINITY;
+  return !Number.isFinite(knownMs) || knownMs <= boundary;
+}
+
 export function filterMemoriesByEntities(memories = [], entities = [], { mode = 'must' } = {}) {
   const wanted = [...new Set((entities || []).map((entity) => normalizeSourceLabel(entity)).filter(Boolean))];
   if (!wanted.length || mode === 'off' || mode === 'should') return [...memories];
@@ -684,9 +711,12 @@ export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
     tags: m.tags || stored.tags,
     score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
     created_at: m.created_at || m.createdAt || stored.created_at || stored.createdAt || null,
-    event_time: m.event_time || m.eventTime || stored.event_time || stored.eventTime || null,
-    valid_at: m.valid_at || m.validAt || stored.valid_at || stored.validAt || null,
-    valid_from: m.valid_from || m.validFrom || stored.valid_from || stored.validFrom || null,
+    event_time: m.event_time || m.eventTime || stored.event_time || stored.eventTime
+      || m.document_date || m.documentDate || stored.document_date || stored.documentDate || null,
+    valid_at: m.valid_at || m.validAt || stored.valid_at || stored.validAt
+      || m.document_date || m.documentDate || stored.document_date || stored.documentDate || null,
+    valid_from: m.valid_from || m.validFrom || stored.valid_from || stored.validFrom
+      || m.document_date || m.documentDate || stored.document_date || stored.documentDate || null,
     valid_to: m.valid_to || m.validTo || stored.valid_to || stored.validTo || null,
     known_at: m.known_at || m.knownAt || stored.known_at || stored.knownAt || m.created_at || m.createdAt || null,
     ...(m.source_metadata?.source_type
@@ -2034,7 +2064,8 @@ export class RecallRouter {
     };
     const requestedDeliveryLimit = recallPlan.max_memories;
     const temporalInventory = ['latest', 'earliest'].includes(recallPlan.time.selector)
-      || recallPlan.operation === 'timeline';
+      || recallPlan.operation === 'timeline'
+      || Boolean(recallPlan.time.valid_at || recallPlan.time.known_at);
     // Hard entity/tag predicates must be evaluated against an authorized
     // inventory before final ranking. Hybrid candidate generation is bounded
     // and relevance-first; relying on it alone can omit a valid exact match
@@ -2356,7 +2387,8 @@ export class RecallRouter {
         const listedSets = await Promise.all([
           withTimeout(this.store.listMemories({ ...inventoryArgs, is_latest: true }),
             Math.min(1800, remainingBudget()), { temporal_inventory_unavailable: true }),
-          (recallPlan.operation === 'timeline' || recallPlan.time.selector === 'earliest')
+          (recallPlan.operation === 'timeline' || recallPlan.time.selector === 'earliest'
+            || Boolean(recallPlan.time.valid_at || recallPlan.time.known_at))
             ? withTimeout(this.store.listMemories({ ...inventoryArgs, is_latest: false }),
               Math.min(1800, remainingBudget()), { temporal_inventory_unavailable: true })
             : Promise.resolve({ memories: [] }),
@@ -2381,6 +2413,12 @@ export class RecallRouter {
         }
         if (Array.isArray(options.tags) && options.tags.length) {
           inventory = inventory.filter((memory) => memoryMatchesTags(memory, options.tags));
+        }
+        if (recallPlan.time.valid_at) {
+          inventory = inventory.filter((memory) => memoryIsValidAt(memory, recallPlan.time.valid_at));
+        }
+        if (recallPlan.time.known_at) {
+          inventory = inventory.filter((memory) => memoryIsKnownAt(memory, recallPlan.time.known_at));
         }
         const byId = new Map([...memories, ...inventory].map((memory) => [recallMemoryRowId(memory), memory]));
         memories = [...byId.values()];
@@ -2503,6 +2541,12 @@ export class RecallRouter {
     });
     if (Array.isArray(options.tags) && options.tags.length) {
       memories = memories.filter((memory) => memoryMatchesTags(memory, options.tags));
+    }
+    if (recallPlan.time.valid_at) {
+      memories = memories.filter((memory) => memoryIsValidAt(memory, recallPlan.time.valid_at));
+    }
+    if (recallPlan.time.known_at) {
+      memories = memories.filter((memory) => memoryIsKnownAt(memory, recallPlan.time.known_at));
     }
 
     let relationshipEdges = [];

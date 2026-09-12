@@ -122,7 +122,7 @@ function dedupeRows(rows = []) {
   return [...winners.values()];
 }
 
-async function authorizedCanonicalRows({ prisma, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
+async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
   if (!prisma?.canonicalEntity || !prisma?.memoryEntityLink || !prisma?.memory) return [];
   const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
   const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
@@ -138,12 +138,29 @@ async function authorizedCanonicalRows({ prisma, orgId, userId, accessContext, p
   });
   if (!entities.length) return [];
 
-  const visibleMemories = await prisma.memory.findMany({
-    where: visibleMemoryWhere({ orgId, userId, accessContext, projectId }),
-    select: { id: true, createdAt: true },
-    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
-    take: MAX_CANDIDATES,
-  });
+  // Memory rows can be resident in the tenant-aware graph store (including
+  // the legacy `hm` schema), while canonical entities live in the canonical
+  // registry schema.  Ask the store for the authorized inventory first so
+  // this chooser never assumes both models share one Prisma schema.
+  const listed = memoryStore?.listMemories
+    ? await memoryStore.listMemories({
+        user_id: userId,
+        org_id: orgId,
+        project_id: projectId || undefined,
+        is_latest: true,
+        limit: MAX_CANDIDATES,
+        scope: 'all',
+        access_context: accessContext,
+      })
+    : null;
+  const visibleMemories = listed?.memories
+    ? listed.memories.map((memory) => ({ id: memory.id, createdAt: memory.created_at || memory.createdAt || null }))
+    : await prisma.memory.findMany({
+        where: visibleMemoryWhere({ orgId, userId, accessContext, projectId }),
+        select: { id: true, createdAt: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        take: MAX_CANDIDATES,
+      });
   if (!visibleMemories.length) return [];
   const memoryTimes = new Map(visibleMemories.map((memory) => [memory.id, memory.createdAt]));
   const links = await prisma.memoryEntityLink.findMany({
@@ -174,7 +191,7 @@ async function authorizedCanonicalRows({ prisma, orgId, userId, accessContext, p
     }));
 }
 
-async function authorizedEntityRows({ prisma, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
+async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
   if (!prisma) return { rows: [], degraded: 'entity_index_unavailable' };
   try {
     const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
@@ -195,7 +212,7 @@ async function authorizedEntityRows({ prisma, orgId, userId, accessContext, proj
       : Promise.resolve([]);
     const [legacyRows, canonicalRows] = await Promise.all([
       legacy,
-      authorizedCanonicalRows({ prisma, orgId, userId, accessContext, projectId, entityIds: ids, entityTypes: types }),
+      authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: ids, entityTypes: types }),
     ]);
     return { rows: dedupeRows([...legacyRows, ...canonicalRows]), degraded: null };
   } catch {
@@ -203,14 +220,14 @@ async function authorizedEntityRows({ prisma, orgId, userId, accessContext, proj
   }
 }
 
-export async function findEntities({ prisma, orgId, userId, query, entityTypes = [], limit = 12, accessContext = {}, projectId = null } = {}) {
+export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = 12, accessContext = {}, projectId = null } = {}) {
   if (!String(query || '').trim()) return { matches: [], degraded: null };
-  const { rows, degraded } = await authorizedEntityRows({ prisma, orgId, userId, accessContext, projectId, entityTypes });
+  const { rows, degraded } = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityTypes });
   if (degraded) return { matches: [], degraded };
   return { matches: rankEntityMatches(rows, query, limit), degraded: null };
 }
 
-export async function resolveAuthorizedEntityIds({ prisma, orgId, userId, entityIds, accessContext = {}, projectId = null } = {}) {
-  const { rows, degraded } = await authorizedEntityRows({ prisma, orgId, userId, accessContext, projectId, entityIds });
+export async function resolveAuthorizedEntityIds({ prisma, memoryStore = null, orgId, userId, entityIds, accessContext = {}, projectId = null } = {}) {
+  const { rows, degraded } = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds });
   return { entities: rows.map((entity) => ({ id: entity.id, canonicalName: entity.canonicalName })), degraded };
 }

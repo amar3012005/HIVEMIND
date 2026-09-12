@@ -10868,6 +10868,40 @@ exit \$RC
         }
       }
 
+      // ── Tenant-scoped lexical entity chooser for canonical recall ─────
+      if (pathname === '/api/entity-search' && req.method === 'GET') {
+        const query = String(url.searchParams.get('query') || '').trim();
+        if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
+        try {
+          const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+          const { entityDiscoveryCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+          const enabled = await entityDiscoveryCanaryFor({ orgId, userId, email: principalUser?.email });
+          if (!enabled) return jsonResponse(res, { error: 'feature_unavailable' }, 404);
+          const entityTypes = url.searchParams.getAll('entity_type')
+            .flatMap((value) => String(value || '').split(','))
+            .map((value) => value.trim())
+            .filter(Boolean);
+          const result = await findEntities({
+            prisma,
+            memoryStore: persistentMemoryStore,
+            orgId,
+            userId,
+            query,
+            entityTypes,
+            limit: Number(url.searchParams.get('limit')) || 12,
+            accessContext: await buildAccessContext(userId, orgId).catch(() => null),
+            projectId: url.searchParams.get('project_id') || null,
+          });
+          if (result.degraded) {
+            return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }, 503);
+          }
+          return jsonResponse(res, { matches: result.matches, degradation: null });
+        } catch (error) {
+          console.warn('[entity-discovery] request failed:', error.message);
+          return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: 'entity_index_unavailable' } }, 503);
+        }
+      }
+
       // ── Entities dyn routes ─────────────────────────────────────────
       if (pathname.startsWith('/api/entities/') && pathname !== '/api/entities/stats' && pathname !== '/api/entities/review-queue' && pathname !== '/api/entities/by-external-ref') {
         if (!prisma || !entityResolver) return jsonResponse(res, { error: 'service unavailable' }, 503);

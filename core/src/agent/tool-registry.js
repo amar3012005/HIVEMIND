@@ -500,6 +500,7 @@ const TOOL_HANDLERS = {
     if (!enabled) return { error: 'feature_unavailable' };
     const result = await findEntities({
       prisma: ctx.prisma,
+      memoryStore: ctx.persistentMemoryStore,
       orgId: ctx.orgId,
       userId: ctx.userId,
       query: args.query,
@@ -542,6 +543,7 @@ const TOOL_HANDLERS = {
     if (Array.isArray(args.entity_ids) && args.entity_ids.length) {
       const selected = await resolveAuthorizedEntityIds({
         prisma: ctx.prisma,
+        memoryStore: ctx.persistentMemoryStore,
         orgId: ctx.orgId,
         userId: ctx.userId,
         entityIds: args.entity_ids,

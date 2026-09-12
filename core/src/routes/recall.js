@@ -214,6 +214,7 @@ export async function handleRecallRoute(ctx = {}) {
     if (Array.isArray(body.entity_ids) && body.entity_ids.length) {
       const selected = await resolveAuthorizedEntityIds({
         prisma, orgId, userId, entityIds: body.entity_ids,
+        memoryStore: persistentMemoryStore,
         accessContext: recallAccessCtx, projectId: recallProjectId,
       });
       if (selected.degraded) {

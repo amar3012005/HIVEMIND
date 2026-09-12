@@ -13,7 +13,8 @@
     "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
     "RECALL_PARALLEL_RELIABILITY_ENABLED": "false",
     "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
-    "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1"
+    "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
+    "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1"
   },
   "flagship": [{
     "binding": "FLAGS",
@@ -48,7 +49,8 @@
         "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
         "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
         "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
-        "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1"
+        "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
+        "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {
@@ -67,7 +69,8 @@
         "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
         "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
         "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
-        "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1"
+        "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
+        "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {

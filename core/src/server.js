@@ -38,6 +38,7 @@ import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
 import { projectScopedAnchorFilter } from './knowledge/document-delete-scope.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
+import { findEntities } from './memory/entity-discovery.js';
 import {
   getRuntimeRole,
   shouldRunConnectorBackground,
@@ -13133,14 +13134,22 @@ exit \$RC
         // baseline Brain features remain available and every canary is off.
         case '/api/brain/capabilities':
           if (req.method === 'GET') {
-            const admission = await cloudflareChatSessionClient
-              .admissionFor({ orgId, userId })
-              .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false }));
+            const [admission, entityDiscovery] = await Promise.all([
+              cloudflareChatSessionClient
+                .admissionFor({ orgId, userId })
+                .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false })),
+              (async () => {
+                const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+                const { entityDiscoveryCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+                return entityDiscoveryCanaryFor({ orgId, userId, email: principalUser?.email });
+              })(),
+            ]);
             return jsonResponse(res, {
               capabilities: {
                 connectors: { enabled: true }, memories: { enabled: true },
                 meeting_notes: { enabled: true, consent_v2: admission.meetingLifecycleMode === 'consent' },
                 graph: { enabled: true }, knowledge: { enabled: true }, mcp: { enabled: true },
+                entity_discovery: { enabled: entityDiscovery === true },
                 chat: { enabled: true, unified_dag: admission.unifiedDag === true,
                   orchestrator_v2_mode: admission.orchestratorV2Mode || 'off',
                   compound_orchestrator: admission.compoundOrchestrator === true },

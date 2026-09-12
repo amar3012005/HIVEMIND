@@ -19,6 +19,8 @@ import { applyProjectScopeFilter } from '../routes/recall.js';
 import { loadTypedGraphEvidence, buildEvidencePacket } from '../memory/recall-router.js';
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { normalizeEntity } from '../memory/entity-normalize.js';
+import { findEntities, resolveAuthorizedEntityIds } from '../memory/entity-discovery.js';
+import { entityDiscoveryCanaryFor } from '../employees/cloudflare-hyper-planner-client.js';
 import {
   CANONICAL_MEMORY_TYPES,
   normalizeMemoryType,
@@ -490,6 +492,27 @@ const TOOL_HANDLERS = {
     };
   },
 
+  async hivemind_find_entities(args, ctx) {
+    const principalUser = ctx.prisma?.user
+      ? await ctx.prisma.user.findUnique({ where: { id: ctx.userId }, select: { email: true } }).catch(() => null)
+      : null;
+    const enabled = await entityDiscoveryCanaryFor({ orgId: ctx.orgId, userId: ctx.userId, email: principalUser?.email });
+    if (!enabled) return { error: 'feature_unavailable' };
+    const result = await findEntities({
+      prisma: ctx.prisma,
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      query: args.query,
+      entityTypes: args.entity_types || [],
+      limit: args.limit || 12,
+      accessContext: ctx.accessContext || {},
+      projectId: ctx.projectId || null,
+    });
+    return result.degraded
+      ? { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }
+      : { matches: result.matches, degradation: null };
+  },
+
   async hivemind_recall(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
 
@@ -515,12 +538,28 @@ const TOOL_HANDLERS = {
     // memory_types=["fact"].
     const strictAnswerTypes = new Set(['decision', 'event', 'goal', 'preference', 'lesson', 'relationship']);
     const strictAnswerType = strictAnswerTypes.has(requestedAnswerType) ? requestedAnswerType : null;
+    let selectedEntities = Array.isArray(args.entities) ? args.entities : [];
+    if (Array.isArray(args.entity_ids) && args.entity_ids.length) {
+      const selected = await resolveAuthorizedEntityIds({
+        prisma: ctx.prisma,
+        orgId: ctx.orgId,
+        userId: ctx.userId,
+        entityIds: args.entity_ids,
+        accessContext: ctx.accessContext || {},
+        projectId: ctx.projectId || null,
+      });
+      if (selected.degraded) {
+        return { memories: [], evidence: [], relationships: [], degradation: { status: 'DEGRADED', reason: selected.degraded } };
+      }
+      selectedEntities = [...new Set([...selectedEntities, ...selected.entities.map((entity) => entity.canonicalName)])];
+    }
     // The planner's answer_type is a retrieval contract, not merely a ranking
     // hint. Compile it into the canonical memory_types predicate once so the
     // memory and evidence lanes apply the same filter before the unified
     // rerank. The boost remains additive inside that already-typed pool.
     const recallPlan = resolveRecallPlan({
       ...args,
+      entities: selectedEntities,
       memory_types: Array.isArray(args.memory_types) && args.memory_types.length
         ? args.memory_types
         : (strictAnswerType ? [strictAnswerType] : []),
@@ -559,7 +598,7 @@ const TOOL_HANDLERS = {
       alternate_lexical_query: args.query_canonical_en && args.query_canonical_en !== originalQuery
         ? args.query_canonical_en
         : null,
-      named_entities: args.entities || [],
+      named_entities: selectedEntities,
       include_full_memory_content: args._include_full_memory_content === true,
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,
@@ -1939,6 +1978,7 @@ export function normalizeAgentRecallMode(mode) {
 // Source: ai-boost/awesome-harness-engineering 2026 recommendations +
 // observed P95 latencies in HIVEMIND production.
 const TOOL_TIMEOUTS_MS = {
+  hivemind_find_entities: 3_000,
   hivemind_aggregate_entities: 5_000,
   // A filtered COUNT is a single indexed aggregate — far cheaper than recall's
   // multi-lane fan-out, so it gets a tight budget. If it ever needs longer the

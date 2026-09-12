@@ -22,6 +22,18 @@ test('legacy frontend configuration cannot leak into invitations or email links'
 });
 
 test('valid preview and self-hosted overrides remain available', () => {
-  assert.equal(resolveInvitationBaseUrl({ HIVEMIND_INVITATION_BASE_URL: 'https://next.preview.singulancelabs.com/' }), 'https://next.preview.singulancelabs.com');
+  assert.equal(resolveInvitationBaseUrl({ HIVEMIND_PUBLIC_ORIGIN: 'https://next.preview.singulancelabs.com/' }), 'https://next.preview.singulancelabs.com');
   assert.equal(resolvePublicFrontendBaseUrl('http://localhost:3000/hivemind'), 'http://localhost:3000');
+});
+
+test('one explicit public origin wins over legacy per-purpose URL settings', () => {
+  const env = {
+    HIVEMIND_PUBLIC_ORIGIN: 'https://dev.next.singulancelabs.com',
+    HIVEMIND_FRONTEND_URL: 'https://next.singulancelabs.com',
+    HIVEMIND_INVITATION_BASE_URL: 'https://next.singulancelabs.com',
+    HIVEMIND_APP_URL: 'https://next.singulancelabs.com/hivemind/app',
+  };
+  assert.equal(resolvePublicFrontendBaseUrl(env.HIVEMIND_PUBLIC_ORIGIN), 'https://dev.next.singulancelabs.com');
+  assert.equal(resolveInvitationBaseUrl(env), 'https://dev.next.singulancelabs.com');
+  assert.equal(resolvePublicAppUrl(env), 'https://dev.next.singulancelabs.com/hivemind/app');
 });

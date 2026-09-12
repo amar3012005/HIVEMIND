@@ -3,10 +3,10 @@ import { CARTESIA, escapeHtml, lifecycleEmailShell, lifecycleRichContentStyles, 
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
 import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../email/humation-avatar.js';
+import { resolvePublicAppUrl } from '../public-frontend-url.js';
 
 export const DAY_ONE_VERSION = 'day-1-first-move-v2';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
-const DEFAULT_APP_URL = 'https://next.singulancelabs.com/hivemind/app/employees';
 const DELIVERABLE_ROOM_STATUSES = new Set(['complete', 'blocked']);
 
 export function isDayOneWorkflowEnabled() {
@@ -289,7 +289,7 @@ export async function deliverDayTwoBrandDna({ prisma, runId, renderPdf = renderD
     const owner = await prisma.user.findUnique({ where: { id: run.userId }, select: { email: true } });
     if (!owner?.email) throw new Error('day2_recipient_missing');
     const companyName = clean(company.company || company.profile?.company_name || 'Your company', 110);
-    const appBase = String(process.env.HIVEMIND_APP_URL || DEFAULT_APP_URL.replace(/\/employees$/, '')).replace(/\/$/, '');
+    const appBase = resolvePublicAppUrl().replace(/\/$/, '');
     const roomUrl = `${appBase}/employees/rooms/${run.roomId}`;
     const characters = Array.isArray(company.team) ? company.team : [];
     const output = dayTwoBrandDnaSummary(run.artifact);
@@ -552,7 +552,7 @@ export async function deliverDayOneFirstMove({
     const task = (company.tasks || []).find((item) => item.id === state.task_id) || {};
     const companyName = clean(company.company || company.profile?.company_name || 'Your company', 110);
     const taskTitle = clean(task.title || 'Your first research move', 160);
-    const appBase = String(process.env.HIVEMIND_APP_URL || DEFAULT_APP_URL.replace(/\/employees$/, '')).replace(/\/$/, '');
+    const appBase = resolvePublicAppUrl().replace(/\/$/, '');
     const roomUrl = `${appBase}/employees/rooms/${state.room_id}`;
     const characters = Array.isArray(company.team) ? company.team : [];
     const rendered = renderDayOneEmail({ companyName, taskTitle, output, roomUrl, characters });

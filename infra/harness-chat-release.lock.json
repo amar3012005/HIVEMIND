@@ -6,7 +6,7 @@
   "harnessBranch": "hivemind-chat",
   "harnessCommit": "c874825a6f57e38c073f53b5f9da88c93403ff2c",
   "davinciSubmodule": "frontend/Da-vinci",
-  "davinciCommit": "1d1ffb84e4a5f8fce6abd2f1ae9cafd1ae4de116",
+  "davinciCommit": "c5e010709abae24eb0ddb8805e3037fd777999ef",
   "harnessProfile": "hivemind-chat",
   "composeProject": "hivemind-chat-local",
   "composeFiles": ["infra/docker-compose.hivemind-chat.yml"],

@@ -33,7 +33,14 @@ http://preview.singulancelabs.com {
 }
 
 http://harness-preview.singulancelabs.com {
-	reverse_proxy harness-runner:3080
+	reverse_proxy harness-runner:3080 {
+		# This private origin exclusively serves the next.preview application.
+		# Keep the browser authority identical for ticket exchange, native boot,
+		# RPC and WebSocket authentication; the tunnel hostname is transport only.
+		header_up Host next.preview.singulancelabs.com
+		header_up X-Forwarded-Host next.preview.singulancelabs.com
+		header_up X-Forwarded-Proto https
+	}
 }
 
 http://nango-preview.singulancelabs.com {

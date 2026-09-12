@@ -163,8 +163,14 @@ async function staticHarness(request: Request, env: Env): Promise<Response> {
       },
     });
   }
-  const payload = await boot.json() as { version?: number; injections?: BootInjection[] };
-  if (payload.version !== 1 || !Array.isArray(payload.injections)) {
+  const payload = await boot.json() as { ok?: boolean; version?: number; injections?: BootInjection[] };
+  // The current runner predates the explicit envelope version but already
+  // returns this same typed injection table. Accept that one legacy envelope;
+  // reject every other unversioned response so arbitrary JSON cannot become
+  // executable page markup.
+  const supportedEnvelope = payload.version === 1
+    || (payload.version === undefined && payload.ok === true);
+  if (!supportedEnvelope || !Array.isArray(payload.injections)) {
     return new Response('HIVE-MIND boot unavailable', { status: 503 });
   }
   const html = renderBootIndex(await asset.text(), payload.injections);
@@ -199,15 +205,10 @@ async function proxyRunner(request: Request, env: Env): Promise<Response> {
   // authority-bound cookie checks while the upstream Host targets the tunnel.
   headers.set('x-forwarded-host', incoming.host);
   headers.set('x-forwarded-proto', incoming.protocol.slice(0, -1));
-  const contentType = (headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
-  const parentNavigation = isEstablishPath(incoming.pathname)
-    && contentType === 'application/x-www-form-urlencoded';
-  const keepBrowserOrigin = isEstablishPath(incoming.pathname)
-    || incoming.pathname === '/api/remote.mux'
-    || incoming.pathname === '/api/hivemind/boot';
-  if (!keepBrowserOrigin && !parentNavigation && headers.get('origin') === incoming.origin) {
-    headers.set('origin', target.origin);
-  }
+  // Origin and forwarded authority describe the same browser for every RPC.
+  // Rewriting only unary RPC origins to the private tunnel breaks the native
+  // CSRF fence after successful admission/boot. Preserve foreign origins too:
+  // the runner must reject them, not receive a forged trusted origin.
   if (incoming.pathname === '/api/remote.mux' && isWebSocketUpgrade(request)) {
     headers.set('upgrade', 'websocket');
     headers.set('connection', 'Upgrade');

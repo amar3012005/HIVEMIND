@@ -31,6 +31,12 @@ not inferred.
       `https://deepseek.singulancelabs.com/` capability, with HIVE chrome only.
 - [ ] Five-session projection shows newest non-empty root sessions.
 - [ ] New Session creates a persisted session.
+- [ ] `/overview/new` creates exactly one session and replaces the URL with
+      `/overview/session/{opaqueSessionId}`.
+- [ ] Selecting a native Recent row pushes its canonical session URL.
+- [ ] Reload and browser back/forward reopen the exact persisted session.
+- [ ] Unknown, cross-tenant, and sub-agent session IDs fail closed without
+      leaking session existence or ownership.
 - [ ] Composer sits at the bottom; Chat/Trajectory do not overlap it.
 
 ## Connectors

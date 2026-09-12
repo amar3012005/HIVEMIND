@@ -3,8 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${HIVEMIND_CHAT_ENV_FILE:-$ROOT/infra/.env.hivemind-chat.local}"
-BASE="$ROOT/infra/docker-compose.hivemind-chat.yml"
-DEV="$ROOT/infra/docker-compose.hivemind-chat.dev.yml"
+RUNNER=hivemind-harness-runner
 
 [[ -f "$ENV_FILE" ]] || { echo "dev-refresh: missing $ENV_FILE" >&2; exit 2; }
 set -a
@@ -13,32 +12,84 @@ source "$ENV_FILE"
 set +a
 HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:?set HIVEMIND_HARNESS_SOURCE}"
 
-load_keychain() {
-  local variable="$1" service="$2"
-  [[ -n "${!variable:-}" ]] && return
-  command -v security >/dev/null 2>&1 || return
-  printf -v "$variable" '%s' "$(security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null || true)"
-  export "$variable"
+# A code refresh preserves the existing container's environment and mounts.
+# Environment/image/mount changes belong to the separate runner release path.
+[[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$RUNNER")" == hivemind-chat-local ]] || {
+  echo 'dev-refresh: refusing a non-preview Compose project' >&2; exit 2;
+}
+[[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$RUNNER")" == harness-runner ]] || {
+  echo 'dev-refresh: unexpected Compose service' >&2; exit 2;
 }
 
-load_keychain HIVEMIND_MASTER_API_KEY hivemind-chat-local-master-api-key
-load_keychain HIVE_HARNESS_EDGE_EVAL_SECRET hivemind-harness-edge-eval-secret
-load_keychain CLOUDFLARE_API_KEY hivemind-cloudflare-api-key
-load_keychain COMPOSIO_API_KEY hivemind-composio-api-key
-
-for key in HIVEMIND_MASTER_API_KEY HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARE_API_KEY COMPOSIO_API_KEY; do
-  [[ -n "${!key:-}" ]] || { echo "dev-refresh: required $key is unavailable" >&2; exit 2; }
-done
+node --input-type=module - "$HARNESS_SOURCE" "$RUNNER" <<'NODE'
+import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
+const [source, runner] = process.argv.slice(2);
+const mounts = JSON.parse(execFileSync('docker', ['inspect', '--format', '{{json .Mounts}}', runner], {encoding:'utf8'}));
+for (const path of ['hivemind/context', 'hivemind/memory', 'hivemind/runtime', 'hivemind/connected-apps', 'session/session-persistence-postgres', 'client/ui-hivemind-connect']) {
+  const destination = `/opt/deepseek-harness/packages/${path}/lib`;
+  const mount = mounts.find(item => item.Destination === destination);
+  if (!mount || realpathSync(mount.Source) !== realpathSync(join(source, 'packages', path, 'lib'))) {
+    throw new Error(`dev-refresh: source mount mismatch for ${path}`);
+  }
+}
+const bundleDestination = '/opt/deepseek-harness/packages/bundle/hivemind-web-app/cordis.patch.yml';
+const bundleMount = mounts.find(item => item.Destination === bundleDestination);
+if (!bundleMount || realpathSync(bundleMount.Source) !== realpathSync(join(source, 'packages/bundle/hivemind-web-app/cordis.patch.yml'))) {
+  throw new Error('dev-refresh: source mount mismatch for HIVE web bundle configuration');
+}
+NODE
 
 cd "$HARNESS_SOURCE"
-pnpm exec tsc -b \
-  packages/hivemind/runtime/tsconfig.json \
-  packages/hivemind/connected-apps/tsconfig.json
-pnpm exec tsdown --config packages/hivemind/runtime/tsdown.config.ts --env.DSH_BUILD_FACE host
-pnpm exec tsdown --config packages/hivemind/connected-apps/tsdown.config.ts --env.DSH_BUILD_FACE host
+require_overlay_entry() {
+  local path="$1"
+  [[ -f "$path" ]] || {
+    echo "dev-refresh: refusing to recreate runner; required overlay entry is missing: $path" >&2
+    exit 2
+  }
+}
 
-docker compose -p hivemind-chat-local --env-file "$ENV_FILE" \
-  -f "$BASE" -f "$DEV" up -d --no-build --no-deps --force-recreate harness-runner
+[[ "${HIVEMIND_SKIP_PACKAGE_BUILD:-0}" != 1 ]] || {
+  echo 'dev-refresh: refusing unchecked stale artifacts; package build is required' >&2; exit 2;
+}
+  # Build only the mounted package projects. The aggregate host config also
+  # type-checks unrelated tests, so it is not a safe preflight for a targeted
+  # runner refresh.
+  pnpm exec tsc -b \
+    packages/hivemind/context/tsconfig.json \
+    packages/hivemind/memory/tsconfig.json \
+    packages/hivemind/runtime/tsconfig.json \
+    packages/hivemind/connected-apps/tsconfig.json \
+    packages/session/session-persistence-postgres/tsconfig.json
+  # tsdown 0.22 accepts one package-name filter per invocation. Build each
+  # mounted host package explicitly so a parser change cannot silently select
+  # no configuration or expand this into a workspace-wide build.
+  for package in \
+    '@deepseek-ai/dsh-hivemind-context' \
+    '@deepseek-ai/dsh-hivemind-memory' \
+    '@deepseek-ai/dsh-hivemind-runtime' \
+    '@deepseek-ai/dsh-hivemind-connected-apps' \
+    '@deepseek-ai/dsh-session-persistence-postgres'; do
+    pnpm exec tsdown --env.DSH_BUILD_FACE host --filter "$package" --logLevel error
+  done
+  pnpm exec tsc -b packages/client/ui-hivemind-connect/tsconfig.json
+  (cd packages/client/ui-hivemind-connect && pnpm exec tsdown)
+
+# Validate every bind-mounted package before touching Docker. A failed
+# preflight preserves the currently healthy runner instead of creating a blank
+# HIVE page due to a missing package entry point.
+for entry in \
+  "$HARNESS_SOURCE/packages/hivemind/context/lib/index.js" \
+  "$HARNESS_SOURCE/packages/hivemind/memory/lib/index.js" \
+  "$HARNESS_SOURCE/packages/hivemind/runtime/lib/index.js" \
+  "$HARNESS_SOURCE/packages/hivemind/connected-apps/lib/index.js" \
+  "$HARNESS_SOURCE/packages/session/session-persistence-postgres/lib/index.js" \
+  "$HARNESS_SOURCE/packages/client/ui-hivemind-connect/lib/client.js"; do
+  require_overlay_entry "$entry"
+done
+
+docker restart "$RUNNER" >/dev/null
 
 deadline=$((SECONDS + 90))
 until [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner 2>/dev/null || true)" == healthy ]]; do

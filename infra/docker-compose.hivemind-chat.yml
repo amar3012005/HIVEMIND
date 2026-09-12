@@ -170,7 +170,26 @@ services:
       HIVEMIND_PLAYWRIGHT_CRAWL_URL: http://playwright:8932/v1/crawl
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
       HIVEMIND_LOCAL_MODE: "true"
-      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-}
+      # Keep local Core on the same authenticated Cloudflare AI boundary as the
+      # Harness model route. Do not route local persistence through the retired
+      # public embeddings tunnel: a 1033 there used to turn every governed save
+      # into an HTTP 500 after PostgreSQL admission.
+      EMBEDDING_PROVIDER: cloudflare
+      EMBEDDING_FALLBACK_PROVIDER: cloudflare
+      EMBEDDING_FALLBACK2_PROVIDER: cloudflare
+      EMBEDDING_DIMENSION: "1024"
+      ENABLE_DOCUMENT_FIRST_INGEST: "true"
+      CLOUDFLARE_ACCOUNT_ID: "0dc6b9186b5a9b8985613b10c1c59f4f"
+      CLOUDFLARE_AI_GATEWAY_ENABLED: "true"
+      CLOUDFLARE_AI_GATEWAY_ID: hivemind-prod
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_API_KEY:?set the Cloudflare AI Gateway credential}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: https://gateway.ai.cloudflare.com
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-first-bundb}
+      LLM_PRIMARY: openrouter
+      LLM_PROVIDER: openrouter
+      LLM_MODEL: ${LLM_MODEL:-openai/gpt-oss-120b}
+      ENTERPRISE_EXTRACTION_MODEL: ${ENTERPRISE_EXTRACTION_MODEL:-google/gemini-2.5-flash-lite}
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:?set a non-placeholder local master API key}
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:?set HIVEMIND_ADMIN_SECRET}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
     volumes:
@@ -229,7 +248,7 @@ services:
       HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL:-https://singulance-preview-mailer.amarsai2005.workers.dev}
       HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}
       HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST: ${HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST:-}
-      API_MASTER_KEY: ${API_MASTER_KEY:-local-api-master-key-change-me}
+      API_MASTER_KEY: ${HIVEMIND_MASTER_API_KEY:?set a non-placeholder local master API key}
       ZITADEL_API_URL: ${ZITADEL_PREVIEW_API_URL:-}
       ZITADEL_SERVICE_PAT: ${ZITADEL_PREVIEW_SERVICE_PAT:-}
       ZITADEL_EMAIL_ORG_ID: ${ZITADEL_PREVIEW_EMAIL_ORG_ID:-}
@@ -262,8 +281,11 @@ services:
       HIVEMIND_PLATFORM_ADMIN_PASSCODE: ${HIVEMIND_PLATFORM_ADMIN_PASSCODE:?set HIVEMIND_PLATFORM_ADMIN_PASSCODE}
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?set a distinct 32+ byte ticket secret}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:?set a distinct 32+ byte runner secret}
+      HIVE_HARNESS_FLAG_URL: ${HIVE_HARNESS_FLAG_URL:-https://next.preview.singulancelabs.com/__hivemind/feature-flags/harness-chat}
+      HIVE_HARNESS_EDGE_EVAL_SECRET: ${HIVE_HARNESS_EDGE_EVAL_SECRET:?set the preview Harness flag evaluator secret}
+      HIVE_HARNESS_EMBED_URL: ${HIVE_HARNESS_EMBED_URL:-https://next.preview.singulancelabs.com/hivemind/app/overview}
       HIVE_HARNESS_PREVIEW_EMBED_URL: ${HIVE_HARNESS_PREVIEW_EMBED_URL:-https://next.preview.singulancelabs.com/hivemind/app/overview}
-      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:?set a non-placeholder local master API key}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 15s
@@ -290,7 +312,7 @@ services:
       HIVEMIND_PUBLIC_CP_URL: https://preview-api.singulancelabs.com
       DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
       REDIS_URL: redis://redis:6379/0
-      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:?set a non-placeholder local master API key}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       REPLICA_ID: ${REPLICA_ID:-local-1}
       REPLICA_COUNT: ${REPLICA_COUNT:-1}

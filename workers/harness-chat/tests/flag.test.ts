@@ -129,7 +129,7 @@ describe('runner and asset routing', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps parent navigation origin and uses private same-origin JSON transport', async () => {
+  it('keeps parent navigation origin for both exchange transports', async () => {
     const received: Array<{ url: string; host: string | null; origin: string | null; contentType: string | null }> = [];
     vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
       received.push({
@@ -175,6 +175,25 @@ describe('runner and asset routing', () => {
     vi.unstubAllGlobals();
   });
 
+  it('preserves browser and foreign origins on native unary RPCs', async () => {
+    const requests: Request[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
+      requests.push(request);
+      return Response.json({ ok: true });
+    }));
+    try {
+      for (const origin of ['https://next.preview.singulancelabs.com', 'https://foreign.example']) {
+        await worker.fetch(new Request('https://next.preview.singulancelabs.com/api/session/list', {
+          method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}',
+        }), { RUNNER_ORIGIN: 'https://private-runner.example' } as Env);
+        const forwarded = requests.at(-1)!;
+        expect(forwarded.url).toBe('https://private-runner.example/api/session/list');
+        expect(forwarded.headers.get('origin')).toBe(origin);
+        expect(forwarded.headers.get('x-forwarded-host')).toBe('next.preview.singulancelabs.com');
+      }
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('adds an explicit frame ancestor policy to static assets', async () => {
     const env = {
       HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com,https://admin.singulancelabs.com',
@@ -203,6 +222,28 @@ describe('runner and asset routing', () => {
     expect(html).toContain('globalThis["__DSH_BOOT__"]');
     expect(html).toContain('__DSH_BOOT_READY__');
     expect(env.ASSETS.fetch).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it('accepts the current unversioned runner boot envelope without serving a raw shell', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true, injections: [
+      { kind: 'script', placement: 'head', text: 'window.__ModuleLoader__={create(){}}' },
+      { kind: 'global', name: '__DSH_BOOT__', value: { entries: [] } },
+    ] })));
+    const env = {
+      RUNNER_ORIGIN: 'https://private-runner.example',
+      HIVE_HARNESS_PARENT_ORIGINS: 'https://next.preview.singulancelabs.com',
+      ASSETS: { fetch: vi.fn(async () => new Response('<html><head></head><body><script type="module" src="/assets/harness-shell.js"></script></body></html>', {
+        headers: { 'content-type': 'text/html' },
+      })) },
+    } as unknown as Env;
+
+    const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/hivemind/app/overview'), env);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html.indexOf('window.__ModuleLoader__')).toBeLessThan(html.indexOf('harness-shell.js'));
+    expect(html).toContain('globalThis["__DSH_BOOT__"]');
     vi.unstubAllGlobals();
   });
 });

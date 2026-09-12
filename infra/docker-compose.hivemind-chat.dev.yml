@@ -9,8 +9,24 @@ services:
         target: /opt/deepseek-harness/packages/hivemind/runtime/lib
         read_only: true
       - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/hivemind/context/lib
+        target: /opt/deepseek-harness/packages/hivemind/context/lib
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/hivemind/memory/lib
+        target: /opt/deepseek-harness/packages/hivemind/memory/lib
+        read_only: true
+      - type: bind
         source: ${HIVEMIND_HARNESS_SOURCE}/packages/hivemind/connected-apps/lib
         target: /opt/deepseek-harness/packages/hivemind/connected-apps/lib
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/client/ui-hivemind-connect/lib
+        target: /opt/deepseek-harness/packages/client/ui-hivemind-connect/lib
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/session/session-persistence-postgres/lib
+        target: /opt/deepseek-harness/packages/session/session-persistence-postgres/lib
         read_only: true
       - type: bind
         source: ${HIVEMIND_HARNESS_SOURCE}/packages/preset/agent-presets/presets/hivemind
@@ -19,4 +35,8 @@ services:
       - type: bind
         source: ${HIVEMIND_HARNESS_SOURCE}/packages/preset/agent-presets/presets/hivemind-chat
         target: /opt/deepseek-harness/packages/preset/agent-presets/presets/hivemind-chat
+        read_only: true
+      - type: bind
+        source: ${HIVEMIND_HARNESS_SOURCE}/packages/bundle/hivemind-web-app/cordis.patch.yml
+        target: /opt/deepseek-harness/packages/bundle/hivemind-web-app/cordis.patch.yml
         read_only: true

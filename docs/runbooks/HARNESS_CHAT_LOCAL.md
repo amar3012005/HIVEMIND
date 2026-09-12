@@ -23,7 +23,7 @@ cd /Users/amar/HIVE-MIND-singulance-chat-local
 Bring the complete origin stack up once, then rebuild only the runner:
 
 ```bash
-cp infra/.env.hivemind-chat.example infra/.env.hivemind-chat.local
+test -e infra/.env.hivemind-chat.local || cp infra/.env.hivemind-chat.example infra/.env.hivemind-chat.local
 # Replace placeholders in the untracked local file; never commit secrets.
 ./scripts/harness-chat-env up-all
 ```
@@ -32,6 +32,12 @@ Use `./scripts/harness-chat-env up` for a runner-only cached rebuild.
 Use `./scripts/harness-chat-env restart` when no image input changed.
 `stop-foreign` removes leftover `hm-*`, compat, and extra-tunnel containers
 without deleting volumes.
+
+## Existing development package mounts
+
+For the existing `hivemind-chat-local` development runner, `./scripts/refresh-harness-chat-dev` validates the Compose project/service and source mount paths, typechecks the mounted packages, runs their real runtime bundle build, and restarts the same container. It does not recreate the container, replace environment variables, or rebuild the Docker image. Run it only when active turns may safely be interrupted. Changes to images, environment or mount paths require the separate release procedure.
+
+TypeScript outputs `lib/types/index.js`; the runtime loads `lib/index.js`. Never copy one over the other: the workspace tsdown build owns runtime entries and dependent chunks. The refresh script refuses the stale-artifact skip flag, and build failures prevent its restart step. Validate refresh changes with `node --test core/tests/unit/harness-chat-dev-refresh.test.mjs`, then prove the authenticated browser path after a real refresh. Development mounts remain a temporary workflow, not the immutable production release artifact.
 
 Do not stack `infra/docker-compose.harness-hotfix.yml` on top unless recovering
 a previously admitted backend. That file bind-mounts package outputs and is how

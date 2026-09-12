@@ -25,12 +25,25 @@ native renderers, plugins, session history, or the agent loop.
 
 ## Request flow
 
-1. Browser stays on `https://next.preview.singulancelabs.com/hivemind/app/overview`.
+1. Browser stays on the canonical Overview route family:
+   - `/hivemind/app/overview` selects the newest accessible non-empty root
+     session, or creates one when none exists.
+   - `/hivemind/app/overview/new` creates one native Harness session and then
+     replaces the URL with `/hivemind/app/overview/session/{opaqueSessionId}`.
+   - `/hivemind/app/overview/session/{opaqueSessionId}` opens that exact
+     tenant-authorized root session. Unknown, cross-tenant, and sub-agent IDs
+     fail closed without disclosing which condition applied.
 2. Control plane authenticates the HIVE user and issues a short-lived admission ticket.
 3. The runner establishes a tenant-scoped session cookie from that ticket.
 4. Native Harness serves conversation, session projection, tools, and replay.
 5. Core remains memory and connector authority. Harness must not invent tenant facts.
 6. External writes go through persisted draft → approval → provider completion.
+
+The URL is a projection of the native Harness session service. It contains
+only the opaque Harness session ID—never a user ID, organization ID, Composio
+workflow ID, or a second frontend state store. Native session selection pushes
+the canonical URL; browser back/forward and reload project the URL back through
+the same tenant-scoped session service.
 
 Private preview tunnels may ingress to a loopback Harness port. They must not
 appear in the browser URL, become a second frontend, or remain in a production

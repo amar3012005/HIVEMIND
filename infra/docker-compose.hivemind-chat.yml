@@ -381,6 +381,7 @@ services:
       HIVEMIND_CONTROL_PLANE_URL: http://control-plane:3000
       HIVEMIND_SERVICE_HTTP_ORIGINS: http://control-plane:3000
       HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-https://next.preview.singulancelabs.com}
+      HIVEMIND_CONNECTED_APP_CALLBACK_URL: https://next.preview.singulancelabs.com/hivemind/app/overview
       HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-next.preview.singulancelabs.com,harness-preview.singulancelabs.com}
       CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:-}
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}

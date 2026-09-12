@@ -1,5 +1,6 @@
 import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../humation-avatar.js';
 import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEmailShell, lifecyclePortraitReportShell, lifecycleSubject } from './cartesia-lifecycle.js';
+import { resolvePublicAppUrl } from '../../public-frontend-url.js';
 
 // Delivery version is deliberately part of the generated artefact contract.
 // A newer renderer can therefore be reissued once without treating a browser
@@ -264,4 +265,3 @@ export function renderDayZeroOnboardingReportHtml(input, options = {}) {
   const report = buildDayZeroOnboardingReport(input, options);
   return { report, html: lifecyclePortraitDayZeroReport(report) };
 }
-import { resolvePublicAppUrl } from '../../public-frontend-url.js';

@@ -71,7 +71,7 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
     summary: clean(item?.summary || item?.snippet || item?.description, 210),
     url: safeUrl(item?.url || item?.source_url || item?.link),
   })).filter((item) => item.title || item.url);
-  const reportUrl = safeUrl(appUrl) || 'https://next.singulancelabs.com/hivemind/app/employees/mycompany';
+  const reportUrl = safeUrl(appUrl) || `${resolvePublicAppUrl()}/employees/mycompany`;
   const members = team.slice(0, 8).map((member) => {
     const roleTitle = clean(member?.jobTitle || member?.title || member?.roleArchetype || member?.role || 'Company Specialist', 96);
     const lane = resolveHumationLane(member?.lane || member?.archetype || roleTitle);
@@ -264,3 +264,4 @@ export function renderDayZeroOnboardingReportHtml(input, options = {}) {
   const report = buildDayZeroOnboardingReport(input, options);
   return { report, html: lifecyclePortraitDayZeroReport(report) };
 }
+import { resolvePublicAppUrl } from '../../public-frontend-url.js';

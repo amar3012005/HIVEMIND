@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from '../../src/auth/email-identity-service.js';
+import { isZitadelEmailIdentityConfigured } from '../../src/control-plane/zitadel-email-identity.js';
 
 test('normalizes valid email and rejects malformed input', () => {
   assert.equal(normalizeEmail('  Person@Example.COM '), 'person@example.com');
@@ -42,4 +43,14 @@ test('email login defaults fail closed instead of silently selecting account cre
   assert.match(source, /const INTENTS = new Set\(\['login', 'register'\]\)/);
   assert.match(source, /MAX_STARTS_PER_EMAIL/);
   assert.match(source, /requestFingerprintHash/);
+});
+
+test('ZITADEL passwordless provisioning requires all three server-side settings', () => {
+  assert.equal(isZitadelEmailIdentityConfigured({ ZITADEL_ISSUER_URL: 'https://issuer.example' }), false);
+  assert.equal(isZitadelEmailIdentityConfigured({ ZITADEL_ISSUER_URL: 'https://issuer.example', ZITADEL_SERVICE_PAT: 'pat' }), false);
+  assert.equal(isZitadelEmailIdentityConfigured({
+    ZITADEL_ISSUER_URL: 'https://issuer.example',
+    ZITADEL_SERVICE_PAT: 'pat',
+    ZITADEL_EMAIL_ORG_ID: 'org-id',
+  }), true);
 });

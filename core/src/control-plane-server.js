@@ -23,7 +23,7 @@ import {
 } from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
-import { createZitadelEmailIdentity } from './control-plane/zitadel-email-identity.js';
+import { createZitadelEmailIdentity, isZitadelEmailIdentityConfigured } from './control-plane/zitadel-email-identity.js';
 import { createEmailIdentityService, EMAIL_AUTH_PUBLIC_RESPONSE, normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from './auth/email-identity-service.js';
 import { cleanIdentityName, isGenericDisplayName, providerDisplayNameForExisting } from './identity/canonical-profile.js';
 import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/email-turnstile.js';
@@ -4806,6 +4806,16 @@ const server = http.createServer(async (req, res) => {
       const admitted = intent === 'login'
         ? Boolean(existingUser && !existingUser.deletedAt)
         : Boolean(admission);
+      // Registration creates a canonical ZITADEL user after the challenge is
+      // verified. Fail before issuing an email if that provisioning path is
+      // not configured, rather than delivering a code that cannot finish.
+      if (intent === 'register' && admitted && !isZitadelEmailIdentityConfigured()) {
+        return jsonResponse(res, {
+          ok: false,
+          code: 'email_identity_provisioning_unavailable',
+          error: 'Email sign-in is temporarily unavailable. Please try again shortly or use another sign-in method.',
+        }, 503);
+      }
       if (turnstileOk && admitted && emailDeliveryConfigured()) started = await emailIdentity.start({
         email, intent, returnTo, mode, signupTicket: admission ? signupTicket : null,
         requestFingerprint: emailRequestFingerprint(req),
@@ -4880,6 +4890,18 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
     } catch (error) {
       console.error('[email-auth] verification failed', { error: error.message });
+      // A valid challenge can reach this branch after its OTP/link has been
+      // verified, for example when the identity provider cannot provision a
+      // first-time email user. Do not misrepresent that operational failure as
+      // an invalid credential: the challenge remains unconsumed and can be
+      // completed after the provider configuration is restored.
+      if (error?.message === 'ZITADEL email identity provisioning is not configured') {
+        return jsonResponse(res, {
+          ok: false,
+          code: 'email_identity_provisioning_unavailable',
+          error: 'Email sign-in is temporarily unavailable. Please try again shortly or use another sign-in method.',
+        }, 503);
+      }
       return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
     }
   }

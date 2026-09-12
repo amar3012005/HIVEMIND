@@ -12,6 +12,10 @@ the private Tunnel origin. Static responses receive a restrictive CSP;
 `HIVE_HARNESS_PARENT_ORIGINS` is the comma-separated allowlist used for
 `frame-ancestors`.
 
+Resolved `/plugins/*` bundles use a short browser-private cache with
+revalidation. Boot HTML and authenticated API, session, connection, and
+workflow responses remain uncached.
+
 Before a release, the Harness web build pipeline copies its reviewed output
 into `public/`; generated assets are intentionally not committed here. A dry
 run validates the Worker and binding contract without publishing it.

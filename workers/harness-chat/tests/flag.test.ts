@@ -204,6 +204,36 @@ describe('runner and asset routing', () => {
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
   });
 
+  it('browser-caches successful plugin bundles without edge-sharing them', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin', {
+      headers: { 'content-type': 'application/javascript', etag: '"plugin-v1"' },
+    })));
+    try {
+      const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/plugins/hivemind/client.js', {
+        headers: { cookie: '__Host-dsh=principal' },
+      }), {
+        RUNNER_ORIGIN: 'https://private-runner.example',
+        HIVE_HARNESS_PARENT_ORIGINS: 'https://next.preview.singulancelabs.com',
+      } as Env);
+      expect(response.headers.get('cache-control')).toBe('private, max-age=60, stale-while-revalidate=300');
+      expect(response.headers.get('vary')).toContain('Cookie');
+      expect(response.headers.get('etag')).toBe('"plugin-v1"');
+      expect(response.headers.get('content-security-policy')).toContain("script-src 'self'");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('does not cache a plugin response which mutates authentication', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin', {
+      headers: { 'content-type': 'application/javascript', 'set-cookie': 'hm=1; Secure' },
+    })));
+    try {
+      const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/plugins/hivemind/client.js'), {
+        RUNNER_ORIGIN: 'https://private-runner.example',
+      } as Env);
+      expect(response.headers.get('cache-control')).toBe('private, no-store');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('serves the document from assets and injects the authenticated runner boot table', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ version: 1, injections: [
       { kind: 'global', name: '__DSH_BOOT__', value: { plugins: [] } },
@@ -221,6 +251,7 @@ describe('runner and asset routing', () => {
     const html = await response.text();
     expect(html).toContain('globalThis["__DSH_BOOT__"]');
     expect(html).toContain('__DSH_BOOT_READY__');
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(env.ASSETS.fetch).toHaveBeenCalledOnce();
     vi.unstubAllGlobals();
   });

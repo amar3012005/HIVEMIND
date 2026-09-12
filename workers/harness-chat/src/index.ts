@@ -196,6 +196,26 @@ function isWebSocketUpgrade(request: Request): boolean {
   return (request.headers.get('upgrade') || '').toLowerCase() === 'websocket';
 }
 
+function cacheClientPlugin(request: Request, response: Response, env: Env): Response {
+  const headers = new Headers(response.headers);
+  const cacheable = (request.method === 'GET' || request.method === 'HEAD')
+    && response.ok
+    && !headers.has('set-cookie');
+  // Plugin URLs are profile-resolved rather than content hashed. Keep them in
+  // the authenticated browser cache only, and revalidate quickly so a new
+  // release cannot leave an old plugin mounted for long. Never edge-share a
+  // tenant-resolved plugin or cache a response which changes authentication.
+  headers.set('cache-control', cacheable
+    ? 'private, max-age=60, stale-while-revalidate=300'
+    : 'private, no-store');
+  headers.append('vary', 'Cookie');
+  return assetSecurityHeaders(new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  }), env);
+}
+
 async function proxyRunner(request: Request, env: Env): Promise<Response> {
   if (!env.RUNNER_ORIGIN) return Response.json({ error: 'runner_unavailable' }, { status: 503 });
   const incoming = new URL(request.url);
@@ -249,6 +269,9 @@ export const worker = {
       const body = await request.json().catch(() => ({})) as { org_id?: string; user_id?: string };
       return Response.json(await evaluateHarnessChatMode(env, body.org_id || '', body.user_id || ''),
         { headers: { 'cache-control': 'no-store' } });
+    }
+    if (url.pathname.startsWith('/plugins/')) {
+      return cacheClientPlugin(request, await proxyRunner(request, env), env);
     }
     if (isRunnerRoute(url.pathname)) return proxyRunner(request, env);
     return staticHarness(request, env);

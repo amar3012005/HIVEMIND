@@ -22,11 +22,19 @@
  *
  * @module src/llm/stt-route
  */
-import { gatewayFirstFetch } from './cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayFirstFetch } from './cloudflare-gateway.js';
 
 const GROQ_STT_DEFAULT = 'whisper-large-v3';
 const OPENROUTER_STT_DEFAULT = 'nvidia/parakeet-tdt-0.6b-v3';
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+function providerCredentialAvailable(provider) {
+  if (provider === 'openrouter') {
+    return Boolean(process.env.OPENROUTER_API_KEY)
+      || (cloudflareGatewayEnabled() && Boolean(gatewayByokAlias('openrouter')));
+  }
+  return Boolean(process.env.GROQ_API_KEY);
+}
 
 /**
  * Resolve the single STT api reference (provider + url + key) and the model for a
@@ -37,13 +45,15 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  */
 export function sttRoute(featureModel, providerOverride) {
   const requestedProvider = (providerOverride || process.env.STT_PROVIDER || 'groq').toLowerCase();
-  const provider = !providerOverride && requestedProvider === 'groq' && !process.env.GROQ_API_KEY && process.env.OPENROUTER_API_KEY
+  const openrouterAvailable = providerCredentialAvailable('openrouter');
+  const groqAvailable = providerCredentialAvailable('groq');
+  const provider = !providerOverride && requestedProvider === 'groq' && !groqAvailable && openrouterAvailable
     ? 'openrouter'
-    : (!providerOverride && requestedProvider === 'openrouter' && !process.env.OPENROUTER_API_KEY && process.env.GROQ_API_KEY
+    : (!providerOverride && requestedProvider === 'openrouter' && !openrouterAvailable && groqAvailable
       ? 'groq'
       : requestedProvider);
   const switchedForAvailability = provider !== requestedProvider;
-  if (provider === 'openrouter' && process.env.OPENROUTER_API_KEY) {
+  if (provider === 'openrouter' && openrouterAvailable) {
     const model = (providerOverride || switchedForAvailability ? null : featureModel) || process.env.STT_MODEL || OPENROUTER_STT_DEFAULT;
     // Multilingual audio-LLMs (Gemini, gpt-audio) transcribe via the CHAT
     // completions API with an input_audio content part — NOT the whisper-style
@@ -208,7 +218,7 @@ export async function transcribeAudio(opts) {
   // Same-provider model fallback: a chat-audio (Gemini) model that keeps failing
   // on OpenRouter degrades to OpenRouter's whisper-style STT (parakeet) — still
   // multilingual-capable, always available — before we cross providers.
-  if (primary.provider === 'openrouter' && primary.shape === 'chat-audio' && process.env.OPENROUTER_API_KEY) {
+  if (primary.provider === 'openrouter' && primary.shape === 'chat-audio' && providerCredentialAvailable('openrouter')) {
     const parakeet = sttRoute(process.env.OPENROUTER_STT_FALLBACK_MODEL || OPENROUTER_STT_DEFAULT);
     if (parakeet.shape === 'whisper') {
       const r1 = await _run(parakeet, opts, 2, timeoutMs);
@@ -221,7 +231,7 @@ export async function transcribeAudio(opts) {
 
   // Single-shot cross-provider failover (outage / billing block) so STT never goes dark.
   const altProvider = primary.provider === 'groq' ? 'openrouter' : 'groq';
-  const altUsable = altProvider === 'openrouter' ? !!process.env.OPENROUTER_API_KEY : !!process.env.GROQ_API_KEY;
+  const altUsable = providerCredentialAvailable(altProvider);
   if (altUsable) {
     const alt = sttRoute(model, altProvider);
     const r2 = await _run(alt, opts, 1, timeoutMs);

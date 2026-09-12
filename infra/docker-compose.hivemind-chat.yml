@@ -152,7 +152,7 @@ services:
         required: true
       - path: ../core/.env
         required: false
-    image: hm-hyper-contract-api
+    image: hivemind/hm-hyper-contract-api:stt-byok-bebf3469d2ad
     container_name: hivemind-core
     environment:
       PORT: 3000
@@ -185,6 +185,11 @@ services:
       CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_API_KEY:?set the Cloudflare AI Gateway credential}
       CLOUDFLARE_AI_GATEWAY_BASE_URL: https://gateway.ai.cloudflare.com
       CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-first-bundb}
+      # Speech input, mobile chat, and Meeting Notes share this one Core route.
+      # Cloudflare AI Gateway supplies the stored OpenRouter BYOK credential;
+      # Core never needs a copied provider key.
+      STT_PROVIDER: ${STT_PROVIDER:-openrouter}
+      STT_MODEL: ${STT_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       LLM_PRIMARY: openrouter
       LLM_PROVIDER: openrouter
       LLM_MODEL: ${LLM_MODEL:-openai/gpt-oss-120b}

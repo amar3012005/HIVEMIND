@@ -102,7 +102,7 @@ test('meeting chat-audio STT uses Cloudflare AI Gateway as the primary transport
   let captured = null;
   try {
     process.env.STT_PROVIDER = 'openrouter';
-    process.env.OPENROUTER_API_KEY = 'direct-key-must-not-leak';
+    delete process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
     process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'true';
     process.env.CLOUDFLARE_ACCOUNT_ID = 'account-test';
@@ -130,6 +130,44 @@ test('meeting chat-audio STT uses Cloudflare AI Gateway as the primary transport
     assert.equal(headers.get('cf-aig-skip-cache'), 'true');
     assert.equal(headers.get('authorization'), null);
     assert.equal(JSON.parse(captured.options.body).model, 'google/gemini-2.5-flash');
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv(snapshot);
+  }
+});
+
+test('Cloudflare OpenRouter BYOK runs the established Meeting Notes STT model without a local provider key', async () => {
+  const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch;
+  let captured = null;
+  try {
+    process.env.STT_PROVIDER = 'openrouter';
+    process.env.STT_MODEL = 'nvidia/parakeet-tdt-0.6b-v3';
+    delete process.env.OPENROUTER_API_KEY;
+    process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'true';
+    process.env.CLOUDFLARE_ACCOUNT_ID = 'account-test';
+    process.env.CLOUDFLARE_AI_GATEWAY_ID = 'hivemind-test';
+    process.env.CLOUDFLARE_AI_GATEWAY_TOKEN = 'gateway-test';
+    process.env.CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS = 'openrouter-byok';
+    globalThis.fetch = async (url, options) => {
+      captured = { url: String(url), options };
+      return Response.json({ text: 'native dictation works', language: 'en' });
+    };
+
+    const result = await transcribeAudio({
+      audio: Buffer.from('gateway-audio-fixture'),
+      contentType: 'audio/webm',
+      filename: 'message.webm',
+      maxAttempts: 1,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.provider, 'openrouter');
+    assert.equal(result.model, 'nvidia/parakeet-tdt-0.6b-v3');
+    assert.equal(captured.url, 'https://gateway.ai.cloudflare.com/v1/account-test/hivemind-test/openrouter/audio/transcriptions');
+    const headers = new Headers(captured.options.headers);
+    assert.equal(headers.get('cf-aig-byok-alias'), 'openrouter-byok');
+    assert.equal(headers.get('authorization'), null);
   } finally {
     globalThis.fetch = originalFetch;
     restoreEnv(snapshot);

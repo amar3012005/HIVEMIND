@@ -115,6 +115,7 @@ status() {
 }
 
 doctor() {
+  local allow_dev_mounts="${1:-0}"
   local bad=0 actual expected mounts creds projects
   fail() { say RED "$1"; bad=1; }
   [[ "$(branch "$ROOT")" != singulance-main ]] || fail "refusing production branch"
@@ -146,9 +147,29 @@ doctor() {
   projects="$(docker compose ls -q 2>/dev/null | grep -E 'hm-hyper-contract|hivemind-dev|hivemind-next' || true)"
   [[ -z "$projects" ]] || fail "duplicate Compose projects: $projects"
   mounts="$(docker inspect hivemind-harness-runner --format '{{range .Mounts}}{{.Destination}} {{end}}' 2>/dev/null || true)"
-  [[ "$mounts" != *'/opt/deepseek-harness/packages/'* ]] || fail "runner has package bind mounts"
+  if [[ "$allow_dev_mounts" != 1 ]]; then
+    [[ "$mounts" != *'/opt/deepseek-harness/packages/'* ]] || fail "runner has package bind mounts"
+  fi
   [[ "$bad" -eq 0 ]] || return 1
   say OK "doctor passed"
+}
+
+release_runner() {
+  # A development refresh may use validated read-only mounts for speed, but a
+  # release always returns to one immutable image and the canonical Compose
+  # model. Docker's cache keeps unchanged layers; only harness-runner is built
+  # and recreated, so every other service retains its environment and state.
+  doctor 1
+  compose build harness-runner
+  compose up -d --no-deps --force-recreate harness-runner
+  local deadline=$((SECONDS + 180)) state
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$RUNNER" 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Harness runner did not become healthy"; return 1; }
+    sleep 3
+  done
+  doctor
+  curl -fsS -H 'Host: next.preview.singulancelabs.com' http://127.0.0.1:18080/health >/dev/null
+  say OK "locked Harness image is healthy without package bind mounts"
 }
 
 verify_health() {
@@ -214,6 +235,7 @@ case "${1:-status}" in
     compose ps
     ;;
   restart) doctor; compose up -d --no-build --no-deps --force-recreate harness-runner; wait_healthy ;;
+  release-runner) release_runner ;;
   refresh-core-auth) refresh_core_auth ;;
   health) verify_health ;;
   test) test_all ;;

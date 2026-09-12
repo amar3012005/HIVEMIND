@@ -1,4 +1,5 @@
-export const HIVE_HARNESS_CHAT_FLAG_KEY = 'hivemind_harness_chat_v1';
+const HIVE_HARNESS_CHAT_FLAG_KEY = 'hivemind_harness_chat_v1';
+const HIVE_COMPACT_TOPBAR_FLAG_KEY = 'hivemind_compact_topbar_v1';
 export type HarnessChatMode = 'legacy' | 'preview' | 'harness';
 
 interface Fetcher {
@@ -55,13 +56,28 @@ export async function evaluateHarnessChatMode(env: Env, orgId: string, userId: s
   }
 }
 
+export async function evaluateUiShell(env: Env): Promise<{ key: string; variation: 'full' | 'compact'; evaluation_id?: string }> {
+  const fallback = env.ENVIRONMENT === 'local' ? 'compact' : 'full';
+  try {
+    const details = await env.FLAGS.getStringDetails(
+      HIVE_COMPACT_TOPBAR_FLAG_KEY,
+      fallback,
+      { targetingKey: env.ENVIRONMENT, environment: env.ENVIRONMENT },
+    );
+    const variation = details.value === 'compact' ? 'compact' : 'full';
+    return { key: HIVE_COMPACT_TOPBAR_FLAG_KEY, variation, ...(details.evaluationId ? { evaluation_id: details.evaluationId } : {}) };
+  } catch {
+    return { key: HIVE_COMPACT_TOPBAR_FLAG_KEY, variation: fallback };
+  }
+}
+
 function assetSecurityHeaders(response: Response, env: Env): Response {
   const headers = new Headers(response.headers);
   const parents = String(env.HIVE_HARNESS_PARENT_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean);
   headers.set('content-security-policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; frame-ancestors ${parents.length ? parents.join(' ') : "'none'"}`);
   headers.set('referrer-policy', 'strict-origin-when-cross-origin');
   headers.set('x-content-type-options', 'nosniff');
-  headers.set('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+  headers.set('permissions-policy', 'camera=(), microphone=(self), geolocation=()');
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -75,6 +91,28 @@ function isEstablishPath(pathname: string): boolean {
 
 function isWebSocketUpgrade(request: Request): boolean {
   return (request.headers.get('upgrade') || '').toLowerCase() === 'websocket';
+}
+
+function cacheClientPlugin(request: Request, response: Response, env: Env): Response {
+  const headers = new Headers(response.headers);
+  const revision = new URL(request.url).searchParams.get('rev');
+  const versioned = revision !== null && /^[A-Za-z0-9_-]{8,128}$/.test(revision);
+  const cacheable = (request.method === 'GET' || request.method === 'HEAD')
+    && response.ok
+    && !headers.has('set-cookie');
+  // Plugin URLs are profile-resolved rather than content hashed. Keep them in
+  // the authenticated browser cache only, and revalidate quickly so a new
+  // release cannot leave an old plugin mounted for long. Never edge-share a
+  // tenant-resolved plugin or cache a response which changes authentication.
+  headers.set('cache-control', cacheable
+    ? versioned ? 'private, max-age=31536000, immutable' : 'private, max-age=60, stale-while-revalidate=300'
+    : 'private, no-store');
+  headers.append('vary', 'Cookie');
+  return assetSecurityHeaders(new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  }), env);
 }
 
 async function proxyRunner(request: Request, env: Env): Promise<Response> {
@@ -131,6 +169,13 @@ export const worker = {
       const body = await request.json().catch(() => ({})) as { org_id?: string; user_id?: string };
       return Response.json(await evaluateHarnessChatMode(env, body.org_id || '', body.user_id || ''),
         { headers: { 'cache-control': 'no-store' } });
+    }
+    if (url.pathname === '/__hivemind/feature-flags/ui-shell') {
+      if (request.method !== 'GET') return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+      return Response.json(await evaluateUiShell(env), { headers: { 'cache-control': 'private, max-age=30' } });
+    }
+    if (url.pathname.startsWith('/plugins/')) {
+      return cacheClientPlugin(request, await proxyRunner(request, env), env);
     }
     if (isRunnerRoute(url.pathname)) return proxyRunner(request, env);
     return assetSecurityHeaders(await env.ASSETS.fetch(request), env);

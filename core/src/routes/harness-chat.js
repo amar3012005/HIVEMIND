@@ -8,6 +8,7 @@ import { verifyHarnessRunnerServiceToken } from '../harness-chat/runner-service-
 import { getInternalApiKey } from '../security/internal-auth.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SESSION_ID_RE = /^session-[A-Za-z0-9-]{8,160}$/;
 
 function embedUrl(mode, env) {
   if (mode === 'harness') return env.HIVE_HARNESS_EMBED_URL || 'https://chat.singulancelabs.com/embed';
@@ -133,7 +134,46 @@ export async function handleHarnessChatBootstrapRoute({
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl })) return true;
-  if (pathname !== '/v1/harness-chat/bootstrap' || req.method !== 'POST') return false;
+  const deleteMatch = pathname.match(/^\/v1\/harness-chat\/sessions\/([^/]+)$/);
+  if (deleteMatch && req.method === 'DELETE') {
+    const current = await requireSession(req, res);
+    if (!current) return true;
+    const { userId, orgId } = current.session || {};
+    let sessionId;
+    try { sessionId = decodeURIComponent(deleteMatch[1]); } catch { sessionId = ''; }
+    if (!UUID_RE.test(userId) || !UUID_RE.test(orgId) || !SESSION_ID_RE.test(sessionId)) {
+      jsonResponse(res, { error: 'Invalid session deletion request' }, 400);
+      return true;
+    }
+    const membership = await prisma?.userOrganization?.findUnique?.({
+      where: { userId_orgId: { userId, orgId } }, select: { isActive: true },
+    });
+    if (!membership?.isActive) {
+      jsonResponse(res, { error: 'Organization membership required' }, 403);
+      return true;
+    }
+    const deleted = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        "SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",
+        orgId, userId,
+      );
+      return tx.$queryRawUnsafe(
+        'DELETE FROM harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid RETURNING id',
+        sessionId, orgId, userId,
+      );
+    });
+    if (!Array.isArray(deleted) || deleted.length === 0) {
+      jsonResponse(res, { error: 'Session not found' }, 404);
+      return true;
+    }
+    jsonResponse(res, {
+      status: 'deleted', session_id: sessionId, deleted_at: new Date().toISOString(),
+      cascade: ['events', 'leases'],
+    });
+    return true;
+  }
+  const dedicatedNewSession = pathname === '/v1/harness-chat/new-session';
+  if ((!dedicatedNewSession && pathname !== '/v1/harness-chat/bootstrap') || req.method !== 'POST') return false;
   const current = await requireSession(req, res);
   if (!current) return true;
   const { userId, orgId } = current.session || {};

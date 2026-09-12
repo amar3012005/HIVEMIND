@@ -16389,16 +16389,20 @@ Write the persona now.`;
       corePath = pathname.replace('/v1/proxy/', '/api/');
     }
 
-    const isMultipart = (req.headers['content-type'] || '').startsWith('multipart/');
+    const requestContentType = (req.headers['content-type'] || '').toLowerCase();
+    const isMultipart = requestContentType.startsWith('multipart/');
+    const isAudio = requestContentType.startsWith('audio/');
 
     // Read body: raw Buffer for multipart, parsed JSON for everything else
     let body = undefined;
     let rawBody = undefined;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if (isMultipart) {
+      if (isMultipart || isAudio) {
         try {
-          const maxMultipartBytes = Number(process.env.KNOWLEDGE_MULTIPART_MAX_BYTES || 52 * 1024 * 1024);
-          rawBody = (await parseBodyWithRaw(req, maxMultipartBytes)).raw;
+          const maxRawBytes = isAudio
+            ? Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24) * 1024 * 1024
+            : Number(process.env.KNOWLEDGE_MULTIPART_MAX_BYTES || 52 * 1024 * 1024);
+          rawBody = (await parseBodyWithRaw(req, maxRawBytes)).raw;
         } catch (error) {
           return jsonResponse(res, {
             error: error.code || 'payload_too_large',

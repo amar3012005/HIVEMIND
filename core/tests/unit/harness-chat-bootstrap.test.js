@@ -25,6 +25,46 @@ test('bootstrap requires the existing authenticated control-plane session', asyn
   assert.equal(res.status, 401);
 });
 
+test('permanent session deletion is tenant scoped and returns a durable receipt', async () => {
+  const res = responseCapture();
+  const calls = [];
+  const tx = {
+    $executeRawUnsafe: async (...args) => { calls.push(args); return 1; },
+    $queryRawUnsafe: async (...args) => { calls.push(args); return [{ id: 'session-12345678' }]; },
+  };
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'DELETE' }, res,
+    pathname: '/v1/harness-chat/sessions/session-12345678',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ isActive: true }) },
+      $transaction: async (action) => action(tx),
+    },
+    requireSession: async () => ({ session: { orgId, userId } }),
+    parseBody: async () => ({}), jsonResponse,
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 200);
+  assert.equal(res.json.status, 'deleted');
+  assert.equal(res.json.session_id, 'session-12345678');
+  assert.deepEqual(res.json.cascade, ['events', 'leases']);
+  assert.equal(calls[1][1], 'session-12345678');
+  assert.equal(calls[1][2], orgId);
+  assert.equal(calls[1][3], userId);
+});
+
+test('permanent session deletion rejects malformed ids before database access', async () => {
+  const res = responseCapture();
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'DELETE' }, res,
+    pathname: '/v1/harness-chat/sessions/not-a-session',
+    prisma: new Proxy({}, { get() { throw new Error('must not query'); } }),
+    requireSession: async () => ({ session: { orgId, userId } }),
+    parseBody: async () => ({}), jsonResponse,
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 400);
+});
+
 test('bootstrap derives tenant scope, mints admission, and never creates a session row', async () => {
   const res = responseCapture();
   const redisValues = new Map();

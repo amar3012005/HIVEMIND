@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateHarnessChatMode, HIVE_HARNESS_CHAT_FLAG_KEY, worker, type Env } from '../src/index';
+import { evaluateHarnessChatMode, evaluateUiShell, worker, type Env } from '../src/index';
+
+const HIVE_HARNESS_CHAT_FLAG_KEY = 'hivemind_harness_chat_v1';
 
 const orgId = '67503d34-97e9-49a8-8c52-8ee30cc7603e';
 const userId = '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
@@ -27,6 +29,15 @@ describe('harness chat Flagship gate', () => {
     expect((await evaluateHarnessChatMode(env, 'invalid', userId)).variation).toBe('legacy');
     env.FLAGS.getStringDetails = vi.fn(async () => { throw new Error('unavailable'); });
     expect((await evaluateHarnessChatMode(env, orgId, userId)).variation).toBe('legacy');
+  });
+});
+
+describe('HIVE shell Flagship gate', () => {
+  it('enables compact preview chrome and fails production closed to full chrome', async () => {
+    const local = { ENVIRONMENT: 'local', FLAGS: { getStringDetails: vi.fn(async () => { throw new Error('missing'); }) } } as unknown as Env;
+    expect((await evaluateUiShell(local)).variation).toBe('compact');
+    const production = { ENVIRONMENT: 'production', FLAGS: { getStringDetails: vi.fn(async () => { throw new Error('missing'); }) } } as unknown as Env;
+    expect((await evaluateUiShell(production)).variation).toBe('full');
   });
 });
 
@@ -158,5 +169,90 @@ describe('runner and asset routing', () => {
     const response = await worker.fetch(new Request('https://chat.singulancelabs.com/'), env);
     expect(response.headers.get('content-security-policy')).toContain('frame-ancestors https://next.singulancelabs.com https://admin.singulancelabs.com');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('browser-caches successful plugin bundles without edge-sharing them', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin', {
+      headers: { 'content-type': 'application/javascript', etag: '"plugin-v1"' },
+    })));
+    try {
+      const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/plugins/hivemind/client.js', {
+        headers: { cookie: '__Host-dsh=principal' },
+      }), {
+        RUNNER_ORIGIN: 'https://private-runner.example',
+        HIVE_HARNESS_PARENT_ORIGINS: 'https://next.preview.singulancelabs.com',
+      } as Env);
+      expect(response.headers.get('cache-control')).toBe('private, max-age=60, stale-while-revalidate=300');
+      expect(response.headers.get('vary')).toContain('Cookie');
+      expect(response.headers.get('etag')).toBe('"plugin-v1"');
+      expect(response.headers.get('content-security-policy')).toContain("script-src 'self'");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('keeps revision-addressed plugin bundles in the private browser cache', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin')));
+    try {
+      const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/plugins/hivemind/client.js?rev=7144fb92', {
+        headers: { cookie: '__Host-dsh=principal' },
+      }), { RUNNER_ORIGIN: 'https://private-runner.example' } as Env);
+      expect(response.headers.get('cache-control')).toBe('private, max-age=31536000, immutable');
+      expect(response.headers.get('vary')).toContain('Cookie');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('does not cache a plugin response which mutates authentication', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('plugin', {
+      headers: { 'content-type': 'application/javascript', 'set-cookie': 'hm=1; Secure' },
+    })));
+    try {
+      const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/plugins/hivemind/client.js'), {
+        RUNNER_ORIGIN: 'https://private-runner.example',
+      } as Env);
+      expect(response.headers.get('cache-control')).toBe('private, no-store');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('serves the document from assets and injects the authenticated runner boot table', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ version: 1, injections: [
+      { kind: 'global', name: '__DSH_BOOT__', value: { plugins: [] } },
+    ] })));
+    const env = {
+      RUNNER_ORIGIN: 'https://private-runner.example',
+      HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com',
+      ASSETS: { fetch: vi.fn(async () => new Response('<html><head></head><body><div id="root"></div></body></html>', {
+        headers: { 'content-type': 'text/html' },
+      })) },
+    } as unknown as Env;
+    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/', {
+      headers: { cookie: '__Host-dsh=principal' },
+    }), env);
+    const html = await response.text();
+    expect(html).toContain('globalThis["__DSH_BOOT__"]');
+    expect(html).toContain('__DSH_BOOT_READY__');
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(env.ASSETS.fetch).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it('accepts the current unversioned runner boot envelope without serving a raw shell', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true, injections: [
+      { kind: 'script', placement: 'head', text: 'window.__ModuleLoader__={create(){}}' },
+      { kind: 'global', name: '__DSH_BOOT__', value: { entries: [] } },
+    ] })));
+    const env = {
+      RUNNER_ORIGIN: 'https://private-runner.example',
+      HIVE_HARNESS_PARENT_ORIGINS: 'https://next.preview.singulancelabs.com',
+      ASSETS: { fetch: vi.fn(async () => new Response('<html><head></head><body><script type="module" src="/assets/harness-shell.js"></script></body></html>', {
+        headers: { 'content-type': 'text/html' },
+      })) },
+    } as unknown as Env;
+
+    const response = await worker.fetch(new Request('https://next.preview.singulancelabs.com/hivemind/app/overview'), env);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html.indexOf('window.__ModuleLoader__')).toBeLessThan(html.indexOf('harness-shell.js'));
+    expect(html).toContain('globalThis["__DSH_BOOT__"]');
+    vi.unstubAllGlobals();
   });
 });

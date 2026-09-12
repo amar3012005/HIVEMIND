@@ -163,7 +163,7 @@ release_runner() {
   compose build harness-runner
   compose up -d --no-deps --force-recreate harness-runner
   local deadline=$((SECONDS + 180)) state
-  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$RUNNER" 2>/dev/null || printf missing)" == healthy ]]; do
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner 2>/dev/null || printf missing)" == healthy ]]; do
     (( SECONDS < deadline )) || { say RED "Harness runner did not become healthy"; return 1; }
     sleep 3
   done
@@ -211,6 +211,21 @@ refresh_core_auth() {
   say OK "Core and Control Plane share an accepted internal auth key"
 }
 
+refresh_control_plane() {
+  # Re-evaluate Control Plane configuration through the same Keychain-hydrated
+  # Compose boundary without rebuilding or disturbing any other service.
+  doctor
+  compose up -d --no-build --no-deps --force-recreate control-plane
+  local deadline=$((SECONDS + 180))
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-control-plane 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Control Plane did not become healthy"; return 1; }
+    sleep 3
+  done
+  [[ "$(docker inspect hivemind-control-plane --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^HIVE_HARNESS_FLAG_URL=//p')" == "https://next.preview.singulancelabs.com/__hivemind/feature-flags/harness-chat" ]] \
+    || { say RED "Control Plane does not use the canonical preview flag URL"; return 1; }
+  say OK "Control Plane uses the canonical next.preview flag URL"
+}
+
 test_all() {
   doctor
   verify_health
@@ -236,9 +251,10 @@ case "${1:-status}" in
     ;;
   restart) doctor; compose up -d --no-build --no-deps --force-recreate harness-runner; wait_healthy ;;
   release-runner) release_runner ;;
+  refresh-control-plane) refresh_control_plane ;;
   refresh-core-auth) refresh_core_auth ;;
   health) verify_health ;;
   test) test_all ;;
   down) compose down ;;
-  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|refresh-core-auth|test|down"; exit 2 ;;
+  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|release-runner|refresh-control-plane|refresh-core-auth|test|down"; exit 2 ;;
 esac

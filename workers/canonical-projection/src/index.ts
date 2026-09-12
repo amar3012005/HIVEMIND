@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateOperatingRoomCanary, evaluateProjectionMode, evaluateRecallReliability } from './flags';
+import { evaluateEntityDiscoveryCanary, evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateOperatingRoomCanary, evaluateProjectionMode, evaluateRecallReliability } from './flags';
 import { signCoreRequest } from './security';
 import {
   type ProjectionParams,
@@ -150,6 +150,12 @@ export default {
       const userId = url.searchParams.get('user_id') || '';
       const email = url.searchParams.get('email') || '';
       return Response.json({ enabled: await evaluateOperatingRoomCanary(env, orgId, userId, email) });
+    }
+    if (url.pathname === '/entity-discovery-enabled' && request.method === 'GET') {
+      const orgId = url.searchParams.get('org_id') || '';
+      const userId = url.searchParams.get('user_id') || '';
+      const email = url.searchParams.get('email') || '';
+      return Response.json({ enabled: await evaluateEntityDiscoveryCanary(env, orgId, userId, email) });
     }
     if (url.pathname === '/start' && request.method === 'POST') {
       let input: unknown;

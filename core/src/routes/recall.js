@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { initialMemoryCrossRerank } from '../memory/recall-rerank-policy.js';
 import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
+import { resolveAuthorizedEntityIds } from '../memory/entity-discovery.js';
 
 export function normalizeRecallLimit(value, fallback = 15) {
   const parsed = Number(value);
@@ -206,6 +207,21 @@ export async function handleRecallRoute(ctx = {}) {
       }
     }
 
+    // Entity ids are issued only by the tenant-scoped chooser. Resolve them
+    // back to canonical names before compiling the one existing RetrievalSpec;
+    // this keeps memory and evidence lanes on identical hard filters.
+    let resolvedEntityNames = Array.isArray(body.entities) ? body.entities : [];
+    if (Array.isArray(body.entity_ids) && body.entity_ids.length) {
+      const selected = await resolveAuthorizedEntityIds({
+        prisma, orgId, userId, entityIds: body.entity_ids,
+        accessContext: recallAccessCtx, projectId: recallProjectId,
+      });
+      if (selected.degraded) {
+        return jsonResponse(res, { error: 'entity_index_unavailable', degradation: { status: 'DEGRADED', reason: selected.degraded } }, 503);
+      }
+      resolvedEntityNames = [...new Set([...resolvedEntityNames, ...selected.entities.map((entity) => entity.canonicalName)])];
+    }
+
     const query = rawRecallQuery;
     let recallRuntime = injectedRecallRuntime;
     if (!recallRuntime) {
@@ -221,7 +237,7 @@ export async function handleRecallRoute(ctx = {}) {
         buildPacket: buildRecallPacket,
       };
     }
-    const recallPlan = recallRuntime.resolvePlan({ ...body, explicit_mode: true });
+    const recallPlan = recallRuntime.resolvePlan({ ...body, entities: resolvedEntityNames, explicit_mode: true });
     // Evaluate once and latch for the entire request. Flag changes cannot split
     // one recall between old/new lane semantics; evaluation failure is the exact
     // rollback path and preserves the existing response behavior.

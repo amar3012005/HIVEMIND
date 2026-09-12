@@ -7,6 +7,14 @@ const MAX_LIMIT = 25;
 
 const normalize = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
 const words = (value) => normalize(value).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+const entitySlug = (value) => normalize(value).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+
+function displayTagEntity(slug, memory) {
+  const extracted = memory?.metadata?.extracted_facts?.entities;
+  const exact = Array.isArray(extracted) && extracted.find((name) => entitySlug(name) === slug);
+  if (exact) return String(exact);
+  return slug.split('-').filter(Boolean).map((word) => word[0]?.toUpperCase() + word.slice(1)).join(' ');
+}
 
 function matchKind(entity, query) {
   const q = normalize(query);
@@ -191,30 +199,73 @@ async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, acc
     }));
 }
 
+async function authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, tagSlugs = [], entityTypes = [] }) {
+  if (!memoryStore?.listMemories) return [];
+  if (entityTypes.length && !entityTypes.includes('entity')) return [];
+  const listed = await memoryStore.listMemories({
+    user_id: userId,
+    org_id: orgId,
+    project_id: projectId || undefined,
+    is_latest: true,
+    limit: MAX_CANDIDATES,
+    scope: 'all',
+    access_context: accessContext,
+  });
+  const wanted = new Set(tagSlugs);
+  const stats = new Map();
+  for (const memory of listed?.memories || []) {
+    for (const tag of memory?.tags || []) {
+      if (typeof tag !== 'string' || !tag.startsWith('entity:')) continue;
+      const slug = entitySlug(tag.slice('entity:'.length));
+      if (!slug || (wanted.size && !wanted.has(slug))) continue;
+      const current = stats.get(slug) || {
+        id: `tag:${slug}`,
+        canonicalName: displayTagEntity(slug, memory),
+        entityType: 'entity',
+        aliases: [],
+        mentionCount: 0,
+        lastSeenAt: null,
+        _tag: true,
+      };
+      current.mentionCount += 1;
+      const occurredAt = memory.created_at || memory.createdAt || null;
+      if (occurredAt && (!current.lastSeenAt || new Date(occurredAt) > new Date(current.lastSeenAt))) current.lastSeenAt = occurredAt;
+      stats.set(slug, current);
+    }
+  }
+  return [...stats.values()];
+}
+
 async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
   if (!prisma) return { rows: [], degraded: 'entity_index_unavailable' };
   try {
     const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
     const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
-    const legacy = prisma.entity
+    const tagSlugs = ids.filter((id) => id.startsWith('tag:')).map((id) => entitySlug(id.slice(4))).filter(Boolean);
+    const registryIds = ids.filter((id) => !id.startsWith('tag:'));
+    const onlyTagIds = ids.length > 0 && registryIds.length === 0;
+    const legacy = prisma.entity && !onlyTagIds
       ? prisma.entity.findMany({
           where: {
             orgId,
             isActive: true,
-            ...(ids.length ? { id: { in: ids } } : {}),
+            ...(registryIds.length ? { id: { in: registryIds } } : {}),
             ...(types.length ? { entityType: { in: types } } : {}),
             mentions: { some: visibilityWhere({ orgId, userId, accessContext, projectId }) },
           },
           select: { id: true, canonicalName: true, entityType: true, aliases: true, mentionCount: true, lastSeenAt: true },
           orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }, { canonicalName: 'asc' }, { id: 'asc' }],
-          take: ids.length ? ids.length : MAX_CANDIDATES,
+          take: registryIds.length ? registryIds.length : MAX_CANDIDATES,
         })
       : Promise.resolve([]);
-    const [legacyRows, canonicalRows] = await Promise.all([
+    const [legacyRows, canonicalRows, tagRows] = await Promise.all([
       legacy,
-      authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: ids, entityTypes: types }),
+      onlyTagIds
+        ? Promise.resolve([])
+        : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: registryIds, entityTypes: types }),
+      authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, tagSlugs, entityTypes: types }),
     ]);
-    return { rows: dedupeRows([...legacyRows, ...canonicalRows]), degraded: null };
+    return { rows: dedupeRows([...legacyRows, ...canonicalRows, ...(tagRows || [])]), degraded: null };
   } catch {
     return { rows: [], degraded: 'entity_index_unavailable' };
   }

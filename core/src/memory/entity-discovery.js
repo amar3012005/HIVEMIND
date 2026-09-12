@@ -88,24 +88,116 @@ function visibilityWhere({ orgId, userId, accessContext = {}, projectId = null }
   return { OR: [{ document }, { memory }] };
 }
 
+// CanonicalEntity/MemoryEntityLink is the entity registry populated by the
+// canonical memory-ingest path.  The older Entity/EntityMention registry is
+// still populated by document extraction, so discovery must query both.  A
+// chooser that only checks Entity silently returns no matches for memories
+// saved through the normal /api/memories path.
+function visibleMemoryWhere({ orgId, userId, accessContext = {}, projectId = null }) {
+  const effectiveAccess = projectId ? { ...accessContext, projectIds: [projectId] } : accessContext;
+  const projectIds = Array.isArray(effectiveAccess?.projectIds) ? effectiveAccess.projectIds : [];
+  const teamIds = Array.isArray(effectiveAccess?.teamIds) ? effectiveAccess.teamIds : [];
+  const tiers = [{ userId, scope: 'personal' }];
+  if (effectiveAccess?.orgRole !== 'guest') tiers.push({ scope: 'organization', orgId });
+  if (projectIds.length) tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: projectIds } } } });
+  if (teamIds.length) tiers.push({ scope: 'team', primaryTeamId: { in: teamIds } });
+  return {
+    orgId,
+    deletedAt: null,
+    OR: tiers,
+    ...((effectiveAccess?.orgRole === 'guest' || effectiveAccess?.crossProject === false)
+      ? { NOT: { tags: { has: 'scope:cross-project' } } } : {}),
+  };
+}
+
+function dedupeRows(rows = []) {
+  const winners = new Map();
+  for (const row of rows) {
+    const key = `${normalize(row.entityType)}\u0000${normalize(row.canonicalName)}`;
+    const previous = winners.get(key);
+    // Canonical links are written by the current ingestion path, so prefer
+    // them on an otherwise identical entity identity.
+    if (!previous || (row._canonical && !previous._canonical)) winners.set(key, row);
+  }
+  return [...winners.values()];
+}
+
+async function authorizedCanonicalRows({ prisma, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
+  if (!prisma?.canonicalEntity || !prisma?.memoryEntityLink || !prisma?.memory) return [];
+  const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
+  const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
+  const entities = await prisma.canonicalEntity.findMany({
+    where: {
+      organizationId: orgId,
+      ...(ids.length ? { id: { in: ids } } : {}),
+      ...(types.length ? { entityKind: { in: types } } : {}),
+    },
+    select: { id: true, canonicalName: true, entityKind: true, aliases: true, updatedAt: true },
+    orderBy: [{ updatedAt: 'desc' }, { canonicalName: 'asc' }, { id: 'asc' }],
+    take: ids.length ? ids.length : MAX_CANDIDATES,
+  });
+  if (!entities.length) return [];
+
+  const visibleMemories = await prisma.memory.findMany({
+    where: visibleMemoryWhere({ orgId, userId, accessContext, projectId }),
+    select: { id: true, createdAt: true },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    take: MAX_CANDIDATES,
+  });
+  if (!visibleMemories.length) return [];
+  const memoryTimes = new Map(visibleMemories.map((memory) => [memory.id, memory.createdAt]));
+  const links = await prisma.memoryEntityLink.findMany({
+    where: {
+      entityId: { in: entities.map((entity) => entity.id) },
+      memoryId: { in: visibleMemories.map((memory) => memory.id) },
+    },
+    select: { entityId: true, memoryId: true },
+  });
+  const stats = new Map();
+  for (const link of links) {
+    const seen = stats.get(link.entityId) || { mentionCount: 0, lastSeenAt: null };
+    seen.mentionCount += 1;
+    const occurredAt = memoryTimes.get(link.memoryId);
+    if (occurredAt && (!seen.lastSeenAt || occurredAt > seen.lastSeenAt)) seen.lastSeenAt = occurredAt;
+    stats.set(link.entityId, seen);
+  }
+  return entities
+    .filter((entity) => stats.has(entity.id))
+    .map((entity) => ({
+      id: entity.id,
+      canonicalName: entity.canonicalName,
+      entityType: entity.entityKind,
+      aliases: entity.aliases || [],
+      mentionCount: stats.get(entity.id).mentionCount,
+      lastSeenAt: stats.get(entity.id).lastSeenAt || entity.updatedAt,
+      _canonical: true,
+    }));
+}
+
 async function authorizedEntityRows({ prisma, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
-  if (!prisma?.entity) return { rows: [], degraded: 'entity_index_unavailable' };
+  if (!prisma) return { rows: [], degraded: 'entity_index_unavailable' };
   try {
     const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
     const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
-    const rows = await prisma.entity.findMany({
-      where: {
-        orgId,
-        isActive: true,
-        ...(ids.length ? { id: { in: ids } } : {}),
-        ...(types.length ? { entityType: { in: types } } : {}),
-        mentions: { some: visibilityWhere({ orgId, userId, accessContext, projectId }) },
-      },
-      select: { id: true, canonicalName: true, entityType: true, aliases: true, mentionCount: true, lastSeenAt: true },
-      orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }, { canonicalName: 'asc' }, { id: 'asc' }],
-      take: ids.length ? ids.length : MAX_CANDIDATES,
-    });
-    return { rows, degraded: null };
+    const legacy = prisma.entity
+      ? prisma.entity.findMany({
+          where: {
+            orgId,
+            isActive: true,
+            ...(ids.length ? { id: { in: ids } } : {}),
+            ...(types.length ? { entityType: { in: types } } : {}),
+            mentions: { some: visibilityWhere({ orgId, userId, accessContext, projectId }) },
+          },
+          select: { id: true, canonicalName: true, entityType: true, aliases: true, mentionCount: true, lastSeenAt: true },
+          orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }, { canonicalName: 'asc' }, { id: 'asc' }],
+          take: ids.length ? ids.length : MAX_CANDIDATES,
+        })
+      : Promise.resolve([]);
+    const [legacyRows, canonicalRows] = await Promise.all([
+      legacy,
+      authorizedCanonicalRows({ prisma, orgId, userId, accessContext, projectId, entityIds: ids, entityTypes: types }),
+    ]);
+    return { rows: dedupeRows([...legacyRows, ...canonicalRows]), degraded: null };
   } catch {
     return { rows: [], degraded: 'entity_index_unavailable' };
   }

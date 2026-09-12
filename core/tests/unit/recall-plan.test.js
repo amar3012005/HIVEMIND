@@ -154,6 +154,43 @@ test('issued entity selections and explicit tags hydrate authorized matches befo
   assert.deepEqual(result.memories.map((memory) => memory.id), ['correction']);
 });
 
+test('valid-time snapshots hydrate superseded authorized revisions and enforce the boundary', async () => {
+  const august = {
+    id: 'aurora-august', title: 'Aurora August', content: 'Sofia Laurent reported discovery.',
+    tags: ['entity:sofia-laurent', 'scenario:aurora-timeline'], memory_type: 'fact',
+    user_id: 'user-1', org_id: 'org-1', is_latest: false,
+    document_date: '2026-08-01T09:00:00.000Z', valid_from: '2026-08-01T09:00:00.000Z',
+    created_at: '2026-09-12T09:00:00.000Z',
+  };
+  const september = {
+    id: 'aurora-september', title: 'Aurora September', content: 'Sofia Laurent approved cutover.',
+    tags: ['entity:sofia-laurent', 'scenario:aurora-timeline'], memory_type: 'fact',
+    user_id: 'user-1', org_id: 'org-1', is_latest: true,
+    document_date: '2026-09-01T09:00:00.000Z', valid_from: '2026-09-01T09:00:00.000Z',
+    created_at: '2026-09-12T09:00:00.000Z',
+  };
+  const router = new RecallRouter({
+    persistentMemoryStore: emptyStore({
+      recall: async () => ({ memories: [september] }),
+      listMemories: async ({ is_latest }) => ({
+        memories: is_latest === false ? [august] : [september], total: 1,
+      }),
+    }),
+    evidenceRetrieval: embeddingEvidence(),
+    prisma: null,
+  });
+
+  const result = await router.recall('Aurora status as of August', {
+    mode: 'fact', explicit_mode: true, reliability_v1: true,
+    selected_entity_names: ['Sofia Laurent'], entity_filter_mode: 'must',
+    tags: ['scenario:aurora-timeline'], valid_at: '2026-08-15T12:00:00.000Z',
+    temporal_axis: 'valid_time', limit: 5,
+  }, { userId: 'user-1', orgId: 'org-1', accessContext: { orgRole: 'member' } });
+
+  assert.deepEqual(result.memories.map((memory) => memory.id), ['aurora-august']);
+  assert.equal(result.memories[0].valid_at, '2026-08-01T09:00:00.000Z');
+});
+
 test('typed relationship predicates are compiled into the graph query before its cap', async () => {
   let captured = null;
   await loadTypedGraphEvidence({

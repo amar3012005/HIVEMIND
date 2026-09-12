@@ -10886,6 +10886,7 @@ exit \$RC
             .filter(Boolean);
           const result = await findEntities({
             prisma,
+            memoryStore: persistentMemoryStore,
             orgId,
             userId,
             query,

@@ -9,6 +9,7 @@ type RecallFlagEnv = FlagEnv & {
 
 type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
 type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
+type OperatingRoomFlagEnv = FlagEnv & { OPERATING_ROOM_FLAG?: string };
 
 export async function evaluateGovernedRoomCanary(
   env: GovernedRoomFlagEnv, orgId: string, userId: string, email: string,
@@ -30,6 +31,33 @@ export async function evaluateGovernedRoomCanary(
     return details.value === true;
   } catch (error) {
     console.error(JSON.stringify({ event: 'governed_room_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
+
+// Live voice rooms are a separate rollout from governed text-room turns.  A
+// shared flag would let a text-only canary accidentally provision media.
+export async function evaluateOperatingRoomCanary(
+  env: OperatingRoomFlagEnv, orgId: string, userId: string, email: string,
+): Promise<boolean> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!validUuid(orgId) || !validUuid(userId) || !normalizedEmail) return false;
+  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return false;
+  try {
+    const details = await env.FLAGS.getBooleanDetails(
+      env.OPERATING_ROOM_FLAG || 'operating_rooms_v1', false,
+      {
+        targetingKey: `${orgId}:${userId}`,
+        org_id: orgId,
+        user_id: userId,
+        email: normalizedEmail,
+        environment: env.ENVIRONMENT,
+      },
+    );
+    return details.value === true;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'operating_room_flag_error', org_id: orgId, user_id: userId,
       message: error instanceof Error ? error.message : String(error) }));
     return false;
   }

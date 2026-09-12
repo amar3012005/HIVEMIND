@@ -9363,8 +9363,29 @@ const server = http.createServer(async (req, res) => {
   // Reuses HyperRoom as the durable room envelope. RealtimeKit owns only the
   // live media session; authenticated HIVEMIND identity and transcript state
   // remain tenant-scoped in Postgres.
-  if (pathname.startsWith('/v1/operating-rooms') && process.env.OPERATING_ROOMS_V1 !== 'true') {
-    return jsonResponse(res, { error: 'not_found' }, 404);
+  if (pathname.startsWith('/v1/operating-rooms')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    // The browser must never discover a live-media surface merely because an
+    // old container environment happened to include a boolean switch.  Flagship
+    // targets an authenticated tenant/user; unavailable Flagship and absent
+    // RealtimeKit credentials both fail closed as not-found.
+    const configured = Boolean(
+      String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+      && String(process.env.CLOUDFLARE_REALTIMEKIT_APP_ID || '').trim()
+      && String(process.env.CLOUDFLARE_REALTIMEKIT_API_TOKEN || '').trim()
+      && String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '').trim(),
+    );
+    const authenticatedUser = await prisma.user.findUnique({
+      where: { id: current.session.userId }, select: { email: true },
+    }).catch(() => null);
+    const { operatingRoomCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+    const admitted = configured && await operatingRoomCanaryFor({
+      orgId: current.session.orgId,
+      userId: current.session.userId,
+      email: authenticatedUser?.email || current.session.email,
+    });
+    if (!admitted) return jsonResponse(res, { error: 'not_found' }, 404);
   }
   if (pathname === '/v1/operating-rooms' && req.method === 'GET') {
     const current = await requireSession(req, res);

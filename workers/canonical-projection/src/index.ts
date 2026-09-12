@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from './flags';
+import { evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateOperatingRoomCanary, evaluateProjectionMode, evaluateRecallReliability } from './flags';
 import { signCoreRequest } from './security';
 import {
   type ProjectionParams,
@@ -144,6 +144,12 @@ export default {
       const userId = url.searchParams.get('user_id') || '';
       const email = url.searchParams.get('email') || '';
       return Response.json({ enabled: await evaluateGovernedRoomCanary(env, orgId, userId, email) });
+    }
+    if (url.pathname === '/operating-room-enabled' && request.method === 'GET') {
+      const orgId = url.searchParams.get('org_id') || '';
+      const userId = url.searchParams.get('user_id') || '';
+      const email = url.searchParams.get('email') || '';
+      return Response.json({ enabled: await evaluateOperatingRoomCanary(env, orgId, userId, email) });
     }
     if (url.pathname === '/start' && request.method === 'POST') {
       let input: unknown;

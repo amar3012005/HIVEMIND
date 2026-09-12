@@ -59,6 +59,26 @@
       },
       "workflows": [{ "name": "hivemind-canonical-projection-workflow-local", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }]
     },
+    "enigma": {
+      "name": "hivemind-canonical-projection-enigma",
+      "vars": {
+        "ENVIRONMENT": "enigma",
+        "HIVEMIND_CORE_URL": "https://api.dev.next.singulancelabs.com",
+        "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
+        "CANONICAL_KNOWLEDGE_ENABLED": "true",
+        "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
+        "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
+        "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
+        "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
+        "OPERATING_ROOM_FLAG": "operating_rooms_v1"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "queues": {
+        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-enigma" }],
+        "consumers": [{ "queue": "hivemind-canonical-projection-enigma", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-enigma", "max_concurrency": 5, "retry_delay": 30 }]
+      },
+      "workflows": [{ "name": "hivemind-canonical-projection-workflow-enigma", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }]
+    },
     "production": {
       "name": "hivemind-canonical-projection-production",
       "vars": {

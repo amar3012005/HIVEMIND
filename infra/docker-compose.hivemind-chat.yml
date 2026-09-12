@@ -372,6 +372,9 @@ services:
       NODE_ENV: production
       PORT: "3080"
       DSH_HOME: /tmp/dsh
+      # Runtime plugin URLs must use the same immutable revision as the image.
+      # This also makes a no-build runner recreate safe after a targeted overlay.
+      DSH_CLIENT_COMMIT_HASH: ${HIVEMIND_HARNESS_COMMIT_HASH:?set the locked Harness SHA}
       DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app
       PGOPTIONS: -c search_path=hivemind,public
       REDIS_URL: redis://redis:6379/0

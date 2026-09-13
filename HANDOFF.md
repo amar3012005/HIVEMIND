@@ -21,6 +21,9 @@ authenticated user, organization, scope, authority, and audit context.
 Authoritative architecture and operating rules:
 
 - [`AGENTS.md`](./AGENTS.md): global safety, memory, runtime, and deployment rules.
+- [`docs/ENIGMA_HANDOFF.md`](./docs/ENIGMA_HANDOFF.md): exact Enigma branch,
+  server, immutable release, Cloudflare/Harness, canary, and cross-laptop
+  continuation state. Read it before changing or deploying `enigma-main`.
 - [`docs/BRANCH_PROTOCOL.md`](./docs/BRANCH_PROTOCOL.md): branch/worktree ownership.
 - [`docs/PRODUCTION_RELEASE_PROTOCOL.md`](./docs/PRODUCTION_RELEASE_PROTOCOL.md): release invariants and acceptance gates.
 - [`DEPLOY_GOVERNOR.md`](./DEPLOY_GOVERNOR.md): the only supported fast production deployment path.

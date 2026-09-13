@@ -114,21 +114,28 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
         async () => { await core<StageResult>(this.env, params, 'stages/materialize/start'); return { ok: true, status: 'accepted' }; },
       );
-      let materialized: MaterializationStatus['result'] | StageResult | null = null;
+      let materialized = false;
       for (let attempt = 0; attempt < 160; attempt += 1) {
         await step.sleep(`wait for canonical materialization ${attempt + 1}`, '2 seconds');
-        const status = await step.do(
+        // Workflow step outputs are retained by Cloudflare. Collapse Core's
+        // detailed local receipt to one coarse decision before returning from
+        // the step so document IDs, coverage details, and memory IDs never
+        // enter Workflow state or logs.
+        const poll = await step.do(
           `verify canonical materialization ${attempt + 1}`,
           { retries: { limit: 3, delay: '5 seconds', backoff: 'exponential' }, timeout: '1 minute' },
-          () => core<MaterializationStatus>(this.env, params, 'stages/materialize/status'),
+          async () => {
+            const status = await core<MaterializationStatus>(this.env, params, 'stages/materialize/status');
+            return { decision: materializationPollDecision(status) };
+          },
         );
-        const decision = materializationPollDecision(status);
+        const decision = poll.decision;
         if (decision === 'complete') {
-          materialized = { ok: true, status: 'succeeded' };
+          materialized = true;
           break;
         }
         if (decision === 'fail') {
-          throw new NonRetryableError(status.message || status.error_code || 'materialization_failed');
+          throw new NonRetryableError('materialization_failed');
         }
         if (decision === 'redispatch') {
           await step.do(

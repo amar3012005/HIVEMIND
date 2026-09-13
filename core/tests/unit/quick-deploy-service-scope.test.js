@@ -15,3 +15,9 @@ test('explicit quick-deploy service arguments remain service scoped', () => {
 test('quick-deploy without service arguments retains the full default group', () => {
   assert.match(quick, /if \[ \$# -eq 0 \]; then\s+SERVICES="core,control-plane,employees"/);
 });
+
+test('Harness runner releases require a digest-pinned external artifact', () => {
+  assert.match(canonical, /harness-runner requires --harness-image/);
+  assert.match(canonical, /@sha256:\[0-9a-f\]\{64\}/);
+  assert.match(canonical, /docker compose --profile harness-chat/);
+});

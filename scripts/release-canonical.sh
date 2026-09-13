@@ -20,7 +20,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --dry-run) DRY=1; shift;;
   --service-scoped) SERVICE_SCOPED=1; shift;;
   --allow-divergence) ALLOW_DIVERGENCE=1; shift;;
+  --harness-image) HARNESS_IMAGE="$2"; shift 2;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
@@ -42,8 +43,8 @@ PRESENCE="$HDIR/scripts/release-presence.sh"
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
-declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=hivemind-harness-runner-1 )
+declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=harness-chat )
 build_cmd() { local s="$1" tag="$2"; case "$s" in
   core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
   control-plane) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=control-plane -t "$tag" -f Dockerfile.control-plane . ;;
@@ -57,6 +58,11 @@ esac; }
 
 IFS=',' read -ra SVCS <<< "$SERVICES"
 for s in "${SVCS[@]}"; do [ -n "${CONTAINER[$s]:-}" ] || { echo "FATAL: unknown service '$s'"; exit 2; }; done
+if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
+  HARNESS_IMAGE="${HARNESS_IMAGE:-${HIVEMIND_HARNESS_IMAGE:-}}"
+  [[ "$HARNESS_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] \
+    || { echo "FATAL: harness-runner requires --harness-image (or HIVEMIND_HARNESS_IMAGE) pinned by @sha256"; exit 2; }
+fi
 
 # Publish intent before building. A conflicting claim fails before consuming
 # disk or producing an image that would supersede another session's release.
@@ -167,6 +173,14 @@ fi
 # ── build immutable sha images + preserve rollback ─────────────────────────
 echo "services:" > "$OVERRIDE.tmp"
 for s in "${SVCS[@]}"; do
+  if [ "$s" = harness-runner ]; then
+    CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
+    if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
+    echo "[pull] $s → $HARNESS_IMAGE"
+    docker pull "$HARNESS_IMAGE" >/dev/null
+    printf '  %s:\n    image: %s\n' "$s" "$HARNESS_IMAGE" >> "$OVERRIDE.tmp"
+    continue
+  fi
   TAG="hivemind/${IMG[$s]}:sha-$SHORT"
   # rollback: retag the currently-live image of this service
   CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
@@ -206,7 +220,7 @@ fi
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
-  docker compose --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+  docker compose --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
 done
 
@@ -220,6 +234,12 @@ for s in "${SVCS[@]}"; do
   done
   rev=$(docker inspect "$c" --format '{{ index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
   ok="✓"; { [ "$st" = healthy ] || [ "$st" = running ]; } || { ok="✗ UNHEALTHY"; FAIL=1; }
+  if [ "$s" = harness-runner ]; then
+    live_image=$(docker inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true)
+    [ "$live_image" = "$HARNESS_IMAGE" ] || { ok="$ok ✗ image=$live_image≠requested-digest"; FAIL=1; }
+    echo "[verify] $s $c → $st  image=$live_image  $ok"
+    continue
+  fi
   [ "$rev" = "$SHA" ] || { ok="$ok ✗ label=$rev≠$SHA"; FAIL=1; }
   echo "[verify] $s $c → $st  rev=${rev:0:12}  $ok"
 done
@@ -227,12 +247,15 @@ if [ "$SKIP_CANARY" = 0 ] && [ -n "$CANARY_URL" ]; then
   code=""; for i in $(seq 1 12); do code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$CANARY_URL" || true); case "$code" in 2*|3*|401|403) break;; esac; sleep 3; done
   echo "[canary] $CANARY_URL → $code"; case "$code" in 2*|3*|401|403);; *) FAIL=1;; esac
 fi
-"$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$SERVICES" --source-root "$REL" || FAIL=1
+VERIFY_SERVICES=$(printf '%s' "$SERVICES" | sed -E 's/(^|,)harness-runner(,|$)/\\1\\2/g; s/,,+/,/g; s/^,|,$//g')
+if [ -n "$VERIFY_SERVICES" ]; then
+  "$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$VERIFY_SERVICES" --source-root "$REL" || FAIL=1
+fi
 
 # ── manifest ───────────────────────────────────────────────────────────────
 {
   echo "{"; echo "  \"sha\": \"$SHA\","; echo "  \"short\": \"$SHORT\","; echo "  \"ts\": \"$TS\","
-  echo "  \"services\": \"$SERVICES\","; echo "  \"worktree\": \"$REL\","
+  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; echo "  \"worktree\": \"$REL\","
   echo -n "  \"rollback\": {"; first=1; for s in "${!ROLLBACK[@]}"; do [ $first = 1 ] || echo -n ","; first=0; echo -n "\"$s\":\"${ROLLBACK[$s]}\""; done; echo "},"
   echo "  \"result\": \"$([ $FAIL = 0 ] && echo ok || echo FAILED)\""; echo "}"
 } > "$MANIFEST"

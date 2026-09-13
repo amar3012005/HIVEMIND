@@ -12,7 +12,7 @@ import {
   promotionProvenance,
   repairSourceLanguageClaims,
 } from '../../src/knowledge/document-first-ingestion.js';
-import { EntityExtractor } from '../../src/knowledge/entity-extractor.js';
+import { EntityExtractor, isValidEntityCandidate } from '../../src/knowledge/entity-extractor.js';
 
 test('model-free entity extraction recognizes unambiguous enterprise names', () => {
   const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
@@ -27,6 +27,24 @@ test('model-free entity extraction recognizes unambiguous enterprise names', () 
   assert.ok(keys.has('product:SolvisControl-3'));
 });
 
+test('entity admission rejects question fragments and source artifacts', () => {
+  assert.equal(isValidEntityCandidate({ name: 'Should Singulance', type: 'person' }), false);
+  assert.equal(isValidEntityCandidate({ name: 'singulance-german-banks-first-DECISION-2026-09-11', type: 'organization' }), false);
+  assert.equal(isValidEntityCandidate({ name: 'DaVinci_AI_Gruendungsstipendium_Final.docx', type: 'organization' }), false);
+  assert.equal(isValidEntityCandidate({ name: 'Singulance', type: 'organization' }), true);
+  assert.equal(isValidEntityCandidate({ name: 'Uwe Berger', type: 'person' }), true);
+});
+
+test('model candidates pass through the same deterministic entity admission gate', () => {
+  const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
+  const entities = extractor._mergeCandidates([], [
+    { name: 'Should Singulance', type: 'person', source: 'llm', confidence: 0.9 },
+    { name: 'pricing-plan-final.pdf', type: 'product', source: 'llm', confidence: 0.9 },
+    { name: 'Singulance', type: 'organization', source: 'llm', confidence: 0.9 },
+  ]);
+  assert.deepEqual(entities.map((entity) => entity.name), ['Singulance']);
+});
+
 test('translated extraction is repaired to exact source-language text', () => {
   const quote = 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026.';
   const result = repairSourceLanguageClaims([{
@@ -37,6 +55,17 @@ test('translated extraction is repaired to exact source-language text', () => {
   assert.equal(result[0].f, quote);
   assert.equal(result[0]._language_repaired, true);
   assert.equal(result._languageRepairCount, 1);
+});
+
+test('German pricing rows cannot survive as English claims despite shared brands and amounts', () => {
+  const quote = 'Kore.ai liegt preislich zwischen €25k und €100k jährlich.';
+  const result = repairSourceLanguageClaims([{
+    t: 'Kore.ai pricing',
+    f: 'Kore.ai pricing ranges from €25k to €100k annually.',
+    source_quote: quote,
+  }], 0.55);
+  assert.equal(result[0].f, quote);
+  assert.equal(result[0]._language_repaired, true);
 });
 
 test('source-anchor coverage restores omitted entity, amount and deadline without invention', () => {

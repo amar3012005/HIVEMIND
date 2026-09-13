@@ -48,6 +48,7 @@ import { isStructuredSourceNoise } from '../memory/durable-content.js';
 import { countPages } from './page-count.js';
 import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
 import { normalizeKbMemoryType } from '../memory/memory-taxonomy.js';
+import { isValidEntityCandidate } from './entity-extractor.js';
 import {
   buildEvidenceMetadata,
   buildEvidenceVectorPayload,
@@ -558,6 +559,22 @@ function lexicalWords(value) {
     .filter((token) => token.length > 3 && /\p{L}/u.test(token));
 }
 
+function languageSignal(value) {
+  const text = ` ${String(value || '').normalize('NFKC').toLocaleLowerCase()} `;
+  const tokens = text.split(/[^\p{L}]+/u).filter(Boolean);
+  const count = (words) => tokens.reduce((total, token) => total + (words.has(token) ? 1 : 0), 0);
+  const german = count(new Set(['der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einer', 'einem', 'und', 'oder', 'aber', 'mit', 'für', 'von', 'zur', 'zum', 'ist', 'sind', 'wird', 'werden', 'liegt', 'zwischen', 'jährlich', 'monatlich', 'preislich', 'kosten', 'angebot']));
+  const english = count(new Set(['the', 'a', 'an', 'and', 'or', 'but', 'with', 'for', 'from', 'to', 'is', 'are', 'will', 'between', 'annual', 'monthly', 'pricing', 'costs', 'ranges', 'offering']));
+  return { german: german + (/[äöüß]/u.test(text) ? 2 : 0), english };
+}
+
+function isGermanEnglishTranslation(claim, quote) {
+  const source = languageSignal(quote);
+  const generated = languageSignal(claim);
+  return source.german >= 2 && source.german > source.english
+    && generated.english >= 2 && generated.english > generated.german;
+}
+
 /**
  * Enforce the extractor's source-language contract. A source quote is already
  * byte-grounded later by normalizeUnifiedClaims; when a generated claim shares
@@ -573,9 +590,10 @@ export function repairSourceLanguageClaims(rawFacts, threshold = 0.55) {
     if (!claim || !quote) return fact;
     const claimWords = new Set(lexicalWords(claim));
     const quoteWords = lexicalWords(quote);
-    if (!claimWords.size || quoteWords.length < 4) return fact;
+    const languageMismatch = isGermanEnglishTranslation(claim, quote);
+    if ((!claimWords.size || quoteWords.length < 4) && !languageMismatch) return fact;
     const overlap = quoteWords.filter((word) => claimWords.has(word)).length / quoteWords.length;
-    if (overlap >= threshold) return fact;
+    if (overlap >= threshold && !languageMismatch) return fact;
     repaired += 1;
     return {
       ...fact,
@@ -855,7 +873,7 @@ function durableEntities(entities) {
       }
       return null;
     })
-    .filter((e) => e && e.name)
+    .filter((e) => e && e.name && isValidEntityCandidate({ name: e.name, type: e.kind }))
     // Measurements, percentages, and dates are values on claims, not graph
     // identities. This language-agnostic structural gate drops numeric-led
     // phrases without maintaining a domain dictionary.
@@ -2181,7 +2199,9 @@ Output the JSON object and nothing else.`;
             .map((e) => (typeof e === 'string'
               ? { name: e, kind: null }
               : (e && typeof e === 'object' && typeof e.n === 'string' ? { name: e.n, kind: e.k || null } : null)))
-            .filter((e) => e && typeof e.name === 'string' && e.name.trim() && !_isArtifactRef(e.name))
+            .filter((e) => e && typeof e.name === 'string' && e.name.trim()
+              && !_isArtifactRef(e.name)
+              && isValidEntityCandidate({ name: e.name, type: e.kind }))
             .slice(0, 8);
           const rawEntityNames = _entityPairs.map((e) => e.name);
           const entityTags = rawEntityNames
@@ -6907,118 +6927,15 @@ Every item must include a non-empty content field and one or more valid support_
       this._distillFactsAsync({ targets: distillTargets, userId, orgId, metadata, documentId });
     }
 
-    // ── Canonical Document parent + PartOf edges (Supermemory-shape graph) ──
-    // Per-segment promotion above wrote N standalone Memory rows but no
-    // connection back to a "this is the document" node. Build that node
-    // now and wire every promoted child to it via PartOf-encoded edges
-    // (RelationshipType enum currently lacks PartOf → encode as
-    // Extends + metadata.subtype='PartOf' until the enum migration).
-    //
-    // Net effect: KB upload from FE produces 1 Document + N Sections +
-    // N PartOf edges, matching the contract the /api/memories route
-    // already emits via SmartIngestRouter._routeKnowledgeBase tree.
-    const persistedChildIds = memories
-      .filter(m => m?.id && !(m?.operation || '').startsWith('skipped'))
-      .map(m => m.id);
-
-    let docParentId = null;
-    if (persistedChildIds.length > 0) {
-      try {
-        // Synthesize a short doc summary: title + N section count + first 280
-        // chars from the first child. Cheap, no LLM. Cognition-loop can refine.
-        const firstContent = promotableSegments[0]?.content || '';
-        const docTitle =
-          metadata.documentTitle
-          || metadata.filename
-          || `Document ${documentId.slice(0, 8)}`;
-        const docSummary = [
-          `Document: ${docTitle}`,
-          `Sections promoted: ${persistedChildIds.length}/${segments.length}`,
-          '',
-          firstContent.slice(0, 280),
-        ].join('\n');
-
-        const parentRes = await this.memoryGraphEngine.ingestMemory({
-          user_id: userId,
-          org_id: orgId,
-          // Same scope/visibility fix as the segment payload — doc parent node
-          // must also become org-visible for org-targeted uploads.
-          scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
-            ? 'project'
-            : metadata.primary_team_id ? 'team' : undefined),
-          visibility: metadata.visibility || 'private',
-          primary_team_id: metadata.primary_team_id || null,
-          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          content: docSummary,
-          title: docTitle,
-          memory_type: 'fact',
-          tags: [
-            ...(metadata.tags || []),
-            'knowledge-base',
-            'document',
-            'document-summary',
-          ],
-          source_metadata: {
-            source_platform: 'knowledge_base',
-            source_type: 'document',
-            document_id: documentId,
-            filename: metadata.filename || null,
-          },
-          metadata: {
-            semantic_role: 'document',
-            ingest_tree_role: 'parent',
-            document_id: documentId,
-            child_count: persistedChildIds.length,
-            total_segments: segments.length,
-          },
-          skip_fact_extraction: true,                // parent is itself a summary
-          skipPredictCalibrate: true,                // never dedup the doc node
-          // Doc node is unique per document — nothing to supersede/contradict/
-          // classify; make it a pure lock-free insert too (#6/#7). PartOf edges
-          // to children + deferred entity tags still attach below.
-          skip_contradiction_detection: true,
-          skip_relationship_classification: true,
-          smartIngest: false,
-          skipAdvisoryLock: true,
-          defer_entity_linking: true,
-        });
-
-        docParentId = parentRes?.memoryId || parentRes?.id || null;
-
-        if (docParentId) {
-          // Native PartOf edge (enum migration 20260521120000 added it).
-          // Falls back to Extends + metadata.subtype='PartOf' if the
-          // running Prisma client predates the migration so KB ingest
-          // never crashes mid-rollout.
-          const createPartOf = async (childId) => {
-            try {
-              await this.memoryGraphEngine.applyValidatedRelationship({
-                org_id: orgId, // residency: worker context may not carry the org — see createRelationship
-                id: crypto.randomUUID(),
-                from_id: childId,
-                to_id: docParentId,
-                type: 'PartOf',
-                confidence: 1.0,
-                created_by: 'document_first_ingestion',
-                created_at: new Date().toISOString(),
-                metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' },
-              }, {
-                user_id: userId,
-                org_id: orgId,
-              });
-            } catch (err) {
-              ingestDiagnostic.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed:`, err.message);
-            }
-          };
-          const edgeTasks = persistedChildIds.map(childId => createPartOf(childId));
-          await Promise.all(edgeTasks);
-
-          memories.push({ id: docParentId, operation: 'document_parent', isParent: true });
-        }
-      } catch (parentErr) {
-        ingestDiagnostic.warn('[doc-first] Failed to attach Document parent:', parentErr.message);
-      }
-    }
+    // The raw-segment fallback used to contain a second, divergent document
+    // parent writer here. It created an extra `source_type=document` memory and
+    // bypassed canonical provenance/language/entity rules. All promotion modes
+    // now use the same parent owner.
+    const docParentId = await this._attachDocumentParent({
+      memories, userId, orgId, documentId, metadata,
+      totalFacts: memories.filter((memory) => memory?.id && !memory?.isParent).length,
+      firstContent: promotableSegments[0]?.content || '',
+    });
 
     return {
       candidates, memories, documentParentId: docParentId,

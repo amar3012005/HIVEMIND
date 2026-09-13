@@ -24,8 +24,21 @@ const PROJECT_RE = /\b(?:Project|Projekt)\s+\p{Lu}[\p{L}\p{M}\d'’_-]*(?:\s+\p{
 const PERSON_RE = /\b\p{Lu}[\p{Ll}\p{M}'’-]{1,}\p{Ll}\s+\p{Lu}[\p{Ll}\p{M}'’-]{1,}\p{Ll}(?:\s+\p{Lu}[\p{Ll}\p{M}'’-]{1,}\p{Ll})?\b/gu;
 const MODEL_RE = /\b(?=[\p{L}\d_-]{4,}\b)(?=[\p{L}\d_-]*\d)[\p{Lu}\p{Ll}][\p{L}\d]*(?:[-_][\p{L}\d]+)+\b/gu;
 const GENERIC_NAME_PREFIX = /^(?:Evidence|Source|Document|Summary|Project|Projekt|Section|Chapter|Meeting|Knowledge)\b/u;
+const NON_PERSON_PREFIX = /^(?:Should|Could|Would|Must|Can|Will|May|Might|Shall|If|When|Where|Why|How|What|Which|This|That|These|Those)\b/iu;
+const FILE_EXTENSION = /\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|md|txt|rtf|html?|xml|json|ya?ml|png|jpe?g|gif|webp|svg|tiff?|zip|tar|gz)\b/iu;
+const PATH_OR_URL = /(?:https?:\/\/|file:\/\/|[\\/][^\s]+[\\/])/iu;
+const FILENAME_SLUG = /(?:[_-][\p{L}\p{N}]+){3,}/u;
 
 const ENTITY_TYPES = ['person', 'organization', 'project', 'topic', 'location', 'product', 'event'];
+
+/** Final deterministic admission gate shared by regex and model candidates. */
+export function isValidEntityCandidate(candidate) {
+  const name = String(candidate?.name || '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  if (name.length < 2 || name.length > 200) return false;
+  if (FILE_EXTENSION.test(name) || PATH_OR_URL.test(name) || FILENAME_SLUG.test(name)) return false;
+  if (candidate?.type === 'person' && (NON_PERSON_PREFIX.test(name) || GENERIC_NAME_PREFIX.test(name))) return false;
+  return true;
+}
 
 const SYSTEM_PROMPT = `You extract EVERY distinct named entity from the text. Be THOROUGH, not minimal — this feeds a knowledge graph, and a missed entity is lost forever. Never stop at the obvious organization; capture every specific named thing.
 
@@ -336,7 +349,7 @@ export class EntityExtractor {
 
   _mergeCandidates(regexC, llmC) {
     const byKey = new Map();
-    for (const c of [...regexC, ...llmC]) {
+    for (const c of [...regexC, ...llmC].filter(isValidEntityCandidate)) {
       const key = `${c.type}|${c.name.toLowerCase()}`;
       const prev = byKey.get(key);
       if (!prev) {

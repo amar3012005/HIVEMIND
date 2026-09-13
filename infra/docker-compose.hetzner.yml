@@ -443,6 +443,10 @@ services:
 
   # ── Voice agent (TARA) — xAI Grok Voice, parallel to Deepgram ───────────
   tara-grok:
+    # Direct xAI/Grok access is intentionally disabled in the default Enigma
+    # topology. It may only be started by explicitly selecting this profile;
+    # all ordinary model traffic uses Cloudflare AI Gateway instead.
+    profiles: ["direct-xai-disabled"]
     build: { context: ../services/tara-grok }
     image: hivemind/tara-grok:${VERSION:-latest}
     container_name: tara-grok

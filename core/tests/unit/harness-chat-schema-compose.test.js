@@ -22,7 +22,7 @@ test('Harness provider schema is additive, tenant scoped, and RLS enforced', asy
 test('canonical Compose uses the dedicated Harness image and existing Postgres and Redis', async () => {
   const compose = await readFile(composeUrl, 'utf8');
   const service = compose.slice(compose.indexOf('\n  harness-runner:'), compose.indexOf('\n  employees:'));
-  assert.match(service, /image: \$\{HIVEMIND_HARNESS_IMAGE:-hivemind\/harness-chat:local\}/);
+  assert.match(service, /image: \$\{HIVEMIND_HARNESS_IMAGE:-hivemind\/harness-chat:sha-[0-9a-f]{9}\}/);
   assert.match(service, /@postgres:5432/);
   assert.match(service, /@redis:6379\/0/);
   assert.match(service, /postgres: \{ condition: service_healthy \}/);

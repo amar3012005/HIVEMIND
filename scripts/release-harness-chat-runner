@@ -3,7 +3,8 @@ set -eu
 
 repo=${1:?usage: release-harness-chat-runner HARNESS_REPO [IMAGE_REPOSITORY]}
 image_repo=${2:-hivemind/harness-chat}
-expected=2de3e2569ac56b09858fe93eaafd1a0ffea8b059
+platform=${HIVEMIND_HARNESS_PLATFORM:-linux/amd64}
+expected=4e4351d40e12807cc25337e707f56222591c3cee
 actual=$(git -C "$repo" rev-parse HEAD)
 dirty=$(git -C "$repo" status --porcelain)
 
@@ -12,7 +13,7 @@ dirty=$(git -C "$repo" status --porcelain)
 
 short=$(printf '%.9s' "$expected")
 tag="$image_repo:sha-$short"
-docker build --build-arg "DSH_CLIENT_COMMIT_HASH=$expected" \
+docker build --platform "$platform" --build-arg "DSH_CLIENT_COMMIT_HASH=$expected" \
   --label "org.opencontainers.image.revision=$expected" \
   --label "org.opencontainers.image.source=https://github.com/amar3012005/deepseek-harness-hivemind" \
   -f "$repo/deploy/hivemind-chat/Dockerfile" -t "$tag" "$repo"

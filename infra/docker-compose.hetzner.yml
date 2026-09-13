@@ -175,7 +175,7 @@ services:
       - hivemind-web
       - --no-open
       - --trusted-host
-      - next.singulancelabs.com
+      - harness-chat-origin.singulancelabs.com
     restart: unless-stopped
     read_only: true
     mem_limit: 2g

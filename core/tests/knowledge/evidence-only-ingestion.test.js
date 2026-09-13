@@ -191,7 +191,11 @@ test('stored evidence promotion generates memories without invoking extraction a
     assert.equal(input.metadata.ingest_mode, 'both');
     assert.equal(input.metadata.original_ingest_mode, 'evidence');
     assert.equal(input.segments.length, 1);
-    return { candidates: [{ segmentId: input.segments[0].id }], memories: [{ id: '66666666-6666-4666-8666-666666666666' }] };
+    return {
+      candidates: [{ segmentId: input.segments[0].id }],
+      memories: [{ id: '66666666-6666-4666-8666-666666666666' }],
+      coverage: { memory_embed: { total: 1, embedded: 1, failed: 0, healed: 0 } },
+    };
   };
 
   const result = await service.promoteStoredEvidence({
@@ -204,6 +208,7 @@ test('stored evidence promotion generates memories without invoking extraction a
   assert.equal(result.promotionMode, 'from_existing_evidence');
   assert.equal(result.promotedCount, 1);
   assert.deepEqual(result.promotedMemoryIds, ['66666666-6666-4666-8666-666666666666']);
+  assert.deepEqual(result.coverage.memory_embed, { total: 1, embedded: 1, failed: 0, healed: 0 });
   assert.equal(updates.length, 1);
   assert.equal(updates[0].data.ingestMode, 'both');
   assert.equal(updates[0].data.parseMetadata.original_ingest_mode, 'evidence');

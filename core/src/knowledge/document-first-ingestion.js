@@ -5489,6 +5489,12 @@ Every item must include a non-empty content field and one or more valid support_
       // zero-yield promotion is an extraction yield of zero, not a new wire value.
       evidenceOnlyReason: memories.length ? null : 'extraction_yield_zero',
       promotionMode: 'from_existing_evidence',
+      // Promotion owns the authoritative semantic projection receipt. The
+      // Cloudflare materializer must receive it so terminal settlement can
+      // prove every promoted PostgreSQL memory exists in Qdrant. Dropping this
+      // field left otherwise successful jobs permanently at `reconciling` once
+      // the no-partial-vector gate was enabled.
+      coverage: promoted?.coverage || {},
     };
   }
 

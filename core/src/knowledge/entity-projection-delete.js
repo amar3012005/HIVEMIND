@@ -33,7 +33,7 @@ export async function purgeEntityResourceProjections({ prisma, organizationId, r
     .filter(({ resourceType }) => resourceType === 'memory')
     .map(({ resourceId }) => resourceId);
 
-  return prisma.$transaction(async (tx) => {
+  const purge = async (tx) => {
     const [resourceEntityRows, memoryEntityRows] = await Promise.all([
       tx.resourceEntityLink.findMany({
         where: resourceFilter,
@@ -79,6 +79,12 @@ export async function purgeEntityResourceProjections({ prisma, organizationId, r
       receipts: receipts.count,
       entities: entities.count,
     };
-  });
-}
+  };
 
+  // Accept either a full Prisma client or an existing TransactionClient. This
+  // lets hard-delete callers remove the polymorphic projections and the owning
+  // resource in one database transaction instead of leaving an orphan window.
+  return typeof prisma.$transaction === 'function'
+    ? prisma.$transaction(purge)
+    : purge(prisma);
+}

@@ -76,3 +76,17 @@ test('does nothing when no valid resources are supplied', async () => {
   assert.equal(transacted, false);
   assert.deepEqual(result, { resources: 0, resourceLinks: 0, memoryLinks: 0, receipts: 0, entities: 0 });
 });
+
+test('runs inside an existing Prisma transaction without nesting another transaction', async () => {
+  const prisma = makePrisma();
+  const tx = await prisma.$transaction(async (client) => client);
+  assert.equal(typeof tx.$transaction, 'undefined');
+  const result = await purgeEntityResourceProjections({
+    prisma: tx,
+    organizationId: 'org-1',
+    resources: [{ resourceType: 'memory', resourceId: 'memory-1' }],
+  });
+  assert.equal(result.resources, 1);
+  assert.equal(result.resourceLinks, 3);
+  assert.equal(result.receipts, 4);
+});

@@ -9,6 +9,7 @@ import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pq
 import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrMemRelationshipsBatch, amrGraph } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList, isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
+import { purgeEntityResourceProjections } from '../knowledge/entity-projection-delete.js';
 import { buildTrigramFallbackForms, buildWideTsQuery, shouldRunTrigramFallback } from './lexical-query.js';
 
 /**
@@ -838,14 +839,33 @@ export class PrismaGraphStore {
       }
       return removed;
     }
-    await this.client.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
-    await this.client.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } });
-    await this.client.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
-    await this.client.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
-    // Audit records are immutable by database policy and do not hold a FK to a
-    // memory row. Keep the historic resource id rather than issuing a rejected
-    // UPDATE every time a memory is hard-deleted.
-    const res = await this.client.memory.deleteMany({ where: { id: { in: ids } } });
+    const rows = await this.client.memory.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, orgId: true },
+    });
+    const idsByOrg = new Map();
+    for (const row of rows) {
+      if (!row.orgId) continue;
+      const scoped = idsByOrg.get(row.orgId) || [];
+      scoped.push(row.id);
+      idsByOrg.set(row.orgId, scoped);
+    }
+    const res = await this.client.$transaction(async (tx) => {
+      for (const [organizationId, scopedIds] of idsByOrg) {
+        await purgeEntityResourceProjections({
+          prisma: tx,
+          organizationId,
+          resources: scopedIds.map((resourceId) => ({ resourceType: 'memory', resourceId })),
+        });
+      }
+      await tx.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+      await tx.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } });
+      await tx.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
+      await tx.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
+      // Audit records are immutable by database policy and do not hold a FK to
+      // a memory row. Keep the historic resource id on hard deletion.
+      return tx.memory.deleteMany({ where: { id: { in: ids } } });
+    });
     return res.count;
   }
 

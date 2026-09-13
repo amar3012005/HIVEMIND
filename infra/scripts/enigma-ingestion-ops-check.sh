@@ -16,9 +16,9 @@ read -r STALE_JOBS VECTOR_GAPS RECENT_FAILURES <<EOF
 $(docker exec "$POSTGRES_CONTAINER" sh -lc "psql -At -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -c \"
 SELECT
   count(*) FILTER (WHERE status IN ('queued','processing') AND updated_at < now() - interval '$STALE_MINUTES minutes'),
-  (SELECT count(*) FROM knowledge_segments WHERE vector_stored = false),
+  (SELECT count(*) FROM hivemind.knowledge_segments WHERE vector_stored = false),
   count(*) FILTER (WHERE status IN ('failed','dead') AND updated_at >= now() - interval '$FAILED_WINDOW_MINUTES minutes')
-FROM knowledge_ingest_jobs;
+FROM hivemind.knowledge_ingest_jobs;
 \"" | tr '|' ' ')
 EOF
 

@@ -4,6 +4,22 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'hivemind_find_entities',
+      description: 'Read-only tenant-scoped entity chooser. Use only when a named subject is partial or ambiguous (for example "Uwe") before recall, or when recall lacks an exact entity anchor. Do not call as a preflight for every recall. Pass selected entity_id values to hivemind_recall.entity_ids.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Partial or ambiguous person, organization, project, or document entity name.' },
+          entity_types: { type: 'array', items: { type: 'string' }, maxItems: 8, description: 'Optional canonical entity-type filters.' },
+          limit: { type: 'integer', minimum: 1, maximum: 25, default: 12 },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'tara_call_get',
       description: 'Read one completed TARA call by durable call, transcript, or session reference. Returns the exact tenant-scoped turns and retained insight. This tool never places a call.',
       parameters: {
@@ -28,6 +44,7 @@ export const TOOL_SCHEMAS = [
           query_original: { type: 'string', description: 'Original-language query for multilingual vector and lexical retrieval.' },
           query_canonical_en: { type: 'string', description: 'English-canonical lexical formulation; exact names and identifiers remain unchanged.' },
           entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entities selected by the structured router.' },
+          entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Entity ids selected from hivemind_find_entities. The server re-authorizes and resolves them before compiling retrieval.' },
           mode: { type: 'string', enum: ['fact', 'explain', 'full', 'quick', 'panorama', 'insight'], default: 'fact' },
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },

@@ -38,6 +38,7 @@ import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
 import { projectScopedAnchorFilter } from './knowledge/document-delete-scope.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
+import { findEntities } from './memory/entity-discovery.js';
 import {
   getRuntimeRole,
   shouldRunConnectorBackground,
@@ -10881,6 +10882,43 @@ exit \$RC
         }
       }
 
+      // ── Entity discovery (canonical Entity + EntityMention only) ─────
+      // This intentionally precedes /api/entities/:id, which is the older
+      // CanonicalEntity/Salesforce administration surface and not safe for
+      // tenant-scoped recall entity selection.
+      if (pathname === '/api/entity-search' && req.method === 'GET') {
+        const query = String(url.searchParams.get('query') || '').trim();
+        if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
+        try {
+          const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+          const { entityDiscoveryCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+          const enabled = await entityDiscoveryCanaryFor({ orgId, userId, email: principalUser?.email });
+          if (!enabled) return jsonResponse(res, { error: 'feature_unavailable' }, 404);
+          const entityTypes = url.searchParams.getAll('entity_type')
+            .flatMap((value) => String(value || '').split(','))
+            .map((value) => value.trim())
+            .filter(Boolean);
+          const result = await findEntities({
+            prisma,
+            memoryStore: persistentMemoryStore,
+            orgId,
+            userId,
+            query,
+            entityTypes,
+            limit: Number(url.searchParams.get('limit')) || 12,
+            accessContext: await buildAccessContext(userId, orgId).catch(() => null),
+            projectId: url.searchParams.get('project_id') || null,
+          });
+          if (result.degraded) {
+            return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }, 503);
+          }
+          return jsonResponse(res, { matches: result.matches, degradation: null });
+        } catch (error) {
+          console.warn('[entity-discovery] request failed:', error.message);
+          return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: 'entity_index_unavailable' } }, 503);
+        }
+      }
+
       // ── Entities dyn routes ─────────────────────────────────────────
       if (pathname.startsWith('/api/entities/') && pathname !== '/api/entities/stats' && pathname !== '/api/entities/review-queue' && pathname !== '/api/entities/by-external-ref') {
         if (!prisma || !entityResolver) return jsonResponse(res, { error: 'service unavailable' }, 503);
@@ -13147,14 +13185,35 @@ exit \$RC
         // baseline Brain features remain available and every canary is off.
         case '/api/brain/capabilities':
           if (req.method === 'GET') {
-            const admission = await cloudflareChatSessionClient
-              .admissionFor({ orgId, userId })
-              .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false }));
+            const [admission, operatingRooms, entityDiscovery] = await Promise.all([
+              cloudflareChatSessionClient
+                .admissionFor({ orgId, userId })
+                .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false })),
+              (async () => {
+                const configured = Boolean(
+                  String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+                  && String(process.env.CLOUDFLARE_REALTIMEKIT_APP_ID || '').trim()
+                  && String(process.env.CLOUDFLARE_REALTIMEKIT_API_TOKEN || '').trim()
+                  && String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '').trim(),
+                );
+                if (!configured) return false;
+                const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+                const { operatingRoomCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+                return operatingRoomCanaryFor({ orgId, userId, email: principalUser?.email });
+              })(),
+              (async () => {
+                const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+                const { entityDiscoveryCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+                return entityDiscoveryCanaryFor({ orgId, userId, email: principalUser?.email });
+              })(),
+            ]);
             return jsonResponse(res, {
               capabilities: {
                 connectors: { enabled: true }, memories: { enabled: true },
                 meeting_notes: { enabled: true, consent_v2: admission.meetingLifecycleMode === 'consent' },
                 graph: { enabled: true }, knowledge: { enabled: true }, mcp: { enabled: true },
+                operating_rooms: { enabled: operatingRooms === true },
+                entity_discovery: { enabled: entityDiscovery === true },
                 chat: { enabled: true, unified_dag: admission.unifiedDag === true,
                   orchestrator_v2_mode: admission.orchestratorV2Mode || 'off',
                   compound_orchestrator: admission.compoundOrchestrator === true },

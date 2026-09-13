@@ -8,6 +8,7 @@
  */
 
 import { emailBrandLockup } from './cartesia-lifecycle.js';
+import { resolvePublicFrontendBaseUrl } from '../../public-frontend-url.js';
 
 const BLUE = '#117dff';
 const BORDER = '#e7e4dd';
@@ -67,7 +68,7 @@ export function renderHivemindWelcomeEmail({
   preheader = '',
   name = '',
   appUrl = '',
-  assetBaseUrl = 'https://next.singulancelabs.com/email/welcome-cartesia/v1',
+  assetBaseUrl = `${resolvePublicFrontendBaseUrl()}/email/welcome-cartesia/v1`,
   year = '',
   orgName = '',
   accountType = 'personal',

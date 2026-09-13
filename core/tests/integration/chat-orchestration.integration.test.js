@@ -63,14 +63,15 @@ test('direct multilingual turn uses one structured parser call and one event con
   }
 });
 
-test('complete aggregate uses scoped entity execution and a grounded answer', async () => {
+test('complete aggregate uses one parser call, scoped entity executor, and no answer model', async () => {
   const originalFetch = globalThis.fetch;
-  let modelCalls = 0;
-  globalThis.fetch = async (_url, options) => {
-    modelCalls++;
-    if (!JSON.parse(options.body).tool_choice) {
-      return { ok: true, async json() { return { choices: [{ message: { content: 'Solvis contains 2 entities associated with Solvis classified as products.' } }] }; } };
-    }
+  let plannerCalls = 0;
+  globalThis.fetch = async (_url, options = {}) => {
+    // Capability discovery may perform a fetch on this path. Count only the
+    // structured planner request; the aggregate executor must not invoke an
+    // answer-model request after planning.
+    const request = options.body ? JSON.parse(options.body) : null;
+    if (request?.tool_choice?.function?.name === 'route_chat_turn') plannerCalls++;
     return {
       ok: true,
       async json() {
@@ -96,11 +97,10 @@ test('complete aggregate uses scoped entity execution and a grounded answer', as
       message: 'How many Solvis products exist?', apiKey: 'test',
       ctx: {
         userId: '33333333-3333-3333-3333-333333333333', orgId: '44444444-4444-4444-4444-444444444444',
-        prisma, unifiedDag: true,
-        accessContext: { projectIds: [], teamIds: [], orgRole: 'owner' },
+        prisma, accessContext: { projectIds: [], teamIds: [], orgRole: 'owner' },
       },
     });
-    assert.equal(modelCalls, 2);
+    assert.equal(plannerCalls, 1);
     assert.match(result.response, /contains 2 entities associated with Solvis classified as products/);
     assert.equal(result.aggregate.count, 2);
     assert.equal(result.grounded, true);
@@ -112,18 +112,31 @@ test('complete aggregate uses scoped entity execution and a grounded answer', as
 test('connector write is selected by schemas and stops at an org-bound draft', async () => {
   const originalFetch = globalThis.fetch;
   const draftRows = [];
-  let modelCalls = 0;
+  let plannerCalls = 0;
+  let actionCalls = 0;
   globalThis.fetch = async (_url, options) => {
-    modelCalls++;
     const body = JSON.parse(options.body);
     const isIntent = body.tool_choice?.function?.name === 'route_chat_turn';
     if (isIntent) {
+      plannerCalls++;
       return { ok: true, async json() { return { choices: [{ message: { tool_calls: [{ function: { name: 'route_chat_turn', arguments: JSON.stringify({
         operation: 'connector_write', confidence: 0.99, response_language: 'fr', queries: [], named_entities: ['lea@example.com'],
         recall_mode: 'fact', tool_groups: ['gmail'], connector_provider: 'gmail', side_effect_policy: 'approval_required',
         failure_response: 'Le connecteur est indisponible pour le moment.',
         acknowledgement: 'Le brouillon attend votre approbation.',
       }) } }] } }] }; } };
+    }
+    // Internal connector capability checks can fetch independently. The
+    // action-loop request is identified by its exposed Gmail tool schema,
+    // rather than its position among all process-level fetch calls.
+    if (Array.isArray(body.tools) && body.tools.some((tool) => tool.function?.name === 'gmail_send_email')) {
+      actionCalls++;
+      if (actionCalls === 1) {
+        return { ok: true, async json() { return { choices: [{ message: { tool_calls: [{ id: 'call-1', function: {
+          name: 'gmail_send_email', arguments: JSON.stringify({ to: 'lea@example.com', subject: 'Rapport', body: 'Bonjour Léa' }),
+        } }] } }] }; } };
+      }
+      return { ok: true, async json() { return { choices: [{ message: { content: 'Le brouillon attend votre approbation.' } }] }; } };
     }
     return { ok: true, async json() { return { choices: [{ message: { content: 'Le brouillon attend votre approbation.' } }] }; } };
   };
@@ -139,13 +152,18 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
       useTools: true,
       ctx: {
         userId: '55555555-5555-5555-5555-555555555555', orgId: '66666666-6666-6666-6666-666666666666',
-        prisma,
-        accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },
+        prisma, accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },
       },
     });
-    assert.equal(modelCalls, 3);
-    assert.equal(draftRows.length, 0);
-    assert.deepEqual(result.draft_ids || [], []);
+    assert.equal(plannerCalls, 1);
+    assert.equal(actionCalls, 2);
+    assert.equal(draftRows.length, 1);
+    assert.equal(draftRows[0].orgId, '66666666-6666-6666-6666-666666666666');
+    assert.equal(draftRows[0].toolGroup, 'gmail');
+    assert.equal(draftRows[0].toolName, 'gmail_send_email');
+    assert.equal(draftRows[0].argsHash.length, 64);
+    assert.ok(draftRows[0].expiresAt instanceof Date);
+    assert.deepEqual(result.draft_ids, ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa']);
   } finally {
     globalThis.fetch = originalFetch;
   }

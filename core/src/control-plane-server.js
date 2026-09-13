@@ -178,6 +178,7 @@ import {
   isAuthorizedActivationLifecycleRequest,
   listEligibleActivationLifecycles,
   recordActivationReminder,
+  renderActivationReminderEmail,
   releaseActivationReminderClaim,
   scheduleActivationWorkflow,
   startInvitationActivation,
@@ -296,11 +297,7 @@ const CONFIG = {
   zitadelClientId: process.env.ZITADEL_CLIENT_ID || null,
   zitadelClientSecret: process.env.ZITADEL_CLIENT_SECRET || null,
   zitadelRedirectUri: process.env.ZITADEL_REDIRECT_URI || null,
-  // The configured public frontend is the sole authority for built-in auth
-  // redirects. A separate environment override can silently send a dev
-  // callback to production; explicit request return_to values are still
-  // validated by safeReturnTo at their use sites.
-  postLoginRedirect: `${defaultFrontendBaseUrl}/hivemind/login`,
+  postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || `${defaultFrontendBaseUrl}/hivemind/login`,
   allowedOrigins: defaultAllowedOrigins
 };
 
@@ -3600,10 +3597,15 @@ const server = http.createServer(async (req, res) => {
       }
       const copy = activationReminderCopy(lifecycle.stage, lifecycle.metadata?.company_name || 'your company');
       const appUrl = `${resolvePublicAppUrl()}${copy.href}`;
-      const delivery = await sendSystemEmail({
-        templateId: 'announcement',
+      const rendered = renderActivationReminderEmail({
+        stage: lifecycle.stage,
+        companyName: lifecycle.metadata?.company_name || 'your company',
+        appUrl,
+      });
+      const delivery = await sendRenderedSystemEmail({
+        templateId: 'activation_lifecycle_reminder',
         to: lifecycle.email,
-        vars: { name: 'there', subject: copy.subject, preheader: copy.subject, heading: copy.heading, body: copy.body, appUrl },
+        rendered,
         notification: lifecycle.org_id && lifecycle.user_id ? {
           orgId: lifecycle.org_id,
           userId: lifecycle.user_id,
@@ -9361,8 +9363,29 @@ const server = http.createServer(async (req, res) => {
   // Reuses HyperRoom as the durable room envelope. RealtimeKit owns only the
   // live media session; authenticated HIVEMIND identity and transcript state
   // remain tenant-scoped in Postgres.
-  if (pathname.startsWith('/v1/operating-rooms') && process.env.OPERATING_ROOMS_V1 !== 'true') {
-    return jsonResponse(res, { error: 'not_found' }, 404);
+  if (pathname.startsWith('/v1/operating-rooms')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    // The browser must never discover a live-media surface merely because an
+    // old container environment happened to include a boolean switch.  Flagship
+    // targets an authenticated tenant/user; unavailable Flagship and absent
+    // RealtimeKit credentials both fail closed as not-found.
+    const configured = Boolean(
+      String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+      && String(process.env.CLOUDFLARE_REALTIMEKIT_APP_ID || '').trim()
+      && String(process.env.CLOUDFLARE_REALTIMEKIT_API_TOKEN || '').trim()
+      && String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '').trim(),
+    );
+    const authenticatedUser = await prisma.user.findUnique({
+      where: { id: current.session.userId }, select: { email: true },
+    }).catch(() => null);
+    const { operatingRoomCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+    const admitted = configured && await operatingRoomCanaryFor({
+      orgId: current.session.orgId,
+      userId: current.session.userId,
+      email: authenticatedUser?.email || current.session.email,
+    });
+    if (!admitted) return jsonResponse(res, { error: 'not_found' }, 404);
   }
   if (pathname === '/v1/operating-rooms' && req.method === 'GET') {
     const current = await requireSession(req, res);

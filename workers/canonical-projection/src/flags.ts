@@ -9,13 +9,15 @@ type RecallFlagEnv = FlagEnv & {
 
 type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
 type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
+type OperatingRoomFlagEnv = FlagEnv & { OPERATING_ROOM_FLAG?: string };
+type EntityDiscoveryFlagEnv = FlagEnv & { ENTITY_DISCOVERY_FLAG?: string };
 
 export async function evaluateGovernedRoomCanary(
   env: GovernedRoomFlagEnv, orgId: string, userId: string, email: string,
 ): Promise<boolean> {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!validUuid(orgId) || !validUuid(userId) || !normalizedEmail) return false;
-  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return false;
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return false;
   try {
     const details = await env.FLAGS.getBooleanDetails(
       env.HYPER_GOVERNED_ROOM_FLAG || 'hyperagents_governed_room_v1', false,
@@ -35,11 +37,57 @@ export async function evaluateGovernedRoomCanary(
   }
 }
 
+// Live voice rooms are a separate rollout from governed text-room turns.  A
+// shared flag would let a text-only canary accidentally provision media.
+export async function evaluateOperatingRoomCanary(
+  env: OperatingRoomFlagEnv, orgId: string, userId: string, email: string,
+): Promise<boolean> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!validUuid(orgId) || !validUuid(userId) || !normalizedEmail) return false;
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return false;
+  try {
+    const details = await env.FLAGS.getBooleanDetails(
+      env.OPERATING_ROOM_FLAG || 'operating_rooms_v1', false,
+      {
+        targetingKey: `${orgId}:${userId}`,
+        org_id: orgId,
+        user_id: userId,
+        email: normalizedEmail,
+        environment: env.ENVIRONMENT,
+      },
+    );
+    return details.value === true;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'operating_room_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
+
+export async function evaluateEntityDiscoveryCanary(
+  env: EntityDiscoveryFlagEnv, orgId: string, userId: string, email: string,
+): Promise<boolean> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!validUuid(orgId) || !validUuid(userId) || !normalizedEmail) return false;
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return false;
+  try {
+    const details = await env.FLAGS.getBooleanDetails(
+      env.ENTITY_DISCOVERY_FLAG || 'entity_discovery_v1', false,
+      { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, email: normalizedEmail, environment: env.ENVIRONMENT },
+    );
+    return details.value === true;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'entity_discovery_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
+
 export async function evaluateHyperPlannerMode(
   env: HyperPlannerFlagEnv, orgId: string, userId: string,
 ): Promise<'off' | 'glm_no_reasoning'> {
   if (!validUuid(orgId) || !validUuid(userId)) return 'off';
-  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return 'off';
   try {
     const details = await env.FLAGS.getStringDetails(
       env.HYPER_FAST_PLANNER_FLAG || 'hyperagents_fast_planner_v1', 'off',
@@ -58,7 +106,7 @@ export async function evaluateHyperPlannerMode(
 
 export async function evaluateRecallReliability(env: RecallFlagEnv, orgId: string, userId: string): Promise<boolean> {
   if (String(env.RECALL_PARALLEL_RELIABILITY_ENABLED) !== 'true' || !validUuid(orgId) || !validUuid(userId)) return false;
-  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return false;
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return false;
   try {
     const details = await env.FLAGS.getBooleanDetails(
       env.RECALL_RELIABILITY_FLAG || 'recall_parallel_reliability_v1',
@@ -79,7 +127,7 @@ export async function evaluateRecallReliability(env: RecallFlagEnv, orgId: strin
 
 export async function evaluateProjectionMode(env: FlagEnv, orgId: string, userId: string): Promise<ProjectionMode | 'off'> {
   if (String(env.CANONICAL_KNOWLEDGE_ENABLED) !== 'true' || !validUuid(orgId) || !validUuid(userId)) return 'off';
-  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return 'off';
   try {
     const details = await env.FLAGS.getStringDetails(
       env.CANONICAL_KNOWLEDGE_FLAG || 'canonical_knowledge_foundation_v1',

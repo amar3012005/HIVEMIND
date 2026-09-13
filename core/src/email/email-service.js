@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path';
 import { fetchBearerFromNango } from '../connectors/mcp/nango-service.js';
 import { renderSingulanceTransactionalEmail } from './templates/singulance-transactional.js';
 import { renderHivemindWelcomeEmail } from './templates/hivemind-welcome.js';
-import { resolvePublicAppUrl } from '../public-frontend-url.js';
+import { resolvePublicAppUrl, resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -47,7 +47,10 @@ const CLOUDFLARE_SEND_BASE = 'https://api.cloudflare.com/client/v4/accounts';
 const SEND_TIMEOUT_MS = 15_000;
 
 const APP_URL = resolvePublicAppUrl();
-const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL || 'https://next.singulancelabs.com/email/welcome-cartesia/v1';
+// Keep visual assets on the same configured public origin as action links.
+// A dev/staging mail must never silently reintroduce the production hostname.
+const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL
+  || `${resolvePublicFrontendBaseUrl()}/email/welcome-cartesia/v1`;
 
 let _templates = null;
 let _warnedNoProvider = false;

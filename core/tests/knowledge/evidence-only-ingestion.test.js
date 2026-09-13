@@ -6,9 +6,53 @@ import {
   buildPromotionSourceMap,
   locatePromotionWindow,
   resolveDocumentClassification,
+  canReuseUnchangedDocument,
   normalizeCuratedClaims,
   promotionProvenance,
 } from '../../src/knowledge/document-first-ingestion.js';
+
+test('unchanged evidence documents are reusable without a memory projection', () => {
+  assert.equal(canReuseUnchangedDocument({ ingestMode: 'evidence', segmentCount: 3, memoryLinkCount: 0 }), true);
+  assert.equal(canReuseUnchangedDocument({ ingestMode: 'both', segmentCount: 3, memoryLinkCount: 0 }), false);
+  assert.equal(canReuseUnchangedDocument({ ingestMode: 'both', segmentCount: 3, memoryLinkCount: 2 }), true);
+  assert.equal(canReuseUnchangedDocument({ ingestMode: 'evidence', segmentCount: 0, memoryLinkCount: 0 }), false);
+});
+
+test('unchanged evidence exits before parser, classifier, or model work', async () => {
+  let parserCalls = 0;
+  const service = new DocumentFirstIngestionService({
+    db: {
+      knowledgeDocument: {
+        findFirst: async () => ({ id: '33333333-3333-4333-8333-333333333333', ingestMode: 'evidence' }),
+      },
+      knowledgeSegment: { count: async () => 2 },
+      memoryEvidenceLink: { count: async () => 0 },
+    },
+    memoryGraphEngine: {},
+    smartIngestRouter: null,
+    doclingAdapter: {
+      parseBuffer: async () => {
+        parserCalls += 1;
+        throw new Error('parser must not run for unchanged evidence');
+      },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const result = await service._ingestKnowledgeDocumentOnce({
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    filename: 'unchanged.txt',
+    fileBuffer: Buffer.from('Already indexed evidence.'),
+    contentType: 'text/plain',
+    metadata: { ingest_mode: 'evidence', scope: 'personal' },
+  });
+
+  assert.equal(parserCalls, 0);
+  assert.equal(result.skippedUnchanged, true);
+  assert.equal(result.promotedCount, 0);
+  assert.equal(result.segmentCount, 2);
+});
 
 test('promotion windows retain exact source segment ownership after re-chunking', () => {
   const segments = [

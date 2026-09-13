@@ -111,7 +111,6 @@ $workflowSecret = $workflowSecretLine.Substring('KNOWLEDGE_INGEST_WORKFLOW_SECRE
 if ([string]::IsNullOrWhiteSpace($workflowSecret)) { throw 'The local Workflow shared secret is empty.' }
 
 [Environment]::SetEnvironmentVariable('HIVEMIND_LOCAL_MODE', 'true', 'Process')
-[Environment]::SetEnvironmentVariable('KNOWLEDGE_INGEST_WORKFLOW_ENABLED', 'true', 'Process')
 [Environment]::SetEnvironmentVariable('KNOWLEDGE_INGEST_WORKFLOW_URL', $WorkflowUrl, 'Process')
 [Environment]::SetEnvironmentVariable('KNOWLEDGE_INGEST_WORKFLOW_SECRET', $workflowSecret, 'Process')
 [Environment]::SetEnvironmentVariable('DOCLING_URL', 'http://docling:5001', 'Process')

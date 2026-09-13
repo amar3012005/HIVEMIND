@@ -934,8 +934,8 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_save_memory(args, ctx) {
-    if (!ctx.persistentMemoryEngine || !ctx.buildRoutedIngestPayloads) {
-      throw new Error('ingest pipeline unavailable');
+    if (typeof ctx.ingestCanonicalPayload !== 'function') {
+      throw new Error('canonical ingest pipeline unavailable');
     }
     // Coerce memory_type to a valid Prisma enum value. Models routinely
     // emit 'note', 'observation', 'todo' etc — they're sensible English
@@ -1117,15 +1117,7 @@ const TOOL_HANDLERS = {
         metadata: { memory_admission: memoryAdmission },
       },
     };
-    let saved;
-    if (ctx.ingestCanonicalPayload) {
-      saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
-    } else {
-      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
-      saved = ctx.ingestRoutedPayload
-        ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-        : await ctx.persistentMemoryEngine.ingestMemory(routed);
-    }
+    const saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
     const id = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
     // Chat writes use canonical ingestion directly, so they previously skipped
     // server.js's upload-only profile extraction hook. Derive caller profile
@@ -1162,9 +1154,7 @@ const TOOL_HANDLERS = {
               mirrors_memory_id: id,
             },
           };
-          const mirrored = ctx.ingestCanonicalPayload
-            ? await ctx.ingestCanonicalPayload(profilePayload, { sourceType: 'mcp', mode: 'atomic' })
-            : null;
+          const mirrored = await ctx.ingestCanonicalPayload(profilePayload, { sourceType: 'mcp', mode: 'atomic' });
           profileMemoryId = mirrored?.parentId || mirrored?.id || mirrored?.memoryId || mirrored?.memory?.id || null;
         }
       } catch (profileError) {
@@ -1218,7 +1208,7 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_update_memory(args, ctx) {
-    if (!ctx.persistentMemoryStore || !ctx.persistentMemoryEngine?.ingestMemory) {
+    if (!ctx.persistentMemoryStore || typeof ctx.ingestCanonicalPayload !== 'function') {
       throw new Error('versioned memory update unavailable');
     }
     let targetId = args.id || null;
@@ -1306,7 +1296,7 @@ const TOOL_HANDLERS = {
     }
     let result;
     try {
-      result = await ctx.persistentMemoryEngine.ingestMemory({
+      result = await ctx.ingestCanonicalPayload({
       title: args.title || existing.title,
       content: args.content || existing.content,
       tags: Array.isArray(args.tags) ? args.tags : (existing.tags || []),
@@ -1323,7 +1313,7 @@ const TOOL_HANDLERS = {
         metadata: { update_reason: args.reason || null, original_target_query: args.target_query || null },
       },
       ...(args.event_time ? { document_date: args.event_time, event_time: args.event_time, valid_from: args.event_time } : {}),
-      });
+      }, { sourceType: 'mcp', mode: 'atomic' });
     } catch (err) {
       // Previously an ingestMemory throw propagated up as an opaque tool failure
       // with NO server log — "update tool failed" in chat with nothing to see in
@@ -1791,6 +1781,9 @@ const TOOL_HANDLERS = {
     // NO id from the model. Distinct from set_assistant_name (which renames
     // HIVE) — "change MY name" belongs here, "call yourself X" belongs there.
     if (!ctx.prisma) return { updated: false, error: 'profile_store_unavailable' };
+    if (typeof ctx.ingestCanonicalPayload !== 'function') {
+      return { updated: false, error: 'canonical_ingest_pipeline_unavailable' };
+    }
     const ALLOWED = new Set(['name', 'role', 'company', 'language', 'location', 'timezone']);
     const fields = [];
     // Structured fields.
@@ -1816,28 +1809,20 @@ const TOOL_HANDLERS = {
         .map((field) => `My ${field.key.replace(/^preference:/, 'preference ')} is ${field.value}.`)
         .join('\n');
       let profileMemoryId = null;
-      if (ctx.ingestCanonicalPayload || ctx.buildRoutedIngestPayloads) {
-        const payload = {
-          title: 'User profile update',
-          content: profileContent,
-          tags: ['profile', 'source:chat', 'provenance:user-fact'],
-          memory_type: 'fact',
-          user_id: ctx.userId,
-          org_id: ctx.orgId,
-          scope: 'personal',
-          project_ids: [],
-          source_metadata: { source_platform: 'talk-to-hive', source_type: 'profile-update', via: 'react-agent' },
-        };
-        const saved = ctx.ingestCanonicalPayload
-          ? await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' })
-          : await (async () => {
-              const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
-              return ctx.ingestRoutedPayload
-                ? ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-                : ctx.persistentMemoryEngine?.ingestMemory(routed);
-            })();
-        profileMemoryId = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
-      }
+      const payload = {
+        title: 'User profile update',
+        content: profileContent,
+        tags: ['profile', 'source:chat', 'provenance:user-fact'],
+        memory_type: 'fact',
+        user_id: ctx.userId,
+        org_id: ctx.orgId,
+        scope: 'personal',
+        project_ids: [],
+        source_metadata: { source_platform: 'talk-to-hive', source_type: 'profile-update', via: 'react-agent' },
+      };
+      const saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
+      profileMemoryId = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
+      if (!profileMemoryId) throw new Error('canonical profile memory returned no id');
       const applied = [];
       for (const f of fields) {
         await store.upsertFact({ userId: ctx.userId, orgId: ctx.orgId, category: f.category, key: f.key, value: f.value, confidence: 1.0, sourceMemoryId: profileMemoryId }).catch(() => {});
@@ -1859,24 +1844,24 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_set_assistant_name(args, ctx) {
-    if (!ctx.persistentMemoryEngine) throw new Error('ingest pipeline unavailable');
+    if (typeof ctx.ingestCanonicalPayload !== 'function') throw new Error('canonical ingest pipeline unavailable');
     const { buildAssistantNamePayload } = await import('../services/assistant-identity.js');
     const payload = buildAssistantNamePayload({
       name: args.name,
       userId: ctx.userId,
       orgId: ctx.orgId,
     });
-    await ctx.persistentMemoryEngine.ingestMemory({
+    await ctx.ingestCanonicalPayload({
       ...payload,
       skipProcessing: true,
       smartIngest: false,
-    });
+    }, { sourceType: 'mcp', mode: 'atomic' });
     return { set: true, name: args.name };
   },
 
   async hivemind_log_decision(args, ctx) {
-    if (!ctx.persistentMemoryEngine || !ctx.buildRoutedIngestPayloads) {
-      throw new Error('ingest pipeline unavailable');
+    if (typeof ctx.ingestCanonicalPayload !== 'function') {
+      throw new Error('canonical ingest pipeline unavailable');
     }
     const content = [
       `Decision: ${args.decision}`,
@@ -1894,15 +1879,7 @@ const TOOL_HANDLERS = {
       org_id: ctx.orgId,
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
     };
-    let saved;
-    if (ctx.ingestCanonicalPayload) {
-      saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
-    } else {
-      const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
-      saved = ctx.ingestRoutedPayload
-        ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
-        : await ctx.persistentMemoryEngine.ingestMemory(routed);
-    }
+    const saved = await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' });
     return { logged: true, id: saved?.parentId || saved?.id || saved?.memoryId || null };
   },
 

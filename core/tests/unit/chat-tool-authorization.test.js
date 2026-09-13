@@ -25,11 +25,9 @@ test('memory-by-id tools use scoped lookup and correct mutation signatures', asy
   const ctx = {
     ...authCtx,
     persistentMemoryStore: store,
-    persistentMemoryEngine: {
-      async ingestMemory(payload) {
-        calls.push(['ingest-update', payload]);
-        return { memoryId: 'replacement', operation: 'updated' };
-      },
+    async ingestCanonicalPayload(payload, options) {
+      calls.push(['ingest-update', payload, options]);
+      return { memoryId: 'replacement', operation: 'updated' };
     },
   };
 
@@ -71,8 +69,9 @@ test('query update resolves an exact authorized tag before semantic recall', asy
     persistentMemoryStore: {
       async getMemoryScoped(id) { return id === memory.id ? memory : null; },
     },
-    persistentMemoryEngine: {
-      async ingestMemory(payload) { updatedPayload = payload; return { memoryId: 'successor' }; },
+    async ingestCanonicalPayload(payload) {
+      updatedPayload = payload;
+      return { memoryId: 'successor' };
     },
   };
   const result = await dispatchTool('hivemind_update_memory', {
@@ -133,8 +132,7 @@ test('save refuses a caller project outside the authorized project set', async (
     project_id: '44444444-4444-4444-4444-444444444444',
   }, {
     ...authCtx,
-    persistentMemoryEngine: {},
-    buildRoutedIngestPayloads: async () => [],
+    ingestCanonicalPayload: async () => ({ memoryId: 'must-not-run' }),
   });
   assert.equal(result.saved, false);
   assert.equal(result.error, 'project_access_denied');
@@ -149,9 +147,7 @@ test('save preserves user-assertion provenance for grounded synthesis', async ()
     _memory_admission: 'user_assertion',
   }, {
     ...authCtx,
-    persistentMemoryEngine: {},
-    buildRoutedIngestPayloads: async (payload) => [payload],
-    ingestRoutedPayload: async (payload) => {
+    ingestCanonicalPayload: async (payload) => {
       persisted = payload;
       return { memoryId: 'assertion-memory' };
     },

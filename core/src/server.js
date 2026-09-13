@@ -20756,10 +20756,9 @@ exit \$RC
 
                     ingestTracker.updateJob(jobId, { status: 'processing', progress: 15 });
 
-                    // Process all routed payloads. ingestRoutedPayload dispatches
-                    // tree-shaped payloads (parent + sections + PartOf edges) to
-                    // engine.ingestMemoryTree(); flat payloads go through the
-                    // legacy ingestMemory() path unchanged.
+                    // Process all routed payloads. Structured trees use the
+                    // only representation the canonical envelope cannot carry;
+                    // every flat payload goes through canonical ingestion.
                     const results = [];
                     for (const p of ingestPayloads) {
                       // Defer the ~2s entity-link LLM OUT of the per-user advisory
@@ -25398,10 +25397,13 @@ exit \$RC
                   const payload = buildAssistantNamePayload({
                     name: intentName, userId, orgId, prevMemoryId: assistantNameMemoryId,
                   });
-                  if (persistentMemoryEngine?.ingestMemory) {
-                    await persistentMemoryEngine.ingestMemory({
-                      ...payload, skipProcessing: true, smartIngest: false, // identity config, not knowledge
-                    });
+                  if (documentFirstIngestion?.ingestSource) {
+                    await ingestCanonicalPayload({
+                      // Identity is configuration-like, but it is still a
+                      // durable memory and therefore uses the canonical write
+                      // boundary. Semantic post-processing remains disabled.
+                      ...payload, skipProcessing: true, smartIngest: false,
+                    }, { sourceType: 'chat', mode: 'atomic' });
                   }
                   // Mark intro shown so the one-time greeting never fires later.
                   if (persistentMemoryStore && !introShownEarly) {

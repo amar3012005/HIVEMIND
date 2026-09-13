@@ -146,7 +146,10 @@ export function createMemoryTapMiddleware({ logger = console } = {}) {
     const resp = await next(kwargs);
 
     if (!tool.readOnly || resp.status !== 'ok') return resp;
-    if (!ctx.ingestCanonicalPayload && !ctx.persistentMemoryEngine?.ingestMemory) return resp;
+    // Live tool results are durable connector evidence. If the canonical
+    // gateway is unavailable, skip the optional tap instead of creating a
+    // differently shaped memory through the legacy graph writer.
+    if (typeof ctx.ingestCanonicalPayload !== 'function') return resp;
 
     const payload = buildIngestPayload(tool.name, args, resp.meta?.raw, ctx);
     if (!payload) return resp;
@@ -154,13 +157,10 @@ export function createMemoryTapMiddleware({ logger = console } = {}) {
     // Fire-and-forget — don't block the agent on memory write.
     setImmediate(async () => {
       try {
-        if (ctx.ingestCanonicalPayload) {
-          await ctx.ingestCanonicalPayload(payload, {
-            sourceType: 'connector', provider: payload.source_metadata?.source_platform || 'mcp_live_tap',
-          });
-        } else {
-          await ctx.persistentMemoryEngine.ingestMemory(payload);
-        }
+        await ctx.ingestCanonicalPayload(payload, {
+          sourceType: 'connector', provider: payload.source_metadata?.source_platform || 'mcp_live_tap',
+          mode: 'atomic',
+        });
       } catch (err) {
         logger.warn(`[memory-tap] ingest failed for ${tool.name}: ${err.message}`);
       }

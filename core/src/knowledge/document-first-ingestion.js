@@ -650,6 +650,17 @@ export function canonicalGenerationPolicy() {
   };
 }
 
+export function canReuseUnchangedDocument({ ingestMode, segmentCount, memoryLinkCount } = {}) {
+  const segments = Number(segmentCount || 0);
+  const memories = Number(memoryLinkCount || 0);
+  if (segments <= 0) return false;
+  // Evidence-only ingestion deliberately creates no MemoryEvidenceLink rows.
+  // Requiring one here forced identical evidence uploads back through parsing,
+  // embedding and segment persistence even though their canonical document was
+  // already complete. Both-mode documents still require their memory projection.
+  return ingestMode === 'evidence' || memories > 0;
+}
+
 async function classifyKnowledgeDocument(text, filename) {
   const preview = String(text || '').slice(0, 6000).trim();
   if (!preview) return { type: 'general', confidence: 0.1 };
@@ -3644,6 +3655,78 @@ Every item must include a non-empty content field and one or more valid support_
     const sourcePlatform = String(metadata.source_platform || 'knowledge_upload');
     const sourceExternalId = String(metadata.source_external_id || metadata.source_id || filename);
     const sourceVersion = String(metadata.source_version || '1').slice(0, 100);
+    // Resolve canonical upload identity before parsing. Reuse must be decided
+    // ahead of hm-extract, document classification and every model path; doing
+    // this after parsing made the old "zero tokens" claim false and amplified
+    // retry storms even when the prior document was already complete.
+    const _scopeKey = metadata.primary_team_id
+      ? `team:${metadata.primary_team_id}`
+      : (metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]))
+        ? `project:${metadata.project_id || metadata.project_ids[0]}`
+        : (metadata.scope === 'organization')
+          ? `org:${orgId}`
+          : `personal:${userId}`;
+    const _scopedSourceId = `${sourceExternalId}#${checksum.slice(0, 12)}#${_scopeKey}`;
+    const _scopeTag = `scope-key:${_scopeKey}`;
+
+    if (!forceReprocess && canonicalGenerationPolicy().skipUnchanged) {
+      try {
+        if (!orgIsRemote(orgId)) {
+          const prior = await this.db.knowledgeDocument.findFirst({
+            where: { orgId, sourceId: _scopedSourceId, archivedAt: null, parseStatus: 'parsed' },
+            select: { id: true, ingestMode: true },
+          });
+          if (prior) {
+            const [segs, memLinks] = await Promise.all([
+              this.db.knowledgeSegment.count({ where: { documentId: prior.id } }),
+              this.db.memoryEvidenceLink.count({ where: { documentId: prior.id } }).catch(() => 0),
+            ]);
+            if (canReuseUnchangedDocument({
+              ingestMode: prior.ingestMode || ingestMode,
+              segmentCount: segs,
+              memoryLinkCount: memLinks,
+            })) {
+              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${segs} segs) — zero parser/model calls`);
+              emit('skipped-unchanged', 100, { documentId: prior.id });
+              return {
+                documentId: prior.id,
+                segmentCount: segs,
+                candidateCount: 0,
+                promotedCount: prior.ingestMode === 'evidence' ? 0 : memLinks,
+                skippedUnchanged: true,
+              };
+            }
+          }
+        } else {
+          const { agentFor } = await import('../vector/mneme/remote-backend.js');
+          if (agentFor(orgId)?.url === 'local:') {
+            const scopeVal = metadata.scope || null;
+            const teamVal = metadata.primary_team_id || null;
+            const projVal = metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null;
+            const rows = await this.db.$queryRawUnsafe(
+              `SELECT d.id, (SELECT count(*)::int FROM hm.knowledge_segments s WHERE s.document_id = d.id) AS segs
+                 FROM hm.knowledge_documents d
+                WHERE d.org_id = $1::uuid AND d.checksum = $2 AND d.filename = $3 AND d.deleted_at IS NULL
+                  AND (d.metadata->>'scope') IS NOT DISTINCT FROM $4
+                  AND (d.metadata->>'primary_team_id') IS NOT DISTINCT FROM $5
+                  AND COALESCE(d.metadata->>'project_id', d.metadata->'project_ids'->>0) IS NOT DISTINCT FROM $6
+                LIMIT 1`,
+              orgId, checksum, filename, scopeVal, teamVal, projVal,
+            ).catch(() => []);
+            const prior = rows?.[0];
+            if (prior && Number(prior.segs) > 0) {
+              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (embedded org, checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${prior.segs} segs) — zero parser/model calls`);
+              emit('skipped-unchanged', 100, { documentId: prior.id });
+              return { documentId: prior.id, segmentCount: Number(prior.segs), candidateCount: 0, promotedCount: 0, skippedUnchanged: true };
+            }
+          }
+          // True self-host agents do not yet expose a checksum probe. Proceed
+          // with canonical ingestion rather than guessing at remote state.
+        }
+      } catch (e) {
+        this.logger.warn?.(`[kb-ingest] skip-unchanged check failed (proceeding with full ingest): ${e.message}`);
+      }
+    }
     // TRUE unit count, read straight from the container (slides / sheets / PDF
     // pages) by the SAME function the pre-admit quota check uses, so what we admit
     // and what we bill cannot drift apart. null = genuinely unknowable for this
@@ -3786,17 +3869,8 @@ Every item must include a non-empty content field and one or more valid support_
     //   project:<id>   when metadata.project_id / project_ids[0]
     //   org:<orgId>    when metadata.scope === 'organization' and no project/team
     //   personal:<uid> otherwise
-    const _scopeKey = metadata.primary_team_id
-      ? `team:${metadata.primary_team_id}`
-      : (metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]))
-        ? `project:${metadata.project_id || metadata.project_ids[0]}`
-        : (metadata.scope === 'organization')
-          ? `org:${orgId}`
-          : `personal:${userId}`;
-    const _scopedSourceId = `${sourceExternalId}#${checksum.slice(0, 12)}#${_scopeKey}`;
     // scope-key tag enables the upload route's per-scope dedup query without
     // any schema change — gin-indexed tags[] is already there.
-    const _scopeTag = `scope-key:${_scopeKey}`;
     const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag, documentTypeTag]));
 
     // Canonical V5 identity: content_hash = the file checksum (sha256 of bytes);
@@ -3807,62 +3881,6 @@ Every item must include a non-empty content field and one or more valid support_
     const _canonicalIngestKey = crypto.createHash('sha256')
       .update([orgId, metadata.ingest_source || 'kb', sourcePlatform, _scopedSourceId, sourceVersion, checksum].join('\u0000'))
       .digest('hex').slice(0, 64);
-
-    // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →
-    // return the existing document's counts and spend ZERO tokens (no docling parse, no distill
-    // windows, no consolidation, no entity linking). Re-uploading the same file used to re-run the
-    // FULL pipeline (observed: same PDF uploaded twice → 2×675s + 2× the LLM spend).
-    if (!forceReprocess && canonicalGenerationPolicy().skipUnchanged) {
-      try {
-        if (!orgIsRemote(orgId)) {
-          // Central orgs: exact scoped-sourceId match on the central KB tables.
-          const prior = await this.db.knowledgeDocument.findFirst({
-            where: { orgId, sourceId: _scopedSourceId, archivedAt: null, parseStatus: 'parsed' },
-            select: { id: true },
-          });
-          if (prior) {
-            const [segs, memLinks] = await Promise.all([
-              this.db.knowledgeSegment.count({ where: { documentId: prior.id } }),
-              this.db.memoryEvidenceLink.count({ where: { documentId: prior.id } }).catch(() => 0),
-            ]);
-            if (segs > 0 && memLinks > 0) {
-              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${segs} segs) — zero tokens`);
-              emit('skipped-unchanged', 100, { documentId: prior.id });
-              return { documentId: prior.id, segmentCount: segs, candidateCount: 0, promotedCount: memLinks, skippedUnchanged: true };
-            }
-          }
-        } else {
-          const { agentFor } = await import('../vector/mneme/remote-backend.js');
-          if (agentFor(orgId)?.url === 'local:') {
-            // Embedded (.amr-central) orgs: their kb rows live in schema hm ON CENTRAL — query it
-            // directly. Agent rows persist checksum + the caller metadata (scope/team/project), so
-            // match those (the agent table has no source_id column). Scope fields compared so the
-            // same file legitimately filed under a DIFFERENT scope still ingests fresh.
-            const scopeVal = metadata.scope || null;
-            const teamVal = metadata.primary_team_id || null;
-            const projVal = metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null;
-            const rows = await this.db.$queryRawUnsafe(
-              `SELECT d.id, (SELECT count(*)::int FROM hm.knowledge_segments s WHERE s.document_id = d.id) AS segs
-                 FROM hm.knowledge_documents d
-                WHERE d.org_id = $1::uuid AND d.checksum = $2 AND d.filename = $3 AND d.deleted_at IS NULL
-                  AND (d.metadata->>'scope') IS NOT DISTINCT FROM $4
-                  AND (d.metadata->>'primary_team_id') IS NOT DISTINCT FROM $5
-                  AND COALESCE(d.metadata->>'project_id', d.metadata->'project_ids'->>0) IS NOT DISTINCT FROM $6
-                LIMIT 1`,
-              orgId, checksum, filename, scopeVal, teamVal, projVal,
-            ).catch(() => []);
-            const prior = rows?.[0];
-            if (prior && Number(prior.segs) > 0) {
-              this.logger.info?.(`[kb-ingest] SKIP unchanged ${filename} (embedded org, checksum+scope match doc ${String(prior.id).slice(0, 8)}, ${prior.segs} segs) — zero tokens`);
-              emit('skipped-unchanged', 100, { documentId: prior.id });
-              return { documentId: prior.id, segmentCount: Number(prior.segs), candidateCount: 0, promotedCount: 0, skippedUnchanged: true };
-            }
-          }
-          // True self-host (agent on the customer box): no cheap checksum probe route yet — full
-          // ingest proceeds (honest gap; add a /v1/kb-doc-by-checksum probe later).
-        }
-      } catch (e) { this.logger.warn?.(`[kb-ingest] skip-unchanged check failed (proceeding with full ingest): ${e.message}`); }
-    }
 
     // Step 3: Create knowledge document — route to agent for remote orgs.
     let knowledgeDoc;

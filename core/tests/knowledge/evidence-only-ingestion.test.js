@@ -237,6 +237,33 @@ test('canonical evidence envelopes persist as documents and segments, never hidd
   assert.equal(result.promotedCount, 0);
 });
 
+test('canonical atomic ingestion delegates entity projection exactly once', async () => {
+  let graphInput = null;
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    memoryGraphEngine: {
+      ingestMemory: async (input) => {
+        graphInput = input;
+        return { memoryId: '66666666-6666-4666-8666-666666666666' };
+      },
+      store: { getMemories: async () => new Map() },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const result = await service.ingestSource({
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    content: 'Sahana Iyer leads the Nimbus Ridge launch.',
+    mode: 'atomic',
+    source: { type: 'mcp', sourceId: 'save-1', title: 'Launch fact' },
+  });
+
+  assert.equal(graphInput.defer_entity_linking, true,
+    'GraphEngine must not enqueue a second canonical projection');
+  assert.deepEqual(result.memoryIds, ['66666666-6666-4666-8666-666666666666']);
+});
+
 test('promotion retains complete persisted evidence provenance', () => {
   const provenance = promotionProvenance({
     id: '55555555-5555-4555-8555-555555555555', startPage: 7,

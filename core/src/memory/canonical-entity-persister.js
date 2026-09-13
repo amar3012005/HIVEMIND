@@ -318,10 +318,18 @@ export async function persistCanonicalLinks({
             if (!edgeAdded) throw new Error('remote memory entity-edge projection was not acknowledged');
           } else {
             if (prisma.resourceEntityLink) {
-              const linkKey = crypto.createHash('sha256').update([
-                organizationId, resource.resourceType, resource.resourceId, entityId,
-                resource.role, resource.startOffset ?? '', resource.endOffset ?? '', resource.mentionText || '',
-              ].join('|')).digest('hex');
+              // A Memory is already a distilled semantic unit, so its link to
+              // one canonical entity/role is singular.  Entity tags and typed
+              // extractor metadata may describe the same entity with different
+              // surface text/offsets; those must converge on the same link.
+              // Evidence documents/segments retain occurrence-level offsets.
+              const linkIdentity = resource.resourceType === 'memory'
+                ? [organizationId, 'memory', resource.resourceId, entityId, resource.role]
+                : [
+                    organizationId, resource.resourceType, resource.resourceId, entityId,
+                    resource.role, resource.startOffset ?? '', resource.endOffset ?? '', resource.mentionText || '',
+                  ];
+              const linkKey = crypto.createHash('sha256').update(linkIdentity.join('|')).digest('hex');
               await prisma.resourceEntityLink.upsert({
                 where: { organizationId_linkKey: { organizationId, linkKey } },
                 update: {

@@ -44,11 +44,21 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
       findUnique: async ({ where }) => entities.find((x) => x.id === where.id) || null,
     },
     memoryEntityLink: {
-      upsert: async ({ create }) => { links.push(create); return create; },
+      upsert: async ({ create, update }) => {
+        const existingLink = links.find((row) => row.memoryId === create.memoryId
+          && row.entityId === create.entityId && row.role === create.role);
+        if (existingLink) { Object.assign(existingLink, update); return existingLink; }
+        links.push(create); return create;
+      },
       findFirst: async () => null,
     },
     resourceEntityLink: {
-      upsert: async ({ create }) => { resourceLinks.push(create); return create; },
+      upsert: async ({ create, update }) => {
+        const existingLink = resourceLinks.find((row) => row.organizationId === create.organizationId
+          && row.linkKey === create.linkKey);
+        if (existingLink) { Object.assign(existingLink, update); return existingLink; }
+        resourceLinks.push(create); return create;
+      },
     },
     entityReviewCandidate: {
       create: async ({ data }) => { const row = { id: `rev-${idSeq++}`, ...data }; reviews.push(row); return row; },
@@ -131,6 +141,25 @@ test('one canonical entity links memory, evidence segment, and document resource
   assert.equal(out.linked, 3);
   assert.deepEqual(prisma.resourceLinks.map((link) => link.resourceType).sort(), ['document', 'memory', 'segment']);
   assert.equal(new Set(prisma.resourceLinks.map((link) => link.linkKey)).size, 3);
+});
+
+test('tag and typed occurrences converge to one canonical link for a memory', async () => {
+  const prisma = makePrisma();
+  const out = await persistCanonicalLinks({
+    prisma, organizationId: ORG,
+    items: [{
+      resourceType: 'memory', resourceId: 'm1',
+      entities: [
+        'Sahana Iyer',
+        { name: 'Sahana Iyer', mentionText: 'Sahana Iyer', startOffset: 0, endOffset: 12 },
+      ],
+    }],
+  });
+
+  assert.equal(prisma.entities.length, 1);
+  assert.equal(out.linked, 2, 'both occurrences were processed idempotently');
+  assert.equal(prisma.resourceLinks.length, 1, 'one memory/entity/role link is authoritative');
+  assert.equal(prisma.links.length, 1, 'compatibility projection is also idempotent');
 });
 
 test('legacy memory-only callers hydrate tenant scope and never default to organization visibility', async () => {

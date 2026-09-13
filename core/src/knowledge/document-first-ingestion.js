@@ -4858,6 +4858,12 @@ Every item must include a non-empty content field and one or more valid support_
       skip_contradiction_detection: envelope.metadata?.skip_contradiction_detection === true || undefined,
       skip_relationship_classification: envelope.metadata?.skip_relationship_classification === true || undefined,
       skipAdvisoryLock: envelope.metadata?.skipAdvisoryLock === true || undefined,
+      // DocumentFirstIngestionService owns the one canonical entity projection
+      // for every canonical atomic save.  Letting GraphEngine enqueue its own
+      // post-commit linker here races the projection immediately below and can
+      // create two ResourceEntityLink occurrences for one memory/entity.
+      // Direct/legacy GraphEngine callers retain their existing enrichment.
+      defer_entity_linking: true,
     });
     if (res?.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: res.reason };
     const memoryIds = Array.isArray(res?.results)

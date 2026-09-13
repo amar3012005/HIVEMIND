@@ -45,6 +45,36 @@ test('scoped proxy forwards only allowlisted operation with server-derived tenan
   assert.ok(!calls[0].init.headers.authorization.includes(secret));
 });
 
+test('scoped proxy forwards bounded entity discovery query with server-derived tenant', async () => {
+  const res = {};
+  const calls = [];
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: {
+      method: 'GET',
+      url: '/internal/v1/harness-chat/core/api/entity-search?query=Uwe&entity_type=person&scope=project&limit=10&org_id=attacker',
+      headers: { authorization: `Bearer ${token()}` },
+    },
+    res,
+    pathname: '/internal/v1/harness-chat/core/api/entity-search',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({}),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: { coreApiBaseUrl: 'http://core.test' },
+    env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ matches: [], degradation: null }));
+    },
+  });
+
+  assert.equal(handled, true);
+  assert.equal(res.status, 200);
+  assert.equal(calls[0].url, 'http://core.test/api/entity-search?query=Uwe&entity_type=person&scope=project&limit=10');
+  assert.equal(calls[0].init.headers['x-hm-user-id'], userId);
+  assert.equal(calls[0].init.headers['x-hm-org-id'], orgId);
+  assert.ok(!calls[0].url.includes('org_id'));
+});
+
 test('scoped proxy rejects invalid token before tenant lookup', async () => {
   const res = {};
   const handled = await handleHarnessChatBootstrapRoute({

@@ -25,6 +25,7 @@ const CORE_ROUTES = new Map([
   ['/api/profile', new Set(['GET'])],
   ['/api/profiles', new Set(['GET'])],
   ['/api/profiles/context', new Set(['GET'])],
+  ['/api/entity-search', new Set(['GET'])],
   ['/api/recall', new Set(['POST'])],
   ['/api/memories', new Set(['POST'])],
 ]);
@@ -104,6 +105,12 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   let body;
   if (req.method !== 'GET') body = await parseBody(req).catch(() => null);
   const target = new URL(corePath, redisConfig.coreApiBaseUrl);
+  if (corePath === '/api/entity-search') {
+    const source = new URL(req.url || pathname, 'http://hivemind.local');
+    for (const key of ['query', 'entity_type', 'scope', 'limit']) {
+      for (const value of source.searchParams.getAll(key)) target.searchParams.append(key, value);
+    }
+  }
   if (corePath === '/api/memories') target.searchParams.set('sync', 'true');
   const upstream = await fetchImpl(target, {
     method: req.method,

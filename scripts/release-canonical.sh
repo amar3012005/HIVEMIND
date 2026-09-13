@@ -20,7 +20,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -32,6 +32,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --allow-divergence) ALLOW_DIVERGENCE=1; shift;;
   --harness-image) HARNESS_IMAGE="$2"; shift 2;;
   --harness-image-preloaded) HARNESS_IMAGE_PRELOADED=1; shift;;
+  --harness-image-preloaded-ref) HARNESS_IMAGE_PRELOADED_REF="$2"; shift 2;;
+  --harness-image-expected-id) HARNESS_IMAGE_EXPECTED_ID="$2"; shift 2;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
@@ -66,6 +68,13 @@ if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
 fi
 [ "$HARNESS_IMAGE_PRELOADED" = 0 ] || [[ ",${SERVICES}," == *,harness-runner,* ]] \
   || { echo "FATAL: --harness-image-preloaded requires harness-runner"; exit 2; }
+if [ "$HARNESS_IMAGE_PRELOADED" = 1 ]; then
+  [ -n "$HARNESS_IMAGE_PRELOADED_REF" ] && [ -n "$HARNESS_IMAGE_EXPECTED_ID" ] \
+    || { echo "FATAL: preloaded Harness image requires --harness-image-preloaded-ref and --harness-image-expected-id"; exit 2; }
+  HARNESS_DEPLOY_IMAGE="$HARNESS_IMAGE_PRELOADED_REF"
+else
+  HARNESS_DEPLOY_IMAGE="$HARNESS_IMAGE"
+fi
 
 # Publish intent before building. A conflicting claim fails before consuming
 # disk or producing an image that would supersede another session's release.
@@ -181,13 +190,17 @@ for s in "${SVCS[@]}"; do
     if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
     if [ "$HARNESS_IMAGE_PRELOADED" = 1 ]; then
       echo "[image] $s uses verified preloaded immutable artifact → $HARNESS_IMAGE"
-      docker image inspect "$HARNESS_IMAGE" >/dev/null \
-        || { echo "FATAL: preloaded Harness image is absent: $HARNESS_IMAGE"; exit 1; }
+      docker image inspect "$HARNESS_IMAGE_EXPECTED_ID" >/dev/null \
+        || { echo "FATAL: expected preloaded Harness image is absent: $HARNESS_IMAGE_EXPECTED_ID"; exit 1; }
+      actual_id=$(docker image inspect "$HARNESS_IMAGE_EXPECTED_ID" --format '{{.Id}}')
+      [ "$actual_id" = "$HARNESS_IMAGE_EXPECTED_ID" ] \
+        || { echo "FATAL: preloaded Harness image ID drift: $actual_id≠$HARNESS_IMAGE_EXPECTED_ID"; exit 1; }
+      docker tag "$HARNESS_IMAGE_EXPECTED_ID" "$HARNESS_DEPLOY_IMAGE"
     else
       echo "[pull] $s → $HARNESS_IMAGE"
       docker pull "$HARNESS_IMAGE" >/dev/null
     fi
-    printf '  %s:\n    image: %s\n' "$s" "$HARNESS_IMAGE" >> "$OVERRIDE.tmp"
+    printf '  %s:\n    image: %s\n' "$s" "$HARNESS_DEPLOY_IMAGE" >> "$OVERRIDE.tmp"
     continue
   fi
   TAG="hivemind/${IMG[$s]}:sha-$SHORT"
@@ -253,7 +266,7 @@ for s in "${SVCS[@]}"; do
   ok="✓"; { [ "$st" = healthy ] || [ "$st" = running ]; } || { ok="✗ UNHEALTHY"; FAIL=1; }
   if [ "$s" = harness-runner ]; then
     live_image=$(docker inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true)
-    [ "$live_image" = "$HARNESS_IMAGE" ] || { ok="$ok ✗ image=$live_image≠requested-digest"; FAIL=1; }
+    [ "$live_image" = "$HARNESS_DEPLOY_IMAGE" ] || { ok="$ok ✗ image=$live_image≠requested-artifact"; FAIL=1; }
     tunnel_status=$(docker inspect "${CONTAINER[harness-tunnel]}" --format '{{.State.Status}}' 2>/dev/null || echo missing)
     [ "$tunnel_status" = running ] || { ok="$ok ✗ tunnel=$tunnel_status"; FAIL=1; }
     echo "[verify] $s $c → $st  image=$live_image  $ok"
@@ -274,7 +287,7 @@ fi
 # ── manifest ───────────────────────────────────────────────────────────────
 {
   echo "{"; echo "  \"sha\": \"$SHA\","; echo "  \"short\": \"$SHORT\","; echo "  \"ts\": \"$TS\","
-  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; echo "  \"worktree\": \"$REL\","
+  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; [ -z "$HARNESS_IMAGE_EXPECTED_ID" ] || echo "  \"harness_image_id\": \"$HARNESS_IMAGE_EXPECTED_ID\","; echo "  \"worktree\": \"$REL\","
   echo -n "  \"rollback\": {"; first=1; for s in "${!ROLLBACK[@]}"; do [ $first = 1 ] || echo -n ","; first=0; echo -n "\"$s\":\"${ROLLBACK[$s]}\""; done; echo "},"
   echo "  \"result\": \"$([ $FAIL = 0 ] && echo ok || echo FAILED)\""; echo "}"
 } > "$MANIFEST"

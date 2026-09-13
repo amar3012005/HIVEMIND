@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run on Singulance as root. Creates a PostgreSQL dump, Qdrant snapshot, and
+# Run on a managed HIVEMIND host as root. Creates a PostgreSQL dump, Qdrant snapshot, and
 # AMR volume archive; upload is mandatory when BACKUP_UPLOAD_COMMAND is configured.
 set -euo pipefail
 
@@ -11,6 +11,7 @@ DEST="$BACKUP_DIR/.${STAMP}.partial"
 FINAL_DEST="$BACKUP_DIR/$STAMP"
 COMPOSE_DIR="${COMPOSE_DIR:-/root/hivemind/infra}"
 ENV_FILE="${ENV_FILE:-/root/hivemind/.env}"
+MANAGED_DATA_VOLUME="${MANAGED_DATA_VOLUME:-hivemind_hivemind-data}"
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
@@ -37,7 +38,7 @@ docker exec hm-qdrant sh -lc "cat /qdrant/snapshots/$SNAPSHOT" > "$DEST/qdrant.s
 test -s "$DEST/qdrant.snapshot"
 
 # The AMR/registry volume is the sole copy of personal AMR workspace records.
-docker run --rm -v hivemind_hivemind-data:/data:ro -v "$DEST:/out" alpine:3.20 \
+docker run --rm -v "$MANAGED_DATA_VOLUME:/data:ro" -v "$DEST:/out" alpine:3.20 \
   tar czf /out/amr-data.tar.gz -C /data .
 gzip -t "$DEST/amr-data.tar.gz"
 

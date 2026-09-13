@@ -142,7 +142,7 @@ services:
       KNOWLEDGE_INGEST_EMBED_ORG_CONCURRENCY: "1"
       # Override any legacy env-file value: failures are terminal and visible.
       DOCLING_URL: ""
-      KB_EXTRACT_URL: http://hm-extract:8788
+      KB_EXTRACT_URL: http://hm-extract:8088
       NANGO_URL: http://nango:8080
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
       NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}

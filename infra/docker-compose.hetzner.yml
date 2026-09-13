@@ -202,6 +202,23 @@ services:
       retries: 5
       start_period: 30s
 
+  # This is the sole public path to the loopback-only Harness runner. The
+  # remotely managed Cloudflare Tunnel configuration owns the hostname and
+  # ingress rules; the token is supplied only by the production secret store.
+  # It shares the Compose network with the runner and never exposes a host port.
+  harness-tunnel:
+    image: cloudflare/cloudflared:2026.8.3
+    profiles: ["harness-chat"]
+    restart: unless-stopped
+    read_only: true
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${HIVE_HARNESS_TUNNEL_TOKEN:-}
+    depends_on:
+      harness-runner: { condition: service_healthy }
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+
   employees:
     build: { context: ../employees-service }
     image: hivemind/employees:${VERSION:-latest}

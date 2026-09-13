@@ -43,7 +43,7 @@ PRESENCE="$HDIR/scripts/release-presence.sh"
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=hivemind-harness-runner-1 )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=hivemind-harness-runner-1 [harness-tunnel]=hivemind-harness-tunnel-1 )
 declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=harness-chat )
 build_cmd() { local s="$1" tag="$2"; case "$s" in
   core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
@@ -222,6 +222,14 @@ for s in "${SVCS[@]}"; do
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
   docker compose --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
+  if [ "$s" = harness-runner ]; then
+    # The tunnel is a profile-bound companion: it is never deployed without
+    # the runner and has no independent image or persistence lifecycle.
+    echo "[deploy] harness-tunnel"
+    "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase deploying:harness-tunnel
+    docker compose --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+      --env-file "$ENVF" up -d --no-deps --force-recreate harness-tunnel >/dev/null
+  fi
 done
 
 # ── verify: health + image-SHA label + optional canary ─────────────────────
@@ -237,6 +245,8 @@ for s in "${SVCS[@]}"; do
   if [ "$s" = harness-runner ]; then
     live_image=$(docker inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true)
     [ "$live_image" = "$HARNESS_IMAGE" ] || { ok="$ok ✗ image=$live_image≠requested-digest"; FAIL=1; }
+    tunnel_status=$(docker inspect "${CONTAINER[harness-tunnel]}" --format '{{.State.Status}}' 2>/dev/null || echo missing)
+    [ "$tunnel_status" = running ] || { ok="$ok ✗ tunnel=$tunnel_status"; FAIL=1; }
     echo "[verify] $s $c → $st  image=$live_image  $ok"
     continue
   fi

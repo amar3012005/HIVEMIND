@@ -36,6 +36,7 @@ import { queueMeetingFinalization, processMeetingFinalization, reconcileMeetingF
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
+import { purgeEntityResourceProjections } from './knowledge/entity-projection-delete.js';
 import { projectScopedAnchorFilter } from './knowledge/document-delete-scope.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
 import { findEntities } from './memory/entity-discovery.js';
@@ -17348,6 +17349,12 @@ exit \$RC
                 // the cross-lock deadlock surface; cascade() retries the rest.
                 ids = Array.from(new Set((ids || []).filter(Boolean))).sort();
                 if (ids.length === 0) return;
+                await cascade('memory_entity_projections', () =>
+                  purgeEntityResourceProjections({
+                    prisma,
+                    organizationId: orgId,
+                    resources: ids.map((resourceId) => ({ resourceType: 'memory', resourceId })),
+                  }));
                 await cascade('source_metadata', () =>
                   prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } }));
                 await cascade('memory_versions_related_refs', () =>
@@ -17421,6 +17428,15 @@ exit \$RC
                     if (!docRow) continue;
                     try {
                       const segs = await prisma.knowledgeSegment.findMany({ where: { documentId: docRow.id }, select: { id: true } });
+                      await cascade('document_entity_projections', () =>
+                        purgeEntityResourceProjections({
+                          prisma,
+                          organizationId: orgId,
+                          resources: [
+                            { resourceType: 'document', resourceId: docRow.id },
+                            ...segs.map(({ id }) => ({ resourceType: 'segment', resourceId: id })),
+                          ],
+                        }));
                       if (segs.length) {
                         const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
                         const qKey = process.env.QDRANT_API_KEY || '';

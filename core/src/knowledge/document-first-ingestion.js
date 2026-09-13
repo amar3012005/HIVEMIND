@@ -5940,6 +5940,14 @@ Every item must include a non-empty content field and one or more valid support_
       ingest_mode: 'both',
       original_ingest_mode: 'evidence',
     };
+    // Workflow v2 deliberately materializes durable evidence first and promotes
+    // it in a second checkpoint. That split bypasses the inline document path's
+    // projection-replacement block, so forced retries previously accumulated a
+    // fresh active memory set on every run. Capture the old set here and retire
+    // it only after the successor memories, citations, entities and claims land.
+    const previousProjectionMemoryIds = metadata.force_reprocess === true && !remote
+      ? await captureDocumentProjection(this.db, document.id)
+      : [];
     onProgress?.({ stage: 'generating_memories', progress: 70 });
     const promoted = await this._promoteMemories({
       documentId: document.id,
@@ -5977,6 +5985,16 @@ Every item must include a non-empty content field and one or more valid support_
     await this._projectPromotedCanonicalKnowledge({
       memories, userId: document.userId || userId, orgId, documentId: document.id,
     });
+    let projectionReplacement = null;
+    if (previousProjectionMemoryIds.length && memories.length) {
+      projectionReplacement = await reconcileDocumentProjection({
+        db: this.db,
+        vectorStore: this.memoryGraphEngine?.vectorStore,
+        documentId: document.id,
+        previousMemoryIds: previousProjectionMemoryIds,
+        currentMemoryIds: memories.map((memory) => memory.id),
+      });
+    }
     onProgress?.({ stage: 'reconciling', progress: 96, memories: memories.length });
     return {
       documentId: document.id,
@@ -5994,7 +6012,10 @@ Every item must include a non-empty content field and one or more valid support_
       // prove every promoted PostgreSQL memory exists in Qdrant. Dropping this
       // field left otherwise successful jobs permanently at `reconciling` once
       // the no-partial-vector gate was enabled.
-      coverage: promoted?.coverage || {},
+      coverage: {
+        ...(promoted?.coverage || {}),
+        ...(projectionReplacement ? { projection_replacement: projectionReplacement } : {}),
+      },
     };
   }
 

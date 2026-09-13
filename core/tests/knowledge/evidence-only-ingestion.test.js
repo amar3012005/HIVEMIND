@@ -517,6 +517,66 @@ test('stored evidence promotion generates memories without invoking extraction a
   assert.equal(updates[0].data.parseMetadata.original_ingest_mode, 'evidence');
 });
 
+test('forced stored-evidence promotion replaces the previous active memory projection', async () => {
+  const documentId = '33333333-3333-4333-8333-333333333333';
+  let reads = 0;
+  const retired = [];
+  const removedVectors = [];
+  const service = new DocumentFirstIngestionService({
+    db: {
+      knowledgeDocument: {
+        findFirst: async () => ({
+          id: documentId, userId: '11111111-1111-4111-8111-111111111111', ingestMode: 'evidence',
+          title: 'Evidence report', documentType: 'file', sourcePlatform: 'knowledge_upload',
+          sourceId: 'report-source', tags: [], parseMetadata: {},
+          segments: [{
+            id: '55555555-5555-4555-8555-555555555555', content: 'Der bestätigte Starttermin ist der 14. September 2028.',
+            segmentIndex: 0, segmentType: 'chunk', metadata: {},
+          }],
+        }),
+        update: async () => ({}),
+      },
+      memoryEvidenceLink: {
+        findMany: async () => {
+          reads += 1;
+          if (reads === 1) return [{ memoryId: 'old-memory' }];
+          return [{ memoryId: 'old-memory', documentId }];
+        },
+      },
+      $transaction: async (fn) => fn({
+        memoryEvidenceLink: { deleteMany: async () => ({ count: 1 }) },
+        relationship: { deleteMany: async () => ({ count: 0 }) },
+        vectorEmbedding: { deleteMany: async () => ({ count: 0 }) },
+        memory: { updateMany: async ({ where }) => { retired.push(...where.id.in); return { count: 1 }; } },
+      }),
+    },
+    memoryGraphEngine: {
+      vectorStore: {
+        deleteMemory: async (id) => { removedVectors.push(id); return true; },
+      },
+    },
+    smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._promoteMemories = async () => ({
+    candidates: [{}], memories: [{ id: 'new-memory' }],
+    coverage: { memory_embed: { total: 1, embedded: 1, failed: 0, healed: 0 } },
+  });
+  service._structureClaimsAsync = async () => {};
+  service._projectPromotedCanonicalKnowledge = async () => {};
+
+  const result = await service.promoteStoredEvidence({
+    documentId,
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    metadata: { force_reprocess: true },
+  });
+
+  assert.deepEqual(removedVectors, ['old-memory']);
+  assert.deepEqual(retired, ['old-memory']);
+  assert.deepEqual(result.coverage.projection_replacement, { stale: 1, retired: 1, detached: 0 });
+});
+
 test('promoted memories retain stored evidence provenance in memory and vector writes', async () => {
   const documentId = '33333333-3333-4333-8333-333333333333';
   const segmentId = '55555555-5555-4555-8555-555555555555';

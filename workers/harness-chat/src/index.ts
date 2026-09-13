@@ -133,8 +133,8 @@ function renderBootIndex(html: string, rows: BootInjection[]): string {
 function authCallback(request: Request): Response {
   const preview = new URL(request.url).hostname.includes('.preview.');
   const hiveOverview = preview
-    ? 'https://next.preview.singulancelabs.com/hivemind/app/new-session'
-    : 'https://next.singulancelabs.com/hivemind/app/new-session';
+    ? 'https://next.preview.singulancelabs.com/hivemind/app/overview/new'
+    : 'https://next.singulancelabs.com/hivemind/app/overview/new';
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening HIVE-MIND</title><style>html,body{height:100%;margin:0;background:#faf9f4;color:#737373;font:13px system-ui,sans-serif}body{display:grid;place-items:center}.card{text-align:center}.bar{width:176px;height:4px;margin:14px auto;overflow:hidden;border-radius:99px;background:#e7e4dc}.bar:after{display:block;width:50%;height:100%;content:"";border-radius:99px;background:#117dff;animation:load 1s ease-in-out infinite alternate}@keyframes load{to{transform:translateX(100%)}}a{color:#117dff}.error{display:none}</style></head><body><main class="card"><strong>Opening HIVE-MIND</strong><div class="bar"></div><div id="status">Securing your Harness session…</div><p class="error" id="error">This sign-in link expired. <a href="${hiveOverview}">Return to HIVE-MIND</a></p></main><script>(()=>{const p=new URLSearchParams(location.hash.slice(1));const ticket=p.get('ticket');const requestId=p.get('request_id')||crypto.randomUUID();history.replaceState(null,'','/auth/callback');const fail=()=>{document.querySelector('.bar').style.display='none';document.querySelector('#status').style.display='none';document.querySelector('#error').style.display='block'};if(!ticket){fail();return}fetch('/api/hivemind/embed/exchange',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({ticket,request_id:requestId})}).then(r=>{if(!r.ok)throw new Error();location.replace('/')}).catch(fail)})()</script></body></html>`;
   return new Response(html, {
     headers: {

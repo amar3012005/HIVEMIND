@@ -279,9 +279,12 @@ if [ "$SKIP_CANARY" = 0 ] && [ -n "$CANARY_URL" ]; then
   code=""; for i in $(seq 1 12); do code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$CANARY_URL" || true); case "$code" in 2*|3*|401|403) break;; esac; sleep 3; done
   echo "[canary] $CANARY_URL → $code"; case "$code" in 2*|3*|401|403);; *) FAIL=1;; esac
 fi
-VERIFY_SERVICES=$(printf '%s' "$SERVICES" | sed -E 's/(^|,)harness-runner(,|$)/\\1\\2/g; s/,,+/,/g; s/^,|,$//g')
-if [ -n "$VERIFY_SERVICES" ]; then
-  "$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$VERIFY_SERVICES" --source-root "$REL" || FAIL=1
+VERIFY_SERVICES=()
+for s in "${SVCS[@]}"; do
+  [ "$s" = harness-runner ] || VERIFY_SERVICES+=("$s")
+done
+if [ "${#VERIFY_SERVICES[@]}" -gt 0 ]; then
+  "$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$(IFS=,; echo "${VERIFY_SERVICES[*]}")" --source-root "$REL" || FAIL=1
 fi
 
 # ── manifest ───────────────────────────────────────────────────────────────

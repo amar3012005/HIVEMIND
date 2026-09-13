@@ -32,4 +32,5 @@ test('canonical Compose uses the dedicated Harness image and existing Postgres a
   assert.doesNotMatch(service, /env_file:/);
   assert.match(service, /profiles: \["harness-chat"\]/);
   assert.match(service, /PGOPTIONS: -c search_path=hivemind,public/);
+  assert.match(service, /HIVEMIND_HARNESS_TRUSTED_HOSTS: \$\{HIVE_HARNESS_TRUSTED_HOSTS:-dev\.next\.singulancelabs\.com\}/);
 });

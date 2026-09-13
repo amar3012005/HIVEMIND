@@ -182,6 +182,60 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 root@159.195.204.36 \
 
 Expected hostname at this snapshot: `v2202609412644514416`.
 
+### Verify Enigma's SSH host key on a new laptop
+
+The Enigma Ed25519 host key was verified on 2026-09-13 through an existing
+trusted SSH connection and independently matched against the network scan:
+
+```text
+SHA256:7KIVB7Wxt7rZbMyRajSKvZ7Tp4n028uN0c/cRYg908Y
+```
+
+On a new laptop, verify the scan **before** writing `known_hosts`:
+
+```bash
+ssh-keyscan -T 10 -t ed25519 159.195.204.36 2>/dev/null \
+  | ssh-keygen -lf - -E sha256
+```
+
+Proceed only when the output exactly matches the fingerprint above. Then pin
+the key:
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+ssh-keyscan -H -T 10 -t ed25519 159.195.204.36 \
+  >> ~/.ssh/known_hosts 2>/dev/null
+chmod 600 ~/.ssh/known_hosts
+```
+
+Host trust and login authorization are separate. Give every laptop its own
+key instead of copying an old private key:
+
+```bash
+ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_enigma \
+  -C "enigma-$(hostname)-$(date +%F)"
+cat ~/.ssh/id_ed25519_enigma.pub
+```
+
+Add that single public-key line to `/root/.ssh/authorized_keys` through the
+already trusted laptop or the provider console. Never transfer or paste
+`~/.ssh/id_ed25519_enigma` itself. After enrollment, create a local alias:
+
+```sshconfig
+Host enigma
+  HostName 159.195.204.36
+  User root
+  IdentityFile ~/.ssh/id_ed25519_enigma
+  IdentitiesOnly yes
+```
+
+Then verify non-interactive access:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 enigma 'hostname && id'
+```
+
 Do not place passwords, tokens, cookies, or API keys in shell arguments or
 command output. If SSH access is missing on a new laptop, transfer only the
 public key through the provider console or an already trusted channel.

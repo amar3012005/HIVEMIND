@@ -201,14 +201,23 @@ describe('runner and asset routing', () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it('adds an explicit frame ancestor policy to static assets', async () => {
+  it('proxies immutable Harness assets and adds the explicit frame ancestor policy', async () => {
+    const runnerFetch = vi.fn(async (request: Request) => new Response(`asset:${request.url}`, {
+      headers: { 'content-type': 'application/javascript' },
+    }));
+    vi.stubGlobal('fetch', runnerFetch);
     const env = {
       HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com,https://admin.singulancelabs.com',
-      ASSETS: { fetch: vi.fn(async () => new Response('app', { headers: { 'content-type': 'application/javascript' } })) },
+      RUNNER_ORIGIN: 'https://private-runner.example',
+      ASSETS: { fetch: vi.fn() },
     } as unknown as Env;
-    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/assets/app.js'), env);
-    expect(response.headers.get('content-security-policy')).toContain('frame-ancestors https://next.singulancelabs.com https://admin.singulancelabs.com');
-    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    try {
+      const response = await worker.fetch(new Request('https://chat.singulancelabs.com/assets/app.js'), env);
+      expect(await response.text()).toBe('asset:https://private-runner.example/assets/app.js');
+      expect(response.headers.get('content-security-policy')).toContain('frame-ancestors https://next.singulancelabs.com https://admin.singulancelabs.com');
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(env.ASSETS.fetch).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('browser-caches successful plugin bundles without edge-sharing them', async () => {

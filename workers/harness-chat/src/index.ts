@@ -159,6 +159,7 @@ async function staticHarness(request: Request, env: Env): Promise<Response> {
 
 function isRunnerRoute(pathname: string): boolean {
   return pathname === '/health' || pathname.startsWith('/plugins/')
+    || pathname.startsWith('/assets/')
     || pathname === '/api/remote.mux' || pathname.startsWith('/api/');
 }
 
@@ -248,6 +249,9 @@ export const worker = {
     }
     if (url.pathname.startsWith('/plugins/')) {
       return cacheClientPlugin(request, await proxyRunner(request, env), env);
+    }
+    if (url.pathname.startsWith('/assets/')) {
+      return assetSecurityHeaders(await proxyRunner(request, env), env);
     }
     if (isRunnerRoute(url.pathname)) return proxyRunner(request, env);
     return staticHarness(request, env);

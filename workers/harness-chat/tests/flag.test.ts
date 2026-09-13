@@ -30,6 +30,14 @@ describe('harness chat Flagship gate', () => {
     env.FLAGS.getStringDetails = vi.fn(async () => { throw new Error('unavailable'); });
     expect((await evaluateHarnessChatMode(env, orgId, userId)).variation).toBe('legacy');
   });
+
+  it('admits the full Harness only for a valid local tenant scope', async () => {
+    const env = { ENVIRONMENT: 'local', FLAGS: { getStringDetails: vi.fn() } } as unknown as Env;
+    expect((await evaluateHarnessChatMode(env, orgId, userId)).variation).toBe('harness');
+    expect((await evaluateHarnessChatMode(env, 'invalid', userId)).variation).toBe('legacy');
+    expect(env.FLAGS.getStringDetails).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('HIVE shell Flagship gate', () => {
@@ -42,6 +50,19 @@ describe('HIVE shell Flagship gate', () => {
 });
 
 describe('runner and asset routing', () => {
+  it('serves an independent same-origin auth callback without booting protected Harness assets', async () => {
+    const assets = vi.fn();
+    const response = await worker.fetch(new Request('https://dev.next.singulancelabs.com/auth/callback'), {
+      ASSETS: { fetch: assets },
+    } as unknown as Env);
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(html).toContain('https://dev.next.singulancelabs.com/hivemind/app/overview/new');
+    expect(html).toContain("fetch('/api/hivemind/embed/exchange'");
+    expect(assets).not.toHaveBeenCalled();
+  });
   it('proxies API paths to the configured private runner origin', async () => {
     const fetchMock = vi.fn(async (request: Request) => Response.json({ target: request.url }));
     vi.stubGlobal('fetch', fetchMock);
@@ -115,7 +136,7 @@ describe('runner and asset routing', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps parent navigation origin and uses private same-origin JSON transport', async () => {
+  it('keeps parent navigation origin for both exchange transports', async () => {
     const received: Array<{ url: string; host: string | null; origin: string | null; contentType: string | null }> = [];
     vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
       received.push({
@@ -161,12 +182,31 @@ describe('runner and asset routing', () => {
     vi.unstubAllGlobals();
   });
 
+  it('preserves browser and foreign origins on native unary RPCs', async () => {
+    const requests: Request[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: Request) => {
+      requests.push(request);
+      return Response.json({ ok: true });
+    }));
+    try {
+      for (const origin of ['https://dev.next.singulancelabs.com', 'https://foreign.example']) {
+        await worker.fetch(new Request('https://dev.next.singulancelabs.com/api/session/list', {
+          method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}',
+        }), { RUNNER_ORIGIN: 'https://private-runner.example' } as Env);
+        const forwarded = requests.at(-1)!;
+        expect(forwarded.url).toBe('https://private-runner.example/api/session/list');
+        expect(forwarded.headers.get('origin')).toBe(origin);
+        expect(forwarded.headers.get('x-forwarded-host')).toBe('dev.next.singulancelabs.com');
+      }
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('adds an explicit frame ancestor policy to static assets', async () => {
     const env = {
       HIVE_HARNESS_PARENT_ORIGINS: 'https://next.singulancelabs.com,https://admin.singulancelabs.com',
-      ASSETS: { fetch: vi.fn(async () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } })) },
+      ASSETS: { fetch: vi.fn(async () => new Response('app', { headers: { 'content-type': 'application/javascript' } })) },
     } as unknown as Env;
-    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/'), env);
+    const response = await worker.fetch(new Request('https://chat.singulancelabs.com/assets/app.js'), env);
     expect(response.headers.get('content-security-policy')).toContain('frame-ancestors https://next.singulancelabs.com https://admin.singulancelabs.com');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
   });

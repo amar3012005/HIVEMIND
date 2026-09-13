@@ -189,13 +189,13 @@ services:
       PARTNER_REFERRALS_FLAG_CACHE_MS: ${PARTNER_REFERRALS_FLAG_CACHE_MS:-5000}
       # HIVE Harness Chat admission. These two secrets are deliberately
       # distinct from session/master credentials and from one another.
-      HIVE_HARNESS_FLAG_URL: ${HIVE_HARNESS_FLAG_URL:-https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat}
+      HIVE_HARNESS_FLAG_URL: ${HIVE_HARNESS_FLAG_URL:-https://dev.next.singulancelabs.com/__hivemind/feature-flags/harness-chat}
       HIVE_HARNESS_EDGE_EVAL_SECRET: ${HIVE_HARNESS_EDGE_EVAL_SECRET:-}
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}
-      HIVE_HARNESS_EMBED_URL: ${HIVE_HARNESS_EMBED_URL:-https://chat.singulancelabs.com/embed}
-      HIVE_HARNESS_PREVIEW_EMBED_URL: ${HIVE_HARNESS_PREVIEW_EMBED_URL:-https://chat.singulancelabs.com/preview}
-      HIVE_HARNESS_LEGACY_EMBED_URL: ${HIVE_HARNESS_LEGACY_EMBED_URL:-https://next.singulancelabs.com/hivemind/app/chat}
+      HIVE_HARNESS_EMBED_URL: ${HIVE_HARNESS_EMBED_URL:-https://dev.next.singulancelabs.com/overview/new}
+      HIVE_HARNESS_PREVIEW_EMBED_URL: ${HIVE_HARNESS_PREVIEW_EMBED_URL:-https://dev.next.singulancelabs.com/overview/new}
+      HIVE_HARNESS_LEGACY_EMBED_URL: ${HIVE_HARNESS_LEGACY_EMBED_URL:-https://dev.next.singulancelabs.com/hivemind/app/overview}
       # Company onboarding is latency-sensitive and Groq is currently failing
       # over on this host. Prefer OpenRouter here; groqFetch still falls back.
       LLM_PRIMARY: ${CONTROL_LLM_PRIMARY:-openrouter}
@@ -213,7 +213,7 @@ services:
   # production. It shares the existing Postgres/Redis services; no parallel
   # persistence stack is permitted.
   harness-runner:
-    image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:local}
+    image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:sha-2de3e2569}
     profiles: ["harness-chat"]
     restart: unless-stopped
     mem_limit: 2g
@@ -231,7 +231,7 @@ services:
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}
       HIVEMIND_CONTROL_PLANE_URL: http://control-plane:3000
-      HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-https://next.singulancelabs.com}
+      HIVEMIND_PARENT_ORIGINS: ${HIVE_HARNESS_PARENT_ORIGINS:-https://dev.next.singulancelabs.com}
       HIVE_HARNESS_RLS_ORG_SETTING: app.hivemind_org_id
       HIVE_HARNESS_RLS_USER_SETTING: app.hivemind_user_id
     depends_on:

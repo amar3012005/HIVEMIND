@@ -72,3 +72,22 @@ test('bootstrap fails closed to legacy without a ticket when edge evaluation fai
     flag_receipt: { key: 'hivemind_harness_chat_v1', variation: 'legacy' },
   });
 });
+
+test('dedicated new-session route honors a legacy feature-flag variation', async () => {
+  const res = responseCapture();
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST' }, res, pathname: '/v1/harness-chat/new-session',
+    prisma: { userOrganization: { findUnique: async () => ({ userId, isActive: true }) } },
+    requireSession: async () => ({ session: { orgId, userId } }), parseBody: async () => ({}), jsonResponse,
+    env: {
+      HIVE_HARNESS_EDGE_EVAL_SECRET: 'edge-secret',
+      HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag',
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      key: 'hivemind_harness_chat_v1', source: 'cloudflare-flagship', variation: 'legacy',
+    })),
+  });
+  assert.equal(res.json.mode, 'legacy');
+  assert.equal(res.json.embed_url, '/hivemind/app/chat');
+  assert.deepEqual(res.json.flag_receipt, { key: 'hivemind_harness_chat_v1', variation: 'legacy' });
+});

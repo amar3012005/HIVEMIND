@@ -26,7 +26,7 @@ if [[ ! -f /etc/enigma/storage-protection.env ]]; then
   install -m 600 /dev/null /etc/enigma/storage-protection.env
   cat > /etc/enigma/storage-protection.env <<'EOF'
 REPO_ROOT=/usr/local/libexec/enigma-storage
-COMPOSE_DIR=/root/hivemind/infra
+COMPOSE_DIR=/opt/enigma
 ENV_FILE=/opt/enigma/.env
 BACKUP_DIR=/opt/enigma/backups-managed
 MANAGED_DATA_VOLUME=enigma_hivemind-data
@@ -34,6 +34,11 @@ MANAGED_BACKUP_KEY_FILE=/root/.config/hivemind-backup.env
 RESTORE_DRILL_RECEIPT_DIR=/opt/enigma/restore-drills
 EOF
   chmod 600 /etc/enigma/storage-protection.env
+fi
+# Migrate only the obsolete generated default; preserve any operator-selected
+# Compose working directory.
+if grep -qx 'COMPOSE_DIR=/root/hivemind/infra' /etc/enigma/storage-protection.env; then
+  sed -i 's#^COMPOSE_DIR=/root/hivemind/infra$#COMPOSE_DIR=/opt/enigma#' /etc/enigma/storage-protection.env
 fi
 
 systemctl daemon-reload

@@ -19,6 +19,8 @@ import { applyProjectScopeFilter } from '../routes/recall.js';
 import { loadTypedGraphEvidence, buildEvidencePacket } from '../memory/recall-router.js';
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { normalizeEntity } from '../memory/entity-normalize.js';
+import { findEntities, resolveAuthorizedEntityIds } from '../memory/entity-discovery.js';
+import { entityDiscoveryCanaryFor } from '../employees/cloudflare-hyper-planner-client.js';
 import {
   CANONICAL_MEMORY_TYPES,
   normalizeMemoryType,
@@ -223,6 +225,23 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'hivemind_find_entities',
+      description: 'Read-only tenant-scoped entity chooser. Use only when a named subject is partial or ambiguous (for example "Uwe") before recall, or when recall lacks an exact entity anchor. Do not call as a preflight for every recall. Pass selected entity_id values to hivemind_recall.entity_ids.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Partial or ambiguous person, organization, project, or document entity name.' },
+          entity_types: { type: 'array', items: { type: 'string' }, maxItems: 8, description: 'Optional canonical entity-type filters.' },
+          scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Optional authorized scope boundary. Omit for all entities visible in the organization; never invent a scope.' },
+          limit: { type: 'integer', minimum: 1, maximum: 25, default: 12 },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'tara_call_get',
       description: 'Read one completed TARA call by durable call, transcript, or session reference. Returns the exact tenant-scoped turns and retained insight. This tool never places a call.',
       parameters: {
@@ -247,6 +266,7 @@ export const TOOL_SCHEMAS = [
           query_original: { type: 'string', description: 'Original-language query for multilingual vector and lexical retrieval.' },
           query_canonical_en: { type: 'string', description: 'English-canonical lexical formulation; exact names and identifiers remain unchanged.' },
           entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entities selected by the structured router.' },
+          entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Entity ids selected from hivemind_find_entities. The server re-authorizes and resolves them before compiling retrieval.' },
           mode: { type: 'string', enum: ['fact', 'explain', 'full', 'quick', 'panorama', 'insight'], default: 'fact' },
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },
@@ -1017,6 +1037,29 @@ const TOOL_HANDLERS = {
     };
   },
 
+  async hivemind_find_entities(args, ctx) {
+    const principalUser = ctx.prisma?.user
+      ? await ctx.prisma.user.findUnique({ where: { id: ctx.userId }, select: { email: true } }).catch(() => null)
+      : null;
+    const enabled = await entityDiscoveryCanaryFor({ orgId: ctx.orgId, userId: ctx.userId, email: principalUser?.email });
+    if (!enabled) return { error: 'feature_unavailable' };
+    const result = await findEntities({
+      prisma: ctx.prisma,
+      memoryStore: ctx.persistentMemoryStore,
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      query: args.query,
+      entityTypes: args.entity_types || [],
+      scope: args.scope || null,
+      limit: args.limit || 12,
+      accessContext: ctx.accessContext || {},
+      projectId: ctx.projectId || null,
+    });
+    if (result.error) return { error: result.error };
+    return result.degraded
+      ? { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }
+      : { matches: result.matches, degradation: null };
+  },
   async hivemind_recall(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
 
@@ -1042,12 +1085,31 @@ const TOOL_HANDLERS = {
     // memory_types=["fact"].
     const strictAnswerTypes = new Set(['decision', 'event', 'goal', 'preference', 'lesson', 'relationship']);
     const strictAnswerType = strictAnswerTypes.has(requestedAnswerType) ? requestedAnswerType : null;
+    let selectedEntities = Array.isArray(args.entities) ? args.entities : [];
+    let selectedEntityNames = [];
+    if (Array.isArray(args.entity_ids) && args.entity_ids.length) {
+      const selected = await resolveAuthorizedEntityIds({
+        prisma: ctx.prisma,
+        memoryStore: ctx.persistentMemoryStore,
+        orgId: ctx.orgId,
+        userId: ctx.userId,
+        entityIds: args.entity_ids,
+        accessContext: ctx.accessContext || {},
+        projectId: ctx.projectId || null,
+      });
+      if (selected.degraded) {
+        return { memories: [], evidence: [], relationships: [], degradation: { status: 'DEGRADED', reason: selected.degraded } };
+      }
+      selectedEntityNames = selected.entities.map((entity) => entity.canonicalName);
+      selectedEntities = [...new Set([...selectedEntities, ...selectedEntityNames])];
+    }
     // The planner's answer_type is a retrieval contract, not merely a ranking
     // hint. Compile it into the canonical memory_types predicate once so the
     // memory and evidence lanes apply the same filter before the unified
     // rerank. The boost remains additive inside that already-typed pool.
     const recallPlan = resolveRecallPlan({
       ...args,
+      entities: selectedEntities,
       memory_types: Array.isArray(args.memory_types) && args.memory_types.length
         ? args.memory_types
         : (strictAnswerType ? [strictAnswerType] : []),
@@ -1086,7 +1148,10 @@ const TOOL_HANDLERS = {
       alternate_lexical_query: args.query_canonical_en && args.query_canonical_en !== originalQuery
         ? args.query_canonical_en
         : null,
-      named_entities: args.entities || [],
+      named_entities: selectedEntities,
+      // Entity IDs come from the tenant-scoped chooser. Keep them as a strict
+      // selection boundary instead of letting query extraction widen `must`.
+      selected_entity_names: selectedEntityNames,
       include_full_memory_content: args._include_full_memory_content === true,
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,
@@ -2448,6 +2513,7 @@ export function normalizeAgentRecallMode(mode) {
 // Source: ai-boost/awesome-harness-engineering 2026 recommendations +
 // observed P95 latencies in HIVEMIND production.
 const TOOL_TIMEOUTS_MS = {
+  hivemind_find_entities: 3_000,
   hivemind_aggregate_entities: 5_000,
   // A filtered COUNT is a single indexed aggregate — far cheaper than recall's
   // multi-lane fan-out, so it gets a tight budget. If it ever needs longer the

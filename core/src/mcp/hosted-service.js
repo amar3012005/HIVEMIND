@@ -597,6 +597,20 @@ Returns { id, name, slug, description, status, created_at }; pass the returned i
       },
     },
     {
+      name: 'hivemind_find_entities',
+      description: 'Read-only tenant-scoped entity chooser for an ambiguous or partial named subject, such as "Uwe". Do not call before every recall. Select a returned entity_id and pass it as entity_ids to hivemind_recall for a hard canonical entity filter.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Partial or ambiguous entity name.' },
+          entity_types: { type: 'array', items: { type: 'string' }, description: 'Optional entity type filters.' },
+          scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Optional authorized scope boundary. Omit for the complete tenant-authorized entity inventory.' },
+          limit: { type: 'integer', minimum: 1, maximum: 25, default: 12 },
+        },
+        required: ['query'],
+      },
+    },
+    {
       name: 'hivemind_recall',
       description: `Semantic search across all stored memories — your primary retrieval reflex. Use on every non-trivial user turn to surface relevant past facts, decisions, or context before composing a response.
 NOT for fetching a single known memory by ID (use hivemind_get_memory); NOT for browsing/listing without a query (use hivemind_list_memories); NOT for AI-synthesized answers (use hivemind_query_with_ai); NOT for code-history reasons (use hivemind_why_code); NOT for bug patterns (use hivemind_recall_bugs).
@@ -2771,6 +2785,21 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           });
         }
 
+      case 'hivemind_find_entities': {
+        const query = String(args.query || '').trim();
+        if (!query) throw new Error('query is required');
+        const result = await apiClient.get('/api/entity-search', {
+          params: {
+            query,
+            ...(Array.isArray(args.entity_types) && args.entity_types.length
+              ? { entity_type: args.entity_types.join(',') }
+              : {}),
+            ...(typeof args.scope === 'string' && args.scope.trim() ? { scope: args.scope.trim() } : {}),
+            limit: Math.max(1, Math.min(Number(args.limit) || 12, 25)),
+          },
+        });
+        return formatToolContent(result);
+      }
       case 'hivemind_recall':
         {
           // Base: all modes use /api/recall for profile + injection + quality fixes

@@ -168,7 +168,7 @@ export async function handleHarnessChatBootstrapRoute({
   // A direct /new route selects session semantics only. It must not bypass
   // the server-side rollout decision: a disabled workspace remains legacy.
   const evaluated = await evaluateHarnessChatFlag({
-    endpoint: env.HIVE_HARNESS_FLAG_URL || 'https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat',
+    endpoint: env.HIVE_HARNESS_FLAG_URL || 'https://next.singulancelabs.com/__hivemind/feature-flags/harness-chat',
     secret: env.HIVE_HARNESS_EDGE_EVAL_SECRET,
     orgId,
     userId,

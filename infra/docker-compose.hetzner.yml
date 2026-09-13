@@ -138,7 +138,7 @@ services:
       PARTNER_REFERRALS_FLAG_CACHE_MS: ${PARTNER_REFERRALS_FLAG_CACHE_MS:-5000}
       # HIVE Harness Chat admission. These two secrets are deliberately
       # distinct from session/master credentials and from one another.
-      HIVE_HARNESS_FLAG_URL: ${HIVE_HARNESS_FLAG_URL:-https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat}
+      HIVE_HARNESS_FLAG_URL: ${HIVE_HARNESS_FLAG_URL:-https://next.singulancelabs.com/__hivemind/feature-flags/harness-chat}
       HIVE_HARNESS_EDGE_EVAL_SECRET: ${HIVE_HARNESS_EDGE_EVAL_SECRET:-}
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}

@@ -20,7 +20,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -31,6 +31,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --service-scoped) SERVICE_SCOPED=1; shift;;
   --allow-divergence) ALLOW_DIVERGENCE=1; shift;;
   --harness-image) HARNESS_IMAGE="$2"; shift 2;;
+  --harness-image-preloaded) HARNESS_IMAGE_PRELOADED=1; shift;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
@@ -63,6 +64,8 @@ if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
   [[ "$HARNESS_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] \
     || { echo "FATAL: harness-runner requires --harness-image (or HIVEMIND_HARNESS_IMAGE) pinned by @sha256"; exit 2; }
 fi
+[ "$HARNESS_IMAGE_PRELOADED" = 0 ] || [[ ",${SERVICES}," == *,harness-runner,* ]] \
+  || { echo "FATAL: --harness-image-preloaded requires harness-runner"; exit 2; }
 
 # Publish intent before building. A conflicting claim fails before consuming
 # disk or producing an image that would supersede another session's release.
@@ -176,8 +179,14 @@ for s in "${SVCS[@]}"; do
   if [ "$s" = harness-runner ]; then
     CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
     if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
-    echo "[pull] $s → $HARNESS_IMAGE"
-    docker pull "$HARNESS_IMAGE" >/dev/null
+    if [ "$HARNESS_IMAGE_PRELOADED" = 1 ]; then
+      echo "[image] $s uses verified preloaded immutable artifact → $HARNESS_IMAGE"
+      docker image inspect "$HARNESS_IMAGE" >/dev/null \
+        || { echo "FATAL: preloaded Harness image is absent: $HARNESS_IMAGE"; exit 1; }
+    else
+      echo "[pull] $s → $HARNESS_IMAGE"
+      docker pull "$HARNESS_IMAGE" >/dev/null
+    fi
     printf '  %s:\n    image: %s\n' "$s" "$HARNESS_IMAGE" >> "$OVERRIDE.tmp"
     continue
   fi

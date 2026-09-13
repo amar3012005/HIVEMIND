@@ -397,6 +397,13 @@ export class CloudflareKnowledgeIngestExecutor {
           return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
         });
         result = promoted.receipt.outputRefs;
+        if (Number(result?.coverage?.memory_embed?.failed || 0) > 0
+          && typeof this.dfi.reconcilePromotedMemoryVectors === 'function') {
+          const memoryEmbed = await this.dfi.reconcilePromotedMemoryVectors({
+            memoryIds: result.promotedMemoryIds || [], orgId: job.orgId,
+          });
+          result = { ...result, coverage: { ...(result.coverage || {}), memory_embed: memoryEmbed } };
+        }
         await this._releaseProcessingLease(job, 'promote');
       } else {
         const evidenceStage = await this.steps.run({
@@ -452,11 +459,22 @@ export class CloudflareKnowledgeIngestExecutor {
             });
             return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
           });
+          let promotionOutput = promotionStage.receipt.outputRefs;
+          if (Number(promotionOutput?.coverage?.memory_embed?.failed || 0) > 0
+            && typeof this.dfi.reconcilePromotedMemoryVectors === 'function') {
+            const memoryEmbed = await this.dfi.reconcilePromotedMemoryVectors({
+              memoryIds: promotionOutput.promotedMemoryIds || [], orgId: job.orgId,
+            });
+            promotionOutput = {
+              ...promotionOutput,
+              coverage: { ...(promotionOutput.coverage || {}), memory_embed: memoryEmbed },
+            };
+          }
           result = {
-            ...promotionStage.receipt.outputRefs,
+            ...promotionOutput,
             pages: evidence.pages,
             segmentCount: evidence.segmentCount,
-            coverage: { ...evidence.coverage, ...promotionStage.receipt.outputRefs.coverage },
+            coverage: { ...evidence.coverage, ...promotionOutput.coverage },
           };
           await this._releaseProcessingLease(job, 'promote');
         }

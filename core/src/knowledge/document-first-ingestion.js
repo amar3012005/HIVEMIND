@@ -3140,6 +3140,17 @@ Every item must include a non-empty content field and one or more valid support_
         claimKind: 'summary', language: parentContext.language,
         contentHash: crypto.createHash('sha256').update(parentContent).digest('hex'),
       });
+      const parentTitle = provenanceMemoryTitle(docTitle, 'Summary');
+      const parentTags = normalizeTagsArray([
+        ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',
+        `ts:${_tsd.toISOString().slice(0, 10)}`,
+        ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+        ...(documentId ? [`doc-id:${documentId}`] : []),
+        ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
+      ]);
+      const parentMetadata = { ...parentProvenance,
+        document_type_confidence: metadata.document_type_confidence ?? null,
+        child_count: childIds.length, total_facts: totalFacts };
       const parentRes = await this.memoryGraphEngine.ingestMemory({
         id: parentMemoryId,
         user_id: userId, org_id: orgId,
@@ -3153,26 +3164,37 @@ Every item must include a non-empty content field and one or more valid support_
         // memory most likely to be read on its own, so it is the one that can least afford to omit
         // which file it describes or when it was recorded.
         content: parentContent,
-        title: provenanceMemoryTitle(docTitle, 'Summary'), memory_type: 'summary',
+        title: parentTitle, memory_type: 'summary',
         // The parent is source-local navigation context, not a durable claim.
         importance_score: 0.45,
         document_date: parentContext.documentDate,
-        tags: normalizeTagsArray([
-          ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',
-          `ts:${_tsd.toISOString().slice(0, 10)}`,
-          ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
-          ...(documentId ? [`doc-id:${documentId}`] : []),
-          ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
-        ]),
+        tags: parentTags,
         source_metadata: parentProvenance,
-        metadata: { ...parentProvenance, document_type_confidence: metadata.document_type_confidence ?? null,
-          child_count: childIds.length, total_facts: totalFacts },
+        metadata: parentMetadata,
         skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
         append_timestamp_to_content: true,
         skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
       });
       docParentId = parentRes?.memoryId || parentRes?.id || null;
       if (docParentId) {
+        let parentVectorEmbedded = false;
+        try {
+          const stored = await this.memoryGraphEngine?.vectorStore?.storeMemory?.({
+            id: docParentId, user_id: userId, org_id: orgId,
+            content: parentContent, title: parentTitle, memory_type: 'summary',
+            is_latest: true, tags: parentTags,
+            project_ids: parentContext.projectIds,
+            primary_team_id: parentContext.teamId,
+            visibility: parentContext.visibility || 'private',
+            created_at: new Date().toISOString(), source_metadata: parentProvenance,
+            metadata: parentMetadata, document_date: parentContext.documentDate,
+            valid_from: parentContext.validFrom, valid_to: parentContext.validTo,
+            content_hash: parentProvenance.source_content_hash,
+          }, { embeddingWorkload: 'ingestion' });
+          parentVectorEmbedded = !!stored;
+        } catch (vectorError) {
+          this.logger.warn?.(`[doc-first] document parent vector failed: ${vectorError.message}`);
+        }
         if (supportSegmentIds.length) {
           const summaryLinks = supportSegmentIds.map((segmentId) => ({
             memoryId: docParentId, documentId, segmentId, linkType: 'supports', confidence: 1,
@@ -3199,10 +3221,43 @@ Every item must include a non-empty content field and one or more valid support_
           }
         };
         await Promise.all(childIds.map(createPartOf));
-        memories.push({ id: docParentId, operation: 'document_parent', isParent: true });
+        memories.push({
+          id: docParentId, user_id: userId, org_id: orgId,
+          content: parentContent, title: parentTitle, memory_type: 'summary', tags: parentTags,
+          project_ids: parentContext.projectIds, primary_team_id: parentContext.teamId,
+          visibility: parentContext.visibility || 'private', source_metadata: parentProvenance,
+          metadata: parentMetadata, document_date: parentContext.documentDate,
+          valid_from: parentContext.validFrom, valid_to: parentContext.validTo,
+          operation: 'document_parent', isParent: true,
+          _vectorEmbedded: parentVectorEmbedded,
+        });
       }
     } catch (e) { this.logger.warn?.(`[doc-first] document parent attach failed: ${e.message}`); }
     return docParentId;
+  }
+
+  /** Repair/certify a bounded set of already-committed memory projections. */
+  async reconcilePromotedMemoryVectors({ memoryIds = [], orgId }) {
+    const ids = [...new Set(memoryIds.filter(Boolean))];
+    if (!ids.length) return { total: 0, embedded: 0, failed: 0, healed: 0 };
+    const store = this.memoryGraphEngine?.store;
+    const vectorStore = this.memoryGraphEngine?.vectorStore;
+    if (!store?.getMemories || !vectorStore?.storeMemory) {
+      return { total: ids.length, embedded: 0, failed: ids.length, healed: 0 };
+    }
+    const hydrated = await store.getMemories(ids);
+    let embedded = 0;
+    await Promise.all(ids.map(async (id) => {
+      const memory = hydrated.get(id);
+      if (!memory || String(memory.org_id || '') !== String(orgId || '')) return;
+      try {
+        const stored = await vectorStore.storeMemory(memory, { embeddingWorkload: 'ingestion' });
+        if (stored) embedded += 1;
+      } catch (error) {
+        this.logger.warn?.(`[kb-vector-repair] ${String(id).slice(0, 8)}: ${error.message}`);
+      }
+    }));
+    return { total: ids.length, embedded, failed: ids.length - embedded, healed: embedded };
   }
 
   /**

@@ -347,6 +347,7 @@ test('one document parent completes a fourteen-memory promotion and keeps child 
   const parentWrites = [];
   const relationships = [];
   const summaryLinks = [];
+  const parentVectors = [];
   const documentId = '33333333-3333-4333-8333-333333333333';
   const memories = Array.from({ length: 14 }, (_, index) => ({
     id: `memory-${index}`,
@@ -378,6 +379,12 @@ test('one document parent completes a fourteen-memory promotion and keeps child 
         return { operation: 'attached', edgesCreated: [edge] };
       },
       store: {},
+      vectorStore: {
+        storeMemory: async (memory, options) => {
+          parentVectors.push({ memory, options });
+          return memory.id;
+        },
+      },
     },
     smartIngestRouter: null, embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },
@@ -398,6 +405,10 @@ test('one document parent completes a fourteen-memory promotion and keeps child 
   assert.equal(memories.length, 15);
   assert.equal(relationships.length, 14);
   assert.equal(summaryLinks.length, 14);
+  assert.equal(parentVectors.length, 1);
+  assert.equal(parentVectors[0].memory.id, 'parent-1');
+  assert.equal(parentVectors[0].memory.memory_type, 'summary');
+  assert.equal(memories[14]._vectorEmbedded, true);
   assert.equal(parentWrites[0].source_metadata.citation_id, 'cite:0');
   assert.equal(parentWrites[0].source_metadata.supporting_evidence.length, 14);
   assert.equal(parentWrites[0].source_metadata.supporting_evidence[13].citation_id, 'cite:13');

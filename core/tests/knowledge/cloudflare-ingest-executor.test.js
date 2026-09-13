@@ -287,6 +287,29 @@ test('partial promoted-memory vector coverage cannot reach settlement', async ()
   assert.equal(events.some(([kind]) => kind === 'complete'), false);
 });
 
+test('a reused partial promotion receipt is repaired before materialization settles', async () => {
+  const { executor, steps } = fixture();
+  executor.dfi.promoteStoredEvidence = async () => ({
+    documentId: ids.document, promotedMemoryIds: ['memory-1', 'memory-2'], pages: 2,
+    segmentCount: 8, candidateCount: 2, promotedCount: 2,
+    coverage: { memory_embed: { total: 2, embedded: 1, failed: 1, healed: 0 } },
+  });
+  let repairs = 0;
+  executor.dfi.reconcilePromotedMemoryVectors = async ({ memoryIds, orgId }) => {
+    repairs += 1;
+    assert.deepEqual(memoryIds, ['memory-1', 'memory-2']);
+    assert.equal(orgId, ids.org);
+    return { total: 2, embedded: 2, failed: 0, healed: 1 };
+  };
+
+  const result = await executor.execute({ jobId: ids.job, processingVersion: 3, stage: 'materialize' });
+  assert.equal(result.ok, true);
+  assert.equal(repairs, 1);
+  const receipt = [...steps.rows.entries()].find(([key]) => key.includes(':materialize:root'))[1];
+  assert.deepEqual(receipt.outputRefs.coverage.memory_embed,
+    { total: 2, embedded: 2, failed: 0, healed: 1 });
+});
+
 test('the fenced scheduler admits four globally, caps each organization at two, and releases cleanly', async () => {
   const { executor, job } = fixture();
   const leases = [];

@@ -134,8 +134,8 @@ test('hivemind_find_entities forwards an optional scope boundary to the canonica
   assert.equal(calls[0].options.params.limit, 7);
   assert.equal(Object.hasOwn(calls[1].options.params, 'scope'), false);
 
-  const manifest = hostedService.generateToolsManifest('user-1', 'org-1', { scopes: ['*'] });
-  const tool = manifest.find((entry) => entry.name === 'hivemind_find_entities');
+  const manifest = hostedService.handleToolsList('user-1', 'org-1', { scopes: ['*'] });
+  const tool = manifest.tools.find((entry) => entry.name === 'hivemind_find_entities');
   assert.deepEqual(tool.inputSchema.properties.scope.enum, ['personal', 'project', 'team', 'organization']);
 });
 

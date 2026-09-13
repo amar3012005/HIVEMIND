@@ -1,7 +1,7 @@
 /**
  * Entity Extractor — extracts entities (people, orgs, projects, topics,
- * locations, products) from knowledge segments and writes them to the
- * canonical Entity + EntityMention tables.
+ * locations, products) from knowledge segments. This module is deliberately
+ * pure: the canonical entity persister is the only database writer.
  *
  * Strategy:
  *   1. Cheap regex pre-pass (emails, @mentions, URLs, hashtags)
@@ -14,7 +14,6 @@
 
 import { chatCompletion, getDefaultModel } from './enterprise/litellm-client.js';
 import { memoryLLMRoute } from '../llm/groq-fallback.js';
-import { orgIsRemote } from '../vector/mneme/driver.js';
 
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s)]+/g;
@@ -61,23 +60,15 @@ export class EntityExtractor {
       || getDefaultModel();
   }
 
-  /**
-   * Extract entities from a single segment and persist mentions.
-   * Returns { entities: [], mentions: [], skipped: false }
-   */
+  extractDeterministic(text) {
+    return this._mergeCandidates(this._regexCandidates(String(text || '')), []);
+  }
+
+  /** Extract entity candidates and span-bearing mentions from one segment. */
   async extractFromSegment({ segment, userId, orgId, documentId, shouldContinue = () => true }) {
     if (!segment?.content || segment.content.trim().length < 20) {
       return { entities: [], mentions: [], skipped: true, reason: 'too_short' };
     }
-    // RESIDENCY: the central entity / entityMention tables are FK'd to central segment/memory rows the
-    // agent doesn't have — for a remote (self-host) org these upserts throw ("Invalid prisma.entityMention
-    // .create invocation"). The memory entity graph for self-host is built on the AGENT by the co-mention
-    // linker (entity:* tags via amrUpdateTags + edges via amrAddEdge). Skip the central segment-entity
-    // persistence for remote.
-    if (orgIsRemote(orgId)) {
-      return { entities: [], mentions: [], skipped: true, reason: 'remote-agent' };
-    }
-
     // 1. Regex pre-pass — cheap candidates
     const regexCandidates = this._regexCandidates(segment.content);
 
@@ -92,59 +83,29 @@ export class EntityExtractor {
     // 3. Merge + dedup by (type, lowercased canonical)
     let merged = this._mergeCandidates(regexCandidates, llmCandidates);
 
-    // 3b. Entity resolution: collapse aliases pointing at same canonical (P1 #10)
-    merged = await this._resolveCandidates(merged, orgId);
+    // 3b. Candidate-local alias collapse only. Cross-document identity
+    // resolution belongs to the canonical writer and its review queue.
+    merged = await this._resolveCandidates(merged);
 
     if (!shouldContinue()) return { entities: [], mentions: [], skipped: true, reason: 'document_deleted' };
 
-    // 4. Upsert entities + write mentions
-    const entities = [];
-    const mentions = [];
-    for (const cand of merged) {
-      if (!shouldContinue()) break;
-      try {
-        const entity = await this.prisma.entity.upsert({
-          where: {
-            orgId_entityType_canonicalName: {
-              orgId,
-              entityType: cand.type,
-              canonicalName: cand.name,
-            },
-          },
-          create: {
-            orgId,
-            entityType: cand.type,
-            canonicalName: cand.name,
-            aliases: cand.aliases || [],
-            confidence: cand.confidence ?? 0.7,
-            mentionCount: 1,
-            lastSeenAt: new Date(),
-          },
-          update: {
-            mentionCount: { increment: 1 },
-            lastSeenAt: new Date(),
-            aliases: { set: Array.from(new Set([...(cand.aliases || [])])) },
-          },
-        });
-        entities.push(entity);
-
-        if (!shouldContinue()) break;
-        const mention = await this.prisma.entityMention.create({
-          data: {
-            entityId: entity.id,
-            documentId,
-            segmentId: segment.id,
-            mentionText: cand.surfaceForm || cand.name,
-            confidence: cand.confidence ?? 0.7,
-            context: segment.content.slice(0, 200),
-          },
-        });
-        mentions.push(mention);
-      } catch (err) {
-        this.logger.warn(`[entity-extractor] upsert failed for "${cand.name}": ${err.message}`);
-      }
-    }
-    return { entities, mentions, skipped: false };
+    const mentions = merged.map((cand) => {
+      const surface = cand.surfaceForm || cand.name;
+      const startOffset = Number.isInteger(cand.startOffset)
+        ? cand.startOffset : segment.content.toLocaleLowerCase().indexOf(String(surface).toLocaleLowerCase());
+      return {
+        ...cand,
+        mentionText: surface,
+        startOffset: startOffset >= 0 ? startOffset : null,
+        endOffset: startOffset >= 0 ? startOffset + String(surface).length : null,
+        resourceType: 'segment',
+        resourceId: segment.id,
+        documentId,
+        userId,
+        orgId,
+      };
+    });
+    return { entities: merged, mentions, skipped: false };
   }
 
   _regexCandidates(text) {
@@ -153,10 +114,12 @@ export class EntityExtractor {
       const email = m[0];
       cands.push({
         name: email.toLowerCase(),
+        email: email.toLowerCase(),
         type: 'person',
         surfaceForm: email,
         confidence: 0.95,
         source: 'regex_email',
+        startOffset: m.index,
       });
     }
     for (const m of text.matchAll(MENTION_RE)) {
@@ -166,6 +129,7 @@ export class EntityExtractor {
         surfaceForm: `@${m[1]}`,
         confidence: 0.85,
         source: 'regex_mention',
+        startOffset: (m.index || 0) + m[0].indexOf('@'),
       });
     }
     for (const m of text.matchAll(HASHTAG_RE)) {
@@ -175,6 +139,7 @@ export class EntityExtractor {
         surfaceForm: `#${m[1]}`,
         confidence: 0.75,
         source: 'regex_hashtag',
+        startOffset: (m.index || 0) + m[0].indexOf('#'),
       });
     }
     return cands;
@@ -269,7 +234,7 @@ export class EntityExtractor {
    *      organization with alias "acme-corp" → merge into the organization)
    *   3. Drop candidates whose name is just an email/handle of an LLM entity
    */
-  async _resolveCandidates(candidates, orgId) {
+  async _resolveCandidates(candidates) {
     if (!candidates.length) return candidates;
 
     // Build alias index from LLM candidates so we can absorb regex variants
@@ -283,33 +248,6 @@ export class EntityExtractor {
       }
     }
 
-    // Pull existing entities for cross-document resolution
-    const lookupNames = Array.from(new Set(candidates.flatMap(c => [c.name.toLowerCase(), ...(c.aliases || []).map(a => a.toLowerCase())])));
-    let existing = [];
-    if (lookupNames.length) {
-      try {
-        existing = await this.prisma.entity.findMany({
-          where: {
-            orgId,
-            OR: [
-              { canonicalName: { in: lookupNames, mode: 'insensitive' } },
-              { aliases: { hasSome: lookupNames } },
-            ],
-          },
-          select: { id: true, entityType: true, canonicalName: true, aliases: true },
-        });
-      } catch {
-        existing = [];
-      }
-    }
-    const existingByAlias = new Map();
-    for (const e of existing) {
-      existingByAlias.set(e.canonicalName.toLowerCase(), e);
-      for (const a of e.aliases || []) {
-        existingByAlias.set(String(a).toLowerCase(), e);
-      }
-    }
-
     const out = new Map(); // dedup
     // Process LLM canonicals first so winners exist in `out` before regex
     // variants are folded in.
@@ -319,26 +257,7 @@ export class EntityExtractor {
     });
     for (const c of sorted) {
       const lower = c.name.toLowerCase();
-      // 1. Already known entity in DB — pin to it
-      const known = existingByAlias.get(lower);
-      if (known) {
-        const key = `${known.entityType}|${known.canonicalName.toLowerCase()}`;
-        const prev = out.get(key);
-        if (prev) {
-          prev.aliases = Array.from(new Set([...(prev.aliases || []), c.name, ...(c.aliases || [])]));
-        } else {
-          out.set(key, {
-            name: known.canonicalName,
-            type: known.entityType,
-            aliases: Array.from(new Set([...(known.aliases || []), c.name, ...(c.aliases || [])])).filter(a => a.toLowerCase() !== known.canonicalName.toLowerCase()),
-            confidence: c.confidence,
-            surfaceForm: c.surfaceForm,
-            source: 'resolved_existing',
-          });
-        }
-        continue;
-      }
-      // 2. Match against another LLM candidate's alias set in this batch
+      // Match against another LLM candidate's alias set in this batch.
       const winnerKey = aliasIndex.get(lower);
       if (winnerKey && winnerKey !== `${c.type}|${lower}`) {
         const prev = out.get(winnerKey);

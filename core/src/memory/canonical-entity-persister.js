@@ -19,6 +19,7 @@
 import { EntityResolver } from './entity-resolver.js';
 import {normalizeEntity, entityMatchVariants } from './entity-normalize.js';
 import { orgIsRemote, amrWrite, amrAddEdge, amrUpdateTags, amrHydrateMemories } from '../vector/mneme/driver.js';
+import crypto from 'node:crypto';
 
 // V5 Phase 10 — cached per-org ontology loader (opt-in enterprise config).
 const _ontoCache = new Map(); // orgId → { value, expiresAt }
@@ -34,8 +35,8 @@ async function _loadOrgOntology(prisma, orgId) {
 }
 
 
-const MAX_ENTITIES_PER_MEMORY = 8;
-const MAX_UNIQUE_ENTITIES_PER_BATCH = 64;
+const MAX_ENTITIES_PER_RESOURCE = 25;
+const MAX_UNIQUE_ENTITIES_PER_BATCH = 128;
 
 // Canonical V5 entity taxonomy — the code-enforced allow-list (previously the
 // type set lived only in the extractor prompt, so entityKind was free-form and
@@ -72,7 +73,8 @@ export function normalizeEntityKind(kind) {
  * @param {object} opts
  * @param {object} opts.prisma          Prisma client (needs canonicalEntity/memoryEntityLink)
  * @param {string} opts.organizationId
- * @param {Array<{memoryId: string, entities: string[]}>} opts.items
+ * @param {Array<{memoryId?: string, resourceType?: 'memory'|'document'|'segment', resourceId?: string,
+ *   userId?: string, scopeType?: string, scopeId?: string, entities: Array<string|object>}>} opts.items
  * @param {string} [opts.entityKind]    kind namespace for extractor names
  * @param {object} [opts.logger]
  * @returns {Promise<{linked:number, created:number, review:number, skipped:number}>}
@@ -89,7 +91,8 @@ export async function persistCanonicalLinks({
   logger = console,
 } = {}) {
   const out = { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 };
-  if (!prisma?.canonicalEntity || !prisma?.memoryEntityLink || !organizationId || !items.length) return out;
+  if (!prisma?.canonicalEntity || (!prisma?.resourceEntityLink && !prisma?.memoryEntityLink)
+      || !organizationId || !items.length) return out;
   // V5: lock entityKind to the canonical taxonomy (was free-form; 'entity'/synonyms
   // fragmented the registry). All registry lookups + creates below use the
   // normalized kind so a re-encounter under a synonym reuses the same entity.
@@ -116,11 +119,49 @@ export async function persistCanonicalLinks({
     const resolver = new EntityResolver({ prisma });
     const remote = orgIsRemote(organizationId);
 
-    // slug → { name (first surface form), memoryIds: [] }
+    // Some older in-process callers know only the memory id. Never turn that
+    // omission into organization-wide visibility. Hydrate the authoritative
+    // scope from PostgreSQL once for the bounded batch; if the row cannot be
+    // resolved, fail closed to personal scope rather than exposing it broadly.
+    const memoryContextById = new Map();
+    const memoryIdsNeedingContext = [...new Set(items
+      .filter((item) => (item?.resourceType || (item?.memoryId ? 'memory' : null)) === 'memory'
+        && (item?.resourceId || item?.memoryId)
+        && (!item.userId || !item.scopeType))
+      .map((item) => item.resourceId || item.memoryId))];
+    if (!remote && memoryIdsNeedingContext.length > 0 && prisma.memory?.findMany) {
+      try {
+        const rows = await prisma.memory.findMany({
+          where: { id: { in: memoryIdsNeedingContext }, orgId: organizationId },
+          select: {
+            id: true, userId: true, scope: true, primaryTeamId: true, projectId: true,
+          },
+        });
+        for (const row of rows) {
+          const scopeType = String(row.scope || 'personal');
+          memoryContextById.set(row.id, {
+            userId: row.userId || null,
+            scopeType,
+            scopeId: scopeType === 'team'
+              ? (row.primaryTeamId || null)
+              : scopeType === 'project' ? (row.projectId || null) : null,
+          });
+        }
+      } catch (err) {
+        logger.warn?.(`[canonical-entities] memory scope hydration failed: ${err.message}`);
+      }
+    }
+
+    // (kind, slug) → one identity candidate plus every resource occurrence.
+    // Occurrence metadata belongs on ResourceEntityLink, never in a capped
+    // source-history array on the entity itself.
     const bySlug = new Map();
     for (const item of items) {
-      if (!item?.memoryId || !Array.isArray(item.entities)) continue;
-      for (const rawItem of item.entities.slice(0, MAX_ENTITIES_PER_MEMORY)) {
+      const resourceType = item?.resourceType || (item?.memoryId ? 'memory' : null);
+      const resourceId = item?.resourceId || item?.memoryId || null;
+      if (!['memory', 'document', 'segment'].includes(resourceType) || !resourceId || !Array.isArray(item.entities)) continue;
+      const memoryContext = resourceType === 'memory' ? memoryContextById.get(resourceId) : null;
+      for (const rawItem of item.entities.slice(0, MAX_ENTITIES_PER_RESOURCE)) {
         // PER-ENTITY KIND. `entityKind` was one namespace for the WHOLE call, so every row the
         // extractor produced landed as entity_kind='entity' — the taxonomy and normalizeEntityKind()
         // existed here, but ingestion had no way to say that one name is a person and another a
@@ -129,8 +170,9 @@ export async function persistCanonicalLinks({
         // minting a new one, so a bad kind cannot fragment the registry.
         const raw = typeof rawItem === 'string' ? rawItem : (rawItem && typeof rawItem.name === 'string' ? rawItem.name : null);
         if (typeof raw !== 'string' || !raw.trim()) continue;
-        const perKind = (rawItem && typeof rawItem === 'object' && rawItem.kind)
-          ? normalizeEntityKind(rawItem.kind) : null;
+        const perKindValue = rawItem && typeof rawItem === 'object'
+          ? (rawItem.kind || rawItem.type) : null;
+        const perKind = perKindValue ? normalizeEntityKind(perKindValue) : null;
         const kindForRow = (perKind && allowedKinds.has(perKind)) ? perKind : entityKind;
         const slug = normalizeEntity(raw);
         if (!slug) continue; // junk/generic names never become canonical entities
@@ -140,10 +182,29 @@ export async function persistCanonicalLinks({
         let entry = bySlug.get(bucket);
         if (!entry) {
           if (bySlug.size >= MAX_UNIQUE_ENTITIES_PER_BATCH) continue;
-          entry = { name: raw.trim(), memoryIds: [], kind: kindForRow, slug };
+          entry = { name: raw.trim(), resources: [], kind: kindForRow, slug, candidate: rawItem };
           bySlug.set(bucket, entry);
         }
-        if (!entry.memoryIds.includes(item.memoryId)) entry.memoryIds.push(item.memoryId);
+        if (!entry.resources.some((resource) => resource.resourceType === resourceType && resource.resourceId === resourceId
+          && resource.startOffset === (rawItem?.startOffset ?? null))) {
+          entry.resources.push({
+            resourceType,
+            resourceId,
+            memoryId: resourceType === 'memory' ? resourceId : null,
+            userId: item.userId || memoryContext?.userId || null,
+            scopeType: item.scopeType || memoryContext?.scopeType
+              || (resourceType === 'memory' ? 'personal' : 'organization'),
+            scopeId: item.scopeId || memoryContext?.scopeId || null,
+            mentionText: (rawItem && typeof rawItem === 'object' && rawItem.mentionText)
+              ? String(rawItem.mentionText).slice(0, 500) : raw.trim().slice(0, 500),
+            startOffset: Number.isInteger(rawItem?.startOffset) ? rawItem.startOffset : null,
+            endOffset: Number.isInteger(rawItem?.endOffset) ? rawItem.endOffset : null,
+            role: String(rawItem?.role || 'mentioned').slice(0, 40),
+            confidence: Number.isFinite(rawItem?.confidence) ? Math.max(0, Math.min(1, rawItem.confidence)) : 1,
+            provenance: rawItem?.provenance || item.provenance || sourceMeta || {},
+            knownAt: item.knownAt || sourceMeta?.seenAt || new Date(),
+          });
+        }
       }
     }
 
@@ -155,88 +216,46 @@ export async function persistCanonicalLinks({
     // re-encounter of a known name to the review queue instead of reusing it.
     // We resolve exact slug matches ourselves and reserve the resolver for
     // genuinely new or ambiguous names.
-    // Kinds actually used by this batch (plus the call-level default), so the reuse prepass covers
-    // exactly what we are about to resolve.
-    const _kindsInBatch = [...new Set([entityKind, ...[...bySlug.values()].map((e) => e.kind).filter(Boolean)])];
     const existingBySlug = new Map();
-    try {
-      // PAGE THE WHOLE REGISTRY. This was a single `take: 500` with no orderBy, which is a
-      // silent cap: org 1380251c holds 784 canonical entities of one kind, so ~36% of the
-      // registry was invisible to the reuse prepass and WHICH 500 you got was arbitrary.
-      // Any entity outside the slice fell through to EntityResolver, scored 0.93 exact
-      // (< AUTO_LINK_FLOOR), and went to the review queue — logging
-      // "+0 entities, 0 links, 1 queued for review" while the graph stopped growing.
-      // A cap that changes behaviour without saying so is the defect class this repo keeps
-      // shipping, so the ceiling is explicit, env-tunable, and WARNS when it truncates.
-      const _pageSize = 1000;
-      const _ceiling = Math.max(_pageSize, Number(process.env.ENTITY_REGISTRY_MAX || 20000));
-      const registry = [];
-      let _cursor = null;
-      for (;;) {
-        const page = await prisma.canonicalEntity.findMany({
-          // Query EVERY kind present in this batch, not just the call-level namespace. With
-          // per-entity kinds a 'person' row would never be found in a cache built only from
-          // 'entity' rows, so every typed entity would miss the reuse prepass, fall through to the
-          // resolver, score 0.93 exact (< AUTO_LINK_FLOOR) and land in the review queue — the exact
-          // "+0 entities, 0 links, 1 queued for review" failure the paging fix above was written for.
-          where: { organizationId, entityKind: { in: _kindsInBatch } },
-          select: { id: true, canonicalName: true, aliases: true, entityKind: true },
+    // Never scan the registry. At millions of resources the canonical-name and
+    // GIN search-term indexes must resolve only this batch's bounded candidates.
+    for (const entry of bySlug.values()) {
+      try {
+        const matches = await prisma.canonicalEntity.findMany({
+          where: {
+            organizationId,
+            entityKind: entry.kind || entityKind,
+            OR: [
+              { canonicalName: { equals: entry.name, mode: 'insensitive' } },
+              { aliases: { has: entry.name } },
+              { searchTerms: { hasSome: entityMatchVariants(entry.slug) } },
+            ],
+          },
+          select: { id: true },
           orderBy: { id: 'asc' },
-          take: _pageSize,
-          ...(_cursor ? { skip: 1, cursor: { id: _cursor } } : {}),
+          take: 2,
         });
-        registry.push(...page);
-        if (page.length < _pageSize) break;
-        if (registry.length >= _ceiling) {
-          logger.warn?.(`[canonical-entities] registry TRUNCATED at ${registry.length} of an unknown `
-            + `larger total (org ${String(organizationId).slice(0, 8)}, kind ${entityKind}) — entities beyond `
-            + `this point will be re-created as duplicates instead of reused. Raise ENTITY_REGISTRY_MAX.`);
-          break;
-        }
-        _cursor = page[page.length - 1].id;
+        existingBySlug.set(`${entry.kind || entityKind}::${entry.slug}`,
+          matches.length === 1 ? matches[0].id : matches.length > 1 ? 'AMBIGUOUS' : null);
+      } catch (err) {
+        logger.warn?.(`[canonical-entities] indexed lookup failed for ${entry.slug}: ${err.message}`);
       }
-      for (const row of registry) {
-        for (const surface of [row.canonicalName, ...(row.aliases || [])]) {
-          const slug = normalizeEntity(surface);
-          if (!slug) continue;
-          // Index the slug AND its diacritic/plural variants, so a NEW encounter of
-          // 'wärmepumpen' reuses the existing 'Wärmepumpe' instead of minting a
-          // sibling canonical. Without this, only byte-identical slugs reused — the
-          // exact fragmentation the 2026-08-03 backfill had to merge (7 losers).
-          for (const variant of entityMatchVariants(slug)) {
-            // Keyed by kind::variant to match the lookup below. Two different kinds sharing a
-            // surface form are two identities, so they must not collide into AMBIGUOUS.
-            const key = `${row.entityKind}::${variant}`;
-            const seen = existingBySlug.get(key);
-            if (seen && seen !== row.id) existingBySlug.set(key, 'AMBIGUOUS');
-            else if (!seen) existingBySlug.set(key, row.id);
-          }
-        }
-      }
-    } catch (err) {
-      logger.warn?.(`[canonical-entities] registry prefetch failed: ${err.message}`);
     }
 
     // Merge, never overwrite: an entity seen in a second document ACCUMULATES filenames and keeps the
   // EARLIEST first_seen_at. Applied to reused entities too — otherwise only brand-new entities would
   // carry provenance and the requirement would silently hold for a minority of rows.
   const stampSource = async (entityId) => {
-    if (!entityId || entityId === 'AMBIGUOUS' || !sourceMeta?.filename) return;
+    if (!entityId || entityId === 'AMBIGUOUS') return;
     try {
       const row = await prisma.canonicalEntity.findUnique({ where: { id: entityId }, select: { metadata: true } });
       const md = (row?.metadata && typeof row.metadata === 'object') ? { ...row.metadata } : {};
-      const files = Array.isArray(md.source_filenames) ? [...md.source_filenames] : [];
-      if (!files.includes(sourceMeta.filename)) files.push(sourceMeta.filename);
-      const docs = Array.isArray(md.source_document_ids) ? [...md.source_document_ids] : [];
-      if (sourceMeta.documentId && !docs.includes(sourceMeta.documentId)) docs.push(sourceMeta.documentId);
-      const seen = sourceMeta.seenAt || new Date().toISOString().slice(0, 10);
+      const seen = sourceMeta?.seenAt || new Date().toISOString().slice(0, 10);
       await prisma.canonicalEntity.update({
         where: { id: entityId },
         data: {
           metadata: {
             ...md,
-            source_filenames: files.slice(-25),
-            source_document_ids: docs.slice(-25),
             first_seen_at: md.first_seen_at && md.first_seen_at <= seen ? md.first_seen_at : seen,
             last_seen_at: seen,
           },
@@ -245,7 +264,8 @@ export async function persistCanonicalLinks({
     } catch (e) { logger.warn?.(`[canonical-entities] source stamp failed for ${entityId}: ${e.message}`); }
   };
 
-  const linkAll = async (entityId, memoryIds, confidence, entitySlug) => {
+  const linkAll = async (entityId, resources, confidence, entitySlug) => {
+      const memoryIds = resources.filter((resource) => resource.resourceType === 'memory').map((resource) => resource.resourceId);
       if (remote) {
         try {
           const ent = await prisma.canonicalEntity.findUnique({
@@ -270,9 +290,11 @@ export async function persistCanonicalLinks({
           return;
         }
       }
-      for (const memoryId of memoryIds) {
+      for (const resource of resources) {
+        const memoryId = resource.resourceType === 'memory' ? resource.resourceId : null;
         try {
           if (remote) {
+            if (!memoryId) continue;
             const tag = `entity:${entitySlug}`;
             const hydrated = await amrHydrateMemories(organizationId, [memoryId]);
             const memory = Array.isArray(hydrated) ? hydrated.find((row) => row?.id === memoryId) : null;
@@ -285,17 +307,43 @@ export async function persistCanonicalLinks({
               createdBy: 'canonical-entity-persister', orgId: organizationId });
             if (!edgeAdded) throw new Error('remote memory entity-edge projection was not acknowledged');
           } else {
-            await prisma.memoryEntityLink.upsert({
-              where: { memoryId_entityId_role: { memoryId, entityId, role: 'mentioned' } },
-              update: { confidence },
-              create: { memoryId, entityId, role: 'mentioned', confidence },
-            });
+            if (prisma.resourceEntityLink) {
+              const linkKey = crypto.createHash('sha256').update([
+                organizationId, resource.resourceType, resource.resourceId, entityId,
+                resource.role, resource.startOffset ?? '', resource.endOffset ?? '', resource.mentionText || '',
+              ].join('|')).digest('hex');
+              await prisma.resourceEntityLink.upsert({
+                where: { organizationId_linkKey: { organizationId, linkKey } },
+                update: {
+                  confidence: resource.confidence ?? confidence,
+                  provenance: resource.provenance || {},
+                  knownAt: new Date(resource.knownAt),
+                },
+                create: {
+                  organizationId, entityId, resourceType: resource.resourceType,
+                  resourceId: resource.resourceId, userId: resource.userId,
+                  scopeType: resource.scopeType, scopeId: resource.scopeId,
+                  mentionText: resource.mentionText, startOffset: resource.startOffset,
+                  endOffset: resource.endOffset, role: resource.role,
+                  confidence: resource.confidence ?? confidence,
+                  provenance: resource.provenance || {}, knownAt: new Date(resource.knownAt), linkKey,
+                },
+              });
+            }
+            // Temporary compatibility projection for existing recall readers.
+            if (memoryId && prisma.memoryEntityLink) {
+              await prisma.memoryEntityLink.upsert({
+                where: { memoryId_entityId_role: { memoryId, entityId, role: resource.role } },
+                update: { confidence: resource.confidence ?? confidence },
+                create: { memoryId, entityId, role: resource.role, confidence: resource.confidence ?? confidence },
+              });
+            }
           }
           out.linked += 1;
         } catch (err) {
           out.skipped += 1;
           if (remote) out.projectionFailed += 1;
-          logger.warn?.(`[canonical-entities] link failed ${memoryId} → ${entityId}: ${err.message}`);
+          logger.warn?.(`[canonical-entities] link failed ${resource.resourceType}:${resource.resourceId} → ${entityId}: ${err.message}`);
         }
       }
     };
@@ -309,20 +357,22 @@ export async function persistCanonicalLinks({
       const slug = entry.slug;
       const known = existingBySlug.get(`${entry.kind || entityKind}::${slug}`);
       if (known && known !== 'AMBIGUOUS') {
-        await linkAll(known, entry.memoryIds, 1.0, slug);
+        await linkAll(known, entry.resources, 1.0, slug);
         await stampSource(known);
         continue;
       }
-      const [firstMemoryId, ...restMemoryIds] = entry.memoryIds;
+      const firstMemory = entry.resources.find((resource) => resource.memoryId);
       let results;
       try {
         results = await resolver.resolveAndLink({
-          memoryId: firstMemoryId,
+          memoryId: firstMemory?.memoryId || entry.resources[0]?.resourceId,
           organizationId,
           role: 'mentioned',
           candidates: [{
             name: entry.name,
             kind: entry.kind || entityKind,
+            email: entry.candidate?.email || null,
+            externalRefs: entry.candidate?.externalRefs || {},
             // Stored verbatim on CREATE by entity-resolver; stampSource below covers reuse.
             metadata: sourceMeta?.filename ? {
               source_filenames: [sourceMeta.filename],
@@ -331,33 +381,34 @@ export async function persistCanonicalLinks({
               last_seen_at: sourceMeta.seenAt || new Date().toISOString().slice(0, 10),
             } : {},
           }],
-          linkMemory: !remote,
+          // Universal links are written below. Avoid a hidden first-memory write
+          // here so every resource follows the same idempotent link path.
+          linkMemory: false,
         });
       } catch (err) {
-        out.skipped += entry.memoryIds.length;
-        if (remote) out.projectionFailed += entry.memoryIds.length;
+        out.skipped += entry.resources.length;
+        if (remote) out.projectionFailed += entry.resources.length;
         logger.warn?.(`[canonical-entities] resolve failed for "${entry.name}": ${err.message}`);
         continue;
       }
       const r = results?.[0];
       if (!r) {
-        out.skipped += entry.memoryIds.length;
-        if (remote) out.projectionFailed += entry.memoryIds.length;
+        out.skipped += entry.resources.length;
+        if (remote) out.projectionFailed += entry.resources.length;
         continue;
       }
       if (r.entityId && r.action !== 'created') await stampSource(r.entityId);
       if (r.action === 'review') {
         // Ambiguous — queued for human review; do not fan links out for it.
         out.review += 1;
-        out.skipped += restMemoryIds.length;
+        out.skipped += entry.resources.length;
         continue;
       }
       if (r.action === 'created') {
         out.created += 1;
         existingBySlug.set(`${entry.kind || entityKind}::${slug}`, r.entityId); // later names in this batch reuse it
       }
-      if (!remote) out.linked += 1;
-      await linkAll(r.entityId, remote ? entry.memoryIds : restMemoryIds, r.confidence ?? 1.0, slug);
+      await linkAll(r.entityId, entry.resources, r.confidence ?? 1.0, slug);
     }
 
     if (out.linked || out.created || out.review) {

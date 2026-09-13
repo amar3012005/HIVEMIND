@@ -287,10 +287,9 @@ win compounds (linking happens concurrently while the upload already reports
 `indexed`; `entity:*` tags + co-mention edges land shortly after, same
 eventual-enrichment posture as `_extractEntitiesAsync`).
 
-> **Posture note.** Entity tags/edges are now *eventually* consistent (seconds after
-> `indexed`), not synchronous. Recall by entity tag on a just-uploaded doc may lag a
-> few seconds. This is intentional and matches the existing async entity-extraction
-> path.
+> **Posture note.** Canonical entity resources and their extraction receipts are
+> settled before the ingestion job completes. Compatibility tags may remain an
+> asynchronous projection, but the indexed entity directory is authoritative.
 
 ---
 
@@ -298,7 +297,8 @@ eventual-enrichment posture as `_extractEntitiesAsync`).
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `ENABLE_DOCUMENT_FIRST_INGEST` | — | must be `true` to enable the pipeline |
+| `KNOWLEDGE_INGEST_WORKFLOW_URL` | — | protected Workflow transport; absent uses BullMQ |
+| `KNOWLEDGE_INGEST_WORKFLOW_SECRET` | — | Workflow transport secret, not a rollout flag |
 | `DOCLING_URL` | `http://docling:5001` | Docling sidecar; absent → fallback parsers only |
 | `PHASE1_MAX_PROMOTE` | `20` | max segments promoted per doc |
 | `PHASE1_MIN_PROMOTE` | `5` | docs ≤ this promote whole |
@@ -306,7 +306,6 @@ eventual-enrichment posture as `_extractEntitiesAsync`).
 | `PHASE1_ENTITY_LINK_CONCURRENCY` | `6` | parallel deferred entity-link workers |
 | `ENTITY_LINK_TIMEOUT_MS` | `25000` | per entity-co-mention Groq fetch timeout |
 | `MEMORY_ENTITY_LINKING` | `true` | `false` disables entity-co-mention entirely |
-| `ENABLE_ENTITY_EXTRACTION` | — | `true` enables per-segment entity extraction |
 | `ENTITY_EXTRACT_CONCURRENCY` | `6` | parallel segment entity-extraction workers |
 | `DOCLING_CHUNK_MAX_TOKENS` | `512` | hybrid chunker token budget (match embedder) |
 | `DOCLING_OCR_LANGS` | `de,en` | smart-mode OCR languages |

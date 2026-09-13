@@ -604,6 +604,9 @@ Returns { id, name, slug, description, status, created_at }; pass the returned i
         properties: {
           query: { type: 'string', description: 'Partial or ambiguous entity name.' },
           entity_types: { type: 'array', items: { type: 'string' }, description: 'Optional entity type filters.' },
+          scope: { type: 'string', enum: ['personal', 'organization', 'project', 'team'], description: 'Optional visibility boundary. Omit for every authorized scope.' },
+          scope_id: { type: 'string', description: 'Required for project or team scope.' },
+          project_id: { type: 'string', description: 'Project scope shorthand.' },
           limit: { type: 'integer', minimum: 1, maximum: 25, default: 12 },
         },
         required: ['query'],
@@ -2798,6 +2801,9 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             ...(Array.isArray(args.entity_types) && args.entity_types.length
               ? { entity_type: args.entity_types.join(',') }
               : {}),
+            ...(args.scope ? { scope: args.scope } : {}),
+            ...(args.scope_id ? { scope_id: args.scope_id } : {}),
+            ...(args.project_id ? { project_id: args.project_id } : {}),
             limit: Math.max(1, Math.min(Number(args.limit) || 12, 25)),
           },
         });

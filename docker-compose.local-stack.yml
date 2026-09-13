@@ -105,10 +105,9 @@ services:
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
       HIVEMIND_OAUTH_SESSION_SECRET: ${HIVEMIND_OAUTH_SESSION_SECRET:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
-      # Durable Knowledge Base ingestion is opt-in and local-only. The core
-      # still requires a positive Flagship decision for the organization.
+      # Flagship selects Workflow per tenant. URL and secret are transport
+      # configuration only; absent transport deterministically uses BullMQ.
       HIVEMIND_LOCAL_MODE: "true"
-      KNOWLEDGE_INGEST_WORKFLOW_ENABLED: ${KNOWLEDGE_INGEST_WORKFLOW_ENABLED:-false}
       KNOWLEDGE_INGEST_WORKFLOW_URL: ${KNOWLEDGE_INGEST_WORKFLOW_URL:-http://host.docker.internal:8788}
       KNOWLEDGE_INGEST_WORKFLOW_SECRET: ${KNOWLEDGE_INGEST_WORKFLOW_SECRET:-}
       # Phase 0 canonical claim projection remains fail-closed unless both the
@@ -126,9 +125,7 @@ services:
       DURABLE_CHAT_AGENT_ENABLED: ${DURABLE_CHAT_AGENT_ENABLED:-false}
       CLOUDFLARE_CHAT_AGENT_URL: ${CLOUDFLARE_CHAT_AGENT_URL:-}
       CLOUDFLARE_CHAT_AGENT_SECRET: ${CLOUDFLARE_CHAT_AGENT_SECRET:-}
-      ENABLE_DOCUMENT_FIRST_INGEST: ${ENABLE_DOCUMENT_FIRST_INGEST:-true}
       ENABLE_EVIDENCE_RECALL: ${ENABLE_EVIDENCE_RECALL:-true}
-      ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
       USE_SITUATIONALIZER: ${USE_SITUATIONALIZER:-true}
       USE_CONTEXTUAL_EMBEDDING: ${USE_CONTEXTUAL_EMBEDDING:-true}
       USE_QDRANT_STORAGE: ${USE_QDRANT_STORAGE:-true}

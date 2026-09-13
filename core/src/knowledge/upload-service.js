@@ -62,9 +62,9 @@ export class KnowledgeUploadService {
       ingest_mode: ingestMode,
     });
     if (validation.kind === 'image' && ingestMode === 'evidence') {
-      return { ok: false, status: 400, body: {
-        error: 'evidence_mode_unsupported_for_image',
-        message: 'Images use the vision-to-memory pipeline and currently support ingestMode=both only.',
+      return { ok: false, status: 422, body: {
+        error: 'ocr_required', code: 'OCR_REQUIRED',
+        message: 'Image evidence requires a configured deterministic OCR parser. No LLM or vision model was called.',
       } };
     }
 

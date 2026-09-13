@@ -50,6 +50,31 @@ test('evidence mode classifies deterministically without invoking an LLM', async
   assert.deepEqual(result, { type: 'general', confidence: 1, method: 'deterministic_evidence' });
 });
 
+test('evidence entity indexing uses deterministic extraction and settles segment plus document receipts', async () => {
+  let llmCalls = 0;
+  let written = null;
+  const service = new DocumentFirstIngestionService({
+    db: {}, memoryGraphEngine: {}, smartIngestRouter: null,
+    entityExtractor: {
+      extractDeterministic: (text) => [{ name: 'Amar Sai Gadde', type: 'person', surfaceForm: 'Amar Sai Gadde', startOffset: text.indexOf('Amar') }],
+      _llmExtract: async () => { llmCalls += 1; return []; },
+    },
+  });
+  service._persistCanonicalEntityResources = async (input) => { written = input; return { linked: 2 }; };
+  await service._persistDeterministicEvidenceEntities({
+    segments: [{ id: '55555555-5555-4555-8555-555555555555', content: 'Amar Sai Gadde approved the plan.' }],
+    documentId: '33333333-3333-4333-8333-333333333333',
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    metadata: { scope: 'organization', filename: 'decision.md' },
+  });
+  assert.equal(llmCalls, 0);
+  assert.equal(written.extractorRoute, 'deterministic_regex');
+  assert.equal(written.modelRoute, null);
+  assert.deepEqual(written.resources.map((resource) => resource.resourceType), ['segment', 'document']);
+  assert.equal(written.resources[0].entities[0].kind, 'person');
+});
+
 test('legacy generation env flags cannot fork the canonical memory and entity pipeline', () => {
   const previous = {
     extract: process.env.KB_UNIFIED_EXTRACT,

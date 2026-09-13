@@ -507,7 +507,8 @@ const TOOL_HANDLERS = {
       entityTypes: args.entity_types || [],
       limit: args.limit || 12,
       accessContext: ctx.accessContext || {},
-      projectId: ctx.projectId || null,
+      projectId: args.project_id || ctx.projectId || null,
+      scope: args.scope ? { type: args.scope, id: args.scope_id || null } : null,
     });
     return result.degraded
       ? { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }

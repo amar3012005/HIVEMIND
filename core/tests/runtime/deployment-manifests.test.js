@@ -55,3 +55,26 @@ test('stateful memory SQL fixes the pgcrypto search path used by relationship tr
   assert.match(text, /ALTER FUNCTION hivemind\.handle_memory_derive_trigger\(\)/);
   assert.match(text, /SET search_path = hivemind, public/);
 });
+
+test('canonical ingestion cannot be disabled by legacy environment flags', () => {
+  for (const file of [
+    'core/src/server.js',
+    'docker-compose.local-stack.yml',
+    'infra/prod-defaults.conf',
+    'infra/ENV-REFERENCE.txt',
+  ]) {
+    const text = read(file);
+    assert.doesNotMatch(text, /ENABLE_DOCUMENT_FIRST_INGEST/, `${file} still has the legacy pipeline switch`);
+    assert.doesNotMatch(text, /ENABLE_ENTITY_EXTRACTION/, `${file} still has the legacy entity switch`);
+    assert.doesNotMatch(text, /KNOWLEDGE_INGEST_WORKFLOW_ENABLED/, `${file} still has the split-brain Workflow switch`);
+  }
+});
+
+test('canonical entity compatibility backfill preserves memory authorization scope', () => {
+  const text = read('core/prisma/migrations/20260913103000_canonical_resource_entities/migration.sql');
+  assert.match(text, /JOIN hivemind\.memories m/);
+  assert.match(text, /m\.user_id/);
+  assert.match(text, /COALESCE\(m\.scope::text, 'personal'\)/);
+  assert.match(text, /WHEN m\.scope::text = 'team' THEN m\.primary_team_id/);
+  assert.match(text, /WHEN m\.scope::text = 'project' THEN m\.project_id/);
+});

@@ -21,6 +21,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'node:crypto';
 
 const AUTO_LINK_FLOOR = 0.95;
 const REVIEW_FLOOR = 0.70;
@@ -42,6 +43,30 @@ function emailDomain(email) {
   const at = email.indexOf('@');
   if (at < 0) return null;
   return email.slice(at + 1).toLowerCase().trim();
+}
+
+function externalIdentityKey({ email, externalRefs = {} } = {}) {
+  if (email) return `email:${String(email).trim().toLowerCase()}`;
+  const entries = Object.entries(externalRefs)
+    .filter(([, value]) => value !== null && value !== undefined && String(value).trim())
+    .map(([system, value]) => [String(system).trim().toLowerCase(), String(value).trim()])
+    .sort(([a], [b]) => a.localeCompare(b));
+  return entries.length ? entries.map(([system, value]) => `${system}:${value}`).join('|') : null;
+}
+
+function searchTermsFor(name, aliases = []) {
+  const terms = new Set();
+  for (const value of [name, ...aliases]) {
+    const normalized = normalizeName(value);
+    for (const variant of entityMatchVariants(normalized)) terms.add(variant);
+    for (const token of normalized.split(/\s+/).filter((part) => part.length >= 2)) {
+      terms.add(token);
+      // Prefixes make `amar`, `amar-sai`, and `amar-sai-gadde` discoverable
+      // through one bounded GIN lookup without scanning entity rows.
+      for (let length = 2; length <= token.length; length += 1) terms.add(token.slice(0, length));
+    }
+  }
+  return [...terms].filter(Boolean).slice(0, 128);
 }
 
 function jaccard(a, b) {
@@ -91,6 +116,13 @@ export class EntityResolver {
    * { entity, confidence, reason } or null.
    */
   async _bestMatch({ organizationId, name, kind, email, emailDomain: domain, externalRefs = {} }) {
+    const verifiedIdentity = externalIdentityKey({ email, externalRefs });
+    if (verifiedIdentity) {
+      const exactIdentity = await this.prisma.canonicalEntity.findFirst({
+        where: { organizationId, entityKind: kind, externalIdentityKey: verifiedIdentity },
+      }).catch(() => null);
+      if (exactIdentity) return { entity: exactIdentity, confidence: 1.00, reason: 'verified_external_identity' };
+    }
     // 1. External ref (1.00)
     for (const [system, externalId] of Object.entries(externalRefs)) {
       if (!externalId) continue;
@@ -105,9 +137,9 @@ export class EntityResolver {
     }
 
     // 3. Domain + fuzzy name (0.90) — companies only
-    if (kind === 'company' && domain) {
+    if ((kind === 'company' || kind === 'organization') && domain) {
       const candidates = await this.prisma.canonicalEntity.findMany({
-        where: { organizationId, entityKind: 'company', emailDomains: { has: domain } },
+        where: { organizationId, entityKind: kind, emailDomains: { has: domain } },
         take: 25,
       });
       if (candidates.length === 1) {
@@ -136,6 +168,12 @@ export class EntityResolver {
           take: 5,
         });
         if (candidates.length === 1) {
+          // A person's name is not an identity. Without a verified email or
+          // provider ID, an exact homonym remains reviewable rather than being
+          // silently merged across documents.
+          if (kind === 'person' && !verifiedIdentity) {
+            return { entity: candidates[0], confidence: 0.85, reason: 'person_name_requires_identity' };
+          }
           // 0.96, ABOVE AUTO_LINK_FLOOR (0.95). This was 0.93 — below the floor — so an
           // EXACT match auto-linked nothing and every hit went to the review queue instead.
           // Effect in production: the first document to mention an entity took the CREATE
@@ -153,19 +191,9 @@ export class EntityResolver {
           // jaccard branches below ARE guesses and must still go to review.
           return { entity: candidates[0], confidence: 0.96, reason: 'name_alias_exact' };
         }
-        // Fuzzy across all same-kind entities (cap 100, prefer recent)
-        const fuzzyPool = await this.prisma.canonicalEntity.findMany({
-          where: { organizationId, entityKind: kind },
-          orderBy: { updatedAt: 'desc' },
-          take: 100,
-        });
-        let best = null;
-        for (const c of fuzzyPool) {
-          const score = jaccard(normName, normalizeName(c.canonicalName));
-          if (!best || score > best.score) best = { entity: c, score };
-        }
-        if (best && best.score >= 0.85) return { entity: best.entity, confidence: 0.80, reason: `name_fuzzy(${best.score.toFixed(2)})` };
-        if (best && best.score >= 0.70) return { entity: best.entity, confidence: 0.72, reason: `name_fuzzy_low(${best.score.toFixed(2)})` };
+        // Do not enumerate a fuzzy pool here. Similar names are discovery
+        // candidates, not identity proof; automatic canonical merging requires
+        // an exact indexed name/alias or verified external identity.
       }
     }
     return null;
@@ -235,7 +263,8 @@ export class EntityResolver {
       // A deterministic, database-unique identity key is the authoritative
       // race fence. Historical rows may keep identity_key=NULL; every newly
       // resolved entity participates in the constraint.
-      const identityKey = `canonical:${normalizedName}`;
+      const verifiedIdentity = externalIdentityKey({ email: cand.email, externalRefs });
+      const identityKey = `canonical:${kind}:${normalizedName}`;
       let created;
       try {
         created = await this.prisma.canonicalEntity.create({
@@ -246,8 +275,10 @@ export class EntityResolver {
             // P2011 and canonical_entities could never populate.
             normalizedName,
             identityKey,
+            externalIdentityKey: verifiedIdentity,
             entityKind: kind,
             aliases: cand.name ? [cand.name] : [],
+            searchTerms: searchTermsFor(_canonName, cand.aliases || []),
             primaryEmail: cand.email ? String(cand.email).toLowerCase() : null,
             emailDomains: domain ? [domain] : [],
             externalRefs,
@@ -297,11 +328,15 @@ export class EntityResolver {
     const newAliases = name && !e.aliases.includes(name) ? [...e.aliases, name] : e.aliases;
     const newDomains = domain && !e.emailDomains.includes(domain) ? [...e.emailDomains, domain] : e.emailDomains;
     const mergedRefs = { ...(e.externalRefs || {}), ...externalRefs };
+    const newSearchTerms = searchTermsFor(e.canonicalName, newAliases);
     const updates = {};
     if (newAliases.length !== e.aliases.length) updates.aliases = newAliases;
     if (newDomains.length !== e.emailDomains.length) updates.emailDomains = newDomains;
     if (JSON.stringify(mergedRefs) !== JSON.stringify(e.externalRefs)) updates.externalRefs = mergedRefs;
+    if (JSON.stringify(newSearchTerms) !== JSON.stringify(e.searchTerms || [])) updates.searchTerms = newSearchTerms;
     if (!e.primaryEmail && email) updates.primaryEmail = String(email).toLowerCase();
+    const verifiedIdentity = externalIdentityKey({ email, externalRefs });
+    if (!e.externalIdentityKey && verifiedIdentity) updates.externalIdentityKey = verifiedIdentity;
     if (Object.keys(updates).length > 0) {
       updates.updatedAt = new Date();
       await this.prisma.canonicalEntity.update({ where: { id: entityId }, data: updates });
@@ -328,6 +363,21 @@ export class EntityResolver {
     if (!c) throw new Error('review candidate not found');
     if (c.proposedEntityId && c.memoryId) {
       await this._link({ memoryId: c.memoryId, entityId: c.proposedEntityId, role: 'subject', confidence: c.confidence });
+      if (this.prisma.resourceEntityLink) {
+        const linkKey = crypto.createHash('sha256').update([
+          c.organizationId, 'memory', c.memoryId, c.proposedEntityId, 'subject', '', '', c.candidateName,
+        ].join('|')).digest('hex');
+        await this.prisma.resourceEntityLink.upsert({
+          where: { organizationId_linkKey: { organizationId: c.organizationId, linkKey } },
+          update: { confidence: c.confidence },
+          create: {
+            organizationId: c.organizationId, entityId: c.proposedEntityId,
+            resourceType: 'memory', resourceId: c.memoryId, role: 'subject',
+            confidence: c.confidence, mentionText: c.candidateName,
+            provenance: { review_candidate_id: c.id }, linkKey,
+          },
+        });
+      }
     }
     await this.prisma.entityReviewCandidate.update({
       where: { id: candidateId },
@@ -363,6 +413,31 @@ export class EntityResolver {
           where: { memoryId_entityId_role: { memoryId: l.memoryId, entityId: srcId, role: l.role } },
         });
       }
+      if (tx.resourceEntityLink) {
+        const resourceLinks = await tx.resourceEntityLink.findMany({ where: { entityId: srcId } });
+        for (const link of resourceLinks) {
+          const linkKey = crypto.createHash('sha256').update([
+            link.organizationId, link.resourceType, link.resourceId, dstId,
+            link.role, link.startOffset ?? '', link.endOffset ?? '', link.mentionText || '',
+          ].join('|')).digest('hex');
+          await tx.resourceEntityLink.upsert({
+            where: { organizationId_linkKey: { organizationId: link.organizationId, linkKey } },
+            update: {
+              confidence: link.confidence, provenance: link.provenance,
+              knownAt: link.knownAt,
+            },
+            create: {
+              organizationId: link.organizationId, entityId: dstId,
+              resourceType: link.resourceType, resourceId: link.resourceId,
+              userId: link.userId, scopeType: link.scopeType, scopeId: link.scopeId,
+              mentionText: link.mentionText, startOffset: link.startOffset,
+              endOffset: link.endOffset, role: link.role, confidence: link.confidence,
+              provenance: link.provenance, knownAt: link.knownAt, linkKey,
+            },
+          });
+          await tx.resourceEntityLink.delete({ where: { id: link.id } });
+        }
+      }
       const src = await tx.canonicalEntity.findUnique({ where: { id: srcId } });
       const dst = await tx.canonicalEntity.findUnique({ where: { id: dstId } });
       if (src && dst) {
@@ -393,15 +468,17 @@ export class EntityResolver {
       this.prisma.canonicalEntity.groupBy({ by: ['entityKind'], where: { organizationId }, _count: true }),
       this.prisma.entityReviewCandidate.count({ where: { organizationId, status: 'pending' } }),
     ]);
-    const linkCount = await this.prisma.$queryRawUnsafe(
-      `SELECT count(*)::int AS n FROM memory_entity_links l
-         JOIN canonical_entities e ON l.entity_id=e.id WHERE e.organization_id = $1::uuid`,
-      organizationId
-    );
+    const [linkCount, memoryLinkCount] = this.prisma.resourceEntityLink
+      ? await Promise.all([
+          this.prisma.resourceEntityLink.count({ where: { organizationId } }),
+          this.prisma.resourceEntityLink.count({ where: { organizationId, resourceType: 'memory' } }),
+        ])
+      : [0, 0];
     return {
       total_entities: total,
       by_kind: byKind.reduce((acc, r) => { acc[r.entityKind] = r._count; return acc; }, {}),
-      memory_links: linkCount?.[0]?.n || 0,
+      resource_links: linkCount,
+      memory_links: memoryLinkCount,
       pending_review: pendingReview,
     };
   }

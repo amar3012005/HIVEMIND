@@ -288,8 +288,10 @@ test('image uploads reject evidence mode before authorization or enqueue', async
   };
   req.metadata = { ingest_mode: 'evidence' };
   const result = await new KnowledgeUploadService(deps).admit(req);
-  assert.equal(result.status, 400);
-  assert.equal(result.body.error, 'evidence_mode_unsupported_for_image');
+  assert.equal(result.status, 422);
+  assert.equal(result.body.error, 'ocr_required');
+  assert.equal(result.body.code, 'OCR_REQUIRED');
+  assert.match(result.body.message, /No LLM or vision model was called/);
   assert.equal(deps.created.length, 0);
 });
 

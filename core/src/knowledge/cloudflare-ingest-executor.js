@@ -373,7 +373,7 @@ export class CloudflareKnowledgeIngestExecutor {
   async _materialize(job) {
     const isImage = job.mediaKind === 'image' || job.metadata?.media_kind === 'image';
     const durableMetadata = isImage
-      ? { ...(job.metadata || {}), media_kind: 'image', ingest_mode: 'both' }
+      ? { ...(job.metadata || {}), media_kind: 'image', ingest_mode: job.ingestMode }
       : (job.metadata || {});
     let run;
     try {

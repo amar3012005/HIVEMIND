@@ -25,23 +25,33 @@ test('entity finder caps output and exposes only safe discovery fields', () => {
   assert.deepEqual(Object.keys(match).sort(), ['aliases', 'canonical_name', 'entity_id', 'entity_type', 'last_seen_at', 'match', 'mention_count']);
 });
 
-test('agent-backed memories expose only authorized entity tags and revalidate issued tag ids', async () => {
+test('indexed resource links bound entity discovery and stable-id revalidation to authorized scope', async () => {
+  const calls = [];
+  const rows = [
+    { id: 'uwe-berger', canonicalName: 'Uwe Berger', entityKind: 'person', aliases: ['Uwe'],
+      searchTerms: ['uwe', 'berger'], updatedAt: '2026-09-12T00:00:00Z',
+      resourceLinks: [{ knownAt: '2026-09-12T00:00:00Z' }] },
+    { id: 'uwe-bross', canonicalName: 'Uwe Bross', entityKind: 'person', aliases: [],
+      searchTerms: ['uwe', 'bross'], updatedAt: '2026-09-11T00:00:00Z',
+      resourceLinks: [{ knownAt: '2026-09-11T00:00:00Z' }] },
+  ];
   const prisma = {
-    entity: { findMany: async () => [] },
-    canonicalEntity: { findMany: async () => [] },
-    memoryEntityLink: { findMany: async () => [] },
-    memory: { findMany: async () => [] },
+    resourceEntityLink: {},
+    canonicalEntity: {
+      findMany: async (args) => {
+        calls.push(args);
+        const ids = args.where.id?.in;
+        return ids ? rows.filter((row) => ids.includes(row.id)) : rows;
+      },
+    },
   };
-  const memoryStore = {
-    listMemories: async () => ({ memories: [
-      { id: 'allowed', created_at: '2026-09-12T00:00:00Z', tags: ['entity:uwe-berger'] },
-      { id: 'other', created_at: '2026-09-11T00:00:00Z', tags: ['entity:uwe-bross'] },
-    ] }),
-  };
-  const scope = { prisma, memoryStore, orgId: 'org', userId: 'user', accessContext: {} };
-  const found = await findEntities({ ...scope, query: 'Uwe' });
-  assert.deepEqual(found.matches.map((match) => match.entity_id), ['tag:uwe-berger', 'tag:uwe-bross']);
+  const scope = { prisma, orgId: 'org', userId: 'user', accessContext: { projectIds: ['project-1'] } };
+  const found = await findEntities({ ...scope, query: 'Uwe', scope: { type: 'project', id: 'project-1' } });
+  assert.deepEqual(found.matches.map((match) => match.entity_id), ['uwe-berger', 'uwe-bross']);
+  assert.equal(calls[0].take, 48, 'bounded indexed candidate query, never a memory scan');
+  assert.deepEqual(calls[0].where.resourceLinks.some,
+    { organizationId: 'org', scopeType: 'project', scopeId: 'project-1' });
 
-  const selected = await resolveAuthorizedEntityIds({ ...scope, entityIds: ['tag:uwe-berger'] });
-  assert.deepEqual(selected.entities, [{ id: 'tag:uwe-berger', canonicalName: 'Uwe Berger' }]);
+  const selected = await resolveAuthorizedEntityIds({ ...scope, entityIds: ['uwe-berger'] });
+  assert.deepEqual(selected.entities, [{ id: 'uwe-berger', canonicalName: 'Uwe Berger' }]);
 });

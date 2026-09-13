@@ -1211,11 +1211,103 @@ export class DocumentFirstIngestionService {
     this.cancelledEntityDocuments = new Set();
   }
 
+  async _recordEntityReceipts({ organizationId, resources = [], extractorRoute, modelRoute = null, processingVersion = 1 }) {
+    if (!this.db?.entityExtractionReceipt || orgIsRemote(organizationId)) return;
+    for (const resource of resources) {
+      if (!resource?.resourceType || !resource?.resourceId) continue;
+      const entities = Array.isArray(resource.entities) ? resource.entities : [];
+      const inputDigest = crypto.createHash('sha256').update(String(resource.input || '')).digest('hex');
+      const outputDigest = crypto.createHash('sha256').update(JSON.stringify(entities)).digest('hex');
+      const status = entities.length ? 'completed' : 'completed_zero';
+      await this.db.entityExtractionReceipt.upsert({
+        where: {
+          organizationId_resourceType_resourceId_processingVersion: {
+            organizationId, resourceType: resource.resourceType,
+            resourceId: resource.resourceId, processingVersion,
+          },
+        },
+        update: {
+          status, extractorRoute, modelRoute, entityCount: entities.length,
+          inputDigest, outputDigest, attempt: { increment: 1 },
+          completedAt: new Date(), lastErrorCode: null,
+        },
+        create: {
+          organizationId, resourceType: resource.resourceType, resourceId: resource.resourceId,
+          processingVersion, status, extractorRoute, modelRoute, attempt: 1,
+          inputDigest, outputDigest, entityCount: entities.length,
+          startedAt: new Date(), completedAt: new Date(),
+        },
+      });
+    }
+  }
+
+  async _persistCanonicalEntityResources({ organizationId, resources = [], sourceMeta = null,
+    extractorRoute = 'unified', modelRoute = null, processingVersion = 1 }) {
+    if (!resources.length) return { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 };
+    const grouped = new Map();
+    for (const resource of resources) {
+      if (!resource?.resourceType || !resource?.resourceId) continue;
+      const key = `${resource.resourceType}:${resource.resourceId}`;
+      const current = grouped.get(key) || { ...resource, entities: [], input: '' };
+      current.entities.push(...(Array.isArray(resource.entities) ? resource.entities : []));
+      if (resource.input && !current.input.includes(String(resource.input))) {
+        current.input = current.input ? `${current.input}\n${resource.input}` : String(resource.input);
+      }
+      grouped.set(key, current);
+    }
+    const canonicalResources = [...grouped.values()];
+    const projection = await persistCanonicalLinks({
+      prisma: this.db, organizationId, items: canonicalResources, sourceMeta, logger: this.logger,
+    });
+    await this._recordEntityReceipts({
+      organizationId, resources: canonicalResources, extractorRoute, modelRoute, processingVersion,
+    });
+    return projection;
+  }
+
+  async _persistDeterministicEvidenceEntities({ segments, documentId, userId, orgId, metadata = {} }) {
+    const scopeType = metadata.scope || (metadata.project_id || metadata.project_ids?.[0] ? 'project'
+      : metadata.primary_team_id ? 'team' : 'organization');
+    const scopeId = scopeType === 'project' ? (metadata.project_id || metadata.project_ids?.[0] || null)
+      : scopeType === 'team' ? (metadata.primary_team_id || null) : null;
+    const resources = [];
+    const documentEntities = [];
+    for (const segment of segments) {
+      const candidates = this.entityExtractor?.extractDeterministic
+        ? this.entityExtractor.extractDeterministic(segment.content)
+        : [];
+      const entities = candidates.map((candidate) => ({
+        name: candidate.name, kind: candidate.type,
+        mentionText: candidate.surfaceForm || candidate.name,
+        startOffset: Number.isInteger(candidate.startOffset) ? candidate.startOffset : null,
+        endOffset: Number.isInteger(candidate.startOffset)
+          ? candidate.startOffset + String(candidate.surfaceForm || candidate.name).length : null,
+        confidence: candidate.confidence, role: 'mentioned',
+        provenance: promotionProvenance(segment, documentId, metadata),
+      }));
+      documentEntities.push(...entities);
+      resources.push({
+        resourceType: 'segment', resourceId: segment.id, userId, scopeType, scopeId,
+        input: segment.content, entities, provenance: promotionProvenance(segment, documentId, metadata),
+      });
+    }
+    resources.push({
+      resourceType: 'document', resourceId: documentId, userId, scopeType, scopeId,
+      input: segments.map((segment) => segment.content).join('\n'), entities: documentEntities,
+      provenance: { document_id: documentId, filename: metadata.filename || null },
+    });
+    return this._persistCanonicalEntityResources({
+      organizationId: orgId, resources,
+      sourceMeta: { filename: metadata.filename || null, documentId, seenAt: new Date().toISOString() },
+      extractorRoute: 'deterministic_regex', modelRoute: null,
+    });
+  }
+
   /** Entity extraction over segments (P1 #9).
    *  Callers may await the returned flight at a durable completion boundary.
    *  Parallel workers are bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */
   _extractEntitiesAsync({ segments, userId, orgId, documentId, force = false }) {
-    if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return null;
+    if (!this.entityExtractor) return null;
     // Skip entity extraction on tiny docs (single short segment) — no real value.
     const totalChars = segments.reduce((acc, s) => acc + (s.content?.length || 0), 0);
     if (!force && segments.length <= 2 && totalChars < 1500) {
@@ -1232,9 +1324,19 @@ export class DocumentFirstIngestionService {
           if (idx >= segments.length) return;
           const segment = segments[idx];
           try {
-            await this.entityExtractor.extractFromSegment({
+            const extracted = await this.entityExtractor.extractFromSegment({
               segment, userId, orgId, documentId,
               shouldContinue: () => !this.cancelledEntityDocuments.has(documentId),
+            });
+            await this._persistCanonicalEntityResources({
+              organizationId: orgId,
+              resources: [{
+                resourceType: 'segment', resourceId: segment.id, userId,
+                input: segment.content, entities: extracted?.mentions || extracted?.entities || [],
+                provenance: { document_id: documentId, segment_id: segment.id },
+              }],
+              extractorRoute: 'entity_extractor',
+              modelRoute: extracted?.modelRoute || null,
             });
           } catch (err) {
             this.logger.warn(`[entity-extractor] segment ${segment.id} failed: ${err.message}`);
@@ -1668,7 +1770,7 @@ Output the JSON object and nothing else.`;
       // (cross-doc dedup + relationship edges). Populated in flushEmbeds.
       const enrichRecs = [];
       const factObjs = []; // created fact memories (id+content+tags) — facts-only mode links them post-distill
-      const canonicalItems = []; // {memoryId, entities:[raw names]} — post-commit canonical registry pass
+      const canonicalItems = []; // canonical resource links, written after memory commit
       const evidenceLinks = [];
 
       // Only sections with enough prose to distill.
@@ -1884,7 +1986,12 @@ Output the JSON object and nothing else.`;
                 // Pass the TYPED pairs as `entities`. The persister accepts string | {name, kind};
                 // a separate parallel array would have been a second shape for one fact — and the
                 // persister would have ignored it, leaving the whole typing chain dead.
-                if (_entityPairs.length) canonicalItems.push({ memoryId: p.factId, entities: _entityPairs });
+                if (_entityPairs.length) canonicalItems.push({
+                  resourceType: 'memory', resourceId: p.factId, memoryId: p.factId,
+                  userId, scopeType: memoryContext.scope, scopeId: memoryContext.projectIds?.[0] || memoryContext.teamId || null,
+                  input: p.t.f, entities: _entityPairs,
+                  provenance: { document_id: documentId, segment_id: p.t.segmentId || null },
+                });
                 factObjs.push({
                   id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
                   title: p.title, memory_type: 'fact',
@@ -1931,8 +2038,9 @@ Output the JSON object and nothing else.`;
       // reuse existing entities, ambiguous fuzzy matches go to the review
       // queue. entity: tags above stay as the compatibility fallback.
       if (canonicalItems.length) {
-        const projection = await persistCanonicalLinks({
-          prisma: this.db, organizationId: orgId, items: canonicalItems, logger: this.logger,
+        const projection = await this._persistCanonicalEntityResources({
+          organizationId: orgId, resources: canonicalItems, extractorRoute: 'kb_distill',
+          modelRoute: process.env.KB_DISTILL_MODEL || memoryLLMRoute()?.model || null,
           sourceMeta: {
             filename: metadata?.filename || docTitle || null,
             documentId: documentId || null,
@@ -2614,14 +2722,42 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // ingest lock (post-commit) so latency lands in background Tier-2.
     const _canonItems = [];
     for (let i = 0; i < facts.length; i++) {
-      if (idByIdx[i] && Array.isArray(facts[i].entities) && facts[i].entities.length) {
-        _canonItems.push({ memoryId: idByIdx[i], entities: facts[i].entities });
+      if (idByIdx[i]) {
+        const supportIds = facts[i].support_segment_ids?.length
+          ? facts[i].support_segment_ids : [window.segmentId];
+        const common = {
+          userId, scopeType: memoryContext.scope,
+          scopeId: memoryContext.projectIds?.[0] || memoryContext.teamId || null,
+          entities: Array.isArray(facts[i].entities) ? facts[i].entities : [],
+          provenance: { document_id: documentId, segment_ids: supportIds },
+        };
+        _canonItems.push({
+          ...common, resourceType: 'memory', resourceId: idByIdx[i], memoryId: idByIdx[i],
+          input: facts[i].f,
+        });
+        for (const segmentId of supportIds.filter(Boolean)) {
+          _canonItems.push({
+            ...common, resourceType: 'segment', resourceId: segmentId,
+            input: facts[i].source_quote || facts[i].f,
+          });
+        }
       }
+    }
+    if (_canonItems.length && documentId) {
+      const allEntities = facts.flatMap((fact) => Array.isArray(fact.entities) ? fact.entities : []);
+      _canonItems.push({
+        resourceType: 'document', resourceId: documentId, userId,
+        scopeType: memoryContext.scope,
+        scopeId: memoryContext.projectIds?.[0] || memoryContext.teamId || null,
+        input: docTitle, entities: allEntities,
+        provenance: { document_id: documentId, filename: metadata.filename || docTitle || null },
+      });
     }
     if (_canonItems.length) {
       try {
-        const projection = await persistCanonicalLinks({
-          prisma: this.db, organizationId: orgId, items: _canonItems, logger: this.logger,
+        const projection = await this._persistCanonicalEntityResources({
+          organizationId: orgId, resources: _canonItems,
+          extractorRoute: 'kb_unified_v2', modelRoute: extractionModel,
           // Mandatory entity provenance: which file, which document, when first seen.
           sourceMeta: {
             filename: metadata.filename || docTitle || null,
@@ -3957,6 +4093,9 @@ Every item must include a non-empty content field and one or more valid support_
     // Do not enter any memory-generation, curator, entity, relationship, or
     // claim-structuring path below this return.
     if (ingestMode === 'evidence') {
+      await this._persistDeterministicEvidenceEntities({
+        segments, documentId: knowledgeDoc.id, userId, orgId, metadata: { ...metadata, filename },
+      });
       if (!_evEmbedCov && !orgIsRemote(orgId)) {
         const embedded = await this.db.knowledgeSegment.count({
           where: { documentId: knowledgeDoc.id, vectorStored: true },
@@ -4396,6 +4535,10 @@ Every item must include a non-empty content field and one or more valid support_
     const _evEmbedC = await this._embedSegments(segments, orgId);
 
     if (metadata.ingest_mode === 'evidence') {
+      await this._persistDeterministicEvidenceEntities({
+        segments, documentId: knowledgeDoc.id, userId, orgId,
+        metadata: { ...metadata, filename: title || `${providerKey}:${sourceId}` },
+      });
       return {
         documentId: knowledgeDoc.id,
         segmentCount: segments.length,
@@ -4611,6 +4754,7 @@ Every item must include a non-empty content field and one or more valid support_
       if (memoryIds.length && this.db?.canonicalEntity && store?.getMemories) {
         const mems = await store.getMemories(memoryIds);
         const items = [];
+        let extractedFallback = [];
         for (const id of memoryIds) {
           const m = mems.get(id);
           const names = (m?.tags || [])
@@ -4621,10 +4765,30 @@ Every item must include a non-empty content field and one or more valid support_
             if (typeof e === 'string' && e.trim()) names.push(e.trim());
             else if (e && typeof e.name === 'string' && e.name.trim()) names.push(e);
           }
-          if (names.length) items.push({ memoryId: id, entities: names });
+          if (!names.length && this.entityExtractor) {
+            if (!extractedFallback.length) {
+              const extracted = await this.entityExtractor.extractFromSegment({
+                segment: { id, content: m?.content || atomicContent },
+                userId, orgId, documentId: null,
+              });
+              extractedFallback = extracted?.mentions || extracted?.entities || [];
+            }
+            names.push(...extractedFallback);
+          }
+          items.push({ memoryId: id, entities: names });
         }
         if (items.length) {
-          const projection = await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });
+          const resources = items.map((item) => ({
+            ...item, resourceType: 'memory', resourceId: item.memoryId,
+            userId,
+            scopeType: scope || (projectId ? 'project' : primaryTeamId ? 'team' : 'personal'),
+            scopeId: projectId || primaryTeamId || null,
+            input: mems.get(item.memoryId)?.content || atomicContent,
+            provenance: { source_type: sourceType },
+          }));
+          const projection = await this._persistCanonicalEntityResources({
+            organizationId: orgId, resources, extractorRoute: 'atomic_ingest',
+          });
           if (projection.projectionFailed > 0) {
             throw new Error(`canonical entity projection incomplete (${projection.projectionFailed} remote links)`);
           }
@@ -6086,7 +6250,7 @@ Every item must include a non-empty content field and one or more valid support_
         // identical claim should never need a model to notice it, and relying on
         // one meant real duplicates shipped: a 54-page deck stored "Home Energy
         // Management Systems (HEMS) like E3DC Hauskraftwerk / One, Fenecon Home 10,
-        // and Huawei's EMMA-A02…" TWICE in a single run while KB_CONSOLIDATE=1 and
+        // and Huawei's EMMA-A02…” TWICE in a single run while canonical consolidation and
         // the consolidator logged nothing in three hours of ingests. Source decks
         // legitimately repeat pages verbatim, so identical windows extract
         // identical claims; comparing normalised text catches that for free and
@@ -6390,7 +6554,10 @@ Every item must include a non-empty content field and one or more valid support_
           // Mirror segment's entity_mentions onto the promoted memory so
           // memory recall can filter/rank by entity.
           this._linkEntitiesToMemoryAsync({
-            memoryId, segmentId: segment.id, orgId, documentId, memoryContent: segment.content,
+            memoryId, segmentId: segment.id, orgId, documentId, userId,
+            scopeType: routed.scope || 'organization',
+            scopeId: routed.project_ids?.[0] || routed.primary_team_id || null,
+            memoryContent: segment.content,
           });
         }
       } catch (error) {
@@ -6602,81 +6769,21 @@ Every item must include a non-empty content field and one or more valid support_
   }
 
   /** Fire-and-forget: copy segment's entity mentions onto memory + update topic state. */
-  _linkEntitiesToMemoryAsync({ memoryId, segmentId, orgId, documentId, memoryContent }) {
-    if (process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
-    // RESIDENCY: this mirrors central segment entity_mentions onto the memory via central entityMention
-    // + memory.update — all FK'd to central rows the agent doesn't have. For a remote (self-host) org the
-    // memory's entity tags + edges are built on the AGENT by the deferred co-mention linker
-    // (_attachEntityCoMentionEdges → amrUpdateTags + amrAddEdge). Skip the central mirror for remote.
-    if (orgIsRemote(orgId)) return;
+  _linkEntitiesToMemoryAsync({ memoryId, segmentId, orgId, documentId, userId = null,
+    scopeType = 'organization', scopeId = null, memoryContent }) {
+    if (!this.entityExtractor || !memoryId || !memoryContent) return;
     (async () => {
       try {
-        await new Promise(r => setTimeout(r, 500));
-        const segMentions = await this.db.entityMention.findMany({
-          where: { segmentId },
-          select: { entityId: true, mentionText: true, confidence: true, context: true },
+        const entities = this.entityExtractor.extractDeterministic(memoryContent);
+        await this._persistCanonicalEntityResources({
+          organizationId: orgId,
+          resources: [{
+            resourceType: 'memory', resourceId: memoryId, memoryId,
+            userId, scopeType, scopeId, input: memoryContent, entities,
+            provenance: { document_id: documentId, segment_id: segmentId },
+          }],
+          extractorRoute: 'deterministic_regex',
         });
-        if (!segMentions.length) return;
-        await this.db.entityMention.createMany({
-          data: segMentions.map(m => ({
-            entityId: m.entityId,
-            memoryId,
-            mentionText: m.mentionText,
-            confidence: m.confidence,
-            context: m.context,
-          })),
-          skipDuplicates: true,
-        });
-
-        // Auto-tag the memory with entity tags for fast filtered recall
-        try {
-          const entityIds = [...new Set(segMentions.map(m => m.entityId))];
-          const entitiesForTags = await this.db.entity.findMany({
-            where: { id: { in: entityIds } },
-            select: { canonicalName: true, entityType: true },
-          });
-          // Canonicalize the entity NAME with the same deterministic slugger
-          // used everywhere else, preserving the entity-type prefix. This raw
-          // db.memory.update bypasses the createMemory chokepoint, so the tag
-          // must already be canonical before it lands.
-          const newTags = entitiesForTags
-            .map(e => { const slug = normalizeEntity(e.canonicalName); return slug ? `${e.entityType}:${slug}` : null; })
-            .filter(Boolean)
-            .slice(0, 25);
-          if (newTags.length) {
-            const existing = await this.db.memory.findUnique({
-              where: { id: memoryId },
-              select: { tags: true },
-            });
-            if (existing) {
-              // normalizeTagsArray re-canonicalizes any legacy entity: tags on
-              // the row too, so a pre-fix entity:Foo can't coexist with the new
-              // canonical form (this update bypasses the chokepoint).
-              const merged = normalizeTagsArray(
-                Array.from(new Set([...(existing.tags || []), ...newTags])).slice(0, 80),
-              );
-              await this.db.memory.update({
-                where: { id: memoryId },
-                data: { tags: merged },
-              });
-            }
-          }
-        } catch (tagErr) {
-          this.logger.warn?.(`[entity-memory-tags] ${memoryId}: ${tagErr.message}`);
-        }
-
-        // P1 #11 — update rolling topic state per linked entity
-        if (this.topicStateWriter && process.env.ENABLE_TOPIC_STATE === 'true') {
-          for (const m of segMentions) {
-            this.topicStateWriter.recordMemoryForEntity({
-              orgId,
-              entityId: m.entityId,
-              memoryId,
-              documentId,
-              memoryContent,
-            }).catch(() => {});
-          }
-        }
       } catch (err) {
         this.logger.warn(`[entity-memory-link] memory ${memoryId} failed: ${err.message}`);
       }

@@ -1278,7 +1278,7 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma && sh
         }
       }
       // Cross-source entity resolution sweep (#8) — alongside hygiene
-      if (process.env.ENABLE_ENTITY_EXTRACTION === 'true') {
+      {
         try {
           const { CrossSourceEntityResolver } = await import('./knowledge/cross-source-entity-resolver.js');
           const resolver = new CrossSourceEntityResolver({ prisma, logger: console });
@@ -1850,7 +1850,8 @@ if (schedulerSyncEngine) {
 }
 
 // ─── Phase 1: Document-Backed Memory Services ───────────────────────────────────
-// Feature-flagged: enabled via ENABLE_DOCUMENT_FIRST_INGEST and ENABLE_EVIDENCE_RECALL env vars
+// Canonical ingestion is an invariant. Flagship selects Workflow admission;
+// BullMQ remains the fallback, but no environment flag may disable this writer.
 let evidenceRetrieval = null;
 const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
@@ -2388,12 +2389,12 @@ if (process.env.DOCLING_URL) {
           }),
           // chunkWithDocling REMOVED. It was a SECOND full Docling conversion of the same
           // file in the same Promise.all, and its output is discarded whenever
-          // KB_SEMANTIC_SEGMENTS is on (the default) because the semantic re-slice works
+          // The canonical semantic re-slice works
           // from the clean markdown instead. Docling's HybridChunker also cuts MID-WORD
           // ("visBruno7kW", "nschluss an SolvisMax"), which is why the re-slice exists.
           // Halves Docling cost per file and removes two failure modes: chunkerError and
           // the 180s chunker abort. hybridChunks still arrive on the parse response for the
-          // KB_SEMANTIC_SEGMENTS=false fallback path.
+          // parser fallback path.
           Promise.resolve({ chunks: [], skipped: 'single-conversion' }),
         ]);
         if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
@@ -2545,7 +2546,7 @@ if (process.env.DOCLING_URL) {
   console.log('[Phase1] Docling adapter enabled');
 }
 
-if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentMemoryStore && persistentMemoryEngine) {
+if (prisma && persistentMemoryStore && persistentMemoryEngine) {
   try {
     documentFirstIngestion = new DocumentFirstIngestionService({
       db: prisma,
@@ -2647,15 +2648,14 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         },
       }
     });
-    // P1 #9 entity extractor — wired only if ENABLE_ENTITY_EXTRACTION=true
-    if (process.env.ENABLE_ENTITY_EXTRACTION === 'true') {
-      try {
-        const { EntityExtractor } = await import('./knowledge/entity-extractor.js');
-        documentFirstIngestion.entityExtractor = new EntityExtractor({ prisma, logger: console });
-        console.log('[Phase1] EntityExtractor enabled');
-      } catch (err) {
-        console.warn('[Phase1] EntityExtractor failed to init:', err.message);
-      }
+    // The extractor is a required pure candidate producer. Evidence mode calls
+    // only its deterministic route; memory promotion may use the model route.
+    try {
+      const { EntityExtractor } = await import('./knowledge/entity-extractor.js');
+      documentFirstIngestion.entityExtractor = new EntityExtractor({ prisma, logger: console });
+      console.log('[Phase1] EntityExtractor enabled');
+    } catch (err) {
+      console.warn('[Phase1] EntityExtractor failed to init:', err.message);
     }
     // P1 #11 topic state writer
     if (process.env.ENABLE_TOPIC_STATE === 'true') {
@@ -2697,6 +2697,11 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
             userId, orgId, source: { type: 'kb', filename },
             file: { buffer: fileBuffer, contentType, filename }, metadata,
             ingestMode: metadata?.ingest_mode || 'both', onProgress, stageHooks,
+          });
+        }
+        if ((metadata?.ingest_mode || 'both') === 'evidence') {
+          throw Object.assign(new Error('Image evidence requires a configured deterministic OCR parser; no model was called.'), {
+            code: 'OCR_REQUIRED', retryable: false,
           });
         }
         onProgress({ stage: 'extracting', progress: 25 });
@@ -5027,8 +5032,8 @@ const server = http.createServer(async (req, res) => {
       },
       features: {
         evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true',
-        document_first_ingest: process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true',
-        entity_extraction: process.env.ENABLE_ENTITY_EXTRACTION === 'true',
+        document_first_ingest: !!documentFirstIngestion,
+        entity_extraction: !!documentFirstIngestion?.entityExtractor,
         topic_state: process.env.ENABLE_TOPIC_STATE === 'true',
       },
       // Honest .amr/ICARUS engine status — READY/DEGRADED/UNAVAILABLE, never
@@ -10882,7 +10887,7 @@ exit \$RC
         }
       }
 
-      // ── Entity discovery (canonical Entity + EntityMention only) ─────
+      // ── Entity discovery (canonical entities + universal resource links) ──
       // This intentionally precedes /api/entities/:id, which is the older
       // CanonicalEntity/Salesforce administration surface and not safe for
       // tenant-scoped recall entity selection.
@@ -10898,6 +10903,8 @@ exit \$RC
             .flatMap((value) => String(value || '').split(','))
             .map((value) => value.trim())
             .filter(Boolean);
+          const requestedScope = url.searchParams.get('scope') || null;
+          const requestedScopeId = url.searchParams.get('scope_id') || null;
           const result = await findEntities({
             prisma,
             memoryStore: persistentMemoryStore,
@@ -10908,6 +10915,7 @@ exit \$RC
             limit: Number(url.searchParams.get('limit')) || 12,
             accessContext: await buildAccessContext(userId, orgId).catch(() => null),
             projectId: url.searchParams.get('project_id') || null,
+            scope: requestedScope ? { type: requestedScope, id: requestedScopeId } : null,
           });
           if (result.degraded) {
             return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }, 503);
@@ -25957,7 +25965,7 @@ ${injectionText}`;
         case '/api/features':
           if (req.method === 'GET') {
             return jsonResponse(res, {
-              document_first_ingest: process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && !!documentFirstIngestion,
+              document_first_ingest: !!documentFirstIngestion,
               evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true' && !!evidenceRetrieval,
               memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
               evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
@@ -26191,7 +26199,7 @@ ${injectionText}`;
             }
 
             if (!documentFirstIngestion) {
-              return jsonResponse(res, { error: 'Document-first ingestion not enabled. Set ENABLE_DOCUMENT_FIRST_INGEST=true' }, 501);
+              return jsonResponse(res, { error: 'Canonical document ingestion is unavailable.' }, 503);
             }
 
             const limit = parseInt(url.searchParams.get('limit') || '20');

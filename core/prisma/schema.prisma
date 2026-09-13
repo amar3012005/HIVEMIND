@@ -4279,8 +4279,10 @@ model CanonicalEntity {
   canonicalName  String   @map("canonical_name")
   normalizedName String   @map("normalized_name")
   identityKey    String?  @map("identity_key") @db.VarChar(500)
+  externalIdentityKey String? @map("external_identity_key") @db.VarChar(500)
   entityKind     String   @map("entity_kind") @db.VarChar(40)
   aliases        String[] @default([])
+  searchTerms    String[] @default([]) @map("search_terms")
   primaryEmail   String?  @map("primary_email") @db.VarChar(255)
   emailDomains   String[] @default([]) @map("email_domains")
   verticalTags   String[] @default([]) @map("vertical_tags")
@@ -4292,13 +4294,16 @@ model CanonicalEntity {
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   memoryLinks MemoryEntityLink[]
+  resourceLinks ResourceEntityLink[]
   subjectClaims CanonicalClaim[] @relation("CanonicalClaimSubject")
   objectClaims  CanonicalClaim[] @relation("CanonicalClaimObject")
 
   @@index([organizationId, entityKind])
   @@unique([organizationId, identityKey], map: "canonical_entities_org_identity_key")
+  @@unique([organizationId, entityKind, externalIdentityKey], map: "canonical_entities_org_kind_external_identity_key")
   @@index([organizationId, entityKind, normalizedName], map: "canonical_entities_org_kind_normalized_idx")
   @@index([aliases], type: Gin)
+  @@index([searchTerms], type: Gin)
   @@index([emailDomains], type: Gin)
   @@index([primaryEmail])
   @@map("canonical_entities")
@@ -4316,6 +4321,65 @@ model MemoryEntityLink {
   @@id([memoryId, entityId, role])
   @@index([entityId])
   @@map("memory_entity_links")
+}
+
+/// Universal tenant-scoped canonical-entity edge. MemoryEntityLink remains a
+/// compatibility projection while readers migrate; this row is authoritative
+/// for memories, documents and evidence segments.
+model ResourceEntityLink {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  entityId       String   @map("entity_id") @db.Uuid
+  resourceType   String   @map("resource_type") @db.VarChar(20)
+  resourceId     String   @map("resource_id") @db.Uuid
+  userId         String?  @map("user_id") @db.Uuid
+  scopeType      String   @default("organization") @map("scope_type") @db.VarChar(20)
+  scopeId        String?  @map("scope_id") @db.Uuid
+  mentionText    String?  @map("mention_text") @db.VarChar(500)
+  startOffset    Int?     @map("start_offset")
+  endOffset      Int?     @map("end_offset")
+  role           String   @default("mentioned") @db.VarChar(40)
+  confidence     Decimal  @default(1.00) @db.Decimal(4, 3)
+  provenance     Json     @default("{}")
+  knownAt        DateTime @default(now()) @map("known_at") @db.Timestamptz(6)
+  linkKey        String   @map("link_key") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  entity CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, linkKey], map: "resource_entity_links_org_link_key")
+  @@index([organizationId, resourceType, resourceId], map: "resource_entity_links_org_resource_idx")
+  @@index([organizationId, entityId, knownAt(sort: Desc)], map: "resource_entity_links_org_entity_seen_idx")
+  @@index([organizationId, scopeType, scopeId], map: "resource_entity_links_org_scope_idx")
+  @@index([userId])
+  @@map("resource_entity_links")
+}
+
+/// Idempotent per-resource entity processing receipt. A completed_zero receipt
+/// is a valid, explicit outcome and prevents invented entities on empty input.
+model EntityExtractionReceipt {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  resourceType      String    @map("resource_type") @db.VarChar(20)
+  resourceId        String    @map("resource_id") @db.Uuid
+  processingVersion Int       @map("processing_version")
+  status            String    @default("pending") @db.VarChar(24)
+  extractorRoute    String?   @map("extractor_route") @db.VarChar(120)
+  modelRoute        String?   @map("model_route") @db.VarChar(160)
+  attempt           Int       @default(0)
+  inputDigest       String    @map("input_digest") @db.VarChar(64)
+  outputDigest      String?   @map("output_digest") @db.VarChar(64)
+  entityCount       Int       @default(0) @map("entity_count")
+  lastErrorCode     String?   @map("last_error_code") @db.VarChar(80)
+  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([organizationId, resourceType, resourceId, processingVersion], map: "entity_extraction_receipts_resource_version")
+  @@index([organizationId, status, updatedAt], map: "entity_extraction_receipts_org_status_idx")
+  @@map("entity_extraction_receipts")
 }
 
 /// Versioned registry for the bounded predicates accepted by the canonical graph.

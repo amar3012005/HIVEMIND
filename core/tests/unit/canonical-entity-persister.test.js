@@ -8,10 +8,14 @@ import { EntityResolver } from '../../src/memory/entity-resolver.js';
 function makePrisma({ existing = [], reviewMatch = null } = {}) {
   const entities = [...existing];
   const links = [];
+  const resourceLinks = [];
   const reviews = [];
   let idSeq = 1;
   return {
-    entities, links, reviews,
+    entities, links, resourceLinks, reviews,
+    memory: {
+      findMany: async () => [],
+    },
     externalRef: { findFirst: async () => null },
     canonicalEntity: {
       findFirst: async ({ where }) => entities.find((e) => {
@@ -42,6 +46,9 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
     memoryEntityLink: {
       upsert: async ({ create }) => { links.push(create); return create; },
       findFirst: async () => null,
+    },
+    resourceEntityLink: {
+      upsert: async ({ create }) => { resourceLinks.push(create); return create; },
     },
     entityReviewCandidate: {
       create: async ({ data }) => { const row = { id: `rev-${idSeq++}`, ...data }; reviews.push(row); return row; },
@@ -105,6 +112,46 @@ test('legacy CANONICAL_ENTITY_PERSIST flag cannot disable canonical entity persi
   } finally { delete process.env.CANONICAL_ENTITY_PERSIST; }
 });
 
+test('one canonical entity links memory, evidence segment, and document resources idempotently', async () => {
+  const prisma = makePrisma();
+  const out = await persistCanonicalLinks({
+    prisma, organizationId: ORG,
+    items: [
+      { resourceType: 'memory', resourceId: 'm1', entities: ['Acme GmbH'] },
+      { resourceType: 'segment', resourceId: 's1', entities: ['Acme'] },
+      { resourceType: 'document', resourceId: 'd1', entities: ['ACME'] },
+    ],
+  });
+  assert.equal(prisma.entities.length, 1);
+  assert.equal(out.linked, 3);
+  assert.deepEqual(prisma.resourceLinks.map((link) => link.resourceType).sort(), ['document', 'memory', 'segment']);
+  assert.equal(new Set(prisma.resourceLinks.map((link) => link.linkKey)).size, 3);
+});
+
+test('legacy memory-only callers hydrate tenant scope and never default to organization visibility', async () => {
+  const prisma = makePrisma();
+  prisma.memory.findMany = async () => [{
+    id: 'm-private', userId: 'user-1', scope: 'personal', primaryTeamId: null, projectId: null,
+  }];
+  const out = await persistCanonicalLinks({
+    prisma, organizationId: ORG,
+    items: [{ memoryId: 'm-private', entities: ['Kruti Rao'] }],
+  });
+  assert.equal(out.linked, 1);
+  assert.equal(prisma.resourceLinks[0].userId, 'user-1');
+  assert.equal(prisma.resourceLinks[0].scopeType, 'personal');
+  assert.equal(prisma.resourceLinks[0].scopeId, null);
+});
+
+test('missing memory context fails closed to personal scope', async () => {
+  const prisma = makePrisma();
+  await persistCanonicalLinks({
+    prisma, organizationId: ORG,
+    items: [{ memoryId: 'missing-memory', entities: ['Kruti Rao'] }],
+  });
+  assert.equal(prisma.resourceLinks[0].scopeType, 'personal');
+});
+
 test('storage failure on one name never throws and continues the batch', async () => {
   const prisma = makePrisma();
   const origCreate = prisma.canonicalEntity.create;
@@ -140,7 +187,7 @@ test('remote resolution can create a canonical entity without a central memory F
   });
   assert.equal(results[0].action, 'created');
   assert.equal(prisma.entities.length, 1);
-  assert.equal(prisma.entities[0].identityKey, 'canonical:paolo rossi');
+  assert.equal(prisma.entities[0].identityKey, 'canonical:person:paolo rossi');
   assert.equal(prisma.links.length, 0, 'remote memory must not create a central FK link');
 });
 
@@ -176,6 +223,16 @@ test('entity merge uses valid idempotent link upserts inside one transaction', a
       upsert: async (args) => calls.push(['upsert', args]),
       delete: async (args) => calls.push(['delete-link', args]),
     },
+    resourceEntityLink: {
+      findMany: async () => [{
+        id: 'rel-1', organizationId: ORG, entityId: 'src', resourceType: 'segment',
+        resourceId: 's1', userId: null, scopeType: 'organization', scopeId: null,
+        mentionText: 'SOLVIS', startOffset: 0, endOffset: 6, role: 'mentioned',
+        confidence: 0.9, provenance: {}, knownAt: new Date('2026-09-13T00:00:00Z'),
+      }],
+      upsert: async (args) => calls.push(['upsert-resource', args]),
+      delete: async (args) => calls.push(['delete-resource', args]),
+    },
     canonicalEntity: {
       findUnique: async ({ where }) => rows[where.id],
       update: async (args) => calls.push(['update-entity', args]),
@@ -186,6 +243,9 @@ test('entity merge uses valid idempotent link upserts inside one transaction', a
 
   await new EntityResolver({ prisma }).mergeEntities({ srcId: 'src', dstId: 'dst' });
 
-  assert.deepEqual(calls.map(([kind]) => kind), ['upsert', 'delete-link', 'update-entity', 'delete-entity']);
+  assert.deepEqual(calls.map(([kind]) => kind), [
+    'upsert', 'delete-link', 'upsert-resource', 'delete-resource', 'update-entity', 'delete-entity',
+  ]);
   assert.equal(calls[0][1].where.memoryId_entityId_role.entityId, 'dst');
+  assert.equal(calls[2][1].create.entityId, 'dst');
 });

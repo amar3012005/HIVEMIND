@@ -287,7 +287,9 @@ export function materializeClaimEntities(item, claimStructure = normalizeClaimSt
   const byName = new Map();
   for (const candidate of candidates) {
     const normalized = normalizedClaimEntity(candidate);
-    if (!normalized?.name || !support.includes(normalized.name.toLocaleLowerCase())) continue;
+    if (!normalized?.name
+        || !isValidEntityCandidate({ name: normalized.name, type: normalized.kind })
+        || !support.includes(normalized.name.toLocaleLowerCase())) continue;
     const key = normalized.name.toLocaleLowerCase();
     const prior = byName.get(key);
     if (!prior || (!prior.kind && normalized.kind)) byName.set(key, normalized);
@@ -568,8 +570,16 @@ function languageSignal(value) {
   return { german: german + (/[äöüß]/u.test(text) ? 2 : 0), english };
 }
 
-function isGermanEnglishTranslation(claim, quote) {
-  const source = languageSignal(quote);
+function isGermanEnglishTranslation(claim, quote, sourceContext = '') {
+  const quoteSignal = languageSignal(quote);
+  // A table row such as "Kore.ai / EUR 25k / EUR 300k" is language-neutral on
+  // its own. Use its bounded source window to determine the document language;
+  // otherwise an English model expansion can pass every lexical grounding
+  // check because the brand and amounts overlap perfectly.
+  const contextSignal = languageSignal(sourceContext);
+  const source = quoteSignal.german > quoteSignal.english
+    ? quoteSignal
+    : contextSignal;
   const generated = languageSignal(claim);
   return source.german >= 2 && source.german > source.english
     && generated.english >= 2 && generated.english > generated.german;
@@ -590,7 +600,7 @@ export function repairSourceLanguageClaims(rawFacts, threshold = 0.55) {
     if (!claim || !quote) return fact;
     const claimWords = new Set(lexicalWords(claim));
     const quoteWords = lexicalWords(quote);
-    const languageMismatch = isGermanEnglishTranslation(claim, quote);
+    const languageMismatch = isGermanEnglishTranslation(claim, quote, fact?.source_context);
     if ((!claimWords.size || quoteWords.length < 4) && !languageMismatch) return fact;
     const overlap = quoteWords.filter((word) => claimWords.has(word)).length / quoteWords.length;
     if (overlap >= threshold && !languageMismatch) return fact;
@@ -1153,16 +1163,22 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     if (!supports.length) continue;
     const primary = supports[0];
     const generatedContent = String(memory.content || '').trim();
-    const sourceLanguageContent = repairSourceLanguageClaims([{
+    const sourceLanguageRepair = repairSourceLanguageClaims([{
       f: generatedContent,
       source_quote: supports.map((item) => item.source_quote).join(' '),
-    }], 0.55)[0]?.f;
-    const content = String(sourceLanguageContent || generatedContent).trim();
+      source_context: supports.map((item) => item.source_window_content || '').join('\n'),
+    }], 0.55)[0];
+    const content = String(sourceLanguageRepair?.f || generatedContent).trim();
     if (content.length < 12) continue;
     const importance = Math.max(...supports.map((item) => Number(item.importance || 0.5)));
     const structured = normalizeClaimStructure(memory, supports.length === 1 ? supports[0] : {});
     output.push({
-      t: durableTitle(memory.title || primary.t, content),
+      // When an English model expansion was repaired to a verbatim German
+      // table row, its English title is translated data too. Prefer the source
+      // heading (or the repaired row) so title and content obey one language.
+      t: durableTitle(sourceLanguageRepair?._language_repaired
+        ? (primary.heading || sourceLanguageRepair.t)
+        : (memory.title || primary.t), content),
       f: content,
       memory_type: kbMemoryType,
       claim_kind: KB_CLAIM_KINDS.has(String(memory.claim_kind || primary.claim_kind || '').toLowerCase())
@@ -1418,7 +1434,11 @@ export class DocumentFirstIngestionService {
       if (!resource?.resourceType || !resource?.resourceId) continue;
       const key = `${resource.resourceType}:${resource.resourceId}`;
       const current = grouped.get(key) || { ...resource, entities: [], input: '' };
-      current.entities.push(...(Array.isArray(resource.entities) ? resource.entities : []));
+      current.entities.push(...(Array.isArray(resource.entities) ? resource.entities : [])
+        .filter((entity) => isValidEntityCandidate({
+          name: typeof entity === 'string' ? entity : (entity?.name || entity?.n),
+          type: typeof entity === 'string' ? null : (entity?.kind || entity?.k || entity?.type),
+        })));
       if (resource.input && !current.input.includes(String(resource.input))) {
         current.input = current.input ? `${current.input}\n${resource.input}` : String(resource.input);
       }
@@ -1452,12 +1472,9 @@ export class DocumentFirstIngestionService {
       confidence: Number.isFinite(entity?.confidence) ? entity.confidence : 1,
       provenance: { document_id: documentId, source: 'structured_metadata' },
     }));
-    if (metadata.filename) {
-      documentEntities.push({
-        name: String(metadata.filename), kind: 'document', role: 'source_document', confidence: 1,
-        provenance: { document_id: documentId, filename: String(metadata.filename) },
-      });
-    }
+    // A source filename identifies the resource, not a real-world entity. It is
+    // retained in sourceMeta/provenance for filtering and citations, but never
+    // inserted into the canonical entity directory.
     for (const segment of segments) {
       const candidates = this.entityExtractor?.extractDeterministic
         ? this.entityExtractor.extractDeterministic(segment.content)

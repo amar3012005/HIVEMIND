@@ -8,6 +8,7 @@ import {
   resolveDocumentClassification,
   canReuseUnchangedDocument,
   ensureSourceAnchorCoverage,
+  materializeClaimEntities,
   normalizeCuratedClaims,
   promotionProvenance,
   repairSourceLanguageClaims,
@@ -45,6 +46,23 @@ test('model candidates pass through the same deterministic entity admission gate
   assert.deepEqual(entities.map((entity) => entity.name), ['Singulance']);
 });
 
+test('structured claim subjects cannot bypass entity artifact admission', () => {
+  const filename = materializeClaimEntities({
+    f: 'The source singulance-german-banks-first-decision.md was superseded.',
+    source_quote: 'singulance-german-banks-first-decision.md',
+    entities: [],
+    subject: { name: 'singulance-german-banks-first-decision.md', kind: 'document' },
+  });
+  const question = materializeClaimEntities({
+    f: 'Should Singulance target German banks first?',
+    source_quote: 'Should Singulance target German banks first?',
+    entities: [],
+    subject: { name: 'Should Singulance', kind: 'person' },
+  });
+  assert.deepEqual(filename, []);
+  assert.deepEqual(question, []);
+});
+
 test('translated extraction is repaired to exact source-language text', () => {
   const quote = 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026.';
   const result = repairSourceLanguageClaims([{
@@ -66,6 +84,36 @@ test('German pricing rows cannot survive as English claims despite shared brands
   }], 0.55);
   assert.equal(result[0].f, quote);
   assert.equal(result[0]._language_repaired, true);
+});
+
+test('German source context repairs an English expansion of a language-neutral table row', () => {
+  const quote = 'Kore.ai\n€25k+\n€300k+\n€50k–100k\n€350k–400k';
+  const context = 'Der Markt teilt sich in zwei Segmente. Anbieter Monatlich Jährlich Setup Gesamt Jahr 1.';
+  const result = repairSourceLanguageClaims([{
+    t: 'Kore.ai Pricing',
+    f: 'Kore.ai pricing ranges from €25k+ monthly and €300k+ annually, with setup costs of €50k–100k.',
+    source_quote: quote,
+    source_context: context,
+  }], 0.55);
+  assert.equal(result[0].f, quote);
+  assert.equal(result[0]._language_repaired, true);
+});
+
+test('curation repairs both content and title for German pricing table claims', () => {
+  const quote = 'Kore.ai\n€25k+\n€300k+\n€50k–100k\n€350k–400k';
+  const candidates = [{
+    t: 'Kore.ai Preisangaben', f: quote, memory_type: 'fact', claim_kind: 'fact',
+    importance: 0.96, source_quote: quote, segmentId: 'segment-1', entities: [],
+    heading: '6.3 Wettbewerbsanalyse',
+    source_window_content: 'Der Markt teilt sich in zwei Segmente. Anbieter Monatlich Jährlich Setup Gesamt Jahr 1.',
+  }];
+  const result = normalizeCuratedClaims([{
+    title: 'Kore.ai Pricing', memory_type: 'fact', claim_kind: 'fact',
+    content: 'Kore.ai pricing ranges from €25k+ monthly and €300k+ annually, with setup costs of €50k–100k.',
+    support_indices: [0],
+  }], candidates, 8);
+  assert.equal(result[0].f, quote);
+  assert.equal(result[0].t, '6.3 Wettbewerbsanalyse');
 });
 
 test('source-anchor coverage restores omitted entity, amount and deadline without invention', () => {
@@ -204,8 +252,8 @@ test('evidence entity indexing uses deterministic extraction and settles segment
   assert.equal(written.modelRoute, null);
   assert.deepEqual(written.resources.map((resource) => resource.resourceType), ['segment', 'document']);
   assert.equal(written.resources[0].entities[0].kind, 'person');
-  assert.ok(written.resources[1].entities.some((entity) =>
-    entity.kind === 'document' && entity.name === 'decision.md'));
+  assert.equal(written.resources[1].entities.some((entity) =>
+    entity.kind === 'document' && entity.name === 'decision.md'), false);
   assert.equal(coverage.linked, 2);
 });
 

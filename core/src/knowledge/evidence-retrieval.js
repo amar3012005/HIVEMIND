@@ -825,6 +825,10 @@ export class EvidenceRetrievalService {
         score_threshold: effectiveThreshold,
         // Per-tenant: constrain to evidence layer within the shared org container.
         layer: PER_TENANT ? 'evidence' : undefined,
+        // In reliability mode an unavailable semantic index is operationally
+        // different from a valid zero-hit query. Preserve that distinction so
+        // the lexical fallback is returned with an explicit DEGRADED lane.
+        fail_on_unavailable: reliabilityV1,
       });
       const vectorBudgetMs = Number(process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS || 900);
       const lexicalBudgetMs = Number(process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS || 700);

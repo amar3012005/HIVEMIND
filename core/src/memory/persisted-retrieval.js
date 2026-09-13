@@ -692,11 +692,19 @@ async function vectorCandidatesForRecall(store, {
   access_context = null,
   scope_filter = null,
   timing = null,
+  report_unavailable = false,
 }) {
   const qdrantClient = getQdrantClient();
   if (memoryBackend(org_id) === 'central') {
     const connected = await qdrantClient.isConnected();
-    if (!connected) return [];
+    if (!connected) {
+      if (report_unavailable) {
+        const error = new Error('Qdrant is unavailable');
+        error.code = 'QDRANT_UNAVAILABLE';
+        throw error;
+      }
+      return [];
+    }
   }
 
   // PHASE-F NOTE: the LIVE /api/recall tuned-param path is
@@ -733,6 +741,7 @@ async function vectorCandidatesForRecall(store, {
     // real bge-m3 vectors live — recall reads were searching the wrong store.
     collectionName: undefined,
     timing,
+    fail_on_unavailable: report_unavailable,
   });
   if (timing) timing.vector_lane_ms = (timing.vector_lane_ms || 0) + (Date.now() - vectorLaneStartedAt);
 
@@ -1548,6 +1557,7 @@ async function _recallPersistedMemoriesImpl(store, {
     access_context,
     scope_filter,
     timing,
+    report_unavailable: reliability_v1,
   })
     // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
     .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));

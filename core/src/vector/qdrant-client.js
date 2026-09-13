@@ -501,7 +501,7 @@ export class QdrantClient {
    * @param {number} options.score_threshold - Minimum similarity score
    * @returns {Promise<Array>} Search results
    */
-  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer, timing }) {
+  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer, timing, fail_on_unavailable = false }) {
     const contextOrg = currentOrg() || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
     filter = enforceTenantFilter(filter, contextOrg);
     const _mnemeOrg = contextOrg || filterMatchValue(filter, 'org_id') || null;
@@ -512,6 +512,11 @@ export class QdrantClient {
     if (!usesSovereignBackend) {
       const connected = await this.isConnected();
       if (!connected) {
+        if (fail_on_unavailable) {
+          const error = new Error('Qdrant is unavailable');
+          error.code = 'QDRANT_UNAVAILABLE';
+          throw error;
+        }
         console.warn('⚠️  Qdrant unavailable, search returning empty results');
         return [];
       }
@@ -548,6 +553,11 @@ export class QdrantClient {
     if (!usesSovereignBackend) {
       const collectionReady = await this.ensureCollection(resolvedCollection);
       if (!collectionReady) {
+        if (fail_on_unavailable) {
+          const error = new Error('Qdrant collection is unavailable');
+          error.code = 'QDRANT_UNAVAILABLE';
+          throw error;
+        }
         console.warn('⚠️  Qdrant collection unavailable, search returning empty results');
         return [];
       }
@@ -658,6 +668,10 @@ export class QdrantClient {
       } else {
         console.error('Failed to search memories:', error.message);
       }
+      if (fail_on_unavailable) {
+        if (!error.code) error.code = 'QDRANT_UNAVAILABLE';
+        throw error;
+      }
       return [];
     }
   }
@@ -680,6 +694,7 @@ export class QdrantClient {
       hnsw_ef: filters.hnsw_ef, // PHASE-F: thread per-org ef_search; inert when undefined (searchMemories → EF_SEARCH_DEFAULT). Dark-safe for all other hybridSearch callers.
       collectionName: filters.collectionName,
       timing: filters.timing,
+      fail_on_unavailable: filters.fail_on_unavailable === true,
     });
   }
 

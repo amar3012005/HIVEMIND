@@ -240,7 +240,15 @@ export async function handleRecallRoute(ctx = {}) {
         buildPacket: buildRecallPacket,
       };
     }
-    const recallPlan = recallRuntime.resolvePlan({ ...body, entities: resolvedEntityNames, explicit_mode: true });
+    const recallPlan = recallRuntime.resolvePlan({
+      ...body,
+      // A picker-issued entity ID is a typed RetrievalSpec predicate. Never
+      // let an omitted legacy mode bypass that predicate and fall into the
+      // compatibility pipeline, which cannot prove entity identity.
+      ...(selectedEntityNames.length && !body.mode ? { mode: 'fact' } : {}),
+      entities: resolvedEntityNames,
+      explicit_mode: true,
+    });
     // Evaluate once and latch for the entire request. Flag changes cannot split
     // one recall between old/new lane semantics; evaluation failure is the exact
     // rollback path and preserves the existing response behavior.

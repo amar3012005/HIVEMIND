@@ -287,12 +287,12 @@ test('partial promoted-memory vector coverage cannot reach settlement', async ()
   assert.equal(events.some(([kind]) => kind === 'complete'), false);
 });
 
-test('a reused partial promotion receipt is repaired before materialization settles', async () => {
+test('a reused legacy promotion receipt without vector coverage is repaired before materialization settles', async () => {
   const { executor, steps } = fixture();
   executor.dfi.promoteStoredEvidence = async () => ({
     documentId: ids.document, promotedMemoryIds: ['memory-1', 'memory-2'], pages: 2,
     segmentCount: 8, candidateCount: 2, promotedCount: 2,
-    coverage: { memory_embed: { total: 2, embedded: 1, failed: 1, healed: 0 } },
+    coverage: {},
   });
   let repairs = 0;
   executor.dfi.reconcilePromotedMemoryVectors = async ({ memoryIds, orgId }) => {

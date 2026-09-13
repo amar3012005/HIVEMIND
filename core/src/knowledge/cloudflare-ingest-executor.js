@@ -70,6 +70,17 @@ function terminalResult(result = {}) {
   });
 }
 
+function memoryProjectionNeedsRepair(result = {}) {
+  const expected = Number(result?.promotedCount || 0);
+  if (expected <= 0) return false;
+  const coverage = result?.coverage?.memory_embed;
+  if (!coverage) return true;
+  const total = Number(coverage.total || expected);
+  const embedded = Number(coverage.embedded || 0);
+  const failed = Number(coverage.failed || 0);
+  return failed > 0 || embedded < expected || embedded < total;
+}
+
 export class CloudflareKnowledgeIngestExecutor {
   constructor({
     prisma, jobStore, sourceStore, documentFirstIngestion,
@@ -397,7 +408,7 @@ export class CloudflareKnowledgeIngestExecutor {
           return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
         });
         result = promoted.receipt.outputRefs;
-        if (Number(result?.coverage?.memory_embed?.failed || 0) > 0
+        if (memoryProjectionNeedsRepair(result)
           && typeof this.dfi.reconcilePromotedMemoryVectors === 'function') {
           const memoryEmbed = await this.dfi.reconcilePromotedMemoryVectors({
             memoryIds: result.promotedMemoryIds || [], orgId: job.orgId,
@@ -460,7 +471,7 @@ export class CloudflareKnowledgeIngestExecutor {
             return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
           });
           let promotionOutput = promotionStage.receipt.outputRefs;
-          if (Number(promotionOutput?.coverage?.memory_embed?.failed || 0) > 0
+          if (memoryProjectionNeedsRepair(promotionOutput)
             && typeof this.dfi.reconcilePromotedMemoryVectors === 'function') {
             const memoryEmbed = await this.dfi.reconcilePromotedMemoryVectors({
               memoryIds: promotionOutput.promotedMemoryIds || [], orgId: job.orgId,

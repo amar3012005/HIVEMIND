@@ -46,5 +46,7 @@ test('canonical Compose uses the dedicated Harness image and existing Postgres a
   assert.match(service, /PGOPTIONS: -c search_path=hivemind,public/);
   assert.match(service, /HIVEMIND_HARNESS_TRUSTED_HOSTS: \$\{HIVE_HARNESS_TRUSTED_HOSTS:-dev\.next\.singulancelabs\.com\}/);
   assert.match(service, /CLOUDFLARE_API_KEY: \$\{CLOUDFLARE_AI_GATEWAY_TOKEN:-\}/);
+  assert.match(service, /COMPOSIO_API_KEY: \$\{COMPOSIO_API_KEY:-\}/);
+  assert.match(service, /HIVEMIND_CONNECTED_APP_CALLBACK_URL: \$\{HIVEMIND_CONNECTED_APP_CALLBACK_URL:-https:\/\/dev\.next\.singulancelabs\.com\/hivemind\/app\/overview\}/);
   assert.doesNotMatch(service, /(?:OPENROUTER|XAI|GROK)_API_KEY:/);
 });

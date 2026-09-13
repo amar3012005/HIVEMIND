@@ -7783,16 +7783,20 @@ const server = http.createServer(async (req, res) => {
       console.warn('[v1/connectors] nango overlay failed:', nangoErr.message);
     }
 
-    // Overlay Composio-backed LIVE connectors (org-scoped — Composio's
-    // user_id is the org id, matching the Nango overlay's org-level
-    // convention above). Same status vocabulary the FE merge already
-    // understands: connected / needs_reauth / error / available.
+    // Overlay Composio-backed LIVE connectors for the authenticated user.
+    // Nango ingestion connections may be shared by an org/team; live agent
+    // tool credentials must never be silently reused by a different member.
+    // Same status vocabulary the FE merge already understands:
+    // connected / needs_reauth / error / available.
     if (composioService.isComposioConfigured()) {
       try {
         const orgId = current.session.orgId || current.session.org_id;
         if (orgId) {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
-          const accounts = await composioService.listConnectedAccounts(orgId);
+          const accounts = await composioService.listConnectedAccounts(orgId, {
+            userId: current.session.userId,
+            connectionScope: 'user',
+          });
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
             const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
@@ -7809,6 +7813,7 @@ const server = http.createServer(async (req, res) => {
               is_active: Boolean(active),
               created_at: (active || dead)?.createdAt || null,
               source: 'composio',
+              connection_scope: 'user',
             };
             if (knownProviders.has(entry.id)) {
               const idx = result.findIndex((e) => e.provider === entry.id);
@@ -7869,6 +7874,8 @@ const server = http.createServer(async (req, res) => {
       // it passes it along so a toolkit with no ops-curated auth config yet
       // gets one auto-provisioned instead of 400ing.
       const link = await composioService.createConnectLink(toolkitSlug, orgId, {
+        userId: current.session.userId,
+        connectionScope: 'user',
         callbackUrl,
         toolkitMeta: body.toolkit_meta && typeof body.toolkit_meta === 'object' ? {
           composioManagedAuthSchemes: Array.isArray(body.toolkit_meta.composio_managed_auth_schemes) ? body.toolkit_meta.composio_managed_auth_schemes : [],
@@ -7909,7 +7916,10 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req).catch(() => ({}));
       const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
       if (!apiKey) return jsonResponse(res, { error: 'api_key is required' }, 400);
-      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey);
+      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey, {
+        userId: current.session.userId,
+        connectionScope: 'user',
+      });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_connect_started', eventCategory: 'connectors', action: 'create',
@@ -7938,7 +7948,10 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
-      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug);
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, {
+        userId: current.session.userId,
+        connectionScope: 'user',
+      });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
@@ -7973,11 +7986,14 @@ const server = http.createServer(async (req, res) => {
         });
       const [page, accounts] = await Promise.all([
         pagePromise,
-        orgId ? composioService.listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
+        orgId ? composioService.listConnectedAccounts(orgId, {
+          userId: current.session.userId,
+          connectionScope: 'user',
+        }).catch(() => []) : Promise.resolve([]),
       ]);
-      // Real per-org connection state, not something the FE has to remember
+      // Real per-user connection state, not something the FE has to remember
       // client-side across reloads — the "connected" flag here reflects
-      // whichever of THIS page's toolkits the org actually has an ACTIVE
+      // whichever of THIS page's toolkits this authenticated user has an ACTIVE
       // connected account for, so the frontend can sort them to the top.
       const connectedToolkits = new Set(accounts.filter((a) => a.status === 'ACTIVE').map((a) => a.toolkit));
       // Slack is native-only (see /connect guard above) — its "connected"
@@ -7998,6 +8014,7 @@ const server = http.createServer(async (req, res) => {
         toolkits,
         next_cursor: page.nextCursor,
         total_items: page.totalItems,
+        connection_scope: 'user',
       });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 502);
@@ -8349,14 +8366,16 @@ const server = http.createServer(async (req, res) => {
     if (!current) return;
     const providerId = connectorDisconnectMatch[1];
 
-    // Composio-backed connector — org-scoped, not the legacy userId-scoped
-    // connectorStore path below.
+    // Composio-backed connector — scoped to this authenticated member.
     const composioEntry = COMPOSIO_CONNECTOR_CATALOG.find((c) => c.provider === 'composio' && c.id === providerId);
     if (composioEntry) {
       const orgId = current.session.orgId || current.session.org_id;
       if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
       try {
-        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id);
+        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id, {
+          userId: current.session.userId,
+          connectionScope: 'user',
+        });
         return jsonResponse(res, { success: removed > 0, provider: providerId });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);

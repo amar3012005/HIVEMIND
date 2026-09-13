@@ -87,6 +87,10 @@ services:
       NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}
       NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-http://nango:3003}
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
+      # Server-held authority for live, user-scoped Composio connections.
+      # The browser receives only catalog/status data and hosted connect URLs.
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      COMPOSIO_AUTH_CONFIGS: ${COMPOSIO_AUTH_CONFIGS:-{}}
       # Keep the Core-to-browser service credential explicit. `env_file` also
       # supplies it today, but Core must retain this dependency if env loading
       # is narrowed in a later production compose change.
@@ -182,6 +186,9 @@ services:
       BYOD_BROKER_URL: http://byod-broker:8790
       BYOD_BROKER_INTERNAL_TOKEN: ${BYOD_BROKER_INTERNAL_TOKEN:?BYOD_BROKER_INTERNAL_TOKEN is required}
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
+      # The Control Plane owns browser catalog/connect/disconnect endpoints.
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      COMPOSIO_AUTH_CONFIGS: ${COMPOSIO_AUTH_CONFIGS:-{}}
       # Runtime kill switch for the named partner-referral lifecycle. Keep
       # disabled unless the matching frontend has been released and verified.
       PARTNER_REFERRALS_ENABLED: ${PARTNER_REFERRALS_ENABLED:-false}

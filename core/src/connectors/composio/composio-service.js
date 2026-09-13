@@ -99,13 +99,16 @@ export function composioConnectionSubject(orgId, { userId = null, connectionScop
 }
 
 /**
- * Delete every connected account an org has for one toolkit (disconnect).
+ * Delete every connected account the selected authority subject has for one
+ * toolkit. Browser-facing routes always provide userId so disconnecting an
+ * app never removes another member's connection in the same organization.
  * Returns the number of accounts removed.
  */
-export async function disconnectToolkit(orgId, toolkitSlug) {
+export async function disconnectToolkit(orgId, toolkitSlug, opts = {}) {
+  const subject = composioConnectionSubject(orgId, opts);
   const accountData = await _composioRequest(
     'GET',
-    `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(orgId)}`,
+    `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}`,
     null,
     { retries: 0, timeoutMs: 3_000 },
   );
@@ -1011,7 +1014,7 @@ export async function getOrCreateAuthConfigId(toolkitSlug, toolkitMeta) {
  * @param {string} toolkitSlug
  * @param {string} apiKey
  */
-export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
+export async function createApiKeyConnection(orgId, toolkitSlug, apiKey, opts = {}) {
   const authConfigId = getAuthConfigId(toolkitSlug) || await (async () => {
     const data = await composioPost('/api/v3.1/auth_configs', {
       toolkit: { slug: toolkitSlug },
@@ -1029,7 +1032,10 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
 
   const data = await composioPost('/api/v3/connected_accounts', {
     auth_config: { id: authConfigId },
-    connection: { user_id: orgId, state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } } },
+    connection: {
+      user_id: composioConnectionSubject(orgId, opts),
+      state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } },
+    },
   });
   return { id: data?.id, status: data?.status };
 }

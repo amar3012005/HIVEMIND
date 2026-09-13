@@ -94,7 +94,7 @@ export class KnowledgeUploadService {
       // have created the Workflow and falling back then could double-process.
       useCloudflare = false;
     }
-    let selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
+    const selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
     let orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';
     if (!await selectedQueue?.isAvailable({ orgId, userId })) {
       return { ok: false, status: 503, body: { error: 'queue_unavailable', message: 'Durable ingestion is temporarily unavailable.' } };
@@ -272,33 +272,13 @@ export class KnowledgeUploadService {
 
     try {
       const promotionOnly = promoteExistingEvidence && !!job.documentId;
-      let persisted;
-      // Persisting the raw source is still before Workflow dispatch.  If R2 is
-      // unavailable, switch the already-created job to BullMQ before writing
-      // the local durable copy.  This is the only post-admission fallback;
-      // enqueue/start errors intentionally remain workflow failures.
-      try {
-        persisted = promotionOnly ? null : await selectedQueue.persistFile({
-          orgId, checksum, filename, fileBuffer: file.data,
-        });
-      } catch (error) {
-        if (orchestrationMode !== 'cloudflare_workflow' || promotionOnly) throw error;
-        selectedQueue = this.queue;
-        orchestrationMode = 'bullmq';
-        await this.jobStore.updateOwned(job.id, orgId, {
-          orchestrationMode,
-          workflowInstanceId: null,
-          sourceObjectKey: null,
-          sourceObjectEtag: null,
-        });
-        persisted = await selectedQueue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
-      }
-      const filePath = typeof persisted === 'string' ? persisted : null;
-      const sourceObjectKey = persisted && typeof persisted === 'object' ? persisted.objectKey : null;
-      const sourceObjectEtag = persisted && typeof persisted === 'object' ? persisted.etag : null;
-      if (sourceObjectKey) {
-        await this.jobStore.updateOwned(job.id, orgId, { sourceObjectKey, sourceObjectEtag });
-      }
+      // Source bytes always stay on the Enigma host. Cloudflare coordinates an
+      // opaque job/version only and can never upload, read, or delete a source.
+      // Both orchestrators consume the same restrictive local spool so a
+      // terminal Workflow can be fenced and replayed through BullMQ safely.
+      const filePath = promotionOnly ? null : await this.queue.persistFile({
+        orgId, checksum, filename, fileBuffer: file.data,
+      });
       const queued = await selectedQueue.enqueue({
         userId, orgId, filename, contentType: file.contentType, checksum, filePath,
         trackerJobId: job.id, processingVersion,
@@ -322,8 +302,8 @@ export class KnowledgeUploadService {
         queueJobId: queued.queue_job_id,
         workflowInstanceId: queued.workflow_instance_id || null,
         orchestrationMode,
-        sourceObjectKey,
-        sourceObjectEtag,
+        sourceObjectKey: null,
+        sourceObjectEtag: null,
       });
       return { ok: true, job: await this.jobStore.findOwned(job.id, { orgId, userId }) };
     } catch (error) {

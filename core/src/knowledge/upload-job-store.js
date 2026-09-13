@@ -133,8 +133,9 @@ export class KnowledgeUploadJobStore {
    * current-version checkpoint heartbeat. A createdAt age is never evidence of
    * abandonment: retries intentionally retain the original job row.
    */
-  async reconcileCloudflareStale({ workflowStatusResolver, staleMin = 15, limit = 25 } = {}) {
-    if (typeof workflowStatusResolver !== 'function' || !this.prisma?.knowledgeIngestStep) return { checked: 0, active: 0, failed: 0 };
+  async reconcileCloudflareStale({ workflowStatusResolver, fallbackHandler = null, staleMin = 15, limit = 25 } = {}) {
+    const empty = { checked: 0, active: 0, recovered: 0, failed: 0, statusUnavailable: 0 };
+    if (typeof workflowStatusResolver !== 'function' || !this.prisma?.knowledgeIngestStep) return empty;
     const cutoff = new Date(Date.now() - Math.max(5, Number(staleMin) || 15) * 60_000);
     const jobs = await this._model().findMany({
       where: {
@@ -143,7 +144,7 @@ export class KnowledgeUploadJobStore {
       },
       orderBy: { updatedAt: 'asc' }, take: Math.max(1, Math.min(100, Number(limit) || 25)),
     });
-    const result = { checked: 0, active: 0, failed: 0 };
+    const result = { ...empty };
     for (const job of jobs) {
       const checkpoint = await this.prisma.knowledgeIngestStep.findFirst({
         where: { jobId: job.id, processingVersion: job.processingVersion },
@@ -159,6 +160,8 @@ export class KnowledgeUploadJobStore {
         workflow = await workflowStatusResolver(job.workflowInstanceId);
       } catch {
         // Control-plane reachability is not proof that a Workflow is dead.
+        // Count and surface the outage so it cannot leave jobs silently queued.
+        result.statusUnavailable += 1;
         continue;
       }
       const status = String(workflow?.status || '').toLowerCase();
@@ -183,7 +186,20 @@ export class KnowledgeUploadJobStore {
             ? 'Cloudflare Workflow instance is missing before terminal settlement.'
           : `Cloudflare Workflow became ${status} before terminal settlement.`,
       ), { code: status === 'complete' ? 'WORKFLOW_UNSETTLED' : status === 'missing' ? 'WORKFLOW_MISSING' : 'WORKFLOW_TERMINAL_STALE' });
-      if (await this.fail(job.id, job.orgId, error, { processingVersion: job.processingVersion })) result.failed += 1;
+      const failed = await this.fail(job.id, job.orgId, error, { processingVersion: job.processingVersion });
+      if (!failed) continue;
+      if (typeof fallbackHandler === 'function') {
+        try {
+          const recovery = await fallbackHandler(job, { terminalStatus: status });
+          if (recovery?.recovered) {
+            result.recovered += 1;
+            continue;
+          }
+        } catch (fallbackError) {
+          this.logger?.warn?.(`[upload-jobs] Workflow fallback failed job=${job.id}: ${fallbackError?.code || 'FALLBACK_FAILED'}`);
+        }
+      }
+      result.failed += 1;
     }
     return result;
   }
@@ -193,6 +209,11 @@ export class KnowledgeUploadJobStore {
     return this._model().findFirst({ where: {
       id: jobId, orgId, ...(userId ? { userId } : {}),
     } });
+  }
+
+  async findById(jobId) {
+    if (!jobId) return null;
+    return this._model().findUnique({ where: { id: jobId } });
   }
 
   async findDuplicate({ orgId, scopeKey, checksum }) {
@@ -218,6 +239,27 @@ export class KnowledgeUploadJobStore {
 
   async updateOwned(jobId, orgId, data) {
     return this._model().updateMany({ where: { id: jobId, orgId }, data });
+  }
+
+  async claimWorkflowFallback({ jobId, orgId, processingVersion, metadata }) {
+    const nextVersion = Number(processingVersion || 1) + 1;
+    const updated = await this._model().updateMany({
+      where: {
+        id: jobId,
+        orgId,
+        processingVersion: Number(processingVersion || 1),
+        orchestrationMode: 'cloudflare_workflow',
+        status: 'failed',
+      },
+      data: {
+        status: 'queued', stage: 'queued', progress: 0,
+        processingVersion: nextVersion, orchestrationMode: 'bullmq',
+        workflowInstanceId: null, queueJobId: null,
+        errorCode: null, errorMessage: null, completedAt: null,
+        attempt: 0, metadata,
+      },
+    });
+    return updated.count ? nextVersion : null;
   }
 
   async progress(jobId, orgId, stage, progress, extra = {}, { processingVersion = null } = {}) {

@@ -108,3 +108,45 @@ test('durable completion gate rejects partial evidence embedding coverage', () =
     coverage: { evidence_embed: { total: 3, embedded: 2, failed: 0, healed: 0 } },
   }), (error) => error.code === 'PARTIAL_EMBEDDING');
 });
+
+test('confirmed dead Workflow is fenced into BullMQ exactly once', async () => {
+  const writes = [];
+  const enqueues = [];
+  const queue = Object.create(KbIngestQueue.prototype);
+  Object.assign(queue, {
+    queue: {},
+    jobStore: {
+      claimWorkflowFallback: async (input) => { writes.push(input); return 4; },
+      updateOwned: async (...args) => writes.push(['updateOwned', ...args]),
+      fail: async () => assert.fail('successful fallback must not fail the new version'),
+    },
+    rawFilePath: () => '/tmp/local-source',
+    enqueue: async (input) => { enqueues.push(input); return { queue_job_id: 'bull-job-v4' }; },
+  });
+  const result = await queue.fallbackWorkflowJob({
+    id: 'job', orgId: 'org', userId: 'user', processingVersion: 3,
+    orchestrationMode: 'cloudflare_workflow', checksum: 'a'.repeat(64), filename: 'doc.pdf',
+    contentType: 'application/pdf', metadata: { ingest_mode: 'both' },
+  }, { terminalStatus: 'terminated' });
+
+  assert.equal(result.recovered, true);
+  assert.equal(result.processingVersion, 4);
+  assert.equal(writes[0].processingVersion, 3);
+  assert.equal(enqueues[0].processingVersion, 4);
+  assert.equal(enqueues[0].filePath, '/tmp/local-source');
+  assert.equal(enqueues[0].metadata.workflow_fallback_count, 1);
+});
+
+test('Workflow fallback exhaustion leaves the confirmed failure terminal', async () => {
+  const queue = Object.create(KbIngestQueue.prototype);
+  Object.assign(queue, {
+    queue: {},
+    jobStore: { claimWorkflowFallback: async () => assert.fail('must not claim exhausted fallback') },
+    rawFilePath: () => '/tmp/local-source',
+  });
+  const result = await queue.fallbackWorkflowJob({
+    id: 'job', orgId: 'org', processingVersion: 2,
+    metadata: { workflow_fallback_count: 1 },
+  }, { terminalStatus: 'errored' });
+  assert.deepEqual(result, { recovered: false, reason: 'fallback_exhausted' });
+});

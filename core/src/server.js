@@ -2730,7 +2730,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       knowledgeWorkflowExecutor = new workflowModule.CloudflareKnowledgeIngestExecutor({
         prisma,
         jobStore: knowledgeUploadJobStore,
-        objectClient: cloudflareKnowledgeIngestClient,
+        sourceStore: kbIngestQueue,
         documentFirstIngestion,
         validateJob: validateKnowledgeIngestJob,
         processUpload: processKnowledgeUpload,
@@ -4479,13 +4479,27 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
     const workflowBody = await parseBody(req).catch(() => ({}));
-    const common = {
-      jobId: (knowledgeWorkflowStage || knowledgeWorkflowMaterializeControl || knowledgeWorkflowFail)[1],
-      orgId: String(workflowBody.org_id || ''),
-      userId: String(workflowBody.user_id || ''),
-      processingVersion: Number(workflowBody.processing_version) || 1,
-    };
     try {
+      const ingestionWorkerUrl = String(process.env.KNOWLEDGE_INGEST_WORKER_URL || '').replace(/\/$/, '');
+      if (RUNTIME_ROLE !== 'ingestion' && ingestionWorkerUrl) {
+        const forwarded = await fetch(`${ingestionWorkerUrl}${pathname}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || ''}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(workflowBody),
+          signal: AbortSignal.timeout(Number(process.env.KNOWLEDGE_INGEST_WORKER_TIMEOUT_MS || 30_000)),
+        });
+        const responseBody = await forwarded.text();
+        res.writeHead(forwarded.status, { 'Content-Type': forwarded.headers.get('content-type') || 'application/json' });
+        res.end(responseBody);
+        return;
+      }
+      const common = await knowledgeWorkflowExecutor.resolveContext({
+        jobId: (knowledgeWorkflowStage || knowledgeWorkflowMaterializeControl || knowledgeWorkflowFail)[1],
+        processingVersion: Number(workflowBody.processing_version) || 1,
+      });
       const result = await runWithOrg(common.orgId, () => (
         knowledgeWorkflowMaterializeControl
           ? (knowledgeWorkflowMaterializeControl[2] === 'start'
@@ -13189,10 +13203,9 @@ exit \$RC
               // the UI would offer Retry on jobs whose bytes are gone.
               const jobs = rows.map((j) => ({
                 ...j,
-                replayable: !!(
-                  (j.orchestrationMode === 'cloudflare_workflow' && j.sourceObjectKey)
-                  || kbIngestQueue?.rawFilePath({ orgId, checksum: j.checksum, filename: j.filename })
-                ),
+                replayable: !!kbIngestQueue?.rawFilePath({
+                  orgId, checksum: j.checksum, filename: j.filename,
+                }),
               }));
               return jsonResponse(res, { jobs, count: jobs.length, statuses: wanted });
             } catch (e) {
@@ -13227,8 +13240,11 @@ exit \$RC
                   message: `Only failed, dead or cancelled jobs can be replayed (this one is "${job.status}").`,
                 }, 409);
               }
+              const filePath = kbIngestQueue.rawFilePath({
+                orgId, checksum: job.checksum, filename: job.filename,
+              });
               const workflowReplay = job.orchestrationMode === 'cloudflare_workflow'
-                && !!job.sourceObjectKey && !!cloudflareKnowledgeIngestClient;
+                && !!filePath && !!cloudflareKnowledgeIngestClient;
               if (workflowReplay && job.workflowInstanceId) {
                 const workflowStatus = await cloudflareKnowledgeIngestClient
                   .getWorkflowStatus(job.workflowInstanceId).catch(() => null);
@@ -13242,10 +13258,7 @@ exit \$RC
                 }
               }
               const selectedQueue = workflowReplay ? cloudflareKnowledgeIngestClient : kbIngestQueue;
-              const filePath = workflowReplay
-                ? null
-                : kbIngestQueue.rawFilePath({ orgId, checksum: job.checksum, filename: job.filename });
-              if (!workflowReplay && !filePath) {
+              if (!filePath) {
                 return jsonResponse(res, {
                   error: 'raw_file_unavailable', job_id: job.id, filename: job.filename,
                   message: 'The original bytes are no longer on disk (the job failed before raw-file '

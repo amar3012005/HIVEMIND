@@ -156,17 +156,14 @@ test('accepted upload persists one durable job before enqueue', async () => {
 
 test('enabled local Workflow latches orchestration and never sends file bytes in its queue message', async () => {
   const deps = dependencies();
-  let legacyUsed = false;
-  deps.queue.persistFile = async () => { legacyUsed = true; return '/tmp/legacy'; };
-  deps.queue.enqueue = async () => { legacyUsed = true; return {}; };
+  let localPersisted = false;
+  deps.queue.persistFile = async () => { localPersisted = true; return '/tmp/local-source'; };
+  let legacyEnqueued = false;
+  deps.queue.enqueue = async () => { legacyEnqueued = true; return {}; };
   const calls = [];
   deps.cloudflareQueue = {
     isEnabled: async (orgId, userId) => orgId === ids.org && userId === ids.user,
     isAvailable: async () => true,
-    persistFile: async (input) => {
-      calls.push(['persist', input]);
-      return { objectKey: 'org/source', etag: 'etag-1' };
-    },
     enqueue: async (input) => {
       calls.push(['enqueue', input]);
       return { queue_job_id: 'workflow-1', workflow_instance_id: 'workflow-1' };
@@ -175,14 +172,15 @@ test('enabled local Workflow latches orchestration and never sends file bytes in
 
   const result = await new KnowledgeUploadService(deps).admit(request());
   assert.equal(result.ok, true);
-  assert.equal(legacyUsed, false);
+  assert.equal(localPersisted, true);
+  assert.equal(legacyEnqueued, false);
   assert.equal(deps.created[0].orchestrationMode, 'cloudflare_workflow');
   const queueInput = calls.find(([kind]) => kind === 'enqueue')[1];
-  assert.equal(queueInput.filePath, null);
+  assert.equal(queueInput.filePath, '/tmp/local-source');
   assert.equal(Object.hasOwn(queueInput, 'fileBuffer'), false);
   const finalUpdate = deps.updates.at(-1)[2];
   assert.equal(finalUpdate.workflowInstanceId, 'workflow-1');
-  assert.equal(finalUpdate.sourceObjectKey, 'org/source');
+  assert.equal(finalUpdate.sourceObjectKey, null);
 });
 
 test('disabled or failed-closed Workflow flag preserves the legacy BullMQ path', async () => {
@@ -210,26 +208,25 @@ test('Workflow admission transport failure falls back to BullMQ before a job is 
   assert.equal(deps.created[0].orchestrationMode, 'bullmq');
 });
 
-test('Workflow source persistence failure changes the durable job to BullMQ before enqueue', async () => {
+test('local source persistence failure fails admission before either orchestrator is dispatched', async () => {
   const deps = dependencies();
   let workflowEnqueued = false;
   let legacyEnqueued = false;
   deps.cloudflareQueue = {
     isEnabled: async () => true,
     isAvailable: async () => true,
-    persistFile: async () => { throw Object.assign(new Error('R2 unavailable'), { code: 'SOURCE_OBJECT_STORE_FAILED' }); },
     enqueue: async () => { workflowEnqueued = true; return {}; },
   };
-  deps.queue.persistFile = async () => '/tmp/legacy';
+  deps.queue.persistFile = async () => { throw Object.assign(new Error('local spool unavailable'), { code: 'SOURCE_OBJECT_STORE_FAILED' }); };
   deps.queue.enqueue = async () => { legacyEnqueued = true; return { queue_job_id: 'queue-1' }; };
 
-  const result = await new KnowledgeUploadService(deps).admit(request());
-  assert.equal(result.ok, true);
+  await assert.rejects(
+    () => new KnowledgeUploadService(deps).admit(request()),
+    /local spool unavailable/,
+  );
   assert.equal(workflowEnqueued, false);
-  assert.equal(legacyEnqueued, true);
+  assert.equal(legacyEnqueued, false);
   assert.equal(deps.created[0].orchestrationMode, 'cloudflare_workflow');
-  assert.ok(deps.updates.some(([, , data]) => data?.orchestrationMode === 'bullmq'));
-  assert.equal(deps.updates.at(-1)[2].orchestrationMode, 'bullmq');
 });
 
 test('evidence mode persists through the durable job and queue metadata', async () => {

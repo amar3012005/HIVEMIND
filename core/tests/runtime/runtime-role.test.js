@@ -65,3 +65,18 @@ test('runtime role sidecar disables HTTP and maintenance but runs warm paths', a
     else process.env.HIVEMIND_RUNTIME_ROLE = prev;
   }
 });
+
+test('ingestion runtime serves only its internal network listener without unrelated background roles', async () => {
+  const prev = process.env.HIVEMIND_RUNTIME_ROLE;
+  process.env.HIVEMIND_RUNTIME_ROLE = 'ingestion';
+  try {
+    const mod = await loadRuntimeRole(`ingestion=${Date.now()}`);
+    assert.equal(mod.shouldStartHttpServer(), true);
+    assert.equal(mod.shouldRunRecurringMaintenanceJobs(), false);
+    assert.equal(mod.shouldRunConnectorBackground(), false);
+    assert.equal(mod.shouldRunWarmupsAndSidecars(), false);
+  } finally {
+    if (prev === undefined) delete process.env.HIVEMIND_RUNTIME_ROLE;
+    else process.env.HIVEMIND_RUNTIME_ROLE = prev;
+  }
+});

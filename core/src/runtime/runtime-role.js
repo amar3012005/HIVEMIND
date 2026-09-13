@@ -16,12 +16,16 @@ export function isMaintenanceRuntime() {
   return ROLE === 'maintenance';
 }
 
+export function isIngestionRuntime() {
+  return ROLE === 'ingestion';
+}
+
 export function isAllInOneRuntime() {
   return ROLE === 'all';
 }
 
 export function shouldStartHttpServer() {
-  return isAllInOneRuntime() || isAppRuntime();
+  return isAllInOneRuntime() || isAppRuntime() || isIngestionRuntime();
 }
 
 export function shouldRunRecurringMaintenanceJobs() {

@@ -40,8 +40,7 @@ function fixture({ remote = false, image = false } = {}) {
   const job = {
     id: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3,
     orchestrationMode: 'cloudflare_workflow', status: 'processing', scopeKey: `personal:${ids.user}`,
-    storageMode: remote ? 'byod_amr' : 'hybrid', sourceObjectKey: `org/${ids.org}/source`,
-    sourceObjectEtag: 'etag-at-admission',
+    storageMode: remote ? 'byod_amr' : 'hybrid',
     checksum: crypto.createHash('sha256').update(bytes).digest('hex'), filename: image ? 'photo.jpg' : 'report.pdf',
     contentType: image ? 'image/jpeg' : 'application/pdf', mediaKind: image ? 'image' : 'document',
     ingestMode: 'both', metadata: { ingest_mode: 'both' },
@@ -56,14 +55,15 @@ function fixture({ remote = false, image = false } = {}) {
       memory: { findFirst: async () => ({ id: ids.document }) },
     },
     jobStore: {
-      findOwned: async () => job,
+      findById: async () => job,
       progress: async (...args) => { events.push(['progress', ...args]); },
       complete: async (...args) => { events.push(['complete', ...args]); return true; },
       fail: async (...args) => { events.push(['fail', ...args]); },
     },
-    objectClient: {
-      getObject: async (key, options) => { events.push(['get', key, options]); return bytes; },
-      deleteObject: async (key) => { events.push(['delete', key]); },
+    sourceStore: {
+      rawFilePath: () => '/app/data/kb/source',
+      readFile: async (identity) => { events.push(['read', identity]); return bytes; },
+      deleteFile: async (identity) => { events.push(['delete', identity]); },
     },
     documentFirstIngestion: {
       promoteStoredEvidence: async ({ documentId, onProgress }) => {
@@ -106,27 +106,27 @@ function fixture({ remote = false, image = false } = {}) {
 
 test('the Workflow executor verifies bytes, evidence coverage, persistence and terminal settlement', async () => {
   const { executor, events } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const input = { jobId: ids.job, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'acquire' });
   await executor.execute({ ...input, stage: 'materialize' });
   await executor.execute({ ...input, stage: 'reconcile' });
 
   assert.equal(events.filter(([kind]) => kind === 'complete').length, 1);
-  assert.deepEqual(events.find(([kind]) => kind === 'get').slice(1), [
-    `org/${ids.org}/source`, { expectedEtag: 'etag-at-admission' },
-  ]);
-  assert.deepEqual(events.find(([kind]) => kind === 'delete').slice(1), [`org/${ids.org}/source`]);
+  assert.deepEqual(events.find(([kind]) => kind === 'read')[1], {
+    orgId: ids.org, checksum: crypto.createHash('sha256').update(Buffer.from('%PDF-1.7\ncanonical')).digest('hex'), filename: 'report.pdf',
+  });
+  assert.equal(events.filter(([kind]) => kind === 'delete').length, 1);
 });
 
 test('materialization records real evidence and promotion checkpoints', async () => {
   const { executor, steps, events } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const input = { jobId: ids.job, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   assert.deepEqual(
     [...steps.rows.keys()].map((key) => key.split(':').at(-2)).sort(),
     ['materialize', 'materialize_evidence', 'promote_memories'].sort(),
   );
-  assert.equal(events.filter(([kind]) => kind === 'get').length, 1);
+  assert.equal(events.filter(([kind]) => kind === 'read').length, 1);
   assert.equal(events.filter(([kind]) => kind === 'promote').length, 1);
   assert.ok(events.findIndex(([kind]) => kind === 'extract-complete')
     < events.findIndex(([kind]) => kind === 'embed-start'));
@@ -140,7 +140,7 @@ test('documents hand off extract capacity before embedding and use independent s
   executor._releaseProcessingLease = async (_job, stage) => { releases.push(stage || 'all'); };
 
   await executor.execute({
-    jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'materialize',
+    jobId: ids.job, processingVersion: 3, stage: 'materialize',
   });
 
   assert.deepEqual(claims, ['extract', 'embed', 'promote']);
@@ -150,7 +150,7 @@ test('documents hand off extract capacity before embedding and use independent s
 
 test('duplicate Workflow stage delivery reuses its durable receipt and settles only once', async () => {
   const { executor, events } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const input = { jobId: ids.job, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   const replay = await executor.execute({ ...input, stage: 'materialize' });
   await executor.execute({ ...input, stage: 'reconcile' });
@@ -164,7 +164,7 @@ test('duplicate Workflow stage delivery reuses its durable receipt and settles o
 test('remote storage reconciliation does not require a central document row', async () => {
   const { executor } = fixture({ remote: true });
   executor.prisma.knowledgeDocument.findFirst = async () => { throw new Error('central lookup must not run'); };
-  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const input = { jobId: ids.job, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   await assert.doesNotReject(() => executor.execute({ ...input, stage: 'reconcile' }));
 });
@@ -172,7 +172,7 @@ test('remote storage reconciliation does not require a central document row', as
 test('image jobs use authoritative mediaKind and settle one canonical memory without document evidence', async () => {
   const { executor, events, steps } = fixture({ image: true });
   executor.prisma.knowledgeDocument.findFirst = async () => { throw new Error('image must not reconcile as a document'); };
-  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const input = { jobId: ids.job, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   await executor.execute({ ...input, stage: 'reconcile' });
 
@@ -193,7 +193,7 @@ test('deterministic media and signature errors cannot enter an infinite redispat
 
 test('materialization dispatch returns immediately and exposes a durable polling receipt', async () => {
   const { executor, steps } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const input = { jobId: ids.job, processingVersion: 3 };
   const dispatched = await executor.startMaterialize(input);
   assert.equal(dispatched.accepted, true);
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -233,23 +233,19 @@ test('internal Workflow authorization requires only the exact protected secret',
   }
 });
 
-test('cancelled, stale, and cross-tenant deliveries cannot execute work', async () => {
+test('cancelled, stale, and missing durable jobs cannot execute work', async () => {
   const { executor, events, job } = fixture();
-  const base = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire' };
+  const base = { jobId: ids.job, processingVersion: 3, stage: 'acquire' };
   job.status = 'cancelled';
   await assert.rejects(executor.execute(base), (error) => error.code === 'UPLOAD_CANCELLED');
   job.status = 'processing';
   await assert.rejects(
-    executor.execute({ ...base, userId: '66666666-6666-4666-8666-666666666666' }),
-    (error) => error.code === 'WORKFLOW_USER_MISMATCH',
-  );
-  await assert.rejects(
     executor.execute({ ...base, processingVersion: 2 }),
     (error) => error.code === 'STALE_WORKFLOW',
   );
-  executor.jobStore.findOwned = async () => null;
+  executor.jobStore.findById = async () => null;
   await assert.rejects(
-    executor.execute({ ...base, orgId: '55555555-5555-4555-8555-555555555555' }),
+    executor.execute(base),
     (error) => error.code === 'JOB_NOT_FOUND',
   );
   assert.equal(events.length, 0);
@@ -262,7 +258,7 @@ test('partial evidence coverage cannot reach settlement', async () => {
     segmentCount: 8, candidateCount: 0, promotedCount: 0,
     coverage: { evidence_embed: { total: 8, embedded: 7, failed: 1, healed: 0 } },
   });
-  const base = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const base = { jobId: ids.job, processingVersion: 3 };
   await assert.rejects(
     executor.execute({ ...base, stage: 'materialize' }),
     (error) => error.code === 'PARTIAL_EMBEDDING' && error.retryable === true,
@@ -385,7 +381,7 @@ test('Core restart requeues every current Workflow in-process checkpoint', async
   const executor = new CloudflareKnowledgeIngestExecutor({
     prisma,
     jobStore: {},
-    objectClient: {},
+    sourceStore: {},
     documentFirstIngestion: {},
     stepStore: stepStore(),
     logger: { warn() {} },

@@ -20,12 +20,6 @@
       "remote": true
     }
   ],
-  "r2_buckets": [
-    {
-      "binding": "ARTIFACTS",
-      "bucket_name": "hivemind-ingest-artifacts-local"
-    }
-  ],
   "queues": {
     "producers": [
       {
@@ -65,12 +59,6 @@
           "binding": "FLAGS",
           "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
           "remote": true
-        }
-      ],
-      "r2_buckets": [
-        {
-          "binding": "ARTIFACTS",
-          "bucket_name": "hivemind-ingest-artifacts-local"
         }
       ],
       "queues": {
@@ -114,12 +102,6 @@
           "remote": true
         }
       ],
-      "r2_buckets": [
-        {
-          "binding": "ARTIFACTS",
-          "bucket_name": "hivemind-ingest-artifacts-production"
-        }
-      ],
       "queues": {
         "producers": [
           {
@@ -155,7 +137,6 @@
         "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
-      "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "hivemind-ingest-artifacts-enigma" }],
       "queues": {
         "producers": [{ "binding": "INGEST_QUEUE", "queue": "hivemind-knowledge-ingest-enigma" }],
         "consumers": [{

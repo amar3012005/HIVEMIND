@@ -93,7 +93,7 @@ test('Cloudflare stale reconciliation trusts current-version checkpoint and Work
   });
 
   assert.deepEqual(statuses, ['wf-active']);
-  assert.deepEqual(result, { checked: 1, active: 1, failed: 0 });
+  assert.deepEqual(result, { checked: 1, active: 1, recovered: 0, failed: 0, statusUnavailable: 0 });
   assert.equal(writes.length, 1);
   assert.equal(writes[0].where.processingVersion, 3);
   assert.ok(writes[0].data.updatedAt instanceof Date);
@@ -119,10 +119,73 @@ test('Cloudflare stale reconciliation fails only a confirmed terminal current ve
     workflowStatusResolver: async () => ({ status: 'terminated' }),
   });
 
-  assert.deepEqual(result, { checked: 1, active: 0, failed: 1 });
+  assert.deepEqual(result, { checked: 1, active: 0, recovered: 0, failed: 1, statusUnavailable: 0 });
   assert.equal(writes.length, 1);
   assert.equal(writes[0].where.processingVersion, 4);
   assert.equal(writes[0].data.errorCode, 'WORKFLOW_TERMINAL_STALE');
+});
+
+test('Cloudflare stale reconciliation exposes status outages without starting competing work', async () => {
+  const job = { id: 'unknown-wf', orgId: 'org', processingVersion: 2, workflowInstanceId: 'wf-unknown' };
+  const writes = [];
+  const store = new KnowledgeUploadJobStore({ prisma: {
+    knowledgeIngestJob: {
+      findMany: async () => [job],
+      findFirst: async () => job,
+      updateMany: async (query) => { writes.push(query); return { count: 1 }; },
+    },
+    knowledgeIngestStep: { findFirst: async () => null },
+  } });
+  const result = await store.reconcileCloudflareStale({
+    workflowStatusResolver: async () => { throw new Error('control plane unavailable'); },
+    fallbackHandler: async () => assert.fail('ambiguous Workflow state must not fall back'),
+  });
+  assert.deepEqual(result, { checked: 1, active: 0, recovered: 0, failed: 0, statusUnavailable: 1 });
+  assert.deepEqual(writes, []);
+});
+
+test('Cloudflare stale reconciliation invokes fallback only after exact-version terminal failure', async () => {
+  const job = { id: 'dead-wf', orgId: 'org', processingVersion: 7, workflowInstanceId: 'wf-dead' };
+  const events = [];
+  const store = new KnowledgeUploadJobStore({ prisma: {
+    knowledgeIngestJob: {
+      findMany: async () => [job],
+      findFirst: async () => job,
+      updateMany: async (query) => { events.push(['fail', query.where]); return { count: 1 }; },
+    },
+    knowledgeIngestStep: { findFirst: async () => null },
+  } });
+  const result = await store.reconcileCloudflareStale({
+    workflowStatusResolver: async () => ({ status: 'errored' }),
+    fallbackHandler: async (received) => { events.push(['fallback', received.processingVersion]); return { recovered: true }; },
+  });
+  assert.deepEqual(result, { checked: 1, active: 0, recovered: 1, failed: 0, statusUnavailable: 0 });
+  assert.equal(events[0][0], 'fail');
+  assert.equal(events[0][1].processingVersion, 7);
+  assert.deepEqual(events[1], ['fallback', 7]);
+});
+
+test('Workflow fallback claim is single-winner and advances the processing fence', async () => {
+  const writes = [];
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    updateMany: async (query) => { writes.push(query); return { count: writes.length === 1 ? 1 : 0 }; },
+  } } });
+
+  const first = await store.claimWorkflowFallback({
+    jobId: 'job', orgId: 'org', processingVersion: 8, metadata: { fallback_count: 1 },
+  });
+  const competing = await store.claimWorkflowFallback({
+    jobId: 'job', orgId: 'org', processingVersion: 8, metadata: { fallback_count: 1 },
+  });
+
+  assert.equal(first, 9);
+  assert.equal(competing, null);
+  assert.deepEqual(writes[0].where, {
+    id: 'job', orgId: 'org', processingVersion: 8,
+    orchestrationMode: 'cloudflare_workflow', status: 'failed',
+  });
+  assert.equal(writes[0].data.processingVersion, 9);
+  assert.equal(writes[0].data.orchestrationMode, 'bullmq');
 });
 
 test('Workflow progress and failure writes are fenced by processing version', async () => {

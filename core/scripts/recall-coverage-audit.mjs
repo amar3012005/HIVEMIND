@@ -96,6 +96,33 @@ async function main() {
   } else {
     console.log(`\n[audit] ✅ every content-bearing is_latest memory in every org has a vector.`);
   }
+
+  const evidenceOrgs = await prisma.$queryRawUnsafe(
+    `SELECT s.org_id, count(*)::int total
+       FROM hivemind.knowledge_segments s
+      WHERE s.org_id IS NOT NULL
+      GROUP BY s.org_id ORDER BY total DESC`,
+  );
+  let evidenceExpected = 0;
+  let evidenceVectored = 0;
+  for (const { org_id } of evidenceOrgs) {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT id, (content IS NOT NULL AND length(trim(content)) > 0) AS has_content
+         FROM hivemind.knowledge_segments
+        WHERE org_id = $1::uuid`,
+      org_id,
+    );
+    const expected = rows.filter((row) => row.has_content);
+    const collection = await resolveCollectionForOrg(org_id);
+    const found = await existingPointIds(collection, expected.map((row) => row.id));
+    const missing = expected.filter((row) => !found.has(String(row.id)));
+    evidenceExpected += expected.length;
+    evidenceVectored += expected.length - missing.length;
+    console.log(`[audit:evidence] ${org_id.slice(0, 8)} → ${collection} expected=${expected.length} vector=${expected.length - missing.length} missing=${missing.length}`);
+    if (VERBOSE && missing.length) console.log(`     missing ids: ${missing.slice(0, 15).map((row) => row.id).join(', ')}`);
+  }
+  console.log(`[audit:evidence] VECTOR coverage: ${evidenceExpected ? ((evidenceVectored / evidenceExpected) * 100).toFixed(2) : '100'}% (${evidenceVectored}/${evidenceExpected})`);
+  if (process.env.STRICT === '1' && (gMissingVec > 0 || evidenceVectored !== evidenceExpected)) process.exitCode = 2;
   await prisma.$disconnect();
 }
 

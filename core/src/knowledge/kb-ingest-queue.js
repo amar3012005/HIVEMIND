@@ -241,6 +241,17 @@ export class KbIngestQueue {
       maxRetriesPerRequest: null,
     };
     this.queue = new bullmq.Queue(QUEUE_NAME, { connection });
+    // API nodes only produce jobs. The dedicated ingestion runtime is the sole
+    // consumer, keeping extraction/model CPU and memory pressure out of chat and
+    // recall request processes. All-in-one remains the backwards-compatible
+    // default for local development.
+    const consumerEnabled = String(process.env.KB_QUEUE_CONSUMER_ENABLED ?? 'true').toLowerCase() !== 'false';
+    this.redis = new IORedis({ host, port, password, username, db, maxRetriesPerRequest: null });
+    this.redis.on('error', () => {});
+    if (!consumerEnabled) {
+      if (VERBOSE) this.logger.info?.(`[kb-queue] producer ready on redis://${host}:${port}/${db}; consumer disabled on this runtime`);
+      return;
+    }
     this.worker = new bullmq.Worker(QUEUE_NAME, (job, token) => this._process(job, token), {
       connection,
       concurrency: CONCURRENCY,
@@ -288,8 +299,6 @@ export class KbIngestQueue {
     // the one the FE polls /api/knowledge/status against (the in-memory
     // ingestTracker is per-process). Mirror job status into Redis so status is
     // readable cross-node. 24h TTL.
-    this.redis = new IORedis({ host, port, password, username, db, maxRetriesPerRequest: null });
-    this.redis.on('error', () => {});
     if (VERBOSE) this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
     this._startStaleJobReaper();
     this._startRawFileSweeper();
@@ -388,7 +397,15 @@ export class KbIngestQueue {
         });
         await this.jobStore.reconcileCloudflareStale?.({
           workflowStatusResolver: this.workflowStatusResolver,
+          fallbackHandler: (job, context) => this.fallbackWorkflowJob(job, context),
           staleMin: Number(process.env.KNOWLEDGE_INGEST_WORKFLOW_STALE_MIN || 15),
+        }).then((result) => {
+          if (result?.statusUnavailable) {
+            this.logger.warn?.(`[kb-queue] Workflow watchdog status unavailable for ${result.statusUnavailable} stale job(s); no competing work was started`);
+          }
+          if (result?.recovered) {
+            this.logger.warn?.(`[kb-queue] Workflow watchdog recovered ${result.recovered} job(s) through fenced BullMQ fallback`);
+          }
         });
       } catch (e) {
         if (VERBOSE) this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);
@@ -498,6 +515,80 @@ export class KbIngestQueue {
     const p = path.join(dir, safe);
     if (!fs.existsSync(p)) fs.writeFileSync(p, fileBuffer, { mode: 0o600 });
     return p;
+  }
+
+  readFile({ orgId, checksum, filename }) {
+    const filePath = this.rawFilePath({ orgId, checksum, filename });
+    if (!filePath) {
+      throw Object.assign(new Error('Durable local source is missing.'), {
+        code: 'SOURCE_OBJECT_MISSING', retryable: false,
+      });
+    }
+    return fs.readFileSync(filePath);
+  }
+
+  deleteFile({ orgId, checksum, filename }) {
+    const filePath = this.rawFilePath({ orgId, checksum, filename });
+    if (!filePath) return false;
+    fs.unlinkSync(filePath);
+    // Remove only now-empty checksum/org directories. Never recursively remove
+    // a tenant directory because another admitted job may share it.
+    for (const dir of [path.dirname(filePath), path.dirname(path.dirname(filePath))]) {
+      try { fs.rmdirSync(dir); } catch { /* non-empty or already absent */ }
+    }
+    return true;
+  }
+
+  /**
+   * Move one confirmed-dead Workflow attempt to BullMQ without allowing the old
+   * Workflow to settle afterward. The caller must first mark the exact Workflow
+   * processingVersion failed; this method atomically increments that fence.
+   */
+  async fallbackWorkflowJob(job, { terminalStatus = 'unknown' } = {}) {
+    if (!job?.id || !job?.orgId || !this.jobStore || !this.queue) return { recovered: false };
+    const fallbackCount = Number(job?.metadata?.workflow_fallback_count || 0);
+    const maxFallbacks = Math.max(0, Number(process.env.KNOWLEDGE_INGEST_WORKFLOW_FALLBACK_MAX || 1));
+    if (fallbackCount >= maxFallbacks) return { recovered: false, reason: 'fallback_exhausted' };
+    const filePath = this.rawFilePath({ orgId: job.orgId, checksum: job.checksum, filename: job.filename });
+    if (!filePath) return { recovered: false, reason: 'source_unavailable' };
+
+    const previousVersion = Number(job.processingVersion || 1);
+    const metadata = sanitizeKnowledgeJson({
+      ...(job.metadata && typeof job.metadata === 'object' ? job.metadata : {}),
+      workflow_fallback_count: fallbackCount + 1,
+      workflow_fallback_from_version: previousVersion,
+      workflow_fallback_reason: String(terminalStatus).slice(0, 32),
+    });
+    const processingVersion = await this.jobStore.claimWorkflowFallback({
+      jobId: job.id,
+      orgId: job.orgId,
+      processingVersion: previousVersion,
+      metadata,
+    });
+    if (!processingVersion) return { recovered: false, reason: 'fence_lost' };
+
+    try {
+      const queued = await this.enqueue({
+        userId: job.userId,
+        orgId: job.orgId,
+        filename: job.filename,
+        contentType: job.contentType,
+        checksum: job.checksum,
+        filePath,
+        metadata,
+        trackerJobId: job.id,
+        processingVersion,
+      });
+      if (queued?.backpressure) throw Object.assign(new Error('BullMQ fallback is saturated.'), { code: 'QUEUE_SATURATED' });
+      await this.jobStore.updateOwned(job.id, job.orgId, { queueJobId: queued?.queue_job_id || null });
+      return { recovered: true, processingVersion, queueJobId: queued?.queue_job_id || null };
+    } catch (error) {
+      await this.jobStore.fail(job.id, job.orgId, Object.assign(
+        new Error('Workflow fallback could not be admitted to the local durable queue.'),
+        { code: error?.code || 'WORKFLOW_FALLBACK_FAILED' },
+      ), { processingVersion });
+      return { recovered: false, reason: error?.code || 'enqueue_failed' };
+    }
   }
 
   /**

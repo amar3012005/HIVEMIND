@@ -71,13 +71,13 @@ function terminalResult(result = {}) {
 
 export class CloudflareKnowledgeIngestExecutor {
   constructor({
-    prisma, jobStore, objectClient, documentFirstIngestion,
+    prisma, jobStore, sourceStore, documentFirstIngestion,
     validateJob, processUpload, isRemoteOrg = () => false, stepStore = null,
     logger = console,
   }) {
     this.prisma = prisma;
     this.jobStore = jobStore;
-    this.objectClient = objectClient;
+    this.sourceStore = sourceStore;
     this.dfi = documentFirstIngestion;
     this.validateJob = validateJob;
     this.processUpload = processUpload;
@@ -116,15 +116,12 @@ export class CloudflareKnowledgeIngestExecutor {
     }
   }
 
-  async _job({ jobId, orgId, userId, processingVersion }) {
-    if (!UUID.test(jobId) || !UUID.test(orgId) || !UUID.test(userId)) {
-      throw Object.assign(new Error('job_id, org_id, and user_id must be UUIDs'), { code: 'INVALID_WORKFLOW_PAYLOAD', retryable: false });
+  async _job({ jobId, processingVersion }) {
+    if (!UUID.test(jobId)) {
+      throw Object.assign(new Error('job_id must be a UUID'), { code: 'INVALID_WORKFLOW_PAYLOAD', retryable: false });
     }
-    const job = await this.jobStore.findOwned(jobId, { orgId });
+    const job = await this.jobStore.findById(jobId);
     if (!job) throw Object.assign(new Error('Knowledge ingest job was not found.'), { code: 'JOB_NOT_FOUND', retryable: false });
-    if (job.userId !== userId) {
-      throw Object.assign(new Error('Workflow user does not own this ingest job.'), { code: 'WORKFLOW_USER_MISMATCH', retryable: false });
-    }
     if (job.orchestrationMode !== 'cloudflare_workflow') {
       throw Object.assign(new Error('Job is not owned by the Cloudflare orchestrator.'), { code: 'ORCHESTRATOR_MISMATCH', retryable: false });
     }
@@ -135,6 +132,16 @@ export class CloudflareKnowledgeIngestExecutor {
       throw Object.assign(new Error('Upload was cancelled.'), { code: 'UPLOAD_CANCELLED', retryable: false });
     }
     return job;
+  }
+
+  async resolveContext({ jobId, processingVersion }) {
+    const job = await this._job({ jobId, processingVersion });
+    return {
+      jobId: job.id,
+      orgId: job.orgId,
+      userId: job.userId,
+      processingVersion: job.processingVersion,
+    };
   }
 
   async execute({ jobId, orgId, userId, processingVersion, stage }) {
@@ -193,13 +200,14 @@ export class CloudflareKnowledgeIngestExecutor {
       await this.validateJob?.({
         trackerJobId: job.id, userId: job.userId, orgId: job.orgId, metadata: job.metadata || {},
       });
-      if (!isStoredEvidencePromotion(job.metadata) && !job.sourceObjectKey) {
-        throw Object.assign(new Error('Durable source object is missing.'), { code: 'SOURCE_OBJECT_MISSING', retryable: false });
+      if (!isStoredEvidencePromotion(job.metadata)
+        && !this.sourceStore.rawFilePath({ orgId: job.orgId, checksum: job.checksum, filename: job.filename })) {
+        throw Object.assign(new Error('Durable local source is missing.'), { code: 'SOURCE_OBJECT_MISSING', retryable: false });
       }
       await this.jobStore.progress(job.id, job.orgId, 'acquiring', 5, {
         orchestration_mode: 'cloudflare_workflow', processing_version: job.processingVersion,
       }, { processingVersion: job.processingVersion });
-      return { outputRefs: { authorized: true, source_object_key: job.sourceObjectKey || null } };
+      return { outputRefs: { authorized: true } };
     });
     return { ok: true, stage: 'acquire', acquired: true, reused: run.reused, receipt_id: run.receipt.id };
   }
@@ -359,7 +367,7 @@ export class CloudflareKnowledgeIngestExecutor {
     try {
       run = await this.steps.run({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'materialize',
-      input: { checksum: job.checksum, sourceObjectKey: job.sourceObjectKey, ingestMode: job.ingestMode },
+      input: { checksum: job.checksum, ingestMode: job.ingestMode },
     }, async () => {
       await this._waitForProcessingLease(job, 'extract');
       await this.validateJob?.({
@@ -393,10 +401,10 @@ export class CloudflareKnowledgeIngestExecutor {
         const evidenceStage = await this.steps.run({
           jobId: job.id, processingVersion: job.processingVersion,
           stageKey: isImage ? 'materialize_image' : 'materialize_evidence',
-          input: { checksum: job.checksum, sourceObjectKey: job.sourceObjectKey, sourceObjectEtag: job.sourceObjectEtag },
+          input: { checksum: job.checksum },
         }, async () => {
-          const fileBuffer = await this.objectClient.getObject(job.sourceObjectKey, {
-            expectedEtag: job.sourceObjectEtag || null,
+          const fileBuffer = await this.sourceStore.readFile({
+            orgId: job.orgId, checksum: job.checksum, filename: job.filename,
           });
           const actualChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
           if (actualChecksum !== job.checksum) {
@@ -524,7 +532,7 @@ export class CloudflareKnowledgeIngestExecutor {
           code: 'STALE_WORKFLOW', retryable: false,
         });
       }
-      await this.objectClient.deleteObject(job.sourceObjectKey);
+      this.sourceStore.deleteFile({ orgId: job.orgId, checksum: job.checksum, filename: job.filename });
       await this._releaseProcessingLease(job);
       return {
         outputRefs: {

@@ -71,6 +71,9 @@ services:
     environment:
       <<: *common-env
       HOSTNAME: hm-core
+      HIVEMIND_RUNTIME_ROLE: app
+      KB_QUEUE_CONSUMER_ENABLED: "false"
+      KNOWLEDGE_INGEST_WORKER_URL: http://ingestion-worker:3000
       DOCLING_URL: http://docling:5001
       # Container-to-container traffic must use Nango's listening port (8080).
       # NANGO_URL in the host .env is the public/host-bound endpoint and is not
@@ -104,6 +107,7 @@ services:
       postgres: { condition: service_healthy }
       qdrant:   { condition: service_started }
       redis:    { condition: service_started }
+      ingestion-worker: { condition: service_healthy }
     ports:
       - "127.0.0.1:${CORE_PORT:-2026}:3000"
     healthcheck:
@@ -112,6 +116,48 @@ services:
       timeout: 10s
       retries: 5
       start_period: 40s
+
+  ingestion-worker:
+    build: { context: .., dockerfile: Dockerfile.production }
+    image: hivemind/core-api:${VERSION:-latest}
+    container_name: hm-ingestion-worker
+    env_file: [../.env]
+    restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 5g
+    cpus: 2.0
+    environment:
+      <<: *common-env
+      HOSTNAME: hm-ingestion-worker
+      HIVEMIND_RUNTIME_ROLE: ingestion
+      PORT: "3000"
+      KB_QUEUE_CONSUMER_ENABLED: "true"
+      KB_QUEUE_CONCURRENCY: "2"
+      KB_QUEUE_ORG_CONCURRENCY: "1"
+      KNOWLEDGE_INGEST_EXTRACT_CONCURRENCY: "2"
+      KNOWLEDGE_INGEST_EXTRACT_ORG_CONCURRENCY: "1"
+      KNOWLEDGE_INGEST_EMBED_CONCURRENCY: "2"
+      KNOWLEDGE_INGEST_EMBED_ORG_CONCURRENCY: "1"
+      DOCLING_URL: http://docling:5001
+      KB_EXTRACT_URL: http://hm-extract:8788
+      NANGO_URL: http://nango:8080
+      NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
+      NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+    volumes:
+      - hivemind-data:/app/data
+      - hivemind-logs:/app/logs
+    depends_on:
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_started }
+      redis: { condition: service_started }
+      hm-extract: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   control-plane:
     build: { context: .., dockerfile: Dockerfile.control-plane }

@@ -3,7 +3,6 @@ import { NonRetryableError } from 'cloudflare:workflows';
 import {
   type IngestParams,
   materializationPollDecision,
-  validOrgId,
   validAdmittedParams,
   validParams,
   workflowFailureDisposition,
@@ -11,8 +10,6 @@ import {
 } from './contract';
 
 export { type IngestParams, validParams, workflowInstanceId } from './contract';
-const OBJECT_KEY = /^org\/[0-9a-f-]{36}\/sha256\/[a-f0-9]{64}\//i;
-const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
 type StageResult = {
   ok: boolean;
   stage?: string;
@@ -51,20 +48,18 @@ async function authorized(request: Request, env: RuntimeEnv): Promise<boolean> {
   return equalSecret(actual, env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '');
 }
 
-async function flagEnabled(env: RuntimeEnv, orgId: string, userId: string): Promise<boolean> {
+async function flagEnabled(env: RuntimeEnv, targetingKey: string): Promise<boolean> {
   const environment = ['production', 'local', 'enigma'].includes(env.ENVIRONMENT)
     ? env.ENVIRONMENT
     : null;
-  if (!environment || !validOrgId(orgId) || !validOrgId(userId) || !env.FLAGS) return false;
+  if (!environment || !/^[a-f0-9]{64}$/i.test(targetingKey) || !env.FLAGS) return false;
   const details = await env.FLAGS.getBooleanDetails(
     env.KNOWLEDGE_INGEST_FLAG || 'knowledge_ingest_workflow_v1',
     false,
-    { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment },
+    { targetingKey, environment },
   );
   console.log(JSON.stringify({
     event: 'knowledge_ingest_flag_evaluation',
-    org_id: orgId,
-    user_id: userId,
     value: details.value,
     variant: details.variant,
     reason: details.reason,
@@ -88,8 +83,6 @@ async function core<T>(
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        org_id: params.org_id,
-        user_id: params.user_id,
         processing_version: params.processing_version,
         ...extra,
       }),
@@ -97,7 +90,7 @@ async function core<T>(
   );
   const body: Record<string, unknown> = await response.json<Record<string, unknown>>().catch(() => ({}));
   if (!response.ok) {
-    const message = String(body.message || body.error || `core_http_${response.status}`);
+    const message = String(body.error || `core_http_${response.status}`);
     if (body.retryable === false || [400, 401, 403, 404, 422].includes(response.status)) {
       throw new NonRetryableError(message);
     }
@@ -114,12 +107,12 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
       await step.do(
         'validate and acquire admission',
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
-        () => core<StageResult>(this.env, params, 'stages/acquire'),
+        async () => { await core<StageResult>(this.env, params, 'stages/acquire'); return { ok: true, status: 'acquired' }; },
       );
       await step.do(
         'dispatch canonical materialization',
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
-        () => core<StageResult>(this.env, params, 'stages/materialize/start'),
+        async () => { await core<StageResult>(this.env, params, 'stages/materialize/start'); return { ok: true, status: 'accepted' }; },
       );
       let materialized: MaterializationStatus['result'] | StageResult | null = null;
       for (let attempt = 0; attempt < 160; attempt += 1) {
@@ -131,7 +124,7 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
         );
         const decision = materializationPollDecision(status);
         if (decision === 'complete') {
-          materialized = status.result || status;
+          materialized = { ok: true, status: 'succeeded' };
           break;
         }
         if (decision === 'fail') {
@@ -141,7 +134,7 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
           await step.do(
             `redispatch failed canonical materialization ${attempt + 1}`,
             { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
-            () => core<StageResult>(this.env, params, 'stages/materialize/start'),
+            async () => { await core<StageResult>(this.env, params, 'stages/materialize/start'); return { ok: true, status: 'accepted' }; },
           );
         }
       }
@@ -149,25 +142,25 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
       await step.do(
         'reconcile coverage and settle',
         { retries: { limit: 8, delay: '30 seconds', backoff: 'exponential' }, timeout: '5 minutes' },
-        () => core<StageResult>(this.env, params, 'stages/reconcile'),
+        async () => { await core<StageResult>(this.env, params, 'stages/reconcile'); return { ok: true, status: 'complete' }; },
       );
       console.log(JSON.stringify({
         event: 'knowledge_ingest_workflow_completed',
         instance_id: event.instanceId,
-        ...params,
+        job_id: params.job_id,
+        processing_version: params.processing_version,
       }));
-      return { ok: true, instance_id: event.instanceId, materialized };
+      return { ok: true, instance_id: event.instanceId, status: 'complete' };
     } catch (error) {
       const failurePlan = workflowFailureDisposition(error instanceof NonRetryableError);
       await core(this.env, params, 'fail', {
         error_code: failurePlan.errorCode,
-        message: error instanceof Error ? error.message : 'Workflow failed',
         retryable: failurePlan.retryable,
       }).catch((failure) => {
         console.error(JSON.stringify({
           event: 'knowledge_ingest_failure_record_failed',
           instance_id: event.instanceId,
-          message: failure instanceof Error ? failure.message : String(failure),
+          error_code: 'FAILURE_RECORD_UNAVAILABLE',
         }));
       });
       if (failurePlan.enqueueRecovery) {
@@ -178,7 +171,7 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
           console.error(JSON.stringify({
             event: 'knowledge_ingest_recovery_enqueue_failed',
             instance_id: event.instanceId,
-            message: failure instanceof Error ? failure.message : String(failure),
+            error_code: 'RECOVERY_ENQUEUE_UNAVAILABLE',
           }));
         });
       }
@@ -187,55 +180,13 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
   }
 }
 
-async function objectResponse(request: Request, env: Env, objectKey: string): Promise<Response> {
-  if (!OBJECT_KEY.test(objectKey)) return Response.json({ error: 'invalid_object_key' }, { status: 400 });
-  if (request.method === 'PUT') {
-    const declared = Number(request.headers.get('content-length') || 0);
-    if (declared > MAX_SOURCE_BYTES) return Response.json({ error: 'payload_too_large' }, { status: 413 });
-    if (!request.body) return Response.json({ error: 'body_required' }, { status: 400 });
-    const stored = await env.ARTIFACTS.put(objectKey, request.body, {
-      httpMetadata: { contentType: 'application/octet-stream' },
-      customMetadata: {
-        sha256: request.headers.get('x-hivemind-sha256') || '',
-        filename: request.headers.get('x-hivemind-filename') || '',
-      },
-    });
-    return Response.json({ ok: true, key: objectKey, etag: stored.etag });
-  }
-  if (request.method === 'GET') {
-    const object = await env.ARTIFACTS.get(objectKey);
-    if (!object) return Response.json({ error: 'not_found' }, { status: 404 });
-    return new Response(object.body, {
-      headers: {
-        'content-type': object.httpMetadata?.contentType || 'application/octet-stream',
-        etag: object.httpEtag,
-        'x-hivemind-sha256': object.customMetadata?.sha256 || '',
-      },
-    });
-  }
-  if (request.method === 'HEAD') {
-    const object = await env.ARTIFACTS.head(objectKey);
-    if (!object) return new Response(null, { status: 404 });
-    return new Response(null, { headers: { etag: object.httpEtag } });
-  }
-  if (request.method === 'DELETE') {
-    await env.ARTIFACTS.delete(objectKey);
-    return Response.json({ ok: true });
-  }
-  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
-}
-
 export default {
   async fetch(request: Request, env: RuntimeEnv): Promise<Response> {
     if (!await authorized(request, env)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
     const url = new URL(request.url);
     if (url.pathname === '/enabled' && request.method === 'GET') {
-      const orgId = url.searchParams.get('org_id') || '';
-      const userId = url.searchParams.get('user_id') || '';
-      return Response.json({ enabled: await flagEnabled(env, orgId, userId), org_id: orgId, user_id: userId });
-    }
-    if (url.pathname.startsWith('/objects/')) {
-      return objectResponse(request, env, decodeURIComponent(url.pathname.slice('/objects/'.length)));
+      const targetingKey = url.searchParams.get('targeting_key') || '';
+      return Response.json({ enabled: await flagEnabled(env, targetingKey) });
     }
     if (url.pathname === '/start' && request.method === 'POST') {
       const params = await request.json<unknown>().catch(() => null);
@@ -247,8 +198,13 @@ export default {
     if (url.pathname === '/status' && request.method === 'GET') {
       const instanceId = url.searchParams.get('instance_id');
       if (!instanceId) return Response.json({ error: 'instance_id_required' }, { status: 400 });
-      const instance = await env.INGEST_WORKFLOW.get(instanceId);
-      return Response.json({ instance_id: instance.id, status: await instance.status() });
+      try {
+        const instance = await env.INGEST_WORKFLOW.get(instanceId);
+        const current = await instance.status();
+        return Response.json({ instance_id: instance.id, status: current.status });
+      } catch {
+        return Response.json({ error: 'workflow_status_unavailable' }, { status: 503 });
+      }
     }
     return Response.json({ error: 'Not found' }, { status: 404 });
   },
@@ -267,9 +223,14 @@ export default {
           retention: { successRetention: '30 days', errorRetention: '30 days' },
         });
       } catch {
-        const existing = await env.INGEST_WORKFLOW.get(id);
-        const status = await existing.status();
-        if (status.status === 'errored' || status.status === 'terminated') await existing.restart();
+        try {
+          const existing = await env.INGEST_WORKFLOW.get(id);
+          const status = await existing.status();
+          if (status.status === 'errored' || status.status === 'terminated') await existing.restart();
+        } catch {
+          message.retry({ delaySeconds: 30 });
+          continue;
+        }
       }
       message.ack();
     }

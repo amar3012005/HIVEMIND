@@ -1,10 +1,6 @@
-import { safeUploadFilename } from './upload-contract.js';
+import crypto from 'node:crypto';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export function knowledgeWorkflowEnvironment() {
   // Rollout is decided by the tenant-scoped Cloudflare Flagship evaluation in
@@ -56,7 +52,15 @@ export class CloudflareKnowledgeIngestClient {
 
   async isEnabled(orgId, userId) {
     if (!this.configured() || !orgId || !userId) return false;
-    const response = await this._request(`/enabled?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, { method: 'GET' }, 5000);
+    // Flagship targeting remains tenant-specific without exposing stable tenant
+    // or user identifiers to Cloudflare. The workflow transport secret is also
+    // the HMAC key, so the pseudonym cannot be reversed or correlated outside
+    // this installation/environment.
+    const { secret } = requireConfig();
+    const targetingKey = crypto.createHmac('sha256', secret)
+      .update(`${orgId}:${userId}`)
+      .digest('hex');
+    const response = await this._request(`/enabled?targeting_key=${targetingKey}`, { method: 'GET' }, 5000);
     if (!response.ok) throw Object.assign(
       new Error(`Cloudflare ingestion admission failed with HTTP ${response.status}`),
       { code: 'WORKFLOW_ADMISSION_UNAVAILABLE', retryable: true },
@@ -69,51 +73,12 @@ export class CloudflareKnowledgeIngestClient {
     return this.isEnabled(orgId, userId);
   }
 
-  async persistFile({ orgId, checksum, filename, fileBuffer }) {
-    const safeName = safeUploadFilename(filename);
-    const objectKey = `org/${orgId}/sha256/${checksum}/${encodeURIComponent(safeName)}`;
-    const attempts = Math.max(1, Number(process.env.KNOWLEDGE_INGEST_SOURCE_UPLOAD_ATTEMPTS || 3));
-    const timeoutMs = Math.max(30_000, Number(process.env.KNOWLEDGE_INGEST_SOURCE_UPLOAD_TIMEOUT_MS || 300_000));
-    let lastError = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        const response = await this._request(`/objects/${objectKey}`, {
-          method: 'PUT',
-          headers: {
-            'content-type': 'application/octet-stream',
-            'x-hivemind-sha256': checksum,
-            'x-hivemind-filename': encodeURIComponent(safeName),
-          },
-          body: fileBuffer,
-        }, timeoutMs);
-        const body = await response.json().catch(() => ({}));
-        if (response.ok && body?.key) return { objectKey: body.key, etag: body.etag || null };
-        lastError = Object.assign(new Error(body?.error || `R2 source upload failed with HTTP ${response.status}`), {
-          code: 'SOURCE_OBJECT_STORE_FAILED', retryable: response.status >= 500,
-        });
-        if (!lastError.retryable) throw lastError;
-      } catch (error) {
-        lastError = Object.assign(error instanceof Error ? error : new Error(String(error)), {
-          code: 'SOURCE_OBJECT_STORE_FAILED',
-          retryable: error?.retryable !== false,
-        });
-        if (!lastError.retryable) throw lastError;
-      }
-      if (attempt < attempts) await sleep(Math.min(5000, 500 * (2 ** (attempt - 1))));
-    }
-    throw lastError || Object.assign(new Error('R2 source upload failed'), {
-      code: 'SOURCE_OBJECT_STORE_FAILED', retryable: true,
-    });
-  }
-
-  async enqueue({ userId, orgId, trackerJobId, processingVersion }) {
+  async enqueue({ trackerJobId, processingVersion }) {
     const response = await this._request('/start', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         job_id: trackerJobId,
-        org_id: orgId,
-        user_id: userId,
         processing_version: Number(processingVersion) || 1,
         admitted: true,
       }),
@@ -142,31 +107,8 @@ export class CloudflareKnowledgeIngestClient {
       });
     }
     const body = await response.json().catch(() => null);
-    return body?.status ? { status: body.status } : null;
-  }
-
-  async getObject(objectKey, { expectedEtag = null } = {}) {
-    if (!objectKey) throw Object.assign(new Error('Source object key is missing.'), { code: 'SOURCE_OBJECT_MISSING' });
-    const response = await this._request(`/objects/${objectKey}`, { method: 'GET' }, 120_000);
-    if (!response.ok) {
-      throw Object.assign(new Error(`Source object read failed with HTTP ${response.status}`), {
-        code: response.status === 404 ? 'SOURCE_OBJECT_MISSING' : 'SOURCE_OBJECT_READ_FAILED',
-        retryable: response.status >= 500,
-      });
-    }
-    const actualEtag = String(response.headers.get('etag') || '').replace(/^W\//, '').replace(/^"|"$/g, '');
-    const wantedEtag = String(expectedEtag || '').replace(/^W\//, '').replace(/^"|"$/g, '');
-    if (wantedEtag && actualEtag && actualEtag !== wantedEtag) {
-      throw Object.assign(new Error('Durable source object ETag does not match admission.'), {
-        code: 'SOURCE_OBJECT_INTEGRITY_FAILED', retryable: false,
-      });
-    }
-    return Buffer.from(await response.arrayBuffer());
-  }
-
-  async deleteObject(objectKey) {
-    if (!objectKey) return;
-    await this._request(`/objects/${objectKey}`, { method: 'DELETE' }).catch(() => null);
+    const status = typeof body?.status === 'string' ? body.status : body?.status?.status;
+    return status ? { status } : null;
   }
 
   async stats() {

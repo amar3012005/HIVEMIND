@@ -198,9 +198,11 @@ async function proxyRunner(request: Request, env: Env): Promise<Response> {
   const incoming = new URL(request.url);
   const target = new URL(`${incoming.pathname}${incoming.search}`, env.RUNNER_ORIGIN);
   const headers = new Headers(request.headers);
-  // Preserve the browser-visible authority for the runner's same-origin and
-  // authority-bound cookie checks while the upstream Host targets the tunnel.
-  headers.set('x-forwarded-host', incoming.host);
+  // The Cloudflare Tunnel pins the runner's upstream Host to the browser-visible
+  // authority. Do not forward the Worker's original x-forwarded-host: cloudflared
+  // rewrites/appends it for the tunnel hostname, which would override that trusted
+  // Host and make the runner reject an otherwise same-origin admission exchange.
+  headers.delete('x-forwarded-host');
   headers.set('x-forwarded-proto', incoming.protocol.slice(0, -1));
   if (incoming.pathname === '/api/remote.mux' && isWebSocketUpgrade(request)) {
     headers.set('upgrade', 'websocket');

@@ -99,7 +99,7 @@ describe('runner and asset routing', () => {
       upgrade: 'websocket',
       connection: 'Upgrade',
       origin: 'https://next.preview.singulancelabs.com',
-      forwardedHost: 'next.preview.singulancelabs.com',
+      forwardedHost: null,
     });
     vi.unstubAllGlobals();
   });
@@ -130,7 +130,7 @@ describe('runner and asset routing', () => {
     expect(response.headers.get('set-cookie')).toContain('Path=/');
     expect(received[0]).toEqual({
       origin: 'https://next.preview.singulancelabs.com',
-      forwardedHost: 'next.preview.singulancelabs.com',
+      forwardedHost: null,
       path: '/api/hivemind/session/establish',
     });
     vi.unstubAllGlobals();
@@ -196,7 +196,7 @@ describe('runner and asset routing', () => {
         const forwarded = requests.at(-1)!;
         expect(forwarded.url).toBe('https://private-runner.example/api/session/list');
         expect(forwarded.headers.get('origin')).toBe(origin);
-        expect(forwarded.headers.get('x-forwarded-host')).toBe('dev.next.singulancelabs.com');
+        expect(forwarded.headers.get('x-forwarded-host')).toBeNull();
       }
     } finally { vi.unstubAllGlobals(); }
   });

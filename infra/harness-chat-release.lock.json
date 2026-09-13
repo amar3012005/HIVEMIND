@@ -4,7 +4,7 @@
   "hivemindWorktree": "/Users/amar/HIVE-MIND-singulance-chat-local",
   "harnessRepo": "amar3012005/deepseek-harness-hivemind",
   "harnessBranch": "hivemind-chat",
-  "harnessCommit": "0babc5cde781b039d8f95e1dbaefb6d223e28fac",
+  "harnessCommit": "2d29c33a44013125de54de8df9b2281638fbfa86",
   "davinciSubmodule": "frontend/Da-vinci",
   "davinciCommit": "f62e14095c1ac6d13627b9a244712597f8072199",
   "coreImage": "hivemind/hm-hyper-contract-api:stt-byok-bebf3469d2ad",

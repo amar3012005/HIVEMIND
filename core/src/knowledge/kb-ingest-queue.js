@@ -104,6 +104,24 @@ export function requireCompleteEvidenceEmbedding(result = {}) {
   throw error;
 }
 
+/** Completion is forbidden while any promoted memory lacks its semantic projection. */
+export function requireCompleteMemoryEmbedding(result = {}) {
+  const expected = Number(result?.promotedCount || 0);
+  if (expected <= 0) return result;
+  const coverage = result?.coverage?.memory_embed;
+  const total = Number(coverage?.total || expected);
+  const embedded = Number(coverage?.embedded || 0);
+  const failed = Number(coverage?.failed || 0);
+  const missing = Math.max(failed, expected - embedded, total - embedded, 0);
+  if (coverage && missing <= 0) return result;
+  const unresolved = coverage ? missing : expected;
+  const error = new Error(`${unresolved}/${Math.max(expected, total, unresolved)} promoted memories were not embedded`);
+  error.code = 'PARTIAL_MEMORY_EMBEDDING';
+  error.retryable = true;
+  error.coverage = coverage || null;
+  throw error;
+}
+
 function unrecoverable(queue, error) {
   const UnrecoverableError = queue?._bullmq?.UnrecoverableError;
   if (!UnrecoverableError) return error;
@@ -766,6 +784,7 @@ export class KbIngestQueue {
       // strict so no alternate processUpload implementation can settle usage
       // or expose `ready` with partial semantic coverage.
       requireCompleteEvidenceEmbedding(result);
+      requireCompleteMemoryEmbedding(result);
       const _evidenceOnly = _promoted === 0 && _segs > 0;
       const _evidenceOnlyReason = result?.evidenceOnlyReason
         || (_evidenceOnly ? (metadata?.ingest_mode === 'evidence' ? 'user_selected' : 'extraction_yield_zero') : null);

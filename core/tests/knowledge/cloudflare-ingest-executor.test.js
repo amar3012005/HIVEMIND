@@ -72,7 +72,8 @@ function fixture({ remote = false, image = false } = {}) {
         return {
           documentId, promotedMemoryIds: ['memory-1', 'memory-2'], pages: 4,
           segmentCount: 8, candidateCount: 3, promotedCount: 2,
-          coverage: { candidates: 3, promoted: 2 },
+          coverage: { candidates: 3, promoted: 2,
+            memory_embed: { total: 2, embedded: 2, failed: 0, healed: 0 } },
         };
       },
     },
@@ -89,13 +90,15 @@ function fixture({ remote = false, image = false } = {}) {
         return {
           documentId: ids.document, promotedMemoryIds: [ids.document], pages: 1,
           segmentCount: 0, candidateCount: 1, promotedCount: 1,
-          coverage: { memory: 1, vector: 1, entities: 2, claims: 1 },
+          coverage: { memory: 1, vector: 1, entities: 2, claims: 1,
+            memory_embed: { total: 1, embedded: 1, failed: 0, healed: 0 } },
         };
       }
       return {
         documentId: ids.document, promotedMemoryIds: ['memory-1', 'memory-2'],
         pages: 4, segmentCount: 8, candidateCount: 3, promotedCount: 2,
-        coverage: { total: 8, succeeded: 8, healed: 0, failed: 0 },
+        coverage: { total: 8, succeeded: 8, healed: 0, failed: 0,
+          memory_embed: { total: 2, embedded: 2, failed: 0, healed: 0 } },
       };
     },
     isRemoteOrg: async () => remote,
@@ -262,6 +265,24 @@ test('partial evidence coverage cannot reach settlement', async () => {
   await assert.rejects(
     executor.execute({ ...base, stage: 'materialize' }),
     (error) => error.code === 'PARTIAL_EMBEDDING' && error.retryable === true,
+  );
+  assert.equal(events.some(([kind]) => kind === 'complete'), false);
+});
+
+test('partial promoted-memory vector coverage cannot reach settlement', async () => {
+  const { executor, events } = fixture();
+  executor.dfi.promoteStoredEvidence = async () => ({
+    documentId: ids.document, promotedMemoryIds: ['memory-1', 'memory-2'], pages: 2,
+    segmentCount: 8, candidateCount: 2, promotedCount: 2,
+    coverage: {
+      evidence_embed: { total: 8, embedded: 8, failed: 0, healed: 0 },
+      memory_embed: { total: 2, embedded: 1, failed: 1, healed: 0 },
+    },
+  });
+  const base = { jobId: ids.job, processingVersion: 3 };
+  await assert.rejects(
+    executor.execute({ ...base, stage: 'materialize' }),
+    (error) => error.code === 'PARTIAL_MEMORY_EMBEDDING' && error.retryable === true,
   );
   assert.equal(events.some(([kind]) => kind === 'complete'), false);
 });

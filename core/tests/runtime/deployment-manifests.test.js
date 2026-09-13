@@ -47,3 +47,11 @@ test('docker-compose.coolify.yml encodes app, maintenance, and sidecar worker sp
   assert.match(text, /memory-maintenance-worker\.js/);
   assert.match(text, /app-sidecar-worker\.js/);
 });
+
+test('stateful memory SQL fixes the pgcrypto search path used by relationship triggers', () => {
+  const text = read('core/prisma/migrations/20260913094500_fix_stateful_pgcrypto_search_path/migration.sql');
+  assert.match(text, /ALTER FUNCTION hivemind\.handle_memory_update_trigger\(\)/);
+  assert.match(text, /ALTER FUNCTION hivemind\.handle_memory_extend_trigger\(\)/);
+  assert.match(text, /ALTER FUNCTION hivemind\.handle_memory_derive_trigger\(\)/);
+  assert.match(text, /SET search_path = hivemind, public/);
+});

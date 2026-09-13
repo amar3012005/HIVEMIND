@@ -9,6 +9,7 @@ import {
   latchQueuedIngestMode,
   terminalIngestWarnings,
   requireCompleteEvidenceEmbedding,
+  requireCompleteMemoryEmbedding,
 } from '../../src/knowledge/kb-ingest-queue.js';
 
 test('queue lifecycle events use the canonical knowledge.ingest namespace', () => {
@@ -122,6 +123,27 @@ test('durable completion gate rejects partial evidence embedding coverage', () =
     documentId: 'doc-1', segmentCount: 3,
     coverage: { evidence_embed: { total: 3, embedded: 2, failed: 0, healed: 0 } },
   }), (error) => error.code === 'PARTIAL_EMBEDDING');
+});
+
+test('durable completion gate rejects partial promoted-memory vector coverage', () => {
+  assert.throws(() => requireCompleteMemoryEmbedding({
+    documentId: 'doc-1', promotedCount: 4,
+    coverage: { memory_embed: { total: 4, embedded: 3, failed: 1, healed: 0 } },
+  }), (error) => {
+    assert.equal(error.code, 'PARTIAL_MEMORY_EMBEDDING');
+    assert.equal(error.retryable, true);
+    assert.match(error.message, /1\/4 promoted memories/);
+    return true;
+  });
+
+  assert.doesNotThrow(() => requireCompleteMemoryEmbedding({
+    documentId: 'doc-1', promotedCount: 4,
+    coverage: { memory_embed: { total: 4, embedded: 4, failed: 0, healed: 1 } },
+  }));
+
+  assert.doesNotThrow(() => requireCompleteMemoryEmbedding({
+    documentId: 'doc-1', promotedCount: 0, coverage: {},
+  }));
 });
 
 test('confirmed dead Workflow is fenced into BullMQ exactly once', async () => {

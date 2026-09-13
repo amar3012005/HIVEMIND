@@ -2512,33 +2512,55 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       this.logger.warn?.(`[kb-unified] evidence metadata enrichment failed: ${metadataError.message}`);
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
+    // Every returned fact carries its acknowledged projection state. Durable
+    // queue/Workflow settlement uses the aggregate to forbid `ready` while a
+    // promoted PostgreSQL memory is still absent from Qdrant.
     if (embedPending.length && vs) {
+      let vecs = [];
       try {
-        const vecs = (await vs.generateEmbeddings?.(embedPending.map((p) => p.ctxInput), {
+        vecs = (await vs.generateEmbeddings?.(embedPending.map((p) => p.ctxInput), {
           workload: 'ingestion', tenantId: orgId,
         })) || [];
-        let deferredVectors = 0;
-        await Promise.all(embedPending.map(async (p, idx) => {
+      } catch (e) {
+        this.logger.warn?.(`[kb-unified] batch embed failed; retrying each promoted memory: ${e.message}`);
+      }
+      let deferredVectors = 0;
+      await Promise.all(embedPending.map(async (p, idx) => {
+        const factObject = factObjs.find((fact) => fact.id === p.id);
+        const initialVector = vecs[idx];
+        const neededHealing = !usableEmbedding(initialVector);
+        let stored = null;
+        let attempts = 0;
+        while (!stored && attempts < 3) {
+          attempts += 1;
           try {
-            const vec = vecs[idx];
-            if (!usableEmbedding(vec)) { deferredVectors += 1; return; }
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
+            stored = await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
               title: p.title, memory_type: p.memory_type, is_latest: true, tags: p.tags,
               project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
               primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private',
               created_at: new Date().toISOString(), source_metadata: p.source_metadata,
               metadata: p.metadata, document_date: p.document_date, valid_from: p.valid_from,
               valid_to: p.valid_to, content_hash: p.content_hash },
-            { vector: vec, embeddingWorkload: 'ingestion' });
-          } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
-        }));
-        if (deferredVectors) {
-          this.logger.warn?.(`[kb-unified] deferred ${deferredVectors}/${embedPending.length} fact vector(s) to reconciler after batch embedding returned incomplete rows`);
+            { ...(usableEmbedding(initialVector) ? { vector: initialVector } : {}), embeddingWorkload: 'ingestion' });
+          } catch (ve) {
+            this.logger.warn?.(`[kb-unified] promoted-memory vector attempt ${attempts}/3 failed: ${ve.message}`);
+          }
+          if (!stored && attempts < 3) await new Promise((resolve) => setTimeout(resolve, 250 * attempts));
         }
-      } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
+        if (factObject) {
+          factObject._vectorEmbedded = !!stored;
+          factObject._vectorHealed = !!stored && (neededHealing || attempts > 1);
+        }
+        if (!stored) deferredVectors += 1;
+      }));
+      if (deferredVectors) {
+        this.logger.warn?.(`[kb-unified] ${deferredVectors}/${embedPending.length} promoted memory vector(s) remain incomplete after bounded retry`);
+      }
+    } else {
+      for (const factObject of factObjs) factObject._vectorEmbedded = false;
     }
     // ROUTED, like the batch flush further down. I broke this once: after making the collection
     // above unconditional, this site still wrote to CENTRAL Prisma for remote orgs, whose memory
@@ -6092,6 +6114,12 @@ Every item must include a non-empty content field and one or more valid support_
           }
         } catch { /* observability must never break ingest */ }
         const promotionFailed = uFacts.length === 0;
+        const memoryVectorCoverage = {
+          total: uFacts.length,
+          embedded: uFacts.filter((memory) => memory?._vectorEmbedded === true).length,
+          healed: uFacts.filter((memory) => memory?._vectorHealed === true).length,
+          failed: uFacts.filter((memory) => memory?._vectorEmbedded !== true).length,
+        };
         return {
           // Candidates are extracted, grounded claims. `targets` are merely LLM
           // input windows and reporting them as candidates made a zero-yield
@@ -6103,6 +6131,7 @@ Every item must include a non-empty content field and one or more valid support_
             ...(curated._coverage || {}),
             relations_written: _docRelWritten,
             memories_promoted: uFacts.length,
+            memory_embed: memoryVectorCoverage,
             ...(promotionFailed ? {
               promotion_failed: true,
               promotion_error: 'No grounded durable claims were produced.',

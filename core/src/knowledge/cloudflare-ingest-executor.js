@@ -3,6 +3,7 @@ import { KnowledgeIngestStepStore } from './ingest-step-store.js';
 import {
   isStoredEvidencePromotion,
   requireCompleteEvidenceEmbedding,
+  requireCompleteMemoryEmbedding,
 } from './kb-ingest-queue.js';
 import { sanitizeKnowledgeJson } from './upload-contract.js';
 
@@ -467,6 +468,7 @@ export class CloudflareKnowledgeIngestExecutor {
         });
       }
       requireCompleteEvidenceEmbedding(result);
+      requireCompleteMemoryEmbedding(result);
       return { outputRefs: terminalResult(result), coverage: result.coverage || {} };
       });
     } catch (error) {

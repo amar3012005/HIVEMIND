@@ -74,7 +74,8 @@ services:
       HIVEMIND_RUNTIME_ROLE: app
       KB_QUEUE_CONSUMER_ENABLED: "false"
       KNOWLEDGE_INGEST_WORKER_URL: http://ingestion-worker:3000
-      DOCLING_URL: http://docling:5001
+      # Override any legacy env-file value: Docling is disabled on Enigma.
+      DOCLING_URL: ""
       # Container-to-container traffic must use Nango's listening port (8080).
       # NANGO_URL in the host .env is the public/host-bound endpoint and is not
       # reliably reachable from Core through the host firewall/NAT path.
@@ -138,7 +139,8 @@ services:
       KNOWLEDGE_INGEST_EXTRACT_ORG_CONCURRENCY: "1"
       KNOWLEDGE_INGEST_EMBED_CONCURRENCY: "2"
       KNOWLEDGE_INGEST_EMBED_ORG_CONCURRENCY: "1"
-      DOCLING_URL: http://docling:5001
+      # Override any legacy env-file value: failures are terminal and visible.
+      DOCLING_URL: ""
       KB_EXTRACT_URL: http://hm-extract:8788
       NANGO_URL: http://nango:8080
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
@@ -305,15 +307,18 @@ services:
     ports:
       - "127.0.0.1:${NANGO_PORT:-3003}:8080"
 
-  docling:
-    image: ghcr.io/docling-project/docling-serve:latest
-    container_name: hm-docling
-    restart: unless-stopped
-    mem_limit: 2g
-    memswap_limit: 3g
-    cpus: 1.0
-    volumes:
-      - docling-models:/opt/app-root/src/.cache
+  # Docling is intentionally disabled on Enigma. Keep this reversible block as
+  # release history until hm-extract coverage is certified on every admitted
+  # legacy format; no dedicated container is created or consumes CPU/RAM.
+  # docling:
+  #   image: ghcr.io/docling-project/docling-serve@sha256:<certified-digest>
+  #   container_name: hm-docling
+  #   restart: unless-stopped
+  #   mem_limit: 2g
+  #   memswap_limit: 3g
+  #   cpus: 1.0
+  #   volumes:
+  #     - docling-models:/opt/app-root/src/.cache
 
   # hm-extract: stateless anydoc-based extraction, NARROW format scope only
   # (pptx/doc/docm/odt/rtf/epub — see hm-extract-adapter.js's
@@ -533,4 +538,4 @@ volumes:
   postgres-pitr-secrets: # repository cipher pass; mounted only into PostgreSQL
   qdrant-data:
   redis-data:
-  docling-models:
+  # docling-models: # disabled with the Docling service above

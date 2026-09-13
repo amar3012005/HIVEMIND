@@ -1856,9 +1856,12 @@ if (schedulerSyncEngine) {
 let evidenceRetrieval = null;
 const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
-// Docling adapter wrapper: converts buffer→file→parse→cleanup
+// Local parser router. The historical `doclingAdapter` name is retained only
+// for the DocumentFirstIngestionService constructor contract. Fast PDF,
+// Mammoth, direct spreadsheet/text parsers and hm-extract must remain usable
+// when Docling is deliberately absent.
 let doclingAdapter = null;
-if (process.env.DOCLING_URL) {
+if (process.env.KB_EXTRACT_URL || process.env.DOCLING_URL) {
   doclingAdapter = {
     parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions: picDescOpt } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
@@ -1868,6 +1871,7 @@ if (process.env.DOCLING_URL) {
       try {
         fs.writeFileSync(tempPath, fileBuffer);
         const ext = (filename || '').split('.').pop()?.toLowerCase();
+        let hmExtractFailure = null;
         // `smart = false` was the destructure default and the KB upload never
         // passes the flag, so EVERY document took the non-smart path. Concretely,
         // the Tier-1 guard below reads `if (!smart && ...)`: fast pdf-parse ran
@@ -2352,10 +2356,23 @@ if (process.env.DOCLING_URL) {
                 hybridChunks: [], chunkerError: null, engine: _hmx.tier,
               };
             }
-            console.warn(`[docling-adapter] hm-extract declined ${filename} (${_hmx.error || 'no text'}) — trying docling`);
+            hmExtractFailure = _hmx.error || 'empty extraction result';
+            console.warn(`[parser-router] hm-extract declined ${filename} (${_hmx.error || 'no text'})`
+              + (process.env.DOCLING_URL ? ' — trying Docling' : ' — Docling disabled'));
           } catch (e) {
-            console.warn(`[docling-adapter] hm-extract threw for ${filename}: ${e.message} — trying docling`);
+            hmExtractFailure = e.message;
+            console.warn(`[parser-router] hm-extract threw for ${filename}: ${e.message}`
+              + (process.env.DOCLING_URL ? ' — trying Docling' : ' — Docling disabled'));
           }
+        }
+
+        // Enigma intentionally runs without Docling. Do not pay a DNS/timeout
+        // penalty or disguise a failed supported-format extraction as an empty
+        // document. Earlier deterministic tiers have already had their chance;
+        // return an explicit terminal parser result now.
+        if (!process.env.DOCLING_URL) {
+          const { buildLocalParserUnavailableResult } = await import('./knowledge/enterprise/hm-extract-adapter.js');
+          return buildLocalParserUnavailableResult({ filename, hmExtractError: hmExtractFailure });
         }
 
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
@@ -2544,7 +2561,7 @@ if (process.env.DOCLING_URL) {
       }
     }
   };
-  console.log('[Phase1] Docling adapter enabled');
+  console.log(`[Phase1] local parser router enabled (hm-extract=${Boolean(process.env.KB_EXTRACT_URL)}, docling=${Boolean(process.env.DOCLING_URL)})`);
 }
 
 if (prisma && persistentMemoryStore && persistentMemoryEngine) {
@@ -2553,7 +2570,7 @@ if (prisma && persistentMemoryStore && persistentMemoryEngine) {
       db: prisma,
       smartIngestRouter,
       memoryGraphEngine: persistentMemoryEngine,
-      doclingAdapter, // Pass Docling adapter if DOCLING_URL is set, null otherwise
+      doclingAdapter, // Historical name: the complete local parser router.
       canonicalProjector: async ({ memory, userId, orgId, documentId, admittedMode }) => {
         // One flag evaluation is latched for the complete document promotion;
         // an in-flight upload cannot switch implementations between memories.
@@ -5014,7 +5031,8 @@ const server = http.createServer(async (req, res) => {
       phase1: {
         document_first_ingestion: !!documentFirstIngestion,
         evidence_retrieval: !!evidenceRetrieval,
-        docling_adapter: !!doclingAdapter,
+        local_parser_router: !!doclingAdapter,
+        docling_adapter: Boolean(process.env.DOCLING_URL && doclingAdapter),
         docling_reachable: doclingOk,
         evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
         memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null,

@@ -87,6 +87,29 @@ export function isHmExtractEnabled(ext) {
 }
 
 /**
+ * Build the canonical empty-parser result when Docling is deliberately absent.
+ * The caller must return this result instead of silently indexing an empty
+ * document or attempting a dead network fallback.
+ */
+export function buildLocalParserUnavailableResult({ filename = 'document', hmExtractError = null } = {}) {
+  const reason = hmExtractError
+    ? `hm-extract could not parse ${filename}: ${hmExtractError}`
+    : `no enabled local parser could parse ${filename}`;
+  return {
+    text: '',
+    markdown: null,
+    json: null,
+    tables: [],
+    pages: null,
+    confidence: null,
+    error: `${reason}; Docling is disabled`,
+    hybridChunks: [],
+    chunkerError: null,
+    engine: 'local-parser-unavailable',
+  };
+}
+
+/**
  * @param {Buffer} fileBuffer
  * @param {string} filename
  * @returns {Promise<{ok: boolean, tier?: string, markdown?: string|null, text?: string, meta?: object, error?: string}>}

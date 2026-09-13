@@ -4,10 +4,54 @@
 
 const MAX_CANDIDATES = 1000;
 const MAX_LIMIT = 25;
+const ENTITY_SCOPE_FILTERS = new Set(['personal', 'project', 'team', 'organization']);
 
 const normalize = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
 const words = (value) => normalize(value).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 const entitySlug = (value) => normalize(value).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+
+// Entity discovery is an authorized inventory browser.  An omitted scope is
+// deliberately the whole authorized organization; an explicit scope narrows
+// that inventory before matching and ranking.  Do not silently turn an
+// unrecognised requested scope into an organization-wide search.
+export function normalizeEntityScope(scope) {
+  if (scope === undefined || scope === null || String(scope).trim() === '') {
+    return { scopeFilter: null, error: null };
+  }
+  const scopeFilter = String(scope).trim().toLowerCase();
+  return ENTITY_SCOPE_FILTERS.has(scopeFilter)
+    ? { scopeFilter, error: null }
+    : { scopeFilter: null, error: 'invalid_scope' };
+}
+
+function effectiveMemoryScope(memory) {
+  const explicit = String(memory?.scope || '').toLowerCase();
+  if (ENTITY_SCOPE_FILTERS.has(explicit)) return explicit;
+  if (memory?.project_id || memory?.projectId || (Array.isArray(memory?.project_ids) && memory.project_ids.length)) return 'project';
+  if (memory?.primary_team_id || memory?.primaryTeamId) return 'team';
+  if (memory?.visibility === 'private') return 'personal';
+  if (memory?.visibility === 'organization') return 'organization';
+  return null;
+}
+
+function memoryMatchesEntityScope(memory, { scopeFilter, userId, accessContext = {}, projectId = null }) {
+  if (!scopeFilter) return true;
+  const scope = effectiveMemoryScope(memory);
+  if (scope !== scopeFilter) return false;
+  if (scope === 'personal') return String(memory?.user_id || memory?.userId || '') === String(userId);
+  if (scope === 'organization') return String(accessContext?.orgRole || '').toLowerCase() !== 'guest';
+  if (scope === 'project') {
+    const permitted = projectId ? [projectId] : (accessContext?.projectIds || []);
+    const assigned = [memory?.project_id, memory?.projectId, ...(memory?.project_ids || memory?.projectIds || [])].filter(Boolean);
+    return assigned.some((id) => permitted.includes(id));
+  }
+  if (scope === 'team') return (accessContext?.teamIds || []).includes(memory?.primary_team_id || memory?.primaryTeamId);
+  return false;
+}
+
+function filterMemoryInventory(memories, options) {
+  return (memories || []).filter((memory) => memoryMatchesEntityScope(memory, options));
+}
 
 function displayTagEntity(slug, memory) {
   const extracted = memory?.metadata?.extracted_facts?.entities;
@@ -64,22 +108,36 @@ export function rankEntityMatches(entities, query, limit = 12) {
     }));
 }
 
-function visibilityWhere({ orgId, userId, accessContext = {}, projectId = null }) {
+function visibilityWhere({ orgId, userId, accessContext = {}, projectId = null, scopeFilter = null }) {
   const role = String(accessContext?.orgRole || '').toLowerCase();
   const privileged = role === 'owner' || role === 'admin';
   const projectTags = (accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
+  const teamTags = (accessContext?.teamIds || []).map((id) => `scope-key:team:${id}`);
+  const documentScope = scopeFilter === 'personal'
+    ? { tags: { has: `scope-key:personal:${userId}` } }
+    : scopeFilter === 'organization'
+      ? { tags: { hasSome: [`scope-key:org:${orgId}`, 'scope-key:organization'] } }
+      : scopeFilter === 'project'
+        ? { tags: { hasSome: projectTags } }
+        : scopeFilter === 'team'
+          ? { tags: { hasSome: teamTags } }
+          : null;
   const document = {
     orgId,
     archivedAt: null,
-    ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
+    ...(projectId && (!scopeFilter || scopeFilter === 'project') ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
+    ...(documentScope && (!projectId || scopeFilter !== 'project') ? documentScope : {}),
     ...(!projectId && !privileged ? { OR: [
       { userId },
       { tags: { hasSome: [`scope-key:org:${orgId}`, 'scope-key:organization'] } },
       { tags: { has: `scope-key:personal:${userId}` } },
       ...(projectTags.length ? [{ tags: { hasSome: projectTags } }] : []),
+      ...(teamTags.length ? [{ tags: { hasSome: teamTags } }] : []),
     ] } : {}),
   };
-  const effectiveAccess = projectId ? { ...accessContext, projectIds: [projectId] } : accessContext;
+  const effectiveAccess = projectId && (!scopeFilter || scopeFilter === 'project')
+    ? { ...accessContext, projectIds: [projectId] }
+    : accessContext;
   const projectIds = Array.isArray(effectiveAccess?.projectIds) ? effectiveAccess.projectIds : [];
   const teamIds = Array.isArray(effectiveAccess?.teamIds) ? effectiveAccess.teamIds : [];
   const tiers = [{ userId, scope: 'personal' }];
@@ -89,7 +147,7 @@ function visibilityWhere({ orgId, userId, accessContext = {}, projectId = null }
   const memory = {
     orgId,
     deletedAt: null,
-    OR: tiers,
+    OR: scopeFilter ? tiers.filter((tier) => tier.scope === scopeFilter) : tiers,
     ...((effectiveAccess?.orgRole === 'guest' || effectiveAccess?.crossProject === false)
       ? { NOT: { tags: { has: 'scope:cross-project' } } } : {}),
   };
@@ -101,8 +159,10 @@ function visibilityWhere({ orgId, userId, accessContext = {}, projectId = null }
 // still populated by document extraction, so discovery must query both.  A
 // chooser that only checks Entity silently returns no matches for memories
 // saved through the normal /api/memories path.
-function visibleMemoryWhere({ orgId, userId, accessContext = {}, projectId = null }) {
-  const effectiveAccess = projectId ? { ...accessContext, projectIds: [projectId] } : accessContext;
+function visibleMemoryWhere({ orgId, userId, accessContext = {}, projectId = null, scopeFilter = null }) {
+  const effectiveAccess = projectId && (!scopeFilter || scopeFilter === 'project')
+    ? { ...accessContext, projectIds: [projectId] }
+    : accessContext;
   const projectIds = Array.isArray(effectiveAccess?.projectIds) ? effectiveAccess.projectIds : [];
   const teamIds = Array.isArray(effectiveAccess?.teamIds) ? effectiveAccess.teamIds : [];
   const tiers = [{ userId, scope: 'personal' }];
@@ -112,7 +172,7 @@ function visibleMemoryWhere({ orgId, userId, accessContext = {}, projectId = nul
   return {
     orgId,
     deletedAt: null,
-    OR: tiers,
+    OR: scopeFilter ? tiers.filter((tier) => tier.scope === scopeFilter) : tiers,
     ...((effectiveAccess?.orgRole === 'guest' || effectiveAccess?.crossProject === false)
       ? { NOT: { tags: { has: 'scope:cross-project' } } } : {}),
   };
@@ -130,7 +190,7 @@ function dedupeRows(rows = []) {
   return [...winners.values()];
 }
 
-async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
+async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds, entityTypes }) {
   if (!prisma?.canonicalEntity || !prisma?.memoryEntityLink || !prisma?.memory) return [];
   const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
   const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
@@ -157,14 +217,15 @@ async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, acc
         project_id: projectId || undefined,
         is_latest: true,
         limit: MAX_CANDIDATES,
-        scope: 'all',
+        scope: scopeFilter ? `tier:${scopeFilter}` : 'all',
         access_context: accessContext,
       })
     : null;
   const visibleMemories = listed?.memories
-    ? listed.memories.map((memory) => ({ id: memory.id, createdAt: memory.created_at || memory.createdAt || null }))
+    ? filterMemoryInventory(listed.memories, { scopeFilter, userId, accessContext, projectId })
+      .map((memory) => ({ id: memory.id, createdAt: memory.created_at || memory.createdAt || null }))
     : await prisma.memory.findMany({
-        where: visibleMemoryWhere({ orgId, userId, accessContext, projectId }),
+        where: visibleMemoryWhere({ orgId, userId, accessContext, projectId, scopeFilter }),
         select: { id: true, createdAt: true },
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         take: MAX_CANDIDATES,
@@ -199,7 +260,7 @@ async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, acc
     }));
 }
 
-async function authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, tagSlugs = [], entityTypes = [] }) {
+async function authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, scopeFilter, tagSlugs = [], entityTypes = [] }) {
   if (!memoryStore?.listMemories) return [];
   if (entityTypes.length && !entityTypes.includes('entity')) return [];
   const listed = await memoryStore.listMemories({
@@ -208,12 +269,12 @@ async function authorizedTagRows({ memoryStore, orgId, userId, accessContext, pr
     project_id: projectId || undefined,
     is_latest: true,
     limit: MAX_CANDIDATES,
-    scope: 'all',
+    scope: scopeFilter ? `tier:${scopeFilter}` : 'all',
     access_context: accessContext,
   });
   const wanted = new Set(tagSlugs);
   const stats = new Map();
-  for (const memory of listed?.memories || []) {
+  for (const memory of filterMemoryInventory(listed?.memories, { scopeFilter, userId, accessContext, projectId })) {
     for (const tag of memory?.tags || []) {
       if (typeof tag !== 'string' || !tag.startsWith('entity:')) continue;
       const slug = entitySlug(tag.slice('entity:'.length));
@@ -236,7 +297,7 @@ async function authorizedTagRows({ memoryStore, orgId, userId, accessContext, pr
   return [...stats.values()];
 }
 
-async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds, entityTypes }) {
+async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds, entityTypes }) {
   if (!prisma) return { rows: [], degraded: 'entity_index_unavailable' };
   try {
     const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
@@ -251,7 +312,7 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
             isActive: true,
             ...(registryIds.length ? { id: { in: registryIds } } : {}),
             ...(types.length ? { entityType: { in: types } } : {}),
-            mentions: { some: visibilityWhere({ orgId, userId, accessContext, projectId }) },
+            mentions: { some: visibilityWhere({ orgId, userId, accessContext, projectId, scopeFilter }) },
           },
           select: { id: true, canonicalName: true, entityType: true, aliases: true, mentionCount: true, lastSeenAt: true },
           orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }, { canonicalName: 'asc' }, { id: 'asc' }],
@@ -262,13 +323,13 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
       legacy,
       onlyTagIds
         ? Promise.resolve([])
-        : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: registryIds, entityTypes: types }),
+        : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds: registryIds, entityTypes: types }),
       // Discovery without an ID may enumerate tag-backed entities. Resolution
       // of a canonical/legacy ID must not: passing an empty tag-slug list used
       // to append every tenant tag as an additional selected entity, silently
       // turning a two-entity `must` request into an impossible predicate.
       (tagSlugs.length || ids.length === 0)
-        ? authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, tagSlugs, entityTypes: types })
+        ? authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, scopeFilter, tagSlugs, entityTypes: types })
         : Promise.resolve([]),
     ]);
     return { rows: dedupeRows([...legacyRows, ...canonicalRows, ...(tagRows || [])]), degraded: null };
@@ -277,9 +338,11 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
   }
 }
 
-export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = 12, accessContext = {}, projectId = null } = {}) {
+export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = 12, accessContext = {}, projectId = null, scope = null } = {}) {
   if (!String(query || '').trim()) return { matches: [], degraded: null };
-  const { rows, degraded } = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityTypes });
+  const { scopeFilter, error } = normalizeEntityScope(scope);
+  if (error) return { matches: [], degraded: null, error };
+  const { rows, degraded } = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityTypes });
   if (degraded) return { matches: [], degraded };
   return { matches: rankEntityMatches(rows, query, limit), degraded: null };
 }

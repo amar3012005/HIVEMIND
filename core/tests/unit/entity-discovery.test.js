@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findEntities, rankEntityMatches, resolveAuthorizedEntityIds } from '../../src/memory/entity-discovery.js';
+import { findEntities, normalizeEntityScope, rankEntityMatches, resolveAuthorizedEntityIds } from '../../src/memory/entity-discovery.js';
 
 const ENTITIES = [
   { id: '2', canonicalName: 'Uwe Berger', entityType: 'person', aliases: ['Uwe'], mentionCount: 4, lastSeenAt: '2026-09-10T00:00:00Z' },
@@ -66,4 +66,39 @@ test('canonical entity resolution never expands an explicit selection to all ten
     prisma, memoryStore, orgId: 'org', userId: 'user', entityIds: ['canonical-uwe'], accessContext: {},
   });
   assert.deepEqual(selected.entities, [{ id: 'canonical-uwe', canonicalName: 'Uwe Berger' }]);
+});
+
+test('entity finder keeps omitted scope global and passes an explicit scope as a hard inventory boundary', async () => {
+  const calls = [];
+  const prisma = {
+    entity: { findMany: async () => [] },
+    canonicalEntity: { findMany: async () => [] },
+    memoryEntityLink: { findMany: async () => [] },
+    memory: { findMany: async () => [] },
+  };
+  const memoryStore = {
+    listMemories: async (args) => {
+      calls.push(args.scope);
+      return { memories: [
+        { id: 'personal', user_id: 'user', scope: 'personal', created_at: '2026-09-12T00:00:00Z', tags: ['entity:uwe-berger'] },
+        { id: 'org', scope: 'organization', created_at: '2026-09-11T00:00:00Z', tags: ['entity:uwe-bross'] },
+      ] };
+    },
+  };
+  const input = { prisma, memoryStore, orgId: 'org', userId: 'user', accessContext: {}, query: 'Uwe' };
+  const global = await findEntities(input);
+  const personal = await findEntities({ ...input, scope: 'personal' });
+
+  assert.deepEqual(global.matches.map((match) => match.entity_id), ['tag:uwe-berger', 'tag:uwe-bross']);
+  assert.deepEqual(personal.matches.map((match) => match.entity_id), ['tag:uwe-berger']);
+  assert.ok(calls.includes('all'));
+  assert.ok(calls.includes('tier:personal'));
+});
+
+test('entity finder fails closed for an invalid supplied scope', async () => {
+  assert.deepEqual(normalizeEntityScope(), { scopeFilter: null, error: null });
+  assert.deepEqual(normalizeEntityScope('team'), { scopeFilter: 'team', error: null });
+  const result = await findEntities({ prisma: {}, orgId: 'org', userId: 'user', query: 'Uwe', scope: 'all' });
+  assert.equal(result.error, 'invalid_scope');
+  assert.deepEqual(result.matches, []);
 });

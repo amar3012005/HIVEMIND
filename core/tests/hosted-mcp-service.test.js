@@ -110,6 +110,35 @@ test('hivemind_chat_context returns the server packet and escalates anchored fac
   assert.equal(parsed.latency_ms, 42);
 });
 
+test('hivemind_find_entities forwards an optional scope boundary to the canonical entity endpoint', async () => {
+  const hostedService = await loadHostedServiceModule(`hosted-mcp-entity-scope=${Date.now()}`);
+  const calls = [];
+  const apiClient = {
+    get: async (path, options) => {
+      calls.push({ path, options });
+      return { matches: [] };
+    },
+  };
+
+  await hostedService.handleToolCall({
+    name: 'hivemind_find_entities',
+    arguments: { query: 'Uwe', scope: 'project', limit: 7 },
+  }, 'user-1', 'org-1', apiClient);
+  await hostedService.handleToolCall({
+    name: 'hivemind_find_entities',
+    arguments: { query: 'Uwe' },
+  }, 'user-1', 'org-1', apiClient);
+
+  assert.equal(calls[0].path, '/api/entity-search');
+  assert.equal(calls[0].options.params.scope, 'project');
+  assert.equal(calls[0].options.params.limit, 7);
+  assert.equal(Object.hasOwn(calls[1].options.params, 'scope'), false);
+
+  const manifest = hostedService.generateToolsManifest('user-1', 'org-1', { scopes: ['*'] });
+  const tool = manifest.find((entry) => entry.name === 'hivemind_find_entities');
+  assert.deepEqual(tool.inputSchema.properties.scope.enum, ['personal', 'project', 'team', 'organization']);
+});
+
 test('temporal MCP tools are thin presets over the shared recall endpoint', async () => {
   const hostedService = await loadHostedServiceModule(`hosted-mcp-temporal=${Date.now()}`);
   const calls = [];

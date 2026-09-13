@@ -10891,7 +10891,11 @@ exit \$RC
             limit: Number(url.searchParams.get('limit')) || 12,
             accessContext: await buildAccessContext(userId, orgId).catch(() => null),
             projectId: url.searchParams.get('project_id') || null,
+            scope: url.searchParams.get('scope') || null,
           });
+          if (result.error === 'invalid_scope') {
+            return jsonResponse(res, { error: 'scope must be personal, project, team, or organization' }, 400);
+          }
           if (result.degraded) {
             return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }, 503);
           }

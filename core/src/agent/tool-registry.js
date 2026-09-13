@@ -505,10 +505,12 @@ const TOOL_HANDLERS = {
       userId: ctx.userId,
       query: args.query,
       entityTypes: args.entity_types || [],
+      scope: args.scope || null,
       limit: args.limit || 12,
       accessContext: ctx.accessContext || {},
       projectId: ctx.projectId || null,
     });
+    if (result.error) return { error: result.error };
     return result.degraded
       ? { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }
       : { matches: result.matches, degradation: null };

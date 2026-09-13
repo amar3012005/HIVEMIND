@@ -2141,6 +2141,8 @@ model KnowledgeIngestJob {
   processingVersion Int       @default(1) @map("processing_version")
   orchestrationMode String    @default("bullmq") @map("orchestration_mode") @db.VarChar(32)
   workflowInstanceId String?  @map("workflow_instance_id") @db.VarChar(160)
+  fallbackFromVersion Int?    @map("fallback_from_version")
+  fallbackReason     String?  @map("fallback_reason") @db.VarChar(80)
   pipelineVersion   Int       @default(1) @map("pipeline_version")
   sourceObjectKey   String?   @map("source_object_key") @db.VarChar(700)
   sourceObjectEtag  String?   @map("source_object_etag") @db.VarChar(160)
@@ -2184,6 +2186,10 @@ model KnowledgeIngestStep {
   inputDigest       String?   @map("input_digest") @db.VarChar(128)
   outputRefs        Json      @default("{}") @map("output_refs")
   coverage          Json      @default("{}")
+  mode              String?   @db.VarChar(16)
+  stagePolicy       Json      @default("{}") @map("stage_policy")
+  modelCalls        Int?      @map("model_calls")
+  resourceCounts    Json      @default("{}") @map("resource_counts")
   leaseUntil        DateTime? @map("lease_until") @db.Timestamptz(6)
   leaseToken        String?   @map("lease_token") @db.Uuid
   errorCode         String?   @map("error_code") @db.VarChar(80)
@@ -2198,6 +2204,7 @@ model KnowledgeIngestStep {
   @@index([jobId, processingVersion, status])
   @@index([status, leaseUntil])
   @@index([stageKey, status, createdAt])
+  @@index([jobId, processingVersion, mode, status])
   @@map("knowledge_ingest_steps")
 }
 

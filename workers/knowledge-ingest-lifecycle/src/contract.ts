@@ -5,15 +5,16 @@ export type IngestParams = {
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ALLOWED_KEYS = new Set(['job_id', 'processing_version', 'admitted']);
 
 export function validParams(value: unknown): value is IngestParams {
   if (!value || typeof value !== 'object') return false;
   const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => !ALLOWED_KEYS.has(key))) return false;
   return UUID.test(String(input.job_id || ''))
     && Number.isInteger(Number(input.processing_version))
     && Number(input.processing_version) > 0
-    && !('org_id' in input)
-    && !('user_id' in input);
+    && (input.admitted === undefined || input.admitted === true);
 }
 
 export function validAdmittedParams(value: unknown): value is IngestParams & { admitted: true } {

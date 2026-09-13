@@ -3,6 +3,29 @@ import { sanitizeKnowledgeJson } from './upload-contract.js';
 
 const COMPLETE = 'succeeded';
 
+function normalizedMode(value) {
+  return value === 'evidence' ? 'evidence' : value === 'both' ? 'both' : null;
+}
+
+function normalizedModelCalls(value) {
+  if (value == null) return null;
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 0) {
+    throw Object.assign(new Error('modelCalls must be a non-negative integer or null'), {
+      code: 'INVALID_MODEL_CALL_COUNT', retryable: false,
+    });
+  }
+  return count;
+}
+
+function assertEvidenceModelBoundary(mode, modelCalls) {
+  if (mode === 'evidence' && Number(modelCalls || 0) > 0) {
+    throw Object.assign(new Error('Evidence-only ingestion attempted a model call.'), {
+      code: 'EVIDENCE_MODEL_CALL_VIOLATION', retryable: false,
+    });
+  }
+}
+
 function safeError(error) {
   return {
     errorCode: String(error?.code || 'INGEST_STAGE_FAILED').slice(0, 80),
@@ -35,14 +58,24 @@ export class KnowledgeIngestStepStore {
     });
   }
 
-  async claim({ jobId, processingVersion, stageKey, shardKey = 'root', inputDigest = null }) {
+  async claim({ jobId, processingVersion, stageKey, shardKey = 'root', inputDigest = null,
+    mode = null, stagePolicy = {} }) {
     const identity = { jobId, processingVersion: Number(processingVersion) || 1, stageKey, shardKey };
+    const normalized = normalizedMode(mode);
     const model = this._model();
     const existing = await model.upsert({
       where: { jobId_processingVersion_stageKey_shardKey: identity },
-      create: { ...identity, inputDigest, status: 'pending' },
+      create: {
+        ...identity, inputDigest, status: 'pending', mode: normalized,
+        stagePolicy: sanitizeKnowledgeJson(stagePolicy || {}),
+      },
       update: {},
     });
+    if (existing.mode && normalized && existing.mode !== normalized) {
+      throw Object.assign(new Error(`Ingestion stage ${stageKey}/${shardKey} mode changed within one processing version`), {
+        code: 'INGEST_STAGE_MODE_MISMATCH', retryable: false,
+      });
+    }
     if (existing.status === COMPLETE) {
       if (existing.inputDigest && inputDigest && existing.inputDigest !== inputDigest) {
         throw Object.assign(new Error(`Ingestion stage ${stageKey}/${shardKey} input changed within one processing version`), {
@@ -65,6 +98,8 @@ export class KnowledgeIngestStepStore {
       },
       data: {
         status: 'processing', attempt: { increment: 1 }, inputDigest,
+        ...(normalized ? { mode: normalized } : {}),
+        stagePolicy: sanitizeKnowledgeJson(stagePolicy || {}),
         leaseUntil, leaseToken, startedAt: now, completedAt: null, errorCode: null, errorMessage: null,
       },
     });
@@ -74,13 +109,22 @@ export class KnowledgeIngestStepStore {
     return { acquired: true, complete: false, receipt: await this.get(identity) };
   }
 
-  async succeed(identity, leaseToken, { outputRefs = {}, coverage = {} } = {}) {
+  async succeed(identity, leaseToken, { outputRefs = {}, coverage = {}, mode = null,
+    stagePolicy = {}, modelCalls = null, resourceCounts = {} } = {}) {
     const now = new Date();
+    const normalized = normalizedMode(mode);
+    const calls = normalizedModelCalls(modelCalls);
+    assertEvidenceModelBoundary(normalized, calls);
     const updated = await this._model().updateMany({
       where: { ...identity, status: 'processing', leaseToken },
       data: {
         status: COMPLETE, outputRefs: sanitizeKnowledgeJson(outputRefs),
-        coverage: sanitizeKnowledgeJson(coverage), leaseUntil: null, leaseToken: null,
+        coverage: sanitizeKnowledgeJson(coverage),
+        ...(normalized ? { mode: normalized } : {}),
+        stagePolicy: sanitizeKnowledgeJson(stagePolicy || {}),
+        modelCalls: calls,
+        resourceCounts: sanitizeKnowledgeJson(resourceCounts || {}),
+        leaseUntil: null, leaseToken: null,
         completedAt: now, errorCode: null, errorMessage: null,
       },
     });
@@ -100,9 +144,12 @@ export class KnowledgeIngestStepStore {
     return this.get(identity);
   }
 
-  async run({ jobId, processingVersion, stageKey, shardKey = 'root', input = null }, work) {
+  async run({ jobId, processingVersion, stageKey, shardKey = 'root', input = null,
+    mode = null, stagePolicy = {} }, work) {
     const identity = { jobId, processingVersion: Number(processingVersion) || 1, stageKey, shardKey };
-    const claim = await this.claim({ ...identity, inputDigest: ingestStepDigest(input) });
+    const claim = await this.claim({
+      ...identity, inputDigest: ingestStepDigest(input), mode, stagePolicy,
+    });
     if (claim.complete) return { reused: true, receipt: claim.receipt, result: claim.receipt.outputRefs };
     if (!claim.acquired) {
       const error = Object.assign(new Error(`Ingestion stage ${stageKey}/${shardKey} is already leased`), {
@@ -115,6 +162,10 @@ export class KnowledgeIngestStepStore {
       const receipt = await this.succeed(identity, claim.receipt.leaseToken, {
         outputRefs: result?.outputRefs || result || {},
         coverage: result?.coverage || {},
+        mode,
+        stagePolicy: result?.stagePolicy || stagePolicy,
+        modelCalls: result?.modelCalls ?? null,
+        resourceCounts: result?.resourceCounts || {},
       });
       return { reused: false, receipt, result };
     } catch (error) {
@@ -123,5 +174,39 @@ export class KnowledgeIngestStepStore {
       });
       throw error;
     }
+  }
+
+  /**
+   * Copy immutable successful checkpoints into a newly fenced processing
+   * version. This is used only after a dead Workflow owner has been replaced by
+   * BullMQ. It does not copy pending/failed leases and cannot overwrite work
+   * already started by the new owner.
+   */
+  async inheritSucceeded({ jobId, fromVersion, toVersion, stageKeys = null }) {
+    const model = this._model();
+    if (typeof model.findMany !== 'function' || typeof model.createMany !== 'function') return 0;
+    const keys = Array.isArray(stageKeys) ? [...new Set(stageKeys.filter(Boolean))] : null;
+    const rows = await model.findMany({
+      where: {
+        jobId, processingVersion: Number(fromVersion), status: COMPLETE,
+        ...(keys?.length ? { stageKey: { in: keys } } : {}),
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    if (!rows.length) return 0;
+    const data = rows.map((row) => ({
+      jobId, processingVersion: Number(toVersion), stageKey: row.stageKey,
+      shardKey: row.shardKey || 'root', status: COMPLETE, attempt: row.attempt || 1,
+      inputDigest: row.inputDigest || null,
+      outputRefs: sanitizeKnowledgeJson(row.outputRefs || {}),
+      coverage: sanitizeKnowledgeJson(row.coverage || {}),
+      mode: normalizedMode(row.mode),
+      stagePolicy: sanitizeKnowledgeJson(row.stagePolicy || {}),
+      modelCalls: row.modelCalls == null ? null : normalizedModelCalls(row.modelCalls),
+      resourceCounts: sanitizeKnowledgeJson(row.resourceCounts || {}),
+      startedAt: row.startedAt || null, completedAt: row.completedAt || new Date(),
+    }));
+    const created = await model.createMany({ data, skipDuplicates: true });
+    return Number(created?.count || 0);
   }
 }

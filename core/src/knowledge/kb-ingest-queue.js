@@ -32,6 +32,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { normalizeKnowledgeIngestMode, sanitizeKnowledgeJson } from './upload-contract.js';
+import { KnowledgeIngestStepStore } from './ingest-step-store.js';
 
 const require_ = createRequire(import.meta.url);
 
@@ -191,6 +192,7 @@ export class KbIngestQueue {
     this.tracker = ingestTracker;
     this.recordUsage = recordUsage;
     this.jobStore = jobStore;
+    this.stepStore = jobStore?.prisma ? new KnowledgeIngestStepStore({ prisma: jobStore.prisma, logger }) : null;
     this.validateJob = validateJob;
     this.processUpload = processUpload;
     this.workflowStatusResolver = null;
@@ -547,19 +549,53 @@ export class KbIngestQueue {
     if (!filePath) return { recovered: false, reason: 'source_unavailable' };
 
     const previousVersion = Number(job.processingVersion || 1);
+    const resumableStages = ['materialize', 'evidence_commit', 'materialize_evidence'];
+    let resumeReceipt = null;
+    if (this.stepStore) {
+      const rows = await this.stepStore._model().findMany({
+        where: {
+          jobId: job.id,
+          processingVersion: previousVersion,
+          stageKey: { in: resumableStages },
+          status: 'succeeded',
+        },
+        orderBy: { completedAt: 'desc' },
+      });
+      resumeReceipt = resumableStages
+        .map((stageKey) => rows.find((row) => row.stageKey === stageKey))
+        .find(Boolean) || null;
+    }
     const metadata = sanitizeKnowledgeJson({
       ...(job.metadata && typeof job.metadata === 'object' ? job.metadata : {}),
       workflow_fallback_count: fallbackCount + 1,
       workflow_fallback_from_version: previousVersion,
       workflow_fallback_reason: String(terminalStatus).slice(0, 32),
+      ...(resumeReceipt ? {
+        workflow_resume_from_version: previousVersion,
+        workflow_resume_stage: resumeReceipt.stageKey,
+        workflow_resume_result: resumeReceipt.outputRefs || {},
+      } : {}),
     });
     const processingVersion = await this.jobStore.claimWorkflowFallback({
       jobId: job.id,
       orgId: job.orgId,
       processingVersion: previousVersion,
       metadata,
+      fallbackReason: String(terminalStatus).slice(0, 80),
     });
     if (!processingVersion) return { recovered: false, reason: 'fence_lost' };
+
+    if (resumeReceipt && this.stepStore) {
+      await this.stepStore.inheritSucceeded({
+        jobId: job.id,
+        fromVersion: previousVersion,
+        toVersion: processingVersion,
+        stageKeys: [
+          'parse', 'evidence_commit', 'materialize_evidence', 'vector_index',
+          'entity_extract', 'entity_link', 'memory_promote', 'promote_memories', 'materialize',
+        ],
+      });
+    }
 
     try {
       const queued = await this.enqueue({
@@ -575,7 +611,12 @@ export class KbIngestQueue {
       });
       if (queued?.backpressure) throw Object.assign(new Error('BullMQ fallback is saturated.'), { code: 'QUEUE_SATURATED' });
       await this.jobStore.updateOwned(job.id, job.orgId, { queueJobId: queued?.queue_job_id || null });
-      return { recovered: true, processingVersion, queueJobId: queued?.queue_job_id || null };
+      return {
+        recovered: true,
+        processingVersion,
+        queueJobId: queued?.queue_job_id || null,
+        resumeStage: resumeReceipt?.stageKey || null,
+      };
     } catch (error) {
       await this.jobStore.fail(job.id, job.orgId, Object.assign(
         new Error('Workflow fallback could not be admitted to the local durable queue.'),
@@ -686,14 +727,25 @@ export class KbIngestQueue {
             new Error(`Queued ingest mode ${latched.actual || 'invalid'} does not match durable mode ${latched.expected || 'invalid'}.`),
             { code: 'INGEST_MODE_MISMATCH' },
           );
-          await this.jobStore.fail(trackerJobId, orgId, error);
+          await this.jobStore.fail(trackerJobId, orgId, error, { processingVersion });
           throw unrecoverable(this, error);
         }
         metadata = sanitizeKnowledgeJson({ ...metadata, ingest_mode: latched.value });
       }
-      await this.jobStore?.progress(trackerJobId, orgId, 'processing', 5, { attempt: job.attemptsMade + 1 });
+      await this.jobStore?.progress(
+        trackerJobId, orgId, 'processing', 5,
+        { attempt: job.attemptsMade + 1 },
+        { processingVersion },
+      );
       const promotionOnly = isStoredEvidencePromotion(metadata);
-      const fileBuffer = promotionOnly ? null : fs.readFileSync(filePath); // durable bytes
+      const workflowResumeStage = metadata?.workflow_resume_stage;
+      const workflowResumeResult = metadata?.workflow_resume_result;
+      const resumeMaterialized = workflowResumeStage === 'materialize' && workflowResumeResult?.documentId;
+      const resumeEvidence = ['evidence_commit', 'materialize_evidence'].includes(workflowResumeStage)
+        && workflowResumeResult?.documentId;
+      const fileBuffer = (promotionOnly || resumeMaterialized || resumeEvidence)
+        ? null
+        : fs.readFileSync(filePath); // durable bytes
       // Canonical front door: file uploads normalize into the IngestEnvelope
       // (source.type='kb'); ingestSource routes document+file → the same
       // ingestKnowledgeDocument pipeline, adding uniform provenance.
@@ -717,9 +769,25 @@ export class KbIngestQueue {
             this.tracker?.updateJob(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...detail } });
           } catch { /* noop */ }
           this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename, ...detail });
-          this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0, detail).catch(() => {});
+          this.jobStore?.progress(
+            trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0,
+            detail, { processingVersion },
+          ).catch(() => {});
         };
-      const work = promotionOnly
+      const work = resumeMaterialized
+        ? Promise.resolve(workflowResumeResult)
+        : resumeEvidence && metadata?.ingest_mode === 'evidence'
+        ? Promise.resolve(workflowResumeResult)
+        : resumeEvidence
+        ? this.dfi.promoteStoredEvidence({
+          documentId: workflowResumeResult.documentId,
+          userId,
+          orgId,
+          metadata: metadata || {},
+          onProgress,
+          promotionStrategy: 'workflow_to_bullmq_resume',
+        })
+        : promotionOnly
         ? this.dfi.promoteStoredEvidence({
           documentId: metadata.promotion_document_id,
           userId,
@@ -738,10 +806,19 @@ export class KbIngestQueue {
           });
       // Hard timeout: poison-pill guard. The pipeline is idempotent (checksum
       // upserts + segment reuse), so an abandoned attempt is safe to retry.
-      const result = await Promise.race([
-        work,
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`kb-ingest timeout ${JOB_TIMEOUT_MS}ms`)), JOB_TIMEOUT_MS)),
-      ]);
+      let timeoutHandle;
+      const timeout = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(Object.assign(new Error(`kb-ingest timeout ${JOB_TIMEOUT_MS}ms`), { code: 'INGEST_TIMEOUT' })),
+          JOB_TIMEOUT_MS,
+        );
+      });
+      let result;
+      try {
+        result = await Promise.race([work, timeout]);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
       // An ingest that produced NO document is a failure, not a success. This
       // block ran unconditionally on resolve, so an empty upload logged
       //   [kb-queue] ✓ empty.txt org=1380251c doc=undefined segs=undefined promoted=undefined
@@ -773,7 +850,7 @@ export class KbIngestQueue {
         this._setStatus(trackerJobId, { status: 'failed', progress: 100, error: reason });
         this._counters.failed = (this._counters.failed || 0) + 1;
         const failed = Object.assign(new Error(reason), { code: 'NO_RECALLABLE_CONTENT' });
-        await this.jobStore?.fail(trackerJobId, orgId, failed);
+        await this.jobStore?.fail(trackerJobId, orgId, failed, { processingVersion });
         // Retain for replay (see the terminal-failure path below) — a document that
         // produced no recallable content is exactly the case a user wants to retry
         // after a parser or model fix. Bounded by _sweepRawFiles().
@@ -796,7 +873,9 @@ export class KbIngestQueue {
           metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null },
         });
       } catch { /* noop */ }
-      if (this.jobStore) await this.jobStore.complete(trackerJobId, orgId, userId, result);
+      if (this.jobStore) {
+        await this.jobStore.complete(trackerJobId, orgId, userId, result, { processingVersion });
+      }
       else { try { this.recordUsage?.(orgId, result); } catch { /* legacy accounting */ } }
       this._setStatus(trackerJobId, {
         status: 'indexed', progress: 100, document_id: result.documentId,
@@ -835,7 +914,7 @@ export class KbIngestQueue {
     } catch (error) {
       const finalAttempt = job.attemptsMade + 1 >= (job.opts?.attempts || ATTEMPTS);
       if (finalAttempt) {
-        await this.jobStore?.fail(trackerJobId, orgId, error);
+        await this.jobStore?.fail(trackerJobId, orgId, error, { processingVersion });
         // RETAIN the raw bytes on terminal failure. This used to unlink here, which
         // made the module's own "raw file kept for replay" promise false: a job that
         // exhausted its attempts had nothing left to replay FROM, so a dead document

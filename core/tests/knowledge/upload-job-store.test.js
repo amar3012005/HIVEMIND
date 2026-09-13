@@ -186,6 +186,8 @@ test('Workflow fallback claim is single-winner and advances the processing fence
   });
   assert.equal(writes[0].data.processingVersion, 9);
   assert.equal(writes[0].data.orchestrationMode, 'bullmq');
+  assert.equal(writes[0].data.fallbackFromVersion, 8);
+  assert.equal(writes[0].data.fallbackReason, 'workflow_terminal');
 });
 
 test('Workflow progress and failure writes are fenced by processing version', async () => {

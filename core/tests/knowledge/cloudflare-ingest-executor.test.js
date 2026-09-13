@@ -28,6 +28,10 @@ function stepStore() {
       const receipt = {
         id: `receipt-${rows.size + 1}`, status: 'succeeded',
         outputRefs: output.outputRefs || output, coverage: output.coverage || {},
+        mode: identity.mode || null,
+        stagePolicy: output.stagePolicy || identity.stagePolicy || {},
+        modelCalls: output.modelCalls ?? null,
+        resourceCounts: output.resourceCounts || {},
       };
       rows.set(mapKey, receipt);
       return { reused: false, receipt };
@@ -127,7 +131,10 @@ test('materialization records real evidence and promotion checkpoints', async ()
   await executor.execute({ ...input, stage: 'materialize' });
   assert.deepEqual(
     [...steps.rows.keys()].map((key) => key.split(':').at(-2)).sort(),
-    ['materialize', 'materialize_evidence', 'promote_memories'].sort(),
+    [
+      'parse', 'evidence_commit', 'vector_index', 'memory_promote',
+      'entity_extract', 'entity_link', 'materialize',
+    ].sort(),
   );
   assert.equal(events.filter(([kind]) => kind === 'read').length, 1);
   assert.equal(events.filter(([kind]) => kind === 'promote').length, 1);
@@ -184,8 +191,21 @@ test('image jobs use authoritative mediaKind and settle one canonical memory wit
   assert.equal(events.find(([kind]) => kind === 'image-metadata')[1].media_kind, 'image');
   assert.deepEqual(
     [...steps.rows.keys()].map((key) => key.split(':').at(-2)).sort(),
-    ['materialize', 'materialize_image', 'reconcile'].sort(),
+    ['memory_promote', 'materialize', 'coverage_verify', 'settle', 'reconcile'].sort(),
   );
+});
+
+test('evidence mode records zero model calls at every completed stage', async () => {
+  const { executor, steps, job } = fixture();
+  job.ingestMode = 'evidence';
+  job.metadata.ingest_mode = 'evidence';
+  await executor.execute({ jobId: ids.job, processingVersion: 3, stage: 'materialize' });
+
+  const receipts = [...steps.rows.values()];
+  assert.equal(receipts.length >= 4, true);
+  assert.equal(receipts.every((receipt) => receipt.mode === 'evidence'), true);
+  assert.equal(receipts.every((receipt) => receipt.modelCalls === 0), true);
+  assert.equal(receipts.every((receipt) => receipt.stagePolicy?.content_egress === false), true);
 });
 
 test('deterministic media and signature errors cannot enter an infinite redispatch loop', () => {

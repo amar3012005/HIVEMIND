@@ -46,6 +46,19 @@ function stepModel() {
       }
       return { count };
     },
+    async findMany(args) {
+      return [...rows.values()].filter((row) => matches(row, args.where)).map((row) => structuredClone(row));
+    },
+    async createMany(args) {
+      let count = 0;
+      for (const value of args.data) {
+        const mapKey = key(value);
+        if (rows.has(mapKey) && args.skipDuplicates) continue;
+        rows.set(mapKey, { id: `receipt-${rows.size + 1}`, ...structuredClone(value) });
+        count += 1;
+      }
+      return { count };
+    },
   };
 }
 
@@ -115,4 +128,55 @@ test('a successful receipt rejects changed input within the same processing vers
     store.run({ ...identity, input: { object: 'two' } }, async () => ({ ok: true })),
     (error) => error.code === 'INGEST_STAGE_INPUT_MISMATCH',
   );
+});
+
+test('stage receipts persist mode, policy, model calls and resource counts', async () => {
+  const model = stepModel();
+  const store = new KnowledgeIngestStepStore({ prisma: { knowledgeIngestStep: model }, leaseMs: 30_000 });
+  const result = await store.run({
+    ...identity, mode: 'both', input: { object: 'one' },
+    stagePolicy: { model_policy: 'allowed', content_egress: false },
+  }, async () => ({
+    outputRefs: { document_id: 'doc-1' }, coverage: { verified: true },
+    modelCalls: 2, resourceCounts: { documents: 1, evidence: 4, memories: 2 },
+  }));
+
+  assert.equal(result.receipt.mode, 'both');
+  assert.equal(result.receipt.modelCalls, 2);
+  assert.deepEqual(result.receipt.stagePolicy, { model_policy: 'allowed', content_egress: false });
+  assert.deepEqual(result.receipt.resourceCounts, { documents: 1, evidence: 4, memories: 2 });
+});
+
+test('evidence-only receipt fails closed if any model call is reported', async () => {
+  const model = stepModel();
+  const store = new KnowledgeIngestStepStore({ prisma: { knowledgeIngestStep: model }, leaseMs: 30_000 });
+  await assert.rejects(
+    store.run({ ...identity, mode: 'evidence', input: { object: 'one' } }, async () => ({
+      outputRefs: { document_id: 'doc-1' }, modelCalls: 1,
+    })),
+    (error) => error.code === 'EVIDENCE_MODEL_CALL_VIOLATION',
+  );
+  assert.equal([...model.rows.values()][0].status, 'failed');
+});
+
+test('successful receipts are inherited into a fenced fallback version only once', async () => {
+  const model = stepModel();
+  const store = new KnowledgeIngestStepStore({ prisma: { knowledgeIngestStep: model }, leaseMs: 30_000 });
+  await store.run({
+    ...identity, stageKey: 'evidence_commit', mode: 'both', input: { checksum: 'one' },
+  }, async () => ({
+    outputRefs: { documentId: 'doc-1', segmentCount: 4 }, modelCalls: 0,
+    resourceCounts: { documents: 1, evidence: 4, memories: 0 },
+  }));
+
+  assert.equal(await store.inheritSucceeded({
+    jobId: identity.jobId, fromVersion: 1, toVersion: 2,
+  }), 1);
+  assert.equal(await store.inheritSucceeded({
+    jobId: identity.jobId, fromVersion: 1, toVersion: 2,
+  }), 0);
+  const inherited = await store.get({ ...identity, processingVersion: 2, stageKey: 'evidence_commit' });
+  assert.equal(inherited.status, 'succeeded');
+  assert.equal(inherited.mode, 'both');
+  assert.deepEqual(inherited.outputRefs, { documentId: 'doc-1', segmentCount: 4 });
 });

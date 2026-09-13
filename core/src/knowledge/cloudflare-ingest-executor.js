@@ -81,6 +81,14 @@ function memoryProjectionNeedsRepair(result = {}) {
   return failed > 0 || embedded < expected || embedded < total;
 }
 
+function resourceCounts(result = {}) {
+  return {
+    documents: result?.documentId ? 1 : 0,
+    evidence: Math.max(0, Number(result?.segmentCount || 0)),
+    memories: Math.max(0, Number(result?.promotedCount || 0)),
+  };
+}
+
 export class CloudflareKnowledgeIngestExecutor {
   constructor({
     prisma, jobStore, sourceStore, documentFirstIngestion,
@@ -208,6 +216,8 @@ export class CloudflareKnowledgeIngestExecutor {
     const run = await this.steps.run({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'acquire',
       input: { orgId: job.orgId, userId: job.userId, scopeKey: job.scopeKey, storageMode: job.storageMode },
+      mode: job.ingestMode,
+      stagePolicy: { content_egress: false, model_policy: 'forbidden' },
     }, async () => {
       await this.validateJob?.({
         trackerJobId: job.id, userId: job.userId, orgId: job.orgId, metadata: job.metadata || {},
@@ -219,7 +229,7 @@ export class CloudflareKnowledgeIngestExecutor {
       await this.jobStore.progress(job.id, job.orgId, 'acquiring', 5, {
         orchestration_mode: 'cloudflare_workflow', processing_version: job.processingVersion,
       }, { processingVersion: job.processingVersion });
-      return { outputRefs: { authorized: true } };
+      return { outputRefs: { authorized: true }, modelCalls: 0, resourceCounts: {} };
     });
     return { ok: true, stage: 'acquire', acquired: true, reused: run.reused, receipt_id: run.receipt.id };
   }
@@ -380,6 +390,12 @@ export class CloudflareKnowledgeIngestExecutor {
       run = await this.steps.run({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'materialize',
       input: { checksum: job.checksum, ingestMode: job.ingestMode },
+      mode: job.ingestMode,
+      stagePolicy: {
+        content_egress: false,
+        model_policy: job.ingestMode === 'evidence' ? 'forbidden' : 'allowed',
+        composite: true,
+      },
     }, async () => {
       await this._waitForProcessingLease(job, 'extract');
       await this.validateJob?.({
@@ -398,14 +414,20 @@ export class CloudflareKnowledgeIngestExecutor {
         await this._releaseProcessingLease(job, 'extract');
         await this._waitForProcessingLease(job, 'promote');
         const promoted = await this.steps.run({
-          jobId: job.id, processingVersion: job.processingVersion, stageKey: 'promote_memories',
+          jobId: job.id, processingVersion: job.processingVersion, stageKey: 'memory_promote',
           input: { documentId: job.metadata.promotion_document_id, strategy: 'upgrade_evidence_to_both' },
+          mode: 'both',
+          stagePolicy: { content_egress: false, model_policy: 'allowed' },
         }, async () => {
           const value = await this.dfi.promoteStoredEvidence({
             documentId: job.metadata.promotion_document_id, userId: job.userId, orgId: job.orgId,
             metadata: job.metadata || {}, onProgress, promotionStrategy: 'upgrade_evidence_to_both',
           });
-          return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
+          return {
+            outputRefs: terminalResult(value), coverage: value.coverage || {},
+            modelCalls: value?.modelCalls ?? value?.coverage?.model_calls ?? null,
+            resourceCounts: resourceCounts(value),
+          };
         });
         result = promoted.receipt.outputRefs;
         if (memoryProjectionNeedsRepair(result)
@@ -419,8 +441,14 @@ export class CloudflareKnowledgeIngestExecutor {
       } else {
         const evidenceStage = await this.steps.run({
           jobId: job.id, processingVersion: job.processingVersion,
-          stageKey: isImage ? 'materialize_image' : 'materialize_evidence',
+          stageKey: isImage ? 'memory_promote' : 'evidence_commit',
           input: { checksum: job.checksum },
+          mode: job.ingestMode,
+          stagePolicy: {
+            content_egress: false,
+            model_policy: isImage ? 'allowed' : 'forbidden',
+            parser_policy: isImage ? 'vision_allowed' : 'deterministic_evidence',
+          },
         }, async () => {
           const fileBuffer = await this.sourceStore.readFile({
             orgId: job.orgId, checksum: job.checksum, filename: job.filename,
@@ -448,9 +476,35 @@ export class CloudflareKnowledgeIngestExecutor {
             },
           });
           requireCompleteEvidenceEmbedding(value);
-          return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
+          return {
+            outputRefs: terminalResult(value), coverage: value.coverage || {},
+            modelCalls: isImage
+              ? (value?.modelCalls ?? value?.coverage?.model_calls ?? null)
+              : 0,
+            resourceCounts: resourceCounts(value),
+          };
         });
         const evidence = evidenceStage.receipt.outputRefs;
+        if (!isImage) {
+          await this.steps.run({
+            jobId: job.id, processingVersion: job.processingVersion, stageKey: 'parse',
+            input: { checksum: job.checksum, evidenceReceipt: evidenceStage.receipt.id },
+            mode: job.ingestMode,
+            stagePolicy: { content_egress: false, model_policy: 'forbidden', checkpoint: 'evidence_commit' },
+          }, async () => ({
+            outputRefs: { documentId: evidence.documentId }, modelCalls: 0,
+            resourceCounts: { documents: evidence.documentId ? 1 : 0, evidence: Number(evidence.segmentCount || 0), memories: 0 },
+          }));
+          await this.steps.run({
+            jobId: job.id, processingVersion: job.processingVersion, stageKey: 'vector_index',
+            input: { evidenceReceipt: evidenceStage.receipt.id, documentId: evidence.documentId },
+            mode: job.ingestMode,
+            stagePolicy: { content_egress: false, model_policy: 'forbidden', projection: 'qdrant' },
+          }, async () => ({
+            outputRefs: { documentId: evidence.documentId }, coverage: evidence.coverage || {},
+            modelCalls: 0, resourceCounts: resourceCounts(evidence),
+          }));
+        }
         // Extraction, parsing and embedding capacity is released as soon as
         // durable evidence exists. The next document starts immediately while
         // this one proceeds through memory generation on an independent pool.
@@ -460,15 +514,21 @@ export class CloudflareKnowledgeIngestExecutor {
         if (job.ingestMode === 'both' && !isImage) {
           await this._waitForProcessingLease(job, 'promote');
           const promotionStage = await this.steps.run({
-            jobId: job.id, processingVersion: job.processingVersion, stageKey: 'promote_memories',
+            jobId: job.id, processingVersion: job.processingVersion, stageKey: 'memory_promote',
             input: { documentId: evidence.documentId, evidenceReceipt: evidenceStage.receipt.id },
+            mode: 'both',
+            stagePolicy: { content_egress: false, model_policy: 'allowed' },
           }, async () => {
             const value = await this.dfi.promoteStoredEvidence({
               documentId: evidence.documentId, userId: job.userId, orgId: job.orgId,
               metadata: { ...(job.metadata || {}), ingest_mode: 'both' }, onProgress,
               promotionStrategy: 'workflow_evidence_checkpoint',
             });
-            return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
+            return {
+              outputRefs: terminalResult(value), coverage: value.coverage || {},
+              modelCalls: value?.modelCalls ?? value?.coverage?.model_calls ?? null,
+              resourceCounts: resourceCounts(value),
+            };
           });
           let promotionOutput = promotionStage.receipt.outputRefs;
           if (memoryProjectionNeedsRepair(promotionOutput)
@@ -487,6 +547,22 @@ export class CloudflareKnowledgeIngestExecutor {
             segmentCount: evidence.segmentCount,
             coverage: { ...evidence.coverage, ...promotionOutput.coverage },
           };
+          for (const stageKey of ['entity_extract', 'entity_link']) {
+            await this.steps.run({
+              jobId: job.id, processingVersion: job.processingVersion, stageKey,
+              input: { promotionReceipt: promotionStage.receipt.id, documentId: result.documentId },
+              mode: 'both',
+              stagePolicy: {
+                content_egress: false,
+                model_policy: stageKey === 'entity_extract' ? 'included_in_memory_promote' : 'forbidden',
+                checkpoint: 'memory_promote',
+              },
+            }, async () => ({
+              outputRefs: { documentId: result.documentId },
+              modelCalls: stageKey === 'entity_link' ? 0 : null,
+              resourceCounts: resourceCounts(result),
+            }));
+          }
           await this._releaseProcessingLease(job, 'promote');
         }
       }
@@ -498,7 +574,11 @@ export class CloudflareKnowledgeIngestExecutor {
       }
       requireCompleteEvidenceEmbedding(result);
       requireCompleteMemoryEmbedding(result);
-      return { outputRefs: terminalResult(result), coverage: result.coverage || {} };
+      return {
+        outputRefs: terminalResult(result), coverage: result.coverage || {},
+        modelCalls: job.ingestMode === 'evidence' ? 0 : null,
+        resourceCounts: resourceCounts(result),
+      };
       });
     } catch (error) {
       // A parser/provider failure must never pin either capacity pool until the
@@ -528,6 +608,14 @@ export class CloudflareKnowledgeIngestExecutor {
       run = await this.steps.run({
         jobId: job.id, processingVersion: job.processingVersion, stageKey: 'reconcile',
         input: { materializeReceipt: materialized.id, documentId: result.documentId },
+        mode: job.ingestMode,
+        stagePolicy: { content_egress: false, model_policy: 'forbidden', composite: true },
+      }, async () => {
+      const verified = await this.steps.run({
+        jobId: job.id, processingVersion: job.processingVersion, stageKey: 'coverage_verify',
+        input: { materializeReceipt: materialized.id, documentId: result.documentId },
+        mode: job.ingestMode,
+        stagePolicy: { content_egress: false, model_policy: 'forbidden', authority: 'postgresql' },
       }, async () => {
       if (!result.documentId || (isImage
         ? Number(result.promotedCount || 0) <= 0
@@ -555,6 +643,17 @@ export class CloudflareKnowledgeIngestExecutor {
           });
         }
       }
+      return {
+        outputRefs: { verified: true, documentId: result.documentId }, coverage: result.coverage || {},
+        modelCalls: 0, resourceCounts: resourceCounts(result),
+      };
+      });
+      const settled = await this.steps.run({
+        jobId: job.id, processingVersion: job.processingVersion, stageKey: 'settle',
+        input: { coverageReceipt: verified.receipt.id, documentId: result.documentId },
+        mode: job.ingestMode,
+        stagePolicy: { content_egress: false, model_policy: 'forbidden', terminal: true },
+      }, async () => {
       const completed = await this.jobStore.complete(
         job.id, job.orgId, job.userId, result, { processingVersion: job.processingVersion },
       );
@@ -573,6 +672,13 @@ export class CloudflareKnowledgeIngestExecutor {
           terminal: true,
         },
         coverage: result.coverage || {},
+        modelCalls: 0,
+        resourceCounts: resourceCounts(result),
+      };
+      });
+      return {
+        outputRefs: settled.receipt.outputRefs,
+        coverage: result.coverage || {}, modelCalls: 0, resourceCounts: resourceCounts(result),
       };
       });
     } finally {

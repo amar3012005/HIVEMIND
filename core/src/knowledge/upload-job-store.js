@@ -241,7 +241,7 @@ export class KnowledgeUploadJobStore {
     return this._model().updateMany({ where: { id: jobId, orgId }, data });
   }
 
-  async claimWorkflowFallback({ jobId, orgId, processingVersion, metadata }) {
+  async claimWorkflowFallback({ jobId, orgId, processingVersion, metadata, fallbackReason = 'workflow_terminal' }) {
     const nextVersion = Number(processingVersion || 1) + 1;
     const updated = await this._model().updateMany({
       where: {
@@ -254,6 +254,8 @@ export class KnowledgeUploadJobStore {
       data: {
         status: 'queued', stage: 'queued', progress: 0,
         processingVersion: nextVersion, orchestrationMode: 'bullmq',
+        fallbackFromVersion: Number(processingVersion || 1),
+        fallbackReason: String(fallbackReason || 'workflow_terminal').slice(0, 80),
         workflowInstanceId: null, queueJobId: null,
         errorCode: null, errorMessage: null, completedAt: null,
         attempt: 0, metadata,

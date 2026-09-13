@@ -16,6 +16,12 @@ describe('knowledge ingest workflow identity', () => {
     expect(validParams({ ...params, user_id: '33333333-3333-4333-8333-333333333333' })).toBe(false);
     expect(validParams({ processing_version: 3 })).toBe(false);
     expect(validParams({ ...params, processing_version: 0 })).toBe(false);
+    for (const forbidden of [
+      'filename', 'document', 'content', 'text', 'chunks', 'embedding',
+      'prompt', 'answer', 'metadata', 'error', 'source_url',
+    ]) {
+      expect(validParams({ ...params, [forbidden]: 'customer-content' })).toBe(false);
+    }
   });
 
   it('uses one deterministic workflow instance per job version', () => {

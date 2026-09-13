@@ -174,6 +174,98 @@ test('confirmed dead Workflow is fenced into BullMQ exactly once', async () => {
   assert.equal(enqueues[0].metadata.workflow_fallback_count, 1);
 });
 
+test('Workflow fallback carries a completed evidence receipt into the fenced BullMQ version', async () => {
+  const enqueues = [];
+  const inherited = [];
+  const queue = Object.create(KbIngestQueue.prototype);
+  Object.assign(queue, {
+    queue: {},
+    stepStore: {
+      _model: () => ({ findMany: async () => [{
+        id: 'receipt-evidence', stageKey: 'evidence_commit', status: 'succeeded',
+        outputRefs: {
+          documentId: '44444444-4444-4444-8444-444444444444', pages: 1,
+          segmentCount: 2, candidateCount: 0, promotedCount: 0,
+          coverage: { evidence_embed: { total: 2, embedded: 2, failed: 0 } },
+        },
+      }] }),
+      inheritSucceeded: async (input) => { inherited.push(input); return 3; },
+    },
+    jobStore: {
+      claimWorkflowFallback: async () => 6,
+      updateOwned: async () => {},
+      fail: async () => assert.fail('resumable fallback must enqueue'),
+    },
+    rawFilePath: () => '/tmp/local-source',
+    enqueue: async (input) => { enqueues.push(input); return { queue_job_id: 'bull-job-v6' }; },
+  });
+  const result = await queue.fallbackWorkflowJob({
+    id: 'job', orgId: 'org', userId: 'user', processingVersion: 5,
+    checksum: 'a'.repeat(64), filename: 'doc.pdf', contentType: 'application/pdf',
+    metadata: { ingest_mode: 'both' },
+  }, { terminalStatus: 'errored' });
+
+  assert.equal(result.resumeStage, 'evidence_commit');
+  assert.equal(enqueues[0].metadata.workflow_resume_from_version, 5);
+  assert.equal(enqueues[0].metadata.workflow_resume_result.documentId, '44444444-4444-4444-8444-444444444444');
+  assert.equal(inherited[0].fromVersion, 5);
+  assert.equal(inherited[0].toVersion, 6);
+});
+
+test('BullMQ resumes a both-mode Workflow after evidence without reparsing source bytes', async () => {
+  const calls = [];
+  const documentId = '44444444-4444-4444-8444-444444444444';
+  const queue = Object.create(KbIngestQueue.prototype);
+  Object.assign(queue, {
+    _orgRunning: new Map(), _orgPending: new Map(), _counters: { processed: 0 },
+    logger: { info() {} }, tracker: null, _setStatus: async () => {}, recordUsage: null,
+    jobStore: {
+      findOwned: async () => ({
+        id: 'job', status: 'queued', processingVersion: 2, ingestMode: 'both', metadata: { ingest_mode: 'both' },
+      }),
+      progress: async () => {},
+      complete: async (...args) => { calls.push(['complete', ...args]); return true; },
+      fail: async (...args) => calls.push(['fail', ...args]),
+    },
+    dfi: {
+      ingestSource: async () => assert.fail('resume must not parse the source again'),
+      promoteStoredEvidence: async (input) => {
+        calls.push(['promote', input]);
+        return {
+          documentId, pages: 1, segmentCount: 2, candidateCount: 2, promotedCount: 1,
+          promotedMemoryIds: ['55555555-5555-4555-8555-555555555555'],
+          coverage: {
+            evidence_embed: { total: 2, embedded: 2, failed: 0 },
+            memory_embed: { total: 1, embedded: 1, failed: 0 },
+          },
+        };
+      },
+    },
+    processUpload: async () => assert.fail('resume must not invoke upload parsing'),
+  });
+  const job = {
+    attemptsMade: 0, opts: { attempts: 3 }, timestamp: Date.now(),
+    data: {
+      trackerJobId: 'job', userId: 'user', orgId: 'org', filename: 'doc.pdf',
+      contentType: 'application/pdf', checksum: 'a'.repeat(64),
+      filePath: '/definitely/missing/source.pdf', processingVersion: 2,
+      metadata: {
+        ingest_mode: 'both', workflow_resume_stage: 'evidence_commit',
+        workflow_resume_result: {
+          documentId, pages: 1, segmentCount: 2, candidateCount: 0, promotedCount: 0,
+          coverage: { evidence_embed: { total: 2, embedded: 2, failed: 0 } },
+        },
+      },
+    },
+  };
+
+  await assert.doesNotReject(() => queue._process(job));
+  assert.equal(calls.filter(([kind]) => kind === 'promote').length, 1);
+  assert.equal(calls.find(([kind]) => kind === 'promote')[1].promotionStrategy, 'workflow_to_bullmq_resume');
+  assert.equal(calls.filter(([kind]) => kind === 'complete').length, 1);
+  assert.equal(calls.filter(([kind]) => kind === 'fail').length, 0);
+});
+
 test('Workflow fallback exhaustion leaves the confirmed failure terminal', async () => {
   const queue = Object.create(KbIngestQueue.prototype);
   Object.assign(queue, {

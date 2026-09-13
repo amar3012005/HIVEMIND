@@ -40,12 +40,10 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
   const previous = {
     unified: process.env.KB_UNIFIED_EXTRACT,
     linkMode: process.env.KB_ENTITY_LINK_MODE,
-    entities: process.env.ENABLE_ENTITY_EXTRACTION,
     memoryEntityLinking: process.env.MEMORY_ENTITY_LINKING,
   };
   process.env.KB_UNIFIED_EXTRACT = 'true';
   process.env.KB_ENTITY_LINK_MODE = 'algo';
-  process.env.ENABLE_ENTITY_EXTRACTION = 'false';
   process.env.MEMORY_ENTITY_LINKING = 'false';
 
   const store = new PrismaGraphStore(prisma);
@@ -214,7 +212,6 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
     for (const [key, value] of Object.entries({
       KB_UNIFIED_EXTRACT: previous.unified,
       KB_ENTITY_LINK_MODE: previous.linkMode,
-      ENABLE_ENTITY_EXTRACTION: previous.entities,
       MEMORY_ENTITY_LINKING: previous.memoryEntityLinking,
     })) {
       if (value === undefined) delete process.env[key];

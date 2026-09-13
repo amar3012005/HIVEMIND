@@ -66,6 +66,23 @@ describe('knowledge ingestion Worker HTTP contract', () => {
     expect(runtime.INGEST_QUEUE.send).not.toHaveBeenCalled();
   });
 
+  it('rejects content-bearing admission payloads before Queue or Workflow state', async () => {
+    for (const forbidden of ['filename', 'text', 'chunks', 'metadata', 'prompt', 'embedding']) {
+      const runtime = env();
+      const response = await handler.fetch(request('/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          job_id: '11111111-1111-4111-8111-111111111111',
+          processing_version: 2,
+          admitted: true,
+          [forbidden]: 'customer-content',
+        }),
+      }), runtime);
+      expect(response.status).toBe(400);
+      expect(runtime.INGEST_QUEUE.send).not.toHaveBeenCalled();
+    }
+  });
+
   it('returns one flat Workflow status', async () => {
     const response = await handler.fetch(request('/status?instance_id=kb-job-v1'), env());
     expect(response.status).toBe(200);

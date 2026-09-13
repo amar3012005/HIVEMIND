@@ -4,7 +4,6 @@ name: hivemind-next
 # never point NEXT_* variables at the production hivemind schema, volumes, or ports.
 x-runtime-env: &runtime-env
   NODE_ENV: production
-  HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS: "true"
   DATABASE_URL: ${NEXT_DATABASE_URL:?set NEXT_DATABASE_URL to the isolated vNext database}
   QDRANT_URL: http://qdrant-next:6333
   QDRANT_API_KEY: ${NEXT_QDRANT_API_KEY:?set NEXT_QDRANT_API_KEY}

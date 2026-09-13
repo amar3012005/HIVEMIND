@@ -2748,7 +2748,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         cloudflareKnowledgeIngestClient?.close().catch(() => {});
       });
     } catch (err) {
-      console.warn('[kb-queue] init failed (inline path unaffected):', err.message);
+      console.warn('[kb-queue] init failed; durable upload admission is unavailable:', err.message);
     }
   } catch (err) {
     console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);

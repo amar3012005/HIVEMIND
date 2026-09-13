@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { decideKbUploadPath, shouldRequireQueuedKbUploads } from '../../src/knowledge/upload-mode.js';
 
-test('knowledge upload mode is optional by default outside production', () => {
+test('knowledge uploads always require the durable queue in every environment', () => {
   const prevNodeEnv = process.env.NODE_ENV;
   const prevFlag = process.env.HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS;
   process.env.NODE_ENV = 'test';
   delete process.env.HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS;
   try {
-    assert.equal(shouldRequireQueuedKbUploads(), false);
+    assert.equal(shouldRequireQueuedKbUploads(), true);
   } finally {
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = prevNodeEnv;
@@ -28,11 +28,11 @@ test('knowledge upload mode is forced in production', () => {
   }
 });
 
-test('knowledge upload mode can be forced by env flag outside production', () => {
+test('legacy queue feature flags cannot disable the durable ingestion boundary', () => {
   const prevNodeEnv = process.env.NODE_ENV;
   const prevFlag = process.env.HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS;
   process.env.NODE_ENV = 'test';
-  process.env.HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS = 'true';
+  process.env.HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS = 'false';
   try {
     assert.equal(shouldRequireQueuedKbUploads(), true);
   } finally {

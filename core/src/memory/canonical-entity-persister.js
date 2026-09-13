@@ -112,8 +112,6 @@ export async function persistCanonicalLinks({
       if (!allowedKinds.has(entityKind)) entityKind = allowedKinds.has('concept') ? 'concept' : [...allowedKinds][0];
     }
   } catch { /* ontology is best-effort; never block entity persistence */ }
-  if ((process.env.CANONICAL_ENTITY_PERSIST || 'true').toLowerCase() === 'false') return out;
-
   try {
     const resolver = new EntityResolver({ prisma });
     const remote = orgIsRemote(organizationId);

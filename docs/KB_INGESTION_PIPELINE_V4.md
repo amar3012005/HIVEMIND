@@ -38,11 +38,14 @@ POST /api/knowledge/upload  (multipart, one file/request)
   6. return 202 { job_id, status:'queued' }   (~0.1s)
 ```
 
-Durability: raw bytes on disk + BullMQ job in Redis survive restarts; closing
-the tab loses nothing. Rollout via `KB_QUEUE_MODE` (`off` | `all` | `<org,org>`);
-no Redis → inline fallback. Status is mirrored to Redis (`kbq:status:<job_id>`,
-24 h TTL) so any node answers the FE poll (no per-process 404s). Fairness: per-org
-concurrency cap; backpressure: global + per-org depth caps → `429 Retry-After`.
+Durability: raw bytes on disk + the PostgreSQL job record survive restarts;
+closing the tab loses nothing. The single Flagship decision
+`knowledge_ingest_workflow_v1` selects Cloudflare Workflow as primary. BullMQ
+is the invariant local fallback; if Redis is unavailable, admission returns an
+explicit `503` and never performs inline ingestion. Status is mirrored to Redis
+(`kbq:status:<job_id>`, 24 h TTL) so any node answers the FE poll. Fairness:
+per-org concurrency cap; backpressure: global + per-org depth caps →
+`429 Retry-After`.
 
 ---
 
@@ -169,15 +172,12 @@ canonical-entity persistence is correct for central orgs only. Self-host parity
 
 | Knob | Default | Meaning |
 | --- | --- | --- |
-| `KB_QUEUE_MODE` | `all` | inline / queued / per-org canary |
-| `KB_UNIFIED_EXTRACT` | `true` | unified single-call extractor |
 | `KB_UNIFIED_MODEL` | `openai/gpt-oss-120b` | extraction model |
 | `KB_UNIFIED_MIN_IMPORTANCE` | `0.65` | promotion floor |
 | `LLM_PRIMARY` | `openrouter` | route all LLM calls via OpenRouter |
 | `OPENROUTER_PROVIDER_ORDER` | `Groq` | preferred backend for Groq-served models |
 | `OPENROUTER_ALLOW_FALLBACKS` | `true` | degrade to another provider vs fail |
 | `RELATIONSHIP_VALIDATOR_MODE` | `enforce` | destructive-edge gate: enforce/shadow/off |
-| `CANONICAL_ENTITY_PERSIST` | `on` | canonical registry persistence |
 | `RECALL_ENTITY_HOP0` | `on` | Hop-0 entity recall lane |
 
 ---

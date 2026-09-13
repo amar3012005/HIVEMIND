@@ -1,6 +1,9 @@
 export function shouldRequireQueuedKbUploads() {
-  return process.env.NODE_ENV === 'production'
-    || process.env.HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS === 'true';
+  // Ingestion durability is a product invariant, not an environment feature.
+  // Cloudflare Workflow may be selected as the primary orchestrator, but the
+  // upload must always cross a durable queue boundary (local BullMQ fallback)
+  // before any parser or model work begins.
+  return true;
 }
 
 export function decideKbUploadPath({ queueEnabled, queueError = null, asyncRequested = false } = {}) {

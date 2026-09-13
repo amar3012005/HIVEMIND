@@ -17,7 +17,7 @@ test('deploy/docker-compose.coolify.yml encodes app, maintenance, and sidecar ru
   assert.match(text, /HIVEMIND_RUNTIME_ROLE=app/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE=maintenance/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE=sidecar/);
-  assert.match(text, /HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true/);
+  assert.doesNotMatch(text, /HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS/);
   assert.match(text, /memory-maintenance-worker\.js/);
   assert.match(text, /app-sidecar-worker\.js/);
 });
@@ -30,7 +30,7 @@ test('infra/docker-compose.production.yml encodes api, maintenance, and sidecar 
   assert.match(text, /HIVEMIND_RUNTIME_ROLE=app/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE=maintenance/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE=sidecar/);
-  assert.match(text, /HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true/);
+  assert.doesNotMatch(text, /HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS/);
   assert.match(text, /memory-maintenance-worker\.js/);
   assert.match(text, /app-sidecar-worker\.js/);
 });
@@ -43,7 +43,7 @@ test('docker-compose.coolify.yml encodes app, maintenance, and sidecar worker sp
   assert.match(text, /HIVEMIND_RUNTIME_ROLE:\s+app/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE:\s+maintenance/);
   assert.match(text, /HIVEMIND_RUNTIME_ROLE:\s+sidecar/);
-  assert.match(text, /HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS:\s+'true'/);
+  assert.doesNotMatch(text, /HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS/);
   assert.match(text, /memory-maintenance-worker\.js/);
   assert.match(text, /app-sidecar-worker\.js/);
 });

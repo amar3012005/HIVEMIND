@@ -5,9 +5,10 @@
  * autosave, raw API) normalizes into ONE envelope shape and calls one
  * dispatcher (`DocumentFirstIngestion.ingestSource`). From that point the
  * pipeline is IDENTICAL regardless of where the data came from:
- *   normalizeProvenance() → mode(document|atomic) → existing proven pipeline
+ *   normalizeProvenance() → mode(document|atomic|evidence) → existing proven pipeline
  *     - document → _promoteMemories  (chunk → unified extract → fact memories)
  *     - atomic   → engine.ingestMemory (single memory, smart-router, edges)
+ *     - evidence → document + segments only (zero LLM generation, zero memories)
  *
  * This module is PURE (no DB, no network, no engine refs) so the schema,
  * provenance normalization, and mode detection are unit-testable in isolation
@@ -92,7 +93,7 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {('personal'|'organization'|'project'|'team')} [scope]
  * @property {string} [projectId]
  * @property {string} [primaryTeamId]
- * @property {('document'|'atomic'|'evidence')} [mode]  override; auto-detected when omitted. 'evidence' = one recall-excluded, non-distilled memory (transcripts/raw evidence)
+ * @property {('document'|'atomic'|'evidence')} [mode]  routing override; evidence is materialized as a document/segment lane with zero memories
  * @property {('both'|'evidence')} [ingestMode] document materialization policy; independent from legacy mode
  * @property {string[]} [tags]
  * @property {Object} [metadata]
@@ -266,6 +267,12 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
   const platform = overrides.platform || sourceMetadata.source_platform || payload.source_platform || undefined;
   const projectIds = Array.isArray(payload.project_ids) ? payload.project_ids.filter(Boolean) : [];
   const memoryType = canonicalMemoryType(payload.memory_type || payload.memoryType || payload.metadata?.memory_type);
+  const requestedIngestMode = overrides.ingestMode || payload.ingestMode || payload.ingest_mode;
+  const ingestMode = requestedIngestMode === 'evidence' ? 'evidence'
+    : requestedIngestMode === 'both' ? 'both' : undefined;
+  const requestedRouteMode = overrides.mode || payload.mode;
+  const mode = requestedRouteMode === 'document' || requestedRouteMode === 'atomic' || requestedRouteMode === 'evidence'
+    ? requestedRouteMode : undefined;
   return {
     userId: payload.user_id || payload.userId,
     orgId: payload.org_id || payload.orgId,
@@ -275,7 +282,8 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
     scope: payload.scope || payload.target_scope || undefined,
     projectId: payload.project_id || projectIds[0] || undefined,
     primaryTeamId: payload.primary_team_id || payload.primaryTeamId || undefined,
-    mode: overrides.mode || payload.ingest_mode || undefined,
+    mode,
+    ingestMode,
     tags: Array.isArray(payload.tags) ? payload.tags : [],
     relationship: payload.relationship || undefined,
     relatedTo: payload.related_to || payload.relatedTo || undefined,

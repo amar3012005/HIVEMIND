@@ -183,7 +183,6 @@ services:
     environment:
       - NODE_ENV=production
       - HIVEMIND_RUNTIME_ROLE=app
-      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - QDRANT_URL=http://qdrant:6333
@@ -251,7 +250,6 @@ services:
     environment:
       - NODE_ENV=production
       - HIVEMIND_RUNTIME_ROLE=maintenance
-      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - QDRANT_URL=http://qdrant:6333
@@ -303,7 +301,6 @@ services:
     environment:
       - NODE_ENV=production
       - HIVEMIND_RUNTIME_ROLE=sidecar
-      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - QDRANT_URL=http://qdrant:6333

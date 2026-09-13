@@ -28,6 +28,7 @@ type MaterializationStatus = StageResult & {
 type RuntimeEnv = Env & {
   KNOWLEDGE_INGEST_WORKFLOW_SECRET: string;
 };
+const KNOWLEDGE_INGEST_FLAG = 'knowledge_ingest_workflow_v1';
 
 async function equalSecret(actual: string, expected: string): Promise<boolean> {
   if (!actual || !expected) return false;
@@ -54,7 +55,7 @@ async function flagEnabled(env: RuntimeEnv, targetingKey: string): Promise<boole
     : null;
   if (!environment || !/^[a-f0-9]{64}$/i.test(targetingKey) || !env.FLAGS) return false;
   const details = await env.FLAGS.getBooleanDetails(
-    env.KNOWLEDGE_INGEST_FLAG || 'knowledge_ingest_workflow_v1',
+    KNOWLEDGE_INGEST_FLAG,
     false,
     { targetingKey, environment },
   );

@@ -2,9 +2,143 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DocumentFirstIngestionService,
+  canonicalGenerationPolicy,
+  buildPromotionSourceMap,
+  locatePromotionWindow,
+  resolveDocumentClassification,
   normalizeCuratedClaims,
   promotionProvenance,
 } from '../../src/knowledge/document-first-ingestion.js';
+
+test('promotion windows retain exact source segment ownership after re-chunking', () => {
+  const segments = [
+    { id: 'segment-a', content: 'Alpha introduction and context.', startPage: 1, metadata: { heading: 'Alpha' } },
+    { id: 'segment-b', content: 'Beta owns the decisive pricing statement.', startPage: 7, metadata: { heading: 'Pricing' } },
+    { id: 'segment-c', content: 'Gamma contains the final implementation date.', startPage: 9, metadata: { heading: 'Timeline' } },
+  ];
+  const source = buildPromotionSourceMap(segments);
+
+  assert.equal(source.text, segments.map((segment) => segment.content).join('\n\n'));
+  assert.deepEqual(locatePromotionWindow('Beta owns the decisive pricing statement.', source, 0), {
+    segmentId: 'segment-b',
+    heading: 'Pricing',
+    page: 7,
+    startOffset: 33,
+    endOffset: 74,
+  });
+  assert.equal(
+    locatePromotionWindow('pricing statement.\n\nGamma contains', source, 0).segmentId,
+    'segment-b',
+    'a cross-segment window belongs to the segment with the largest byte overlap',
+  );
+});
+
+test('evidence mode classifies deterministically without invoking an LLM', async () => {
+  let classifierCalls = 0;
+  const result = await resolveDocumentClassification({
+    ingestMode: 'evidence',
+    metadata: {},
+    text: 'A plain evidence passage.',
+    filename: 'notes.txt',
+    classify: async () => {
+      classifierCalls += 1;
+      return { type: 'llm-result', confidence: 1 };
+    },
+  });
+
+  assert.equal(classifierCalls, 0);
+  assert.deepEqual(result, { type: 'general', confidence: 1, method: 'deterministic_evidence' });
+});
+
+test('legacy generation env flags cannot fork the canonical memory and entity pipeline', () => {
+  const previous = {
+    extract: process.env.KB_UNIFIED_EXTRACT,
+    relations: process.env.KB_DOC_RELATIONS,
+    consolidate: process.env.KB_CONSOLIDATE,
+    linkMode: process.env.KB_ENTITY_LINK_MODE,
+    context: process.env.KB_MEMORY_CONTEXT_PREFIX,
+    claimStructuring: process.env.V5_CLAIM_STRUCTURING,
+    atomicFacts: process.env.KB_ATOMIC_FACTS,
+    semanticSegments: process.env.KB_SEMANTIC_SEGMENTS,
+    skipUnchanged: process.env.KB_SKIP_UNCHANGED,
+    enrichment: process.env.KB_ENRICH_ENABLED,
+    versionEdges: process.env.KB_ENABLE_ALGO_VERSION_EDGES,
+  };
+  Object.assign(process.env, {
+    KB_UNIFIED_EXTRACT: 'false',
+    KB_DOC_RELATIONS: 'false',
+    KB_CONSOLIDATE: '0',
+    KB_ENTITY_LINK_MODE: 'llm',
+    KB_MEMORY_CONTEXT_PREFIX: 'false',
+    V5_CLAIM_STRUCTURING: 'false',
+    KB_ATOMIC_FACTS: 'false',
+    KB_SEMANTIC_SEGMENTS: 'false',
+    KB_SKIP_UNCHANGED: '0',
+    KB_ENRICH_ENABLED: '1',
+    KB_ENABLE_ALGO_VERSION_EDGES: 'true',
+  });
+  try {
+    assert.deepEqual(canonicalGenerationPolicy(), {
+      extractor: 'unified',
+      entityLinkMode: 'hybrid',
+      documentRelations: true,
+      consolidate: true,
+      sourceContextPrefix: true,
+      claimStructuring: true,
+      atomicFacts: true,
+      semanticSegments: true,
+      skipUnchanged: true,
+      phaseTwoEnrichment: false,
+      algorithmicVersionEdges: false,
+    });
+  } finally {
+    for (const [key, value] of Object.entries({
+      KB_UNIFIED_EXTRACT: previous.extract,
+      KB_DOC_RELATIONS: previous.relations,
+      KB_CONSOLIDATE: previous.consolidate,
+      KB_ENTITY_LINK_MODE: previous.linkMode,
+      KB_MEMORY_CONTEXT_PREFIX: previous.context,
+      V5_CLAIM_STRUCTURING: previous.claimStructuring,
+      KB_ATOMIC_FACTS: previous.atomicFacts,
+      KB_SEMANTIC_SEGMENTS: previous.semanticSegments,
+      KB_SKIP_UNCHANGED: previous.skipUnchanged,
+      KB_ENRICH_ENABLED: previous.enrichment,
+      KB_ENABLE_ALGO_VERSION_EDGES: previous.versionEdges,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('canonical evidence envelopes persist as documents and segments, never hidden memory rows', async () => {
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    memoryGraphEngine: {
+      ingestMemory: async () => { throw new Error('evidence must not create a memory row'); },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  let connectorInput = null;
+  service.ingestConnectorRecord = async (input) => {
+    connectorInput = input;
+    return {
+      documentId: 'doc-evidence', segmentCount: 1, candidateCount: 0,
+      promotedCount: 0, promotedMemoryIds: [], evidenceOnlyReason: 'user_selected',
+    };
+  };
+
+  const result = await service.ingestSource({
+    userId: 'user-1', orgId: 'org-1', content: 'A source-grounded transcript.',
+    mode: 'evidence', ingestMode: 'evidence',
+    source: { type: 'meeting', sourceId: 'meeting-1', title: 'Weekly meeting' },
+  });
+
+  assert.equal(connectorInput.metadata.ingest_mode, 'evidence');
+  assert.equal(result.documentId, 'doc-evidence');
+  assert.deepEqual(result.memoryIds, []);
+  assert.equal(result.promotedCount, 0);
+});
 
 test('promotion retains complete persisted evidence provenance', () => {
   const provenance = promotionProvenance({
@@ -303,16 +437,19 @@ test('intentional evidence ingest stops after hybrid indexing and never calls me
     embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },
   });
-  service._parseDocument = async () => ({
-    success: true,
-    text: 'The Atlas launch date is 14 September 2028.',
-    markdown: '# Atlas\nThe Atlas launch date is 14 September 2028.',
-    wordCount: 9,
-    pages: 1,
-    engine: 'test-parser',
-    metadata: { pages: 1 },
-    tables: [],
-  });
+  service._parseDocument = async (_buffer, _contentType, _filename, options) => {
+    calls.push(['parser-picture-descriptions', options.picture_descriptions]);
+    return {
+      success: true,
+      text: 'The Atlas launch date is 14 September 2028.',
+      markdown: '# Atlas\nThe Atlas launch date is 14 September 2028.',
+      wordCount: 9,
+      pages: 1,
+      engine: 'test-parser',
+      metadata: { pages: 1 },
+      tables: [],
+    };
+  };
   service._createSegments = async () => [{
     id: '55555555-5555-4555-8555-555555555555',
     documentId,
@@ -350,7 +487,11 @@ test('intentional evidence ingest stops after hybrid indexing and never calls me
     assert.deepEqual(result.promotedMemoryIds, []);
     assert.equal(result.evidenceOnlyReason, 'user_selected');
     assert.deepEqual(result.coverage.evidence_lexical, { total: 1, indexed: 1, failed: 0 });
-    assert.deepEqual(calls, [['document', 'evidence'], ['hybrid-index']]);
+    assert.deepEqual(calls, [
+      ['parser-picture-descriptions', false],
+      ['document', 'evidence'],
+      ['hybrid-index'],
+    ]);
   } finally {
     if (oldSkip === undefined) delete process.env.KB_SKIP_UNCHANGED;
     else process.env.KB_SKIP_UNCHANGED = oldSkip;

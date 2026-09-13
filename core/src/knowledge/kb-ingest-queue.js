@@ -9,8 +9,8 @@
  *
  * Properties:
  *   DURABLE      raw bytes on disk (kb-store/<org>/<checksum>/) + BullMQ jobs
- *                in Redis survive restarts; in-memory fallback degrades to the
- *                old inline behavior when Redis is unreachable.
+ *                in Redis survive restarts. Redis unavailability is explicit;
+ *                ingestion never falls back to inline request processing.
  *   IDEMPOTENT   jobId = <orgId>-<checksum> (BullMQ dedups double-submits);
  *                downstream sourceArtifact/knowledgeDocument upserts already
  *                dedup by checksum.
@@ -24,9 +24,8 @@
  *   BACKPRESSURE enqueue rejects (caller → 429) past a global depth cap and
  *                a per-org pending cap.
  *
- * Rollout flag (no compose surgery needed): env KB_QUEUE_MODE, else the file
- * /app/data/kb-queue-mode (hot-reloaded every 30s). Values:
- *   'off' (default) | 'all' | comma-separated org ids (canary by org).
+ * Cloudflare Workflow admission is the sole ingestion rollout decision.
+ * BullMQ is the always-on local fallback whenever Redis is available.
  */
 
 import fs from 'node:fs';
@@ -37,7 +36,6 @@ import { normalizeKnowledgeIngestMode, sanitizeKnowledgeJson } from './upload-co
 const require_ = createRequire(import.meta.url);
 
 const KB_STORE_DIR = process.env.KB_STORE_DIR || '/app/data/kb-store';
-const MODE_FILE = process.env.KB_QUEUE_MODE_FILE || '/app/data/kb-queue-mode';
 const QUEUE_NAME = 'kb-ingest';
 const ATTEMPTS = Number(process.env.KB_QUEUE_ATTEMPTS || 3);
 const JOB_TIMEOUT_MS = Number(process.env.KB_QUEUE_JOB_TIMEOUT_MS || 10 * 60 * 1000);
@@ -181,18 +179,12 @@ export class KbIngestQueue {
     this.logger = logger;
     this.queue = null;
     this.worker = null;
-    this.mode = 'off';
-    this._modeReadAt = 0;
     this._orgRunning = new Map();   // orgId -> running count (fairness)
     this._orgPending = new Map();   // orgId -> queued count (backpressure, best-effort)
     this._counters = { processed: 0, failed: 0, dead: 0, delayed_fair: 0, rejected_backpressure: 0 };
-    // DEGRADED MODE FLAG. When Redis is unreachable the queue disables itself and
-    // ingestion runs INLINE in the request: no retry, no DLQ, no cross-node status,
-    // no backpressure. That is a reasonable last resort but it was completely
-    // silent — two WARN lines at startup and nothing afterwards, so an operator
-    // could serve uploads for hours in a mode with none of the durability
-    // guarantees the rest of this file provides. Exposed via stats() so health and
-    // /api/knowledge/status can say so out loud.
+    // Health signal retained for API compatibility. When Redis is unavailable,
+    // upload admission fails explicitly; request-time inline ingestion is not a
+    // permitted fallback.
     this.inlineFallback = false;
     this.inlineFallbackReason = null;
     this._ready = this._init();
@@ -203,7 +195,7 @@ export class KbIngestQueue {
     if (!deps) {
       this.inlineFallback = true;
       this.inlineFallbackReason = 'bullmq/ioredis module unavailable';
-      if (VERBOSE) this.logger.warn?.('[kb-queue] DEGRADED: bullmq/ioredis unavailable — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)');
+      if (VERBOSE) this.logger.warn?.('[kb-queue] UNAVAILABLE: bullmq/ioredis unavailable — durable upload admission is disabled');
       return;
     }
     const { bullmq, IORedis } = deps;
@@ -232,7 +224,7 @@ export class KbIngestQueue {
     if (!host) {
       this.inlineFallback = true;
       this.inlineFallbackReason = `no reachable Redis after ${PROBE_ATTEMPTS} attempts`;
-      if (VERBOSE) this.logger.warn?.(`[kb-queue] DEGRADED: no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)`);
+      if (VERBOSE) this.logger.warn?.(`[kb-queue] UNAVAILABLE: no reachable Redis after ${PROBE_ATTEMPTS} attempts — durable upload admission is disabled`);
       return;
     }
     this._redisHost = host;
@@ -461,25 +453,9 @@ export class KbIngestQueue {
     return null;
   }
 
-  /** Rollout mode: env wins, else hot-reloaded mode file. 'off'|'all'|csv-org-ids */
-  _readMode() {
-    const now = Date.now();
-    if (now - this._modeReadAt < 30_000) return this.mode;
-    this._modeReadAt = now;
-    let raw = (process.env.KB_QUEUE_MODE || '').trim();
-    if (!raw) {
-      try { raw = fs.readFileSync(MODE_FILE, 'utf8').trim(); } catch { raw = 'off'; }
-    }
-    this.mode = raw || 'off';
-    return this.mode;
-  }
-
   isEnabledFor(orgId) {
-    if (!this.queue) return false; // no Redis → inline path
-    const mode = this._readMode();
-    if (!mode || mode === 'off') return false;
-    if (mode === 'all') return true;
-    return mode.split(',').map(s => s.trim()).filter(Boolean).includes(orgId);
+    void orgId; // compatibility signature for older callers
+    return !!this.queue;
   }
 
   async isAvailable() {

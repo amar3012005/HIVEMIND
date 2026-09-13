@@ -27,7 +27,6 @@ function env(overrides: Record<string, unknown> = {}) {
   return {
     KNOWLEDGE_INGEST_WORKFLOW_SECRET: 'test-secret',
     ENVIRONMENT: 'enigma',
-    KNOWLEDGE_INGEST_FLAG: 'knowledge_ingest_workflow_v1',
     FLAGS: { getBooleanDetails: vi.fn(async () => ({ value: true, variant: 'on', reason: 'targeted' })) },
     INGEST_QUEUE: { send: vi.fn(async () => {}) },
     INGEST_WORKFLOW: {

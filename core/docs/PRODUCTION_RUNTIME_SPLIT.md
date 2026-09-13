@@ -35,11 +35,9 @@ HIVEMIND_RUNTIME_ROLE=sidecar npm run worker:sidecar
 
 ## Queue-Required Knowledge Uploads
 
-Production now treats durable KB queueing as mandatory:
-
-- `NODE_ENV=production` forces queued knowledge uploads
-- `HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true` forces the same behavior outside production
-- if the KB queue is unavailable, `/api/knowledge/upload` returns `503 queue_unavailable`
+Durable KB queueing is mandatory in every environment. It is a code invariant,
+not a rollout environment variable. If the local BullMQ queue is unavailable,
+`/api/knowledge/upload` returns `503 queue_unavailable`.
 
 That removes the old inline fallback that could pin an HTTP worker for minutes.
 

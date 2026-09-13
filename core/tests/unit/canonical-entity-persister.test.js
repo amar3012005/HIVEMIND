@@ -92,7 +92,7 @@ test('junk/generic names never become canonical entities', async () => {
   assert.equal(prisma.links.length, 0);
 });
 
-test('kill switch CANONICAL_ENTITY_PERSIST=false is a no-op', async () => {
+test('legacy CANONICAL_ENTITY_PERSIST flag cannot disable canonical entity persistence', async () => {
   process.env.CANONICAL_ENTITY_PERSIST = 'false';
   try {
     const prisma = makePrisma();
@@ -100,8 +100,8 @@ test('kill switch CANONICAL_ENTITY_PERSIST=false is a no-op', async () => {
       prisma, organizationId: ORG,
       items: [{ memoryId: 'm1', entities: ['SOLVIS'] }],
     });
-    assert.equal(prisma.entities.length, 0);
-    assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 });
+    assert.equal(prisma.entities.length, 1);
+    assert.equal(out.linked, 1);
   } finally { delete process.env.CANONICAL_ENTITY_PERSIST; }
 });
 

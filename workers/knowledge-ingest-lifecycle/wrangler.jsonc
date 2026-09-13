@@ -10,8 +10,7 @@
   },
   "vars": {
     "ENVIRONMENT": "local",
-    "HIVEMIND_CORE_URL": "http://127.0.0.1:3000",
-    "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+    "HIVEMIND_CORE_URL": "http://127.0.0.1:3000"
   },
   "flagship": [
     {
@@ -51,8 +50,7 @@
       "name": "hivemind-knowledge-ingest-local",
       "vars": {
         "ENVIRONMENT": "local",
-        "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com",
-        "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+        "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com"
       },
       "flagship": [
         {
@@ -92,8 +90,7 @@
       "name": "hivemind-knowledge-ingest-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
-        "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+        "HIVEMIND_CORE_URL": "https://api.singulancelabs.com"
       },
       "flagship": [
         {
@@ -133,8 +130,7 @@
       "name": "hivemind-knowledge-ingest-enigma",
       "vars": {
         "ENVIRONMENT": "enigma",
-        "HIVEMIND_CORE_URL": "https://core.dev.next.singulancelabs.com",
-        "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+        "HIVEMIND_CORE_URL": "https://core.dev.next.singulancelabs.com"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {

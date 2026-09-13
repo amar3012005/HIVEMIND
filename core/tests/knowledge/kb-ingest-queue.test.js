@@ -41,6 +41,21 @@ test('durable BullMQ IDs never contain the forbidden colon separator', () => {
   assert.equal(id.includes(':'), false);
 });
 
+test('BullMQ fallback availability is not controlled by legacy rollout environment flags', () => {
+  const previous = process.env.KB_QUEUE_MODE;
+  process.env.KB_QUEUE_MODE = 'off';
+  try {
+    const queue = Object.create(KbIngestQueue.prototype);
+    queue.queue = { name: 'kb-ingest' };
+    assert.equal(queue.isEnabledFor('org-canary'), true);
+    queue.queue = null;
+    assert.equal(queue.isEnabledFor('org-canary'), false);
+  } finally {
+    if (previous === undefined) delete process.env.KB_QUEUE_MODE;
+    else process.env.KB_QUEUE_MODE = previous;
+  }
+});
+
 test('stored-evidence promotion is selected only with an explicit durable document id', () => {
   assert.equal(isStoredEvidencePromotion({ promotion_existing_evidence: true, promotion_document_id: 'doc-1' }), true);
   assert.equal(isStoredEvidencePromotion({ promotion_existing_evidence: true }), false);

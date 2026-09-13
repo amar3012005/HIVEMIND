@@ -477,6 +477,67 @@ export function segmentHeading(segment) {
   return null;
 }
 
+/**
+ * Build the exact promotion text and retain the byte range owned by every
+ * persisted evidence segment. Promotion windows are re-chunked independently
+ * from evidence segments, so array position is not a valid provenance join.
+ */
+export function buildPromotionSourceMap(segments) {
+  const spans = [];
+  const parts = [];
+  let offset = 0;
+  for (const segment of (Array.isArray(segments) ? segments : [])) {
+    const content = String(segment?.content || '').trim();
+    if (!content) continue;
+    if (parts.length) offset += 2;
+    const startOffset = offset;
+    parts.push(content);
+    offset += content.length;
+    spans.push({
+      segment,
+      startOffset,
+      endOffset: offset,
+    });
+  }
+  return { text: parts.join('\n\n'), spans };
+}
+
+/** Resolve a re-chunked promotion window to the evidence segment with the
+ * largest source-byte overlap. Exact offsets remain the authority; quote
+ * matching may later narrow an individual claim to a different segment. */
+export function locatePromotionWindow(content, sourceMap, searchFrom = 0) {
+  const text = String(sourceMap?.text || '');
+  const windowText = String(content || '').trim();
+  const spans = Array.isArray(sourceMap?.spans) ? sourceMap.spans : [];
+  if (!windowText || !spans.length) return null;
+  let startOffset = text.indexOf(windowText, Math.max(0, Number(searchFrom) || 0));
+  if (startOffset < 0) startOffset = text.indexOf(windowText);
+  if (startOffset < 0) {
+    const anchor = windowText.slice(0, Math.min(80, windowText.length));
+    startOffset = anchor.length >= 12 ? text.indexOf(anchor, Math.max(0, Number(searchFrom) || 0)) : -1;
+    if (startOffset < 0 && anchor.length >= 12) startOffset = text.indexOf(anchor);
+  }
+  if (startOffset < 0) return null;
+  const endOffset = Math.min(text.length, startOffset + windowText.length);
+  let winner = null;
+  let winnerOverlap = -1;
+  for (const span of spans) {
+    const overlap = Math.max(0, Math.min(endOffset, span.endOffset) - Math.max(startOffset, span.startOffset));
+    if (overlap > winnerOverlap) {
+      winner = span;
+      winnerOverlap = overlap;
+    }
+  }
+  if (!winner) return null;
+  return {
+    segmentId: winner.segment?.id || null,
+    heading: segmentHeading(winner.segment),
+    page: winner.segment?.startPage || null,
+    startOffset,
+    endOffset,
+  };
+}
+
 // Deterministic count of a window's fact-bearing sentences (digits/units/proper
 // nouns). Used to FLOOR the per-window extraction ask — a flat chars/1k rate
 // under-asks on dense windows and the model delivers conservatively under
@@ -570,6 +631,25 @@ function safeDocumentType(value) {
   return type || 'general';
 }
 
+export function canonicalGenerationPolicy() {
+  // Semantic generation is a data-model invariant. Operational limits and
+  // model routes remain configurable, but environment flags cannot fork how
+  // identical evidence becomes memories, entities, or relationships.
+  return {
+    extractor: 'unified',
+    entityLinkMode: 'hybrid',
+    documentRelations: true,
+    consolidate: true,
+    sourceContextPrefix: true,
+    claimStructuring: true,
+    atomicFacts: true,
+    semanticSegments: true,
+    skipUnchanged: true,
+    phaseTwoEnrichment: false,
+    algorithmicVersionEdges: false,
+  };
+}
+
 async function classifyKnowledgeDocument(text, filename) {
   const preview = String(text || '').slice(0, 6000).trim();
   if (!preview) return { type: 'general', confidence: 0.1 };
@@ -590,6 +670,25 @@ async function classifyKnowledgeDocument(text, filename) {
     ingestDiagnostic.warn(`[kb-ingest] document type classification unavailable: ${error.message}`);
     return { type: 'general', confidence: 0.2 };
   }
+}
+
+export async function resolveDocumentClassification({
+  ingestMode,
+  metadata = {},
+  text,
+  filename,
+  classify = classifyKnowledgeDocument,
+} = {}) {
+  if (metadata?.document_type) {
+    return { type: safeDocumentType(metadata.document_type), confidence: 1, method: 'provided' };
+  }
+  // Evidence mode is a zero-LLM contract. Classification is metadata used for
+  // browsing and filtering, so a deterministic generic value is preferable to
+  // silently invoking a remote model before the evidence has even committed.
+  if (ingestMode === 'evidence') {
+    return { type: 'general', confidence: 1, method: 'deterministic_evidence' };
+  }
+  return classify(text, filename);
 }
 
 function durableTitle(title, content, max = 80) {
@@ -1203,12 +1302,12 @@ export class DocumentFirstIngestionService {
    * dreaming / clustering / graph intelligence have structured claim identity.
    * Language-agnostic (the model reads any language; we store canonical English
    * subject/predicate for cross-language clustering). Robust: bounded
-   * concurrency and per-memory failure isolation. Flag V5_CLAIM_STRUCTURING
-   * (default on). NOT wired to destructive dedup
+   * concurrency and per-memory failure isolation. This is part of the canonical
+   * generation policy, not a deployment flag. NOT wired to destructive dedup
    * (safe — enrichment only).
    */
   async _structureClaimsAsync({ memories, orgId }) {
-    if ((process.env.V5_CLAIM_STRUCTURING || 'true').toLowerCase() === 'false') return;
+    if (!canonicalGenerationPolicy().claimStructuring) return;
     const store = this.memoryGraphEngine?.store;
     if (!store?.updateMemory) return;
     const targets = (Array.isArray(memories) ? memories : [])
@@ -1533,7 +1632,6 @@ Output the JSON object and nothing else.`;
 
   _distillFactsAsync({ targets, userId, orgId, metadata = {}, documentId }) {
     if (!Array.isArray(targets) || targets.length === 0) return null;
-    if (process.env.KB_FACT_DISTILL === 'false') return null; // emergency off-switch
     const BATCH = Number(process.env.KB_DISTILL_BATCH || 6);
     // Concurrency 5 (was 3): the distill LLM calls are independent, so run all of
     // a typical doc's batches in one wave instead of two — the LLM calls were
@@ -1847,7 +1945,7 @@ Output the JSON object and nothing else.`;
       }
       // Phase 2 enrichment — OFF the hot path, flag-gated (default off). Cross-doc
       // dedup + relationship edges, using vectors already computed during embed.
-      if (process.env.KB_ENRICH_ENABLED === '1' && enrichRecs.length) {
+      if (canonicalGenerationPolicy().phaseTwoEnrichment && enrichRecs.length) {
         this._enrichDocAsync({ enrichRecs, orgId, documentId })
           .catch((e) => this.logger.warn?.(`[kb-enrich] ${e.message}`));
       }
@@ -1994,7 +2092,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // supersession ambiguous, because "latest" is only definable per (entity, attribute).
     // Split on sentence boundaries and keep the parts that still carry a verb, preserving
     // each part's grounding quote. Cheap, deterministic, no extra LLM call.
-    if (String(process.env.KB_ATOMIC_FACTS ?? 'true').toLowerCase() !== 'false') {
+    if (canonicalGenerationPolicy().atomicFacts) {
       // Owner directive: memories may carry 2-4 sentences of RELATED detail — only
       // split when a claim packs 3+ sentences (those are almost always unrelated facts).
       const split = atomizeUnifiedFacts(rawFacts);
@@ -2488,9 +2586,8 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       }
     }
     // Canonical-entity registry: turn the extractor's canonical NAMES into
-    // durable CanonicalEntity + MemoryEntityLink rows. This is the LIVE KB path
-    // (KB_UNIFIED_EXTRACT default on); the mirror hook in _distillFactsAsync
-    // covers the legacy fallback. Awaited (not fire-and-forget) so serial
+    // durable CanonicalEntity + MemoryEntityLink rows. This is the sole live KB
+    // entity writer. Awaited (not fire-and-forget) so serial
     // window calls can't race-create duplicate entities; it's already off the
     // ingest lock (post-commit) so latency lands in background Tier-2.
     const _canonItems = [];
@@ -2522,7 +2619,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
   }
 
   /**
-   * ALGORITHMIC cross-doc entity linking for KB facts (KB_ENTITY_LINK_MODE=algo) — the token
+   * ALGORITHMIC cross-doc entity linking for KB facts — the token
    * optimization: the unified extractor ALREADY produced each fact's canonical entities (written
    * as entity:* tags at insert), so paying one co-mention LLM call PER FACT (~24 calls/doc, each
    * carrying the full canonicalization prompt + candidate list) just to re-derive tags + edges is
@@ -2578,7 +2675,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // is what keeps the graph EVOLVING (belief change, supersession, contradiction) without the
       // per-fact LLM. `Derives` (multi-source synthesis) is NOT produced here — it's a
       // cognition/dreaming-layer product, unaffected by this path.
-      if (process.env.KB_ENABLE_ALGO_VERSION_EDGES === 'true'
+      if (canonicalGenerationPolicy().algorithmicVersionEdges
           && typeof this.memoryGraphEngine.detectAndLinkContradictionsFor === 'function') {
         const cands = ranked.slice(0, Number(process.env.KB_ALGO_REL_MAX_CANDS || 8))
           .map(([pid]) => poolById.get(pid)).filter((m) => m && m.content);
@@ -2595,7 +2692,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // canonicalization drift across docs, non-numeric updates ("CTO"→"CEO"). Escalate ONLY those
     // gray-zone pairs to ONE batched LLM call/doc (vs the old ~24 per-fact calls). Idempotent:
     // any edge the LLM re-affirms that algo already made is a no-op (createRelationship dup-tolerant).
-    if (!skipHybrid && String(process.env.KB_ENTITY_LINK_MODE || 'llm') === 'hybrid') {
+    if (!skipHybrid) {
       try { created += await this._hybridClassifyRelations(facts, pool, poolById, byEntity, { documentId }); }
       catch (e) { this.logger.warn?.(`[kb-hybrid-rel] batched classify failed (algo edges kept): ${e.message}`); }
     }
@@ -2820,7 +2917,7 @@ Every item must include a non-empty content field and one or more valid support_
   }
 
   /**
-   * Cross-window fact consolidation (KB_CONSOLIDATE=1). Different windows of the same document
+   * Cross-window fact consolidation. Different windows of the same document
    * extract near-duplicate facts independently ("X was founded in 1998" appears in the intro AND
    * the timeline). One structured LLM call groups near-duplicates; for each group we KEEP the
    * canonical fact (unioning the dupes' tags into it) and DELETE the duplicates — fewer, richer
@@ -3272,9 +3369,11 @@ Every item must include a non-empty content field and one or more valid support_
       // PDF was silently discarded. For a slide deck or a report that is most of
       // the document: a market-adoption chart or a compatibility table carries
       // facts that exist nowhere in the prose. The caller can still force it off.
-      picture_descriptions: metadata?.picture_descriptions !== undefined
-        ? metadata.picture_descriptions === true
-        : String(process.env.KB_PICTURE_DESCRIPTIONS ?? 'true').toLowerCase() !== 'false',
+      picture_descriptions: ingestMode === 'evidence'
+        ? false
+        : (metadata?.picture_descriptions !== undefined
+          ? metadata.picture_descriptions === true
+          : String(process.env.KB_PICTURE_DESCRIPTIONS ?? 'true').toLowerCase() !== 'false'),
     });
     // SECURITY BOUNDARY: parser output is untrusted document content. Redact
     // reusable authentication material once, before classification, retained
@@ -3296,9 +3395,12 @@ Every item must include a non-empty content field and one or more valid support_
         code: 'PARSER_PROVIDER_ERROR_CONTAMINATION', retryable: true,
       });
     }
-    const documentClassification = metadata.document_type
-      ? { type: safeDocumentType(metadata.document_type), confidence: 1 }
-      : await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);
+    const documentClassification = await resolveDocumentClassification({
+      ingestMode,
+      metadata,
+      text: parseResult.text || parseResult.markdown,
+      filename,
+    });
     const documentType = safeDocumentType(metadata.document_type || documentClassification.type);
     const documentTypeTag = `document-type:${documentType}`;
     const _msParse = Date.now() - _tParse;
@@ -3390,8 +3492,7 @@ Every item must include a non-empty content field and one or more valid support_
     // return the existing document's counts and spend ZERO tokens (no docling parse, no distill
     // windows, no consolidation, no entity linking). Re-uploading the same file used to re-run the
     // FULL pipeline (observed: same PDF uploaded twice → 2×675s + 2× the LLM spend).
-    // Disable with KB_SKIP_UNCHANGED=0.
-    if (!forceReprocess && String(process.env.KB_SKIP_UNCHANGED ?? '1') !== '0') {
+    if (!forceReprocess && canonicalGenerationPolicy().skipUnchanged) {
       try {
         if (!orgIsRemote(orgId)) {
           // Central orgs: exact scoped-sourceId match on the central KB tables.
@@ -3881,10 +3982,10 @@ Every item must include a non-empty content field and one or more valid support_
       };
     }
     emit('projecting_entities', 96, { memories: promoted.memories.length });
-    await Promise.all([
-      this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
-      this._structureClaimsAsync({ memories: promoted.memories, orgId }),
-    ]);
+    // The unified extractor already persisted canonical entity links alongside
+    // each grounded memory. Do not run the legacy segment Entity/EntityMention
+    // projector a second time over the same output.
+    await this._structureClaimsAsync({ memories: promoted.memories, orgId });
     await this._projectPromotedCanonicalKnowledge({
       memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id,
     });
@@ -4045,10 +4146,7 @@ Every item must include a non-empty content field and one or more valid support_
       },
       promotionStrategy: 'enterprise_selective'
     });
-    await Promise.all([
-      this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id }),
-      this._structureClaimsAsync({ memories: promoted.memories, orgId }),
-    ]);
+    await this._structureClaimsAsync({ memories: promoted.memories, orgId });
     await this._projectPromotedCanonicalKnowledge({
       memories: promoted.memories, userId, orgId, documentId: parentDoc.id,
     });
@@ -4125,6 +4223,7 @@ Every item must include a non-empty content field and one or more valid support_
         orgId,
         sourceArtifactId: sourceArtifact.id,
         documentType: 'connector_record',
+        ingestMode: metadata.ingest_mode === 'evidence' ? 'evidence' : 'both',
         filename: title || `${providerKey}:${sourceId}`,
         contentType: 'text/plain',
         status: 'ready',
@@ -4139,6 +4238,7 @@ Every item must include a non-empty content field and one or more valid support_
           userId, orgId,
           sourceArtifactId: sourceArtifact.id,
           documentType: 'connector_record',
+          ingestMode: metadata.ingest_mode === 'evidence' ? 'evidence' : 'both',
           title: title || `${providerKey}:${sourceId}`,
           sourcePlatform: providerKey,
           sourceId,
@@ -4218,6 +4318,18 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 4: embed segment — pass orgId so _embedSegments routes to agent for remote.
     const _evEmbedC = await this._embedSegments(segments, orgId);
 
+    if (metadata.ingest_mode === 'evidence') {
+      return {
+        documentId: knowledgeDoc.id,
+        segmentCount: segments.length,
+        candidateCount: 0,
+        promotedCount: 0,
+        promotedMemoryIds: [],
+        evidenceOnlyReason: 'user_selected',
+        coverage: { evidence_embed: _evEmbedC || null },
+      };
+    }
+
     // Step 5: promote memories
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,
@@ -4231,10 +4343,7 @@ Every item must include a non-empty content field and one or more valid support_
       },
       promotionStrategy: `connector_${providerKey}`,
     });
-    await Promise.all([
-      this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
-      this._structureClaimsAsync({ memories: promoted.memories, orgId }),
-    ]);
+    await this._structureClaimsAsync({ memories: promoted.memories, orgId });
     await this._projectPromotedCanonicalKnowledge({
       memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id,
     });
@@ -4295,7 +4404,7 @@ Every item must include a non-empty content field and one or more valid support_
     const projectIds = projectId ? [projectId] : metadataProjectIds;
     const primaryTeamId = envelope.primaryTeamId || null;
 
-    if (mode === 'document') {
+    if (mode === 'document' || mode === 'evidence' || ingestMode === 'evidence') {
       // Common provenance carried via metadata → _promoteMemories stamps it on
       // every distilled fact (source_metadata + filename/doc-id tags).
       const docMeta = {
@@ -4347,42 +4456,6 @@ Every item must include a non-empty content field and one or more valid support_
       });
       if (r.skipped) return { ok: true, mode, source: sourceType, skipped: true, reason: r.reason };
       return { ...r, ok: true, mode, source: sourceType, memoryIds: r.promotedMemoryIds || [] };
-    }
-
-    // ── evidence mode ── store the raw content as ONE recall-excluded,
-    // non-distilled memory (e.g. a meeting transcript). It grounds facts by
-    // shared tag but never surfaces in recall (persisted-retrieval honours
-    // metadata.recall_exclude). No fact distillation, no smart-router, no edges.
-    if (mode === 'evidence') {
-      const evRes = await this.memoryGraphEngine.ingestMemory({
-        user_id: userId,
-        org_id: orgId,
-        content: envelope.content,
-        title: prov.title || undefined,
-        memory_type: envelope.metadata?.memory_type || 'event',
-        source_type: sourceType,
-        source_platform: prov.sourcePlatform,
-        source_metadata: prov.sourceMetadata,
-        document_date: prov.documentDate || undefined,
-        scope: scope || undefined,
-        project_ids: projectIds,
-        primary_team_id: primaryTeamId || undefined,
-        visibility: envelope.metadata?.visibility || undefined,
-        tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags, 'evidence']),
-        metadata: { ...(envelope.metadata || {}), recall_exclude: true, evidence_only: true },
-        skip_fact_extraction: true,
-        defer_entity_linking: true,
-        skipSmartRouting: true,
-        skipPredictCalibrate: true,
-        skipAdvisoryLock: true,
-        skip_relationship_classification: true,
-        skip_contradiction_detection: true,
-      });
-      const evId = evRes?.memoryId || evRes?.id || null;
-      // V5: evidence rows also get async claim structuring so meeting/transcript
-      // sources carry the same subject/predicate/qualifiers identity for clustering.
-      if (evId) await this._structureClaimsAsync({ memories: [{ id: evId, content: envelope.content }], orgId });
-      return { ok: true, mode, source: sourceType, memoryIds: evId ? [evId] : [], promotedCount: evId ? 1 : 0, memoryId: evId };
     }
 
     // ── atomic mode ── one memory through the canonical engine gateway.
@@ -4695,13 +4768,13 @@ Every item must include a non-empty content field and one or more valid support_
     }
     if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
 
-    // SEMANTIC SEGMENTS (default; reversible via KB_SEMANTIC_SEGMENTS=false). Docling's HybridChunker
+    // SEMANTIC SEGMENTS are canonical. Docling's HybridChunker
     // text can start/end MID-WORD (token-window artifacts: "...doc" | "ents to share…"), poisoning the
     // evidence layer (recall hop-2) + embeddings. Re-segment the CLEAN docling markdown (or text) with
     // boundary-aware chunkText — splits only at heading/paragraph/sentence edges (forceSplit is
     // sentence-safe), never mid-word; heading-aware via markdown ##. Falls through to hybrid/fallback
     // if it yields nothing. Same clean units the distill re-windows over → uniform, no mid-word anywhere.
-    if (String(process.env.KB_SEMANTIC_SEGMENTS ?? 'true').toLowerCase() !== 'false') {
+    if (canonicalGenerationPolicy().semanticSegments) {
       const _srcRaw = (parseResult.markdown && parseResult.markdown.trim().length > 40)
         ? parseResult.markdown : (parseResult.text || '');
       // Markers out of the CONTENT, into a map. Everything downstream — chunkText,
@@ -5378,12 +5451,7 @@ Every item must include a non-empty content field and one or more valid support_
     }
     const memories = (promoted?.memories || []).filter((memory) => memory?.id);
     onProgress?.({ stage: 'linking_provenance', progress: 92 });
-    await Promise.all([
-      this._extractPromotedEntitiesAsync({
-        memories, userId: document.userId || userId, orgId, documentId: document.id,
-      }),
-      this._structureClaimsAsync({ memories, orgId }),
-    ]);
+    await this._structureClaimsAsync({ memories, orgId });
     await this._projectPromotedCanonicalKnowledge({
       memories, userId: document.userId || userId, orgId, documentId: document.id,
     });
@@ -5497,7 +5565,8 @@ Every item must include a non-empty content field and one or more valid support_
       // COVERAGE from the evidence chunker: a doc that arrived as one giant segment or many tiny
       // fragments both get ~WIN-sized windows spanning the whole doc, so the tail (metrics/timeline)
       // isn't starved by a single front-loaded window.
-      const fullText = promotableSegments.map((s) => (s.content || '').trim()).filter(Boolean).join('\n\n');
+      const promotionSourceMap = buildPromotionSourceMap(promotableSegments);
+      const fullText = promotionSourceMap.text;
       let winChunks = [];
       try {
         const { chunkText } = await import('./document-chunker.js');
@@ -5507,26 +5576,29 @@ Every item must include a non-empty content field and one or more valid support_
         this.logger.warn?.(`[kb-facts-only] re-window failed, using segments: ${e.message}`);
       }
       if (!winChunks.length) winChunks = promotableSegments.map((s) => s.content).filter(Boolean);
-      const targets = winChunks.map((content, i) => ({
-        segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
-        content,
-        // The SECOND of the "TWO places" the comment below refers to: still hardcoded null, so any
-        // document taking this fallback path lost its headings entirely.
-        heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
-        page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
-        maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * FACTS_PER_K))),
-        scope: metadata.scope,
-        visibility: metadata.visibility,
-        primary_team_id: metadata.primary_team_id || null,
-        project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-      }));
+      let targetCursor = 0;
+      const targets = winChunks.map((content) => {
+        const located = locatePromotionWindow(content, promotionSourceMap, targetCursor);
+        if (located) targetCursor = Math.max(located.startOffset + 1, located.endOffset);
+        return {
+          segmentId: located?.segmentId || null,
+          content,
+          heading: located?.heading || null,
+          page: located?.page || null,
+          maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * FACTS_PER_K))),
+          scope: metadata.scope,
+          visibility: metadata.visibility,
+          primary_team_id: metadata.primary_team_id || null,
+          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+        };
+      });
       // Canonical path: one structured LLM call per window emits facts,
       // entities, evidence spans, and intra-window relationships together.
-      // Set KB_UNIFIED_EXTRACT=false only for an emergency rollback.
       // emits facts + canonical entities + intra-window relationships TOGETHER (coherent, low-noise,
       // alias-collapsed, ~1 call/window). The recall co-mention pass below then adds CROSS-DOC/TIME edges
       // only (no batch peers → no duplicate intra-doc edges).
-      if (String(process.env.KB_UNIFIED_EXTRACT ?? 'true').toLowerCase() !== 'false' && String(process.env.KB_UNIFIED_EXTRACT ?? '') !== '0') {
+      const generationPolicy = canonicalGenerationPolicy();
+      if (generationPolicy.extractor === 'unified') {
         const docTitle = metadata.documentTitle || metadata.filename || '';
         // Extraction windows are independent LLM calls; the only shared state is uBudget,
         // mutated only between awaits (single-threaded), so the cap stays hard at any width.
@@ -5582,26 +5654,30 @@ Every item must include a non-empty content field and one or more valid support_
           // was seen whole by NEITHER window. 200 chars of overlap fixes that.
           const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 200 }) || [])
             .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 40);
-          if (uc.length) uWindows = uc.map((content, i) => ({
-            segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
-            content,
-            // was `heading: null, page: null` — hardcoded, in TWO places, so the extractor
-            // saw window text + filename only. Subject-less claims and ungrounded
-            // importance both trace back to here.
-            heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
-            page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
-            // Floor the ask at the window's MEASURED fact count, not just its length.
-            // Measured live: a 735-char doc with ~12 fact-bearing sentences across 3
-            // sections was assigned maxFacts=5 by the flat rate and the model returned
-            // exactly 5 — the other 7 facts existed in no layer. Over-asking is safe:
-            // unused grants refund into factBudget and the curator dedups downstream.
-            maxFacts: Math.max(1, Math.min(UWHARD, Math.max(
-              Math.min(UWMAX, Math.round((content.length / 1000) * UFPK)),
-              estimateFactBearingSentences(content).factBearing))),
-            scope: metadata.scope, visibility: metadata.visibility,
-            primary_team_id: metadata.primary_team_id || null,
-            project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          }));
+          if (uc.length) {
+            let unifiedCursor = 0;
+            uWindows = uc.map((content) => {
+              const located = locatePromotionWindow(content, promotionSourceMap, unifiedCursor);
+              if (located) unifiedCursor = Math.max(located.startOffset + 1, located.endOffset - 250);
+              return {
+                segmentId: located?.segmentId || null,
+                content,
+                heading: located?.heading || null,
+                page: located?.page || null,
+                // Floor the ask at the window's MEASURED fact count, not just its length.
+                // Measured live: a 735-char doc with ~12 fact-bearing sentences across 3
+                // sections was assigned maxFacts=5 by the flat rate and the model returned
+                // exactly 5 — the other 7 facts existed in no layer. Over-asking is safe:
+                // unused grants refund into factBudget and the curator dedups downstream.
+                maxFacts: Math.max(1, Math.min(UWHARD, Math.max(
+                  Math.min(UWMAX, Math.round((content.length / 1000) * UFPK)),
+                  estimateFactBearingSentences(content).factBearing))),
+                scope: metadata.scope, visibility: metadata.visibility,
+                primary_team_id: metadata.primary_team_id || null,
+                project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+              };
+            });
+          }
         } catch { /* keep targets */ }
         const extractedCandidates = [];
         let wi = 0;
@@ -5797,7 +5873,7 @@ Every item must include a non-empty content field and one or more valid support_
           // document must still say WHAT it came from. Note the source is metadata.filename FIRST:
           // docTitle prefers metadata.documentTitle, which is a derived/LLM title, so the header
           // could read as something the user never named. The filename is what they uploaded.
-          if (claim?.f && String(process.env.KB_MEMORY_CONTEXT_PREFIX ?? 'true').toLowerCase() !== 'false') {
+          if (claim?.f && generationPolicy.sourceContextPrefix) {
             const _h = (claim.heading || '').toString().slice(0, 80);
             const _d = (metadata.filename || docTitle || '').toString().slice(0, 80);
             const _pfx = _d ? (`\u00ab${_d}${_h ? ' : ' + _h : ''}\u00bb `) : '';
@@ -5850,7 +5926,7 @@ Every item must include a non-empty content field and one or more valid support_
         // Grounding: both endpoints are already source_quote-verified memories; the
         // edge itself is validated by index + type allow-list. Derives is INFERRED —
         // metadata.inferred=true, confidence 0.6, never citable, never supersedes.
-        if (uFacts.length >= 2 && String(process.env.KB_DOC_RELATIONS ?? 'true').toLowerCase() !== 'false') {
+        if (uFacts.length >= 2 && generationPolicy.documentRelations) {
           try {
             const _relList = uFacts.map((m, idx) => `${idx}: ${String(m.content || '').slice(0, 200)}`).join('\n');
             // P5 explicit retry: the relations proposer is the one relationship
@@ -5921,8 +5997,8 @@ Every item must include a non-empty content field and one or more valid support_
         // status" x3, "B&B partnership" x2). Within-window NON-REDUNDANT can't
         // see across windows. Merge near-duplicates here → fewer, richer memories
         // (keep the most complete, union the dupes' tags into it, delete the rest).
-        // Runs BEFORE entity-linking so edges attach only to survivors. Default
-        // ON; KB_CONSOLIDATE=0 disables. Best-effort: on failure facts ship as-is.
+        // Runs BEFORE entity-linking so edges attach only to survivors. This is
+        // canonical behavior. Best-effort: on failure facts ship as-is.
         // Deterministic exact-duplicate pass BEFORE the LLM consolidator. An
         // identical claim should never need a model to notice it, and relying on
         // one meant real duplicates shipped: a 54-page deck stored "Home Energy
@@ -5949,7 +6025,7 @@ Every item must include a non-empty content field and one or more valid support_
               + `for doc ${String(documentId).slice(0, 8)} → ${uFacts.length} kept`);
           }
         }
-        if (uFacts.length >= 2 && String(process.env.KB_CONSOLIDATE || '1') !== '0') {
+        if (uFacts.length >= 2 && generationPolicy.consolidate) {
           try {
             const before = uFacts.length;
             const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
@@ -5961,21 +6037,9 @@ Every item must include a non-empty content field and one or more valid support_
           } catch (e) { this.logger.warn?.(`[kb-unified] consolidation failed (facts kept as-is): ${e.message}`); }
         }
         if (uFacts.length) {
-          // KB_ENTITY_LINK_MODE=algo → zero-LLM cross-doc edges from the entity:* tags the unified
-          // extractor already produced (one pool fetch + tag intersection).
-          // MODES (KB_ENTITY_LINK_MODE):
-          //   'llm'  (DEFAULT — graph-intelligence-first): full per-fact co-mention LLM (richest
-          //          edges — Mentions/Updates/Extends/Contradicts/Derives, best semantic recall)
-          //          PLUS the deterministic algo supersession sweep (guarantees numeric/negation
-          //          Updates the LLM might phrase-miss). Belt-and-suspenders = maximum graph quality.
-          //   'hybrid': algo edges + ONE batched LLM/doc for the gray-zone (cost-leaning).
-          //   'algo' : pure algorithmic, 0 LLM (cheapest, higher miss).
-          const configuredLinkMode = String(process.env.KB_ENTITY_LINK_MODE || 'hybrid');
-          // Per-fact LLM linking magnifies noisy extraction into noisy graph
-          // topology. Keep it only as an explicit diagnostic escape hatch.
-          const _linkMode = configuredLinkMode === 'llm' && process.env.KB_ALLOW_PER_FACT_LLM_LINKING !== 'true'
-            ? 'hybrid'
-            : configuredLinkMode;
+          // Canonical hybrid mode creates zero-LLM exact entity-tag edges, then
+          // one bounded document-level model pass for ambiguous gray-zone pairs.
+          const _linkMode = generationPolicy.entityLinkMode;
           if (_linkMode === 'algo' || _linkMode === 'hybrid') {
             this._algoLinkKbFacts(uFacts, { orgId, userId, documentId })
               .then((n) => this.logger.info?.(`[kb-unified] ${_linkMode} cross-doc linked ${uFacts.length} facts → ${n} edges`))

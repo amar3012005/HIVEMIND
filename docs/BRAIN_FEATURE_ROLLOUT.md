@@ -26,13 +26,15 @@ Flag: `knowledge_ingest_workflow_v1`
 1. Core asks the Workflow Worker to evaluate the tenant and user.
 2. The decision is persisted on the knowledge job as either
    `cloudflare_workflow` or `bullmq` before any dispatch.
-3. A selected Workflow job writes source bytes to R2 and sends only job
-   identifiers to Cloudflare Queue/Workflow. Core remains the canonical
+3. Core writes source bytes to its local durable spool. Cloudflare receives
+   only opaque job/version identifiers and coarse lifecycle state; no filename,
+   document bytes, extracted text, chunks, embeddings, prompts, or answers enter
+   Worker, Queue, Workflow, Durable Object state, or logs. Core remains the canonical
    extraction, chunking, embedding, evidence, memory, provenance, and
    settlement executor.
-4. If Flagship admission or R2 source persistence is unavailable **before**
-   Workflow start, Core changes the durable job to `bullmq` and uses the
-   existing local raw-file queue with the same job identity.
+4. If Flagship admission is unavailable **before** Workflow start, Core selects
+   `bullmq` with the same durable job identity. If the shared local source spool
+   is unavailable, admission fails before either orchestrator is dispatched.
 5. Once `/start` has been attempted, Core never switches to BullMQ: an
    ambiguous network timeout might already have started the Workflow.
 

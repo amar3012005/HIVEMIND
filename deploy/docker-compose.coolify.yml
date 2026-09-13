@@ -10,7 +10,6 @@ services:
     environment:
       - NODE_ENV=production
       - HIVEMIND_RUNTIME_ROLE=app
-      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - VERSION=20260519-002114
       - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
       - QDRANT_URL=https://your-cluster.qdrant.io:6333
@@ -35,7 +34,6 @@ services:
     environment:
       - NODE_ENV=production
       - HIVEMIND_RUNTIME_ROLE=maintenance
-      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - VERSION=20260519-002114
       - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
       - QDRANT_URL=https://your-cluster.qdrant.io:6333
@@ -53,7 +51,6 @@ services:
     environment:
       - NODE_ENV=production
       - HIVEMIND_RUNTIME_ROLE=sidecar
-      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - VERSION=20260519-002114
       - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
       - QDRANT_URL=https://your-cluster.qdrant.io:6333

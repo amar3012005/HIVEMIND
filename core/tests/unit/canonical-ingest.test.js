@@ -27,6 +27,18 @@ test('document ingestMode is independent from the legacy evidence record mode', 
   assert.match(invalid.error, /ingestMode/);
 });
 
+test('legacy ingest_mode selects evidence policy without corrupting document versus atomic routing', () => {
+  const both = legacyPayloadToEnvelope({ ...base, ingest_mode: 'both' });
+  assert.equal(both.ingestMode, 'both');
+  assert.equal(both.mode, undefined);
+  assert.deepEqual(validateEnvelope(both), { ok: true });
+
+  const evidence = legacyPayloadToEnvelope({ ...base, ingest_mode: 'evidence' });
+  assert.equal(evidence.ingestMode, 'evidence');
+  assert.equal(evidence.mode, undefined);
+  assert.deepEqual(validateEnvelope(evidence), { ok: true });
+});
+
 test('canonical provenance accepts snake-case external source ids', () => {
   const provenance = normalizeProvenance(base);
   assert.equal(provenance.sourceMetadata.source_id, 'source-1');

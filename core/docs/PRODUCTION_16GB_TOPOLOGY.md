@@ -70,7 +70,7 @@ Runtime settings:
 
 - `hm-core-app`: `HIVEMIND_RUNTIME_ROLE=app`
 - `hm-core-maintenance`: `HIVEMIND_RUNTIME_ROLE=maintenance`
-- both core roles: `HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true`
+- both core roles: durable upload admission is always enabled in code
 
 ### Node B — Heavy Workers
 
@@ -182,7 +182,7 @@ This branch introduced:
 
 - `HIVEMIND_RUNTIME_ROLE=app`
 - `HIVEMIND_RUNTIME_ROLE=maintenance`
-- `HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true`
+- durable upload admission is always enabled in code
 
 Use them in production.
 

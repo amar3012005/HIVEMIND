@@ -2,6 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { withPdfRenderSlot } from '../src/knowledge/enterprise/groq-vision-parser.js';
+import { GroqClient } from '../config/groq.js';
+
+test('a configured Cloudflare AI Gateway suppresses the direct Groq key warning', () => {
+  const previous = {
+    CLOUDFLARE_AI_GATEWAY_ENABLED: process.env.CLOUDFLARE_AI_GATEWAY_ENABLED,
+    CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_AI_GATEWAY_ID: process.env.CLOUDFLARE_AI_GATEWAY_ID,
+    CLOUDFLARE_AI_GATEWAY_TOKEN: process.env.CLOUDFLARE_AI_GATEWAY_TOKEN,
+  };
+  Object.assign(process.env, {
+    CLOUDFLARE_AI_GATEWAY_ENABLED: 'true',
+    CLOUDFLARE_ACCOUNT_ID: 'account',
+    CLOUDFLARE_AI_GATEWAY_ID: 'gateway',
+    CLOUDFLARE_AI_GATEWAY_TOKEN: 'token',
+  });
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    const client = new GroqClient({ apiKey: '' });
+    assert.equal(client.isAvailable(), false);
+    assert.deepEqual(warnings, []);
+  } finally {
+    console.warn = originalWarn;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test('PDF rendering uses a bounded pool while downstream work remains concurrent', async () => {
   let active = 0;

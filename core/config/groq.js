@@ -1,4 +1,4 @@
-import { gatewayFirstFetch } from '../src/llm/cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayFirstFetch } from '../src/llm/cloudflare-gateway.js';
 
 /**
  * Groq Cloud API Configuration
@@ -71,9 +71,13 @@ export class GroqClient {
   constructor(config = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     
-    // Validate API key
+    // Direct Groq is optional when this installation deliberately routes
+    // inference through Cloudflare AI Gateway. Keep this provider unavailable
+    // without its own credential, but do not report a platform-wide failure.
     if (!this.config.apiKey || this.config.apiKey === 'your-groq-api-key-here') {
-      console.warn('⚠️  Groq API key not configured. Embeddings and inference will fail.');
+      if (!cloudflareGatewayEnabled()) {
+        console.warn('⚠️  No direct Groq key or Cloudflare AI Gateway route is configured.');
+      }
     }
 
     // Usage tracking
@@ -94,7 +98,7 @@ export class GroqClient {
    * @returns {boolean}
    */
   isAvailable() {
-    return (
+    return Boolean(
       this.config.apiKey &&
       this.config.apiKey !== 'your-groq-api-key-here' &&
       this.config.apiKey.length > 10

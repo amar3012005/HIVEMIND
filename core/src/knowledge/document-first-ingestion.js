@@ -5100,7 +5100,11 @@ Every item must include a non-empty content field and one or more valid support_
    */
   async _parseDocument(fileBuffer, contentType, filename, opts = {}) {
     try {
-      if (this.doclingAdapter && process.env.DOCLING_URL) {
+      // `doclingAdapter` is the historical name of the complete local parser
+      // router assembled by server.js. The router remains valid when Docling
+      // itself is disabled because hm-extract and deterministic format tiers
+      // live behind the same interface.
+      if (this.doclingAdapter) {
         const doclingResult = await this.doclingAdapter.parseBuffer(fileBuffer, {
           filename,
           contentType,

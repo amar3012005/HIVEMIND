@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const schemaUrl = new URL('../../prisma/schema.prisma', import.meta.url);
 const migrationUrl = new URL('../../prisma/migrations/20260908150000_harness_chat_sessions/migration.sql', import.meta.url);
+const usageMigrationUrl = new URL('../../prisma/migrations/20260913143000_harness_chat_usage_projection/migration.sql', import.meta.url);
 const composeUrl = new URL('../../../infra/docker-compose.hetzner.yml', import.meta.url);
 
 test('Harness provider schema is additive, tenant scoped, and RLS enforced', async () => {
@@ -17,6 +18,17 @@ test('Harness provider schema is additive, tenant scoped, and RLS enforced', asy
   assert.match(migration, /current_setting\('app\.hivemind_org_id', true\)/);
   assert.match(migration, /current_setting\('app\.hivemind_user_id', true\)/);
   assert.match(migration, /UNIQUE INDEX IF NOT EXISTS "harness_session_leases_session_key"/);
+});
+
+test('native Harness usage projects idempotently into the existing content-free AI ledger', async () => {
+  const migration = await readFile(usageMigrationUrl, 'utf8');
+  assert.match(migration, /AFTER INSERT ON harness_session_events/);
+  assert.match(migration, /WHEN \(NEW\.event_type = 'assistant\/message'\)/);
+  assert.match(migration, /'harness:' \|\| md5\(p_session_id\) \|\| ':' \|\| p_sequence::text/);
+  assert.match(migration, /ON CONFLICT \(idempotency_key\) DO NOTHING/);
+  assert.match(migration, /p_payload #> '\{data,usage\}'/);
+  assert.match(migration, /'harness_chat'/);
+  assert.doesNotMatch(migration, /p_payload\s*#>{1,2}\s*'\{data,(?:message|content)/i);
 });
 
 test('canonical Compose uses the dedicated Harness image and existing Postgres and Redis', async () => {

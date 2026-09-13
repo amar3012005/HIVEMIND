@@ -205,23 +205,28 @@ export async function handleHarnessChatBootstrapRoute({
     }
   }
 
-  const evaluation = dedicatedNewSession
+  // A direct /new route chooses session semantics; it must never bypass the
+  // server-side rollout decision. With the flag off, the shell remains on the
+  // established legacy chat. With it enabled, the runner receives a native
+  // admission ticket and the client creates a fresh Harness session.
+  const evaluated = await evaluateHarnessChatFlag({
+    endpoint: env.HIVE_HARNESS_FLAG_URL || 'https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat',
+    secret: env.HIVE_HARNESS_EDGE_EVAL_SECRET,
+    orgId,
+    userId,
+    fetchImpl,
+    timeoutMs: Number(env.HIVE_HARNESS_FLAG_TIMEOUT_MS || 2000),
+  });
+  const evaluation = dedicatedNewSession && evaluated.mode !== 'legacy'
     ? {
+        ...evaluated,
         mode: 'harness',
         flagReceipt: {
-          key: 'hivemind_harness_chat_v1',
-          variation: 'harness',
+          ...evaluated.flagReceipt,
           source: 'dedicated-new-session-route',
         },
       }
-    : await evaluateHarnessChatFlag({
-        endpoint: env.HIVE_HARNESS_FLAG_URL || 'https://chat.singulancelabs.com/__hivemind/feature-flags/harness-chat',
-        secret: env.HIVE_HARNESS_EDGE_EVAL_SECRET,
-        orgId,
-        userId,
-        fetchImpl,
-        timeoutMs: Number(env.HIVE_HARNESS_FLAG_TIMEOUT_MS || 2000),
-      });
+    : evaluated;
   if (evaluation.mode === 'legacy') {
     jsonResponse(res, legacyResponse(env, evaluation.flagReceipt));
     return true;

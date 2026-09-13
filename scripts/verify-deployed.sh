@@ -12,9 +12,10 @@ esac; done
 [ -n "$SHA" ] && [ -n "$SERVICES" ] && [ -d "$SOURCE_ROOT" ] \
   || { echo "usage: $0 --sha FULL_SHA --services core,control-plane,employees --source-root PATH" >&2; exit 2; }
 
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
+declare -A CONTAINER=( [core]=hm-core [ingestion-worker]=hm-ingestion-worker [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
 declare -A LOCAL_FILE=(
   [core]="core/src/runtime-playbooks/stage-executor.js"
+  [ingestion-worker]="core/src/runtime-playbooks/stage-executor.js"
   [control-plane]="core/src/runtime-playbooks/stage-executor.js"
   [employees]="employees-service/src/hivemind_employees/api_hyper_rooms.py"
   [byod-broker]="byod/broker/server.mjs"
@@ -25,6 +26,7 @@ declare -A LOCAL_FILE=(
 )
 declare -A IMAGE_FILE=(
   [core]="/app/src/runtime-playbooks/stage-executor.js"
+  [ingestion-worker]="/app/src/runtime-playbooks/stage-executor.js"
   [control-plane]="/app/src/runtime-playbooks/stage-executor.js"
   [employees]="/app/src/hivemind_employees/api_hyper_rooms.py"
   [byod-broker]="/app/server.mjs"
@@ -71,7 +73,7 @@ for service in "${requested[@]}"; do
     image_hash=$(docker exec "$container" sh -lc "cat '${IMAGE_FILE[$service]}'" | hash_stream)
     [ "$local_hash" = "$image_hash" ] || { echo "FATAL: $service runtime source hash mismatch" >&2; exit 1; }
   fi
-  if [ "$service" = core ] || [ "$service" = control-plane ]; then
+  if [ "$service" = core ] || [ "$service" = ingestion-worker ] || [ "$service" = control-plane ]; then
     local_fixture_hash=$(fixture_hash_local)
     image_fixture_hash=$(fixture_hash_container "$container")
     [ "$local_fixture_hash" = "$image_fixture_hash" ] || { echo "FATAL: $service playbook fixture catalog mismatch" >&2; exit 1; }

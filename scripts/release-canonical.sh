@@ -50,10 +50,10 @@ COMPOSE_PROJECT_ARGS=()
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
-declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
+declare -A CONTAINER=( [core]=hm-core [ingestion-worker]=hm-ingestion-worker [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
+declare -A IMG=( [core]=core-api [ingestion-worker]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
 build_cmd() { local s="$1" tag="$2"; case "$s" in
-  core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
+  core|ingestion-worker) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
   control-plane) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=control-plane -t "$tag" -f Dockerfile.control-plane . ;;
   employees)     docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=employees -t "$tag" ./employees-service ;;
   byod-broker)   docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=byod-broker -t "$tag" ./byod/broker ;;
@@ -164,6 +164,7 @@ sed "s#env_file: \[../.env\]#env_file: [$ENVF]#g" "$REL/infra/docker-compose.het
 docker compose "${COMPOSE_PROJECT_ARGS[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
   && echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()
+declare -A BUILT_TAGS=()
 
 if [ "$DRY" = 1 ]; then
   "$PRESENCE" complete --session "$RELEASE_SESSION_ID" --result dry_run --summary "release validation passed; no deployment"
@@ -179,9 +180,14 @@ for s in "${SVCS[@]}"; do
   # rollback: retag the currently-live image of this service
   CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
   if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
-  echo "[build] $s → $TAG"
-  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "building:$s"
-  ( cd "$REL" && build_cmd "$s" "$TAG" ) >/dev/null
+  if [ -z "${BUILT_TAGS[$TAG]:-}" ]; then
+    echo "[build] $s → $TAG"
+    "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "building:$s"
+    ( cd "$REL" && build_cmd "$s" "$TAG" ) >/dev/null
+    BUILT_TAGS[$TAG]=1
+  else
+    echo "[build] $s reuses $TAG"
+  fi
   printf '  %s:\n    image: %s\n' "$s" "$TAG" >> "$OVERRIDE.tmp"
 done
 mv "$OVERRIDE.tmp" "$OVERRIDE"

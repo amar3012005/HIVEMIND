@@ -2002,6 +2002,7 @@ Output the JSON object and nothing else.`;
                   ],
                   project: Array.isArray(p.t.project_ids) ? p.t.project_ids[0] : null,
                   support_segment_ids: p.t.segmentId ? [p.t.segmentId] : [],
+                  extracted_entities: _entityPairs,
                 });
                 if (p.t.segmentId) evidenceLinks.push({ memoryId: p.factId, documentId,
                   segmentId: p.t.segmentId, linkType: 'supports', confidence: 1 });
@@ -3357,6 +3358,35 @@ Every item must include a non-empty content field and one or more valid support_
           }
         };
         await Promise.all(childIds.map(createPartOf));
+
+        // The document parent is a real persisted summary memory and must use
+        // the same canonical entity ground truth as its child facts. Inherit
+        // the structured candidates produced by the existing extraction pass;
+        // never pay for (or risk disagreement from) another entity-model call.
+        const parentEntities = (memories || []).flatMap((memory) => {
+          const direct = Array.isArray(memory?.extracted_entities) ? memory.extracted_entities : [];
+          const nested = Array.isArray(memory?.metadata?.extracted_entities)
+            ? memory.metadata.extracted_entities : [];
+          return [...direct, ...nested];
+        });
+        await this._persistCanonicalEntityResources({
+          organizationId: orgId,
+          resources: [{
+            resourceType: 'memory', resourceId: docParentId, memoryId: docParentId,
+            userId, scopeType: parentContext.scope || 'personal',
+            scopeId: parentContext.projectIds?.[0] || parentContext.teamId || null,
+            input: parentContent, entities: parentEntities,
+            provenance: { document_id: documentId, segment_ids: supportSegmentIds,
+              source_type: 'document_summary' },
+          }],
+          sourceMeta: {
+            filename: metadata.filename || docTitle || null,
+            documentId,
+            seenAt: parentContext.knownAt || new Date().toISOString(),
+          },
+          extractorRoute: 'document_parent_inherit',
+          modelRoute: null,
+        });
         memories.push({
           id: docParentId, user_id: userId, org_id: orgId,
           content: parentContent, title: parentTitle, memory_type: 'summary', tags: parentTags,

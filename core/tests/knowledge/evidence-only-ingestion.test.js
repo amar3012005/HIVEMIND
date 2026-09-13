@@ -75,6 +75,48 @@ test('evidence entity indexing uses deterministic extraction and settles segment
   assert.equal(written.resources[0].entities[0].kind, 'person');
 });
 
+test('document parent summaries inherit canonical entities and receive a zero-extra-model receipt', async () => {
+  let persisted = null;
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    memoryGraphEngine: {
+      ingestMemory: async ({ id }) => ({ memoryId: id }),
+      vectorStore: { storeMemory: async () => true },
+      applyValidatedRelationship: async () => ({}),
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._persistCanonicalEntityResources = async (input) => {
+    persisted = input;
+    return { linked: input.resources[0].entities.length };
+  };
+
+  const memories = [{
+    id: '66666666-6666-4666-8666-666666666666',
+    content: 'short',
+    extracted_entities: [
+      { name: 'Solvis GmbH', kind: 'organization' },
+      { name: 'Project Aurora', kind: 'project' },
+    ],
+  }];
+  const parentId = await service._attachDocumentParent({
+    memories,
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    documentId: '33333333-3333-4333-8333-333333333333',
+    metadata: { filename: 'pilot.txt', scope: 'personal' },
+    totalFacts: 1,
+  });
+
+  assert.ok(parentId);
+  assert.equal(persisted.extractorRoute, 'document_parent_inherit');
+  assert.equal(persisted.modelRoute, null);
+  assert.equal(persisted.resources[0].resourceType, 'memory');
+  assert.equal(persisted.resources[0].resourceId, parentId);
+  assert.deepEqual(persisted.resources[0].entities, memories[0].extracted_entities);
+  assert.equal(memories.at(-1).memory_type, 'summary');
+});
+
 test('legacy generation env flags cannot fork the canonical memory and entity pipeline', () => {
   const previous = {
     extract: process.env.KB_UNIFIED_EXTRACT,

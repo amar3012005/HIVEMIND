@@ -45,3 +45,25 @@ test('agent-backed memories expose only authorized entity tags and revalidate is
   const selected = await resolveAuthorizedEntityIds({ ...scope, entityIds: ['tag:uwe-berger'] });
   assert.deepEqual(selected.entities, [{ id: 'tag:uwe-berger', canonicalName: 'Uwe Berger' }]);
 });
+
+test('canonical entity resolution never expands an explicit selection to all tenant tags', async () => {
+  const prisma = {
+    entity: { findMany: async () => [{
+      id: 'canonical-uwe', canonicalName: 'Uwe Berger', entityType: 'person',
+      aliases: [], mentionCount: 1, lastSeenAt: '2026-09-12T00:00:00Z',
+    }] },
+    canonicalEntity: { findMany: async () => [] },
+    memoryEntityLink: { findMany: async () => [] },
+    memory: { findMany: async () => [] },
+  };
+  const memoryStore = {
+    listMemories: async () => ({ memories: [
+      { id: 'uwe', created_at: '2026-09-12T00:00:00Z', tags: ['entity:uwe-berger'] },
+      { id: 'other', created_at: '2026-09-11T00:00:00Z', tags: ['entity:uwe-bross'] },
+    ] }),
+  };
+  const selected = await resolveAuthorizedEntityIds({
+    prisma, memoryStore, orgId: 'org', userId: 'user', entityIds: ['canonical-uwe'], accessContext: {},
+  });
+  assert.deepEqual(selected.entities, [{ id: 'canonical-uwe', canonicalName: 'Uwe Berger' }]);
+});

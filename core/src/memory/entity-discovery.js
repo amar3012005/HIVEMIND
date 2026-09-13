@@ -263,7 +263,13 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
       onlyTagIds
         ? Promise.resolve([])
         : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: registryIds, entityTypes: types }),
-      authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, tagSlugs, entityTypes: types }),
+      // Discovery without an ID may enumerate tag-backed entities. Resolution
+      // of a canonical/legacy ID must not: passing an empty tag-slug list used
+      // to append every tenant tag as an additional selected entity, silently
+      // turning a two-entity `must` request into an impossible predicate.
+      (tagSlugs.length || ids.length === 0)
+        ? authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, tagSlugs, entityTypes: types })
+        : Promise.resolve([]),
     ]);
     return { rows: dedupeRows([...legacyRows, ...canonicalRows, ...(tagRows || [])]), degraded: null };
   } catch {

@@ -51,6 +51,11 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
         links.push(create); return create;
       },
       findFirst: async () => null,
+      deleteMany: async ({ where }) => {
+        const retained = links.filter((row) => !(row.memoryId === where.memoryId
+          && (!where.entityId?.notIn || where.entityId.notIn.includes(row.entityId) === false)));
+        links.splice(0, links.length, ...retained);
+      },
     },
     resourceEntityLink: {
       upsert: async ({ create, update }) => {
@@ -58,6 +63,15 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
           && row.linkKey === create.linkKey);
         if (existingLink) { Object.assign(existingLink, update); return existingLink; }
         resourceLinks.push(create); return create;
+      },
+      deleteMany: async ({ where }) => {
+        const retained = resourceLinks.filter((row) => !(
+          row.organizationId === where.organizationId
+          && row.resourceType === where.resourceType
+          && row.resourceId === where.resourceId
+          && (!where.linkKey?.notIn || where.linkKey.notIn.includes(row.linkKey) === false)
+        ));
+        resourceLinks.splice(0, resourceLinks.length, ...retained);
       },
     },
     entityReviewCandidate: {
@@ -160,6 +174,43 @@ test('tag and typed occurrences converge to one canonical link for a memory', as
   assert.equal(out.linked, 2, 'both occurrences were processed idempotently');
   assert.equal(prisma.resourceLinks.length, 1, 'one memory/entity/role link is authoritative');
   assert.equal(prisma.links.length, 1, 'compatibility projection is also idempotent');
+});
+
+test('authoritative replacement removes stale resource and compatibility links', async () => {
+  const prisma = makePrisma();
+  await persistCanonicalLinks({
+    prisma, organizationId: ORG, replaceExisting: true,
+    items: [{ resourceType: 'memory', resourceId: 'm1', entities: ['decision.md', 'Should Singulance'] }],
+  });
+  assert.equal(prisma.resourceLinks.length, 2);
+  assert.equal(prisma.links.length, 2);
+
+  await persistCanonicalLinks({
+    prisma, organizationId: ORG, replaceExisting: true,
+    items: [{ resourceType: 'memory', resourceId: 'm1', entities: ['Singulance'] }],
+  });
+
+  assert.deepEqual(prisma.resourceLinks.map((row) => row.entityId), [
+    prisma.entities.find((entity) => entity.canonicalName === 'Singulance').id,
+  ]);
+  assert.deepEqual(prisma.links.map((row) => row.entityId), [
+    prisma.entities.find((entity) => entity.canonicalName === 'Singulance').id,
+  ]);
+});
+
+test('authoritative empty extraction clears every prior entity link', async () => {
+  const prisma = makePrisma();
+  await persistCanonicalLinks({
+    prisma, organizationId: ORG, replaceExisting: true,
+    items: [{ resourceType: 'document', resourceId: 'd1', entities: ['decision.md'] }],
+  });
+  assert.equal(prisma.resourceLinks.length, 1);
+
+  await persistCanonicalLinks({
+    prisma, organizationId: ORG, replaceExisting: true,
+    items: [{ resourceType: 'document', resourceId: 'd1', entities: [] }],
+  });
+  assert.equal(prisma.resourceLinks.length, 0);
 });
 
 test('legacy memory-only callers hydrate tenant scope and never default to organization visibility', async () => {

@@ -76,6 +76,7 @@ export function normalizeEntityKind(kind) {
  * @param {Array<{memoryId?: string, resourceType?: 'memory'|'document'|'segment', resourceId?: string,
  *   userId?: string, scopeType?: string, scopeId?: string, entities: Array<string|object>}>} opts.items
  * @param {string} [opts.entityKind]    kind namespace for extractor names
+ * @param {boolean} [opts.replaceExisting] Replace prior links for each supplied resource
  * @param {object} [opts.logger]
  * @returns {Promise<{linked:number, created:number, review:number, skipped:number}>}
  */
@@ -88,6 +89,7 @@ export async function persistCanonicalLinks({
   // can always answer "which document did this come from, and when did we first see it". Passed in
   // rather than derived here because only the ingestion path knows the upload's real filename.
   sourceMeta = null,   // { filename, documentId, seenAt }
+  replaceExisting = false,
   logger = console,
 } = {}) {
   const out = { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0, writeFailed: 0 };
@@ -156,10 +158,17 @@ export async function persistCanonicalLinks({
     // Occurrence metadata belongs on ResourceEntityLink, never in a capped
     // source-history array on the entity itself.
     const bySlug = new Map();
+    const resourceTargets = new Map();
+    const expectedLinkKeys = new Map();
+    const expectedEntityIds = new Map();
     for (const item of items) {
       const resourceType = item?.resourceType || (item?.memoryId ? 'memory' : null);
       const resourceId = item?.resourceId || item?.memoryId || null;
       if (!['memory', 'document', 'segment'].includes(resourceType) || !resourceId || !Array.isArray(item.entities)) continue;
+      const resourceKey = `${resourceType}:${resourceId}`;
+      resourceTargets.set(resourceKey, { resourceType, resourceId });
+      expectedLinkKeys.set(resourceKey, new Set());
+      expectedEntityIds.set(resourceKey, new Set());
       const memoryContext = resourceType === 'memory' ? memoryContextById.get(resourceId) : null;
       for (const rawItem of item.entities.slice(0, MAX_ENTITIES_PER_RESOURCE)) {
         // PER-ENTITY KIND. `entityKind` was one namespace for the WHOLE call, so every row the
@@ -347,6 +356,9 @@ export async function persistCanonicalLinks({
                   provenance: resource.provenance || {}, knownAt: new Date(resource.knownAt), linkKey,
                 },
               });
+              const resourceKey = `${resource.resourceType}:${resource.resourceId}`;
+              expectedLinkKeys.get(resourceKey)?.add(linkKey);
+              expectedEntityIds.get(resourceKey)?.add(entityId);
             }
             // Temporary compatibility projection for existing recall readers.
             if (memoryId && prisma.memoryEntityLink) {
@@ -429,6 +441,44 @@ export async function persistCanonicalLinks({
         existingBySlug.set(`${entry.kind || entityKind}::${slug}`, r.entityId); // later names in this batch reuse it
       }
       await linkAll(r.entityId, entry.resources, r.confidence ?? 1.0, slug);
+    }
+
+    // An extraction result is a complete projection for its resource, not an
+    // append-only event. On a retry/reprocess, stale links must disappear or a
+    // rejected filename/person false-positive remains searchable forever even
+    // after the extractor is fixed. Only canonical ingestion opts into this;
+    // partial/legacy callers retain additive behavior. Prune after all new
+    // links have landed and only when the batch had no write failure.
+    if (replaceExisting && !remote && out.writeFailed === 0 && out.projectionFailed === 0) {
+      const reconcile = async (client) => {
+        for (const [resourceKey, target] of resourceTargets) {
+          const linkKeys = [...(expectedLinkKeys.get(resourceKey) || [])];
+          await client.resourceEntityLink.deleteMany({
+            where: {
+              organizationId,
+              resourceType: target.resourceType,
+              resourceId: target.resourceId,
+              ...(linkKeys.length ? { linkKey: { notIn: linkKeys } } : {}),
+            },
+          });
+          if (target.resourceType === 'memory' && client.memoryEntityLink) {
+            const entityIds = [...(expectedEntityIds.get(resourceKey) || [])];
+            await client.memoryEntityLink.deleteMany({
+              where: {
+                memoryId: target.resourceId,
+                ...(entityIds.length ? { entityId: { notIn: entityIds } } : {}),
+              },
+            });
+          }
+        }
+      };
+      try {
+        if (typeof prisma.$transaction === 'function') await prisma.$transaction(reconcile);
+        else await reconcile(prisma);
+      } catch (error) {
+        out.writeFailed += 1;
+        logger.warn?.(`[canonical-entities] stale projection cleanup failed: ${error.message}`);
+      }
     }
 
     if (out.linked || out.created || out.review) {

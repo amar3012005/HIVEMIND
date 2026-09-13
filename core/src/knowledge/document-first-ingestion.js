@@ -1446,7 +1446,8 @@ export class DocumentFirstIngestionService {
     }
     const canonicalResources = [...grouped.values()];
     const projection = await persistCanonicalLinks({
-      prisma: this.db, organizationId, items: canonicalResources, sourceMeta, logger: this.logger,
+      prisma: this.db, organizationId, items: canonicalResources, sourceMeta,
+      replaceExisting: true, logger: this.logger,
     });
     await this._recordEntityReceipts({
       organizationId, resources: canonicalResources, extractorRoute, modelRoute, processingVersion, projection,

@@ -42,7 +42,45 @@ test('legacy ingest_mode selects evidence policy without corrupting document ver
 test('canonical provenance accepts snake-case external source ids', () => {
   const provenance = normalizeProvenance(base);
   assert.equal(provenance.sourceMetadata.source_id, 'source-1');
+  assert.equal(provenance.sourceMetadata.source_external_id, 'source-1');
+  assert.equal(provenance.sourceMetadata.source_version, '1');
+  assert.equal(provenance.sourceMetadata.uploader_user_id, 'user-1');
+  assert.equal(provenance.sourceMetadata.organization_id, 'org-1');
+  assert.match(provenance.sourceMetadata.content_checksum, /^[a-f0-9]{64}$/);
   assert.ok(provenance.provenanceTags.includes('source-id:source-1'));
+});
+
+test('canonical provenance captures immutable revision, scope, consent and extraction policy', () => {
+  const provenance = normalizeProvenance({
+    ...base,
+    knownAt: '2026-09-13T10:00:00Z',
+    occurredAt: '2026-09-12T09:00:00Z',
+    scope: 'project', projectId: 'project-1',
+    ingestMode: 'evidence',
+    consent: { lawful_basis: 'contract', receipt_id: 'consent-1' },
+    source: { type: 'connector', provider: 'gmail', sourceId: 'message-1', version: 'rev-4', checksum: 'abc123' },
+  });
+  assert.equal(provenance.sourceMetadata.source_version, 'rev-4');
+  assert.equal(provenance.sourceMetadata.content_checksum, 'abc123');
+  assert.equal(provenance.sourceMetadata.known_at, '2026-09-13T10:00:00.000Z');
+  assert.equal(provenance.sourceMetadata.event_time, '2026-09-12T09:00:00.000Z');
+  assert.equal(provenance.sourceMetadata.scope, 'project');
+  assert.equal(provenance.sourceMetadata.project_id, 'project-1');
+  assert.equal(provenance.sourceMetadata.consent.receipt_id, 'consent-1');
+  assert.equal(provenance.sourceMetadata.extraction_policy.model_calls, 'forbidden');
+});
+
+test('explicit evidence routing records a zero-model extraction policy', () => {
+  const provenance = normalizeProvenance({ ...base, mode: 'evidence' });
+  assert.equal(provenance.sourceMetadata.extraction_policy.ingest_mode, 'evidence');
+  assert.equal(provenance.sourceMetadata.extraction_policy.model_calls, 'forbidden');
+});
+
+test('missing upstream source identity is stable across retries', () => {
+  const first = normalizeProvenance({ ...base, source: { type: 'api' } });
+  const second = normalizeProvenance({ ...base, source: { type: 'api' } });
+  assert.equal(first.sourceId, second.sourceId);
+  assert.equal(first.sourceId, first.contentChecksum);
 });
 
 test('canonical mode keeps explicit mode authoritative', () => {
@@ -111,6 +149,7 @@ test('every source type shares the same provenance and mode contract', () => {
         type,
         ...(type === 'connector' ? { provider: 'gmail' } : {}),
         sourceId: `${type}-source-1`,
+        version: 'revision-1',
         title: `${type} source`,
       },
     };
@@ -120,6 +159,7 @@ test('every source type shares the same provenance and mode contract', () => {
     assert.equal(provenance.sourcePlatform, expectedPlatform, type);
     assert.equal(provenance.sourceMetadata.ingest_source, type, type);
     assert.equal(provenance.sourceMetadata.source_id, `${type}-source-1`, type);
+    assert.equal(provenance.sourceMetadata.source_version, 'revision-1', type);
     assert.ok(provenance.provenanceTags.includes(`source:${type}`), type);
     assert.equal(detectMode(envelope), expectedMode, type);
   }

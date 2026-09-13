@@ -232,6 +232,18 @@ test('image jobs use authoritative mediaKind and settle one canonical memory wit
   );
 });
 
+test('evidence-mode image jobs fail before any vision or model work', async () => {
+  const { executor, events, job } = fixture({ image: true });
+  job.ingestMode = 'evidence';
+  job.metadata.ingest_mode = 'evidence';
+  await assert.rejects(
+    executor.execute({ jobId: ids.job, processingVersion: 3, stage: 'materialize' }),
+    (error) => error.code === 'OCR_REQUIRED' && error.retryable === false,
+  );
+  assert.equal(events.some(([kind]) => kind === 'read'), false);
+  assert.equal(events.some(([kind]) => kind === 'image-metadata'), false);
+});
+
 test('evidence mode records zero model calls at every completed stage', async () => {
   const { executor, steps, job } = fixture();
   job.ingestMode = 'evidence';

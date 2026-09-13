@@ -45,21 +45,21 @@ class FakeSlackAdapter {
   async fetchResource() { return { id: 'res-1', title: 'Hi', body: 'body', ts: null, refs: {} }; }
 }
 
-function makeProcessor({ rows, sub, adapterClass = FakeSlackAdapter, smartIngestRouter } = {}) {
+function makeProcessor({ rows, sub, adapterClass = FakeSlackAdapter, documentFirstIngestion } = {}) {
   const registry = new AdapterRegistry();
   registry.register('slack', adapterClass);
 
   const defaultSub = sub ?? { id: 'sub-1', providerKey: 'slack', userId: 'u1', orgId: 'o1', consecutiveFailures: 0 };
   const prisma = makePrisma({ rows: rows ?? [makeRow()], sub: defaultSub });
 
-  const router = smartIngestRouter ?? { route: async () => {} };
+  const dfi = documentFirstIngestion ?? { ingestSource: async () => ({ ok: true }) };
   const logger = { info() {}, warn() {}, error() {} };
 
   const processor = new WebhookProcessor({
     prisma,
     adapterRegistry: registry,
     tokenResolver: async () => 'tok',
-    smartIngestRouter: router,
+    documentFirstIngestion: dfi,
     logger,
     intervalMs: 5000,
   });
@@ -98,14 +98,25 @@ describe('WebhookProcessor.tickOnce — success path', () => {
     assert.equal(prisma._store.subs['sub-1'].consecutiveFailures, 0);
   });
 
-  it('calls smartIngestRouter.route with userId, orgId, resource, type', async () => {
+  it('submits webhook resources through the canonical envelope', async () => {
     const calls = [];
-    const router = { route: async (args) => { calls.push(args); } };
-    const { processor } = makeProcessor({ smartIngestRouter: router });
+    const dfi = { ingestSource: async (args) => { calls.push(args); return { ok: true }; } };
+    const { processor } = makeProcessor({ documentFirstIngestion: dfi });
     await processor.tickOnce();
     assert.equal(calls.length, 1);
     assert.equal(calls[0].userId, 'u1');
     assert.equal(calls[0].orgId, 'o1');
+    assert.equal(calls[0].content, 'body');
+    assert.equal(calls[0].source.sourceId, 'res-1');
+    assert.equal(calls[0].source.type, 'connector');
+  });
+
+  it('fails visibly when the canonical ingestion gateway is unavailable', async () => {
+    const { processor, prisma } = makeProcessor({ documentFirstIngestion: null });
+    processor._dfiGetter = () => null;
+    await processor.tickOnce();
+    assert.equal(prisma._store.events['evt-1'].status, 'failed');
+    assert.match(prisma._store.events['evt-1'].error, /canonical ingestion unavailable/);
   });
 });
 

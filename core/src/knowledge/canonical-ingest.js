@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 /**
  * Canonical Ingest Envelope — the single front door for memory creation.
  *
@@ -68,6 +70,8 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {string} [platform]   provider/system label (e.g. 'gmail', 'knowledge_base'); defaults per type
  * @property {string} [provider]   connector provider key (gmail/slack/...) — folds into platform as connector:<provider>
  * @property {string} [sourceId]   stable external id (message id, doc id, meeting id)
+ * @property {string} [version]    immutable upstream revision/version; defaults to 1
+ * @property {string} [checksum]   upstream checksum when already known
  * @property {string} [url]        canonical source URL
  * @property {string} [title]      human title of the source item
  * @property {string} [filename]   filename when the payload is a file
@@ -90,6 +94,9 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {IngestFile} [file]           raw file (document mode; parsed by docling/OCR/STT)
  * @property {IngestSource} source
  * @property {(string|Date)} [occurredAt]  event date (NOT ingest time) → document_date / valid_from
+ * @property {(string|Date)} [knownAt]     when HIVEMIND learned this source; defaults to now
+ * @property {Object} [consent]            source-specific consent/lawful-basis receipt
+ * @property {Object} [extractionPolicy]   parser/model permissions captured at admission
  * @property {('personal'|'organization'|'project'|'team')} [scope]
  * @property {string} [projectId]
  * @property {string} [primaryTeamId]
@@ -169,7 +176,21 @@ export function resolvePlatform(source) {
 export function normalizeProvenance(env) {
   const source = env.source || {};
   const platform = resolvePlatform(source);
-  const sourceId = source.sourceId || source.source_id || source.filename || null;
+  const suppliedSourceId = source.sourceId || source.source_id || source.immutableId || null;
+  const contentChecksum = source.checksum || env.metadata?.content_checksum || (() => {
+    if (env.file?.buffer && Buffer.isBuffer(env.file.buffer)) {
+      return crypto.createHash('sha256').update(env.file.buffer).digest('hex');
+    }
+    if (typeof env.content === 'string' && env.content.length) {
+      return crypto.createHash('sha256').update(env.content).digest('hex');
+    }
+    return null;
+  })();
+  // Missing upstream IDs use a content digest, never wall-clock time, so retry
+  // and connector replay preserve the same source identity.
+  const sourceId = suppliedSourceId || source.filename || contentChecksum || null;
+  const sourceVersion = String(source.version || source.source_version
+    || source.metadata?.source_version || env.metadata?.source_version || '1').slice(0, 100);
   const sourceUrl = source.url || null;
   const title = env.title || source.title || source.filename || null;
 
@@ -186,7 +207,7 @@ export function normalizeProvenance(env) {
   // and — appended by the caller — the content body. Idempotent: an existing
   // recorded_at (re-ingest / dedup) is preserved so the timestamp and its
   // ts: tag never drift or stack on re-processing.
-  const existingRecordedAt = source.metadata?.recorded_at;
+  const existingRecordedAt = env.knownAt || source.metadata?.known_at || source.metadata?.recorded_at;
   const recordedAtDate = existingRecordedAt && !Number.isNaN(new Date(existingRecordedAt).getTime())
     ? new Date(existingRecordedAt)
     : new Date();
@@ -198,8 +219,26 @@ export function normalizeProvenance(env) {
     source_platform: platform,
     source_type: source.type,
     source_id: sourceId,
+    source_external_id: sourceId,
+    source_version: sourceVersion,
+    content_checksum: contentChecksum,
     source_url: sourceUrl,
     ingest_source: source.type,
+    provider: source.provider || source.metadata?.provider || null,
+    source_filename: source.filename || env.file?.filename || null,
+    source_title: title,
+    uploader_user_id: env.userId,
+    organization_id: env.orgId,
+    scope: env.scope || null,
+    project_id: env.projectId || null,
+    primary_team_id: env.primaryTeamId || null,
+    event_time: documentDate ? documentDate.toISOString() : null,
+    known_at: recordedAtIso,
+    consent: env.consent || env.metadata?.consent || source.metadata?.consent || null,
+    extraction_policy: env.extractionPolicy || env.metadata?.extraction_policy || {
+      ingest_mode: env.mode === 'evidence' || env.ingestMode === 'evidence' ? 'evidence' : 'both',
+      model_calls: env.mode === 'evidence' || env.ingestMode === 'evidence' ? 'forbidden' : 'allowed',
+    },
     recorded_at: recordedAtIso,
   };
 
@@ -214,7 +253,10 @@ export function normalizeProvenance(env) {
   if (sourceId) provenanceTags.push(`source-id:${slug(sourceId)}`);
   if (source.filename) provenanceTags.push(`filename:${source.filename}`);
 
-  return { sourcePlatform: platform, sourceMetadata, documentDate, provenanceTags, title, recordedAtIso };
+  return {
+    sourcePlatform: platform, sourceMetadata, documentDate, provenanceTags, title, recordedAtIso,
+    sourceId, sourceVersion, contentChecksum,
+  };
 }
 
 /**
@@ -279,6 +321,10 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
     content: payload.content,
     title: payload.title,
     occurredAt: payload.document_date || payload.documentDate || payload.event_time || undefined,
+    knownAt: payload.known_at || payload.knownAt || sourceMetadata.known_at || sourceMetadata.recorded_at || undefined,
+    consent: payload.consent || payload.metadata?.consent || sourceMetadata.consent || undefined,
+    extractionPolicy: payload.extraction_policy || payload.extractionPolicy
+      || payload.metadata?.extraction_policy || sourceMetadata.extraction_policy || undefined,
     scope: payload.scope || payload.target_scope || undefined,
     projectId: payload.project_id || projectIds[0] || undefined,
     primaryTeamId: payload.primary_team_id || payload.primaryTeamId || undefined,
@@ -316,6 +362,8 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
       platform,
       provider: overrides.provider || sourceMetadata.provider || undefined,
       sourceId: sourceMetadata.source_id || payload.source_id || undefined,
+      version: sourceMetadata.source_version || payload.source_version || undefined,
+      checksum: sourceMetadata.content_checksum || payload.content_checksum || undefined,
       url: sourceMetadata.source_url || payload.source_url || undefined,
       title: payload.title,
       filename: sourceMetadata.filename || payload.filename || undefined,

@@ -67,6 +67,7 @@ test('canonical ingestion cannot be disabled by legacy environment flags', () =>
     assert.doesNotMatch(text, /ENABLE_DOCUMENT_FIRST_INGEST/, `${file} still has the legacy pipeline switch`);
     assert.doesNotMatch(text, /ENABLE_ENTITY_EXTRACTION/, `${file} still has the legacy entity switch`);
     assert.doesNotMatch(text, /KNOWLEDGE_INGEST_WORKFLOW_ENABLED/, `${file} still has the split-brain Workflow switch`);
+    assert.doesNotMatch(text, /V5_MEMORIES_CANONICAL/, `${file} still has the legacy canonical-write switch`);
   }
 });
 

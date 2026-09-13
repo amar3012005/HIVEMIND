@@ -3641,6 +3641,9 @@ Every item must include a non-empty content field and one or more valid support_
     const forceReprocess = metadata.force_reprocess === true;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    const sourcePlatform = String(metadata.source_platform || 'knowledge_upload');
+    const sourceExternalId = String(metadata.source_external_id || metadata.source_id || filename);
+    const sourceVersion = String(metadata.source_version || '1').slice(0, 100);
     // TRUE unit count, read straight from the container (slides / sheets / PDF
     // pages) by the SAME function the pre-admit quota check uses, so what we admit
     // and what we bill cannot drift apart. null = genuinely unknowable for this
@@ -3656,15 +3659,15 @@ Every item must include a non-empty content field and one or more valid support_
             userId,
             orgId,
             checksum,
-            sourcePlatform: 'knowledge_upload'
+            sourcePlatform
           }
         },
         create: {
           userId,
           orgId,
           artifactType: 'upload',
-          sourcePlatform: 'knowledge_upload',
-          sourceId: filename,
+          sourcePlatform,
+          sourceId: sourceExternalId,
           contentType,
           sizeBytes: BigInt(fileBuffer.length),
           checksum,
@@ -3790,7 +3793,7 @@ Every item must include a non-empty content field and one or more valid support_
         : (metadata.scope === 'organization')
           ? `org:${orgId}`
           : `personal:${userId}`;
-    const _scopedSourceId = `${filename}#${checksum.slice(0, 12)}#${_scopeKey}`;
+    const _scopedSourceId = `${sourceExternalId}#${checksum.slice(0, 12)}#${_scopeKey}`;
     // scope-key tag enables the upload route's per-scope dedup query without
     // any schema change — gin-indexed tags[] is already there.
     const _scopeTag = `scope-key:${_scopeKey}`;
@@ -3802,7 +3805,7 @@ Every item must include a non-empty content field and one or more valid support_
     // VERSION. Same bytes + same scope re-upload → identical key → the partial
     // UNIQUE (org_id, canonical_ingest_key) collapses to one document row.
     const _canonicalIngestKey = crypto.createHash('sha256')
-      .update([orgId, 'knowledge_base', 'knowledge_upload', _scopedSourceId, '1', checksum].join('\u0000'))
+      .update([orgId, metadata.ingest_source || 'kb', sourcePlatform, _scopedSourceId, sourceVersion, checksum].join('\u0000'))
       .digest('hex').slice(0, 64);
 
     // SKIP-UNCHANGED (dirty-tracking): identical bytes + same scope ALREADY parsed + distilled →
@@ -3892,9 +3895,9 @@ Every item must include a non-empty content field and one or more valid support_
         sourceArtifactId: sourceArtifact.id,
         documentType,
         title: filename,
-        sourcePlatform: 'knowledge_upload',
+        sourcePlatform,
         sourceId: _scopedSourceId,
-        documentDate: new Date().toISOString(),
+        documentDate: metadata.document_date || new Date().toISOString(),
         wordCount: parseResult.wordCount,
         parseStatus: parseResult.success ? 'parsed' : 'failed',
         parseEngine: parseResult.engine,
@@ -3919,7 +3922,7 @@ Every item must include a non-empty content field and one or more valid support_
           userId_orgId_sourcePlatform_sourceId: {
             userId,
             orgId,
-            sourcePlatform: 'knowledge_upload',
+            sourcePlatform,
             sourceId: _scopedSourceId,
           }
         },
@@ -3930,9 +3933,9 @@ Every item must include a non-empty content field and one or more valid support_
           sourceArtifactId: sourceArtifact.id,
           documentType,
           title: filename,
-          sourcePlatform: 'knowledge_upload',
+          sourcePlatform,
           sourceId: _scopedSourceId,
-          documentDate: new Date(),
+          documentDate: metadata.document_date ? new Date(metadata.document_date) : new Date(),
           wordCount: parseResult.wordCount,
           parseStatus: parseResult.success ? 'parsed' : 'failed',
           parseEngine: parseResult.engine,
@@ -3941,8 +3944,8 @@ Every item must include a non-empty content field and one or more valid support_
           tags: _docTags,
           // Canonical V5 identity
           canonicalIngestKey: _canonicalIngestKey,
-          sourceExternalId: _scopedSourceId,
-          sourceVersion: '1',
+          sourceExternalId,
+          sourceVersion,
           contentHash: checksum,
           processingVersion: 1,
         },
@@ -3958,7 +3961,8 @@ Every item must include a non-empty content field and one or more valid support_
           }),
           // Backfill canonical identity on legacy rows (idempotent).
           canonicalIngestKey: _canonicalIngestKey,
-          sourceExternalId: _scopedSourceId,
+          sourceExternalId,
+          sourceVersion,
           contentHash: checksum,
           tags: _docTags,
         }
@@ -4741,9 +4745,13 @@ Every item must include a non-empty content field and one or more valid support_
       // every distilled fact (source_metadata + filename/doc-id tags).
       const docMeta = {
         ...(envelope.metadata || {}),
+        source_metadata: prov.sourceMetadata,
         ingest_mode: ingestMode,
         source_platform: prov.sourcePlatform,
         source_id: prov.sourceMetadata.source_id,
+        source_external_id: prov.sourceId,
+        source_version: prov.sourceVersion,
+        content_checksum: prov.contentChecksum,
         source_url: prov.sourceMetadata.source_url,
         ingest_source: sourceType,
         document_date: prov.documentDate ? prov.documentDate.toISOString() : null,

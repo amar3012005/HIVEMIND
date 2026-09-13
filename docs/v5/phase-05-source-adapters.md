@@ -48,7 +48,7 @@ corroboration change already caused a data-loss near-miss this session).
 - 5B /api/memories (highest-traffic write): routed through ingestCanonicalPayload
   (envelope) via ingestRoutedPayloadCanonical — provenance tags + claim identity on
   rows VERIFIED, response shape byte-compatible, zero fallbacks. Trees keep engine path.
-  Flag V5_MEMORIES_CANONICAL.
+  This route is now unconditionally canonical; the migration flag was retired.
 - 5C Tara voice: all 4 raw store.createMemory sites (transcript/call-log/outreach/
   session-summary) → canonical EVIDENCE mode (one row, no fact-splitting). saved.id
   shape preserved for PartOf edges. Loud fallback during migration.

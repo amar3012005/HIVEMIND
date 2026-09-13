@@ -3262,26 +3262,23 @@ async function ingestRoutedPayload(routedPayload, engine) {
 // retrying through the legacy writer after a remote Memory Box has acknowledged a
 // partial operation can create duplicate memories and split graph semantics.
 async function ingestRoutedPayloadCanonical(routedPayload, engine) {
-  const v5 = (process.env.V5_MEMORIES_CANONICAL || 'true').toLowerCase() !== 'false';
-  if (!v5 || routedPayload?.__ingest_tree) return ingestRoutedPayload(routedPayload, engine);
+  // Structured trees are the one representation ingestSource does not accept;
+  // every ordinary memory is unconditionally canonical. There is no rollout
+  // env switch and no second writer to drift from this path.
+  if (routedPayload?.__ingest_tree) return ingestRoutedPayload(routedPayload, engine);
   const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
   if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
   return { ...r, operation: r.operation || 'created' };
 }
 
-// V5 Phase 5C — Tara voice saves via the canonical envelope (evidence mode:
-// ONE row, no fact-splitting — transcripts/logs are deliberate raw evidence).
-// Adds provenance + claim identity + the engine chokepoint; loud fallback to the
-// raw store write during migration (removed in the Phase 11 sweep).
+// TARA-derived summaries/learnings are deliberate single memories. They enter
+// the same atomic canonical gateway as MCP/chat/API saves; transcript evidence
+// uses the document/evidence path separately. Failure is surfaced and retried by
+// the owning lifecycle — never duplicated through a raw-store fallback.
 async function taraCanonicalSave(payload) {
-  try {
-    const r = await ingestCanonicalPayload(payload, { sourceType: 'meeting', mode: 'evidence' });
-    if (r?.memoryId || r?.id) return r;
-    throw new Error('canonical evidence save returned no id');
-  } catch (e) {
-    console.warn('[v5-tara-canonical] envelope path failed, raw store fallback:', e.message);
-    return persistentMemoryStore.createMemory({ id: crypto.randomUUID(), ...payload });
-  }
+  const r = await ingestCanonicalPayload(payload, { sourceType: 'meeting', mode: 'atomic' });
+  if (r?.memoryId || r?.id) return r;
+  throw new Error('canonical TARA memory save returned no id');
 }
 
 async function ingestCanonicalPayload(payload, options = {}) {

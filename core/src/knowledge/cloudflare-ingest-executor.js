@@ -420,6 +420,11 @@ export class CloudflareKnowledgeIngestExecutor {
 
   async _materialize(job) {
     const isImage = job.mediaKind === 'image' || job.metadata?.media_kind === 'image';
+    if (isImage && job.ingestMode === 'evidence') {
+      throw Object.assign(new Error(
+        'Image evidence requires a configured deterministic OCR parser; no model was called.',
+      ), { code: 'OCR_REQUIRED', retryable: false });
+    }
     const durableMetadata = isImage
       ? { ...(job.metadata || {}), media_kind: 'image', ingest_mode: job.ingestMode }
       : (job.metadata || {});

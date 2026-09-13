@@ -3,7 +3,7 @@
  *
  * Background worker that polls webhook_events rows in 'received' status,
  * claims them with SELECT FOR UPDATE SKIP LOCKED semantics, processes each
- * through the appropriate provider adapter, and routes results to SmartIngestRouter.
+ * through the appropriate provider adapter and the canonical ingestion gateway.
  */
 
 const BATCH_SIZE = 10;
@@ -17,15 +17,13 @@ export class WebhookProcessor {
    * @param {import('@prisma/client').PrismaClient} deps.prisma
    * @param {import('./adapter-registry.js').AdapterRegistry} deps.adapterRegistry
    * @param {Function} deps.tokenResolver - async (userId, orgId, provider) => token
-   * @param {Object} deps.smartIngestRouter
    * @param {Object} deps.logger
    * @param {number} [deps.intervalMs]
    */
-  constructor({ prisma, adapterRegistry, tokenResolver, smartIngestRouter, documentFirstIngestion, getDocumentFirstIngestion, logger, intervalMs = MIN_INTERVAL_MS }) {
+  constructor({ prisma, adapterRegistry, tokenResolver, documentFirstIngestion, getDocumentFirstIngestion, logger, intervalMs = MIN_INTERVAL_MS }) {
     this.prisma = prisma;
     this.adapterRegistry = adapterRegistry;
     this.tokenResolver = tokenResolver;
-    this.smartIngestRouter = smartIngestRouter;
     // Accept either an eager instance or a getter for late binding
     this._dfiGetter = typeof getDocumentFirstIngestion === 'function'
       ? getDocumentFirstIngestion
@@ -129,10 +127,12 @@ export class WebhookProcessor {
       if (resource) {
         // Evidence-first path (P1 #13): wrap resource as connector record so it
         // lands in source_artifacts + knowledge_documents + knowledge_segments
-        // and produces memory_evidence_links. Falls back to legacy router if
-        // documentFirstIngestion not wired (back-compat).
+        // and produces memory_evidence_links. There is deliberately no legacy
+        // router fallback: an unavailable canonical writer must leave a visible,
+        // retryable event rather than creating a different data shape.
         const dfi = this._dfiGetter?.();
-        if (dfi && resource?.content) {
+        const content = resource?.content || resource?.body || resource?.text || null;
+        if (dfi?.ingestSource && content) {
           // Canonical front door: every connector record normalizes into the
           // same IngestEnvelope. source.provider highlights WHICH connector
           // (platform → connector:<provider>); occurredAt carries the real
@@ -140,19 +140,21 @@ export class WebhookProcessor {
           await dfi.ingestSource({
             userId: sub.userId,
             orgId: sub.orgId,
-            content: resource.content,
+            content,
             source: {
               type: 'connector',
               provider: sub.providerKey,
-              sourceId: resource.id || resource.resourceId || `${sub.providerKey}-${Date.now()}`,
+              sourceId: resource.id || resource.resourceId || resourceId,
               url: resource.sourceUrl || resource.url || null,
               title: resource.title || resource.subject || null,
             },
             occurredAt: resource.timestamp ? new Date(resource.timestamp) : null,
             metadata: { ...(resource.metadata || {}), webhookEventId: eventId, eventType: type },
           });
-        } else if (this.smartIngestRouter) {
-          await this.smartIngestRouter.route({ userId: sub.userId, orgId: sub.orgId, resource, type });
+        } else {
+          throw Object.assign(new Error(
+            !content ? 'connector resource has no canonical content' : 'canonical ingestion unavailable',
+          ), { code: !content ? 'CONNECTOR_CONTENT_EMPTY' : 'CANONICAL_INGEST_UNAVAILABLE' });
         }
       }
 

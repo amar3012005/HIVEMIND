@@ -229,6 +229,10 @@ test('BullMQ resumes a both-mode Workflow after evidence without reparsing sourc
     },
     dfi: {
       ingestSource: async () => assert.fail('resume must not parse the source again'),
+      reconcileEntityCoverage: async () => ({
+        complete: true, expected: 4, completed: 4, failed: 0, pending: 0,
+        authority: 'postgresql_receipts',
+      }),
       promoteStoredEvidence: async (input) => {
         calls.push(['promote', input]);
         return {
@@ -264,6 +268,7 @@ test('BullMQ resumes a both-mode Workflow after evidence without reparsing sourc
   assert.equal(calls.find(([kind]) => kind === 'promote')[1].promotionStrategy, 'workflow_to_bullmq_resume');
   assert.equal(calls.filter(([kind]) => kind === 'complete').length, 1);
   assert.equal(calls.filter(([kind]) => kind === 'fail').length, 0);
+  assert.equal(calls.find(([kind]) => kind === 'complete')[4].coverage.entity_projection.complete, true);
 });
 
 test('Workflow fallback exhaustion leaves the confirmed failure terminal', async () => {

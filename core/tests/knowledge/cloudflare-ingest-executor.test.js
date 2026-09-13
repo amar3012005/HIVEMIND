@@ -70,6 +70,16 @@ function fixture({ remote = false, image = false } = {}) {
       deleteFile: async (identity) => { events.push(['delete', identity]); },
     },
     documentFirstIngestion: {
+      reconcileEntityCoverage: async ({ documentId, memoryIds }) => ({
+        complete: true,
+        expected: 9 + memoryIds.length,
+        completed: 9 + memoryIds.length,
+        failed: 0,
+        pending: 0,
+        links: 3,
+        authority: 'postgresql_receipts',
+        documentId,
+      }),
       promoteStoredEvidence: async ({ documentId, onProgress }) => {
         events.push(['promote', documentId]);
         onProgress({ stage: 'promoting', progress: 80 });
@@ -140,6 +150,33 @@ test('materialization records real evidence and promotion checkpoints', async ()
   assert.equal(events.filter(([kind]) => kind === 'promote').length, 1);
   assert.ok(events.findIndex(([kind]) => kind === 'extract-complete')
     < events.findIndex(([kind]) => kind === 'embed-start'));
+  const entityReceipt = [...steps.rows.values()].find((receipt) =>
+    receipt.outputRefs?.entityCoverage?.authority === 'postgresql_receipts');
+  assert.equal(entityReceipt.outputRefs.entityCoverage.complete, true);
+});
+
+test('evidence-only Workflow records zero-model entity stages from PostgreSQL receipts', async () => {
+  const { executor, steps, job } = fixture();
+  job.ingestMode = 'evidence';
+  job.metadata.ingest_mode = 'evidence';
+  await executor.execute({ jobId: ids.job, processingVersion: 3, stage: 'materialize' });
+  const entityStages = [...steps.rows.entries()]
+    .filter(([key]) => key.includes(':entity_extract:') || key.includes(':entity_link:'))
+    .map(([, receipt]) => receipt);
+  assert.equal(entityStages.length, 2);
+  assert.ok(entityStages.every((receipt) => receipt.modelCalls === 0));
+  assert.ok(entityStages.every((receipt) => receipt.stagePolicy.authority === 'postgresql_entity_receipts'));
+});
+
+test('Workflow refuses settlement when a canonical entity receipt is missing', async () => {
+  const { executor } = fixture();
+  executor.dfi.reconcileEntityCoverage = async () => ({
+    complete: false, expected: 11, completed: 10, failed: 0, pending: 1,
+  });
+  await assert.rejects(
+    () => executor.execute({ jobId: ids.job, processingVersion: 3, stage: 'materialize' }),
+    (error) => error.code === 'ENTITY_COVERAGE_INCOMPLETE',
+  );
 });
 
 test('documents hand off extract capacity before embedding and use independent stage pools', async () => {

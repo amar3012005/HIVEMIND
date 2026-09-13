@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { persistCanonicalLinks } from '../../src/memory/canonical-entity-persister.js';
+import { normalizeEntityKind, persistCanonicalLinks } from '../../src/memory/canonical-entity-persister.js';
 import { EntityResolver } from '../../src/memory/entity-resolver.js';
 
 // Minimal fake prisma implementing exactly what EntityResolver +
@@ -57,6 +57,11 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
 }
 
 const ORG = 'org-1';
+
+test('canonical taxonomy preserves topic and event entity kinds', () => {
+  assert.equal(normalizeEntityKind('topic'), 'topic');
+  assert.equal(normalizeEntityKind('event'), 'event');
+});
 
 test('creates one canonical entity per unique name and links every memory', async () => {
   const prisma = makePrisma();
@@ -165,6 +170,7 @@ test('storage failure on one name never throws and continues the batch', async (
     items: [{ memoryId: 'm1', entities: ['Alpha Corp', 'Beta GmbH'] }],
   });
   assert.equal(out.skipped >= 1, true);
+  assert.equal(out.writeFailed >= 1, true);
   assert.equal(prisma.entities.length, 1, 'second name still persisted');
 });
 
@@ -173,7 +179,7 @@ test('missing prisma models → safe no-op', async () => {
     prisma: {}, organizationId: ORG,
     items: [{ memoryId: 'm1', entities: ['SOLVIS'] }],
   });
-  assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 });
+  assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0, writeFailed: 0 });
 });
 
 test('remote resolution can create a canonical entity without a central memory FK link', async () => {

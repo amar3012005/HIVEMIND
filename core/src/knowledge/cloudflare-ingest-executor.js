@@ -380,6 +380,44 @@ export class CloudflareKnowledgeIngestExecutor {
     for (const wake of [...stageWaiters]) wake();
   }
 
+  async _settleEntityStages(job, result, checkpointReceiptId) {
+    if (typeof this.dfi?.reconcileEntityCoverage !== 'function') {
+      throw Object.assign(new Error('Canonical entity coverage reconciler is unavailable.'), {
+        code: 'ENTITY_COVERAGE_UNAVAILABLE', retryable: false,
+      });
+    }
+    const coverage = await this.dfi.reconcileEntityCoverage({
+      documentId: result.documentId,
+      orgId: job.orgId,
+      memoryIds: result.promotedMemoryIds || [],
+    });
+    if (!coverage?.complete) {
+      throw Object.assign(new Error(
+        `Canonical entity coverage incomplete: ${Number(coverage?.completed || 0)}/${Number(coverage?.expected || 0)} resources.`,
+      ), { code: 'ENTITY_COVERAGE_INCOMPLETE', retryable: true, coverage });
+    }
+    for (const stageKey of ['entity_extract', 'entity_link']) {
+      await this.steps.run({
+        jobId: job.id, processingVersion: job.processingVersion, stageKey,
+        input: { checkpointReceiptId, documentId: result.documentId },
+        mode: job.ingestMode,
+        stagePolicy: {
+          content_egress: false,
+          model_policy: stageKey === 'entity_extract' && job.ingestMode === 'both'
+            ? 'included_in_memory_promote' : 'forbidden',
+          checkpoint: checkpointReceiptId,
+          authority: 'postgresql_entity_receipts',
+        },
+      }, async () => ({
+        outputRefs: { documentId: result.documentId, entityCoverage: coverage },
+        coverage: { entity_projection: coverage },
+        modelCalls: stageKey === 'entity_link' || job.ingestMode === 'evidence' ? 0 : null,
+        resourceCounts: resourceCounts(result),
+      }));
+    }
+    return coverage;
+  }
+
   async _materialize(job) {
     const isImage = job.mediaKind === 'image' || job.metadata?.media_kind === 'image';
     const durableMetadata = isImage
@@ -437,6 +475,8 @@ export class CloudflareKnowledgeIngestExecutor {
           });
           result = { ...result, coverage: { ...(result.coverage || {}), memory_embed: memoryEmbed } };
         }
+        const entityCoverage = await this._settleEntityStages(job, result, promoted.receipt.id);
+        result = { ...result, coverage: { ...(result.coverage || {}), entity_projection: entityCoverage } };
         await this._releaseProcessingLease(job, 'promote');
       } else {
         const evidenceStage = await this.steps.run({
@@ -511,6 +551,10 @@ export class CloudflareKnowledgeIngestExecutor {
         await this._releaseProcessingLease(job, 'extract');
         if (!isImage) await this._releaseProcessingLease(job, 'embed');
         result = evidence;
+        if (job.ingestMode === 'evidence' && !isImage) {
+          const entityCoverage = await this._settleEntityStages(job, result, evidenceStage.receipt.id);
+          result = { ...result, coverage: { ...(result.coverage || {}), entity_projection: entityCoverage } };
+        }
         if (job.ingestMode === 'both' && !isImage) {
           await this._waitForProcessingLease(job, 'promote');
           const promotionStage = await this.steps.run({
@@ -547,22 +591,8 @@ export class CloudflareKnowledgeIngestExecutor {
             segmentCount: evidence.segmentCount,
             coverage: { ...evidence.coverage, ...promotionOutput.coverage },
           };
-          for (const stageKey of ['entity_extract', 'entity_link']) {
-            await this.steps.run({
-              jobId: job.id, processingVersion: job.processingVersion, stageKey,
-              input: { promotionReceipt: promotionStage.receipt.id, documentId: result.documentId },
-              mode: 'both',
-              stagePolicy: {
-                content_egress: false,
-                model_policy: stageKey === 'entity_extract' ? 'included_in_memory_promote' : 'forbidden',
-                checkpoint: 'memory_promote',
-              },
-            }, async () => ({
-              outputRefs: { documentId: result.documentId },
-              modelCalls: stageKey === 'entity_link' ? 0 : null,
-              resourceCounts: resourceCounts(result),
-            }));
-          }
+          const entityCoverage = await this._settleEntityStages(job, result, promotionStage.receipt.id);
+          result = { ...result, coverage: { ...(result.coverage || {}), entity_projection: entityCoverage } };
           await this._releaseProcessingLease(job, 'promote');
         }
       }

@@ -862,6 +862,25 @@ export class KbIngestQueue {
       // or expose `ready` with partial semantic coverage.
       requireCompleteEvidenceEmbedding(result);
       requireCompleteMemoryEmbedding(result);
+      const isImage = String(contentType || '').toLowerCase().startsWith('image/');
+      if (!isImage) {
+        if (typeof this.dfi?.reconcileEntityCoverage !== 'function') {
+          throw Object.assign(new Error('Canonical entity coverage reconciler is unavailable.'), {
+            code: 'ENTITY_COVERAGE_UNAVAILABLE', retryable: false,
+          });
+        }
+        const entityCoverage = await this.dfi.reconcileEntityCoverage({
+          documentId: result.documentId,
+          orgId,
+          memoryIds: result.promotedMemoryIds || [],
+        });
+        if (!entityCoverage?.complete) {
+          throw Object.assign(new Error(
+            `Canonical entity coverage incomplete: ${Number(entityCoverage?.completed || 0)}/${Number(entityCoverage?.expected || 0)} resources.`,
+          ), { code: 'ENTITY_COVERAGE_INCOMPLETE', retryable: true, coverage: entityCoverage });
+        }
+        result.coverage = { ...(result.coverage || {}), entity_projection: entityCoverage };
+      }
       const _evidenceOnly = _promoted === 0 && _segs > 0;
       const _evidenceOnlyReason = result?.evidenceOnlyReason
         || (_evidenceOnly ? (metadata?.ingest_mode === 'evidence' ? 'user_selected' : 'extraction_yield_zero') : null);

@@ -61,7 +61,7 @@ test('evidence entity indexing uses deterministic extraction and settles segment
     },
   });
   service._persistCanonicalEntityResources = async (input) => { written = input; return { linked: 2 }; };
-  await service._persistDeterministicEvidenceEntities({
+  const coverage = await service._persistDeterministicEvidenceEntities({
     segments: [{ id: '55555555-5555-4555-8555-555555555555', content: 'Amar Sai Gadde approved the plan.' }],
     documentId: '33333333-3333-4333-8333-333333333333',
     userId: '11111111-1111-4111-8111-111111111111',
@@ -73,6 +73,36 @@ test('evidence entity indexing uses deterministic extraction and settles segment
   assert.equal(written.modelRoute, null);
   assert.deepEqual(written.resources.map((resource) => resource.resourceType), ['segment', 'document']);
   assert.equal(written.resources[0].entities[0].kind, 'person');
+  assert.ok(written.resources[1].entities.some((entity) =>
+    entity.kind === 'document' && entity.name === 'decision.md'));
+  assert.equal(coverage.linked, 2);
+});
+
+test('entity coverage reconciliation treats completed_zero as durable and detects missing receipts', async () => {
+  const segmentId = '55555555-5555-4555-8555-555555555555';
+  const documentId = '33333333-3333-4333-8333-333333333333';
+  const orgId = '22222222-2222-4222-8222-222222222222';
+  const receipts = [
+    { resourceType: 'document', resourceId: documentId, status: 'completed_zero', processingVersion: 1 },
+    { resourceType: 'segment', resourceId: segmentId, status: 'completed', processingVersion: 1 },
+  ];
+  const service = new DocumentFirstIngestionService({
+    db: {
+      knowledgeSegment: { findMany: async () => [{ id: segmentId }] },
+      entityExtractionReceipt: { findMany: async () => receipts },
+      resourceEntityLink: { count: async () => 1 },
+    },
+    memoryGraphEngine: {}, smartIngestRouter: null,
+  });
+  const complete = await service.reconcileEntityCoverage({ documentId, orgId });
+  assert.equal(complete.complete, true);
+  assert.equal(complete.zeroEntityResources, 1);
+  assert.equal(complete.links, 1);
+
+  receipts.pop();
+  const incomplete = await service.reconcileEntityCoverage({ documentId, orgId });
+  assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.pending, 1);
 });
 
 test('document parent summaries inherit canonical entities and receive a zero-extra-model receipt', async () => {

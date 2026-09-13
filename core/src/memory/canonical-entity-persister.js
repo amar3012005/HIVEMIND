@@ -44,7 +44,7 @@ const MAX_UNIQUE_ENTITIES_PER_BATCH = 128;
 // the taxonomy; anything unrecognized falls back to 'concept'.
 export const ENTITY_TAXONOMY = new Set([
   'person', 'organization', 'product', 'project', 'document',
-  'location', 'system', 'technology', 'standard', 'concept',
+  'location', 'system', 'technology', 'standard', 'concept', 'topic', 'event',
 ]);
 // Synonym → taxonomy map. NOTE: 'entity' (the legacy default) is deliberately
 // NOT remapped — the existing registry is full of entityKind='entity' rows, and
@@ -90,7 +90,7 @@ export async function persistCanonicalLinks({
   sourceMeta = null,   // { filename, documentId, seenAt }
   logger = console,
 } = {}) {
-  const out = { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 };
+  const out = { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0, writeFailed: 0 };
   if (!prisma?.canonicalEntity || (!prisma?.resourceEntityLink && !prisma?.memoryEntityLink)
       || !organizationId || !items.length) return out;
   // V5: lock entityKind to the canonical taxonomy (was free-form; 'entity'/synonyms
@@ -251,11 +251,21 @@ export async function persistCanonicalLinks({
       const row = await prisma.canonicalEntity.findUnique({ where: { id: entityId }, select: { metadata: true } });
       const md = (row?.metadata && typeof row.metadata === 'object') ? { ...row.metadata } : {};
       const seen = sourceMeta?.seenAt || new Date().toISOString().slice(0, 10);
+      const sourceFilenames = [...new Set([
+        ...(Array.isArray(md.source_filenames) ? md.source_filenames : []),
+        ...(sourceMeta?.filename ? [String(sourceMeta.filename)] : []),
+      ])].slice(-100);
+      const sourceDocumentIds = [...new Set([
+        ...(Array.isArray(md.source_document_ids) ? md.source_document_ids : []),
+        ...(sourceMeta?.documentId ? [String(sourceMeta.documentId)] : []),
+      ])].slice(-100);
       await prisma.canonicalEntity.update({
         where: { id: entityId },
         data: {
           metadata: {
             ...md,
+            source_filenames: sourceFilenames,
+            source_document_ids: sourceDocumentIds,
             first_seen_at: md.first_seen_at && md.first_seen_at <= seen ? md.first_seen_at : seen,
             last_seen_at: seen,
           },
@@ -343,6 +353,7 @@ export async function persistCanonicalLinks({
         } catch (err) {
           out.skipped += 1;
           if (remote) out.projectionFailed += 1;
+          else out.writeFailed += 1;
           logger.warn?.(`[canonical-entities] link failed ${resource.resourceType}:${resource.resourceId} → ${entityId}: ${err.message}`);
         }
       }
@@ -388,6 +399,7 @@ export async function persistCanonicalLinks({
       } catch (err) {
         out.skipped += entry.resources.length;
         if (remote) out.projectionFailed += entry.resources.length;
+        else out.writeFailed += entry.resources.length;
         logger.warn?.(`[canonical-entities] resolve failed for "${entry.name}": ${err.message}`);
         continue;
       }

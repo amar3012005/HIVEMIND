@@ -1211,14 +1211,17 @@ export class DocumentFirstIngestionService {
     this.cancelledEntityDocuments = new Set();
   }
 
-  async _recordEntityReceipts({ organizationId, resources = [], extractorRoute, modelRoute = null, processingVersion = 1 }) {
+  async _recordEntityReceipts({ organizationId, resources = [], extractorRoute, modelRoute = null,
+    processingVersion = 1, projection = null }) {
     if (!this.db?.entityExtractionReceipt || orgIsRemote(organizationId)) return;
     for (const resource of resources) {
       if (!resource?.resourceType || !resource?.resourceId) continue;
       const entities = Array.isArray(resource.entities) ? resource.entities : [];
       const inputDigest = crypto.createHash('sha256').update(String(resource.input || '')).digest('hex');
       const outputDigest = crypto.createHash('sha256').update(JSON.stringify(entities)).digest('hex');
-      const status = entities.length ? 'completed' : 'completed_zero';
+      const projectionFailed = Number(projection?.projectionFailed || 0) + Number(projection?.writeFailed || 0);
+      const status = projectionFailed > 0 ? 'failed' : (entities.length ? 'completed' : 'completed_zero');
+      const lastErrorCode = projectionFailed > 0 ? 'ENTITY_PROJECTION_FAILED' : null;
       await this.db.entityExtractionReceipt.upsert({
         where: {
           organizationId_resourceType_resourceId_processingVersion: {
@@ -1229,13 +1232,13 @@ export class DocumentFirstIngestionService {
         update: {
           status, extractorRoute, modelRoute, entityCount: entities.length,
           inputDigest, outputDigest, attempt: { increment: 1 },
-          completedAt: new Date(), lastErrorCode: null,
+          completedAt: new Date(), lastErrorCode,
         },
         create: {
           organizationId, resourceType: resource.resourceType, resourceId: resource.resourceId,
           processingVersion, status, extractorRoute, modelRoute, attempt: 1,
           inputDigest, outputDigest, entityCount: entities.length,
-          startedAt: new Date(), completedAt: new Date(),
+          startedAt: new Date(), completedAt: new Date(), lastErrorCode,
         },
       });
     }
@@ -1243,7 +1246,10 @@ export class DocumentFirstIngestionService {
 
   async _persistCanonicalEntityResources({ organizationId, resources = [], sourceMeta = null,
     extractorRoute = 'unified', modelRoute = null, processingVersion = 1 }) {
-    if (!resources.length) return { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 };
+    if (!resources.length) return {
+      linked: 0, created: 0, review: 0, skipped: 0,
+      projectionFailed: 0, writeFailed: 0, resources: 0, complete: true,
+    };
     const grouped = new Map();
     for (const resource of resources) {
       if (!resource?.resourceType || !resource?.resourceId) continue;
@@ -1260,9 +1266,10 @@ export class DocumentFirstIngestionService {
       prisma: this.db, organizationId, items: canonicalResources, sourceMeta, logger: this.logger,
     });
     await this._recordEntityReceipts({
-      organizationId, resources: canonicalResources, extractorRoute, modelRoute, processingVersion,
+      organizationId, resources: canonicalResources, extractorRoute, modelRoute, processingVersion, projection,
     });
-    return projection;
+    return { ...projection, resources: canonicalResources.length,
+      complete: Number(projection?.projectionFailed || 0) === 0 && Number(projection?.writeFailed || 0) === 0 };
   }
 
   async _persistDeterministicEvidenceEntities({ segments, documentId, userId, orgId, metadata = {} }) {
@@ -1271,7 +1278,23 @@ export class DocumentFirstIngestionService {
     const scopeId = scopeType === 'project' ? (metadata.project_id || metadata.project_ids?.[0] || null)
       : scopeType === 'team' ? (metadata.primary_team_id || null) : null;
     const resources = [];
-    const documentEntities = [];
+    const declaredEntities = [
+      ...(Array.isArray(metadata.entities) ? metadata.entities : []),
+      ...(Array.isArray(metadata.extracted_entities) ? metadata.extracted_entities : []),
+      ...(Array.isArray(metadata.participants) ? metadata.participants.map((name) => ({ name, type: 'person' })) : []),
+    ].filter((entity) => typeof entity === 'string' || entity?.name);
+    const documentEntities = declaredEntities.map((entity) => ({
+      ...(typeof entity === 'string' ? { name: entity, kind: 'entity' } : entity),
+      role: entity?.role || 'declared',
+      confidence: Number.isFinite(entity?.confidence) ? entity.confidence : 1,
+      provenance: { document_id: documentId, source: 'structured_metadata' },
+    }));
+    if (metadata.filename) {
+      documentEntities.push({
+        name: String(metadata.filename), kind: 'document', role: 'source_document', confidence: 1,
+        provenance: { document_id: documentId, filename: String(metadata.filename) },
+      });
+    }
     for (const segment of segments) {
       const candidates = this.entityExtractor?.extractDeterministic
         ? this.entityExtractor.extractDeterministic(segment.content)
@@ -1301,6 +1324,54 @@ export class DocumentFirstIngestionService {
       sourceMeta: { filename: metadata.filename || null, documentId, seenAt: new Date().toISOString() },
       extractorRoute: 'deterministic_regex', modelRoute: null,
     });
+  }
+
+  /** Reconcile durable entity extraction receipts for a document projection. */
+  async reconcileEntityCoverage({ documentId, orgId, memoryIds = [] }) {
+    if (!documentId || !orgId) return { complete: false, expected: 0, completed: 0, failed: 0, reason: 'missing_identity' };
+    if (orgIsRemote(orgId) || !this.db?.entityExtractionReceipt) {
+      return { complete: true, expected: null, completed: null, failed: 0, authority: 'remote_agent' };
+    }
+    const segments = await this.db.knowledgeSegment.findMany({
+      where: { documentId, orgId }, select: { id: true },
+    });
+    const expectedResources = [
+      { resourceType: 'document', resourceId: documentId },
+      ...segments.map(({ id }) => ({ resourceType: 'segment', resourceId: id })),
+      ...[...new Set(memoryIds.filter(Boolean))].map((id) => ({ resourceType: 'memory', resourceId: id })),
+    ];
+    const receipts = await this.db.entityExtractionReceipt.findMany({
+      where: {
+        organizationId: orgId,
+        OR: expectedResources.map(({ resourceType, resourceId }) => ({ resourceType, resourceId })),
+      },
+      orderBy: [{ processingVersion: 'desc' }, { updatedAt: 'desc' }],
+    });
+    const latest = new Map();
+    for (const receipt of receipts) {
+      const key = `${receipt.resourceType}:${receipt.resourceId}`;
+      if (!latest.has(key)) latest.set(key, receipt);
+    }
+    const completedStatuses = new Set(['completed', 'completed_zero']);
+    const completed = expectedResources.filter(({ resourceType, resourceId }) =>
+      completedStatuses.has(latest.get(`${resourceType}:${resourceId}`)?.status)).length;
+    const failed = expectedResources.filter(({ resourceType, resourceId }) =>
+      latest.get(`${resourceType}:${resourceId}`)?.status === 'failed').length;
+    const linkCount = this.db.resourceEntityLink
+      ? await this.db.resourceEntityLink.count({
+        where: { organizationId: orgId, OR: expectedResources.map(({ resourceType, resourceId }) => ({ resourceType, resourceId })) },
+      }) : null;
+    return {
+      complete: completed === expectedResources.length && failed === 0,
+      expected: expectedResources.length,
+      completed,
+      failed,
+      pending: Math.max(0, expectedResources.length - completed - failed),
+      links: linkCount,
+      zeroEntityResources: expectedResources.filter(({ resourceType, resourceId }) =>
+        latest.get(`${resourceType}:${resourceId}`)?.status === 'completed_zero').length,
+      authority: 'postgresql_receipts',
+    };
   }
 
   /** Entity extraction over segments (P1 #9).
@@ -1986,7 +2057,10 @@ Output the JSON object and nothing else.`;
                 // Pass the TYPED pairs as `entities`. The persister accepts string | {name, kind};
                 // a separate parallel array would have been a second shape for one fact — and the
                 // persister would have ignored it, leaving the whole typing chain dead.
-                if (_entityPairs.length) canonicalItems.push({
+                // A zero-entity extraction is still a durable, meaningful
+                // outcome. Persist the resource with an empty candidate list so
+                // its completed_zero receipt can satisfy the coverage gate.
+                canonicalItems.push({
                   resourceType: 'memory', resourceId: p.factId, memoryId: p.factId,
                   userId, scopeType: memoryContext.scope, scopeId: memoryContext.projectIds?.[0] || memoryContext.teamId || null,
                   input: p.t.f, entities: _entityPairs,
@@ -4117,15 +4191,19 @@ Every item must include a non-empty content field and one or more valid support_
       ingestDiagnostic.warn(`[kb-tables] persist skipped (ingest unaffected): ${e.message}`);
     }
 
+    // Every document/evidence resource receives a deterministic, zero-model
+    // entity pass before the mode branch. `both` may enrich these links during
+    // canonical memory generation, but it must never skip the evidence baseline.
+    const entityCoverage = await this._persistDeterministicEvidenceEntities({
+      segments, documentId: knowledgeDoc.id, userId, orgId, metadata: { ...metadata, filename },
+    });
+
     // Intentional evidence-only ingest stops at the durable hybrid evidence
     // boundary. Lexical recall reads these scope-stamped segment rows (or the
     // corresponding AMR rows); semantic recall requires every segment vector.
     // Do not enter any memory-generation, curator, entity, relationship, or
     // claim-structuring path below this return.
     if (ingestMode === 'evidence') {
-      await this._persistDeterministicEvidenceEntities({
-        segments, documentId: knowledgeDoc.id, userId, orgId, metadata: { ...metadata, filename },
-      });
       if (!_evEmbedCov && !orgIsRemote(orgId)) {
         const embedded = await this.db.knowledgeSegment.count({
           where: { documentId: knowledgeDoc.id, vectorStored: true },
@@ -4155,6 +4233,7 @@ Every item must include a non-empty content field and one or more valid support_
       const coverage = {
         evidence_embed: _evEmbedCov,
         evidence_lexical: { total: segments.length, indexed: segments.length, failed: 0 },
+        entity_projection: entityCoverage,
       };
       if (KB_INGEST_VERBOSE) this.logger.info?.(`[kb-unified] EVIDENCE-ONLY doc=${String(knowledgeDoc.id).slice(0, 8)} `
         + `segments=${segments.length} semantic=${_evEmbedCov.embedded} lexical=${segments.length}; memory pipeline skipped`);
@@ -4274,6 +4353,7 @@ Every item must include a non-empty content field and one or more valid support_
       highValueCoverage: _cands > 0 ? Number((_promotedOk / _cands).toFixed(3)) : 1,
     };
     coverage.evidence_embed = _evEmbedCov; // segments embedded/failed/healed (P3 no-silent-partial)
+    coverage.entity_projection = entityCoverage;
     return {
       documentId: knowledgeDoc.id,
       segmentCount: segments.length,
@@ -4564,11 +4644,12 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 4: embed segment — pass orgId so _embedSegments routes to agent for remote.
     const _evEmbedC = await this._embedSegments(segments, orgId);
 
+    const entityCoverage = await this._persistDeterministicEvidenceEntities({
+      segments, documentId: knowledgeDoc.id, userId, orgId,
+      metadata: { ...metadata, filename: title || `${providerKey}:${sourceId}` },
+    });
+
     if (metadata.ingest_mode === 'evidence') {
-      await this._persistDeterministicEvidenceEntities({
-        segments, documentId: knowledgeDoc.id, userId, orgId,
-        metadata: { ...metadata, filename: title || `${providerKey}:${sourceId}` },
-      });
       return {
         documentId: knowledgeDoc.id,
         segmentCount: segments.length,
@@ -4576,7 +4657,7 @@ Every item must include a non-empty content field and one or more valid support_
         promotedCount: 0,
         promotedMemoryIds: [],
         evidenceOnlyReason: 'user_selected',
-        coverage: { evidence_embed: _evEmbedC || null },
+        coverage: { evidence_embed: _evEmbedC || null, entity_projection: entityCoverage },
       };
     }
 
@@ -4604,7 +4685,8 @@ Every item must include a non-empty content field and one or more valid support_
       candidateCount: promoted.candidates.length,
       promotedCount: promoted.memories.length,
       promotedMemoryIds: promoted.memories.map(m => m.id).filter(Boolean),
-      coverage: { evidence_embed: _evEmbedC || null },
+      coverage: { ...(promoted.coverage || {}), evidence_embed: _evEmbedC || null,
+        entity_projection: entityCoverage },
     };
   }
 
@@ -5751,6 +5833,7 @@ Every item must include a non-empty content field and one or more valid support_
     const candidates = [];
     const memories = [];
     const entityLinkTargets = []; // collected during promote, entity-linked concurrently after commit
+    const canonicalEntityLinkTasks = []; // awaited before the projection can settle
     const distillTargets = [];    // big-doc deferred fact distillation (P6) — fed after commit
     const evidenceLinkRows = []; // #6 — batched provenance inserts (was per-section)
     const derivationRows = [];
@@ -6583,12 +6666,12 @@ Every item must include a non-empty content field and one or more valid support_
           // P1 #12 — entity-aware memory linking
           // Mirror segment's entity_mentions onto the promoted memory so
           // memory recall can filter/rank by entity.
-          this._linkEntitiesToMemoryAsync({
+          canonicalEntityLinkTasks.push(this._linkEntitiesToMemory({
             memoryId, segmentId: segment.id, orgId, documentId, userId,
             scopeType: routed.scope || 'organization',
             scopeId: routed.project_ids?.[0] || routed.primary_team_id || null,
             memoryContent: segment.content,
-          });
+          }));
         }
       } catch (error) {
         ingestDiagnostic.error(`[DocumentFirstIngestion] Failed to promote segment ${segment.id}:`, error);
@@ -6621,6 +6704,17 @@ Every item must include a non-empty content field and one or more valid support_
       }
     });
     await Promise.all(workers);
+
+    // Canonical resource links are part of ingestion durability, not background
+    // decoration. Await every idempotent write so Workflow/BullMQ settlement can
+    // verify real receipts rather than racing fire-and-forget work.
+    const canonicalEntityResults = await Promise.allSettled(canonicalEntityLinkTasks);
+    const canonicalEntityFailures = canonicalEntityResults.filter((entry) => entry.status === 'rejected').length;
+    if (canonicalEntityFailures > 0) {
+      const error = new Error(`Canonical entity projection failed for ${canonicalEntityFailures} promoted memories.`);
+      error.code = 'ENTITY_PROJECTION_INCOMPLETE';
+      throw error;
+    }
 
     // #6 — batched provenance inserts (2 round-trips total vs 2×N). Append-only
     // link rows, no advisory-lock semantics — safe + contained to the KB path.
@@ -6795,28 +6889,38 @@ Every item must include a non-empty content field and one or more valid support_
       }
     }
 
-    return { candidates, memories, documentParentId: docParentId };
+    return {
+      candidates, memories, documentParentId: docParentId,
+      coverage: {
+        entity_projection: {
+          complete: canonicalEntityFailures === 0,
+          expected: canonicalEntityLinkTasks.length,
+          completed: canonicalEntityLinkTasks.length - canonicalEntityFailures,
+          failed: canonicalEntityFailures,
+        },
+      },
+    };
   }
 
-  /** Fire-and-forget: copy segment's entity mentions onto memory + update topic state. */
-  _linkEntitiesToMemoryAsync({ memoryId, segmentId, orgId, documentId, userId = null,
+  /** Copy a segment's deterministic entity mentions onto its promoted memory. */
+  async _linkEntitiesToMemory({ memoryId, segmentId, orgId, documentId, userId = null,
     scopeType = 'organization', scopeId = null, memoryContent }) {
-    if (!this.entityExtractor || !memoryId || !memoryContent) return;
-    (async () => {
-      try {
-        const entities = this.entityExtractor.extractDeterministic(memoryContent);
-        await this._persistCanonicalEntityResources({
-          organizationId: orgId,
-          resources: [{
-            resourceType: 'memory', resourceId: memoryId, memoryId,
-            userId, scopeType, scopeId, input: memoryContent, entities,
-            provenance: { document_id: documentId, segment_id: segmentId },
-          }],
-          extractorRoute: 'deterministic_regex',
-        });
-      } catch (err) {
-        this.logger.warn(`[entity-memory-link] memory ${memoryId} failed: ${err.message}`);
-      }
-    })();
+    if (!this.entityExtractor || !memoryId || !memoryContent) return { complete: true, resources: 0 };
+    const entities = this.entityExtractor.extractDeterministic(memoryContent);
+    const projection = await this._persistCanonicalEntityResources({
+      organizationId: orgId,
+      resources: [{
+        resourceType: 'memory', resourceId: memoryId, memoryId,
+        userId, scopeType, scopeId, input: memoryContent, entities,
+        provenance: { document_id: documentId, segment_id: segmentId },
+      }],
+      extractorRoute: 'deterministic_regex',
+    });
+    if (projection?.complete === false) {
+      const error = new Error(`Canonical entity write incomplete for memory ${memoryId}`);
+      error.code = 'ENTITY_PROJECTION_INCOMPLETE';
+      throw error;
+    }
+    return projection;
   }
 }

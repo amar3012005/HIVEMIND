@@ -10,11 +10,15 @@ function baseUrl(provider) {
 }
 
 function configuredOrder(runtime) {
-  const preferred = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
+  const grokEnabled = !['0', 'false', 'no', 'off', 'disabled'].includes(
+    String(process.env.TARA_GROK_ENABLED ?? 'true').trim().toLowerCase(),
+  );
+  const allowed = grokEnabled ? ['deepgram', 'grok'] : ['deepgram'];
+  const preferred = runtime?.defaultProvider === 'grok' && grokEnabled ? 'grok' : 'deepgram';
   const configured = [runtime?.deepgramConfig, runtime?.grokConfig]
     .flatMap((value) => Array.isArray(value?.provider_order) ? value.provider_order : [])
-    .map(String).filter((value) => ['deepgram', 'grok'].includes(value));
-  return [...new Set([preferred, ...configured, preferred === 'grok' ? 'deepgram' : 'grok'])];
+    .map(String).filter((value) => allowed.includes(value));
+  return [...new Set([preferred, ...configured, ...(grokEnabled ? [preferred === 'grok' ? 'deepgram' : 'grok'] : [])])];
 }
 
 async function probe(fetchImpl, url) {

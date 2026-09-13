@@ -5,6 +5,19 @@ import { RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 const PROVIDERS = new Set(['deepgram', 'grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
 const RUNTIME_OPERATOR_PROVIDER = 'grok';
+
+export function taraGrokEnabled() {
+  const value = String(process.env.TARA_GROK_ENABLED ?? 'true').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off', 'disabled'].includes(value);
+}
+
+function providerEnabled(provider) {
+  return PROVIDERS.has(provider) && (provider !== 'grok' || taraGrokEnabled());
+}
+
+function enabledDefaultProvider(provider) {
+  return provider === 'grok' && !taraGrokEnabled() ? 'deepgram' : provider;
+}
 // Runtime-admin check-in voice. Overridable via TARA_RUNTIME_OPERATOR_VOICE_ID.
 // The live xAI roster (GET /v1/tts/voices) carries 26 voices — altair, ara, atlas,
 // carina, castor, celeste, cosmo, eve, helios, helix, iris, kepler, leo, lumen, luna,
@@ -192,7 +205,13 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
     return !!serviceToken && safeEqual(header, `Bearer ${serviceToken}`);
   }
   function publicConfig(row) {
-    return { default_provider: row.defaultProvider, revision: row.revision, deepgram: row.deepgramConfig || {}, grok: row.grokConfig || {} };
+    return {
+      default_provider: enabledDefaultProvider(row.defaultProvider),
+      revision: row.revision,
+      deepgram: row.deepgramConfig || {},
+      grok: row.grokConfig || {},
+      grok_enabled: taraGrokEnabled(),
+    };
   }
 
   return async function handle({ pathname, method, body, url, req, res, userId, orgId, jsonResponse, accessContext }) {
@@ -204,8 +223,9 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       if (method !== 'PATCH') return false;
       const expected = Number(body.expected_revision);
       if (!Number.isInteger(expected) || expected !== current.revision) return reply(res, { error: 'stale_revision', revision: current.revision }, 409);
-      const provider = body.default_provider || current.defaultProvider;
+      const provider = body.default_provider || enabledDefaultProvider(current.defaultProvider);
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
+      if (!providerEnabled(provider)) return reply(res, { error: 'provider_disabled', provider }, 409);
       let grok;
       try { grok = validatedGrokConfig(current.grokConfig, body.grok || {}); }
       catch (error) { return reply(res, { error: error.message }, error.statusCode || 400); }
@@ -220,8 +240,9 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const interactionProfile = requestedMode === 'internal' && body.interaction_profile === 'runtime_operator'
         ? 'runtime_operator'
         : null;
-      const provider = interactionProfile ? RUNTIME_OPERATOR_PROVIDER : current.defaultProvider;
-      if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
+      const preferredProvider = interactionProfile ? RUNTIME_OPERATOR_PROVIDER : current.defaultProvider;
+      const provider = enabledDefaultProvider(preferredProvider);
+      if (!providerEnabled(provider)) return reply(res, { error: 'provider_disabled', provider }, 409);
       let providerConfig;
       try { providerConfig = provider === 'grok' ? validatedGrokConfig(current.grokConfig) : current.deepgramConfig || {}; }
       catch (error) { return reply(res, { error: error.message }, error.statusCode || 400); }
@@ -309,6 +330,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
     if (pathname === '/api/tara/voices' && method === 'GET') {
       const provider = url.searchParams.get('provider') || (await configFor(orgId)).defaultProvider;
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
+      if (!providerEnabled(provider)) return reply(res, { error: 'provider_disabled', provider }, 409);
       const voices = provider === 'grok' ? await loadGrokVoices() : await loadDeepgramVoices();
       const languages = [...new Set(voices.flatMap((voice) => Array.isArray(voice?.languages)
         ? voice.languages : voice?.language ? [voice.language] : []))];
@@ -339,7 +361,9 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const orgId = boundedString(body.org_id, 64);
       const userId = boundedString(body.user_id, 64);
       if (!orgId || !userId) return reply(res, { error: 'org_id and user_id required' }, 400);
-      const provider = PROVIDERS.has(body.provider) ? body.provider : 'grok';
+      const requestedProvider = PROVIDERS.has(body.provider) ? body.provider : 'grok';
+      if (!providerEnabled(requestedProvider)) return reply(res, { error: 'provider_disabled', provider: requestedProvider }, 409);
+      const provider = requestedProvider;
       const snapshot = plainObject(body.config) ? body.config : {};
       const session = await prisma.taraVoiceSession.create({
         data: {

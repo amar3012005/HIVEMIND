@@ -219,6 +219,7 @@ export function filterEvidenceByMetadata(rows = [], {
   relationshipMemoryIds = [],
   relationshipRequired = false,
   entityFilterMode = 'must',
+  strictEntitySelection = false,
 } = {}) {
   const wantedKind = String(sourceKind || '').normalize('NFKC').trim().toLocaleLowerCase();
   const wantedTypes = normalizedValues(memoryTypes);
@@ -247,11 +248,17 @@ export function filterEvidenceByMetadata(rows = [], {
     if (wantedEntities.size && entityFilterMode !== 'off' && entityFilterMode !== 'should') {
       const searchable = `${row.content || row.snippet || ''} ${row.document?.title || ''}`
         .normalize('NFKC').toLocaleLowerCase();
-      const matches = [...wantedEntities].map((entity) => meta.entities.has(entity)
-        || [...meta.entities].some((candidate) => candidate.includes(entity) || entity.includes(candidate))
-        // Historical rows may pre-date entity metadata. Content matching is a
-        // deterministic compatibility fallback, never a source of scope widening.
-        || searchable.includes(entity));
+      const entitySlug = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+      const matches = [...wantedEntities].map((entity) => {
+        const exactIdentity = meta.entities.has(entity)
+          || [...meta.entities].some((candidate) => entitySlug(candidate) === entitySlug(entity));
+        if (exactIdentity || strictEntitySelection) return exactIdentity;
+        // Historical free-text recall may use content as a compatibility
+        // fallback. A picker-issued entity selection must be an exact link.
+        return [...meta.entities].some((candidate) => candidate.includes(entity) || entity.includes(candidate))
+          || searchable.includes(entity);
+      });
       const matched = entityFilterMode === 'any' ? matches.some(Boolean) : matches.every(Boolean);
       if (!matched) return false;
     }

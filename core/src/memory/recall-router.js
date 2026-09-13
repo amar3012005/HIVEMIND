@@ -157,12 +157,24 @@ function memoryIsKnownAt(memory, at) {
   return !Number.isFinite(knownMs) || knownMs <= boundary;
 }
 
-export function filterMemoriesByEntities(memories = [], entities = [], { mode = 'must' } = {}) {
+function entitySlug(value) {
+  return normalizeSourceLabel(value).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+}
+
+export function filterMemoriesByEntities(memories = [], entities = [], {
+  mode = 'must',
+  strictEntitySelection = false,
+} = {}) {
   const wanted = [...new Set((entities || []).map((entity) => normalizeSourceLabel(entity)).filter(Boolean))];
   if (!wanted.length || mode === 'off' || mode === 'should') return [...memories];
   return memories.filter((memory) => {
     const stored = memory?.memory || {};
-    const tags = [...(memory?.tags || stored?.tags || [])].map((tag) => normalizeSourceLabel(tag));
+    const rawTags = [...(memory?.tags || stored?.tags || [])].map((tag) => String(tag || ''));
+    const tags = rawTags.map((tag) => normalizeSourceLabel(tag));
+    const entityTags = new Set(rawTags
+      .filter((tag) => tag.toLocaleLowerCase().startsWith('entity:'))
+      .map((tag) => entitySlug(tag.slice('entity:'.length)))
+      .filter(Boolean));
     const metadata = memory?.source_metadata || memory?.sourceMetadata || stored?.source_metadata || {};
     const metadataEntities = [
       ...(Array.isArray(metadata.entities) ? metadata.entities : []),
@@ -172,11 +184,18 @@ export function filterMemoriesByEntities(memories = [], entities = [], { mode = 
     const searchable = [memory?.title, stored?.title, memory?.content, stored?.content]
       .map((value) => typeof value === 'string' ? value : '')
       .join(' ').normalize('NFKC').toLocaleLowerCase();
-    const matches = wanted.map((entity) => tags.includes(`entity:${entity}`)
-      || metadataEntities.some((candidate) => candidate === entity
-        || candidate.includes(entity) || entity.includes(candidate))
-      // Compatibility for rows ingested before canonical entity metadata.
-      || searchable.includes(entity));
+    const matches = wanted.map((entity) => {
+      const slug = entitySlug(entity);
+      const exactIdentity = tags.includes(`entity:${entity}`)
+        || entityTags.has(slug)
+        || metadataEntities.some((candidate) => candidate === entity || entitySlug(candidate) === slug);
+      if (exactIdentity || strictEntitySelection) return exactIdentity;
+      // Free-text recall retains historical compatibility for rows ingested
+      // before entity links existed. An ID issued by the entity chooser does
+      // not: a textual mention is not proof that this row is about that entity.
+      return metadataEntities.some((candidate) => candidate.includes(entity) || entity.includes(candidate))
+        || searchable.includes(entity);
+    });
     return mode === 'any' ? matches.some(Boolean) : matches.every(Boolean);
   });
 }
@@ -1485,6 +1504,7 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
     relationshipRequired: filters.relationships?.requested === true,
     entityFilterMode: filters.relationships?.requested === true
       ? 'any' : (filters.entity_filter_mode || 'must'),
+    strictEntitySelection: filters.strict_entity_selection === true,
     temporalInventory: filters.operation === 'timeline',
     reliabilityV1: filters.reliability_v1 === true,
     depth: EVIDENCE_DEPTH,
@@ -2093,6 +2113,7 @@ export class RecallRouter {
         || Boolean(recallPlan.time.valid_at)
         || options.include_superseded === true,
       canonical_entities: mergedCanonicalEntities,
+      strict_entity_selection: selectedEntityNames.length > 0,
       alternate_lexical_query: options.alternate_lexical_query || exactEntityLexicalQuery,
       query_vector: queryVector,
       limit: (temporalInventory || strictFilteredInventory)
@@ -2401,7 +2422,10 @@ export class RecallRouter {
         let inventory = filterMemoriesByEntities(
           listedSets.flatMap((listed) => listed?.memories || []),
           recallPlan.entities,
-          { mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode },
+          {
+            mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode,
+            strictEntitySelection: options.strict_entity_selection === true,
+          },
         );
         inventory = [...new Map(inventory.map((memory) => [recallMemoryRowId(memory), memory])).values()];
         if (recallPlan.memory_types.length) {
@@ -2538,6 +2562,7 @@ export class RecallRouter {
     // metadata before either lane enters unified delivery.
     memories = filterMemoriesByEntities(memories, recallPlan.entities, {
       mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode,
+      strictEntitySelection: options.strict_entity_selection === true,
     });
     if (Array.isArray(options.tags) && options.tags.length) {
       memories = memories.filter((memory) => memoryMatchesTags(memory, options.tags));

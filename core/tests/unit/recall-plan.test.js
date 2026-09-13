@@ -112,6 +112,26 @@ test('memory entity and relationship predicates are hard filters before delivery
   assert.deepEqual(related.map((row) => row.id), ['m1']);
 });
 
+test('picker-issued entity selections reject textual co-mentions and require exact identity', () => {
+  const rows = [
+    {
+      id: 'selected', title: 'Atlas approval',
+      tags: ['entity:uwe-berger', 'entity:maya-chen'],
+      content: 'Uwe Berger and Maya Chen approved the renewal.',
+    },
+    {
+      id: 'textual-mention', title: 'Vendor escalation', tags: ['entity:uwe-bross'],
+      content: 'This is not a decision by Uwe Berger or Maya Chen.',
+    },
+  ];
+  assert.deepEqual(
+    filterMemoriesByEntities(rows, ['Uwe Berger', 'Maya Chen'], {
+      mode: 'must', strictEntitySelection: true,
+    }).map((row) => row.id),
+    ['selected'],
+  );
+});
+
 test('issued entity selections and explicit tags hydrate authorized matches before ranking', async () => {
   const correction = {
     id: 'correction', title: 'Atlas correction',

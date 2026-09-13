@@ -1,0 +1,13 @@
+[Unit]
+Description=Enigma encrypted managed storage backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/enigma/storage-protection.env
+ExecStart=/usr/local/libexec/enigma-storage/infra/scripts/managed-backup.sh
+# Exit 2 means a verified encrypted local bundle exists but no off-host upload
+# destination is configured. Keep the daily protection active while surfacing
+# that DR gap in the journal.
+SuccessExitStatus=2

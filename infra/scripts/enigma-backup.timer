@@ -1,0 +1,10 @@
+[Unit]
+Description=Create an Enigma encrypted storage backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Enigma disposable encrypted storage restore drill
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/enigma/storage-protection.env
+ExecStart=/usr/local/libexec/enigma-storage/infra/scripts/restore-drill.sh

@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify Enigma encrypted restore weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

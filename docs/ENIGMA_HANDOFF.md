@@ -68,13 +68,15 @@ contract; it does not redefine Singulance production.
 | --- | --- |
 | Remote | `https://github.com/amar3012005/HIVEMIND.git` |
 | Canonical Enigma branch | `enigma-main` |
-| Current Enigma tip | `b1680c5b4c9f246dde3094d5833eed81022d2e12` |
-| Tip subject | `fix(harness): configure native connected apps` |
+| Functional rollout baseline | `b1680c5b4c9f246dde3094d5833eed81022d2e12` |
+| Baseline subject | `fix(harness): configure native connected apps` |
 | Working branch used for the rollout | `codex/enigma-harness-chat-e2e` |
 | Current frontend gitlink | `7f7f6a0340aa333672b4fe6dc22b57f99b2dbab2` |
 
-At this snapshot, the working branch and `origin/enigma-main` point to the same
-commit and the rollout worktree is clean.
+The cross-laptop handoff itself is published in later documentation-only
+commits. Always resolve the current `origin/enigma-main` tip after fetching;
+do not confuse a handoff-document update with a newly deployed application
+revision.
 
 ### 2.2 Da-vinci frontend submodule
 
@@ -457,8 +459,9 @@ snapshot their merge base is:
 b28f072d5e996639b765076b184ced687ed6b8eb
 ```
 
-There are 102 Enigma-side commits and 37 Singulance-side commits after that
-base. Therefore:
+At the functional rollout snapshot there were 102 Enigma-side commits and 37
+Singulance-side commits after that base; later handoff-only commits increase the
+first count. Therefore:
 
 - Enigma is **not** simply “the latest Singulance plus dev URLs.”
 - Do not merge either branch wholesale into the other.

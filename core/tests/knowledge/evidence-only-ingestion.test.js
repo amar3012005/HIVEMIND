@@ -7,9 +7,53 @@ import {
   locatePromotionWindow,
   resolveDocumentClassification,
   canReuseUnchangedDocument,
+  ensureSourceAnchorCoverage,
   normalizeCuratedClaims,
   promotionProvenance,
+  repairSourceLanguageClaims,
 } from '../../src/knowledge/document-first-ingestion.js';
+
+test('translated extraction is repaired to exact source-language text', () => {
+  const quote = 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026.';
+  const result = repairSourceLanguageClaims([{
+    t: 'Genehmigung von Projekt Lantern',
+    f: 'Atlas Meridian GmbH genehmigte Projekt Lantern mit einem Budget von 42.000 EUR.',
+    source_quote: quote,
+  }], 0.55);
+  assert.equal(result[0].f, quote);
+  assert.equal(result[0]._language_repaired, true);
+  assert.equal(result._languageRepairCount, 1);
+});
+
+test('source-anchor coverage restores omitted entity, amount and deadline without invention', () => {
+  const source = 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026. Priya Nair and Uwe Berger selected SolvisControl-3 and rejected Project Eclipse.';
+  const result = ensureSourceAnchorCoverage([{
+    t: 'Product choice',
+    f: 'Priya Nair and Uwe Berger selected SolvisControl-3 and rejected Project Eclipse.',
+    source_quote: 'Priya Nair and Uwe Berger selected SolvisControl-3 and rejected Project Eclipse.',
+    importance: 0.9,
+  }], source, 8);
+  assert.equal(result.length, 2);
+  const repaired = result.find((claim) => claim._coverage_fallback);
+  assert.equal(repaired.f, 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026.');
+  assert.equal(repaired.source_quote, repaired.f);
+  assert.equal(repaired.claim_kind, 'decision');
+  assert.ok(repaired.entities.some((entity) => entity.n === 'Atlas Meridian GmbH' && entity.k === 'organization'));
+});
+
+test('document curation cannot translate a grounded candidate', () => {
+  const quote = 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026.';
+  const candidates = [{
+    t: 'Project Lantern approval', f: quote, memory_type: 'fact', claim_kind: 'decision',
+    importance: 0.96, source_quote: quote, segmentId: 'segment-1', entities: [],
+  }];
+  const result = normalizeCuratedClaims([{
+    title: 'Genehmigung von Projekt Lantern', memory_type: 'fact', claim_kind: 'decision',
+    content: 'Atlas Meridian GmbH genehmigte Projekt Lantern mit einem Budget von 42.000 EUR.',
+    support_indices: [0],
+  }], candidates, 8);
+  assert.equal(result[0].f, quote);
+});
 
 test('unchanged evidence documents are reusable without a memory projection', () => {
   assert.equal(canReuseUnchangedDocument({ ingestMode: 'evidence', segmentCount: 3, memoryLinkCount: 0 }), true);

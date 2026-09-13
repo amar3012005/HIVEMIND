@@ -552,6 +552,135 @@ export function estimateFactBearingSentences(content) {
   return { sentences: sentences.length, factBearing };
 }
 
+function lexicalWords(value) {
+  return String(value || '').normalize('NFKC').toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((token) => token.length > 3 && /\p{L}/u.test(token));
+}
+
+/**
+ * Enforce the extractor's source-language contract. A source quote is already
+ * byte-grounded later by normalizeUnifiedClaims; when a generated claim shares
+ * almost none of its lexical words, retaining the paraphrase turns a detected
+ * translation into durable data. Use the verbatim quote as the safe claim.
+ */
+export function repairSourceLanguageClaims(rawFacts, threshold = 0.55) {
+  const facts = Array.isArray(rawFacts) ? rawFacts : [];
+  let repaired = 0;
+  const output = facts.map((fact) => {
+    const claim = fact?.f || fact?.content;
+    const quote = fact?.source_quote;
+    if (!claim || !quote) return fact;
+    const claimWords = new Set(lexicalWords(claim));
+    const quoteWords = lexicalWords(quote);
+    if (!claimWords.size || quoteWords.length < 4) return fact;
+    const overlap = quoteWords.filter((word) => claimWords.has(word)).length / quoteWords.length;
+    if (overlap >= threshold) return fact;
+    repaired += 1;
+    return {
+      ...fact,
+      t: cleanTitleFrom(quote, 80),
+      f: String(quote).trim(),
+      _language_repaired: true,
+    };
+  });
+  Object.defineProperty(output, '_languageRepairCount', {
+    value: repaired, enumerable: false, configurable: true,
+  });
+  return output;
+}
+
+function sourceSentences(content) {
+  return String(content || '').split(/(?<=[.!?。！？])\s+|\n{2,}/u)
+    .map((sentence) => sentence.trim()).filter((sentence) => sentence.length >= 18);
+}
+
+function highSignalSourceAnchors(content) {
+  const anchors = [];
+  const add = (type, value, sentence) => {
+    const normalized = String(value || '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    if (!normalized) return;
+    const key = `${type}:${normalized.toLocaleLowerCase()}`;
+    if (!anchors.some((anchor) => anchor.key === key)) anchors.push({ key, type, value: normalized, sentence });
+  };
+  for (const sentence of sourceSentences(content)) {
+    for (const match of sentence.matchAll(/(?:€|£|\$|\b(?:EUR|USD|GBP)\b)\s*[\d][\d.,]*(?:\s*(?:k|m|million|billion))?|[\d][\d.,]*\s*(?:€|£|\$|\b(?:EUR|USD|GBP)\b)/giu)) {
+      add('amount', match[0], sentence);
+    }
+    for (const match of sentence.matchAll(/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+\p{L}{3,}\s+\d{4})\b/giu)) {
+      add('date', match[0], sentence);
+    }
+    // Multi-token proper names and legal company suffixes are high-signal. A
+    // one-token capital at a sentence boundary is deliberately not enough.
+    for (const match of sentence.matchAll(/\b(?:\p{Lu}[\p{L}\p{M}'’.-]+\s+){1,4}(?:\p{Lu}[\p{L}\p{M}'’.-]+|GmbH|AG|SE|Ltd\.?|LLC|Inc\.?|S\.A\.)\b/gu)) {
+      if (!/^(?:The|A|An)\s/u.test(match[0])) add('entity', match[0], sentence);
+    }
+  }
+  return anchors;
+}
+
+function deterministicEntitiesFromSentence(sentence) {
+  return highSignalSourceAnchors(sentence)
+    .filter((anchor) => anchor.type === 'entity')
+    .map((anchor) => ({
+      n: anchor.value,
+      k: /\b(?:GmbH|AG|SE|Ltd\.?|LLC|Inc\.?|S\.A\.)$/u.test(anchor.value)
+        ? 'organization'
+        : /^(?:Project|Projekt|Product|Produkt)\s/u.test(anchor.value) ? 'product' : 'person',
+    })).slice(0, 12);
+}
+
+/**
+ * Coverage net for high-value names, money and dates. It never invents text:
+ * an uncovered anchor becomes one candidate whose claim and quote are the exact
+ * source sentence. The LLM remains the primary extractor; this only prevents a
+ * technically successful response from silently omitting enterprise anchors.
+ */
+export function ensureSourceAnchorCoverage(claims, content, maxFacts = 8) {
+  const existing = Array.isArray(claims) ? claims : [];
+  const cap = Math.max(1, Number(maxFacts) || 1);
+  const represented = existing.map((claim) => String(claim?.f || '')).join('\n').toLocaleLowerCase();
+  const missing = highSignalSourceAnchors(content)
+    .filter((anchor) => !represented.includes(anchor.value.toLocaleLowerCase()));
+  if (!missing.length) return existing;
+
+  const fallbackBySentence = new Map();
+  for (const anchor of missing) fallbackBySentence.set(anchor.sentence, anchor);
+  const fallbacks = [...fallbackBySentence.entries()].map(([sentence, anchor], index) => {
+    const entities = deterministicEntitiesFromSentence(sentence);
+    const subject = entities[0] || null;
+    const decision = /\b(?:approve(?:d|s)?|decid(?:e|ed)|select(?:ed|s)?|reject(?:ed|s)?|genehmigt|beschlossen|ausgewählt|abgelehnt)\b/iu.test(sentence);
+    return {
+      t: cleanTitleFrom(sentence, 80),
+      f: sentence,
+      memory_type: 'fact',
+      claim_kind: decision ? 'decision' : 'fact',
+      importance: 0.96,
+      extraction_confidence: 1,
+      source_quote: sentence,
+      source_start: String(content).indexOf(sentence),
+      source_end: String(content).indexOf(sentence) + sentence.length,
+      subject,
+      predicate: decision ? 'decided' : `states_${anchor.type}`,
+      object: { value: anchor.value, type: anchor.type },
+      qualifiers: { deterministic_source_coverage: true },
+      entities,
+      relationships: [], rels: [],
+      _coverage_fallback: true,
+      _coverage_order: index,
+    };
+  });
+  const room = Math.max(0, cap - existing.length);
+  if (room >= fallbacks.length) return [...existing, ...fallbacks];
+  if (room > 0) return [...existing, ...fallbacks.slice(0, room)];
+  // At the cap, high-value exact-source fallbacks replace the lowest-confidence
+  // generated candidates rather than disappearing. Keep deterministic ordering.
+  return [...existing, ...fallbacks]
+    .sort((a, b) => Number(Boolean(b._coverage_fallback)) - Number(Boolean(a._coverage_fallback))
+      || Number(b.importance || 0) - Number(a.importance || 0))
+    .slice(0, cap);
+}
+
 export function markdownFromHeadedChunks(chunks) {
   const list = Array.isArray(chunks) ? chunks : [];
   const out = [];
@@ -1005,7 +1134,12 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     const supports = indices.map((index) => pool[index]).filter((item) => item?.segmentId && item?.source_quote);
     if (!supports.length) continue;
     const primary = supports[0];
-    const content = String(memory.content || '').trim();
+    const generatedContent = String(memory.content || '').trim();
+    const sourceLanguageContent = repairSourceLanguageClaims([{
+      f: generatedContent,
+      source_quote: supports.map((item) => item.source_quote).join(' '),
+    }], 0.55)[0]?.f;
+    const content = String(sourceLanguageContent || generatedContent).trim();
     if (content.length < 12) continue;
     const importance = Math.max(...supports.map((item) => Number(item.importance || 0.5)));
     const structured = normalizeClaimStructure(memory, supports.length === 1 ? supports[0] : {});
@@ -2232,54 +2366,13 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       ],
     });
     let rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
-    // TRANSLATION DETECTOR — language-neutral, no detector library, no per-language rules.
-    // The prompt forbids translating the section, but compliance was only ever assessed by eye.
-    // Measured by hand on a German upload: memories came back as "Phase 1 starts in April 2026 with
-    // the pilot installation in Hanover" from "Phase 1 startet im April 2026 mit der
-    // Pilotinstallation in Hannover" — and MANDI rows from 2026-07-22 show the same mix, so this
-    // long predates any model change and was never quantified.
-    // The signal: a fact's own `f` quote is REQUIRED to be a verbatim substring of the section, so a
-    // faithful fact shares many tokens with its quote and a translated one shares almost none. That
-    // holds in any language and privileges none. Logged, never dropped — a wrong count must not
-    // delete a user's fact.
-    if (rawFacts.length) {
-      // Pure numerals are EXCLUDED: dates, prices and part numbers survive translation unchanged and
-      // inflate the overlap. Measured on the real observed pair, keeping numerals scored 0.50 and hid
-      // the translation; dropping them scores it 0.40 against 0.75-1.00 for faithful facts.
-      // Threshold validated on 7 hand-built pairs drawn from actual output (3 translated / 4 faithful),
-      // separating 0.00-0.40 from 0.75-1.00. Directional instrumentation, not proof.
-      const _norm = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)
-        // Pure numerals are EXCLUDED: dates, prices and part numbers survive translation unchanged
-        // and inflate the overlap. Keeping them scored the real observed pair 0.50 and MISSED it;
-        // dropping them scores it 0.40 against 0.75-1.00 for faithful facts.
-        .filter((t) => t.length > 3 && /\p{L}/u.test(t));
-      const _langThreshold = Number(process.env.KB_LANG_DRIFT_THRESHOLD || 0.45);
-      let _suspect = 0;
-      let _judged = 0;
-      for (const f of rawFacts) {
-        // COMPARE THE CLAIM AGAINST ITS OWN QUOTE. My first version compared `t` (the SHORT TOPIC)
-        // against `f` (the full claim) — two fields that legitimately share few tokens, so it
-        // reported drift on faithful facts. Measured on an English PDF: 7 of 7 flagged when nothing
-        // had been translated. The contract is {t: short topic, f: claim, source_quote: verbatim
-        // substring}, and the only pair whose languages MUST match is the claim and its quote.
-        const claim = f?.f || f?.content;
-        const quote = f?.source_quote;
-        if (!claim || !quote) continue;          // nothing to compare — say nothing
-        const t = new Set(_norm(claim));
-        const q = _norm(quote);
-        if (!t.size || q.length < 4) continue;   // too short to judge
-        _judged += 1;
-        const shared = q.filter((w) => t.has(w)).length / q.length;
-        if (shared < _langThreshold) _suspect += 1;
-      }
-      if (_suspect) {
-        // Print the ACTUAL threshold, not a literal. The first version hardcoded "<15%" while the
-        // threshold had already moved to 0.45, so the log understated the bar it was applying.
-        ingestDiagnostic.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${_judged} judged facts share under `
-          + `${Math.round(_langThreshold * 100)}% of tokens with their own source quote — likely `
-          + `translated away from the section's language, which the prompt forbids. Facts kept; this `
-          + `is a measurement, not a filter.`);
-      }
+    // Detection without enforcement allowed translated claims into durable
+    // memory. Repair suspect claims to their already-grounded exact quote.
+    rawFacts = repairSourceLanguageClaims(rawFacts,
+      Number(process.env.KB_LANG_DRIFT_THRESHOLD || 0.55));
+    if (rawFacts._languageRepairCount) {
+      ingestDiagnostic.warn(`[kb-unified] repaired ${rawFacts._languageRepairCount} translated claim(s) `
+        + `to exact source-language text`);
     }
     // ATOMICITY. Measured on a real ingest: 23 of 29 claims were already single-sentence,
     // avg 119 chars — so the extractor is close. The 6 multi-sentence ones are what make
@@ -2302,7 +2395,13 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // segments. Importance is query-dependent and cannot be known at ingest time.
     // Env override honoured only if someone deliberately sets it ABOVE 0.
     const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0);
-    return normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
+    const normalized = normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
+    const covered = ensureSourceAnchorCoverage(normalized, content, factCap);
+    if (covered.length > normalized.length) {
+      ingestDiagnostic.warn(`[kb-unified] source-anchor coverage added ${covered.length - normalized.length} `
+        + `exact-source claim(s)`);
+    }
+    return covered;
   }
 
   async _recoverTruncatedUnified(window, options, error, depth = 0) {

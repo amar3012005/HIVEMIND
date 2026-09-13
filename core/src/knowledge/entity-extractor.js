@@ -19,6 +19,11 @@ const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s)]+/g;
 const MENTION_RE = /(?:^|[^A-Z0-9_])@([A-Z0-9_.-]{2,40})/gi;
 const HASHTAG_RE = /(?:^|\s)#([A-Z0-9_-]{2,40})/gi;
+const ORG_RE = /\b(?:\p{Lu}[\p{L}\p{M}'’&.-]+\s+){1,5}(?:GmbH|AG|SE|Ltd\.?|LLC|Inc\.?|Corp\.?|S\.A\.)\b/gu;
+const PROJECT_RE = /\b(?:Project|Projekt)\s+\p{Lu}[\p{L}\p{M}\d'’_-]*(?:\s+\p{Lu}[\p{L}\p{M}\d'’_-]*){0,3}\b/gu;
+const PERSON_RE = /\b\p{Lu}[\p{Ll}\p{M}'’-]{1,}\p{Ll}\s+\p{Lu}[\p{Ll}\p{M}'’-]{1,}\p{Ll}(?:\s+\p{Lu}[\p{Ll}\p{M}'’-]{1,}\p{Ll})?\b/gu;
+const MODEL_RE = /\b(?=[\p{L}\d_-]{4,}\b)(?=[\p{L}\d_-]*\d)[\p{Lu}\p{Ll}][\p{L}\d]*(?:[-_][\p{L}\d]+)+\b/gu;
+const GENERIC_NAME_PREFIX = /^(?:Evidence|Source|Document|Summary|Project|Projekt|Section|Chapter|Meeting|Knowledge)\b/u;
 
 const ENTITY_TYPES = ['person', 'organization', 'project', 'topic', 'location', 'product', 'event'];
 
@@ -110,6 +115,20 @@ export class EntityExtractor {
 
   _regexCandidates(text) {
     const cands = [];
+    const occupied = [];
+    const pushSpan = (match, type, confidence, source) => {
+      const surfaceForm = String(match[0]).trim();
+      const startOffset = Number(match.index) || 0;
+      cands.push({
+        name: surfaceForm, type, surfaceForm, confidence, source, startOffset,
+      });
+      occupied.push([startOffset, startOffset + surfaceForm.length]);
+    };
+    const overlapsNamedSpan = (match) => {
+      const start = Number(match.index) || 0;
+      const end = start + String(match[0]).length;
+      return occupied.some(([left, right]) => start < right && end > left);
+    };
     for (const m of text.matchAll(EMAIL_RE)) {
       const email = m[0];
       cands.push({
@@ -141,6 +160,22 @@ export class EntityExtractor {
         source: 'regex_hashtag',
         startOffset: (m.index || 0) + m[0].indexOf('#'),
       });
+    }
+    // Evidence mode forbids model calls, so the deterministic pass must still
+    // recognize unambiguous enterprise names. These patterns intentionally
+    // cover only high-signal shapes; ambiguous one-word capitals remain for the
+    // LLM-assisted `both` path rather than becoming false canonical entities.
+    for (const m of text.matchAll(ORG_RE)) pushSpan(m, 'organization', 0.99, 'regex_organization');
+    for (const m of text.matchAll(PROJECT_RE)) {
+      if (!overlapsNamedSpan(m)) pushSpan(m, 'project', 0.96, 'regex_project');
+    }
+    for (const m of text.matchAll(PERSON_RE)) {
+      if (!overlapsNamedSpan(m) && !GENERIC_NAME_PREFIX.test(m[0])) {
+        pushSpan(m, 'person', 0.9, 'regex_person');
+      }
+    }
+    for (const m of text.matchAll(MODEL_RE)) {
+      if (!overlapsNamedSpan(m)) pushSpan(m, 'product', 0.94, 'regex_product_model');
     }
     return cands;
   }

@@ -12,6 +12,20 @@ import {
   promotionProvenance,
   repairSourceLanguageClaims,
 } from '../../src/knowledge/document-first-ingestion.js';
+import { EntityExtractor } from '../../src/knowledge/entity-extractor.js';
+
+test('model-free entity extraction recognizes unambiguous enterprise names', () => {
+  const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
+  const entities = extractor.extractDeterministic(
+    'Orion Harbor AG approved Project Lantern. Priya Nair and Uwe Berger selected SolvisControl-3.',
+  );
+  const keys = new Set(entities.map((entity) => `${entity.type}:${entity.name}`));
+  assert.ok(keys.has('organization:Orion Harbor AG'));
+  assert.ok(keys.has('project:Project Lantern'));
+  assert.ok(keys.has('person:Priya Nair'));
+  assert.ok(keys.has('person:Uwe Berger'));
+  assert.ok(keys.has('product:SolvisControl-3'));
+});
 
 test('translated extraction is repaired to exact source-language text', () => {
   const quote = 'Atlas Meridian GmbH approved Project Lantern with a budget of EUR 42000 and a deadline of 30 November 2026.';

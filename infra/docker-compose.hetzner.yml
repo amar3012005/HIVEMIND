@@ -164,6 +164,18 @@ services:
   harness-runner:
     image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:local}
     profiles: ["harness-chat"]
+    # The native browser stays on the public HIVE authority while the Worker
+    # proxies to this private runner. Declare that public authority to the
+    # Harness request fence; otherwise its own session-controller requests
+    # correctly fail with 403 after a successful ticket exchange.
+    entrypoint:
+      - node
+      - /opt/deepseek-harness/apps/cli/lib/bin.js
+      - --profile
+      - hivemind-web
+      - --no-open
+      - --trusted-host
+      - next.singulancelabs.com
     restart: unless-stopped
     read_only: true
     mem_limit: 2g

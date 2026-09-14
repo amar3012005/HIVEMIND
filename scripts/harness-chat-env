@@ -39,6 +39,10 @@ if [[ -z "${COMPOSIO_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
   COMPOSIO_API_KEY="$(security find-generic-password -a "${USER}" -s hivemind-composio-api-key -w 2>/dev/null || true)"
   export COMPOSIO_API_KEY
 fi
+if [[ -z "${HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
+  HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY="$(security find-generic-password -a "${USER}" -s hivemind-connected-app-receipt-encryption-key -w 2>/dev/null || true)"
+  export HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY
+fi
 FILES=(-f "$ROOT/infra/docker-compose.hivemind-chat.yml")
 FOREIGN_CONTAINERS=(
   hm-core hm-control hm-postgres hm-redis hm-nango hm-playwright hm-employees
@@ -129,7 +133,7 @@ doctor() {
   actual="$(git -C "$ROOT" ls-tree HEAD frontend/Da-vinci | awk '{print $3}')"
   [[ "$actual" == "$expected" ]] || fail "Da-vinci SHA drift"
   [[ -f "$ENV_FILE" ]] || fail "missing $ENV_FILE"
-  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN HIVEMIND_MASTER_API_KEY CLOUDFLARE_API_KEY; do
+  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN HIVEMIND_MASTER_API_KEY CLOUDFLARE_API_KEY; do
     configured "$key" || fail "$key missing"
   done
   [[ "$(env_val HIVEMIND_MASTER_API_KEY)" != "hm_master_key_99228811" ]] || fail "placeholder HIVEMIND_MASTER_API_KEY is forbidden"

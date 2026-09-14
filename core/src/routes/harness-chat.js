@@ -26,6 +26,7 @@ function legacyResponse(env, flagReceipt) {
 }
 
 const INTERNAL_PREFIX = '/internal/v1/harness-chat/core';
+const RECEIPT_PREFIX = '/internal/v1/harness-chat/receipts';
 const CORE_ROUTES = new Map([
   ['/api/profile', new Set(['GET'])],
   ['/api/profiles', new Set(['GET'])],
@@ -81,7 +82,9 @@ async function scopedHyperagentProfiles(prisma, claims) {
 }
 
 async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl }) {
-  if (!pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
+  const coreRequest = pathname.startsWith(`${INTERNAL_PREFIX}/`);
+  const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
+  if (!coreRequest && !receiptRequest) return false;
   const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let claims;
   try {

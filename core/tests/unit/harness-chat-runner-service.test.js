@@ -56,3 +56,20 @@ test('scoped proxy rejects invalid token before tenant lookup', async () => {
   });
   assert.equal(handled, true); assert.equal(res.status, 401);
 });
+
+test('receipt routes enter the authenticated runner boundary', async () => {
+  const res = {};
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: 'Bearer invalid' } }, res,
+    pathname: '/internal/v1/harness-chat/receipts',
+    prisma: new Proxy({}, { get() { throw new Error('must not query'); } }),
+    parseBody: async () => ({}),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {},
+    env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: fetch,
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 401);
+  assert.deepEqual(res.body, { error: 'Unauthorized' });
+});

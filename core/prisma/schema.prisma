@@ -1475,6 +1475,26 @@ model SourceMetadata {
   @@map("source_metadata")
 }
 
+/// Exactly-once ledger for synchronous memory writes made by agents and clients.
+model MemoryWriteReceipt {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(180)
+  requestHash    String    @map("request_hash") @db.Char(64)
+  status         String    @default("processing") @db.VarChar(24)
+  memoryId       String?   @map("memory_id") @db.Uuid
+  response       Json?     @db.JsonB
+  errorCode      String?   @map("error_code") @db.VarChar(80)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@unique([orgId, userId, idempotencyKey], map: "memory_write_receipts_owner_key")
+  @@index([status, updatedAt], map: "memory_write_receipts_updated_idx")
+  @@map("memory_write_receipts")
+}
+
 /// AST and scope metadata for code memories
 model CodeMemoryMetadata {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid

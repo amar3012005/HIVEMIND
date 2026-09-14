@@ -40,6 +40,7 @@ import { purgeEntityResourceProjections } from './knowledge/entity-projection-de
 import { projectScopedAnchorFilter } from './knowledge/document-delete-scope.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
 import { findEntities } from './memory/entity-discovery.js';
+import { MemoryWriteReceiptStore, memoryWriteIdempotencyKey, memoryWriteRequestHash, publicMemoryWriteReceipt } from './memory/memory-write-receipts.js';
 import {
   getRuntimeRole,
   shouldRunConnectorBackground,
@@ -532,6 +533,7 @@ installConsoleCapture('core');
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
+const memoryWriteReceipts = prisma ? new MemoryWriteReceiptStore(prisma) : null;
 const { configureAiGovernance, recordAiUsage } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 // Production Web Intelligence must use durable tenant-scoped state. The
@@ -3052,7 +3054,7 @@ function applyCorsHeaders(req, res) {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID, Accept');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id, X-Idempotency-Key, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID, Accept');
   res.setHeader('Access-Control-Expose-Headers', 'WWW-Authenticate, MCP-Protocol-Version, Mcp-Session-Id');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 }
@@ -10997,7 +10999,7 @@ exit \$RC
         return jsonResponse(res, { error: 'method not allowed' }, 405);
       }
 
-      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
+      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all' && pathname !== '/api/memories/save-status') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
             return;
@@ -20494,6 +20496,23 @@ exit \$RC
           }
           break;
 
+        case '/api/memories/save-status':
+          if (req.method === 'GET') {
+            if (!memoryWriteReceipts) {
+              return jsonResponse(res, { status: 'capability_unavailable', code: 'MEMORY_WRITE_RECEIPTS_UNAVAILABLE' }, 503);
+            }
+            const idempotencyKey = memoryWriteIdempotencyKey(req.headers, {
+              idempotency_key: url.searchParams.get('idempotency_key'),
+            });
+            if (!idempotencyKey) {
+              return jsonResponse(res, { error: 'invalid_idempotency_key' }, 400);
+            }
+            await ensureTenantContext(prisma, { user_id: userId, org_id: orgId });
+            const receipt = await memoryWriteReceipts.get({ orgId, userId, idempotencyKey });
+            return jsonResponse(res, publicMemoryWriteReceipt(receipt, idempotencyKey), receipt ? 200 : 404);
+          }
+          break;
+
         case '/api/memories':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories')) {
@@ -20633,10 +20652,49 @@ exit \$RC
               }, 400);
             }
 
+            const writeIdempotencyKey = memoryWriteIdempotencyKey(req.headers, body);
+            const writeRequestHash = writeIdempotencyKey ? memoryWriteRequestHash({
+              ...validation.data,
+              relationship: body.relationship || null,
+              scope: body.scope || null,
+              primary_team_id: body.primary_team_id || null,
+              project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
+            }) : null;
+            let writeReceiptOwned = false;
+            if (writeIdempotencyKey) {
+              if (!memoryWriteReceipts) {
+                return jsonResponse(res, { status: 'capability_unavailable', code: 'MEMORY_WRITE_RECEIPTS_UNAVAILABLE' }, 503);
+              }
+              await ensureTenantContext(prisma, { user_id: userId, org_id: orgId });
+              try {
+                const admission = await memoryWriteReceipts.begin({
+                  orgId, userId, idempotencyKey: writeIdempotencyKey, requestHash: writeRequestHash,
+                });
+                writeReceiptOwned = admission.acquired;
+                if (!admission.acquired) {
+                  const prior = publicMemoryWriteReceipt(admission.receipt, writeIdempotencyKey);
+                  if (admission.receipt.status === 'saved') {
+                    return jsonResponse(res, { ...(admission.receipt.response || {}), receipt: prior, replayed: true }, 200);
+                  }
+                  return jsonResponse(res, prior, admission.receipt.status === 'processing' ? 202 : 409);
+                }
+              } catch (error) {
+                if (error?.code === 'IDEMPOTENCY_CONFLICT') {
+                  return jsonResponse(res, { error: 'idempotency_conflict', message: error.message }, 409);
+                }
+                throw error;
+              }
+            }
+
             // Plan enforcement: check memory limit before ingest
             if (planEnforcer && orgId) {
               const memoryLimitCheck = await planEnforcer.checkLimit(orgId, 'memories', 1);
               if (!memoryLimitCheck.allowed) {
+                if (writeIdempotencyKey && writeReceiptOwned && memoryWriteReceipts) {
+                  await memoryWriteReceipts.failed({
+                    orgId, userId, idempotencyKey: writeIdempotencyKey, errorCode: 'PLAN_LIMIT_EXCEEDED',
+                  }).catch(() => {});
+                }
                 return jsonResponse(res, planLimitBody(memoryLimitCheck, 'memories'), memoryLimitCheck.status || 402);
               }
             }
@@ -20710,6 +20768,7 @@ exit \$RC
                 defer_entity_linking: body.defer_entity_linking === true,
                 metadata: {
                   ...validation.data.metadata,
+                  ...(writeIdempotencyKey ? { idempotency_key: writeIdempotencyKey } : {}),
                   valid_from: validation.data.valid_from || null,
                   valid_to: validation.data.valid_to || null,
                   source_platform: validation.data.source_platform || null,
@@ -21058,7 +21117,7 @@ exit \$RC
               // All payloads skipped as redundant
               if (!firstSuccessResult) {
                 const skippedResult = syncResults[0] || {};
-                return jsonResponse(res, {
+                const skippedResponse = {
                   success: true,
                   skipped: true,
                   mutation: {
@@ -21068,7 +21127,14 @@ exit \$RC
                     max_similarity: skippedResult.maxSimilarity,
                     processing_ms: skippedResult.processingMs
                   }
-                }, 200);
+                };
+                if (writeIdempotencyKey && writeReceiptOwned) {
+                  const savedReceipt = await memoryWriteReceipts.saved({
+                    orgId, userId, idempotencyKey: writeIdempotencyKey, memoryId: null, response: skippedResponse,
+                  });
+                  skippedResponse.receipt = publicMemoryWriteReceipt(savedReceipt, writeIdempotencyKey);
+                }
+                return jsonResponse(res, skippedResponse, 200);
               }
 
               const firstMemory = await persistentMemoryStore.getMemory(firstSuccessResult.memoryId);
@@ -21086,7 +21152,7 @@ exit \$RC
                 }
               }
 
-              return jsonResponse(res, {
+              const savedResponse = {
                 success: true,
                 memory: firstMemory,
                 relationships: firstSuccessResult.edgesCreated,
@@ -21099,9 +21165,39 @@ exit \$RC
                   novelty_score: firstSuccessResult.noveltyScore ?? null,
                   delta_extracted: firstSuccessResult.deltaExtracted ?? false
                 }
-              }, 201);
+              };
+              if (writeIdempotencyKey && writeReceiptOwned) {
+                const savedReceipt = await memoryWriteReceipts.saved({
+                  orgId, userId, idempotencyKey: writeIdempotencyKey,
+                  memoryId: firstSuccessResult.memoryId, response: savedResponse,
+                });
+                savedResponse.receipt = publicMemoryWriteReceipt(savedReceipt, writeIdempotencyKey);
+              }
+              return jsonResponse(res, savedResponse, 201);
             } catch (error) {
               console.error('Store memory failed:', error);
+              if (writeIdempotencyKey && writeReceiptOwned && memoryWriteReceipts) {
+                const committedMemoryId = await memoryWriteReceipts.findCommittedMemory({
+                  orgId, userId, idempotencyKey: writeIdempotencyKey,
+                }).catch(() => null);
+                if (committedMemoryId) {
+                  const memory = await persistentMemoryStore.getMemory(committedMemoryId).catch(() => ({ id: committedMemoryId }));
+                  const recoveredResponse = {
+                    success: true,
+                    memory,
+                    degraded: true,
+                    degradation: 'The PostgreSQL memory commit succeeded; a post-commit projection did not complete.',
+                  };
+                  const savedReceipt = await memoryWriteReceipts.saved({
+                    orgId, userId, idempotencyKey: writeIdempotencyKey, memoryId: committedMemoryId, response: recoveredResponse,
+                  });
+                  recoveredResponse.receipt = publicMemoryWriteReceipt(savedReceipt, writeIdempotencyKey);
+                  return jsonResponse(res, recoveredResponse, 201);
+                }
+                await memoryWriteReceipts.failed({
+                  orgId, userId, idempotencyKey: writeIdempotencyKey, errorCode: 'MEMORY_WRITE_FAILED',
+                }).catch(() => {});
+              }
               return jsonResponse(res, {
                 error: 'Memory storage failed',
                 message: error.message

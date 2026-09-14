@@ -222,7 +222,7 @@ services:
   # production. It shares the existing Postgres/Redis services; no parallel
   # persistence stack is permitted.
   harness-runner:
-    image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:sha-4e4351d40}
+    image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:sha-4887449af}
     profiles: ["harness-chat"]
     restart: unless-stopped
     mem_limit: 2g

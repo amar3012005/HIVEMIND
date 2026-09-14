@@ -20661,6 +20661,7 @@ exit \$RC
               project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
             }) : null;
             let writeReceiptOwned = false;
+            let admittedWriteReceipt = null;
             if (writeIdempotencyKey) {
               if (!memoryWriteReceipts) {
                 return jsonResponse(res, { status: 'capability_unavailable', code: 'MEMORY_WRITE_RECEIPTS_UNAVAILABLE' }, 503);
@@ -20671,6 +20672,7 @@ exit \$RC
                   orgId, userId, idempotencyKey: writeIdempotencyKey, requestHash: writeRequestHash,
                 });
                 writeReceiptOwned = admission.acquired;
+                admittedWriteReceipt = admission.receipt;
                 if (!admission.acquired) {
                   const prior = publicMemoryWriteReceipt(admission.receipt, writeIdempotencyKey);
                   if (admission.receipt.status === 'saved') {
@@ -20799,7 +20801,14 @@ exit \$RC
 
                 res.setHeader('X-Job-Id', jobId);
                 try { planEnforcer?.recordUsage(orgId, 'memories', 1); } catch { /* meter */ }
-                jsonResponse(res, { success: true, job_id: jobId, status: 'queued' }, 202);
+                jsonResponse(res, {
+                  success: true,
+                  job_id: jobId,
+                  status: 'queued',
+                  ...(writeIdempotencyKey && admittedWriteReceipt
+                    ? { receipt: publicMemoryWriteReceipt(admittedWriteReceipt, writeIdempotencyKey) }
+                    : {}),
+                }, 202);
 
                 // Process in background — smart routing (semantic recall +
                 // triple-operator detection) runs HERE, not before 202, so
@@ -20954,10 +20963,37 @@ exit \$RC
                         progress: 100,
                         metadata: { userId, orgId, title: validation.data.title, skipped: true, operation: 'skipped_redundant' }
                       });
+                      if (writeIdempotencyKey && writeReceiptOwned && memoryWriteReceipts) {
+                        const skippedResponse = {
+                          success: true,
+                          job_id: jobId,
+                          status: 'indexed',
+                          skipped: true,
+                        };
+                        await memoryWriteReceipts.saved({
+                          orgId, userId, idempotencyKey: writeIdempotencyKey,
+                          memoryId: null, response: skippedResponse,
+                        });
+                      }
                       return;
                     }
 
                     ingestTracker.updateJob(jobId, { status: 'indexed', progress: 100, memoryId: results[0].memoryId, count: results.length });
+
+                    if (writeIdempotencyKey && writeReceiptOwned && memoryWriteReceipts) {
+                      const memory = await persistentMemoryStore.getMemory(results[0].memoryId);
+                      await memoryWriteReceipts.saved({
+                        orgId, userId, idempotencyKey: writeIdempotencyKey,
+                        memoryId: results[0].memoryId,
+                        response: {
+                          success: true,
+                          job_id: jobId,
+                          status: 'indexed',
+                          memory,
+                          chunk_count: results.length,
+                        },
+                      });
+                    }
 
                     // Dispatch webhook event
                     webhookManager?.dispatch('memory.created', { memoryId: results[0].memoryId, userId, orgId }, { userId, orgId }).catch(() => {});
@@ -20975,6 +21011,31 @@ exit \$RC
                   } catch (err) {
                     console.error('[async-ingest] Job failed:', jobId, err);
                     ingestTracker.updateJob(jobId, { status: 'failed', error: err.message });
+                    if (writeIdempotencyKey && writeReceiptOwned && memoryWriteReceipts) {
+                      const committedMemoryId = await memoryWriteReceipts.findCommittedMemory({
+                        orgId, userId, idempotencyKey: writeIdempotencyKey,
+                      }).catch(() => null);
+                      if (committedMemoryId) {
+                        const memory = await persistentMemoryStore.getMemory(committedMemoryId).catch(() => ({ id: committedMemoryId }));
+                        await memoryWriteReceipts.saved({
+                          orgId, userId, idempotencyKey: writeIdempotencyKey,
+                          memoryId: committedMemoryId,
+                          response: {
+                            success: true,
+                            job_id: jobId,
+                            status: 'indexed',
+                            memory,
+                            degraded: true,
+                            degradation: 'The PostgreSQL memory commit succeeded; a post-commit projection did not complete.',
+                          },
+                        }).catch(() => {});
+                      } else {
+                        await memoryWriteReceipts.failed({
+                          orgId, userId, idempotencyKey: writeIdempotencyKey,
+                          errorCode: 'MEMORY_WRITE_FAILED',
+                        }).catch(() => {});
+                      }
+                    }
                   } finally {
                     clearTimeout(_slotSafety);
                     _freeSlot();

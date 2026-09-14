@@ -24,7 +24,12 @@ COPY core/prisma ./prisma
 COPY core/tsconfig.json ./
 
 # Install dependencies
-RUN npm ci && npm cache clean --force
+# Keep the npm download cache outside the resulting image, while requiring the
+# local Prisma CLI that later build stages use. This prevents a partial npm
+# install from being cached as a valid dependency layer.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund && \
+    test -x ./node_modules/.bin/prisma
 
 # Copy source code
 COPY core/src ./src

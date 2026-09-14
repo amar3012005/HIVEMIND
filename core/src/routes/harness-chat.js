@@ -26,6 +26,7 @@ function legacyResponse(env, flagReceipt) {
 }
 
 const INTERNAL_PREFIX = '/internal/v1/harness-chat/core';
+const RECEIPT_PREFIX = '/internal/v1/harness-chat/receipts';
 const CORE_ROUTES = new Map([
   ['/api/profile', new Set(['GET'])],
   ['/api/profiles', new Set(['GET'])],
@@ -81,7 +82,8 @@ async function scopedHyperagentProfiles(prisma, claims) {
 }
 
 async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl }) {
-  if (!pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
+  const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
+  if (!receiptRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
   const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let claims;
   try {
@@ -97,7 +99,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     const project = await prisma?.project?.findFirst?.({ where: { id: claims.project_id, orgId: claims.org_id }, select: { id: true } });
     if (!project) { jsonResponse(res, { error: 'Project not found' }, 404); return true; }
   }
-  if (pathname === '/internal/v1/harness-chat/receipts' && req.method === 'POST') {
+  if (pathname === RECEIPT_PREFIX && req.method === 'POST') {
     try {
       const input = await parseBody(req);
       const receipt = await storeConnectedAppReceipt({ prisma, owner: { orgId: claims.org_id, userId: claims.sub }, input, env });

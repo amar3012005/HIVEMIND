@@ -5,6 +5,11 @@ import {
 } from '../harness-chat/admission-ticket.js';
 import { evaluateHarnessChatFlag } from '../harness-chat/flag-client.js';
 import { verifyHarnessRunnerServiceToken } from '../harness-chat/runner-service-token.js';
+import {
+  ConnectedAppReceiptError,
+  readConnectedAppReceipt,
+  storeConnectedAppReceipt,
+} from '../harness-chat/connected-app-receipts.js';
 import { getInternalApiKey } from '../security/internal-auth.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -90,6 +95,35 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   if (claims.project_id) {
     const project = await prisma?.project?.findFirst?.({ where: { id: claims.project_id, orgId: claims.org_id }, select: { id: true } });
     if (!project) { jsonResponse(res, { error: 'Project not found' }, 404); return true; }
+  }
+  if (pathname === '/internal/v1/harness-chat/receipts' && req.method === 'POST') {
+    try {
+      const input = await parseBody(req);
+      const receipt = await storeConnectedAppReceipt({ prisma, owner: { orgId: claims.org_id, userId: claims.sub }, input, env });
+      jsonResponse(res, {
+        receipt_id: receipt.id, stored: true, bytes: receipt.contentBytes,
+        expires_at: receipt.expiresAt.toISOString(), allowed_fields: receipt.allowedFields,
+      }, 201);
+    } catch (error) {
+      const status = error instanceof ConnectedAppReceiptError ? error.status : 500;
+      jsonResponse(res, { error: error instanceof ConnectedAppReceiptError ? error.code : 'receipt_store_failed' }, status);
+    }
+    return true;
+  }
+  const receiptRead = pathname.match(/^\/internal\/v1\/harness-chat\/receipts\/([0-9a-f-]{36})\/read$/i);
+  if (receiptRead && req.method === 'POST') {
+    try {
+      const input = await parseBody(req);
+      const result = await readConnectedAppReceipt({
+        prisma, owner: { orgId: claims.org_id, userId: claims.sub }, receiptId: receiptRead[1],
+        sessionId: input.session_id, requestedFields: input.fields, env,
+      });
+      jsonResponse(res, { receipt_id: receiptRead[1], fields: result });
+    } catch (error) {
+      const status = error instanceof ConnectedAppReceiptError ? error.status : 500;
+      jsonResponse(res, { error: error instanceof ConnectedAppReceiptError ? error.code : 'receipt_read_failed' }, status);
+    }
+    return true;
   }
   const corePath = pathname.slice(INTERNAL_PREFIX.length);
   if (corePath === '/v1/hyperagents/profiles' && req.method === 'GET') {

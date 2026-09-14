@@ -8,7 +8,7 @@ const composeUrl = new URL('../../../infra/docker-compose.hetzner.yml', import.m
 
 test('Harness provider schema is additive, tenant scoped, and RLS enforced', async () => {
   const [schema, migration] = await Promise.all([readFile(schemaUrl, 'utf8'), readFile(migrationUrl, 'utf8')]);
-  for (const model of ['HarnessSession', 'HarnessSessionEvent', 'HarnessSessionLease']) assert.match(schema, new RegExp(`model ${model} \\{`));
+  for (const model of ['HarnessSession', 'HarnessSessionEvent', 'HarnessSessionLease', 'ConnectedAppReceipt']) assert.match(schema, new RegExp(`model ${model} \\{`));
   assert.match(schema, /id\s+String\s+@id\s+@db\.VarChar\(180\)/);
   assert.match(schema, /eventCount\s+BigInt/);
   assert.match(schema, /inheritedEventCount\s+BigInt/);
@@ -32,4 +32,10 @@ test('canonical Compose uses the dedicated Harness image and existing Postgres a
   assert.doesNotMatch(service, /env_file:/);
   assert.match(service, /profiles: \["harness-chat"\]/);
   assert.match(service, /PGOPTIONS: -c search_path=hivemind,public/);
+});
+
+test('Control Plane owns an explicit encrypted connected-app receipt key', async () => {
+  const compose = await readFile(composeUrl, 'utf8');
+  const service = compose.slice(compose.indexOf('\n  control-plane:'), compose.indexOf('\n  # Native DeepSeek Harness'));
+  assert.match(service, /HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY: \$\{HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-\}/);
 });

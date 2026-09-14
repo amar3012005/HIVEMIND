@@ -56,3 +56,32 @@ test('scoped proxy rejects invalid token before tenant lookup', async () => {
   });
   assert.equal(handled, true); assert.equal(res.status, 401);
 });
+
+test('receipt endpoint is admitted outside the Core proxy namespace', async () => {
+  const rows = new Map();
+  const model = {
+    findUnique: async ({ where }) => [...rows.values()].find((row) => row.sessionId === where.sessionId_callId.sessionId && row.callId === where.sessionId_callId.callId) || null,
+    create: async ({ data }) => { rows.set(data.id, structuredClone(data)); return structuredClone(data); },
+  };
+  const res = {};
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/receipts',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ isActive: true }) },
+      $transaction: async (action) => action({ $executeRawUnsafe: async () => [], connectedAppReceipt: model }),
+    },
+    parseBody: async () => ({
+      session_id: 'session-12345678', call_id: 'receipt-route-test', provider: 'composio', tool: 'GMAIL_FETCH_EMAILS',
+      projection_policy: 'selected-contract', allowed_fields: ['subject'], approved_projection: { subject: 'test' }, raw_receipt: { private: 'test' },
+    }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: {
+      HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret,
+      HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY: crypto.randomBytes(32).toString('base64'),
+    }, fetchImpl: fetch,
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 201);
+  assert.equal(res.body.stored, true);
+});

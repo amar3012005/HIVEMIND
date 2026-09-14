@@ -10,10 +10,31 @@ import {
   ensureSourceAnchorCoverage,
   materializeClaimEntities,
   normalizeCuratedClaims,
+  normalizeUnifiedEntityCatalog,
   promotionProvenance,
   repairSourceLanguageClaims,
 } from '../../src/knowledge/document-first-ingestion.js';
 import { EntityExtractor, isValidEntityCandidate } from '../../src/knowledge/entity-extractor.js';
+
+test('both-mode entity catalog keeps grounded named entities outside promoted facts', () => {
+  const source = 'Uwe Berger introduced SINGULANCE to Amar Sai. Should Singulance expand?';
+  const entities = normalizeUnifiedEntityCatalog([
+    { n: 'Uwe Berger', k: 'person', aliases: ['Uwe'] },
+    { n: 'SINGULANCE', k: 'organization' },
+    { n: 'Amar Sai', k: 'person' },
+    { n: 'Should Singulance', k: 'person' },
+    { n: 'Invented GmbH', k: 'organization' },
+  ], source);
+
+  assert.deepEqual(entities.map(({ name, kind }) => ({ name, kind })), [
+    { name: 'Uwe Berger', kind: 'person' },
+    { name: 'SINGULANCE', kind: 'organization' },
+    { name: 'Amar Sai', kind: 'person' },
+  ]);
+  assert.deepEqual(entities[0].aliases, ['Uwe']);
+  assert.equal(entities[0].mentionText, 'Uwe Berger');
+  assert.equal(entities[0].startOffset, 0);
+});
 
 test('model-free entity extraction recognizes unambiguous enterprise names', () => {
   const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
@@ -315,6 +336,7 @@ test('document parent summaries inherit canonical entities and receive a zero-ex
     documentId: '33333333-3333-4333-8333-333333333333',
     metadata: { filename: 'pilot.txt', scope: 'personal' },
     totalFacts: 1,
+    canonicalEntities: [{ name: 'Uwe Berger', kind: 'person' }],
   });
 
   assert.ok(parentId);
@@ -322,7 +344,10 @@ test('document parent summaries inherit canonical entities and receive a zero-ex
   assert.equal(persisted.modelRoute, null);
   assert.equal(persisted.resources[0].resourceType, 'memory');
   assert.equal(persisted.resources[0].resourceId, parentId);
-  assert.deepEqual(persisted.resources[0].entities, memories[0].extracted_entities);
+  assert.deepEqual(persisted.resources[0].entities, [
+    { name: 'Uwe Berger', kind: 'person' },
+    ...memories[0].extracted_entities,
+  ]);
   assert.equal(memories.at(-1).memory_type, 'summary');
 });
 

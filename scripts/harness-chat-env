@@ -230,6 +230,40 @@ refresh_control_plane() {
   say OK "Control Plane uses the canonical next.preview flag URL"
 }
 
+activate_durable_receipts() {
+  # This is a bounded, recoverable release of the receipt authority. It does
+  # not rebuild or replace Core, storage, the gateway, or unrelated services.
+  # The caller supplies an immutable Control Plane image; the runner is only
+  # recreated after that image and the database migration have passed checks.
+  [[ -f "$ENV_FILE" ]] || { say RED "missing $ENV_FILE"; return 1; }
+  [[ -n "${HIVEMIND_CONTROL_PLANE_IMAGE:-}" ]] || { say RED "set HIVEMIND_CONTROL_PLANE_IMAGE to an immutable image tag"; return 1; }
+  [[ -n "${HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-}" ]] || { say RED "receipt encryption key is unavailable"; return 1; }
+  docker image inspect "$HIVEMIND_CONTROL_PLANE_IMAGE" >/dev/null || { say RED "Control Plane image is not available locally"; return 1; }
+  docker exec hivemind-postgres psql -U hivemind -d hivemind_app -tAc \
+    "SELECT to_regclass('hivemind.connected_app_receipts') IS NOT NULL" | grep -Fxq t \
+    || { say RED "connected receipt migration is not applied"; return 1; }
+  docker exec hivemind-postgres psql -U hivemind -d hivemind_app -tAc \
+    "SELECT count(*) FROM hivemind.harness_chat_migrations WHERE name='20260914110000_connected_app_receipts'" | grep -Fxq 1 \
+    || { say RED "connected receipt migration ledger is incomplete"; return 1; }
+  compose config --quiet
+  compose up -d --no-build --no-deps --force-recreate control-plane
+  local deadline=$((SECONDS + 180))
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-control-plane 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Control Plane did not become healthy"; return 1; }
+    sleep 3
+  done
+  docker exec hivemind-control-plane node -e 'import("./src/harness-chat/connected-app-receipts.js").then(() => console.log("receipt authority loaded"))'
+  compose up -d --no-build --no-deps --force-recreate harness-runner
+  deadline=$((SECONDS + 180))
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Harness runner did not become healthy"; return 1; }
+    sleep 3
+  done
+  docker inspect hivemind-harness-runner --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fxq 'HIVEMIND_CONNECTED_RECEIPTS_REQUIRED=true' \
+    || { say RED "runner did not require durable receipts"; return 1; }
+  say OK "durable receipt authority and runner are healthy"
+}
+
 test_all() {
   doctor
   verify_health
@@ -256,9 +290,10 @@ case "${1:-status}" in
   restart) doctor; compose up -d --no-build --no-deps --force-recreate harness-runner; wait_healthy ;;
   release-runner) release_runner ;;
   refresh-control-plane) refresh_control_plane ;;
+  activate-durable-receipts) activate_durable_receipts ;;
   refresh-core-auth) refresh_core_auth ;;
   health) verify_health ;;
   test) test_all ;;
   down) compose down ;;
-  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|release-runner|refresh-control-plane|refresh-core-auth|test|down"; exit 2 ;;
+  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|release-runner|refresh-control-plane|refresh-core-auth|activate-durable-receipts|test|down"; exit 2 ;;
 esac

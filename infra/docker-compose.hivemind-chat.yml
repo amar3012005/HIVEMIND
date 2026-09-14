@@ -152,7 +152,7 @@ services:
         required: true
       - path: ../core/.env
         required: false
-    image: hivemind/hm-hyper-contract-api:stt-byok-bebf3469d2ad
+    image: ${HIVEMIND_CORE_IMAGE:-hivemind/hm-hyper-contract-api:stt-byok-bebf3469d2ad}
     container_name: hivemind-core
     environment:
       PORT: 3000
@@ -217,7 +217,7 @@ services:
 
   control-plane:
     <<: *env-file
-    image: hivemind-control-plane-local:latest
+    image: ${HIVEMIND_CONTROL_PLANE_IMAGE:-hivemind-control-plane-local:latest}
     container_name: hivemind-control-plane
     environment:
       NODE_ENV: production

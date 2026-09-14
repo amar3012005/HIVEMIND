@@ -4,7 +4,7 @@
   "hivemindWorktree": "/opt/enigma",
   "harnessRepo": "amar3012005/deepseek-harness-hivemind",
   "harnessBranch": "durable-connected-app-receipts",
-  "harnessCommit": "8f762bde7f0ffa6804dcdd8537ec3f47d645a45e",
+  "harnessCommit": "820ba150a6273b78c8702f3e1760dfcce052a893",
   "davinciSubmodule": "frontend/Da-vinci",
   "davinciCommit": "5a38bec6fb0987664bb3b9336fa713cf1b1e4553",
   "harnessProfile": "hivemind-chat",

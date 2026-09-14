@@ -7,12 +7,25 @@ LOCK="$ROOT/infra/harness-chat-release.lock.json"
 ENV_FILE="${HIVEMIND_CHAT_ENV_FILE:-$ROOT/infra/.env.hivemind-chat.local}"
 EXAMPLE="$ROOT/infra/.env.hivemind-chat.example"
 HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:-/Users/amar/deepseek-harness-upstream-clean-preview}"
+# A release candidate may need to use a clean Harness checkout without
+# rewriting the long-lived secrets env file.  Capture explicit process-level
+# overrides before sourcing it, then restore them below.  Docker Compose gives
+# exported process variables precedence over --env-file values too.
+HARNESS_SOURCE_OVERRIDE="${HIVEMIND_HARNESS_SOURCE_OVERRIDE:-}"
+HARNESS_COMMIT_OVERRIDE="${HIVEMIND_HARNESS_COMMIT_HASH_OVERRIDE:-}"
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
   HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:-$HARNESS_SOURCE}"
+fi
+if [[ -n "$HARNESS_SOURCE_OVERRIDE" ]]; then
+  HARNESS_SOURCE="$HARNESS_SOURCE_OVERRIDE"
+  export HIVEMIND_HARNESS_SOURCE="$HARNESS_SOURCE_OVERRIDE"
+fi
+if [[ -n "$HARNESS_COMMIT_OVERRIDE" ]]; then
+  export HIVEMIND_HARNESS_COMMIT_HASH="$HARNESS_COMMIT_OVERRIDE"
 fi
 # Preview email credentials are kept out of the repository and plaintext env
 # files. Prefer an explicit process/env-file value, then the local Keychain.

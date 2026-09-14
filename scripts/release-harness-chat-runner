@@ -4,7 +4,7 @@ set -eu
 repo=${1:?usage: release-harness-chat-runner HARNESS_REPO [IMAGE_REPOSITORY]}
 image_repo=${2:-hivemind/harness-chat}
 platform=${HIVEMIND_HARNESS_PLATFORM:-linux/amd64}
-expected=4887449afb608a267920eb37c2efc1e8276b4c75
+expected=efeb045c93753992781da9aea452e1b1a07495df
 actual=$(git -C "$repo" rev-parse HEAD)
 dirty=$(git -C "$repo" status --porcelain)
 

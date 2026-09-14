@@ -52,7 +52,10 @@ COPY employees-service/src/HQ-runtime ./hq-runtime
 COPY core/tests ./tests
 
 # Generate Prisma client
-RUN npx prisma generate
+# Use the exact Prisma CLI installed by the locked dependency layer. `npx`
+# may contact the registry when its resolver cannot find a binary, which makes
+# an otherwise hermetic release fail on a transient DNS outage.
+RUN ./node_modules/.bin/prisma generate
 
 # Release gate: execute the security-sensitive chat contracts in the same
 # dependency environment used to assemble the production image. Tests remain

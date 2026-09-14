@@ -6,7 +6,7 @@
   "harnessBranch": "durable-connected-app-receipts",
   "harnessCommit": "ed0ca657f73e25b66b98a483ea5a1e46aea89c4f",
   "davinciSubmodule": "frontend/Da-vinci",
-  "davinciCommit": "02285f08b20b3bec9dfbf60295620e6a92d14e47",
+  "davinciCommit": "6b1ed13aab2904ff293591ca19227ad448d48480",
   "harnessProfile": "hivemind-chat",
   "composeProject": "enigma",
   "composeFiles": ["infra/docker-compose.hetzner.yml"],

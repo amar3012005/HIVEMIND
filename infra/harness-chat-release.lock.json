@@ -6,7 +6,7 @@
   "harnessBranch": "codex/hivemind-singulance-release-candidate-v2",
   "harnessCommit": "e16e0b0682d97fb5ddeebefe605d71189eab9ce6",
   "davinciSubmodule": "frontend/Da-vinci",
-  "davinciCommit": "e1e540e164f2c1298e119f917823aa5eee421507",
+  "davinciCommit": "c7ef9b41158185e1c87019dc500f976e5d9292e7",
   "coreImage": "hivemind/hm-hyper-contract-api:stt-byok-bebf3469d2ad",
   "harnessProfile": "hivemind-chat",
   "composeProject": "hivemind-chat-local",

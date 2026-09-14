@@ -230,6 +230,33 @@ refresh_control_plane() {
   say OK "Control Plane uses the canonical next.preview flag URL"
 }
 
+refresh_runner_dev() {
+  # Build only HIVE's mounted packages, then project their compiled outputs into
+  # the existing preview runner. This is intentionally a preview-only path;
+  # release-runner remains the immutable-image production path.
+  [[ -n "${COMPOSIO_API_KEY:-}" ]] || { say RED "COMPOSIO_API_KEY missing after Keychain hydration"; return 1; }
+  [[ -n "${CLOUDFLARE_API_KEY:-}" ]] || { say RED "CLOUDFLARE_API_KEY missing after Keychain hydration"; return 1; }
+  "$ROOT/scripts/refresh-harness-chat-dev" prepare
+  local env=()
+  [[ -f "$ENV_FILE" ]] && env=(--env-file "$ENV_FILE")
+  HIVEMIND_CHAT_ENV_FILE="$ENV_FILE" docker compose -p "$PROJECT" "${env[@]}" \
+    -f "$ROOT/infra/docker-compose.hivemind-chat.yml" \
+    -f "$ROOT/infra/docker-compose.hivemind-chat.dev.yml" \
+    up -d --no-build --no-deps --force-recreate harness-runner
+  local deadline=$((SECONDS + 180))
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Harness runner did not become healthy"; return 1; }
+    sleep 3
+  done
+  docker exec hivemind-harness-runner sh -lc 'test -n "$COMPOSIO_API_KEY" && test -n "$CLOUDFLARE_API_KEY"' \
+    || { say RED "runner lost connected-app credentials"; return 1; }
+  docker inspect hivemind-harness-runner --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fxq 'HIVEMIND_CONNECTED_RECEIPTS_REQUIRED=true' \
+    || { say RED "runner did not require durable receipts"; return 1; }
+  curl -fsS -H 'Host: next.preview.singulancelabs.com' http://127.0.0.1:18080/health >/dev/null \
+    || { say RED "preview origin health check failed"; return 1; }
+  say OK "targeted HIVE overlay is live and connected-tool secrets survived"
+}
+
 activate_durable_receipts() {
   # This is a bounded, recoverable release of the receipt authority. It does
   # not rebuild or replace Core, storage, the gateway, or unrelated services.
@@ -288,6 +315,7 @@ case "${1:-status}" in
     compose ps
     ;;
   restart) doctor; compose up -d --no-build --no-deps --force-recreate harness-runner; wait_healthy ;;
+  refresh-runner-dev) refresh_runner_dev ;;
   release-runner) release_runner ;;
   refresh-control-plane) refresh_control_plane ;;
   activate-durable-receipts) activate_durable_receipts ;;
@@ -295,5 +323,5 @@ case "${1:-status}" in
   health) verify_health ;;
   test) test_all ;;
   down) compose down ;;
-  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|release-runner|refresh-control-plane|refresh-core-auth|activate-durable-receipts|test|down"; exit 2 ;;
+  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|refresh-runner-dev|release-runner|refresh-control-plane|refresh-core-auth|activate-durable-receipts|test|down"; exit 2 ;;
 esac

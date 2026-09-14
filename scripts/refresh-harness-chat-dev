@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${HIVEMIND_CHAT_ENV_FILE:-$ROOT/infra/.env.hivemind-chat.local}"
 RUNNER=hivemind-harness-runner
+MODE="${1:-refresh}"
+
+case "$MODE" in
+  prepare|refresh) ;;
+  *) echo "usage: $0 [prepare|refresh]" >&2; exit 2 ;;
+esac
 
 [[ -f "$ENV_FILE" ]] || { echo "dev-refresh: missing $ENV_FILE" >&2; exit 2; }
 set -a
@@ -12,8 +18,10 @@ source "$ENV_FILE"
 set +a
 HARNESS_SOURCE="${HIVEMIND_HARNESS_SOURCE:?set HIVEMIND_HARNESS_SOURCE}"
 
-# A code refresh preserves the existing container's environment and mounts.
-# Environment/image/mount changes belong to the separate runner release path.
+# A normal refresh preserves existing development mounts. `prepare` deliberately
+# skips this check so the managed Compose wrapper can install those mounts after
+# compiling a clean source checkout for the first time.
+if [[ "$MODE" == refresh ]]; then
 [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$RUNNER")" == hivemind-chat-local ]] || {
   echo 'dev-refresh: refusing a non-preview Compose project' >&2; exit 2;
 }
@@ -40,6 +48,7 @@ if (!bundleMount || realpathSync(bundleMount.Source) !== realpathSync(join(sourc
   throw new Error('dev-refresh: source mount mismatch for HIVE web bundle configuration');
 }
 NODE
+fi
 
 cd "$HARNESS_SOURCE"
 require_overlay_entry() {
@@ -88,6 +97,11 @@ for entry in \
   "$HARNESS_SOURCE/packages/client/ui-hivemind-connect/lib/client.js"; do
   require_overlay_entry "$entry"
 done
+
+if [[ "$MODE" == prepare ]]; then
+  echo "dev-refresh: targeted HIVE package outputs are ready"
+  exit 0
+fi
 
 docker restart "$RUNNER" >/dev/null
 

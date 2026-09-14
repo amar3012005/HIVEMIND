@@ -170,6 +170,19 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
     schema: {
       type: 'object',
       properties: {
+        entities: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              n: { type: 'string' }, k: { type: 'string' },
+              aliases: { type: 'array', items: { type: 'string' } },
+              confidence: { type: 'number' },
+            },
+            required: ['n', 'k'],
+            additionalProperties: false,
+          },
+        },
         facts: {
           type: 'array',
           items: {
@@ -193,7 +206,7 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
           },
         },
       },
-      required: ['facts'],
+      required: ['entities', 'facts'],
       additionalProperties: false,
     },
   },
@@ -889,6 +902,62 @@ function durableEntities(entities) {
     // phrases without maintaining a domain dictionary.
     .filter((e) => /^\p{L}/u.test(e.name))
     .slice(0, 8);
+}
+
+/**
+ * Normalize the document/window entity directory emitted by the same LLM call
+ * that extracts durable facts. Every admitted name must occur in the source;
+ * this keeps a model-created label from becoming a canonical graph identity.
+ */
+export function normalizeUnifiedEntityCatalog(rawEntities, content) {
+  const source = String(content || '');
+  const byIdentity = new Map();
+  for (const raw of Array.isArray(rawEntities) ? rawEntities : []) {
+    const normalized = normalizedClaimEntity(raw);
+    if (!normalized?.name || !normalized.kind
+        || !isValidEntityCandidate({ name: normalized.name, type: normalized.kind })) continue;
+    const located = locateSourceQuote(source, normalized.name);
+    if (located.start < 0) continue;
+    const aliases = (Array.isArray(raw?.aliases) ? raw.aliases : [])
+      .map((alias) => boundedClaimText(alias, 200))
+      .filter((alias) => alias && locateSourceQuote(source, alias).start >= 0);
+    const confidenceValue = Number(raw?.confidence);
+    const candidate = {
+      name: normalized.name,
+      kind: normalized.kind,
+      aliases: [...new Set(aliases)].slice(0, 12),
+      confidence: Number.isFinite(confidenceValue)
+        ? Math.max(0, Math.min(1, confidenceValue)) : 0.8,
+      mentionText: located.quote,
+      startOffset: located.start,
+      endOffset: located.start + located.quote.length,
+      ...(raw?.segmentId ? { segmentId: raw.segmentId } : {}),
+      ...(raw?.heading ? { heading: raw.heading } : {}),
+    };
+    const key = `${candidate.kind}:${normalizeEntity(candidate.name)}`;
+    const prior = byIdentity.get(key);
+    if (!prior) byIdentity.set(key, candidate);
+    else byIdentity.set(key, {
+      ...prior,
+      aliases: [...new Set([...prior.aliases, ...candidate.aliases])].slice(0, 12),
+      confidence: Math.max(prior.confidence, candidate.confidence),
+    });
+  }
+  return [...byIdentity.values()].slice(0, 40);
+}
+
+function attachUnifiedEntityCatalog(claims, catalogs, content = '') {
+  const facts = Array.isArray(claims) ? claims : [];
+  const fromFacts = facts.flatMap((fact) => materializeClaimEntities(fact)
+    .map((entity) => ({ ...entity, confidence: 0.8 })));
+  const merged = normalizeUnifiedEntityCatalog([
+    ...(Array.isArray(catalogs) ? catalogs.flat() : []),
+    ...fromFacts,
+  ], content);
+  Object.defineProperty(facts, 'entityCatalog', {
+    value: merged, writable: true, configurable: true, enumerable: false,
+  });
+  return facts;
 }
 
 // Build a regex that matches `quote` inside the section tolerant of the
@@ -2335,6 +2404,8 @@ Output the JSON object and nothing else.`;
    * recall-based co-mention pass handles those afterward. Enterprise-robust: strict
    * json_schema on gpt-oss-120b + salvage; per-window bounded; caps on facts/entities/rels.
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
+   *   The returned array carries a non-enumerable entityCatalog containing the
+   *   complete grounded window directory from that same model response.
    */
   async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '', compact = false, model: modelOverride = null } = {}) {
     // modelOverride lets the reliability layer ESCALATE a shortfall window to a
@@ -2343,8 +2414,9 @@ Output the JSON object and nothing else.`;
     const content = (window.content || '').slice(0, 6000);
     if (content.trim().length < 40) {
       // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
-      return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
-        .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] }));
+      return attachUnifiedEntityCatalog(content.split(/(?<=[.!?])\s/).map((x) => x.trim())
+        .filter((x) => x.length >= 25).slice(0, maxFacts)
+        .map((f) => ({ t: cleanTitleFrom(f, 48), f, entities: [], rels: [] })), [], content);
     }
     // Per-window candidate ceiling. This is the EVIDENCE-candidate stage — the
     // document curator downstream picks and merges the durable set, so the
@@ -2358,7 +2430,7 @@ Output the JSON object and nothing else.`;
     const sys = `Extract only high-value durable workspace memory from the SECTION.
 LANGUAGE: infer the SECTION's language semantically and write every "t" and "f" in that same language. Do not translate. These instructions are not a language sample. For mixed-language sources, preserve the language of each supported claim. Only JSON keys, memory_type and the canonical predicate use English.
 Return ONLY valid JSON:
-{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|event","claim_kind":"fact|event|decision|preference|policy|goal|commitment|procedure|lesson","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
+{"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard","aliases":["exact source variant"],"confidence":0.0}],"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|event","claim_kind":"fact|event|decision|preference|policy|goal|commitment|procedure|lesson","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
 
 SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
 Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:
@@ -2371,7 +2443,7 @@ Rules: up to ${factCap} facts. Capture every distinct durable claim (decision, c
 MERGE LINE ITEMS OF ONE CATEGORY INTO ONE MEMORY, CARRYING EVERY FIGURE. A price list, budget table, cost breakdown, schedule or feature list under one heading is ONE durable fact stating the whole set with all its numbers and labels, not one fact per line. Measured failure to avoid: a 5-page budget produced 30 separate memories averaging 154 characters — "The cost for 1 brand strategy is EUR 8,000.", "The cost for identity development is EUR 24,500.", "The cost for consulting and project management is ...", each a table row stored alone. Correct output is a single memory naming the section and listing every item with its amount, so a reader who retrieves only that memory can answer any question about the breakdown. Splitting it loses the comparison AND wastes the budget above.
 Emit a separate fact only when a claim stands on a DIFFERENT subject or decision, not when it is another row of the same table. Do NOT drop a distinct high-value claim to keep the count low — merge related ones instead. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, concrete specifications, products and their exact categories or variants, roles, responsibilities, status changes, risks, constraints, dependencies, policies and durable organization or customer facts. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, repeated descriptions and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. memory_type is only fact or event; preserve the narrower enterprise meaning in claim_kind. Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty. Never broaden or guess a category. The subject, predicate and object must express the same complete claim as "f"; prefer one complete claim over fragments. Relationships are structured claim metadata only and must be explicitly supported by the same source_quote; do not invent causal or organizational links. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: a generic kind is not an entity. Give each entity a "k" from the listed kinds; if none fits, omit it. Never emit source filenames, document titles, file extensions, part numbers, fonts, colours, format sizes, URLs or asset identifiers as entities.
+Promote only decisions, commitments, requirements, metrics, named parties, dates, concrete specifications, products and their exact categories or variants, roles, responsibilities, status changes, risks, constraints, dependencies, policies and durable organization or customer facts. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, repeated descriptions and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. memory_type is only fact or event; preserve the narrower enterprise meaning in claim_kind. Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty. Never broaden or guess a category. The subject, predicate and object must express the same complete claim as "f"; prefer one complete claim over fragments. Relationships are structured claim metadata only and must be explicitly supported by the same source_quote; do not invent causal or organizational links. The TOP-LEVEL entities array is the complete named-entity directory for the SECTION, including valid entities that are not attached to a promoted fact. Fact entities are the subset supporting that fact. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: a generic kind is not an entity. Give each entity a "k" from the listed kinds; if none fits, omit it. Never emit source filenames, document titles, file extensions, part numbers, fonts, colours, format sizes, URLs or asset identifiers as entities. Every entity name and alias must occur verbatim in SECTION.
 FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.
 "t" and "f" MUST be in the same language as each other. "source_quote" is the verbatim SECTION substring; "f" is the standalone claim it supports and may resolve context without translating or inventing. If "t" or "f" uses a different language from "source_quote", you have translated, and that is wrong. Keep the SECTION's own names and number formats as written (not 1.240 -> 1,240, not Hannover -> Hanover).`;
 // REVERTED, DO NOT REINTRODUCE: an earlier version of this paragraph also said every "t" must be
@@ -2439,7 +2511,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       ingestDiagnostic.warn(`[kb-unified] source-anchor coverage added ${covered.length - normalized.length} `
         + `exact-source claim(s)`);
     }
-    return covered;
+    return attachUnifiedEntityCatalog(covered, parsed?.entities, content);
   }
 
   async _recoverTruncatedUnified(window, options, error, depth = 0) {
@@ -2447,7 +2519,11 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     const maxFacts = Math.max(1, Number(options?.maxFacts) || 8);
     const rawPartial = Array.isArray(error?.partial?.facts)
       ? error.partial.facts : (Array.isArray(error?.partial) ? error.partial : []);
-    const partial = normalizeUnifiedClaims(rawPartial, content, maxFacts, 0);
+    const partial = attachUnifiedEntityCatalog(
+      normalizeUnifiedClaims(rawPartial, content, maxFacts, 0),
+      error?.partial?.entities,
+      content,
+    );
     const maxDepth = Math.max(0, Math.min(3, Number(process.env.KB_TRUNCATION_SPLIT_DEPTH ?? 2)));
     const parts = depth < maxDepth ? splitDenseExtractionContent(content) : [];
     if (parts.length !== 2) {
@@ -2457,6 +2533,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     }
 
     const recovered = [];
+    const recoveredEntities = [];
     const partBudget = Math.max(2, Math.min(maxFacts, Math.ceil(maxFacts / 2) + 1));
     let searchFrom = 0;
     for (const part of parts) {
@@ -2465,6 +2542,11 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       const child = { ...window, content: part };
       try {
         const childClaims = await this._extractUnified(child, { ...options, maxFacts: partBudget });
+        recoveredEntities.push(...(childClaims.entityCatalog || []).map((entity) => ({
+          ...entity,
+          startOffset: Number.isInteger(entity.startOffset) ? entity.startOffset + partOffset : entity.startOffset,
+          endOffset: Number.isInteger(entity.endOffset) ? entity.endOffset + partOffset : entity.endOffset,
+        })));
         recovered.push(...childClaims.map((claim) => ({
           ...claim,
           source_start: Number.isInteger(claim?.source_start) ? claim.source_start + partOffset : claim?.source_start,
@@ -2473,6 +2555,11 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       } catch (childError) {
         if (childError?.code === 'LLM_JSON_TRUNCATED') {
           const childClaims = await this._recoverTruncatedUnified(child, { ...options, maxFacts: partBudget }, childError, depth + 1);
+          recoveredEntities.push(...(childClaims.entityCatalog || []).map((entity) => ({
+            ...entity,
+            startOffset: Number.isInteger(entity.startOffset) ? entity.startOffset + partOffset : entity.startOffset,
+            endOffset: Number.isInteger(entity.endOffset) ? entity.endOffset + partOffset : entity.endOffset,
+          })));
           recovered.push(...childClaims.map((claim) => ({
             ...claim,
             source_start: Number.isInteger(claim?.source_start) ? claim.source_start + partOffset : claim?.source_start,
@@ -2497,7 +2584,8 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     }
     this.logger.info?.(`[kb-unified] provider truncation recovered by semantic split depth=${depth}: `
       + `${unique.length} unique grounded claim(s)`);
-    return unique.slice(0, maxFacts);
+    return attachUnifiedEntityCatalog(unique.slice(0, maxFacts),
+      [recoveredEntities, partial.entityCatalog || []], content);
   }
 
   async _extractUnifiedReliable(window, options = {}) {
@@ -2567,7 +2655,12 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           maxFacts: degraded ? Math.min(maxFacts, 2) : maxFacts,
           compact: degraded,
         });
-        if (claims.length > best.length) best = claims;
+        const priorCatalog = best.entityCatalog || [];
+        if (claims.length > best.length
+            || (claims.length === best.length
+              && (claims.entityCatalog?.length || 0) > priorCatalog.length)) best = claims;
+        attachUnifiedEntityCatalog(best,
+          [priorCatalog, claims.entityCatalog || []], String(window?.content || ''));
         const { sentences: _sentencesLen, factBearing: _factBearing } = estimateFactBearingSentences(window?.content);
         const _capacity = Math.max(1, Math.min(maxFacts, _factBearing));
         // P2 ESCALATION — a USABLE, fact-bearing window that the fast extractor
@@ -2586,7 +2679,12 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             && _escModel && _escModel !== _primaryModel) {
           try {
             const _esc = await this._extractUnified(window, { ...options, maxFacts, compact: false, model: _escModel, _escalated: true });
-            if (Array.isArray(_esc) && _esc.length > best.length) best = _esc;
+            if (Array.isArray(_esc)) {
+              const priorEscalationCatalog = best.entityCatalog || [];
+              if (_esc.length > best.length) best = _esc;
+              attachUnifiedEntityCatalog(best,
+                [priorEscalationCatalog, _esc.entityCatalog || []], String(window?.content || ''));
+            }
             this.logger.info?.(`[kb-unified] escalated shortfall → ${_escModel}: now ${best.length} facts (capacity≈${_capacity})`);
           } catch (e) { this.logger.warn?.(`[kb-unified] escalation to ${_escModel} failed: ${e.message}`); }
         }
@@ -3392,7 +3490,8 @@ Every item must include a non-empty content field and one or more valid support_
    * structure). Best-effort + residency-safe (ingestMemory→agent, edges→amrAddEdge).
    * @returns {Promise<string|null>} the document-parent memory id
    */
-  async _attachDocumentParent({ memories, userId, orgId, documentId, metadata = {}, totalFacts = 0, firstContent = '' }) {
+  async _attachDocumentParent({ memories, userId, orgId, documentId, metadata = {}, totalFacts = 0,
+    firstContent = '', canonicalEntities = [] }) {
     const childIds = (memories || [])
       .filter((m) => m?.id && !(m?.operation || '').startsWith('skipped') && !m?.isParent)
       .map((m) => m.id);
@@ -3585,12 +3684,12 @@ Every item must include a non-empty content field and one or more valid support_
         // the same canonical entity ground truth as its child facts. Inherit
         // the structured candidates produced by the existing extraction pass;
         // never pay for (or risk disagreement from) another entity-model call.
-        const parentEntities = (memories || []).flatMap((memory) => {
+        const parentEntities = [...canonicalEntities, ...(memories || []).flatMap((memory) => {
           const direct = Array.isArray(memory?.extracted_entities) ? memory.extracted_entities : [];
           const nested = Array.isArray(memory?.metadata?.extracted_entities)
             ? memory.metadata.extracted_entities : [];
           return [...direct, ...nested];
-        });
+        })];
         await this._persistCanonicalEntityResources({
           organizationId: orgId,
           resources: [{
@@ -6234,6 +6333,7 @@ Every item must include a non-empty content field and one or more valid support_
           }
         } catch { /* keep targets */ }
         const extractedCandidates = [];
+        const extractedEntityCatalog = [];
         let wi = 0;
         // RESERVE the budget synchronously BEFORE each window's async call. The old code clamped
         // against the result length, which is stale while other workers are mid-flight — 4 workers ×
@@ -6282,6 +6382,23 @@ Every item must include a non-empty content field and one or more valid support_
               this.logger.warn?.(`[kb-unified] candidate extract failed: ${error.message}`);
             }
             const got = Array.isArray(claims) ? claims.length : 0;
+            if (Array.isArray(claims?.entityCatalog)) {
+              extractedEntityCatalog.push(...claims.entityCatalog.map((entity) => {
+                const segmentId = resolveEvidenceSegment(entity.mentionText || entity.name,
+                  promotableSegments, w.segmentId);
+                const segment = promotableSegments.find((candidate) => candidate?.id === segmentId);
+                const located = locateSourceQuote(String(segment?.content || ''),
+                  entity.mentionText || entity.name);
+                return {
+                  ...entity, segmentId, heading: segment?.heading || w.heading || null,
+                  ...(located.start >= 0 ? {
+                    mentionText: located.quote,
+                    startOffset: located.start,
+                    endOffset: located.start + located.quote.length,
+                  } : {}),
+                };
+              }));
+            }
             if (got) {
               extractedCandidates.push(...claims.map((claim) => ({
                 ...claim,
@@ -6472,6 +6589,50 @@ Every item must include a non-empty content field and one or more valid support_
         }));
         ingestDiagnostic.info(`[kb-persist] n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
 
+        // Per-memory persistence above runs concurrently and intentionally owns
+        // promoted-memory identity. Reconcile the document and evidence segment
+        // directory once, after every window has completed, from the SAME unified
+        // LLM results. This final replace prevents the last finished fact from
+        // erasing sibling entity links on shared document/segment resources.
+        const canonicalEntityCatalog = normalizeUnifiedEntityCatalog(extractedEntityCatalog, fullText);
+        if (canonicalEntityCatalog.length) {
+          const scopeType = metadata.scope || (metadata.project_id || metadata.project_ids?.[0]
+            ? 'project' : metadata.primary_team_id ? 'team' : 'organization');
+          const scopeId = scopeType === 'project'
+            ? (metadata.project_id || metadata.project_ids?.[0] || null)
+            : scopeType === 'team' ? (metadata.primary_team_id || null) : null;
+          const segmentResources = new Map();
+          for (const entity of extractedEntityCatalog) {
+            if (!entity.segmentId) continue;
+            const resource = segmentResources.get(entity.segmentId) || {
+              resourceType: 'segment', resourceId: entity.segmentId,
+              userId, scopeType, scopeId, input: '', entities: [],
+              provenance: { document_id: documentId, segment_id: entity.segmentId },
+            };
+            resource.entities.push(entity);
+            resource.input = resource.input || entity.mentionText || entity.name;
+            segmentResources.set(entity.segmentId, resource);
+          }
+          await this._persistCanonicalEntityResources({
+            organizationId: orgId,
+            resources: [
+              ...segmentResources.values(),
+              {
+                resourceType: 'document', resourceId: documentId, userId,
+                scopeType, scopeId, input: fullText, entities: canonicalEntityCatalog,
+                provenance: { document_id: documentId, filename: metadata.filename || docTitle || null },
+              },
+            ],
+            extractorRoute: 'kb_unified_v2_document_catalog',
+            modelRoute: process.env.KB_UNIFIED_MODEL || memoryLLMRoute()?.model || null,
+            sourceMeta: {
+              filename: metadata.filename || docTitle || null,
+              documentId,
+              seenAt: new Date().toISOString(),
+            },
+          });
+        }
+
         // ── 5b: DOCUMENT-LEVEL SEMANTIC RELATIONS ──────────────────────────────
         // Intra-window rels only see facts that shared one 2500-char window, so a
         // subject in window 2 and its update in window 5 never get an edge — measured:
@@ -6612,7 +6773,9 @@ Every item must include a non-empty content field and one or more valid support_
           }
         }
         // Document anchor + PartOf edges → the doc→fact hierarchy (was dropped on this path).
-        const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId, documentId, metadata, totalFacts: uFacts.length, firstContent: fullText });
+        const uDocParent = await this._attachDocumentParent({ memories: uFacts, userId, orgId,
+          documentId, metadata, totalFacts: uFacts.length, firstContent: fullText,
+          canonicalEntities: canonicalEntityCatalog });
         this.logger.info?.(`[kb-unified] doc ${String(documentId).slice(0, 8)}: ${extractedCandidates.length} candidates → ${uFacts.length} curated memories + parent=${uDocParent ? 'y' : 'n'}`);
         // OBSERVABILITY: a silently THIN extraction was previously invisible without
         // a hand-written SQL query — a 54-page deck yielding 8 memories logged

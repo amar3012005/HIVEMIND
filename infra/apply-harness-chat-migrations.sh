@@ -13,6 +13,7 @@ db_name=$(docker exec "$container" printenv POSTGRES_DB)
 
 migrations=(
   20260914110000_connected_app_receipts
+  20260914220000_harness_session_hardening
 )
 
 docker exec -i "$container" psql -v ON_ERROR_STOP=1 -U "$db_user" -d "$db_name" <<'SQL'

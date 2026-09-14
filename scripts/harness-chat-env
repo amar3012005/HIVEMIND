@@ -282,9 +282,11 @@ activate_durable_receipts() {
   docker exec hivemind-postgres psql -U hivemind -d hivemind_app -tAc \
     "SELECT to_regclass('hivemind.connected_app_receipts') IS NOT NULL" | grep -Fxq t \
     || { say RED "connected receipt migration is not applied"; return 1; }
-  docker exec hivemind-postgres psql -U hivemind -d hivemind_app -tAc \
-    "SELECT count(*) FROM hivemind.harness_chat_migrations WHERE name='20260914110000_connected_app_receipts'" | grep -Fxq 1 \
-    || { say RED "connected receipt migration ledger is incomplete"; return 1; }
+  for migration in 20260914110000_connected_app_receipts 20260914220000_harness_session_hardening; do
+    docker exec hivemind-postgres psql -U hivemind -d hivemind_app -tAc \
+      "SELECT count(*) FROM hivemind.harness_chat_migrations WHERE name='$migration'" | grep -Fxq 1 \
+      || { say RED "Harness migration ledger is incomplete: $migration"; return 1; }
+  done
   compose config --quiet
   compose up -d --no-build --no-deps --force-recreate control-plane
   local deadline=$((SECONDS + 180))

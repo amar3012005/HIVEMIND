@@ -383,7 +383,10 @@ services:
       # Runtime plugin URLs must use the same immutable revision as the image.
       # This also makes a no-build runner recreate safe after a targeted overlay.
       DSH_CLIENT_COMMIT_HASH: ${HIVEMIND_HARNESS_COMMIT_HASH:?set the locked Harness SHA}
-      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app
+      # The native Harness runner is the user-facing session writer. It must
+      # use its own non-superuser role so the forced session RLS policies are
+      # enforceable even if a query loses an application-level tenant filter.
+      DATABASE_URL: postgresql://hivemind_harness_runtime:${HIVE_HARNESS_RUNTIME_DB_PASSWORD:?set the Harness runtime database password}@postgres:5432/hivemind_app
       PGOPTIONS: -c search_path=hivemind,public
       REDIS_URL: redis://redis:6379/0
       HIVE_HARNESS_PROFILE: hivemind-chat

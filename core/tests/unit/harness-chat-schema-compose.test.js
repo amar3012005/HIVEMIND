@@ -6,6 +6,8 @@ const schemaUrl = new URL('../../prisma/schema.prisma', import.meta.url);
 const migrationUrl = new URL('../../prisma/migrations/20260908150000_harness_chat_sessions/migration.sql', import.meta.url);
 const hardeningMigrationUrl = new URL('../../prisma/migrations/20260914220000_harness_session_hardening/migration.sql', import.meta.url);
 const composeUrl = new URL('../../../infra/docker-compose.hetzner.yml', import.meta.url);
+const chatComposeUrl = new URL('../../../infra/docker-compose.hivemind-chat.yml', import.meta.url);
+const runtimeEnvUrl = new URL('../../../scripts/harness-chat-env', import.meta.url);
 
 test('Harness provider schema is additive, tenant scoped, and RLS enforced', async () => {
   const [schema, migration, hardening] = await Promise.all([
@@ -48,4 +50,14 @@ test('Control Plane owns an explicit encrypted connected-app receipt key', async
   const compose = await readFile(composeUrl, 'utf8');
   const service = compose.slice(compose.indexOf('\n  control-plane:'), compose.indexOf('\n  # Native DeepSeek Harness'));
   assert.match(service, /HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY: \$\{HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-\}/);
+});
+
+test('the native Harness session writer uses a non-superuser runtime role', async () => {
+  const [compose, runtimeEnv] = await Promise.all([readFile(chatComposeUrl, 'utf8'), readFile(runtimeEnvUrl, 'utf8')]);
+  const service = compose.slice(compose.indexOf('\n  harness-runner:'), compose.indexOf('\n  origin-gateway:'));
+  assert.match(service, /hivemind_harness_runtime:\$\{HIVE_HARNESS_RUNTIME_DB_PASSWORD/);
+  assert.match(runtimeEnv, /CREATE ROLE hivemind_harness_runtime LOGIN NOSUPERUSER/);
+  assert.match(runtimeEnv, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE hivemind\.harness_sessions/);
+  assert.match(runtimeEnv, /restart_runner\(\)/);
+  assert.match(runtimeEnv, /restart\) restart_runner/);
 });

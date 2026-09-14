@@ -56,6 +56,14 @@ if [[ -z "${HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-}" ]] && command -v secur
   HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY="$(security find-generic-password -a "${USER}" -s hivemind-connected-app-receipt-encryption-key -w 2>/dev/null || true)"
   export HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY
 fi
+if [[ -z "${HIVE_HARNESS_RUNTIME_DB_PASSWORD:-}" ]] && command -v security >/dev/null 2>&1; then
+  HIVE_HARNESS_RUNTIME_DB_PASSWORD="$(security find-generic-password -a "${USER}" -s hivemind-harness-runtime-db-password -w 2>/dev/null || true)"
+  if [[ -z "$HIVE_HARNESS_RUNTIME_DB_PASSWORD" ]]; then
+    HIVE_HARNESS_RUNTIME_DB_PASSWORD="$(openssl rand -hex 32)"
+    security add-generic-password -U -a "${USER}" -s hivemind-harness-runtime-db-password -w "$HIVE_HARNESS_RUNTIME_DB_PASSWORD" >/dev/null
+  fi
+  export HIVE_HARNESS_RUNTIME_DB_PASSWORD
+fi
 FILES=(-f "$ROOT/infra/docker-compose.hivemind-chat.yml")
 FOREIGN_CONTAINERS=(
   hm-core hm-control hm-postgres hm-redis hm-nango hm-playwright hm-employees
@@ -146,7 +154,7 @@ doctor() {
   actual="$(git -C "$ROOT" ls-tree HEAD frontend/Da-vinci | awk '{print $3}')"
   [[ "$actual" == "$expected" ]] || fail "Da-vinci SHA drift"
   [[ -f "$ENV_FILE" ]] || fail "missing $ENV_FILE"
-  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN HIVEMIND_MASTER_API_KEY CLOUDFLARE_API_KEY; do
+  for key in HIVEMIND_HARNESS_SOURCE HIVEMIND_HARNESS_COMMIT_HASH HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY HIVE_HARNESS_RUNTIME_DB_PASSWORD HIVE_HARNESS_EDGE_EVAL_SECRET CLOUDFLARED_CREDENTIALS_FILE NANGO_SECRET_KEY PLAYWRIGHT_SERVICE_TOKEN HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN HIVEMIND_MASTER_API_KEY CLOUDFLARE_API_KEY; do
     configured "$key" || fail "$key missing"
   done
   [[ "$(env_val HIVEMIND_MASTER_API_KEY)" != "hm_master_key_99228811" ]] || fail "placeholder HIVEMIND_MASTER_API_KEY is forbidden"
@@ -177,6 +185,7 @@ release_runner() {
   # model. Docker's cache keeps unchanged layers; only harness-runner is built
   # and recreated, so every other service retains its environment and state.
   doctor 1
+  ensure_harness_runtime_role
   compose build harness-runner
   compose up -d --no-deps --force-recreate harness-runner
   local deadline=$((SECONDS + 180)) state
@@ -187,6 +196,44 @@ release_runner() {
   doctor
   curl -fsS -H 'Host: next.preview.singulancelabs.com' http://127.0.0.1:18080/health >/dev/null
   say OK "locked Harness image is healthy without package bind mounts"
+}
+
+ensure_harness_runtime_role() {
+  # Keep the session writer separate from the bootstrap/migration owner. The
+  # password is generated once in the local Keychain, never written into the
+  # repository or a container image. Hex encoding makes the SQL literal safe.
+  [[ "$HIVE_HARNESS_RUNTIME_DB_PASSWORD" =~ ^[0-9a-f]{64}$ ]] || { say RED "Harness runtime DB password is invalid"; return 1; }
+  docker exec -i hivemind-postgres psql -v ON_ERROR_STOP=1 -U hivemind -d hivemind_app <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hivemind_harness_runtime') THEN
+    CREATE ROLE hivemind_harness_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+  END IF;
+END \$\$;
+ALTER ROLE hivemind_harness_runtime NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '${HIVE_HARNESS_RUNTIME_DB_PASSWORD}';
+GRANT CONNECT ON DATABASE hivemind_app TO hivemind_harness_runtime;
+GRANT USAGE ON SCHEMA hivemind TO hivemind_harness_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE hivemind.harness_sessions, hivemind.harness_session_events, hivemind.harness_session_leases TO hivemind_harness_runtime;
+GRANT USAGE, SELECT ON SEQUENCE hivemind.harness_session_events_id_seq TO hivemind_harness_runtime;
+SQL
+}
+
+restart_runner() {
+  # Configuration-only runner changes (credentials, a new RLS role, or an
+  # already-built image) must not trigger a rebuild. Recreate this one service
+  # through the same checked Compose boundary used by release_runner.
+  doctor 1
+  ensure_harness_runtime_role
+  compose up -d --no-build --no-deps --force-recreate harness-runner
+  local deadline=$((SECONDS + 180))
+  until [[ "$(docker inspect --type container -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' hivemind-harness-runner 2>/dev/null || printf missing)" == healthy ]]; do
+    (( SECONDS < deadline )) || { say RED "Harness runner did not become healthy"; return 1; }
+    sleep 3
+  done
+  docker exec hivemind-harness-runner sh -lc 'test -n "$COMPOSIO_API_KEY" && test -n "$CLOUDFLARE_API_KEY"' \
+    || { say RED "runner lost connected-app credentials"; return 1; }
+  doctor
+  say OK "Harness runner restarted without rebuilding and uses the scoped runtime role"
 }
 
 verify_health() {
@@ -329,14 +376,15 @@ case "${1:-status}" in
     wait_healthy
     compose ps
     ;;
-  restart) doctor; compose up -d --no-build --no-deps --force-recreate harness-runner; wait_healthy ;;
+  restart) restart_runner ;;
   refresh-runner-dev) refresh_runner_dev ;;
   release-runner) release_runner ;;
+  restart-runner) restart_runner ;;
   refresh-control-plane) refresh_control_plane ;;
   activate-durable-receipts) activate_durable_receipts ;;
   refresh-core-auth) refresh_core_auth ;;
   health) verify_health ;;
   test) test_all ;;
   down) compose down ;;
-  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|refresh-runner-dev|release-runner|refresh-control-plane|refresh-core-auth|activate-durable-receipts|test|down"; exit 2 ;;
+  *) echo "usage: $0 status|doctor|health|stop-foreign|up|up-all|restart|restart-runner|refresh-runner-dev|release-runner|refresh-control-plane|refresh-core-auth|activate-durable-receipts|test|down"; exit 2 ;;
 esac

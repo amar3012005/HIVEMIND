@@ -3574,6 +3574,7 @@ const server = http.createServer(async (req, res) => {
     parseBody,
     jsonResponse,
     redisConfig: CONFIG,
+    creditService: controlCreditService,
   })) return;
 
   // A lifecycle worker may reissue exactly one newer Day-0 renderer for an

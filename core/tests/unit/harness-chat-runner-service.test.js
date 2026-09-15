@@ -57,6 +57,33 @@ test('scoped proxy rejects invalid token before tenant lookup', async () => {
   assert.equal(handled, true); assert.equal(res.status, 401);
 });
 
+test('project catalog exposes only policy-authorized project labels to the ticket subject', async () => {
+  const res = {};
+  const calls = [];
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'GET', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/core/projects',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ isActive: true, role: 'member' }) },
+      teamMember: { findMany: async () => [] },
+      $queryRawUnsafe: async (query, ...args) => {
+        calls.push({ query, args });
+        return [{ id: 'b79673b4-4578-4fc2-8144-05056983f4e1', org_id: orgId, team_id: null,
+          name: 'Authorized project', slug: 'authorized-project', description: null, status: 'active',
+          policy: 'org_visible', created_by: userId, created_at: new Date(), updated_at: new Date(),
+          member_count: 1, memory_count: 0 }];
+      },
+    },
+    parseBody: async () => ({}), jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, fetchImpl: fetch,
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.projects, [{ id: 'b79673b4-4578-4fc2-8144-05056983f4e1', name: 'Authorized project', slug: 'authorized-project' }]);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].query, /project_members/);
+});
+
 test('receipt endpoint is admitted outside the Core proxy namespace', async () => {
   const rows = new Map();
   const model = {

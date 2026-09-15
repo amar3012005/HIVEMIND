@@ -112,3 +112,40 @@ test('receipt endpoint is admitted outside the Core proxy namespace', async () =
   assert.equal(res.status, 201);
   assert.equal(res.body.stored, true);
 });
+
+test('runner admits one actual Composio execution and makes replay idempotent', async () => {
+  const calls = [];
+  const creditService = { charge: async (input) => { calls.push(input); return { admitted: true, duplicate: calls.length > 1 }; } };
+  const invoke = async (callId) => {
+    const res = {};
+    await handleHarnessChatBootstrapRoute({
+      req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: '/internal/v1/harness-chat/credit-operations',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => ({ session_id: 'session-12345678', call_id: callId, kind: 'composio_execution', tool: 'GMAIL_FETCH_EMAILS' }),
+      jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+      redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, creditService,
+    });
+    return res;
+  };
+  assert.equal((await invoke('call-1')).status, 200);
+  assert.equal((await invoke('call-1')).body.duplicate, true);
+  assert.equal(calls[0].service, 'composio_tool_call');
+  assert.equal(calls[0].idempotencyKey, calls[1].idempotencyKey);
+  assert.match(calls[0].idempotencyKey, /^harness:[a-f0-9]{64}$/);
+});
+
+test('runner charges a no-tool Harness turn once and rejects exhausted credits', async () => {
+  const res = {};
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/credit-operations',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({ session_id: 'session-12345678', call_id: 'turn-3', kind: 'no_tool_turn' }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    creditService: { charge: async () => ({ admitted: false }) },
+  });
+  assert.equal(res.status, 402);
+  assert.equal(res.body.code, 'credits_exhausted');
+});

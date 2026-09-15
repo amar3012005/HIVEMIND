@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { getRedisClient } from '../control-plane/session-store.js';
 import {
   mintHarnessAdmissionTicket,
@@ -26,6 +27,7 @@ function legacyResponse(env, flagReceipt) {
 
 const INTERNAL_PREFIX = '/internal/v1/harness-chat/core';
 const RECEIPT_PREFIX = '/internal/v1/harness-chat/receipts';
+const CREDIT_OPERATION_PREFIX = '/internal/v1/harness-chat/credit-operations';
 const CORE_ROUTES = new Map([
   ['/api/profile', new Set(['GET'])],
   ['/api/profiles', new Set(['GET'])],
@@ -108,9 +110,10 @@ async function scopedProjects(prisma, claims) {
   };
 }
 
-async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl }) {
+async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService }) {
   const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
-  if (!receiptRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
+  const creditOperationRequest = pathname === CREDIT_OPERATION_PREFIX;
+  if (!receiptRequest && !creditOperationRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
   const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let claims;
   try {
@@ -125,6 +128,33 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   if (claims.project_id) {
     const project = await prisma?.project?.findFirst?.({ where: { id: claims.project_id, orgId: claims.org_id }, select: { id: true } });
     if (!project) { jsonResponse(res, { error: 'Project not found' }, 404); return true; }
+  }
+  if (creditOperationRequest) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    const input = await parseBody(req).catch(() => null);
+    const sessionId = typeof input?.session_id === 'string' ? input.session_id : '';
+    const callId = typeof input?.call_id === 'string' ? input.call_id : '';
+    const kind = input?.kind;
+    const tool = typeof input?.tool === 'string' ? input.tool : '';
+    if (!/^session-[A-Za-z0-9-]{8,160}$/.test(sessionId) || !/^[A-Za-z0-9._:-]{1,180}$/.test(callId)) {
+      jsonResponse(res, { error: 'Invalid credit operation identity' }, 400); return true;
+    }
+    const service = kind === 'composio_execution' ? 'composio_tool_call'
+      : kind === 'no_tool_turn' ? 'harness_no_tool_turn' : null;
+    if (!service || (service === 'composio_tool_call' && !/^[A-Za-z0-9_:-]{1,180}$/.test(tool))) {
+      jsonResponse(res, { error: 'Invalid credit operation' }, 400); return true;
+    }
+    if (!creditService) { jsonResponse(res, { error: 'Credit service unavailable' }, 503); return true; }
+    const operationIdentity = `${service}\u0000${sessionId}\u0000${callId}`;
+    const idempotencyKey = `harness:${crypto.createHash('sha256').update(operationIdentity).digest('hex')}`;
+    const charged = await creditService.charge({
+      orgId: claims.org_id, userId: claims.sub, service, units: 1, source: 'harness-runner',
+      idempotencyKey,
+      metadata: { session_id: sessionId, call_id: callId, ...(tool ? { tool } : {}) },
+    });
+    if (!charged.admitted) { jsonResponse(res, { error: 'Credits exhausted', code: 'credits_exhausted' }, 402); return true; }
+    jsonResponse(res, { admitted: true, duplicate: Boolean(charged.duplicate), service }, 200);
+    return true;
   }
   if (pathname === RECEIPT_PREFIX && req.method === 'POST') {
     try {
@@ -204,8 +234,9 @@ export async function handleHarnessChatBootstrapRoute({
   getRedis = getRedisClient,
   env = process.env,
   fetchImpl = globalThis.fetch,
+  creditService,
 } = {}) {
-  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl })) return true;
+  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService })) return true;
   const dedicatedNewSession = pathname === '/v1/harness-chat/new-session';
   if ((!dedicatedNewSession && pathname !== '/v1/harness-chat/bootstrap') || req.method !== 'POST') return false;
   const current = await requireSession(req, res);

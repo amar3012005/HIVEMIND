@@ -6,8 +6,10 @@ description: Review SINGULANCE tenant isolation, Cloudflare edge controls, secre
 # Platform security audit
 
 Read `../../platform.yaml` and `../../delivery-contract.md`. For Cloudflare work,
-load the Cloudflare skill and retrieve current product documentation before
-recommending account-level controls.
+inspect the installed MCP tool inventory, load the Cloudflare skill, and retrieve
+current product documentation before recommending account-level controls. Read
+[`references/cloudflare-security-audit-skill.md`](references/cloudflare-security-audit-skill.md)
+for a requested full security audit; do not run a broad audit for ordinary work.
 
 1. Map request path, authenticated principal, tenant/project authorization,
    service trust boundary, secret source, and persisted data owner.

@@ -1,6 +1,8 @@
 # SINGULANCE platform contract
 
 Read [platform/ground-truth/START_HERE.md](platform/ground-truth/START_HERE.md) before planning, editing, testing, or deploying.
+Then read [.agents/hivemind/EveryAgent.md](.agents/hivemind/EveryAgent.md) for
+capability discovery, model-tier, and self-improvement boundaries.
 
 This repository owns the canonical platform contract. Product repositories consume
 the versioned contract; they do not copy or reinterpret it.

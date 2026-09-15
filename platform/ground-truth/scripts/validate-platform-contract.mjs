@@ -54,6 +54,13 @@ for (const required of [
   'workflows/task.example.json',
   'scripts/validate-task-manifest.mjs',
   'scripts/inventory-agent-surface.mjs',
+  'skills/platform-security-audit/references/cloudflare-security-audit-skill.md',
 ]) await access(path.join(root, required));
+
+const everyAgent = path.resolve(root, '..', '..', '.agents', 'hivemind', 'EveryAgent.md');
+await access(everyAgent);
+for (const expected of ['GitHub MCP', 'Cloudflare MCP', 'The seven skills', 'Self-improvement without self-damage']) {
+  assert.ok((await readFile(everyAgent, 'utf8')).includes(expected), `EveryAgent.md missing ${expected}`);
+}
 
 console.log('platform ground-truth contract: valid');

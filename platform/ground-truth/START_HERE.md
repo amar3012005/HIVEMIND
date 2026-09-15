@@ -13,6 +13,8 @@ reference.
 4. The one skill matching the requested work in [skills/](skills/).
 5. For delegated or lower-tier execution, a validated task manifest in
    [workflows/](workflows/).
+6. [EveryAgent.md](../../.agents/hivemind/EveryAgent.md) — shared operating
+   behavior and capability discovery for every coding-agent host.
 
 ## Authority hierarchy
 

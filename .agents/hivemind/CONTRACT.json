@@ -5,5 +5,7 @@
   "taskSchema": "platform/ground-truth/workflows/task.schema.json",
   "taskValidator": "platform/ground-truth/scripts/validate-task-manifest.mjs",
   "releaseValidator": "platform/ground-truth/scripts/validate-release-manifest.mjs",
+  "everyAgent": ".agents/hivemind/EveryAgent.md",
+  "externalCapabilities": ["GitHub MCP", "Cloudflare MCP", "official provider documentation"],
   "intent": "This folder is a thin consumer entrypoint. Canonical rules remain under platform/ground-truth."
 }

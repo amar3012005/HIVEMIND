@@ -4,6 +4,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:platform": "node platform/ground-truth/scripts/validate-platform-contract.mjs && node platform/ground-truth/scripts/validate-release-manifest.mjs platform/ground-truth/release-manifest.example.json",
     "install:tavily": "npm install @tavily/core"
   },
   "dependencies": {

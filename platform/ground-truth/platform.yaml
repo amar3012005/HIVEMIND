@@ -1,0 +1,93 @@
+version: 1
+name: singulance-platform
+principle: One organization platform for memory, operating agents, voice, and governed action.
+
+products:
+  hivemind:
+    purpose: Company memory engine and governed action layer.
+    owns:
+      - memory ingestion and evidence lifecycle
+      - recall, entities, graph, and MCP memory contracts
+      - tenant, user, organization, project, and authorization records
+      - connected-app receipts and approval state
+  hyperagents:
+    purpose: Organization operating system for governed specialist workflows.
+    owns:
+      - playbooks, rooms, work lifecycle, and artifact verification
+      - agent orchestration policy
+  tara:
+    purpose: Voice interaction product.
+    owns:
+      - voice session lifecycle
+      - speech input/output providers and call artifacts
+  hivemind_chat:
+    purpose: The conversation surface of HIVE-MIND and HyperAgents.
+    owns:
+      - native conversation rendering and session navigation
+      - profile-specific agent behavior
+
+services:
+  core:
+    owner: hivemind
+    authority:
+      - durable product data
+      - authorization and ticket validation
+      - memory and connected-app receipt APIs
+  davinci_worker:
+    owner: hivemind_chat
+    authority:
+      - authenticated web shell
+      - edge routing and feature-flag evaluation
+      - static asset and runner admission proxying
+  harness_runner:
+    owner: hivemind_chat
+    authority:
+      - resolved Cordis profiles and scoped plugins
+      - native conversation rendering
+      - typed model tools and session projections
+  hyperagents_runtime:
+    owner: hyperagents
+    authority:
+      - playbook execution and lifecycle
+  tara_runtime:
+    owner: tara
+    authority:
+      - voice orchestration and speech provider dispatch
+
+chat_modes:
+  feature_flag: hivemind_harness_chat_v1
+  values:
+    harness: Native Cordis/Harness conversation mode.
+    legacy: Existing LangGraph/LangChain chat orchestrator.
+  default: legacy
+  unknown_value_behavior: legacy
+  rule: The flag selects an engine; it never selects an unreviewed third mode.
+
+environments:
+  singulance_local:
+    role: Local development and deterministic reproduction on the macOS workstation.
+    branch: singulance-local
+    release: targeted development refresh only
+  enigma:
+    role: Shared preview and integration environment.
+    branch: enigma-main
+    release: immutable preview artifact plus authenticated browser canary
+  singulance_production:
+    role: Customer production environment.
+    branch: singulance-main
+    release: immutable artifact, migration gate, feature flag, authenticated canary, release lock
+
+repositories:
+  hivemind:
+    responsibility: Core APIs, memory, identity, HyperAgents, Tara integrations, migrations, and deployment contracts.
+  davinci:
+    responsibility: Product frontend and Cloudflare Worker shell.
+  deepseek_harness_hivemind:
+    responsibility: Native Cordis profiles, scoped plugins, runner UI, and runner artifact.
+
+invariants:
+  - Each durable fact has one service owner and an authorization boundary.
+  - Each model-callable tool has one canonical typed contract and bounded projection.
+  - Each external write has one approval state, idempotency key, and terminal provider receipt.
+  - Each production release records source, artifact, configuration, migration, and canary evidence.
+  - A browser fallback cannot conceal an unverified native implementation failure.

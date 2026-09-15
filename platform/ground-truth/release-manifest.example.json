@@ -1,0 +1,26 @@
+{
+  "contractVersion": 1,
+  "environment": "enigma",
+  "changeClass": "runner",
+  "source": {
+    "repository": "amar3012005/deepseek-harness",
+    "branch": "hivemind-chat",
+    "commit": "0123456789abcdef"
+  },
+  "artifacts": [
+    {
+      "kind": "container_image",
+      "identity": "hivemind/harness-chat:sha-0123456789",
+      "previousIdentity": "hivemind/harness-chat:sha-previous"
+    }
+  ],
+  "configurationRevision": "hivemind-web-profile-v1",
+  "featureFlag": {
+    "key": "hivemind_harness_chat_v1",
+    "target": "harness"
+  },
+  "rollback": "Redeploy previousIdentity through the canonical runner-only helper and return the feature flag target to legacy.",
+  "canaries": [
+    "resolved profile", "authenticated fresh session", "direct session reload", "stream", "changed behavior"
+  ]
+}

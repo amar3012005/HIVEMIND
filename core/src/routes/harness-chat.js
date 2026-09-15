@@ -134,9 +134,10 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     const input = await parseBody(req).catch(() => null);
     const sessionId = typeof input?.session_id === 'string' ? input.session_id : '';
     const callId = typeof input?.call_id === 'string' ? input.call_id : '';
+    const turnId = Number.isSafeInteger(input?.turn_id) && input.turn_id >= 0 ? input.turn_id : -1;
     const kind = input?.kind;
     const tool = typeof input?.tool === 'string' ? input.tool : '';
-    if (!/^session-[A-Za-z0-9-]{8,160}$/.test(sessionId) || !/^[A-Za-z0-9._:-]{1,180}$/.test(callId)) {
+    if (!/^session-[A-Za-z0-9-]{8,160}$/.test(sessionId) || !/^[A-Za-z0-9._:-]{1,180}$/.test(callId) || turnId < 0) {
       jsonResponse(res, { error: 'Invalid credit operation identity' }, 400); return true;
     }
     const service = kind === 'composio_execution' ? 'composio_tool_call'
@@ -145,12 +146,22 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       jsonResponse(res, { error: 'Invalid credit operation' }, 400); return true;
     }
     if (!creditService) { jsonResponse(res, { error: 'Credit service unavailable' }, 503); return true; }
+    if (service === 'harness_no_tool_turn') {
+      const paid = await prisma.$queryRawUnsafe(
+        `SELECT 1 FROM hivemind.usage_events
+          WHERE org_id=$1::uuid AND initiating_user_id=$2::uuid AND metric='credits_consumed'
+            AND state IN ('reserved','settled') AND metadata->>'service'='composio_tool_call'
+            AND metadata->>'session_id'=$3 AND metadata->>'turn_id'=$4 LIMIT 1`,
+        claims.org_id, claims.sub, sessionId, String(turnId),
+      );
+      if (paid.length > 0) { jsonResponse(res, { admitted: true, duplicate: true, service: 'composio_tool_call' }, 200); return true; }
+    }
     const operationIdentity = `${service}\u0000${sessionId}\u0000${callId}`;
     const idempotencyKey = `harness:${crypto.createHash('sha256').update(operationIdentity).digest('hex')}`;
     const charged = await creditService.charge({
       orgId: claims.org_id, userId: claims.sub, service, units: 1, source: 'harness-runner',
       idempotencyKey,
-      metadata: { session_id: sessionId, call_id: callId, ...(tool ? { tool } : {}) },
+      metadata: { session_id: sessionId, turn_id: String(turnId), call_id: callId, ...(tool ? { tool } : {}) },
     });
     if (!charged.admitted) { jsonResponse(res, { error: 'Credits exhausted', code: 'credits_exhausted' }, 402); return true; }
     jsonResponse(res, { admitted: true, duplicate: Boolean(charged.duplicate), service }, 200);

@@ -12,6 +12,7 @@ import {
   normalizeCuratedClaims,
   normalizeUnifiedEntityCatalog,
   promotionProvenance,
+  repairUnifiedClaimEntityTypes,
   repairSourceLanguageClaims,
 } from '../../src/knowledge/document-first-ingestion.js';
 import { EntityExtractor, isValidEntityCandidate } from '../../src/knowledge/entity-extractor.js';
@@ -65,6 +66,20 @@ test('unified entity catalog repairs only source-grounded LLM type mistakes', ()
     { name: 'Aegis October Summit', kind: 'event' },
     { name: 'Northstar Labs', kind: 'organization' },
   ]);
+});
+
+test('unified extraction repairs per-fact entity types before resource projection', () => {
+  const source = 'Atlas Dispatch is the operating system used by Project Borealis.';
+  const repaired = repairUnifiedClaimEntityTypes({
+    source_quote: source,
+    subject: { n: 'Atlas Dispatch', k: 'person' },
+    entities: [
+      { n: 'Atlas Dispatch', k: 'person' },
+      { n: 'Project Borealis', k: 'person' },
+    ],
+  }, source);
+  assert.equal(repaired.subject.k, 'system');
+  assert.deepEqual(repaired.entities.map((entity) => entity.k), ['system', 'project']);
 });
 
 test('model-free entity extraction recognizes unambiguous enterprise names', () => {

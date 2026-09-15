@@ -291,6 +291,37 @@ function normalizedClaimEntity(value, { sourceContext = '' } = {}) {
   return name ? { name, kind: sourceGroundedEntityKind(name, rawKind, sourceContext) } : null;
 }
 
+function repairClaimEntityType(value, sourceContext = '') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const normalized = normalizedClaimEntity(value, { sourceContext });
+  if (!normalized?.kind) return value;
+  // Preserve the provider's object shape (`n`/`k` or `name`/`kind`) so the
+  // rest of the structured-claim pipeline remains unchanged.
+  return Object.prototype.hasOwnProperty.call(value, 'k')
+    ? { ...value, k: normalized.kind }
+    : { ...value, kind: normalized.kind };
+}
+
+export function repairUnifiedClaimEntityTypes(item, sourceContext = '') {
+  if (!item || typeof item !== 'object') return item;
+  const local = `${item.source_quote || ''}\n${sourceContext}`;
+  const relationships = Array.isArray(item.relationships)
+    ? item.relationships.map((relationship) => ({
+      ...relationship,
+      from: repairClaimEntityType(relationship?.from, local),
+      to: repairClaimEntityType(relationship?.to, local),
+    }))
+    : item.relationships;
+  return {
+    ...item,
+    subject: repairClaimEntityType(item.subject, local),
+    entities: Array.isArray(item.entities)
+      ? item.entities.map((entity) => repairClaimEntityType(entity, local))
+      : item.entities,
+    relationships,
+  };
+}
+
 function normalizedClaimRelationship(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const from = normalizedClaimEntity(value.from);
@@ -2549,7 +2580,12 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // Env override honoured only if someone deliberately sets it ABOVE 0.
     const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0);
     const normalized = normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
-    const covered = ensureSourceAnchorCoverage(normalized, content, factCap);
+    const covered = ensureSourceAnchorCoverage(normalized, content, factCap)
+      // The complete top-level catalog and each individual memory projection
+      // must agree on type.  Without this pass, the catalog could say
+      // `system` while an earlier per-fact projection overwrote the same
+      // canonical name as `person`.
+      .map((fact) => repairUnifiedClaimEntityTypes(fact, content));
     if (covered.length > normalized.length) {
       ingestDiagnostic.warn(`[kb-unified] source-anchor coverage added ${covered.length - normalized.length} `
         + `exact-source claim(s)`);

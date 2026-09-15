@@ -42,6 +42,8 @@ test('canonical Compose uses the dedicated Harness image and existing Postgres a
   assert.doesNotMatch(service, /env_file:/);
   assert.match(service, /profiles: \["harness-chat"\]/);
   assert.match(service, /PGOPTIONS: -c search_path=hivemind,public/);
+  assert.match(service, /HIVEMIND_CONNECTED_RECEIPT_SERVICE_URL: \$\{HIVEMIND_CONNECTED_RECEIPT_SERVICE_URL:-http:\/\/control-plane:3000\}/);
+  assert.match(service, /HIVEMIND_CONNECTED_RECEIPTS_REQUIRED: "true"/);
 });
 
 test('Control Plane owns an explicit encrypted connected-app receipt key', async () => {

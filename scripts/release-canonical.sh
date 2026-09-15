@@ -65,6 +65,15 @@ if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
   HARNESS_IMAGE="${HARNESS_IMAGE:-${HIVEMIND_HARNESS_IMAGE:-}}"
   [[ "$HARNESS_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] \
     || { echo "FATAL: harness-runner requires --harness-image (or HIVEMIND_HARNESS_IMAGE) pinned by @sha256"; exit 2; }
+  # A native runner is not a valid production artifact without the secrets and
+  # receipt boundary it needs to preserve tenant-scoped connected-app state.
+  # Read only whether each value is populated; never source or print .env.
+  for required_env in HIVE_HARNESS_TICKET_SECRET HIVE_HARNESS_RUNNER_SERVICE_SECRET HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY COMPOSIO_API_KEY HIVE_HARNESS_TUNNEL_TOKEN; do
+    if ! awk -F= -v key="$required_env" '$1 == key && length(substr($0, length(key) + 2)) > 0 { found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
+      echo "FATAL: harness-runner requires non-empty $required_env in the managed production environment"
+      exit 1
+    fi
+  done
 fi
 [ "$HARNESS_IMAGE_PRELOADED" = 0 ] || [[ ",${SERVICES}," == *,harness-runner,* ]] \
   || { echo "FATAL: --harness-image-preloaded requires harness-runner"; exit 2; }

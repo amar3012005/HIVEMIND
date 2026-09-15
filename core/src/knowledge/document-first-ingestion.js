@@ -6687,7 +6687,12 @@ Every item must include a non-empty content field and one or more valid support_
             ? (metadata.project_id || metadata.project_ids?.[0] || null)
             : scopeType === 'team' ? (metadata.primary_team_id || null) : null;
           const segmentResources = new Map();
-          for (const entity of extractedEntityCatalog) {
+          // Use the normalized catalog here as well.  `replaceExisting` makes
+          // this the final writer for each segment: using the raw model catalog
+          // here previously replaced a corrected `system`/`event`/organization
+          // link with the model's erroneous `person` link after the document
+          // resource had been written correctly.
+          for (const entity of canonicalEntityCatalog) {
             if (!entity.segmentId) continue;
             const resource = segmentResources.get(entity.segmentId) || {
               resourceType: 'segment', resourceId: entity.segmentId,

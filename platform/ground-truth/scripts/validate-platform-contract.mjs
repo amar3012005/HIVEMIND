@@ -53,6 +53,7 @@ for (const required of [
   'workflows/task.schema.json',
   'workflows/task.example.json',
   'scripts/validate-task-manifest.mjs',
+  'scripts/resolve-worktree-start.mjs',
   'scripts/inventory-agent-surface.mjs',
   'scripts/inventory-worktrees.mjs',
   'skills/platform-security-audit/references/cloudflare-security-audit-skill.md',
@@ -60,7 +61,7 @@ for (const required of [
 
 const everyAgent = path.resolve(root, '..', '..', '.agents', 'hivemind', 'EveryAgent.md');
 await access(everyAgent);
-for (const expected of ['GitHub MCP', 'Cloudflare MCP', 'The seven skills', 'Self-improvement without self-damage']) {
+for (const expected of ['GitHub MCP', 'Cloudflare MCP', 'The seven skills', 'New task worktrees', 'Self-improvement without self-damage']) {
   assert.ok((await readFile(everyAgent, 'utf8')).includes(expected), `EveryAgent.md missing ${expected}`);
 }
 

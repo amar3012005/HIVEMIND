@@ -5,6 +5,11 @@
   "modelTier": "terra",
   "repository": "amar3012005/HIVEMIND",
   "baseBranch": "singulance-local",
+  "execution": {
+    "mode": "worktree",
+    "sourceRef": "origin/singulance-local",
+    "onMissing": "error"
+  },
   "objective": "Repair the scoped recall projection without changing authorization semantics.",
   "files": ["core/src/routes/recall.js", "core/tests/unit/recall-scope.test.js"],
   "allowedCommands": ["node --test core/tests/unit/recall-scope.test.js", "git diff --check"],

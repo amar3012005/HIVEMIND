@@ -65,6 +65,22 @@ node platform/ground-truth/scripts/validate-task-manifest.mjs task.json
 approved task. `sol-astra` owns critical architecture, security decisions, and
 production release manifests.
 
+## New task worktrees
+
+Every coding task manifest names both its logical environment branch and the
+exact Git ref from which its worktree starts. Resolve that ref before creating a
+task worktree:
+
+```bash
+node platform/ground-truth/scripts/resolve-worktree-start.mjs task.json
+```
+
+Use the emitted `codexStartingState` unchanged when creating a native Codex
+task. A missing ref is an error: never use the repository default branch,
+`main`, or the current checkout as a fallback. The chosen ref is environment
+specific; `singulance-local`, `enigma-main`, `singulance-main`, and
+`singulance-selfhost` are not interchangeable.
+
 ## Repository cleanup
 
 Inventory before cleanup; do not delete or move agent instructions, journals,

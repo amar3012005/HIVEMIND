@@ -12,6 +12,20 @@ unrelated work, or treating a healthy process as end-to-end proof.
 3. Use one owner skill. Split cross-owner work into dependent manifests.
 4. Validate the task manifest before a mechanical/bounded executor changes code.
 
+## New task worktrees
+
+A coding task always starts in an explicit Git worktree. Its manifest must name
+the target environment in `baseBranch` and the exact existing Git ref in
+`execution.sourceRef`. Resolve it before task creation with
+`resolve-worktree-start.mjs`; then pass the returned `codexStartingState` to
+the native task creator. `onMissing` is always `error`.
+
+Never default a new task to the saved project's default branch, `main`, or the
+current checkout. A generic project cannot safely infer whether a task belongs
+to `singulance-local`, `enigma-main`, `singulance-main`, or
+`singulance-selfhost`. If the requested ref is missing, fetch/inspect it and
+stop with that concrete error; do not create an unrelated worktree from `main`.
+
 ## Capability discovery
 
 Inspect the runtime tool inventory first. When installed, use native GitHub MCP

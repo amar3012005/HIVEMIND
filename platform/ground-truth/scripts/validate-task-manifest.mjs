@@ -7,11 +7,11 @@ const task = JSON.parse(await readFile(file, 'utf8'));
 
 const allowed = new Set([
   'contractVersion', 'id', 'skill', 'modelTier', 'repository', 'baseBranch',
-  'objective', 'files', 'allowedCommands', 'checks', 'risk', 'requiresApproval',
+  'execution', 'objective', 'files', 'allowedCommands', 'checks', 'risk', 'requiresApproval',
   'release', 'rollback', 'dependencies',
 ]);
 for (const key of Object.keys(task)) assert.ok(allowed.has(key), `unsupported field: ${key}`);
-for (const key of ['id', 'skill', 'modelTier', 'repository', 'baseBranch', 'objective', 'files', 'allowedCommands', 'checks', 'risk']) assert.ok(task[key], `missing ${key}`);
+for (const key of ['id', 'skill', 'modelTier', 'repository', 'baseBranch', 'execution', 'objective', 'files', 'allowedCommands', 'checks', 'risk']) assert.ok(task[key], `missing ${key}`);
 assert.equal(task.contractVersion, 1, 'unsupported contractVersion');
 assert.match(task.id, /^[a-z0-9][a-z0-9-]{2,80}$/);
 
@@ -22,6 +22,11 @@ assert.ok(['mechanical', 'bounded', 'critical'].includes(task.risk), 'unknown ri
 assert.ok(Array.isArray(task.files) && task.files.length > 0, 'files must be a non-empty array');
 assert.ok(Array.isArray(task.allowedCommands) && task.allowedCommands.length > 0, 'allowedCommands must be a non-empty array');
 assert.ok(Array.isArray(task.checks) && task.checks.length > 0, 'checks must be a non-empty array');
+assert.equal(typeof task.execution, 'object', 'execution must be an object');
+assert.equal(task.execution.mode, 'worktree', 'tasks must run in an explicit worktree');
+assert.equal(typeof task.execution.sourceRef, 'string', 'execution.sourceRef must be an exact Git ref');
+assert.ok(task.execution.sourceRef.length > 0, 'execution.sourceRef must not be empty');
+assert.equal(task.execution.onMissing, 'error', 'missing source refs must fail; never fall back to main');
 
 const releases = new Set(['none', 'local', 'enigma', 'production']);
 assert.ok(releases.has(task.release ?? 'none'), 'invalid release target');

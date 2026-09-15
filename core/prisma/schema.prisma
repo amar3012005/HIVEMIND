@@ -5313,6 +5313,7 @@ model HarnessSession {
   @@index([orgId, userId, updatedAt(sort: Desc)], map: "harness_sessions_tenant_updated_idx")
   @@index([status, updatedAt(sort: Desc)], map: "harness_sessions_status_updated_idx")
   @@index([orgId, projectId, updatedAt(sort: Desc)], map: "harness_sessions_project_updated_idx")
+  @@index([orgId, userId, scopeKind, updatedAt(sort: Desc)], map: "harness_sessions_scope_updated_idx")
   @@map("harness_sessions")
 }
 

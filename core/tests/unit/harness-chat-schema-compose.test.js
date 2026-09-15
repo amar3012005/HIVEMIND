@@ -4,10 +4,13 @@ import { readFile } from 'node:fs/promises';
 
 const schemaUrl = new URL('../../prisma/schema.prisma', import.meta.url);
 const migrationUrl = new URL('../../prisma/migrations/20260908150000_harness_chat_sessions/migration.sql', import.meta.url);
+const hardeningMigrationUrl = new URL('../../prisma/migrations/20260914220000_harness_session_hardening/migration.sql', import.meta.url);
 const composeUrl = new URL('../../../infra/docker-compose.hetzner.yml', import.meta.url);
 
 test('Harness provider schema is additive, tenant scoped, and RLS enforced', async () => {
-  const [schema, migration] = await Promise.all([readFile(schemaUrl, 'utf8'), readFile(migrationUrl, 'utf8')]);
+  const [schema, migration, hardening] = await Promise.all([
+    readFile(schemaUrl, 'utf8'), readFile(migrationUrl, 'utf8'), readFile(hardeningMigrationUrl, 'utf8'),
+  ]);
   for (const model of ['HarnessSession', 'HarnessSessionEvent', 'HarnessSessionLease', 'ConnectedAppReceipt']) assert.match(schema, new RegExp(`model ${model} \\{`));
   assert.match(schema, /id\s+String\s+@id\s+@db\.VarChar\(180\)/);
   assert.match(schema, /eventCount\s+BigInt/);
@@ -17,6 +20,13 @@ test('Harness provider schema is additive, tenant scoped, and RLS enforced', asy
   assert.match(migration, /current_setting\('app\.hivemind_org_id', true\)/);
   assert.match(migration, /current_setting\('app\.hivemind_user_id', true\)/);
   assert.match(migration, /UNIQUE INDEX IF NOT EXISTS "harness_session_leases_session_key"/);
+  assert.match(schema, /scopeKind\s+String\s+@default\("organization"\)/);
+  assert.match(schema, /harness_sessions_scope_updated_idx/);
+  assert.match(hardening, /SET LOCAL search_path TO hivemind, public/);
+  assert.match(hardening, /SET scope_kind = 'project'/);
+  assert.match(hardening, /harness_sessions_scope_kind_check/);
+  assert.match(hardening, /harness_session_events_tenant_created_idx/);
+  assert.match(hardening, /harness_session_leases_tenant_expiry_idx/);
 });
 
 test('canonical Compose uses the dedicated Harness image and existing Postgres and Redis', async () => {

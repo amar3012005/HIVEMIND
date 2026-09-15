@@ -2821,6 +2821,12 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       }
     }
     if (!facts.length) return [];
+    // Curated claims can be rebuilt after the first unified extraction pass.
+    // Re-apply the deterministic, source-grounded type repair at the final
+    // memory projection boundary so a stale model label cannot overwrite the
+    // corrected document catalog in CanonicalEntity/ResourceEntityLink.
+    facts = facts.map((fact) => repairUnifiedClaimEntityTypes(fact,
+      `${window.content || ''}\n${fact?.source_quote || ''}`));
     const vs = this.memoryGraphEngine.vectorStore;
     const idByIdx = new Array(facts.length).fill(null);
     const factObjs = [];

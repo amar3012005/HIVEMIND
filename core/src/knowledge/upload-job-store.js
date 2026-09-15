@@ -300,6 +300,37 @@ export class KnowledgeUploadJobStore {
     });
   }
 
+  /**
+   * Record a retryable Workflow interruption without changing the processing
+   * fence.  Cloudflare may redeliver a workflow after a local dependency
+   * outage, but it must not leave a job perpetually `processing`: after the
+   * configured budget the executor records a normal terminal failure, making
+   * the retained source available to the existing fenced retry/DLQ flow.
+   */
+  async recordWorkflowRecovery(jobId, orgId, { processingVersion, errorCode, maxAttempts = 2 } = {}) {
+    const before = await this.findOwned(jobId, { orgId });
+    if (!before || Number(before.processingVersion || 1) !== Number(processingVersion || 1)) {
+      return { recorded: false, attempts: 0, exhausted: false };
+    }
+    const metadata = before.metadata && typeof before.metadata === 'object' ? before.metadata : {};
+    const attempts = Math.max(0, Number(metadata.workflow_retryable_failure_count || 0)) + 1;
+    const updated = await this._model().updateMany({
+      where: {
+        id: jobId, orgId, processingVersion: Number(processingVersion || 1),
+        status: { in: LIVE_UPLOAD_STATUSES },
+      },
+      data: {
+        metadata: {
+          ...metadata,
+          workflow_retryable_failure_count: attempts,
+          workflow_retryable_failure_code: String(errorCode || 'WORKFLOW_RETRYABLE_INTERRUPTION').slice(0, 80),
+          workflow_retryable_failure_at: new Date().toISOString(),
+        },
+      },
+    });
+    return { recorded: updated.count > 0, attempts, exhausted: attempts > Math.max(0, Number(maxAttempts) || 0) };
+  }
+
   async fail(jobId, orgId, error, { processingVersion = null } = {}) {
     const before = await this.findOwned(jobId, { orgId });
     const updated = await this._model().updateMany({

@@ -170,6 +170,7 @@ async function _acquireSlot(orgId, path, signal, options = {}) {
 //   3. MNEME_AGENT_URLS env: "orgId=https://host|token,orgId2=...".
 import { readFileSync, writeFileSync, existsSync, renameSync, statSync } from 'node:fs';
 import { currentStageSignal } from '../../runtime/stage-deadline.js';
+import { isAppRuntime } from '../../runtime/runtime-role.js';
 
 const _registry = new Map();
 // Default to a path on the shared core↔control volume. Self-host activates simply by the file existing
@@ -227,6 +228,35 @@ function _persist() {
 }
 _loadEnv();
 _loadFile();
+
+// A managed `local:` AMR org is an embedded agent, not a separate database.
+// The native binding locks a shard while it is open, including for reads.  In
+// the appliance topology the API process owns those open shards because it
+// serves recall for their full lifetime; the ingestion process must therefore
+// marshal its writes to that owner rather than opening the same mmap file.
+//
+// Keeping the hand-off on the private Compose network preserves locality: this
+// is not Cloudflare transport and no content crosses the public edge.
+export function embeddedDispatchOwnerUrl() {
+  if (isAppRuntime()) return null;
+  return String(process.env.MNEME_EMBEDDED_OWNER_URL || '').replace(/\/$/, '') || null;
+}
+
+async function dispatchEmbeddedToOwner(ownerUrl, orgId, path, body) {
+  const secret = String(process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '');
+  if (!secret) throw new Error('embedded AMR owner dispatch is not configured');
+  const response = await fetch(`${ownerUrl}/internal/mneme-embedded/v1/dispatch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ org_id: orgId, path, body }),
+    signal: AbortSignal.timeout(Math.max(1000, Number(process.env.MNEME_EMBEDDED_DISPATCH_TIMEOUT_MS || 30_000))),
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok || result?.ok === false) {
+    throw new Error(`embedded AMR owner dispatch failed (${response.status}): ${result?.error || 'unavailable'}`);
+  }
+  return result;
+}
 
 // Broker calls this when an agent enrolls (API-key authenticated → orgId resolved).
 export function registerAgent(orgId, url, token) {
@@ -300,6 +330,8 @@ async function _call(orgId, path, body, options = {}) {
   // (personal/managed .amr orgs — self-host semantics where the box is central itself). Same
   // route table, same shapes, no HTTP. Lazy import keeps deployments without the binding inert.
   if (a.url === 'local:') {
+    const ownerUrl = embeddedDispatchOwnerUrl();
+    if (ownerUrl) return dispatchEmbeddedToOwner(ownerUrl, orgId, path, body);
     const { dispatch } = await import('./embedded-agent.mjs');
     const out = await dispatch(orgId, path, body);
     if (out?.ok === false) throw new Error(`agent ${path} rejected request: ${out.error || 'ok=false'}`);

@@ -4549,6 +4549,34 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Only the app runtime opens central embedded-AMR shards.  Ingestion and
+  // sidecar processes marshal `local:` agent operations here over the private
+  // Compose network, which prevents a second native open from taking the
+  // shard lock during a document write.  This shares the existing internal
+  // Workflow credential; the path is never exposed by the edge proxy.
+  if (pathname === '/internal/mneme-embedded/v1/dispatch') {
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    if (!isAuthorizedKnowledgeWorkflowRequest?.(req) || RUNTIME_ROLE !== 'app') {
+      return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    }
+    const dispatchBody = await parseBody(req).catch(() => null);
+    const orgId = String(dispatchBody?.org_id || '');
+    const route = String(dispatchBody?.path || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^\/v1\/[a-z-]+$/i.test(route)) {
+      return jsonResponse(res, { error: 'Invalid embedded AMR dispatch request' }, 400);
+    }
+    try {
+      const { agentFor } = await import('./vector/mneme/remote-backend.js');
+      if (agentFor(orgId)?.url !== 'local:') return jsonResponse(res, { error: 'Embedded AMR organization not found' }, 404);
+      const { dispatch } = await import('./vector/mneme/embedded-agent.mjs');
+      const result = await runWithOrg(orgId, () => dispatch(orgId, route, dispatchBody?.body || {}));
+      return jsonResponse(res, result);
+    } catch (error) {
+      console.warn(`[mneme/embedded-dispatch] ${route} failed org=${orgId.slice(0, 8)}: ${error.message}`);
+      return jsonResponse(res, { error: 'Embedded AMR operation failed' }, 503);
+    }
+  }
+
   // ─── Connector Runtime V1 — capability endpoint + stateless MCP gateway ───
   // Flag-gated (CONNECTOR_RUNTIME_ENABLED). Default OFF → this block is skipped
   // entirely and has ZERO effect on any existing route. When on, it serves only

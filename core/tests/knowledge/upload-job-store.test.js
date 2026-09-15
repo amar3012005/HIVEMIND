@@ -202,6 +202,28 @@ test('Workflow progress and failure writes are fenced by processing version', as
   assert.equal(writes[1].where.processingVersion, 4);
 });
 
+test('retryable Workflow recovery is version-fenced and becomes terminal only after its bounded budget', async () => {
+  const writes = [];
+  const job = { id: 'job', orgId: 'org', status: 'processing', processingVersion: 4, metadata: {} };
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    findFirst: async () => job,
+    updateMany: async (query) => { writes.push(query); return { count: 1 }; },
+  } } });
+
+  const first = await store.recordWorkflowRecovery('job', 'org', {
+    processingVersion: 4, errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION', maxAttempts: 2,
+  });
+  assert.deepEqual(first, { recorded: true, attempts: 1, exhausted: false });
+  assert.equal(writes[0].where.processingVersion, 4);
+  assert.equal(writes[0].data.metadata.workflow_retryable_failure_count, 1);
+
+  job.metadata = writes[0].data.metadata;
+  const second = await store.recordWorkflowRecovery('job', 'org', {
+    processingVersion: 4, errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION', maxAttempts: 1,
+  });
+  assert.deepEqual(second, { recorded: true, attempts: 2, exhausted: true });
+});
+
 test('a stale Workflow failure cannot release the current retry reservation', async () => {
   const released = [];
   const store = new KnowledgeUploadJobStore({

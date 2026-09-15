@@ -6,7 +6,7 @@ export const WRITE_TOOLS = new Set([
 export const HIVEMIND_TOOL_GROUPS = {
   'hivemind-recall': {
     description: 'Tenant-scoped HIVEMIND memory, evidence, exact-source, entity aggregation, temporal recall and graph retrieval.',
-    tools: new Set(['hivemind_recall', 'hivemind_relation_between', 'hivemind_aggregate_entities', 'hivemind_count_where', 'hivemind_query_table', 'hivemind_get_memory', 'hivemind_list_memories', 'hivemind_traverse_graph', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_query_with_ai', 'get_user_profile', 'tara_call_get']),
+    tools: new Set(['hivemind_find_entities', 'hivemind_recall', 'hivemind_relation_between', 'hivemind_aggregate_entities', 'hivemind_count_where', 'hivemind_query_table', 'hivemind_get_memory', 'hivemind_list_memories', 'hivemind_traverse_graph', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_query_with_ai', 'get_user_profile', 'tara_call_get']),
   },
   'hivemind-memory-write': {
     description: 'Versioned HIVEMIND memory creation, update, deletion, decisions and assistant identity. Mutations are scoped and approval/policy checked.',

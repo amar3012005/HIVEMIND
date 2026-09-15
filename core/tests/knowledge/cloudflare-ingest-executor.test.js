@@ -480,6 +480,34 @@ test('durable FIFO capacity row prevents a newer stage from jumping the queue', 
   assert.equal(created, false);
 });
 
+test('retryable Workflow interruptions are terminalized after the bounded recovery budget', async () => {
+  const { executor, events, job } = fixture();
+  let recoveryCalls = 0;
+  executor.jobStore.recordWorkflowRecovery = async () => ({
+    recorded: true,
+    attempts: ++recoveryCalls,
+    exhausted: recoveryCalls > 2,
+  });
+
+  const first = await executor.fail({
+    jobId: job.id, orgId: job.orgId, userId: job.userId, processingVersion: job.processingVersion,
+    errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION', retryable: true,
+  });
+  assert.deepEqual(first, { ok: true, deferred: true, recovery_attempt: 1 });
+
+  await executor.fail({
+    jobId: job.id, orgId: job.orgId, userId: job.userId, processingVersion: job.processingVersion,
+    errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION', retryable: true,
+  });
+  const exhausted = await executor.fail({
+    jobId: job.id, orgId: job.orgId, userId: job.userId, processingVersion: job.processingVersion,
+    errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION', retryable: true,
+  });
+  assert.deepEqual(exhausted, { ok: true, failed: true, recovery_exhausted: true });
+  assert.equal(events.filter(([event]) => event === 'fail').length, 1);
+  assert.equal(events.find(([event]) => event === 'fail')[3].code, 'WORKFLOW_RECOVERY_EXHAUSTED');
+});
+
 test('Core restart requeues every current Workflow in-process checkpoint', async () => {
   const sql = [];
   let leasesCleared = false;

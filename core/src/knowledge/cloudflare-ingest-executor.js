@@ -724,7 +724,25 @@ export class CloudflareKnowledgeIngestExecutor {
 
   async fail({ jobId, orgId, userId, processingVersion, errorCode, message, retryable }) {
     const job = await this._job({ jobId, orgId, userId, processingVersion });
-    if (retryable === true) return { ok: true, deferred: true };
+    if (retryable === true) {
+      const recovery = await this.jobStore.recordWorkflowRecovery?.(
+        job.id,
+        job.orgId,
+        {
+          processingVersion: job.processingVersion,
+          errorCode,
+          maxAttempts: Math.max(0, Number(process.env.KNOWLEDGE_INGEST_WORKFLOW_RECOVERY_MAX || 2)),
+        },
+      );
+      if (!recovery?.exhausted) return { ok: true, deferred: true, recovery_attempt: recovery?.attempts || 0 };
+      const exhausted = Object.assign(
+        new Error('Cloudflare Workflow recovery attempts were exhausted; the upload is retryable from its retained local source.'),
+        { code: 'WORKFLOW_RECOVERY_EXHAUSTED' },
+      );
+      await this.jobStore.fail(job.id, job.orgId, exhausted, { processingVersion: job.processingVersion });
+      await this._releaseProcessingLease(job);
+      return { ok: true, failed: true, recovery_exhausted: true };
+    }
     const error = Object.assign(new Error(String(message || 'Cloudflare workflow failed')), {
       code: String(errorCode || 'WORKFLOW_FAILED').slice(0, 80),
     });

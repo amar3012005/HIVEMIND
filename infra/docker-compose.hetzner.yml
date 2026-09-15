@@ -23,6 +23,9 @@ x-common-env: &common-env
   MNEME_BINDING: ${MNEME_BINDING:-/app/src/vector/mneme/singulance-amr.linux-x64-gnu.node}
   # BYOD: per-org remote agents. Inert until an agent enrolls (file empty). Shared with the broker.
   MNEME_AGENT_REGISTRY_FILE: ${MNEME_AGENT_REGISTRY_FILE:-/app/data/byod-agents.json}
+  # The API runtime is the sole owner of embedded local: AMR shard handles.
+  # Other runtimes proxy only over the private Compose network.
+  MNEME_EMBEDDED_OWNER_URL: ${MNEME_EMBEDDED_OWNER_URL:-http://core:3000}
   # ── model providers (egress) ──
   # Direct Groq is disabled on Enigma. Model traffic uses Cloudflare AI Gateway.
   GROQ_API_KEY: ""

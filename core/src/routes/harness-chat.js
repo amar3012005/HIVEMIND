@@ -11,6 +11,7 @@ import {
   storeConnectedAppReceipt,
 } from '../harness-chat/connected-app-receipts.js';
 import { getInternalApiKey } from '../security/internal-auth.js';
+import { TeamStore } from '../teams/team-store.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -80,6 +81,34 @@ async function scopedHyperagentProfiles(prisma, claims) {
   };
 }
 
+/** Return only the projects the ticket subject can read.  This deliberately
+ * shares the dashboard's policy-aware TeamStore query rather than treating a
+ * project id supplied by the browser as authorization. */
+async function scopedProjects(prisma, claims) {
+  const membership = await prisma.userOrganization.findUnique({
+    where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } },
+    select: { role: true, isActive: true },
+  });
+  if (!membership?.isActive) return null;
+  const projects = await new TeamStore(prisma).listProjectsForUser({
+    userId: claims.sub,
+    orgId: claims.org_id,
+    orgRole: membership.role || null,
+  });
+  const visible = claims.project_id === undefined
+    ? projects
+    : projects.filter(project => project.id === claims.project_id);
+  return {
+    ok: true,
+    contract: 'hivemind.projects.v1',
+    projects: visible.slice(0, 100).map(project => ({
+      id: project.id,
+      name: project.name,
+      slug: project.slug,
+    })),
+  };
+}
+
 async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl }) {
   const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
   if (!receiptRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
@@ -128,6 +157,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     return true;
   }
   const corePath = pathname.slice(INTERNAL_PREFIX.length);
+  if (corePath === '/projects' && req.method === 'GET') {
+    try {
+      const result = await scopedProjects(prisma, claims);
+      jsonResponse(res, result || { error: 'Organization membership required' }, result ? 200 : 403);
+    } catch {
+      jsonResponse(res, { error: 'Project catalog unavailable' }, 503);
+    }
+    return true;
+  }
   if (corePath === '/v1/hyperagents/profiles' && req.method === 'GET') {
     const result = await scopedHyperagentProfiles(prisma, claims);
     jsonResponse(res, result || { error: 'Organization membership required' }, result ? 200 : 403);

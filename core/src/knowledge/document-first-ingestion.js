@@ -295,11 +295,14 @@ function repairClaimEntityType(value, sourceContext = '') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const normalized = normalizedClaimEntity(value, { sourceContext });
   if (!normalized?.kind) return value;
+  const originalKind = boundedClaimText(value.kind || value.k, 64).toLowerCase();
+  const corrected = Boolean(originalKind && originalKind !== normalized.kind);
   // Preserve the provider's object shape (`n`/`k` or `name`/`kind`) so the
   // rest of the structured-claim pipeline remains unchanged.
-  return Object.prototype.hasOwnProperty.call(value, 'k')
+  const typed = Object.prototype.hasOwnProperty.call(value, 'k')
     ? { ...value, k: normalized.kind }
     : { ...value, kind: normalized.kind };
+  return corrected ? { ...typed, typeEvidence: 'source_grounded' } : typed;
 }
 
 export function repairUnifiedClaimEntityTypes(item, sourceContext = '') {
@@ -1583,7 +1586,12 @@ export class DocumentFirstIngestionService {
       if (!resource?.resourceType || !resource?.resourceId) continue;
       const key = `${resource.resourceType}:${resource.resourceId}`;
       const current = grouped.get(key) || { ...resource, entities: [], input: '' };
-      current.entities.push(...(Array.isArray(resource.entities) ? resource.entities : [])
+      // This is the last canonical write boundary.  Apply type repair here as
+      // well as during model normalization, because curator/document-parent
+      // paths may rebuild entity objects before they arrive at this method.
+      const resourceEntities = (Array.isArray(resource.entities) ? resource.entities : [])
+        .map((entity) => repairClaimEntityType(entity, resource.input || ''));
+      current.entities.push(...resourceEntities
         .filter((entity) => isValidEntityCandidate({
           name: typeof entity === 'string' ? entity : (entity?.name || entity?.n),
           type: typeof entity === 'string' ? null : (entity?.kind || entity?.k || entity?.type),

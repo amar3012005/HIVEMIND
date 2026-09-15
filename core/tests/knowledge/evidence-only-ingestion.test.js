@@ -83,6 +83,7 @@ test('unified extraction repairs per-fact entity types before resource projectio
     ],
   }, source);
   assert.equal(repaired.subject.k, 'system');
+  assert.equal(repaired.subject.typeEvidence, 'source_grounded');
   assert.deepEqual(repaired.entities.map((entity) => entity.k), ['system', 'project']);
 });
 

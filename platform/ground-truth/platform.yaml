@@ -54,6 +54,25 @@ services:
     authority:
       - voice orchestration and speech provider dispatch
 
+persistent_agent_state:
+  semantic_company_memory:
+    owner: core
+    contains:
+      - memories, evidence, entities, and authorization-scoped recall
+      - durable connected-app receipts and approval records
+    excludes:
+      - browser-only state and raw provider payloads outside encrypted receipts
+  operational_coordination:
+    owner: cloudflare_durable_objects
+    scope: tenant/user/workflow only
+    contains:
+      - short-lived task leases and idempotency coordination
+      - workflow checkpoint pointers and release/skill metadata cache
+    excludes:
+      - organization semantic memory
+      - raw prompts, provider receipts, credentials, and authorization authority
+    deployment_status: must be separately provisioned and verified; this contract does not assert a live binding
+
 chat_modes:
   feature_flag: hivemind_harness_chat_v1
   values:

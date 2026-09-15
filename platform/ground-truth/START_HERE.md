@@ -11,6 +11,8 @@ reference.
 2. [capability-contracts.md](capability-contracts.md) — which boundary owns each behavior.
 3. [delivery-contract.md](delivery-contract.md) — deterministic delivery and rollback rules.
 4. The one skill matching the requested work in [skills/](skills/).
+5. For delegated or lower-tier execution, a validated task manifest in
+   [workflows/](workflows/).
 
 ## Authority hierarchy
 
@@ -45,3 +47,31 @@ lower-capability model may then execute only its specified workflow:
 ```bash
 node platform/ground-truth/scripts/validate-release-manifest.mjs release-manifest.json
 ```
+
+## Deterministic task execution
+
+A senior model turns a bounded request into one task manifest. The manifest
+selects exactly one specialist skill, the permitted file surface, commands,
+checks, risk tier, release target, and rollback when needed. Validate it before
+any lower-tier execution:
+
+```bash
+node platform/ground-truth/scripts/validate-task-manifest.mjs task.json
+```
+
+`luna` executes only mechanical, non-release work. `terra` executes a bounded,
+approved task. `sol-astra` owns critical architecture, security decisions, and
+production release manifests.
+
+## Repository cleanup
+
+Inventory before cleanup; do not delete or move agent instructions, journals,
+or documentation based on filename alone:
+
+```bash
+node platform/ground-truth/scripts/inventory-agent-surface.mjs . /tmp/agent-surface-inventory.json
+```
+
+The inventory is read-only. Archive actions require a separate approved task
+manifest, an explicit source-to-archive mapping, and a post-move link/check
+verification.

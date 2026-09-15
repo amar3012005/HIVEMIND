@@ -44,6 +44,11 @@ the versioned contract; they do not copy or reinterpret it.
   `identity-platform`.
 - DeepSeek Harness/Cordis modes, native UI, connected apps, or durable agent
   state: `cordis-harness-platform`.
+- Tara speech capture, transcription, voice sessions, and call artifacts:
+  `tara-voice-platform`.
+- Tenant isolation, Cloudflare edge controls, admission, secrets, or a sensitive
+  release review: `platform-security-audit`.
+- Contract, replay, browser, and release canaries: `platform-evals`.
 - Worker, backend, database, container, tunnel, or production delivery:
   `platform-release`.
 

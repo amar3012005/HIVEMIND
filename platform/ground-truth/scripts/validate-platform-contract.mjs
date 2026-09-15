@@ -37,6 +37,9 @@ for (const skill of [
   'memory-platform',
   'identity-platform',
   'cordis-harness-platform',
+  'tara-voice-platform',
+  'platform-security-audit',
+  'platform-evals',
   'platform-release',
 ]) {
   const canonical = path.join(root, 'skills', skill, 'SKILL.md');
@@ -45,5 +48,12 @@ for (const skill of [
   await access(entrypoint);
   assert.ok((await readFile(entrypoint, 'utf8')).includes(`platform/ground-truth/skills/${skill}/SKILL.md`), `${skill} entrypoint does not point to canonical skill`);
 }
+
+for (const required of [
+  'workflows/task.schema.json',
+  'workflows/task.example.json',
+  'scripts/validate-task-manifest.mjs',
+  'scripts/inventory-agent-surface.mjs',
+]) await access(path.join(root, required));
 
 console.log('platform ground-truth contract: valid');

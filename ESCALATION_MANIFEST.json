@@ -1,0 +1,13 @@
+{
+  "event": "model_escalation_required",
+  "fromTier": "terra",
+  "toTier": "sol",
+  "reason": "Cross-service tool-credit accounting and canonical/live-source divergence",
+  "blockingEvidence": [
+    "required canonical source 698eb74b5bdac41b69bf79cbece82466d8572b45 lacks the deployed Harness Core proxy and receipt owner",
+    "live Control 8ab9040bc1f99bc57c7b1b6ec82db1a8ed5b1d1a proxies HIVE calls without call/session/turn metering identity",
+    "live Core 1e656af26afe28daf28c5a70c85c97ca810bab46 charges recall once; Composio dispatches occur directly in Harness without HIVE settlement",
+    "canonical component-release gate prevents routine Core-only promotion unless omitted coupled services already run the new exact SHA"
+  ],
+  "status": "waiting_for_handoff"
+}

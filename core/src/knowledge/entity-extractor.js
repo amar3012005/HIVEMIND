@@ -29,7 +29,16 @@ const FILE_EXTENSION = /\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|md|txt|rtf|html?|xml|
 const PATH_OR_URL = /(?:https?:\/\/|file:\/\/|[\\/][^\s]+[\\/])/iu;
 const FILENAME_SLUG = /(?:[_-][\p{L}\p{N}]+){3,}/u;
 
-const ENTITY_TYPES = ['person', 'organization', 'project', 'topic', 'location', 'product', 'event'];
+// Keep this aligned with the canonical registry taxonomy.  The former, smaller
+// list forced an extraction model to misclassify a named protocol, platform, or
+// technical system as a vague "topic" (or omit it completely).  That loses the
+// typed identity needed by the entity directory and later entity-filtered
+// recall.  These are still *named* entities only; generic concepts remain
+// intentionally excluded by the prompt and the admission gate below.
+const ENTITY_TYPES = [
+  'person', 'organization', 'project', 'topic', 'location', 'product', 'event',
+  'technology', 'standard', 'system',
+];
 
 /** Final deterministic admission gate shared by regex and model candidates. */
 export function isValidEntityCandidate(candidate) {
@@ -51,7 +60,10 @@ Extract ALL of these whenever named or specifically identified:
 - product — products, product LINES, MODELS, devices, COMPONENTS, apps, services, features, and article/model/SKU numbers. List EACH distinct product/component as its OWN entity, not just the parent brand (e.g. "Solvis Indoor Unit", "Solvis Storage Tank", "Solvis Outdoor Unit", "SolvisBen HB", "article 33989" — all separate products).
 - project — named projects, initiatives, campaigns.
 - location — places, cities, countries, regions, sites, addresses, facilities.
-- topic — significant technologies, standards, materials, methods, or concepts central to the text (e.g. "R290 refrigerant", "heat pump", "GWP").
+- technology — specifically named technical methods, protocols, frameworks, materials, or architectures.
+- standard — named standards, regulations, specifications, or certifications.
+- system — specifically named platforms, applications, services, or operating systems when they are not a product line.
+- topic — a significant, specifically identified domain concept central to the text when no more precise type fits.
 - event — meetings, launches, milestones, or notable dated occurrences.
 
 Rules:
@@ -59,7 +71,7 @@ Rules:
 - Canonical name = most common written form. Strip titles ("Mr.", "Dr.") for people.
 - Combine same-entity spelling/casing variants under ONE canonical with aliases (don't drop them).
 - Skip ONLY truly generic words with no specific name ("user", "the team", "the company", "the system", "lorem ipsum" placeholder text).
-- Up to 40 entities per call.
+- Capture every distinct grounded entity in the supplied window, up to 40 entities per call. If there are more, prioritize named people, organizations, projects, products, systems, technologies, standards, and dated events over generic topics.
 - Empty list only if there are genuinely no named entities.`;
 
 export class EntityExtractor {

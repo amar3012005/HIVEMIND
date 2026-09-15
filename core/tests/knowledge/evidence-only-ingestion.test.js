@@ -67,6 +67,20 @@ test('model candidates pass through the same deterministic entity admission gate
   assert.deepEqual(entities.map((entity) => entity.name), ['Singulance']);
 });
 
+test('LLM entity extraction preserves precise technical entity types for the canonical registry', () => {
+  const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
+  const entities = extractor._mergeCandidates([], [
+    { name: 'Model Context Protocol', type: 'standard', source: 'llm', confidence: 0.95 },
+    { name: 'Apache AGE', type: 'technology', source: 'llm', confidence: 0.94 },
+    { name: 'HIVEMIND Control Plane', type: 'system', source: 'llm', confidence: 0.93 },
+  ]);
+  assert.deepEqual(entities.map((entity) => ({ name: entity.name, type: entity.type })), [
+    { name: 'Model Context Protocol', type: 'standard' },
+    { name: 'Apache AGE', type: 'technology' },
+    { name: 'HIVEMIND Control Plane', type: 'system' },
+  ]);
+});
+
 test('structured claim subjects cannot bypass entity artifact admission', () => {
   const filename = materializeClaimEntities({
     f: 'The source singulance-german-banks-first-decision.md was superseded.',

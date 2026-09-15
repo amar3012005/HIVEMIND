@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -32,5 +32,18 @@ for (const expected of [
   'No client should load native Harness assets for a legacy admission.',
   'release lock',
 ]) assert.ok(delivery.includes(expected), `delivery contract missing ${expected}`);
+
+for (const skill of [
+  'memory-platform',
+  'identity-platform',
+  'cordis-harness-platform',
+  'platform-release',
+]) {
+  const canonical = path.join(root, 'skills', skill, 'SKILL.md');
+  const entrypoint = path.resolve(root, '..', '..', '.agents', 'skills', skill, 'SKILL.md');
+  await access(canonical);
+  await access(entrypoint);
+  assert.ok((await readFile(entrypoint, 'utf8')).includes(`platform/ground-truth/skills/${skill}/SKILL.md`), `${skill} entrypoint does not point to canonical skill`);
+}
 
 console.log('platform ground-truth contract: valid');

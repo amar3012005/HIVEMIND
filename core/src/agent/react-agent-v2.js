@@ -1357,7 +1357,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // do not also run blended recall — otherwise tenant-scoped-but-unrelated
   // memories compete with the profile facts in the synthesis prompt (review
   // MEDIUM: no precedence rule) and can be mistaken for authoritative profile.
-  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile' || plan.operation === 'projects';
+  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'entity_discovery' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile' || plan.operation === 'projects';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
     ? [plan._native_single_call
       // The progressive native planner already performed semantic query

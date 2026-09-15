@@ -20,7 +20,7 @@ import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
-import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete, amrKbDocDetail } from '../vector/mneme/driver.js';
+import { orgIsRemote, orgUsesExternalAgent, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete, amrKbDocDetail } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 import { redactParsedDocument } from './content-secret-redaction.js';
 import { sanitizeKnowledgeJson } from './upload-contract.js';
@@ -1461,7 +1461,10 @@ export class DocumentFirstIngestionService {
 
   async _recordEntityReceipts({ organizationId, resources = [], extractorRoute, modelRoute = null,
     processingVersion = 1, projection = null }) {
-    if (!this.db?.entityExtractionReceipt || orgIsRemote(organizationId)) return;
+    // `local:` uses the embedded AMR memory plane but is still managed by this
+    // appliance. Its PostgreSQL receipts are the authority for entity-link
+    // coverage and recovery; only an external customer agent owns its own.
+    if (!this.db?.entityExtractionReceipt || orgUsesExternalAgent(organizationId)) return;
     for (const resource of resources) {
       if (!resource?.resourceType || !resource?.resourceId) continue;
       const entities = Array.isArray(resource.entities) ? resource.entities : [];
@@ -1579,7 +1582,7 @@ export class DocumentFirstIngestionService {
   /** Reconcile durable entity extraction receipts for a document projection. */
   async reconcileEntityCoverage({ documentId, orgId, memoryIds = [] }) {
     if (!documentId || !orgId) return { complete: false, expected: 0, completed: 0, failed: 0, reason: 'missing_identity' };
-    if (orgIsRemote(orgId) || !this.db?.entityExtractionReceipt) {
+    if (orgUsesExternalAgent(orgId) || !this.db?.entityExtractionReceipt) {
       return { complete: true, expected: null, completed: null, failed: 0, authority: 'remote_agent' };
     }
     const segments = await this.db.knowledgeSegment.findMany({

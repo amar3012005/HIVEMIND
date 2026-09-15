@@ -2,7 +2,7 @@ export const NATIVE_CAPABILITY_FAMILIES = Object.freeze({
   profile: ['profile', 'update_profile'],
   memory_write: ['save', 'log_decision', 'set_assistant_name'],
   workspace_read: [
-    'recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline',
+    'recall', 'entity_discovery', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline',
     'relation_between', 'aggregate', 'projects',
     'list_memories', 'get_memory', 'traverse', 'query_with_ai', 'count_where', 'query_table',
     'web_search', 'recall_bugs', 'why_code', 'code_at',
@@ -26,6 +26,7 @@ export const NATIVE_OPERATION_TO_TOOL = Object.freeze({
   update_profile: 'update_user_profile',
   save: 'hivemind_save_memory',
   recall: 'hivemind_recall',
+  entity_discovery: 'hivemind_find_entities',
   source_read: 'hivemind_recall',
   event_range: 'hivemind_recall',
   snapshot: 'hivemind_at',

@@ -18,7 +18,7 @@
 
 import { EntityResolver } from './entity-resolver.js';
 import {normalizeEntity, entityMatchVariants } from './entity-normalize.js';
-import { orgIsRemote, amrWrite, amrAddEdge, amrUpdateTags, amrHydrateMemories } from '../vector/mneme/driver.js';
+import { orgUsesExternalAgent, amrWrite, amrAddEdge, amrUpdateTags, amrHydrateMemories } from '../vector/mneme/driver.js';
 import crypto from 'node:crypto';
 
 // V5 Phase 10 — cached per-org ontology loader (opt-in enterprise config).
@@ -119,7 +119,10 @@ export async function persistCanonicalLinks({
   } catch { /* ontology is best-effort; never block entity persistence */ }
   try {
     const resolver = new EntityResolver({ prisma });
-    const remote = orgIsRemote(organizationId);
+    // Only a customer-hosted agent is remote for entity projection purposes.
+    // A managed `local:` AMR shard keeps its memory data in AMR but must write
+    // canonical entity links and receipts to PostgreSQL for authorized search.
+    const remote = orgUsesExternalAgent(organizationId);
 
     // Some older in-process callers know only the memory id. Never turn that
     // omission into organization-wide visibility. Hydrate the authoritative

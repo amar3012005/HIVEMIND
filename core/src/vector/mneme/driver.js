@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, remoteHydrate, hasRemoteAgent, remoteAgentOrgIds, meetingAgentOrgIds, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteMeetingAudioWrite, remoteMeetingAudioClaim, remoteMeetingAudioSettle, remoteMeetingAudioPending, remoteMeetingSessionWrite, remoteMeetingSessionStatus, remoteMeetingSessionPending, remoteMeetingSessionClaim, remoteMeetingSessionSettle, remoteTaraCall, remoteKbDocs, remoteKbEvidence, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteMemRelationshipsBatch, remoteFindByTags, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables, remoteMemoryClaims, remoteCanonicalProjection } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, remoteHydrate, hasRemoteAgent, agentFor, remoteAgentOrgIds, meetingAgentOrgIds, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteMeetingAudioWrite, remoteMeetingAudioClaim, remoteMeetingAudioSettle, remoteMeetingAudioPending, remoteMeetingSessionWrite, remoteMeetingSessionStatus, remoteMeetingSessionPending, remoteMeetingSessionClaim, remoteMeetingSessionSettle, remoteTaraCall, remoteKbDocs, remoteKbEvidence, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteMemRelationshipsBatch, remoteFindByTags, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables, remoteMemoryClaims, remoteCanonicalProjection } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -39,6 +39,18 @@ async function _getEnqueuePush() {
 // Cheap no-op unless a registry is configured (MNEME_AGENT_REGISTRY_FILE / MNEME_AGENT_URLS).
 export function orgIsRemote(orgId) {
   return !!orgId && hasRemoteAgent(orgId); // hasRemoteAgent is cheap (throttled file check) when inert
+}
+
+// `local:` is an AMR transport adapter running on this appliance, not a
+// customer-owned external data plane.  Callers that decide whether an
+// authoritative PostgreSQL projection may be written must use this predicate,
+// not orgIsRemote(): managed embedded shards still need canonical entity links,
+// receipts, audit records, and lifecycle recovery metadata in PostgreSQL.
+// Keep orgIsRemote unchanged because normal memory/KB routing deliberately
+// continues to use the embedded agent path for `local:` organizations.
+export function orgUsesExternalAgent(orgId) {
+  const agent = orgId ? agentFor(orgId) : null;
+  return Boolean(agent?.url && agent.url !== 'local:');
 }
 
 // THE single routing seam. Every write + read chokepoint routes through this one predicate so the

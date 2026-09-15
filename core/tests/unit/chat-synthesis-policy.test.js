@@ -49,6 +49,7 @@ test('native recall reuses the planner query while missing/tool-enabled queries 
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color', useTools: true }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'recall' }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'timeline' }), true);
+  assert.equal(shouldRunRecallOptimizer({ operation: 'entity_discovery' }), false);
   assert.equal(shouldRunRecallOptimizer({ operation: 'connector_read' }), false);
 });
 

@@ -11,7 +11,7 @@ export function shouldOptimizeRecallQuery({ canonicalQuery, useTools = false } =
 }
 
 export function shouldRunRecallOptimizer({ operation } = {}) {
-  return !new Set(['aggregate', 'connector_read', 'relation_between', 'profile']).has(operation);
+  return !new Set(['aggregate', 'entity_discovery', 'connector_read', 'relation_between', 'profile']).has(operation);
 }
 
 export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage, alreadyOptimized = false, useTools = false } = {}) {

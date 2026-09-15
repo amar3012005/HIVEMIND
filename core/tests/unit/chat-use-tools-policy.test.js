@@ -18,10 +18,11 @@ test('use_tools false never discloses connected or compound capabilities', () =>
 test('native planner requests a semantic retrieval expression instead of a copied query', () => {
   const context = getProgressiveTools({ useTools: false })
     .find((tool) => tool.function.name === 'hivemind_context');
-  assert.deepEqual(context.function.parameters.properties.native_tool.enum, [
-    'hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline',
+  const nativeTools = context.function.parameters.properties.native_tool.enum;
+  for (const required of [
+    'hivemind_recall', 'hivemind_find_entities', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline',
     'hivemind_aggregate_entities', 'hivemind_relation_between',
-  ]);
+  ]) assert.ok(nativeTools.includes(required));
   assert.deepEqual(context.function.parameters.properties.temporal_axis.enum, [
     'none', 'valid_time', 'known_time',
   ]);
@@ -179,6 +180,20 @@ test('native aggregate and relation selections compile their required executor i
   assert.deepEqual(relation.relation, { entities: ['Solvis', 'SolvisLea'] });
 });
 
+test('native entity discovery is authoritative over a generic recall operation', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_find_entities', temporal_axis: 'none', operation: 'recall', temporal_semantics: 'none',
+    query_original: 'Find every Uwe', query_canonical_en: 'Uwe', response_language: 'en',
+    mode: 'fact', entities: ['Uwe'], response_depth: 'standard', retrieval_shape: 'inventory',
+    answer_objective: 'List matching entities only.', source_title: null,
+    valid_at: null, known_at: null, range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  }, 'Find every Uwe in the company brain.', 'en', { useTools: false });
+  assert.equal(decision.operation, 'entity_discovery');
+  assert.equal(decision.native_tool, 'hivemind_find_entities');
+  assert.deepEqual(decision.queries, ['Uwe']);
+});
+
 test('native source reads retain an exact filename supplied as a planner entity', () => {
   const title = 'Solvis Elektrifizierung 2025.pdf';
   const { decision } = adaptToDecision('hivemind_context', {
@@ -191,7 +206,7 @@ test('native source reads retain an exact filename supplied as a planner entity'
     aggregate_kind: null, answer_type: 'fact',
   }, `Tell me about ${title}`, 'en', { useTools: false });
   assert.equal(decision.operation, 'source_read');
-  assert.deepEqual(decision.source, { title });
+  assert.deepEqual(decision.source, { title, kind: null });
 });
 
 test('connection-aware tools disclose only active connector providers', () => {

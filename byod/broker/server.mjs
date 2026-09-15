@@ -187,23 +187,27 @@ http.createServer(async (req, res) => {
         await acquireOrgLock(client, principal.org_id);
         const pending = await client.query(`SELECT endpoint,tunnel_id,state,metadata FROM memory_box_connections WHERE org_id=$1 AND revoked_at IS NULL`, [principal.org_id]);
         const meta = pending.rows[0]?.metadata || {};
+        tunnel = await provisionTunnel(principal.org_id);
         if (pending.rows[0]?.state === 'ENROLLING' && meta.enrollmentKeyId === principal.id && meta.connectorCredential) {
-          tunnel = { agentUrl: pending.rows[0].endpoint, tunnelId: pending.rows[0].tunnel_id, connectorToken: unseal(meta.connectorCredential) };
-        } else {
-          tunnel = await provisionTunnel(principal.org_id);
-          await client.query(`INSERT INTO memory_box_connections
+          tunnel.connectorToken = unseal(meta.connectorCredential);
+        }
+        await client.query(`INSERT INTO memory_box_connections
             (org_id,box_id,transport,endpoint,state,tunnel_id,metadata)
             VALUES ($1,$2,'cloudflare',$3,'ENROLLING',$4,$5::jsonb)
             ON CONFLICT (org_id) DO UPDATE SET transport='cloudflare',endpoint=EXCLUDED.endpoint,state='ENROLLING',
               tunnel_id=EXCLUDED.tunnel_id,metadata=memory_box_connections.metadata||EXCLUDED.metadata,revoked_at=NULL,updated_at=now()`,
           [principal.org_id, crypto.randomUUID(), tunnel.agentUrl, tunnel.tunnelId,
-            JSON.stringify({ enrollmentKeyId: principal.id, connectorCredential: seal(tunnel.connectorToken), enrollmentProvisionedAt: new Date().toISOString() })]);
-        }
+            JSON.stringify({
+              enrollmentKeyId: principal.id,
+              connectorCredential: seal(tunnel.connectorToken),
+              enrollmentProvisionedAt: new Date().toISOString(),
+              harnessUrl: tunnel.harnessUrl,
+            })]);
       } finally {
         await client.query('SELECT pg_advisory_unlock(hashtext($1))', [`memory-box:${principal.org_id}`]).catch(() => {}); client.release();
       }
       return send(res, 200, { ok: true, orgId: principal.org_id, credentialKind: principal.kind,
-        agentUrl: tunnel.agentUrl, tunnelToken: tunnel.connectorToken, tunnelId: tunnel.tunnelId, transport: 'cloudflare' });
+        agentUrl: tunnel.agentUrl, harnessUrl: tunnel.harnessUrl, tunnelToken: tunnel.connectorToken, tunnelId: tunnel.tunnelId, transport: 'cloudflare' });
     }
     if (req.url === '/v1/selfhost/register' || req.url === '/v1/byod/enroll') {
       const principal = (await connectionPrincipal(body)) || (await registrationEnrollmentPrincipal(body)) || (await connectorPrincipal(body));

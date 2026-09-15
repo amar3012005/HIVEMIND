@@ -1,0 +1,15 @@
+/* SINGULANCE lockup from Da-vinci LoginPage: ivory ground, ink, Space Grotesk, #117dff. */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+html {
+  background: #faf9f4;
+  color: #0a0a0a;
+}
+
+body, button, input {
+  font-family: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+}
+
+code, kbd, pre, .font-mono {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+}

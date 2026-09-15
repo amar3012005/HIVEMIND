@@ -1,0 +1,75 @@
+name: hivemind-hyperagent-see
+
+# Local demo cluster only. Prints a trycloudflare URL. Not Memory Box enroll.
+# Production public URL remains broker-managed hr-<16hex>.singulancelabs.com.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind_see
+      POSTGRES_DB: hivemind
+    volumes:
+      - ./init-harness.sql:/docker-entrypoint-initdb.d/harness.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile.hyperagent
+    image: hivemind/harness-chat:byod-hyperagent
+    read_only: true
+    environment:
+      NODE_ENV: production
+      PORT: "3080"
+      DSH_HOME: /var/lib/dsh
+      DSH_WORKSPACE: /data/fs
+      DATABASE_URL: postgresql://hivemind:hivemind_see@postgres:5432/hivemind
+      PGOPTIONS: -c search_path=public
+      REDIS_URL: redis://redis:6379/0
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:?}
+      HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:?}
+      HIVEMIND_CONTROL_PLANE_URL: ${HIVEMIND_CENTRAL_URL:-https://preview-api.singulancelabs.com}
+      HIVEMIND_SERVICE_HTTP_ORIGINS: ${HIVEMIND_CENTRAL_URL:-https://preview-api.singulancelabs.com}
+      HIVEMIND_PARENT_ORIGINS: ${HIVEMIND_HARNESS_PARENT_ORIGINS:-http://localhost:13080}
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-localhost}
+      HIVEMIND_ORG_ID: ${HIVEMIND_ORG_ID:-00000000-0000-4000-8000-000000000001}
+      HIVEMIND_USER_ID: ${HIVEMIND_USER_ID:-00000000-0000-4000-8000-000000000001}
+      HIVEMIND_INVITED_USER_IDS: ${HIVEMIND_INVITED_USER_IDS:-}
+    volumes:
+      - ./data/fs:/data/fs
+      - ./data/dsh-home:/var/lib/dsh
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    ports:
+      - "127.0.0.1:13080:3080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:?}"]
+    depends_on:
+      harness: { condition: service_healthy }

@@ -47,6 +47,7 @@ test('broker enforces expiring tenant credentials and stores only credential has
   assert.match(source, /scopes\.includes\('selfhost:connect'\)/);
   assert.match(source, /pg_try_advisory_lock/);
   assert.match(source, /connectorCredential: seal\(tunnel\.connectorToken\)/);
+  assert.match(source, /harnessUrl: tunnel.harnessUrl/);
   assert.match(source, /projectionPending: true/);
   assert.match(source, /await projectConnection[\s\S]*Memory Box enrollment consumed/);
   assert.match(source, /restoreConnectionProjection/);
@@ -88,13 +89,16 @@ test('Cloudflare provisioning reuses tunnel and DNS then returns connector crede
     let result = {};
     if (url.includes('cfd_tunnel?')) result = [{ id: 'tunnel', name: 'hivemind-memory-box-11111111-1111-1111-1111-111111111111' }];
     else if (url.endsWith('/dns_records?type=CNAME&name=mb-1111111111111111.example.com')) result = [{ id: 'dns', content: 'tunnel.cfargotunnel.com' }];
+    else if (url.endsWith('/dns_records?type=CNAME&name=hr-1111111111111111.example.com')) result = [{ id: 'dns-hr', content: 'tunnel.cfargotunnel.com' }];
     else if (url.endsWith('/token')) result = 'x'.repeat(80);
     return { ok: true, async json() { return { success: true, result }; } };
   };
   try {
     const result = await provisionTunnel('11111111-1111-1111-1111-111111111111', { fetchImpl });
     assert.equal(result.agentUrl, 'https://mb-1111111111111111.example.com');
+    assert.equal(result.harnessUrl, 'https://hr-1111111111111111.example.com');
     assert.equal(result.tunnelId, 'tunnel');
+    assert.ok(calls.some(([, , body]) => body?.config?.ingress?.some((row) => row.hostname === 'hr-1111111111111111.example.com' && row.service === 'http://harness:3080' && row.originRequest?.keepAliveConnections === 32)));
     assert.equal(result.connectorToken.length, 80);
     assert.equal(calls.some(([, method]) => method === 'POST' && calls[0][0].endsWith('/cfd_tunnel')), false);
     assert.ok(calls.some(([url, method]) => url.endsWith('/configurations') && method === 'PUT'));

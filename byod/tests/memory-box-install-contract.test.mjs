@@ -40,11 +40,15 @@ test('setup proves local health and central reachability before reporting connec
 test('one-command enrollment defaults to a private managed Cloudflare tunnel while preserving legacy transports', () => {
   const setup = read('setup.sh');
   const compose = read('docker-compose.byod.yml');
+  assert.match(setup, /harnessUrl/);
+  assert.match(setup, /HARNESS_PUBLIC_URL/);
   assert.match(setup, /HIVEMIND_ENROLLMENT_TOKEN/);
   assert.match(setup, /enrollmentToken/);
   assert.match(setup, /HIVEMIND_BOX_TOKEN/);
-  assert.match(setup, /--profile cloudflare up -d/);
-  assert.match(setup, /--profile tailnet up -d/);
+  assert.match(setup, /compose_up --profile cloudflare up -d/);
+  assert.match(setup, /compose_up --profile tailnet up -d/);
+  assert.match(setup, /--profile harness/);
+  assert.match(setup, /HyperAgent Harness/);
   assert.match(compose, /network_mode: "service:agent"/);
   assert.match(setup, /AGENT_PUBLIC_URL/);
   assert.match(compose, /cloudflare\/cloudflared@sha256:[a-f0-9]{64}/);

@@ -48,7 +48,7 @@ case "$command_name" in
   status)
     printf 'channel: %s\n' "$(hm_channel)"
     if [[ -f "$HM_CURRENT_RECEIPT" ]]; then node -e 'const r=require(process.argv[1]);console.log(`release: ${r.release||"unknown"}\nimage: ${r.image||"unknown"}\nverified: ${r.verified_at||"unknown"}\nrollback: ${r.rollback_state||"ready"}`)' "$HM_CURRENT_RECEIPT"; else echo 'release: unmanaged'; fi
-    for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent hm-byod-cloudflared hm-byod-tunnel; do
+    for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent hm-byod-harness hm-byod-redis hm-byod-cloudflared hm-byod-tunnel; do
       state="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)"; printf '%s: %s\n' "$container" "${state:-missing}"
     done
     ;;
@@ -59,9 +59,9 @@ case "$command_name" in
   recover)
     hm_require_root; hm_lock; hm_compose_prefix
     hm_load_env_file "$HM_CONFIG_DIR/memory-box.env"
-    if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then "${HM_COMPOSE[@]}" --profile cloudflare up -d
-    elif [[ -n "${TS_AUTHKEY:-}" ]]; then "${HM_COMPOSE[@]}" --profile tailnet up -d
-    else "${HM_COMPOSE[@]}" up -d; fi
+    if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then "${HM_COMPOSE[@]}" --profile harness --profile cloudflare up -d
+    elif [[ -n "${TS_AUTHKEY:-}" ]]; then "${HM_COMPOSE[@]}" --profile harness --profile tailnet up -d
+    else "${HM_COMPOSE[@]}" --profile harness up -d; fi
     # Reconciliation is intentionally limited to service repair. Full doctor
     # also enforces backup age and is run independently by operators/monitoring.
     for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent; do

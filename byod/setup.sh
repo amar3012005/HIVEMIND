@@ -14,6 +14,10 @@ CENTRAL="${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}"
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$INSTALL_DIR/data" "$INSTALL_DIR/backups"
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$INSTALL_DIR/docker-compose.byod.yml")
+# Harness is part of the same one-command: Memory Box + HyperAgent native UI.
+compose_up() {
+  "${COMPOSE[@]}" --profile harness "$@"
+}
 log(){ printf '\033[1;36m[memory-box]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[memory-box] %s\033[0m\n' "$*" >&2; exit 1; }
 gen(){ openssl rand -hex "${1:-24}"; }
@@ -49,12 +53,18 @@ if [[ -f "$ENV_FILE" && -n "$ENROLLMENT_TOKEN" ]]; then
   [[ -n "$REQUESTED_ORG" ]] || die "enrollment response did not contain a valid organization"
   [[ "${HIVEMIND_ORG_ID:-}" == "$REQUESTED_ORG" ]] || die "this server already contains a Memory Box for another organization; preserve or remove that installation before enrolling a different organization"
   MANAGED_URL="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.agentUrl||x.agent_url||"")')"
+  HARNESS_URL="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.harnessUrl||x.harness_url||"")')"
   TUNNEL_TOKEN="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.tunnelToken||x.tunnel_token||"")')"
   [[ "$MANAGED_URL" == https://* && -n "$TUNNEL_TOKEN" ]] || die "managed tunnel enrollment response is incomplete"
   hm_validate_env_value AGENT_PUBLIC_URL "$MANAGED_URL"
   hm_validate_env_value CLOUDFLARE_TUNNEL_TOKEN "$TUNNEL_TOKEN"
   hm_set_env_value "$ENV_FILE" AGENT_PUBLIC_URL "$MANAGED_URL"
   hm_set_env_value "$ENV_FILE" CLOUDFLARE_TUNNEL_TOKEN "$TUNNEL_TOKEN"
+  if [[ "$HARNESS_URL" == https://* ]]; then
+    hm_set_env_value "$ENV_FILE" HARNESS_PUBLIC_URL "$HARNESS_URL"
+    hm_set_env_value "$ENV_FILE" HIVEMIND_HARNESS_PARENT_ORIGINS "$HARNESS_URL"
+    hm_set_env_value "$ENV_FILE" HIVEMIND_HARNESS_TRUSTED_HOSTS "$(URL="$HARNESS_URL" node -e 'process.stdout.write(new URL(process.env.URL).hostname)')"
+  fi
   ok "Enrollment" "existing organization verified"
 fi
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -81,6 +91,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   ORG="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);if(!/^[0-9a-f-]{36}$/i.test(x.orgId||""))process.exit(1);process.stdout.write(x.orgId)' 2>/dev/null || true)"
   [[ -n "$ORG" ]] || die "enrollment response did not contain a valid organization"
   MANAGED_URL="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.agentUrl||x.agent_url||"")')"
+  HARNESS_URL="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.harnessUrl||x.harness_url||"")')"
   TUNNEL_TOKEN="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.tunnelToken||x.tunnel_token||"")')"
   if [[ -n "$TUNNEL_TOKEN" || -n "$MANAGED_URL" ]]; then
     [[ -n "$TUNNEL_TOKEN" && "$MANAGED_URL" == https://* ]] || die "managed tunnel enrollment response is incomplete"
@@ -124,6 +135,15 @@ CLOUDFLARE_TUNNEL_TOKEN=$TUNNEL_TOKEN
 CLOUDFLARED_IMAGE=cloudflare/cloudflared@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
 TS_AUTHKEY=${TS_AUTHKEY:-}
 TS_HOSTNAME=${TS_HOSTNAME:-hivemind-byod}
+HIVEMIND_CENTRAL_URL=$CENTRAL
+HIVEMIND_HARNESS_IMAGE=${BYOD_INITIAL_HARNESS_IMAGE:-hivemind/harness-chat:byod-hyperagent}
+HIVE_HARNESS_TICKET_SECRET=$(gen 24)
+HIVE_HARNESS_RUNNER_SERVICE_SECRET=$(gen 24)
+HIVEMIND_HARNESS_PARENT_ORIGINS=${HARNESS_URL:-http://localhost:3080}
+HIVEMIND_HARNESS_TRUSTED_HOSTS=$(URL="${HARNESS_URL:-http://localhost:3080}" node -e 'process.stdout.write(new URL(process.env.URL).hostname)')
+HARNESS_PUBLIC_URL=${HARNESS_URL:-}
+HARNESS_BIND=127.0.0.1
+HARNESS_PORT=3080
 EOF
   chmod 600 "$ENV_FILE"
   rm -f -- "$BOOTSTRAP_RELEASE_FILE"
@@ -133,12 +153,24 @@ fi
 
 hm_load_env_file "$ENV_FILE"
 [[ "${HIVEMIND_AGENT_IMAGE:-}" =~ @sha256:[a-f0-9]{64}$ ]] || die "configuration has no digest-pinned signed agent image"
+if [[ -z "${HIVEMIND_HARNESS_IMAGE:-}" ]]; then
+  hm_set_env_value "$ENV_FILE" HIVEMIND_HARNESS_IMAGE "${BYOD_INITIAL_HARNESS_IMAGE:-hivemind/harness-chat:byod-hyperagent}"
+fi
+if [[ -z "${HIVE_HARNESS_TICKET_SECRET:-}" ]]; then hm_set_env_value "$ENV_FILE" HIVE_HARNESS_TICKET_SECRET "$(gen 24)"; fi
+if [[ -z "${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}" ]]; then hm_set_env_value "$ENV_FILE" HIVE_HARNESS_RUNNER_SERVICE_SECRET "$(gen 24)"; fi
+if [[ -z "${HIVEMIND_HARNESS_PARENT_ORIGINS:-}" ]]; then hm_set_env_value "$ENV_FILE" HIVEMIND_HARNESS_PARENT_ORIGINS "${HARNESS_PUBLIC_URL:-http://localhost:3080}"; fi
+if [[ -z "${HARNESS_PORT:-}" ]]; then hm_set_env_value "$ENV_FILE" HARNESS_PORT "3080"; fi
+if [[ -z "${HIVEMIND_CENTRAL_URL:-}" ]]; then hm_set_env_value "$ENV_FILE" HIVEMIND_CENTRAL_URL "$CENTRAL"; fi
+hm_load_env_file "$ENV_FILE"
+mkdir -p "$INSTALL_DIR/data/fs/org/${HIVEMIND_ORG_ID}/shared" \
+  "$INSTALL_DIR/data/fs/org/${HIVEMIND_ORG_ID}/users/${HIVEMIND_USER_ID:-_owner}/workspace"
+
 if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
-  TRANSPORT=cloudflare; step "Transport" "Cloudflare managed tunnel"; "${COMPOSE[@]}" --profile cloudflare up -d
+  TRANSPORT=cloudflare; step "Transport" "Cloudflare managed tunnel + HyperAgent Harness"; compose_up --profile cloudflare up -d
 elif [[ -n "${TS_AUTHKEY:-}" ]]; then
-  TRANSPORT=tailscale; step "Transport" "Tailscale private network"; "${COMPOSE[@]}" --profile tailnet up -d
+  TRANSPORT=tailscale; step "Transport" "Tailscale private network + HyperAgent Harness"; compose_up --profile tailnet up -d
 else
-  TRANSPORT=custom_https; step "Transport" "customer-managed HTTPS"; "${COMPOSE[@]}" up -d
+  TRANSPORT=custom_https; step "Transport" "customer-managed HTTPS + HyperAgent Harness"; compose_up up -d
 fi
 
 AGENT_PORT="${AGENT_PORT:-8787}"; AGENT_URL="${AGENT_PUBLIC_URL:-}"
@@ -168,6 +200,16 @@ done
 [[ "$LOCAL_READY" == true ]] || die "agent did not become healthy; run: hivemind-memory-box logs"
 ok "Local health" "agent is ready"
 
+step "HyperAgent" "waiting for native Harness UI"
+HARNESS_READY=false
+HARNESS_PORT="${HARNESS_PORT:-3080}"
+for _ in $(seq 1 40); do
+  if curl -fsS -m 3 "http://127.0.0.1:${HARNESS_PORT}/health" | node -e 'let b="";process.stdin.on("data",d=>b+=d).on("end",()=>{try{const x=JSON.parse(b);process.exit(x.ok===true?0:1)}catch{process.exit(1)}})' >/dev/null 2>&1; then HARNESS_READY=true; break; fi
+  sleep 2
+done
+[[ "$HARNESS_READY" == true ]] || die "HyperAgent Harness did not become healthy on :${HARNESS_PORT}; image ${HIVEMIND_HARNESS_IMAGE:-unset}"
+ok "HyperAgent" "native UI ${HARNESS_PUBLIC_URL:-http://localhost:${HARNESS_PORT}} (Connect to HIVEMIND)"
+
 REGISTER_BODY="$(API_KEY="${HIVEMIND_API_KEY:-$API_KEY}" ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" BOX_TOKEN="${HIVEMIND_BOX_TOKEN:-}" AGENT_URL="$AGENT_URL" AGENT_TOKEN="$AGENT_TOKEN" TRANSPORT="$TRANSPORT" node -e 'const b={agentUrl:process.env.AGENT_URL,agentToken:process.env.AGENT_TOKEN,transport:process.env.TRANSPORT};if(process.env.ENROLLMENT_TOKEN)b.enrollmentToken=process.env.ENROLLMENT_TOKEN;if(process.env.BOX_TOKEN)b.boxToken=process.env.BOX_TOKEN;if(process.env.API_KEY)b.apiKey=process.env.API_KEY;process.stdout.write(JSON.stringify(b))')"
 REGISTER_RESPONSE="$(curl -fsS --proto '=https' --tlsv1.2 --max-time 30 -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' --data-binary "$REGISTER_BODY")" || die "agent registration failed"
 NEW_BOX_TOKEN="$(REGISTER_RESPONSE="$REGISTER_RESPONSE" node -e 'const x=JSON.parse(process.env.REGISTER_RESPONSE);process.stdout.write(x.boxToken||x.box_token||"")')"
@@ -188,4 +230,4 @@ for _ in $(seq 1 24); do
 done
 [[ "$REMOTE_READY" == true ]] || die "agent is locally healthy but not centrally reachable; rerun after checking transport status"
 ok "Central reachability" "registered and reachable"
-printf '\n  \033[1;32m✓ Memory Box connected to SINGULANCE\033[0m\n\n  organization: %s\n  transport:    %s\n  endpoint:     %s\n  data:         %s\n\n' "$HIVEMIND_ORG_ID" "$TRANSPORT" "$AGENT_URL" "$INSTALL_DIR/data"
+printf '\n  \033[1;32m✓ Memory Box connected to SINGULANCE\033[0m\n\n  organization: %s\n  transport:    %s\n  endpoint:     %s\n  harness UI:   %s\n  data:         %s\n\n' "$HIVEMIND_ORG_ID" "$TRANSPORT" "$AGENT_URL" "${HARNESS_PUBLIC_URL:-http://localhost:${HARNESS_PORT:-3080}}" "$INSTALL_DIR/data"

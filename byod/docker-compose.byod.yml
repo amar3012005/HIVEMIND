@@ -95,3 +95,62 @@ services:
     command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:-missing}"]
     depends_on:
       agent: { condition: service_started }
+
+  # Optional Harness plane (native DeepSeek UI, Singulance-branded). Same
+  # container serves hivemind-chat and hivemind-hyperagent modes. Enable with
+  # --profile harness. Usage is gated by Connect to HIVEMIND (SINGULANCE auth).
+  # Not embedded in Da-vinci. Do not run k3s on the customer box.
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: hm-byod-redis
+    restart: unless-stopped
+    profiles: ["harness"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+
+  harness:
+    image: ${HIVEMIND_HARNESS_IMAGE:-hivemind/harness-chat:byod-hyperagent}
+    container_name: hm-byod-harness
+    restart: unless-stopped
+    profiles: ["harness"]
+    read_only: true
+    environment:
+      NODE_ENV: production
+      PORT: "3080"
+      DSH_HOME: /var/lib/dsh
+      DSH_WORKSPACE: /data/fs
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
+      PGOPTIONS: -c search_path=hivemind,public
+      REDIS_URL: redis://redis:6379/0
+      HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
+      HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}
+      HIVEMIND_CONTROL_PLANE_URL: ${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}
+      HIVEMIND_SERVICE_HTTP_ORIGINS: ${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}
+      HIVEMIND_PARENT_ORIGINS: ${HIVEMIND_HARNESS_PARENT_ORIGINS:-http://localhost:3080}
+      HIVEMIND_HARNESS_TRUSTED_HOSTS: ${HIVEMIND_HARNESS_TRUSTED_HOSTS:-localhost}
+      HIVEMIND_ORG_ID: ${HIVEMIND_ORG_ID:-}
+      HIVEMIND_USER_ID: ${HIVEMIND_USER_ID:-00000000-0000-4000-8000-000000000001}
+      HIVEMIND_INVITED_USER_IDS: ${HIVEMIND_INVITED_USER_IDS:-}
+      HIVEMIND_BOX_TOKEN: ${HIVEMIND_BOX_TOKEN:-${AGENT_TOKEN:-}}
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+    volumes:
+      - ./data/fs:/data/fs
+      - ./data/dsh-home:/var/lib/dsh
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    ports:
+      - "${HARNESS_BIND:-127.0.0.1}:${HARNESS_PORT:-3080}:3080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 25s
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }

@@ -17,7 +17,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 function embedUrl(mode, env) {
   if (mode === 'harness') return env.HIVE_HARNESS_EMBED_URL || 'https://chat.singulancelabs.com/embed';
-  if (mode === 'preview') return env.HIVE_HARNESS_PREVIEW_EMBED_URL || 'https://chat.singulancelabs.com/preview';
   return env.HIVE_HARNESS_LEGACY_EMBED_URL || '/hivemind/app/chat';
 }
 
@@ -249,14 +248,17 @@ export async function handleHarnessChatBootstrapRoute({
     fetchImpl,
     timeoutMs: Number(env.HIVE_HARNESS_FLAG_TIMEOUT_MS || 2000),
   });
-  const evaluation = dedicatedNewSession && evaluated.mode !== 'legacy'
+  // Admission is intentionally binary.  Unknown or retired rollout values
+  // fail closed to the established LangGraph/LangChain orchestrator rather
+  // than placing a browser on a partially admitted native route.
+  const evaluation = dedicatedNewSession && evaluated.mode === 'harness'
     ? {
         ...evaluated,
         mode: 'harness',
         flagReceipt: { ...evaluated.flagReceipt, source: 'dedicated-new-session-route' },
       }
     : evaluated;
-  if (evaluation.mode === 'legacy') {
+  if (evaluation.mode !== 'harness') {
     jsonResponse(res, legacyResponse(env, evaluation.flagReceipt));
     return true;
   }

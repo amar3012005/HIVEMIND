@@ -30,3 +30,22 @@ the bound account/project rather than assumptions.
 
 No raw Docker Compose recreation, mutable `latest` image, copied `.env`, manual
 container patch, or assumed Cloudflare binding is allowed.
+
+## Worktree cleanup and branch maintenance
+
+Use this only when cleanup is explicitly requested. Branches serving local,
+Enigma, self-hosted, and production goals remain separate; "up to date" means
+compared with their configured upstream, not merged into one branch.
+
+1. Fetch remotes and record each environment branch's exact local SHA, upstream
+   SHA, ahead/behind count, worktree path, and dirty/untracked state.
+2. On a server, inspect live container mounts, service units, and deployment
+   helpers before classifying any checkout as inactive.
+3. `git worktree prune` is allowed only for registrations whose paths are already
+   missing. It does not authorize deletion of existing worktrees or branches.
+4. Remove an existing worktree only when it is not a live mount, is clean, has
+   no unpushed commit, is outside the explicit keep set, and its branch is
+   merged or exported as a recoverable bundle. Record the path and bundle/merge
+   evidence in the release lock.
+5. Never delete a dirty server checkout, a path used by a running container, or
+   a deployment rollback source. Resolve these as migration tasks first.

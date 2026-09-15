@@ -77,3 +77,10 @@ node platform/ground-truth/scripts/inventory-agent-surface.mjs . /tmp/agent-surf
 The inventory is read-only. Archive actions require a separate approved task
 manifest, an explicit source-to-archive mapping, and a post-move link/check
 verification.
+
+For local Git worktree hygiene, use the separate read-only inventory. It never
+deletes a worktree or branch:
+
+```bash
+node platform/ground-truth/scripts/inventory-worktrees.mjs . /tmp/worktree-inventory.json
+```

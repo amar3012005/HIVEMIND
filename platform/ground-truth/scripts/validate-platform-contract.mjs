@@ -54,6 +54,7 @@ for (const required of [
   'workflows/task.example.json',
   'scripts/validate-task-manifest.mjs',
   'scripts/inventory-agent-surface.mjs',
+  'scripts/inventory-worktrees.mjs',
   'skills/platform-security-audit/references/cloudflare-security-audit-skill.md',
 ]) await access(path.join(root, required));
 

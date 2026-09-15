@@ -73,3 +73,13 @@ Cloudflare audit reference. Confirm findings independently and keep unresolved
 leads as `needs_validation`. For delivery, use one artifact-specific release
 manifest, an immutable identifier, configuration/migration evidence, an
 authenticated canary, and a tested rollback. Never patch a running container.
+
+## Worktree and branch hygiene
+
+Treat cleanup as a `platform-release` task. Fetch and compare every environment
+branch with its own configured upstream; never merge local, Enigma, self-hosted,
+and production branches merely to make them equal. Before pruning, inventory
+worktree registrations, dirty state, unpushed commits, and live server mounts.
+`git worktree prune` may remove only already-missing registrations. Removing an
+existing worktree or server copy requires a reviewed keep/archive manifest after
+its changes are committed, pushed, or captured in a recoverable bundle.

@@ -380,7 +380,31 @@ export async function persistCanonicalLinks({
           logger.warn?.(`[canonical-entities] link failed ${resource.resourceType}:${resource.resourceId} → ${entityId}: ${err.message}`);
         }
       }
-    };
+  };
+
+  // Preserve one canonical identity per normalized name, but do not preserve a
+  // known-wrong low-specificity label forever.  A source-grounded correction
+  // (for example, "Atlas Dispatch is the operating system" after an LLM called
+  // it a person) may upgrade only an older generic/person/topic/concept row.
+  // Ordinary model predictions never take this path, so a speculative label
+  // cannot rewrite an established canonical identity.
+  const upgradeSourceGroundedType = async (entityId, entry) => {
+    if (entry?.candidate?.typeEvidence !== 'source_grounded' || !entry?.kind) return;
+    try {
+      const current = await prisma.canonicalEntity.findUnique({
+        where: { id: entityId }, select: { entityKind: true },
+      });
+      if (!current || !new Set(['person', 'entity', 'topic', 'concept']).has(current.entityKind)
+          || current.entityKind === entry.kind) return;
+      await prisma.canonicalEntity.update({
+        where: { id: entityId }, data: { entityKind: entry.kind },
+      });
+    } catch (error) {
+      // Type correction is an enrichment; never make a durable entity link
+      // fail because a concurrent registry update lost a race.
+      logger.warn?.(`[canonical-entities] source-grounded type upgrade failed for ${entry.name}: ${error.message}`);
+    }
+  };
 
     // Serial per unique name: exact slug → direct reuse; otherwise resolve
     // once via the resolver (create / fuzzy-review), then fan links out.
@@ -391,6 +415,7 @@ export async function persistCanonicalLinks({
       const slug = entry.slug;
       const known = existingBySlug.get(`${entry.kind || entityKind}::${slug}`);
       if (known && known !== 'AMBIGUOUS') {
+        await upgradeSourceGroundedType(known, entry);
         await linkAll(known, entry.resources, 1.0, slug);
         await stampSource(known);
         continue;
@@ -433,6 +458,7 @@ export async function persistCanonicalLinks({
         continue;
       }
       if (r.entityId && r.action !== 'created') await stampSource(r.entityId);
+      if (r.entityId && r.action !== 'created') await upgradeSourceGroundedType(r.entityId, entry);
       if (r.action === 'review') {
         // Ambiguous — queued for human review; do not fan links out for it.
         out.review += 1;

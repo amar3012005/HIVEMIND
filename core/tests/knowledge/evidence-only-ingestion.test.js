@@ -49,6 +49,8 @@ test('unified entity catalog retains named system, project, and event types', ()
     { name: 'Project Horizon', kind: 'project' },
     { name: 'Enigma launch', kind: 'event' },
   ]);
+  assert.equal(entities[0].typeEvidence, 'model');
+  assert.equal(entities[1].typeEvidence, 'model');
 });
 
 test('unified entity catalog repairs only source-grounded LLM type mistakes', () => {
@@ -66,6 +68,8 @@ test('unified entity catalog repairs only source-grounded LLM type mistakes', ()
     { name: 'Aegis October Summit', kind: 'event' },
     { name: 'Northstar Labs', kind: 'organization' },
   ]);
+  assert.equal(entities[0].typeEvidence, 'source_grounded');
+  assert.equal(entities[1].typeEvidence, 'source_grounded');
 });
 
 test('unified extraction repairs per-fact entity types before resource projection', () => {

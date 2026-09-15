@@ -993,9 +993,15 @@ export function normalizeUnifiedEntityCatalog(rawEntities, content) {
       .map((alias) => boundedClaimText(alias, 200))
       .filter((alias) => alias && locateSourceQuote(source, alias).start >= 0);
     const confidenceValue = Number(raw?.confidence);
+    const rawKind = boundedClaimText(raw?.kind || raw?.k, 64).toLowerCase();
     const candidate = {
       name: normalized.name,
       kind: normalized.kind,
+      // This is not model confidence.  It records that the deterministic
+      // source-context guard corrected the model's label and lets the
+      // canonical registry safely upgrade an earlier generic/person row.
+      typeEvidence: raw?.typeEvidence || (rawKind && rawKind !== normalized.kind
+        ? 'source_grounded' : 'model'),
       aliases: [...new Set(aliases)].slice(0, 12),
       confidence: Number.isFinite(confidenceValue)
         ? Math.max(0, Math.min(1, confidenceValue)) : 0.8,

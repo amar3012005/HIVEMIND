@@ -250,12 +250,45 @@ function boundedClaimText(value, max = 500) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
 
-function normalizedClaimEntity(value) {
+/**
+ * Repair an LLM's broad entity label only when the literal name or its local
+ * source context makes the type unambiguous.  This is intentionally a narrow
+ * post-generation guard: it must never manufacture an entity or infer a type
+ * from a distant paragraph.  It closes the common extraction failure where a
+ * named platform, summit, or company is emitted as `person` despite the source
+ * saying "operating system", "Summit", or "Labs".
+ */
+function sourceGroundedEntityKind(name, kind, sourceContext = '') {
+  const current = CLAIM_ENTITY_KINDS.has(String(kind || '').toLowerCase())
+    ? String(kind).toLowerCase()
+    : null;
+  const label = String(name || '').trim();
+  const labelLower = label.toLocaleLowerCase();
+  const source = String(sourceContext || '');
+  const offset = source.toLocaleLowerCase().indexOf(labelLower);
+  const local = offset >= 0
+    ? source.slice(Math.max(0, offset - 24), Math.min(source.length, offset + label.length + 96)).toLocaleLowerCase()
+    : '';
+
+  if (/\b(project|initiative|programme|program)\b/u.test(labelLower)) return 'project';
+  if (/\b(summit|conference|workshop|webinar|launch|forum|roundtable)\b/u.test(labelLower)) return 'event';
+  if (/\b(ag|gmbh|ug|inc\.?|llc|ltd\.?|limited|labs|laboratories|university|foundation|association)\b/iu.test(label)) return 'organization';
+
+  // A matching phrase must be next to the entity mention; an arbitrary word
+  // elsewhere in a long section is not sufficient evidence to relabel it.
+  if (/\b(operating system|control plane|platform|application|service)\b/u.test(local)) return 'system';
+  if (/\b(standard|specification|regulation|certification)\b/u.test(local)) return 'standard';
+  if (/\b(technology|protocol|framework|architecture|database extension)\b/u.test(local)) return 'technology';
+  if (/\b(event|meeting)\b/u.test(local)) return 'event';
+  return current;
+}
+
+function normalizedClaimEntity(value, { sourceContext = '' } = {}) {
   if (typeof value === 'string') return { name: boundedClaimText(value), kind: null };
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const name = boundedClaimText(value.name || value.n);
   const rawKind = boundedClaimText(value.kind || value.k, 64).toLowerCase();
-  return name ? { name, kind: CLAIM_ENTITY_KINDS.has(rawKind) ? rawKind : null } : null;
+  return name ? { name, kind: sourceGroundedEntityKind(name, rawKind, sourceContext) } : null;
 }
 
 function normalizedClaimRelationship(value) {
@@ -306,7 +339,7 @@ export function materializeClaimEntities(item, claimStructure = normalizeClaimSt
   ];
   const byName = new Map();
   for (const candidate of candidates) {
-    const normalized = normalizedClaimEntity(candidate);
+    const normalized = normalizedClaimEntity(candidate, { sourceContext: support });
     if (!normalized?.name
         || !isValidEntityCandidate({ name: normalized.name, type: normalized.kind })
         || !support.includes(normalized.name.toLocaleLowerCase())) continue;
@@ -920,7 +953,7 @@ export function normalizeUnifiedEntityCatalog(rawEntities, content) {
   const source = String(content || '');
   const byIdentity = new Map();
   for (const raw of Array.isArray(rawEntities) ? rawEntities : []) {
-    const normalized = normalizedClaimEntity(raw);
+    const normalized = normalizedClaimEntity(raw, { sourceContext: source });
     if (!normalized?.name || !normalized.kind
         || !isValidEntityCandidate({ name: normalized.name, type: normalized.kind })) continue;
     const located = locateSourceQuote(source, normalized.name);

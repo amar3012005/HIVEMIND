@@ -50,6 +50,23 @@ test('unified entity catalog retains named system, project, and event types', ()
   ]);
 });
 
+test('unified entity catalog repairs only source-grounded LLM type mistakes', () => {
+  const source = 'Aegis Dispatch is the operating system used by Project Meridian. '
+    + 'At the Aegis October Summit event, Northstar Labs adopted it.';
+  const entities = normalizeUnifiedEntityCatalog([
+    { n: 'Aegis Dispatch', k: 'person' },
+    { n: 'Project Meridian', k: 'person' },
+    { n: 'Aegis October Summit', k: 'person' },
+    { n: 'Northstar Labs', k: 'person' },
+  ], source);
+  assert.deepEqual(entities.map(({ name, kind }) => ({ name, kind })), [
+    { name: 'Aegis Dispatch', kind: 'system' },
+    { name: 'Project Meridian', kind: 'project' },
+    { name: 'Aegis October Summit', kind: 'event' },
+    { name: 'Northstar Labs', kind: 'organization' },
+  ]);
+});
+
 test('model-free entity extraction recognizes unambiguous enterprise names', () => {
   const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
   const entities = extractor.extractDeterministic(

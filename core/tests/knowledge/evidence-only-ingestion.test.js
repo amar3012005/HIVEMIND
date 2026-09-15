@@ -36,6 +36,20 @@ test('both-mode entity catalog keeps grounded named entities outside promoted fa
   assert.equal(entities[0].startOffset, 0);
 });
 
+test('unified entity catalog retains named system, project, and event types', () => {
+  const source = 'HIVEMIND Control Plane approved Project Horizon during the Enigma launch.';
+  const entities = normalizeUnifiedEntityCatalog([
+    { n: 'HIVEMIND Control Plane', k: 'system' },
+    { n: 'Project Horizon', k: 'project' },
+    { n: 'Enigma launch', k: 'event' },
+  ], source);
+  assert.deepEqual(entities.map(({ name, kind }) => ({ name, kind })), [
+    { name: 'HIVEMIND Control Plane', kind: 'system' },
+    { name: 'Project Horizon', kind: 'project' },
+    { name: 'Enigma launch', kind: 'event' },
+  ]);
+});
+
 test('model-free entity extraction recognizes unambiguous enterprise names', () => {
   const extractor = new EntityExtractor({ prisma: null, logger: { warn() {} } });
   const entities = extractor.extractDeterministic(

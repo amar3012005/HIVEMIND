@@ -1,0 +1,6 @@
+{
+  "contractVersion": 1,
+  "canonicalRepository": "amar3012005/HIVEMIND",
+  "canonicalPath": "platform/ground-truth",
+  "consumerRequirement": "Pin this version in each product repository and assess every contract upgrade before release."
+}

@@ -1,0 +1,10 @@
+{
+  "memory": "memory-platform",
+  "identity": "identity-platform",
+  "harness_or_connected_apps": "cordis-harness-platform",
+  "voice": "tara-voice-platform",
+  "security_review": "platform-security-audit",
+  "test_or_canary": "platform-evals",
+  "delivery": "platform-release",
+  "rule": "Choose one task owner. Split work into dependent manifests instead of combining unrelated owners."
+}

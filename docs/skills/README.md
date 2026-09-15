@@ -1,5 +1,11 @@
 # HIVE-MIND Skill System Documentation
 
+> **Canonical engineering skills:** use
+> [`platform/ground-truth/`](../../platform/ground-truth/START_HERE.md) for
+> platform implementation and delivery. This document describes the legacy
+> marketplace skill runtime only; it is not the operating contract for HIVE-MIND,
+> HyperAgents, Tara, the Da-vinci Worker, or the native Harness runner.
+
 ## Overview
 
 The HIVE-MIND Skill System is a production-grade, enterprise-ready plugin architecture that enables:

@@ -1,6 +1,6 @@
 import { resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
 
-export const DAY0_LIFECYCLE_FLAG_KEY = 'day0-lifecycle';
+export const DAY0_LIFECYCLE_FLAG_KEY = 'day0_onboarding_v1';
 
 // Flagship is the sole Day-0 rollout authority. The edge evaluates the flag
 // against the authenticated org/user supplied by Core and fails closed.
@@ -13,7 +13,7 @@ export async function isDayZeroLifecycleEnabled({
 } = {}) {
   const secret = String(env.HIVE_HARNESS_EDGE_EVAL_SECRET || '').trim();
   if (!orgId || !userId || !secret || typeof fetchImpl !== 'function') return false;
-  const endpoint = `${resolvePublicFrontendBaseUrl(env.HIVEMIND_PUBLIC_ORIGIN || env.HIVEMIND_FRONTEND_URL)}/__hivemind/feature-flags/day0-lifecycle`;
+  const endpoint = `${resolvePublicFrontendBaseUrl(env.HIVEMIND_PUBLIC_ORIGIN || env.HIVEMIND_FRONTEND_URL)}/__hivemind/feature-flags/day0-onboarding`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

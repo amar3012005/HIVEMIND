@@ -106,6 +106,8 @@ export async function startDayZeroOnboardingReport({
     try {
       const recipient = await prisma.user.findUnique({ where: { id: ownerId }, select: { email: true } });
       if (!recipient?.email) throw new Error('day0_report_recipient_missing');
+      // The release environment owns this value.  Do not let a Dev/Enigma
+      // lifecycle email silently point a user at the Production frontend.
       const appBase = resolvePublicAppUrl().replace(/\/$/, '');
       const appUrl = appBase.endsWith('/employees/mycompany') ? appBase : `${appBase}/employees/mycompany`;
       const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl });

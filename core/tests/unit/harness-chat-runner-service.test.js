@@ -150,6 +150,54 @@ test('runner charges a no-tool Harness turn once and rejects exhausted credits',
   assert.equal(res.body.code, 'credits_exhausted');
 });
 
+test('runner admits a turn without debiting and blocks exhausted credits before model dispatch', async () => {
+  const calls = [];
+  const invoke = async (summary) => {
+    const res = {};
+    await handleHarnessChatBootstrapRoute({
+      req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: '/internal/v1/harness-chat/credit-operations',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => ({ session_id: 'session-12345678', turn_id: 3, call_id: 'turn-3-admission', kind: 'turn_admission' }),
+      jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+      redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+      creditService: {
+        getSummary: async () => summary,
+        charge: async (...args) => { calls.push(args); return { admitted: true }; },
+      },
+    });
+    return res;
+  };
+
+  const allowed = await invoke({ plan: 'free', included: 500, used: 499, reserved: 0, remaining: 1, unlimited: false });
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.body.admitted, true);
+  assert.equal(calls.length, 0);
+
+  const exhausted = await invoke({ plan: 'free', included: 500, used: 500, reserved: 0, remaining: 0, unlimited: false });
+  assert.equal(exhausted.status, 402);
+  assert.equal(exhausted.body.code, 'plan_limit_exceeded');
+  assert.equal(exhausted.body.resource, 'credits');
+  assert.equal(calls.length, 0);
+});
+
+test('bootstrap returns the legacy plan-limit contract before native admission for an exhausted account', async () => {
+  const res = {};
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: {} }, res,
+    pathname: '/v1/harness-chat/bootstrap',
+    requireSession: async () => ({ session: { userId, orgId } }),
+    prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
+    parseBody: async () => ({}),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    creditService: { getSummary: async () => ({ plan: 'free', included: 500, used: 500, reserved: 0, remaining: 0, unlimited: false }) },
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 402);
+  assert.equal(res.body.code, 'plan_limit_exceeded');
+  assert.equal(res.body.upgrade_url, '/hivemind/app/billing');
+});
+
 test('terminal no-tool reconciliation does not debit a turn with an admitted Composio operation', async () => {
   const res = {};
   const queries = [];

@@ -36,6 +36,23 @@ const CORE_ROUTES = new Map([
   ['/api/memories', new Set(['POST'])],
 ]);
 
+function harnessCreditLimitResponse(summary) {
+  const plan = summary?.plan || 'free';
+  const nextPlan = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise_onboarding: 'enterprise', enterprise: null }[plan] ?? 'pro';
+  return {
+    error: 'plan_limit_exceeded',
+    code: 'plan_limit_exceeded',
+    message: 'Monthly credits exhausted',
+    resource: 'credits',
+    plan,
+    limit: summary?.included ?? null,
+    current: Number(summary?.used || 0) + Number(summary?.reserved || 0),
+    remaining: summary?.remaining ?? 0,
+    suggested_plan: nextPlan,
+    upgrade_url: '/hivemind/app/billing',
+  };
+}
+
 async function readJsonBounded(response, maxBytes = 2 * 1024 * 1024) {
   const text = await response.text();
   if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('upstream_response_too_large');
@@ -142,10 +159,19 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     const service = kind === 'composio_execution' ? 'composio_tool_call'
       : kind === 'no_tool_turn' ? 'harness_no_tool_turn' : null;
-    if (!service || (service === 'composio_tool_call' && !/^[A-Za-z0-9_:-]{1,180}$/.test(tool))) {
+    if ((kind !== 'turn_admission' && !service) || (service === 'composio_tool_call' && !/^[A-Za-z0-9_:-]{1,180}$/.test(tool))) {
       jsonResponse(res, { error: 'Invalid credit operation' }, 400); return true;
     }
     if (!creditService) { jsonResponse(res, { error: 'Credit service unavailable' }, 503); return true; }
+    // This check is deliberately non-mutating. It guards the first model step,
+    // while the terminal settlement path remains the sole debit authority.
+    if (kind === 'turn_admission') {
+      const summary = await creditService.getSummary(claims.org_id, claims.sub);
+      if (!summary.unlimited && summary.remaining < 1) {
+        jsonResponse(res, harnessCreditLimitResponse(summary), 402); return true;
+      }
+      jsonResponse(res, { admitted: true, remaining: summary.remaining, plan: summary.plan }, 200); return true;
+    }
     if (service === 'harness_no_tool_turn') {
       const paid = await prisma.$queryRawUnsafe(
         `SELECT 1 FROM hivemind.usage_events
@@ -264,6 +290,17 @@ export async function handleHarnessChatBootstrapRoute({
   if (!membership) {
     jsonResponse(res, { error: 'Organization membership required' }, 403);
     return true;
+  }
+
+  // Match legacy chat: a quota-exhausted account sees the common upgrade
+  // modal before the native client mounts, rather than receiving an answer
+  // and discovering the charge only after the turn completes.
+  if (creditService) {
+    const summary = await creditService.getSummary(orgId, userId);
+    if (!summary.unlimited && summary.remaining < 1) {
+      jsonResponse(res, harnessCreditLimitResponse(summary), 402);
+      return true;
+    }
   }
 
   const body = await parseBody(req).catch(() => ({}));

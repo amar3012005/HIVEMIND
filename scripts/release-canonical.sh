@@ -240,12 +240,21 @@ if [ -n "${REQUESTED[core]:-}" ]; then
   else
     echo "[migrate] guarded Prisma deploy via $CORE_TAG"
     "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase migrating:core
+    # The Compose project name differs between environments (for example,
+    # `enigma_default` versus `hivemind_default`).  Derive the live Core's
+    # attached network instead of assuming a production-only network name.
+    MIGRATION_NETWORK=$(docker inspect "${CONTAINER[core]}" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null \
+      | sed -n 's/.*{"\([^"]*\)".*/\1/p')
+    [ -n "$MIGRATION_NETWORK" ] || {
+      echo "FATAL: cannot resolve the live Core Docker network for migrations"
+      exit 1
+    }
     # Docker's --env-file does not evaluate Compose interpolation.  Core's
     # Compose service derives DATABASE_URL from the Postgres credentials, so
     # reproduce that derivation inside the immutable migration container rather
     # than requiring a duplicate DATABASE_URL secret in the host env file.
     docker run --rm \
-      --network hivemind_default \
+      --network "$MIGRATION_NETWORK" \
       --env-file "$ENVF" \
       "$CORE_TAG" sh -ec '
         : "${POSTGRES_USER:=hivemind_user}"

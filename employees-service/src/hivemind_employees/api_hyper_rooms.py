@@ -69,6 +69,12 @@ from .hyper.execution_profiles import (
     DEFAULT_PROFILE_ID, get_execution_profile, default_execution_profile,
     profile_registry_manifest,
 )
+from .hyper.output_contract import (
+    labeled_unverified_draft,
+    resolve_output_contract,
+    should_run_render_gate,
+    split_goalkeeper_gaps,
+)
 from .hyper.model_policy import HYPER_FAST_MODEL, HYPER_PLANNER_MODEL, canonical_hyper_model
 from .db import (
     get_org_approval_rules,
@@ -3233,7 +3239,11 @@ async def _verify_and_emit(
         return None
     plan = _PLAN_BY_TURN.get(req.turn_id)
     if isinstance(plan, dict):
-        if isinstance(plan.get("artifact_intent"), dict):
+        contract = plan.get("output_contract") if isinstance(plan.get("output_contract"), dict) else {}
+        # Render/receipt override is only lawful when the resolved contract actually
+        # asked for a visual artifact. A text/decision room must keep the verifier's
+        # own textual-answer policy even if a planner invented artifact_intent.
+        if should_run_render_gate(contract) and isinstance(plan.get("artifact_intent"), dict):
             receipt = plan.get("artifact_receipt")
             artifact_ok = bool(isinstance(receipt, dict) and receipt.get("ok") and receipt.get("artifact_id"))
             verdict["artifact_ok"] = artifact_ok
@@ -3298,6 +3308,8 @@ async def _verify_and_emit(
                 gaps = list(verdict.get("gaps") or [])
                 gaps.append("The requested interactive artifact did not pass production rendering checks.")
                 verdict["gaps"] = list(dict.fromkeys(gaps))
+        elif not should_run_render_gate(contract) and isinstance(plan.get("artifact_intent"), dict):
+            plan["artifact_intent"] = None
         plan["verification"] = verdict
     await _emit_event(req.callback_url, req.turn_id, {"t": "verify", **verdict})
     log.info("[verify] room=%s met=%s artifact=%s assign=%s grounded=%s gaps=%d",
@@ -3886,8 +3898,9 @@ async def _run_agentic_task_agent(
 # (persist_work_room_progress, "needs_evidence"/"caveated") because partial
 # operational progress is real and useful; a plain factual answer that failed
 # verification is a different case — an unverified claim must never read as a
-# normal completed answer. Pulled out as pure functions so this is directly
-# unit-testable without mocking the whole (very large) orchestration function.
+# normal completed answer. Label the draft; never hide it or ask the user to
+# "ask again with more context". Pulled out as pure functions so this is
+# directly unit-testable without mocking the whole (very large) orchestration.
 def _should_withhold_ungrounded_answer(room_mode: Optional[str], status: str, final_text: str) -> bool:
     return (
         (room_mode or "").strip().lower() != "work"
@@ -3908,13 +3921,9 @@ def _verification_failure_result(exc: BaseException) -> Dict[str, Any]:
     }
 
 
-def _grounding_withheld_text(gaps: Optional[List[str]]) -> str:
-    preview = "; ".join(list(gaps or [])[:3]) or "the claim could not be verified against real evidence"
-    return (
-        "Runtime could not verify this answer against real evidence, so it is "
-        f"withholding the draft rather than presenting an unverified claim as fact. "
-        f"Gap: {preview}. Ask again with more context, or specify the exact evidence needed."
-    )
+def _grounding_withheld_text(gaps: Optional[List[str]], draft: str = "") -> str:
+    """Return the textual draft labeled as unverified. Never withhold it."""
+    return labeled_unverified_draft(draft, list(gaps or []))
 
 
 async def _orchestrate_single_agent(
@@ -3951,6 +3960,23 @@ async def _orchestrate_single_agent(
     else:
         from .hyper.skills import resolve_turn_room_kind
         _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
+    # Specialist execution_profile is Work-Room-only. Every human-facing room,
+    # including branding/research/runtime, still gets a persisted output contract
+    # so profile=none cannot invent a visual artifact or skip required evidence.
+    _output_contract = resolve_output_contract(
+        user_message=req.user_message or "",
+        room_kind=_room_kind,
+        room_mode=req.room_mode or "runtime",
+        execution_profile=_work_room_profile,
+    )
+    log.info(
+        "[single] output contract room=%s kind=%s mode=%s intended=%s artifact_required=%s evidence_required=%s profile=%s",
+        req.room_id, _room_kind, req.room_mode or "runtime",
+        _output_contract.get("intended_output"),
+        _output_contract.get("artifact_required"),
+        _output_contract.get("evidence_required"),
+        (_work_room_profile or {}).get("profile_id") or "none",
+    )
     _m_recon = canonical_hyper_model(
         getattr(req, "agentic_model", None)
         or os.environ.get("HYPER_MODEL_RECON")
@@ -4083,9 +4109,10 @@ async def _orchestrate_single_agent(
         conns.append("gmail")
 
     # The Director selects post-output actions from the live capability catalog.
-    # Start neutral so room names/goals and language-specific regexes cannot force
-    # a tool. The selected action later determines the deliverable format.
-    intended_output = "answer"
+    # Start from the room's output contract so an explicit visual/file request is
+    # visible to verify/goalkeeper even before the planner runs. Room names/goals
+    # still cannot force a tool — only an explicit user/profile visual contract can.
+    intended_output = str(_output_contract.get("intended_output") or "answer")
     # Room-level learned method lessons (skill sequences that worked for this room
     # kind) prime the planner's skill choice. Best-effort — [] pre-migration.
     _room_playbook: list = []
@@ -4400,7 +4427,12 @@ async def _orchestrate_single_agent(
 
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output,
-        "artifact_intent": result.get("artifact_intent"),
+        "output_contract": result.get("output_contract") or _output_contract,
+        "artifact_intent": (
+            result.get("artifact_intent")
+            if should_run_render_gate(result.get("output_contract") or _output_contract)
+            else None
+        ),
         "artifact_receipt": result.get("artifact_receipt"),
         "artifact_steps": [
             {"kind": action.get("artifact_kind"), "capability": action.get("capability")}
@@ -4604,7 +4636,7 @@ async def _orchestrate_single_agent(
             # audit, but never render unsupported legal/numeric claims as the
             # user-facing final report merely because this is an operational
             # profile. The receipt list below still shows what was actually read.
-            final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
+            final_text = _grounding_withheld_text((_gv or {}).get("gaps"), final_text)
     elif (req.room_mode or "").strip().lower() == "work" and final_text.strip() and (
         not _gv or (
             _gv.get("grounded_ok") is True
@@ -4658,9 +4690,9 @@ async def _orchestrate_single_agent(
             "gaps": list((_gv or {}).get("gaps") or [])[:8],
             "message": "The candidate was retained for audit but withheld as the final deliverable because grounding or verification failed.",
         })
-        final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
+        final_text = _grounding_withheld_text((_gv or {}).get("gaps"), final_text)
     elif _should_withhold_ungrounded_answer(req.room_mode, status, final_text):
-        final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
+        final_text = _grounding_withheld_text((_gv or {}).get("gaps"), final_text)
 
     # The single-engine path must emit the same durable report contract as the
     # legacy orchestrator. CampaignOperatingReport uses this event as its render
@@ -5217,12 +5249,17 @@ def _is_hq_work_order_context(execution_context: str) -> bool:
     return contract.startswith(("hq-work-order.v", "runtime-stage.v", "room-phase.v"))
 
 
-def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
+def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]],
+                                contract: Optional[Dict[str, Any]] = None) -> bool:
     """Phase 6 — decide whether to run another round. Loop ONLY when the
     done-criterion is unmet AND the gap is re-plannable: the artifact was never
     produced, or claims are ungrounded. A write that is PENDING the user's
     approval is terminal (the work is done — it's the human's turn, not the
-    goalkeeper's), as is a "met" verdict or a missing/empty plan."""
+    goalkeeper's), as is a "met" verdict or a missing/empty plan.
+
+    Text/decision contracts never re-plan a missing visual. They re-plan only
+    missing evidence (ungrounded claims).
+    """
     if not isinstance(verdict, dict):
         return False
     if verdict.get("met"):
@@ -5240,6 +5277,8 @@ def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
     # working toward the goal — it doesn't surface a known-bad result.)
     if verdict.get("pending_writes") and verdict.get("artifact_ok") and verdict.get("grounded_ok"):
         return False
+    if not should_run_render_gate(contract or {}):
+        return not verdict.get("grounded_ok")
     # Re-plannable iff the actual output is missing or the claims aren't grounded.
     return (not verdict.get("artifact_ok")) or (not verdict.get("grounded_ok"))
 
@@ -5397,6 +5436,20 @@ async def post_room_turn(
                 break
             plan = _PLAN_BY_TURN.get(req.turn_id)
             verdict = plan.get("verification") if isinstance(plan, dict) else None
+            contract = (plan.get("output_contract") if isinstance(plan, dict) else None) or {}
+            if isinstance(verdict, dict) and isinstance(plan, dict):
+                kept, dropped = split_goalkeeper_gaps(verdict.get("gaps"), contract)
+                if dropped:
+                    log.info("[goalkeeper] room=%s dropping accidental render gaps on text contract: %s",
+                             req.room_id, dropped)
+                    verdict["gaps"] = kept
+                    plan["artifact_intent"] = None
+                    if not should_run_render_gate(contract):
+                        plan["intended_output"] = str(contract.get("intended_output") or "answer")
+                        if not kept:
+                            verdict["artifact_ok"] = True
+                elif not should_run_render_gate(contract):
+                    plan["artifact_intent"] = None
             # Terminal-honest: an un-fixable gap (the toolset can't reach the goal, or
             # the source data genuinely doesn't exist) is NOT re-plannable — re-running
             # would only re-discover the same wall and burn rounds. Stop and let the
@@ -5409,7 +5462,8 @@ async def post_room_turn(
             # produced AND grounded), or the round cap is hit. A recon-rejected
             # draft (ungrounded / incomplete) gets reworked — we don't surface a
             # known-bad result. Same shape as Claude `/goal`: keep going to success.
-            if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
+            # Text rooms re-plan evidence only; accidental visual intent is cleared.
+            if not _goalkeeper_should_continue(verdict, contract) or rnd >= max_rounds:
                 break
             # Discard the rejected round's draft/artifacts so the rework round
             # produces a FRESH deliverable (else `_produce_output`'s idempotency
@@ -5424,14 +5478,16 @@ async def post_room_turn(
                 "met": False,
                 "gaps": gaps,
             })
-            log.info("[goalkeeper] room=%s round=%d unmet → re-plan; gaps=%s",
+            log.info("[goalkeeper] room=%s round=%d unmet → re-plan evidence; gaps=%s",
                      req.room_id, rnd, gap_str)
             # Re-base off the ORIGINAL message (not the prior round's plan-preamble)
-            # so preambles don't stack; the planner re-plans against the gaps.
+            # so preambles don't stack; the planner re-plans against the evidence gaps
+            # only. Do not mention visual mediums here — that text is re-parsed as
+            # the next turn's output contract.
             req.user_message = (
-                f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] The previous attempt did NOT "
-                f"finish. Done criterion: {(verdict or {}).get('done_criterion') or '(see goal)'}. "
-                f"Address these gaps and COMPLETE the task this round: {gap_str}."
+                f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] Evidence only. "
+                f"Stay with a written answer. Do not add a visual artifact. "
+                f"Gather the missing evidence and continue: {gap_str}."
             )
             # Re-rounds close GAPS — they never re-simulate the stakeholder population
             # (the sim's report doesn't change; it cost 11-31s per round for nothing).

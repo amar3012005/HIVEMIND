@@ -1,0 +1,6 @@
+{
+  "environment": "enigma",
+  "ref": "enigma-main",
+  "releaseMode": "immutable targeted artifact",
+  "note": "Build and recreate only affected services after a clean source verification."
+}

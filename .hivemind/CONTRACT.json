@@ -1,0 +1,15 @@
+{
+  "version": "platform-contract-v1.5",
+  "purpose": "Versioned operating contract for SINGULANCE engineering worktrees.",
+  "invariants": [
+    "Use an explicit source ref and a clean task worktree.",
+    "Preserve unrelated changes and do not force-push shared branches.",
+    "Use one routed platform skill and proportional verification.",
+    "Company memory belongs in HIVE Core; operational coordination is task-scoped.",
+    "Do not patch running containers or expose secrets.",
+    "Production changes require an immutable artifact, affected-service health, and a rollback target."
+  ],
+  "environments": ["local", "enigma", "production"],
+  "skillRoot": ".hivemind/skills",
+  "manifestRoot": ".hivemind/manifests"
+}

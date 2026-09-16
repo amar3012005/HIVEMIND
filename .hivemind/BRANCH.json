@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "branch": "singulance-main",
+  "environment": "production",
+  "role": "Canonical production source. It is not a fallback for local or Enigma work.",
+  "release": {
+    "artifact": "immutable image or Worker version from this exact source SHA",
+    "rollback": "previous recorded artifact or Worker version",
+    "forbid": ["force push", "live container patch", "cross-environment secret copy"]
+  }
+}

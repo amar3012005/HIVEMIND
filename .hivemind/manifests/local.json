@@ -1,0 +1,6 @@
+{
+  "environment": "local",
+  "ref": "singulance-local",
+  "releaseMode": "targeted refresh",
+  "note": "Use the local runner refresh command; preserve local runtime secrets."
+}

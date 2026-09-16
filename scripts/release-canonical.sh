@@ -243,8 +243,9 @@ if [ -n "${REQUESTED[core]:-}" ]; then
     # The Compose project name differs between environments (for example,
     # `enigma_default` versus `hivemind_default`).  Derive the live Core's
     # attached network instead of assuming a production-only network name.
-    MIGRATION_NETWORK=$(docker inspect "${CONTAINER[core]}" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null \
-      | sed -n 's/.*{"\([^"]*\)".*/\1/p')
+    MIGRATION_NETWORK_ID=$(docker inspect "${CONTAINER[core]}" \
+      --format '{{range .NetworkSettings.Networks}}{{println .NetworkID}}{{end}}' 2>/dev/null | head -n 1)
+    MIGRATION_NETWORK=$(docker network inspect "$MIGRATION_NETWORK_ID" --format '{{.Name}}' 2>/dev/null || true)
     [ -n "$MIGRATION_NETWORK" ] || {
       echo "FATAL: cannot resolve the live Core Docker network for migrations"
       exit 1

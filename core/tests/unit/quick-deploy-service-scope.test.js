@@ -8,6 +8,7 @@ const canonical = fs.readFileSync(new URL('../../../scripts/release-canonical.sh
 test('canonical migrations derive the same database URL as Compose without duplicating a secret', () => {
   assert.match(canonical, /Docker's --env-file does not evaluate Compose interpolation/);
   assert.match(canonical, /cannot resolve the live Core Docker network for migrations/);
+  assert.match(canonical, /docker network inspect "\$MIGRATION_NETWORK_ID" --format '\{\{\.Name\}\}'/);
   assert.match(canonical, /--network "\$MIGRATION_NETWORK"/);
   assert.doesNotMatch(canonical, /--network hivemind_default/);
   assert.match(canonical, /export DATABASE_URL="postgresql:\/\/\$\{POSTGRES_USER\}:\$\{POSTGRES_PASSWORD\}@postgres:5432\/\$\{POSTGRES_DB\}\?schema=hivemind/);

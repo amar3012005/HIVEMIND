@@ -1,0 +1,4 @@
+services:
+  harness-runner:
+    environment:
+      HIVEMIND_CONNECTED_RECEIPT_SERVICE_URL: ${HIVEMIND_CONNECTED_RECEIPT_SERVICE_URL}

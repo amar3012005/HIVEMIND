@@ -113,6 +113,7 @@ import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
+import { chatCompletionFetch } from './llm/chat-provider.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
@@ -11988,20 +11989,26 @@ Write the persona now.`;
         lastTimingAt = now;
       };
 
-      // The shared fetch router rewrites this legacy-compatible request onto the
-      // canonical Cerebras gpt-oss-120b route, with the configured provider failover.
+      // Onboarding is customer-facing and must use the same governed Cloudflare
+      // Gateway/model-policy route as the rest of HIVEMIND.  It intentionally
+      // has no GROQ_API_KEY dependency: a missing or unhealthy selected route
+      // produces the existing bounded fallback profile rather than a secret
+      // configuration error halfway through onboarding.
       const llm = async (sys, user, { json = false, maxTokens = 900 } = {}) => {
-        const r = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
+        const r = await chatCompletionFetch(
+          String(process.env.HYPER_ONBOARDING_MODEL || 'openai/gpt-oss-20b:nitro').trim(),
+          {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
           body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile',
+            model: String(process.env.HYPER_ONBOARDING_MODEL || 'openai/gpt-oss-20b:nitro').trim(),
             messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
             temperature: 0.5,
             max_tokens: maxTokens,
             ...(json ? { response_format: { type: 'json_object' } } : {}),
           }),
-        });
+          },
+          { useCase: 'hq_dispatch', traceId: `hyper-onboarding:${orgId}` },
+        );
         if (!r.ok) throw new Error(`llm ${r.status}`);
         const d = await r.json();
         return (d.choices?.[0]?.message?.content || '').trim();

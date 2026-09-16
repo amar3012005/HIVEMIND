@@ -316,6 +316,7 @@ async def health_live():
     return {"ok": True, "service": "tara-grok"}
 
 @app.get("/health/ready")
+@app.get("/voice-grok/health/ready")
 async def health_ready():
     error = config.ready_error()
     if error:
@@ -366,6 +367,7 @@ async def _xai_connect(snapshot: dict, resume_conversation_id: str | None = None
     return await websockets.connect(url, additional_headers={"Authorization": f"Bearer {config.XAI_API_KEY}"}, max_size=8 * 1024 * 1024)
 
 @app.websocket("/voice/{session_id}")
+@app.websocket("/voice-grok/voice/{session_id}")
 async def voice(ws: WebSocket, session_id: str):
     capability = _capability_from_subprotocols(ws.scope.get("subprotocols", []))
     if not capability or not session_id:

@@ -337,7 +337,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const session = await prisma.taraVoiceSession.create({ data: { orgId, userId, provider, mode: snapshot.mode, capabilityJti: jti, configSnapshot: snapshot, expiresAt } });
       const token = capability({ iss: 'hivemind-core', aud: `tara-${provider}`, sub: userId, org_id: orgId, session_id: session.id, jti, exp: expiresAt.getTime(), operations: ['voice'] }, capabilitySecret);
       const wsUrl = provider === 'grok'
-        ? publicWebsocketUrl(req, process.env.TARA_GROK_PUBLIC_WS_URL, '/voice-grok/voice')
+        ? publicWebsocketUrl(req, process.env.TARA_GROK_PUBLIC_WS_URL, `/voice-grok/voice/${session.id}`)
         : publicWebsocketUrl(req, process.env.TARA_DEEPGRAM_PUBLIC_WS_URL, '/voice2/voice');
       if (!wsUrl) return reply(res, { error: 'public_voice_url_unavailable' }, 503);
       return reply(res, { session_id: session.id, provider, ws_url: wsUrl, capability: token, expires_at: expiresAt.toISOString(), config_revision: current.revision, audio_format: { type: 'pcm16', sample_rate: 16000 } });

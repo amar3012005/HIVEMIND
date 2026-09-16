@@ -210,6 +210,7 @@ _BASE_PROMPT = (
 
 
 @app.get("/health")
+@app.get("/voice2/health")
 async def health():
     return {
         "ok": True,
@@ -228,6 +229,7 @@ async def health():
 
 # Browser mic widget (Talk to TARA) — same protocol as tara-aaas /voice.
 @app.websocket("/voice")
+@app.websocket("/voice2/voice")
 async def browser_voice(ws: WebSocket):
     qp = ws.query_params
     await handle_browser_voice(

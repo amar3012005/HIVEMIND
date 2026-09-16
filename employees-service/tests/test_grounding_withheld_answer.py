@@ -4,17 +4,16 @@ from hivemind_employees.api_hyper_rooms import (
     _should_withhold_ungrounded_answer,
     _grounding_withheld_text,
     _verification_failure_result,
+    _goalkeeper_should_continue,
 )
+from hivemind_employees.hyper.output_contract import resolve_output_contract
 
 
 class ShouldWithholdUngroundedAnswerTests(unittest.TestCase):
-    """Real gap found investigating a human-input-focused HyperAgents Room
-    review: a plain (non-Work-Room) turn whose answer failed grounding
-    (status computed as 'blocked'/'escalated' by _verify_turn's verdict)
-    still shipped the model's original, possibly fabricated draft to the
-    user — only an internal status field was downgraded, which the user
-    never sees. Work Rooms are deliberately excluded: they keep showing
-    in-progress drafts as real operational progress, a different case."""
+    """The gate still fires for a plain (non-Work-Room) turn whose answer
+    failed grounding, but the user-facing path now LABELS the draft instead
+    of hiding it. Work Rooms remain excluded from this path.
+    """
 
     def test_withholds_for_a_plain_room_with_an_ungrounded_or_unmet_verdict(self):
         self.assertTrue(_should_withhold_ungrounded_answer(None, "escalated", "The answer is 42."))
@@ -33,23 +32,31 @@ class ShouldWithholdUngroundedAnswerTests(unittest.TestCase):
 
 
 class GroundingWithheldTextTests(unittest.TestCase):
-    def test_includes_up_to_three_gaps(self):
-        text = _grounding_withheld_text(["missing revenue figures", "no source for the claim", "unverified date", "a fourth gap"])
+    def test_keeps_the_textual_draft_and_lists_gaps(self):
+        text = _grounding_withheld_text(
+            ["missing revenue figures", "no source for the claim", "unverified date", "a fourth gap"],
+            "Our offering is the only sovereign memory layer.",
+        )
         self.assertIn("missing revenue figures", text)
         self.assertIn("no source for the claim", text)
         self.assertIn("unverified date", text)
-        self.assertNotIn("a fourth gap", text)
+        self.assertIn("a fourth gap", text)
+        self.assertIn("Our offering is the only sovereign memory layer.", text)
+        self.assertTrue(text.startswith("Draft."))
 
-    def test_falls_back_to_a_generic_reason_when_no_gaps_are_given(self):
-        text = _grounding_withheld_text(None)
-        self.assertIn("could not be verified against real evidence", text)
-        text_empty = _grounding_withheld_text([])
-        self.assertIn("could not be verified against real evidence", text_empty)
+    def test_falls_back_to_a_labeled_draft_when_no_gaps_are_given(self):
+        text = _grounding_withheld_text(None, "A written recommendation.")
+        self.assertIn("Draft.", text)
+        self.assertIn("A written recommendation.", text)
+        text_empty = _grounding_withheld_text([], "A written recommendation.")
+        self.assertIn("A written recommendation.", text_empty)
 
-    def test_never_echoes_the_word_fact_as_a_claim_of_truth(self):
-        # Regression guard on the actual message content the user sees.
-        text = _grounding_withheld_text(["x"])
-        self.assertIn("withholding the draft", text)
+    def test_never_hides_the_draft_or_asks_for_more_context(self):
+        text = _grounding_withheld_text(["x"], "Positioning line.")
+        self.assertNotIn("withholding the draft", text)
+        self.assertNotIn("Ask again", text)
+        self.assertIn("not withheld", text.lower())
+        self.assertIn("Positioning line.", text)
 
 
 class VerificationFailureResultTests(unittest.TestCase):
@@ -76,11 +83,39 @@ class VerificationFailureResultTests(unittest.TestCase):
     def test_a_recorded_verification_failure_correctly_triggers_the_withhold_path(self):
         # End-to-end of the real fix: verifier crashes -> failure result has
         # grounded_ok=False -> the real code's status derivation would set
-        # status='escalated' -> the withhold path (tested above) must fire.
+        # status='escalated' -> the label path (tested above) must fire.
         failure = _verification_failure_result(Exception("timeout"))
         status = "escalated" if failure and not failure.get("grounded_ok") else "complete"
         self.assertEqual(status, "escalated")
         self.assertTrue(_should_withhold_ungrounded_answer(None, status, "A confident but unverified answer."))
+
+
+class GoalkeeperTextContractTests(unittest.TestCase):
+    def test_text_contract_does_not_replan_a_missing_visual(self):
+        contract = resolve_output_contract(
+            user_message="create a brand voice guide and test against competitor absence",
+            room_kind="branding",
+        )
+        verdict = {
+            "met": False,
+            "artifact_ok": False,
+            "grounded_ok": True,
+            "gaps": ["The requested interactive artifact did not pass production rendering checks."],
+        }
+        self.assertFalse(_goalkeeper_should_continue(verdict, contract))
+
+    def test_text_contract_replans_missing_evidence_only(self):
+        contract = resolve_output_contract(
+            user_message="create a brand voice guide and test against competitor absence",
+            room_kind="branding",
+        )
+        verdict = {
+            "met": False,
+            "artifact_ok": True,
+            "grounded_ok": False,
+            "gaps": ["competitor set"],
+        }
+        self.assertTrue(_goalkeeper_should_continue(verdict, contract))
 
 
 if __name__ == "__main__":

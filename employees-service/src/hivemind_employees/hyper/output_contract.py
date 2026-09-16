@@ -7,7 +7,7 @@ to profile=none + invented visual artifacts.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 EVIDENCE_HINTS = (
     "competitor", "competitors", "regulation", "regulatory", "gdpr", "compliance",
@@ -18,13 +18,19 @@ EVIDENCE_HINTS = (
 EXPLICIT_VISUAL = re.compile(
     r"\b(?:visual\s+guide|lookbook|dashboard|mock(?:up)?s?|pitch\s+deck|slide\s*deck|"
     r"slides?|presentation|poster|banner|interactive\s+(?:doc|document|page)|"
-    r"generate\s+(?:an?\s+)?image)\b",
+    r"generate\s+(?:an?\s+)?image|deck|documents?)\b",
     re.I,
 )
 
 EXPLICIT_FILE = re.compile(
     r"\b(?:spreadsheet|workbook|\.csv\b|xlsx|word\s+document|google\s+doc)\b",
     re.I,
+)
+
+RENDER_GAP_FRAGMENTS = (
+    "production rendering checks",
+    "requested interactive artifact",
+    "interactive artifact did not pass",
 )
 
 
@@ -88,9 +94,34 @@ def should_run_render_gate(contract: Mapping[str, Any]) -> bool:
     return intended == "artifact" and bool(contract.get("artifactRequired") or contract.get("artifact_required"))
 
 
+def is_render_gap(gap: str) -> bool:
+    text = str(gap or "").casefold()
+    return any(fragment in text for fragment in RENDER_GAP_FRAGMENTS)
+
+
+def split_goalkeeper_gaps(
+    gaps: Optional[Sequence[Any]],
+    contract: Mapping[str, Any],
+) -> Tuple[List[str], List[str]]:
+    """Return (kept_gaps, dropped_render_gaps).
+
+    Accidental visual intents must not keep a text room in the render-failure loop.
+    """
+    kept: List[str] = []
+    dropped: List[str] = []
+    run_render = should_run_render_gate(contract)
+    for raw in gaps or []:
+        gap = str(raw)
+        if not run_render and is_render_gap(gap):
+            dropped.append(gap)
+        else:
+            kept.append(gap)
+    return kept, dropped
+
+
 def labeled_unverified_draft(text: str, gaps: list) -> str:
     body = (text or "").strip()
-    gap_lines = "\n".join(f"- {g}" for g in gaps if str(g).strip())
+    gap_lines = "\n".join(f"- {g}" for g in list(gaps or [])[:8] if str(g).strip())
     prefix = (
         "Draft. Unverified claims were removed or marked. "
         "This is not withheld for lack of context.\n"

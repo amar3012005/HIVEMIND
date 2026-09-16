@@ -29,6 +29,11 @@ x-common-env: &common-env
   # ── model providers (egress) ──
   # Direct Groq is disabled on Enigma. Model traffic uses Cloudflare AI Gateway.
   GROQ_API_KEY: ""
+  # Browser Grok uses two scoped secrets only: Core signs a single-use session
+  # capability and authenticates the adapter's internal redemption request.
+  # Feature admission itself is evaluated exclusively by Cloudflare Flagship.
+  TARA_GROK_CAPABILITY_SECRET: ${TARA_GROK_CAPABILITY_SECRET:-}
+  TARA_GROK_SERVICE_TOKEN: ${TARA_GROK_SERVICE_TOKEN:-}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
   OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}

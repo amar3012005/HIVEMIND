@@ -149,3 +149,27 @@ test('runner charges a no-tool Harness turn once and rejects exhausted credits',
   assert.equal(res.status, 402);
   assert.equal(res.body.code, 'credits_exhausted');
 });
+
+test('terminal no-tool reconciliation does not debit a turn with an admitted Composio operation', async () => {
+  const res = {};
+  const queries = [];
+  const creditService = { charge: async () => { throw new Error('must not charge'); } };
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/credit-operations',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ isActive: true }) },
+      $queryRawUnsafe: async (query, ...args) => {
+        queries.push({ query, args });
+        return [{ exists: 1 }];
+      },
+    },
+    parseBody: async () => ({ session_id: 'session-12345678', turn_id: 3, call_id: 'turn-3', kind: 'no_tool_turn' }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, creditService,
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { admitted: true, duplicate: true, service: 'composio_tool_call' });
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].args.at(-1), '3');
+});

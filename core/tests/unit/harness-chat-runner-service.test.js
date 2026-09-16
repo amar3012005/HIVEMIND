@@ -45,6 +45,26 @@ test('scoped proxy forwards only allowlisted operation with server-derived tenan
   assert.ok(!calls[0].init.headers.authorization.includes(secret));
 });
 
+test('scoped proxy forwards a save-status replay lookup without allowing other memory subroutes', async () => {
+  const res = {};
+  const calls = [];
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'GET', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/core/api/memories/save-status',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({}), jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: { coreApiBaseUrl: 'http://core.test' }, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ status: 'completed' }));
+    },
+  });
+  assert.equal(handled, true);
+  assert.equal(res.status, 200);
+  assert.equal(calls[0].url, 'http://core.test/api/memories/save-status');
+  assert.equal(calls[0].init.method, 'GET');
+});
+
 test('scoped proxy rejects invalid token before tenant lookup', async () => {
   const res = {};
   const handled = await handleHarnessChatBootstrapRoute({

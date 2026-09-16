@@ -34,6 +34,11 @@ const CORE_ROUTES = new Map([
   ['/api/profiles/context', new Set(['GET'])],
   ['/api/recall', new Set(['POST'])],
   ['/api/memories', new Set(['POST'])],
+  // A completed HIVE save is reconciled through this bounded, tenant-scoped
+  // receipt lookup after replay or a transport interruption. Keep it on the
+  // same authenticated runner-to-Core proxy as the write; a public browser
+  // route or a broad /api/memories wildcard would weaken that boundary.
+  ['/api/memories/save-status', new Set(['GET'])],
 ]);
 
 function harnessCreditLimitResponse(summary) {

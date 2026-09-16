@@ -5253,6 +5253,28 @@ class Director:
             )
             if not has_external_read and self._web_budget > 0:
                 amended["web_query"] = str(self.user_message or "")[:1200]
+            # A supplied public URL is an explicit first-party evidence seed, not
+            # merely a search term.  Preserve any planner-provided URLs and add
+            # the bounded URL set from the request/company brief so an evidence
+            # contract cannot skip the company site that the user named.
+            existing_urls = [str(value).strip() for value in (amended.get("extract_urls") or [])]
+            context_urls = [
+                value.rstrip(".,;…")
+                for value in re.findall(
+                    r"https?://[^\s<>\]\[\)\(\"']+",
+                    f"{self.user_message}\n{getattr(self, 'company_brief', '')}",
+                    re.IGNORECASE,
+                )
+            ]
+            public_urls = [
+                value for value in (existing_urls + context_urls)
+                if value.startswith(("https://", "http://"))
+            ]
+            if public_urls:
+                amended["extract_urls"] = list(dict.fromkeys(public_urls))[:3]
+                amended["extract_page_limit"] = max(1, min(
+                    int(amended.get("extract_page_limit") or 12), 25,
+                ))
             amended["turn_mode"] = "task"
             amended["research_floor"] = "output_contract.evidence_required"
             log.warning("[hyper-engine] enforced output-contract research floor")

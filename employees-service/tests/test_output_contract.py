@@ -117,3 +117,26 @@ def test_research_floor_applies_without_work_room_profile():
     assert plan["web_query"]
     assert plan["research_floor"] == "output_contract.evidence_required"
     assert plan["turn_mode"] == "task"
+
+
+def test_evidence_contract_extracts_the_explicit_company_url():
+    from hivemind_employees.hyper.engine import Director
+
+    prompt = (
+        "Map competitors and the local market for Solvis GmbH. "
+        "Start from https://solvis.de and cite every market claim."
+    )
+    director = object.__new__(Director)
+    director.execution_profile = {}
+    director.user_message = prompt
+    director.company_brief = "Company: Solvis GmbH\nWebsite: https://solvis.de\nLocation: Hannover"
+    director.output_contract = resolve_output_contract(user_message=prompt, room_kind="research")
+    director._web_budget = 1
+
+    plan = director._apply_research_floor({
+        "recall_queries": [], "web_query": None, "connector_calls": [],
+    })
+
+    assert plan["web_query"]
+    assert plan["extract_urls"] == ["https://solvis.de"]
+    assert plan["extract_page_limit"] == 12

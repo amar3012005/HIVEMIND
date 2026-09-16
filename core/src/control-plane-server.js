@@ -148,6 +148,11 @@ import {
 import {
   createEvidenceJob, prepareEvidenceJob, acquireEvidenceJob, persistEvidenceJob, readEvidenceJob,
 } from './artifacts/hyper-evidence-lifecycle.js';
+import {
+  mergeExtractedContent,
+  normalizeUrlBackedSearchResults,
+  providerCandidateRows,
+} from './hyper/web-search-citations.js';
 import { discoverGovernedSessionReads, executeGovernedResearchTool,
   executeGovernedSessionRead, issueGovernedReadGrant,
   resolveGovernedReadGrant } from './connectors/composio/runtime-adapter.js';
@@ -10604,6 +10609,7 @@ Write the persona now.`;
       || String(req.headers['x-api-key'] || '').trim();
     const expected = process.env.HIVEMIND_MASTER_API_KEY;
     if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const body = await parseBody(req).catch(() => ({}));
     const orgId = String(body.org_id || ''); const userId = String(body.user_id || '');
     const toolkit = String(body.toolkit || '').trim().toLowerCase();
@@ -10667,6 +10673,7 @@ Write the persona now.`;
       || String(req.headers['x-api-key'] || req.headers['x-hivemind-master-key'] || '').trim();
     const expected = process.env.HIVEMIND_MASTER_API_KEY;
     if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const body = await parseBody(req).catch(() => ({}));
     const orgId = String(body?.org_id || '');
     const userId = String(body?.user_id || '');
@@ -10675,56 +10682,67 @@ Write the persona now.`;
     if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId) || query.length < 3) {
       return jsonResponse(res, { error: 'org_id, user_id and query are required' }, 400);
     }
+    if (!await getActiveOrganizationMembership(prisma, { userId, orgId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    const providerAttempts = [];
     try {
       const executed = await composioService.executeTool(orgId, 'COMPOSIO_SEARCH_WEB', { query });
       if (!executed?.successful) {
-        return jsonResponse(res, { error: 'composio search failed', detail: String(executed?.error || '').slice(0, 300) }, 502);
+        providerAttempts.push({ provider: 'composio_search', status: 'failed' });
+      } else {
+        const data = executed.data && typeof executed.data === 'object' ? executed.data : {};
+        let results = normalizeUrlBackedSearchResults(providerCandidateRows(data), { limit });
+        if (!results.length) {
+          providerAttempts.push({ provider: 'composio_search', status: 'no_url_citations' });
+        } else {
+          // Search citations can be URL-only. Fetch the cited pages in one bounded
+          // read call so downstream agents receive source text, not provider prose.
+          const extracted = await composioService.executeTool(orgId, 'COMPOSIO_SEARCH_FETCH_URL_CONTENT', {
+            urls: results.map((row) => row.url), max_chars_per_url: 3000,
+          });
+          results = mergeExtractedContent(
+            results,
+            extracted?.successful && Array.isArray(extracted?.data?.results) ? extracted.data.results : [],
+          );
+          if (results.some((row) => row.snippet)) {
+            return jsonResponse(res, {
+              status: 'succeeded', provider: 'composio_search', tool: 'COMPOSIO_SEARCH_WEB',
+              extraction_tool: 'COMPOSIO_SEARCH_FETCH_URL_CONTENT',
+              results, answer: String(data.answer || '').slice(0, 12000),
+              evidence_policy: 'citations_only', provider_attempts: providerAttempts,
+            });
+          }
+          providerAttempts.push({ provider: 'composio_search', status: 'citations_not_extractable' });
+        }
       }
-      const data = executed.data && typeof executed.data === 'object' ? executed.data : {};
-      const citations = Array.isArray(data.citations) ? data.citations : [];
-      let results = citations.map((citation, index) => {
-        const row = citation && typeof citation === 'object' ? citation : { url: citation };
-        const urlValue = String(row.url || row.link || row.source_url || '').trim();
-        if (!/^https?:\/\//i.test(urlValue)) return null;
-        return {
-          title: String(row.title || row.name || `Source ${index + 1}`).slice(0, 500),
-          url: urlValue.slice(0, 2048),
-          snippet: String(row.snippet || row.text || row.description || '').slice(0, 3000),
-          score: Number.isFinite(Number(row.score)) ? Number(row.score) : null,
-        };
-      }).filter(Boolean).slice(0, limit);
-      if (!results.length) {
-        return jsonResponse(res, { error: 'search returned no URL-backed citations', provider: 'composio_search' }, 502);
-      }
-      // Search citations can be URL-only. Fetch the cited pages in one bounded
-      // read call so downstream agents receive source text, not provider prose.
-      const extracted = await composioService.executeTool(orgId, 'COMPOSIO_SEARCH_FETCH_URL_CONTENT', {
-        urls: results.map((row) => row.url), max_chars_per_url: 3000,
-      });
-      const extractedRows = extracted?.successful && Array.isArray(extracted?.data?.results)
-        ? extracted.data.results : [];
-      const contentByUrl = new Map(extractedRows.map((row) => [
-        String(row?.url || row?.id || '').trim(),
-        String(row?.text || row?.content || '').trim().slice(0, 3000),
-      ]));
-      results = results.map((row) => ({
-        ...row,
-        snippet: row.snippet || contentByUrl.get(row.url) || '',
-      }));
-      if (!results.some((row) => row.snippet)) {
-        return jsonResponse(res, {
-          error: 'search citations could not be extracted', provider: 'composio_search',
-        }, 502);
-      }
-      return jsonResponse(res, {
-        status: 'succeeded', provider: 'composio_search', tool: 'COMPOSIO_SEARCH_WEB',
-        extraction_tool: 'COMPOSIO_SEARCH_FETCH_URL_CONTENT',
-        results, answer: String(data.answer || '').slice(0, 12000),
-        evidence_policy: 'citations_only',
-      });
     } catch (err) {
-      return jsonResponse(res, { error: 'composio search unavailable', detail: String(err?.message || err).slice(0, 300) }, 502);
+      providerAttempts.push({ provider: 'composio_search', status: 'unavailable' });
     }
+    try {
+      const executed = await executeGovernedResearchTool(orgId, 'parallel_search', {
+        search_queries: [query], objective: query,
+      }, { mode: 'canary' });
+      if (executed?.successful === false) {
+        providerAttempts.push({ provider: 'parallel_search', status: 'failed' });
+      } else {
+        const results = normalizeUrlBackedSearchResults(providerCandidateRows(executed?.data || executed), { limit });
+        if (results.length) {
+          return jsonResponse(res, {
+            status: 'succeeded', provider: 'parallel_search', tool: 'PARALLEL_SEARCH',
+            extraction_tool: null, results, evidence_policy: 'citations_only',
+            provider_attempts: providerAttempts,
+          });
+        }
+        providerAttempts.push({ provider: 'parallel_search', status: 'no_url_citations' });
+      }
+    } catch (err) {
+      providerAttempts.push({ provider: 'parallel_search', status: 'unavailable' });
+    }
+    return jsonResponse(res, {
+      error: 'governed web search returned no usable URL-backed citations',
+      provider_attempts: providerAttempts,
+    }, 502);
   }
 
   if (pathname === '/internal/hyper/prospects' && req.method === 'GET') {

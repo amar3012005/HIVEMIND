@@ -14,7 +14,7 @@ test('accepts only the Day-0 Cloudflare Flagship receipt', async () => {
     },
   });
   assert.equal(enabled, true);
-  assert.equal(seen.url, 'https://dev.next.singulancelabs.com/__hivemind/feature-flags/day0-lifecycle');
+  assert.equal(seen.url, 'https://dev.next.singulancelabs.com/__hivemind/feature-flags/day0-onboarding');
   assert.equal(seen.init.headers.authorization, 'Bearer test-secret');
 });
 

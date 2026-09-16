@@ -240,10 +240,20 @@ if [ -n "${REQUESTED[core]:-}" ]; then
   else
     echo "[migrate] guarded Prisma deploy via $CORE_TAG"
     "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase migrating:core
+    # Docker's --env-file does not evaluate Compose interpolation.  Core's
+    # Compose service derives DATABASE_URL from the Postgres credentials, so
+    # reproduce that derivation inside the immutable migration container rather
+    # than requiring a duplicate DATABASE_URL secret in the host env file.
     docker run --rm \
       --network hivemind_default \
       --env-file "$ENVF" \
-      "$CORE_TAG" node scripts/prisma-migrate-deploy.mjs
+      "$CORE_TAG" sh -ec '
+        : "${POSTGRES_USER:=hivemind_user}"
+        : "${POSTGRES_DB:=hivemind}"
+        : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required for migrations}"
+        export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=hivemind&connection_limit=20&pool_timeout=30"
+        exec node scripts/prisma-migrate-deploy.mjs
+      '
   fi
 fi
 

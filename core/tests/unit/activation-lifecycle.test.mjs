@@ -4,6 +4,7 @@ import {
   ACTIVATION_STAGES,
   activationReminderCopy,
   advanceActivationForEmail,
+  claimActivationReminder,
   isActivationLifecycleEnabled,
   renderActivationReminderEmail,
   scheduleActivationWorkflow,
@@ -51,6 +52,25 @@ test('direct signup joins the same recipient lifecycle without retaining raw ema
   });
   assert.deepEqual(activation, { id: 'activation', generation: 1 });
   assert.doesNotMatch(query, /person@example\.test/);
+});
+
+test('enterprise invitation reminders use the persisted recipient before signup', async () => {
+  let query = '';
+  const reminder = await claimActivationReminder({
+    prisma: {
+      $queryRawUnsafe: async (sql) => {
+        query = sql;
+        return [{
+          id: 'activation', generation: 1, stage: ACTIVATION_STAGES.INVITED_PENDING_SIGNUP,
+          user_email: null, invite_email: null, enterprise_invite_email: 'recipient@example.test',
+        }];
+      },
+    },
+    activationId: '11111111-1111-1111-1111-111111111111',
+    generation: 1,
+  });
+  assert.equal(reminder.email, 'recipient@example.test');
+  assert.match(query, /hivemind\.enterprise_invitations/);
 });
 
 test('activation scheduling sends identifiers and deterministic reminder sequence only', async () => {

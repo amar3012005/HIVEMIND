@@ -128,12 +128,15 @@ export async function claimActivationReminder({ prisma, activationId, generation
         AND (delivery_lease_until IS NULL OR delivery_lease_until <= $4)
       RETURNING id, org_id, user_id, stage, generation, reminder_count, next_reminder_at, metadata,
                 (SELECT email FROM hivemind.users WHERE id=user_id) AS user_email,
-                (SELECT email FROM hivemind.org_invites WHERE id=invite_id) AS invite_email`,
+                (SELECT email FROM hivemind.org_invites WHERE id=invite_id) AS invite_email,
+                (SELECT recipient_email FROM hivemind.enterprise_invitations WHERE id=invite_id) AS enterprise_invite_email`,
     activationId, Number(generation), leaseUntil, now,
   );
   const lifecycle = rows?.[0];
   if (!lifecycle) return null;
-  return { ...lifecycle, email: lifecycle.user_email || lifecycle.invite_email || null };
+  // Enterprise invitations have no user row until the recipient signs in.  Their
+  // persisted recipient is the safe final fallback for the pre-signup reminder.
+  return { ...lifecycle, email: lifecycle.user_email || lifecycle.invite_email || lifecycle.enterprise_invite_email || null };
 }
 
 export async function releaseActivationReminderClaim({ prisma, activationId, generation } = {}) {

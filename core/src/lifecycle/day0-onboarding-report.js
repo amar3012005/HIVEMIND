@@ -1,9 +1,9 @@
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
 import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../email/templates/day0-company-onboarding.js';
+import { resolvePublicAppUrl } from '../public-frontend-url.js';
 
 const SENDING_LEASE_MS = 10 * 60 * 1000;
-const DEFAULT_APP_URL = 'https://next.singulancelabs.com/hivemind/app';
 
 function parseCompany(value) {
   if (!value) return null;
@@ -106,7 +106,9 @@ export async function startDayZeroOnboardingReport({
     try {
       const recipient = await prisma.user.findUnique({ where: { id: ownerId }, select: { email: true } });
       if (!recipient?.email) throw new Error('day0_report_recipient_missing');
-      const appBase = String(process.env.HIVEMIND_APP_URL || DEFAULT_APP_URL).replace(/\/$/, '');
+      // The release environment owns this value.  Do not let a Dev/Enigma
+      // lifecycle email silently point a user at the Production frontend.
+      const appBase = resolvePublicAppUrl();
       const appUrl = appBase.endsWith('/employees/mycompany') ? appBase : `${appBase}/employees/mycompany`;
       const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl });
       const print = renderDayZeroOnboardingReportHtml(dashboardCompany, { appUrl });

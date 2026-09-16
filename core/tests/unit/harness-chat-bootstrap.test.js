@@ -73,6 +73,27 @@ test('bootstrap fails closed to legacy without a ticket when edge evaluation fai
   });
 });
 
+test('a Harness flag never becomes a legacy selection when ticket admission fails', async () => {
+  const res = responseCapture();
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap',
+    prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
+    requireSession: async () => ({ session: { orgId, userId} }), parseBody: async () => ({}), jsonResponse,
+    env: {
+      HIVE_HARNESS_TICKET_SECRET: 'not-distinct-but-otherwise-long-enough-ticket-secret',
+      HIVEMIND_CONTROL_PLANE_SESSION_SECRET: 'not-distinct-but-otherwise-long-enough-ticket-secret',
+      HIVE_HARNESS_EDGE_EVAL_SECRET: 'edge-secret', HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag',
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      key: 'hivemind_harness_chat_v1', source: 'cloudflare-flagship', variation: 'harness',
+    })),
+  });
+  assert.equal(res.status, 503);
+  assert.equal(res.json.code, 'harness_admission_unavailable');
+  assert.equal(res.json.flag_receipt.variation, 'harness');
+  assert.equal(res.json.mode, undefined);
+});
+
 test('dedicated new-session route honors a legacy feature-flag variation', async () => {
   const res = responseCapture();
   await handleHarnessChatBootstrapRoute({

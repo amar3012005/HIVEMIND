@@ -357,7 +357,14 @@ export async function handleHarnessChatBootstrapRoute({
     });
   } catch (error) {
     console.warn('[harness-chat.bootstrap] admission unavailable:', error?.code || error?.message || error);
-    jsonResponse(res, legacyResponse(env, evaluation.flagReceipt));
+    // A successful Flagship evaluation is the sole surface decision.  A later
+    // admission outage must not masquerade as an explicit legacy rollout.
+    jsonResponse(res, {
+      error: 'harness_admission_unavailable',
+      code: 'harness_admission_unavailable',
+      message: 'HIVE-MIND chat is temporarily unavailable. Please retry.',
+      flag_receipt: evaluation.flagReceipt,
+    }, 503);
   }
   return true;
 }

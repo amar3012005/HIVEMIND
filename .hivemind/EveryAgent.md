@@ -17,7 +17,7 @@ agent and every worktree derived from this branch.
 - Prefer the smallest complete change that fixes the demonstrated boundary.
 - Keep company memory in HIVE Core; use task-ledger infrastructure only when it is configured and
   relevant. A missing optional ledger is not a reason to stop ordinary implementation.
-- Use the environment-specific release manifest for deployments. Never patch a running container
+- Use the environment-specific release manifest and `platform-release` for deployments. Never patch a running container
   or copy secrets from another environment.
 - Use immutable artifacts, recreate only affected services, and verify the real route after release.
 - Treat browser/UI proof, authorization, durable state, and provider receipts as distinct evidence.

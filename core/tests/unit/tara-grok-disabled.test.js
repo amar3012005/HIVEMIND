@@ -1,8 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createTaraGrokRuntime } from '../../src/tara/grok-runtime.js';
+import { createTaraGrokRuntime, resolveTaraPublicWebsocketUrl } from '../../src/tara/grok-runtime.js';
 import { resolveTaraProviderCandidates } from '../../src/tara/provider-policy.js';
+
+test('browser voice sessions use the configured public Core origin, not the Docker proxy host', () => {
+  const wsUrl = resolveTaraPublicWebsocketUrl(
+    { headers: { host: 'core:3000' } },
+    '',
+    '/voice-grok/voice',
+    'https://core.dev.next.singulancelabs.com',
+  );
+  assert.equal(wsUrl, 'wss://core.dev.next.singulancelabs.com/voice-grok/voice');
+});
 
 test('runtime rejects Grok selection when Flagship denies the authenticated user', async () => {
 

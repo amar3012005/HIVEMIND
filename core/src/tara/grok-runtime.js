@@ -184,17 +184,40 @@ function validatedGrokConfig(base, patch = {}) {
   return next;
 }
 
+export function resolveTaraPublicWebsocketUrl(req, configured, path, publicCoreBaseUrl = process.env.HIVEMIND_CORE_API_PUBLIC_URL || process.env.HIVEMIND_CORE_PUBLIC_URL || '') {
+  // An explicit TARA_*_PUBLIC_WS_URL is a complete, operator-owned endpoint.
+  // Otherwise use the same public Core origin already used by bootstrap instead
+  // of a request Host header: control-plane → Core runs over Docker, where that
+  // header is inevitably `core:3000` and is unusable from a browser.
+  const explicit = String(configured || '').trim().replace(/\/$/, '');
+  if (explicit) return explicit;
+
+  const publicBase = String(publicCoreBaseUrl || '').trim().replace(/\/$/, '');
+  if (publicBase) {
+    try {
+      const url = new URL(publicBase);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+      url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  // Local/direct Core requests remain supported when no public origin is
+  // configured. This is deliberately the final fallback only.
+  const host = String(req?.headers?.['x-forwarded-host'] || req?.headers?.host || '').split(',')[0].trim();
+  if (!host) return null;
+  const proto = String(req?.headers?.['x-forwarded-proto'] || 'https').split(',')[0].trim().toLowerCase();
+  return `${proto === 'http' ? 'ws' : 'wss'}://${host}${path}`;
+}
+
 export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraConfig, isGrokAdmitted = async () => false }) {
   const capabilitySecret = process.env.TARA_GROK_CAPABILITY_SECRET || '';
   const serviceToken = process.env.TARA_GROK_SERVICE_TOKEN || '';
-  function publicWebsocketUrl(req, configured, path) {
-    const explicit = String(configured || '').trim().replace(/\/$/, '');
-    if (explicit) return explicit;
-    const host = String(req?.headers?.['x-forwarded-host'] || req?.headers?.host || '').split(',')[0].trim();
-    if (!host) return null;
-    const proto = String(req?.headers?.['x-forwarded-proto'] || 'https').split(',')[0].trim().toLowerCase();
-    return `${proto === 'http' ? 'ws' : 'wss'}://${host}${path}`;
-  }
 
   async function configFor(orgId) {
     return prisma.taraRuntimeConfig.upsert({
@@ -337,8 +360,9 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const session = await prisma.taraVoiceSession.create({ data: { orgId, userId, provider, mode: snapshot.mode, capabilityJti: jti, configSnapshot: snapshot, expiresAt } });
       const token = capability({ iss: 'hivemind-core', aud: `tara-${provider}`, sub: userId, org_id: orgId, session_id: session.id, jti, exp: expiresAt.getTime(), operations: ['voice'] }, capabilitySecret);
       const wsUrl = provider === 'grok'
-        ? publicWebsocketUrl(req, process.env.TARA_GROK_PUBLIC_WS_URL, `/voice-grok/voice/${session.id}`)
-        : publicWebsocketUrl(req, process.env.TARA_DEEPGRAM_PUBLIC_WS_URL, '/voice2/voice');
+        // AaasVoiceWidget appends session_id after receiving this endpoint.
+        ? resolveTaraPublicWebsocketUrl(req, process.env.TARA_GROK_PUBLIC_WS_URL, '/voice-grok/voice')
+        : resolveTaraPublicWebsocketUrl(req, process.env.TARA_DEEPGRAM_PUBLIC_WS_URL, '/voice2/voice');
       if (!wsUrl) return reply(res, { error: 'public_voice_url_unavailable' }, 503);
       return reply(res, { session_id: session.id, provider, ws_url: wsUrl, capability: token, expires_at: expiresAt.toISOString(), config_revision: current.revision, audio_format: { type: 'pcm16', sample_rate: 16000 } });
     }

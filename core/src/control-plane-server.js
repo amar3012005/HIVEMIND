@@ -166,9 +166,8 @@ import {
   listEligibleDayOneCompanies,
   notifyDayOneWorkflowCompletion,
   prepareDayOneFirstMove,
-  scheduleDayOneWorkflow,
 } from './lifecycle/day1-first-move.js';
-import { startDayZeroOnboardingReport } from './lifecycle/day0-onboarding-report.js';
+import { startDayZeroLifecycle } from './lifecycle/day0-lifecycle.js';
 import { DAY_ZERO_REPORT_VERSION } from './email/templates/day0-company-onboarding.js';
 import {
   ACTIVATION_STAGES,
@@ -3591,7 +3590,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'org_id and hq_room_id are required' }, 400);
     }
     try {
-      const started = await startDayZeroOnboardingReport({ prisma, orgId, hqRoomId, allowVersionedReissue: true });
+      const started = await startDayZeroLifecycle({ prisma, orgId, hqRoomId, allowVersionedReissue: true });
       if (!started.accepted) return jsonResponse(res, started);
       return jsonResponse(res, await started.completion);
     } catch (error) {
@@ -12619,6 +12618,12 @@ Write the persona now.`;
             console.warn('[hyper-onboarding] HQ activation failed:', error.message);
             say('HQ activation is queued for retry');
           }
+          // Day 0 belongs to the durable onboarding completion, not to a
+          // later dashboard mount. The claim makes re-onboarding/retries safe;
+          // the tenant-scoped Cloudflare Day-0 flag controls this entry point.
+          void startDayZeroLifecycle({ prisma, orgId, hqRoomId: room.id, userId })
+            .then((started) => started.accepted ? started.completion : null)
+            .catch((error) => console.warn('[hyper-onboarding] day-0 lifecycle failed:', error.message));
           void (async () => {
             const capturedScreenshot = await screenshotCapturePromise;
             let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
@@ -12644,9 +12649,8 @@ Write the persona now.`;
                 JSON.stringify({ _company: resultPayload }), room.id,
               );
             } catch (error) { console.warn('[hyper-onboarding] website preview persist failed:', error.message); }
-            // Do not send Day-0 from the background scrape. It is claimed
-            // exactly once after the completed record is visibly loaded in
-            // "Your Company" (POST /v1/hyper/company/day0-report).
+            // Day 0 was already claimed from the durable onboarding completion.
+            // Screenshot enrichment must never become a lifecycle dependency.
           })();
           console.info('[hyper-onboarding] timing', JSON.stringify({
             org_id: orgId,
@@ -12735,10 +12739,8 @@ Write the persona now.`;
       return res.end(svg);
     }
 
-    // POST /v1/hyper/company/day0-report — the CompanyDashboard calls this
-    // only after it has rendered the completed company payload. The database
-    // claim makes delivery idempotent across refreshes, tabs, and retries:
-    // one organization gets one Day-0 report, not one per scrape or page load.
+    // Dashboard fallback/status trigger. Onboarding starts Day 0 server-side;
+    // this retains a safe idempotent retry path for an existing company.
     if (pathname === '/v1/hyper/company/day0-report' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -12752,32 +12754,14 @@ Write the persona now.`;
         );
         const row = rows?.[0];
         if (!row?.id) return jsonResponse(res, { error: 'not_onboarded' }, 404);
-        const started = await startDayZeroOnboardingReport({
+        const started = await startDayZeroLifecycle({
           prisma,
           orgId: current.session.orgId,
           hqRoomId: row.id,
           userId: current.session.userId,
         });
         if (!started.accepted) return jsonResponse(res, started);
-        // Day 1 is scheduled only after the first Day-0 receipt. A versioned
-        // report reissue never starts a second complimentary lifecycle.
-        void started.completion.then(async (result) => {
-          if (started.reissue) return;
-          // Day 0 seals onboarding; activation reminders stop here. Day 1+
-          // remain owned by their established, typed lifecycle workflows.
-          const owner = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
-          if (owner?.email) {
-            await advanceActivationForEmail({
-              prisma, email: owner.email, userId: current.session.userId, orgId: current.session.orgId,
-              stage: ACTIVATION_STAGES.DAY0_DELIVERED, reason: 'day0_delivered',
-            });
-          }
-          const dayOne = await scheduleDayOneWorkflow({
-            orgId: started.orgId, hqRoomId: started.hqRoomId, onboardedAt: started.company.onboarded_at,
-          });
-          if (!dayOne.ok && !dayOne.skipped) console.warn('[hyper-company] day-1 workflow scheduling failed:', dayOne.reason);
-          return result;
-        }).catch((error) => console.warn('[hyper-company] day-0 report failed:', error.message));
+        void started.completion.catch((error) => console.warn('[hyper-company] day-0 report failed:', error.message));
         return jsonResponse(res, { ok: true, accepted: true, status: 'sending', version: DAY_ZERO_REPORT_VERSION }, 202);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);

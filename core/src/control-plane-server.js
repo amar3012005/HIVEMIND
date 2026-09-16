@@ -3590,7 +3590,18 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'org_id and hq_room_id are required' }, 400);
     }
     try {
-      const started = await startDayZeroLifecycle({ prisma, orgId, hqRoomId, allowVersionedReissue: true });
+      // The edge Flagship decision is user-scoped. Unlike the browser route,
+      // this authenticated worker route has no session, so resolve the owner
+      // from the already-authorized room before asking the lifecycle to retry.
+      const ownerRows = await prisma.$queryRawUnsafe(
+        `SELECT user_id FROM "hivemind"."hyper_rooms"
+          WHERE id=$1::uuid AND org_id=$2::uuid AND archived_at IS NULL
+          LIMIT 1`,
+        hqRoomId, orgId,
+      );
+      const userId = String(ownerRows?.[0]?.user_id || '');
+      if (!/^[0-9a-f-]{36}$/i.test(userId)) return jsonResponse(res, { error: 'day0_report_owner_missing' }, 409);
+      const started = await startDayZeroLifecycle({ prisma, orgId, hqRoomId, userId, allowVersionedReissue: true });
       if (!started.accepted) return jsonResponse(res, started);
       return jsonResponse(res, await started.completion);
     } catch (error) {

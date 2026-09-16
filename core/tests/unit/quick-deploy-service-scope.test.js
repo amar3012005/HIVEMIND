@@ -11,6 +11,8 @@ test('canonical migrations derive the same database URL as Compose without dupli
   assert.match(canonical, /docker network inspect "\$MIGRATION_NETWORK_ID" --format '\{\{\.Name\}\}'/);
   assert.match(canonical, /--network "\$MIGRATION_NETWORK"/);
   assert.doesNotMatch(canonical, /--network hivemind_default/);
+  assert.match(canonical, /com\.docker\.compose\.project/);
+  assert.match(canonical, /--project-name "\$COMPOSE_PROJECT"/);
   assert.match(canonical, /export DATABASE_URL="postgresql:\/\/\$\{POSTGRES_USER\}:\$\{POSTGRES_PASSWORD\}@postgres:5432\/\$\{POSTGRES_DB\}\?schema=hivemind/);
 });
 
@@ -28,5 +30,5 @@ test('quick-deploy without service arguments retains the full default group', ()
 test('Harness runner releases require a digest-pinned external artifact', () => {
   assert.match(canonical, /harness-runner requires --harness-image/);
   assert.match(canonical, /@sha256:\[0-9a-f\]\{64\}/);
-  assert.match(canonical, /docker compose --profile harness-chat/);
+  assert.match(canonical, /docker compose --project-name "\$COMPOSE_PROJECT" --profile harness-chat/);
 });

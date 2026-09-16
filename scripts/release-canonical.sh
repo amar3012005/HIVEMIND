@@ -48,6 +48,12 @@ RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 # service → container / image-name / build recipe (run from the release worktree root)
 declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=hivemind-harness-runner-1 [harness-tunnel]=hivemind-harness-tunnel-1 )
 declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=harness-chat )
+COMPOSE_PROJECT=$(docker inspect "${CONTAINER[core]}" \
+  --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)
+# A fresh host has no Core label yet; otherwise preserve the live project name
+# (Enigma uses `enigma`, production uses `hivemind`) so Compose recreates the
+# intended named containers instead of attempting a duplicate project.
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-hivemind}"
 build_cmd() { local s="$1" tag="$2"; case "$s" in
   core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
   control-plane) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=control-plane -t "$tag" -f Dockerfile.control-plane . ;;
@@ -180,7 +186,7 @@ OVERRIDE="$STATE_ROOT/deploy-override.yml"
 # --project-directory. No secret value is copied into this artifact.
 HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
 sed "s#env_file: \[../.env\]#env_file: [$ENVF]#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
-docker compose --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
+docker compose --project-name "$COMPOSE_PROJECT" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
   && echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()
 
@@ -271,14 +277,14 @@ fi
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
-  docker compose --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+  docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
   if [ "$s" = harness-runner ]; then
     # The tunnel is a profile-bound companion: it is never deployed without
     # the runner and has no independent image or persistence lifecycle.
     echo "[deploy] harness-tunnel"
     "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase deploying:harness-tunnel
-    docker compose --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+    docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
       --env-file "$ENVF" up -d --no-deps --force-recreate harness-tunnel >/dev/null
   fi
 done

@@ -5,6 +5,11 @@ import test from 'node:test';
 const quick = fs.readFileSync(new URL('../../../scripts/quick-deploy.sh', import.meta.url), 'utf8');
 const canonical = fs.readFileSync(new URL('../../../scripts/release-canonical.sh', import.meta.url), 'utf8');
 
+test('canonical migrations derive the same database URL as Compose without duplicating a secret', () => {
+  assert.match(canonical, /Docker's --env-file does not evaluate Compose interpolation/);
+  assert.match(canonical, /export DATABASE_URL="postgresql:\/\/\$\{POSTGRES_USER\}:\$\{POSTGRES_PASSWORD\}@postgres:5432\/\$\{POSTGRES_DB\}\?schema=hivemind/);
+});
+
 test('explicit quick-deploy service arguments remain service scoped', () => {
   assert.match(quick, /RELEASE_SCOPE_ARGS=\(--service-scoped\)/);
   assert.match(quick, /--services "\$SERVICES" "\$\{RELEASE_SCOPE_ARGS\[@\]\}"/);

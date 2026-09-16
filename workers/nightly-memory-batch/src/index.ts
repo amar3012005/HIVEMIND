@@ -26,17 +26,32 @@ async function core(env: Env, path: string, body: unknown): Promise<any> {
   return payload;
 }
 
+async function dispatch(env: Env) {
+  const eligible = await core(env, '/internal/dream/eligible', {
+    limit: Number(env.NIGHT_BATCH_LIMIT || 100),
+    flag: env.NIGHT_BATCH_WORKFLOW_FLAG || 'night_memory_batch_v1',
+  });
+  const items = Array.isArray(eligible?.tenants) ? eligible.tenants : [];
+  if (items.length) await env.NIGHT_BATCH_QUEUE.sendBatch(items.map((item: WorkItem) => ({ body: item })));
+  return { dispatched: items.length, tenants: items.map((item: WorkItem) => item.org_id) };
+}
+
 export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil((async () => {
-      const eligible = await core(env, '/internal/dream/eligible', {
-        limit: Number(env.NIGHT_BATCH_LIMIT || 100),
-        flag: env.NIGHT_BATCH_WORKFLOW_FLAG || 'night_memory_batch_v1',
-      });
-      const items = Array.isArray(eligible?.tenants) ? eligible.tenants : [];
-      if (items.length) await env.NIGHT_BATCH_QUEUE.sendBatch(items.map((item: WorkItem) => ({ body: item })));
-      console.log(JSON.stringify({ event: 'night_memory_batch_dispatched', count: items.length }));
+      const result = await dispatch(env);
+      console.log(JSON.stringify({ event: 'night_memory_batch_dispatched', ...result }));
     })());
+  },
+
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+    if (url.pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });
+    if (url.pathname !== '/dispatch' || request.method !== 'POST') return Response.json({ error: 'not_found' }, { status: 404 });
+    const supplied = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+    if (!supplied || supplied !== env.NIGHT_BATCH_SECRET) return Response.json({ error: 'unauthorized' }, { status: 401 });
+    try { return Response.json({ ok: true, ...(await dispatch(env)) }, { status: 202 }); }
+    catch (error) { return Response.json({ ok: false, error: String(error) }, { status: 502 }); }
   },
 
   async queue(batch: MessageBatch<WorkItem>, env: Env) {

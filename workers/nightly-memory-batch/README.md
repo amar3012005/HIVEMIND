@@ -2,6 +2,8 @@
 
 This Worker is the cost-control dispatcher for tenant-scoped knowledge/dream work.
 
+For a manual smoke test after deployment, call `POST /dispatch` with `Authorization: Bearer <NIGHT_BATCH_SECRET>`. `GET /health` is unauthenticated and only checks that the Worker is reachable.
+
 - The hourly Cron invocation asks HIVEMIND for organizations currently inside their configured local night window.
 - It puts only tenant/job identifiers on a Cloudflare Queue; source evidence never leaves core for the queue.
 - Queue batching, retries, and a dead-letter queue absorb spikes without changing tenant isolation.

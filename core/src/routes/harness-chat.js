@@ -292,17 +292,6 @@ export async function handleHarnessChatBootstrapRoute({
     return true;
   }
 
-  // Match legacy chat: a quota-exhausted account sees the common upgrade
-  // modal before the native client mounts, rather than receiving an answer
-  // and discovering the charge only after the turn completes.
-  if (creditService) {
-    const summary = await creditService.getSummary(orgId, userId);
-    if (!summary.unlimited && summary.remaining < 1) {
-      jsonResponse(res, harnessCreditLimitResponse(summary), 402);
-      return true;
-    }
-  }
-
   const body = await parseBody(req).catch(() => ({}));
   const projectId = typeof body?.project_id === 'string' ? body.project_id : null;
   if (projectId && !UUID_RE.test(projectId)) {

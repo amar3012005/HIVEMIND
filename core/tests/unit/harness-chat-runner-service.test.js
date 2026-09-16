@@ -181,8 +181,9 @@ test('runner admits a turn without debiting and blocks exhausted credits before 
   assert.equal(calls.length, 0);
 });
 
-test('bootstrap returns the legacy plan-limit contract before native admission for an exhausted account', async () => {
+test('bootstrap surface selection is independent of credits; exhausted credits are enforced at turn admission', async () => {
   const res = {};
+  const redisValues = new Map();
   const handled = await handleHarnessChatBootstrapRoute({
     req: { method: 'POST', headers: {} }, res,
     pathname: '/v1/harness-chat/bootstrap',
@@ -190,12 +191,22 @@ test('bootstrap returns the legacy plan-limit contract before native admission f
     prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
     parseBody: async () => ({}),
     jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    env: {
+      HIVE_HARNESS_TICKET_SECRET: 'test-harness-ticket-secret-at-least-32-bytes',
+      HIVE_HARNESS_EDGE_EVAL_SECRET: 'edge-secret',
+      HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag',
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      key: 'hivemind_harness_chat_v1', source: 'cloudflare-flagship', variation: 'harness',
+    })),
+    getRedis: async () => ({ set: async (key, value) => { redisValues.set(key, value); return 'OK'; } }),
     creditService: { getSummary: async () => ({ plan: 'free', included: 500, used: 500, reserved: 0, remaining: 0, unlimited: false }) },
   });
   assert.equal(handled, true);
-  assert.equal(res.status, 402);
-  assert.equal(res.body.code, 'plan_limit_exceeded');
-  assert.equal(res.body.upgrade_url, '/hivemind/app/billing');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.mode, 'harness');
+  assert.equal(typeof res.body.ticket, 'string');
+  assert.equal(redisValues.size, 1);
 });
 
 test('terminal no-tool reconciliation does not debit a turn with an admitted Composio operation', async () => {

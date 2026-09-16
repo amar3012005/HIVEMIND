@@ -17,6 +17,7 @@ import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, a
 import { remoteList, remoteHydrate, isRemoteMemoryUnavailableError } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { exactMemoryListTotal } from './memory/memory-list-contract.js';
+import { getSaveOperation, publicSaveStatus, upsertSaveOperation } from './memory/save-operations.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { gatewayFirstFetch, gatewayProviderForUrl } from './llm/cloudflare-gateway.js';
@@ -10960,7 +10961,7 @@ exit \$RC
         return jsonResponse(res, { error: 'method not allowed' }, 405);
       }
 
-      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
+      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all' && pathname !== '/api/memories/save-status') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
             return;
@@ -20430,6 +20431,33 @@ exit \$RC
           }
           break;
 
+        case '/api/memories/save-status': {
+          if (!ensurePersistedMemoryOrFail(res, '/api/memories/save-status')) return;
+          const headerKey = typeof req.headers['x-idempotency-key'] === 'string' ? req.headers['x-idempotency-key'] : '';
+          if (req.method === 'GET') {
+            const key = url.searchParams.get('idempotency_key') || headerKey;
+            const row = await getSaveOperation(prisma, { orgId, userId, idempotencyKey: key }).catch(() => null);
+            if (!row) return jsonResponse(res, { status: 'not_found', operation: 'save_status', idempotency_key: key || null }, 404);
+            return jsonResponse(res, publicSaveStatus(row));
+          }
+          if (req.method !== 'POST') return jsonResponse(res, { error: 'method not allowed' }, 405);
+          try {
+            const row = await upsertSaveOperation(prisma, {
+              orgId,
+              userId,
+              idempotencyKey: body?.idempotency_key || headerKey,
+              operationId: body?.operation_id,
+              status: body?.status,
+              destinationScope: body?.destination_scope,
+              request: body?.request,
+              receipt: body?.receipt,
+            });
+            return jsonResponse(res, publicSaveStatus(row));
+          } catch (error) {
+            return jsonResponse(res, { error: error.message || 'invalid_save_operation' }, 400);
+          }
+        }
+
         case '/api/memories':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories')) {
@@ -20548,6 +20576,15 @@ exit \$RC
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories')) {
               return;
+            }
+            const saveKey = typeof req.headers['x-idempotency-key'] === 'string'
+              ? req.headers['x-idempotency-key']
+              : (typeof body?.idempotency_key === 'string' ? body.idempotency_key : '');
+            if (saveKey) {
+              const prior = await getSaveOperation(prisma, { orgId, userId, idempotencyKey: saveKey }).catch(() => null);
+              if (prior?.status === 'completed' && prior.receipt) {
+                return jsonResponse(res, { ...prior.receipt, replayed: true, receipt: prior.receipt }, 200);
+              }
             }
             // Validate request body with scoping enforcement
             const scopedBody = {
@@ -21023,7 +21060,7 @@ exit \$RC
                 }
               }
 
-              return jsonResponse(res, {
+              const savedBody = {
                 success: true,
                 memory: firstMemory,
                 relationships: firstSuccessResult.edgesCreated,
@@ -21036,7 +21073,25 @@ exit \$RC
                   novelty_score: firstSuccessResult.noveltyScore ?? null,
                   delta_extracted: firstSuccessResult.deltaExtracted ?? false
                 }
-              }, 201);
+              };
+              if (saveKey) {
+                await upsertSaveOperation(prisma, {
+                  orgId,
+                  userId,
+                  idempotencyKey: saveKey,
+                  operationId: typeof body?.operation_id === 'string' ? body.operation_id : saveKey,
+                  status: 'completed',
+                  destinationScope: body?.scope,
+                  request: { title: validation.data.title, content: validation.data.content },
+                  receipt: {
+                    status: 'saved',
+                    memory_id: firstSuccessResult.memoryId,
+                    receipt_id: `memory:${firstSuccessResult.memoryId}`,
+                    idempotency_key: saveKey,
+                  },
+                }).catch(() => {});
+              }
+              return jsonResponse(res, savedBody, 201);
             } catch (error) {
               console.error('Store memory failed:', error);
               return jsonResponse(res, {

@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-nightly-memory-batch",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
+    "NIGHT_BATCH_LIMIT": "100",
+    "NIGHT_BATCH_WORKFLOW_FLAG": "night_memory_batch_v1"
+  },
+  "queues": {
+    "producers": [{ "binding": "NIGHT_BATCH_QUEUE", "queue": "hivemind-night-memory-production" }],
+    "consumers": [{
+      "queue": "hivemind-night-memory-production",
+      "max_batch_size": 20,
+      "max_batch_timeout": 30,
+      "max_retries": 5,
+      "dead_letter_queue": "hivemind-night-memory-dlq-production",
+      "max_concurrency": 4,
+      "retry_delay": 60
+    }]
+  },
+  "env": {
+    "local": {
+      "name": "hivemind-nightly-memory-batch-local",
+      "vars": { "ENVIRONMENT": "local", "HIVEMIND_CORE_URL": "http://127.0.0.1:3000" },
+      "queues": {
+        "producers": [{ "binding": "NIGHT_BATCH_QUEUE", "queue": "hivemind-night-memory-local" }],
+        "consumers": [{ "queue": "hivemind-night-memory-local", "max_batch_size": 20, "max_batch_timeout": 5, "max_retries": 2, "dead_letter_queue": "hivemind-night-memory-dlq-local", "max_concurrency": 2, "retry_delay": 10 }]
+      }
+    }
+  }
+}

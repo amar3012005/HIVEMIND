@@ -18,6 +18,8 @@ const KEYS = [
   'CLOUDFLARE_AI_GATEWAY_BGE_EMBEDDINGS_PROVIDER',
   'CLOUDFLARE_AI_GATEWAY_BGE_RERANKER_PROVIDER',
   'CLOUDFLARE_AI_GATEWAY_QWEN_INGEST_PROVIDER',
+  'CLOUDFLARE_AI_GATEWAY_MODELARK_PROVIDER',
+  'CLOUDFLARE_AI_GATEWAY_BYTEPLUS_MODELARK_BYOK_ALIAS',
 ];
 
 async function withEnv(values, fn) {
@@ -64,13 +66,31 @@ test('Gateway maps only known provider hosts and uses provider-native paths', ()
   assert.equal(gatewayProviderForUrl('https://api.cohere.ai/v2/rerank'), 'cohere');
   assert.equal(gatewayProviderForUrl('https://api.anthropic.com/v1/messages'), 'anthropic');
   assert.equal(gatewayProviderForUrl('https://api.together.xyz/v1/chat/completions'), 'together-ai');
+  assert.equal(gatewayProviderForUrl('https://ark.ap-southeast.bytepluses.com/api/coding/v3/responses'), 'custom-byteplus-modelark');
   assert.equal(gatewayProviderForUrl('https://embeddings.singulancelabs.com/v1/embeddings'), 'custom-bge-embeddings');
   assert.equal(gatewayProviderForUrl('https://rerank.singulancelabs.com/api/v1/rerank'), 'custom-bge-reranker');
   assert.equal(gatewayProviderForUrl('https://synthesize.singulancelabs.com/v1/chat/completions'), 'custom-qwen3-ingest');
   assert.equal(gatewayProviderUrl('openrouter', 'https://openrouter.ai/api/v1/chat/completions'), 'https://gateway.ai.cloudflare.com/v1/account/gateway/openrouter/chat/completions');
   assert.deepEqual(gatewayHeaders('cerebras'), {
-    'cf-aig-authorization': 'Bearer token', 'cf-aig-skip-cache': 'true', 'cf-aig-byok-alias': 'first',
+    'cf-aig-authorization': 'Bearer token', 'cf-aig-skip-cache': 'true', 'cf-aig-collect-log-payload': 'false', 'cf-aig-byok-alias': 'first',
   });
+}));
+
+test('Gateway routes ModelArk through the configured custom provider and preserves the API path', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_BYTEPLUS_MODELARK_BYOK_ALIAS: 'modelark',
+}, async () => {
+  let call;
+  await gatewayFirstFetch('https://ark.ap-southeast.bytepluses.com/api/coding/v3/responses', {
+    method: 'POST', headers: { Authorization: 'Bearer modelark-key' },
+  }, { fetchImpl: async (url, init) => {
+    call = { url: String(url), headers: new Headers(init.headers) };
+    return new Response('{}');
+  } });
+  assert.equal(call.url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-byteplus-modelark/api/coding/v3/responses');
+  assert.equal(call.headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(call.headers.get('authorization'), null);
 }));
 
 test('Gateway routes embeddings and reranking without replaying upstream', async () => withEnv({

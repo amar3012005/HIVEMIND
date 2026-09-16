@@ -42,6 +42,13 @@ export function gatewayProviderForUrl(value) {
   if (host === 'api.cohere.com' || host === 'api.cohere.ai') return 'cohere';
   if (host === 'api.anthropic.com') return 'anthropic';
   if (host === 'api.together.xyz') return 'together-ai';
+  // BytePlus ModelArk / Coding Plan is configured in AI Gateway as a custom
+  // provider. Keep the upstream path intact so both /api/coding/v3 and any
+  // future ModelArk-compatible endpoint continue to work through Gateway.
+  if (host === 'ark.ap-southeast.bytepluses.com') {
+    return String(process.env.CLOUDFLARE_AI_GATEWAY_MODELARK_PROVIDER || '').trim()
+      || 'custom-byteplus-modelark';
+  }
   if (host === 'embeddings.singulancelabs.com') {
     return String(process.env.CLOUDFLARE_AI_GATEWAY_BGE_EMBEDDINGS_PROVIDER || '').trim()
       || 'custom-bge-embeddings';

@@ -46,6 +46,10 @@ from ..db import (
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
 from .model_policy import HYPER_FAST_MODEL, HYPER_PLANNER_MODEL, canonical_hyper_model
+from .output_contract import (
+    artifact_intent_allowed,
+    resolve_output_contract,
+)
 from .visual_artifact_renderer import (
     PRESENTATION_SPEC_SCHEMA,
     normalize_presentation_spec,
@@ -1498,6 +1502,16 @@ class Director:
                           or resolve_room_kind("", room_goal or "", user_message or ""))
         self.room_mode = str(room_mode or "runtime").strip().lower()
         self.is_work_room = self.room_mode == "work"
+        self.output_contract = resolve_output_contract(
+            user_message=self.user_message or "",
+            room_kind=self.room_kind,
+            room_mode=self.room_mode,
+            execution_profile=self.execution_profile,
+        )
+        if self.output_contract.get("artifact_required"):
+            self.intended_output = "artifact"
+        elif self.intended_output in {"", "answer"} and self.output_contract.get("intended_output"):
+            self.intended_output = str(self.output_contract["intended_output"])
         self.domain_pack = get_domain_pack(self.room_kind)
         self.campaign_brief = campaign_brief if isinstance(campaign_brief, dict) else {}
         self.skills_used: List[str] = []
@@ -5221,8 +5235,28 @@ class Director:
         """
         profile_id = str(self.execution_profile.get("profile_id") or "")
         governed_profiles = {"research.decision.v1", "fundraising.artifact.v1", "legal_finance.review.v1"}
+        contract = getattr(self, "output_contract", None) or {}
         if profile_id not in governed_profiles:
-            return plan
+            if not contract.get("evidence_required"):
+                return plan
+            if re.search(r"\b(?:do not|don't|without|no)\s+(?:use\s+)?(?:the\s+)?web(?:\s+search)?\b",
+                         self.user_message or "", re.IGNORECASE):
+                return plan
+            amended = dict(plan)
+            queries = [str(q).strip() for q in (amended.get("recall_queries") or []) if str(q).strip()]
+            if not queries:
+                amended["recall_queries"] = [str(self.user_message or "")[:400]]
+            has_external_read = bool(
+                str(amended.get("web_query") or "").strip()
+                or amended.get("connector_calls")
+                or amended.get("seo_audit_url")
+            )
+            if not has_external_read and self._web_budget > 0:
+                amended["web_query"] = str(self.user_message or "")[:1200]
+            amended["turn_mode"] = "task"
+            amended["research_floor"] = "output_contract.evidence_required"
+            log.warning("[hyper-engine] enforced output-contract research floor")
+            return amended
         if re.search(r"\b(?:do not|don't|without|no)\s+(?:use\s+)?(?:the\s+)?web(?:\s+search)?\b",
                      self.user_message or "", re.IGNORECASE):
             return plan
@@ -5429,7 +5463,7 @@ class Director:
             "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "execution_engine", "collaboration_intensity", "response_depth", "output_family", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
             "additionalProperties": False,
         }
-        if _visual_artifacts_enabled():
+        if _visual_artifacts_enabled() and (getattr(self, "output_contract", {}) or {}).get("artifact_required"):
             schema["properties"]["artifact_intent"] = {
                 "type": ["object", "null"],
                 "properties": {
@@ -5602,24 +5636,37 @@ class Director:
                     "Reconcile your output-mode decision with this contract; do not silently downgrade a required "
                     "artifact to prose:\n" + json.dumps(self.execution_profile, ensure_ascii=False)[:3000]
                 )
+            output_contract = getattr(self, "output_contract", None) or {}
+            if output_contract.get("artifact_required"):
+                sysp += (
+                    "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact when "
+                    "a presentation, explorable document, or dashboard materially "
+                    "completes the ACTIVE request better than prose. This capability belongs to every Room; decide "
+                    "from the requested outcome, never the Room name. Use null for normal answers, greetings, email, "
+                    "or external Docs/Sheets/Notion writes. Preserve the requested medium exactly: use kind=presentation "
+                    "for a deck, pitch deck, slides, briefing presentation, or slide-by-slide request; use kind=dashboard "
+                    "only when the user asks for monitoring, a dashboard, console, or recurring metric exploration; "
+                    "otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
+                    "dashboard. Describe purpose and audience without choosing a theme "
+                    "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
+                    " A requested wireframe, prototype, journey map, flow visualization, system diagram, or other "
+                    "designed visual deliverable normally uses kind=interactive_document unless the user explicitly "
+                    "asked for slides or a dashboard. A request to explain, advise, summarize, or write without a "
+                    "visual deliverable remains textual and uses null. When artifact_intent is not null, choose "
+                    "execution_engine=debate so the governed final-output adapter receives the complete evidence board "
+                    "instead of returning early through agentic execution."
+                    + profile_contract
+                )
+            else:
+                sysp += (
+                    "\n\nOUTPUT CONTRACT: this turn is text-first. "
+                    "Do not invent an interactive page, deck, or dashboard. "
+                    "A positioning line, brand voice guide, or written recommendation is prose."
+                )
+        output_contract = getattr(self, "output_contract", None) or {}
+        if output_contract.get("evidence_required"):
             sysp += (
-                "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact when "
-                "a presentation, explorable document, or dashboard materially "
-                "completes the ACTIVE request better than prose. This capability belongs to every Room; decide "
-                "from the requested outcome, never the Room name. Use null for normal answers, greetings, email, "
-                "or external Docs/Sheets/Notion writes. Preserve the requested medium exactly: use kind=presentation "
-                "for a deck, pitch deck, slides, briefing presentation, or slide-by-slide request; use kind=dashboard "
-                "only when the user asks for monitoring, a dashboard, console, or recurring metric exploration; "
-                "otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
-                "dashboard. Describe purpose and audience without choosing a theme "
-                "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
-                " A requested wireframe, prototype, journey map, flow visualization, system diagram, or other "
-                "designed visual deliverable normally uses kind=interactive_document unless the user explicitly "
-                "asked for slides or a dashboard. A request to explain, advise, summarize, or write without a "
-                "visual deliverable remains textual and uses null. When artifact_intent is not null, choose "
-                "execution_engine=debate so the governed final-output adapter receives the complete evidence board "
-                "instead of returning early through agentic execution."
-                + profile_contract
+                "\nEvidence is required: plan at least one recall_query or web_query before synthesis."
             )
         if self.domain_pack:
             sysp += (
@@ -5740,7 +5787,9 @@ class Director:
             plan["output_family"] = explicit_family
         if explicit_family in {"text", "spreadsheet"}:
             plan["artifact_intent"] = None
-        elif explicit_family in {"presentation", "image", "document"} and _visual_artifacts_enabled():
+        elif (explicit_family in {"presentation", "image", "document"}
+                and _visual_artifacts_enabled()
+                and bool((getattr(self, "output_contract", None) or {}).get("artifact_required"))):
             raw = plan.get("artifact_intent") if isinstance(plan.get("artifact_intent"), dict) else {}
             plan["artifact_intent"] = {
                 "kind": "presentation" if explicit_family == "presentation" else "interactive_document",
@@ -5751,11 +5800,12 @@ class Director:
                 "creative_freedom": str(raw.get("creative_freedom") or "high"),
                 "requirements": [str(item)[:240] for item in (raw.get("requirements") or [])][:12],
             }
-        profile_controls_visual = (self.fast_planner_mode == "glm_no_reasoning"
-                                   and bool(self.execution_profile.get("profile_id")))
-        profile_requires_visual = self.execution_profile.get("visual_artifact_required") is True
-        if (_visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict)
-                and (not profile_controls_visual or profile_requires_visual)):
+        profile_requires_visual = (
+            self.execution_profile.get("visual_artifact_required") is True
+            or bool((getattr(self, "output_contract", None) or {}).get("artifact_required"))
+        )
+        if (_visual_artifacts_enabled()
+                and artifact_intent_allowed(getattr(self, "output_contract", {}) or {}, plan.get("artifact_intent"))):
             raw_intent = plan["artifact_intent"]
             artifact_kind = str(raw_intent.get("kind") or "interactive_document").strip()
             if artifact_kind not in {"presentation", "interactive_document", "dashboard"}:
@@ -5776,6 +5826,8 @@ class Director:
             }
         else:
             self.artifact_intent = None
+            if not profile_requires_visual:
+                plan["artifact_intent"] = None
         required_artifacts = [
             str(item).strip()
             for item in (self.execution_profile.get("required_artifacts") or [])
@@ -5788,7 +5840,7 @@ class Director:
         }
         if (_visual_artifacts_enabled() and self.artifact_intent is None
                 and required_artifacts and allowed_outputs == {"artifact"}
-                and (not profile_controls_visual or profile_requires_visual)):
+                and profile_requires_visual):
             requested_medium = str(plan.get("output_family") or "").strip().lower()
             if requested_medium not in {"presentation", "image"}:
                 requested_medium = (
@@ -5809,17 +5861,21 @@ class Director:
             }
             plan["artifact_intent"] = dict(self.artifact_intent)
             plan["execution_engine"] = "debate"
-        if self.artifact_intent:
-            # The execution profile and the planner have selected the visual
-            # producer as the final-output adapter. Keep that decision authoritative
-            # through verification instead of inheriting the caller's prose default.
+        if self.artifact_intent and (getattr(self, "output_contract", {}) or {}).get("artifact_required"):
             self.intended_output = "artifact"
+        elif getattr(self, "output_contract", None):
+            if not self.output_contract.get("artifact_required"):
+                self.artifact_intent = None
+                plan["artifact_intent"] = None
+                if self.intended_output == "artifact":
+                    self.intended_output = str(self.output_contract.get("intended_output") or "answer")
         log.info(
-            "[hyper-engine] output contract profile=%s visual_enabled=%s intended_output=%s artifact_kind=%s",
+            "[hyper-engine] output contract profile=%s visual_enabled=%s intended_output=%s artifact_kind=%s evidence_required=%s",
             self.execution_profile.get("profile_id") or "none",
-            _visual_artifacts_enabled(),
+            bool((getattr(self, "output_contract", None) or {}).get("visual_enabled")),
             self.intended_output,
             (self.artifact_intent or {}).get("kind") or "none",
+            bool((getattr(self, "output_contract", None) or {}).get("evidence_required")),
         )
         intensity = str(plan.get("collaboration_intensity") or "").strip().lower()
         if intensity not in {"light", "standard", "deep"}:
@@ -7876,6 +7932,7 @@ class Director:
                 "intended_output": "artifact",
                 "artifact_intent": None,
                 "artifact_path_error": "visual_artifact_path_disabled",
+                "output_contract": dict(getattr(self, "output_contract", None) or {}),
             }
         if self.domain_pack:
             await self.emit({
@@ -7912,6 +7969,10 @@ class Director:
             "mode": "visual" if self.artifact_intent else "text",
             "artifact_kind": (self.artifact_intent or {}).get("kind"),
             "profile_id": self.execution_profile.get("profile_id"),
+            "intended_output": self.intended_output,
+            "artifact_required": bool((getattr(self, "output_contract", None) or {}).get("artifact_required")),
+            "evidence_required": bool((getattr(self, "output_contract", None) or {}).get("evidence_required")),
+            "output_contract": dict(getattr(self, "output_contract", None) or {}),
             "reason": (
                 "A governed visual artifact is the selected deliverable."
                 if self.artifact_intent else
@@ -8302,6 +8363,7 @@ class Director:
             "artifact_receipt": artifact_receipt,
             "debate_contract": turn_contract.get("debate_contract") or {},
             "roundtable_shadow": self._roundtable_shadow,
+            "output_contract": dict(getattr(self, "output_contract", None) or {}),
         }
 
 

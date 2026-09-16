@@ -1814,6 +1814,12 @@ const taraGrokRuntime = createTaraGrokRuntime({
   recallFn: recallPersistedMemories,
   memoryStore: persistentMemoryStore,
   getTaraConfig: async ({ userId, orgId }) => taraHandler?.configStore?.getConfig('default', 'default', { userId, orgId }),
+  isGrokAdmitted: async ({ userId, orgId }) => {
+    if (!userId || !orgId) return false;
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+    const { taraGrokCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+    return taraGrokCanaryFor({ orgId, userId, email: user?.email || '' });
+  },
 });
 // TARA Skills store — named prompt presets; select copies prompts into config.
 if (taraHandler) {

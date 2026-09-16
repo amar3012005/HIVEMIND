@@ -10,15 +10,15 @@ function baseUrl(provider) {
 }
 
 function configuredOrder(runtime) {
-  const grokEnabled = !['0', 'false', 'no', 'off', 'disabled'].includes(
-    String(process.env.TARA_GROK_ENABLED ?? 'true').trim().toLowerCase(),
-  );
-  const allowed = grokEnabled ? ['deepgram', 'grok'] : ['deepgram'];
-  const preferred = runtime?.defaultProvider === 'grok' && grokEnabled ? 'grok' : 'deepgram';
+  // Browser Grok is admitted per user by Flagship in the Core runtime.  Outbound
+  // calling has no user session to evaluate, so it remains Deepgram-only until
+  // it gets its own explicit server-side admission contract.
+  const allowed = ['deepgram'];
+  const preferred = 'deepgram';
   const configured = [runtime?.deepgramConfig, runtime?.grokConfig]
     .flatMap((value) => Array.isArray(value?.provider_order) ? value.provider_order : [])
     .map(String).filter((value) => allowed.includes(value));
-  return [...new Set([preferred, ...configured, ...(grokEnabled ? [preferred === 'grok' ? 'deepgram' : 'grok'] : [])])];
+  return [...new Set([preferred, ...configured])];
 }
 
 async function probe(fetchImpl, url) {

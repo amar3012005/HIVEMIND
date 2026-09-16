@@ -11,6 +11,7 @@ type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
 type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
 type OperatingRoomFlagEnv = FlagEnv & { OPERATING_ROOM_FLAG?: string };
 type EntityDiscoveryFlagEnv = FlagEnv & { ENTITY_DISCOVERY_FLAG?: string };
+type TaraGrokFlagEnv = FlagEnv & { TARA_GROK_FLAG?: string };
 
 export async function evaluateGovernedRoomCanary(
   env: GovernedRoomFlagEnv, orgId: string, userId: string, email: string,
@@ -78,6 +79,28 @@ export async function evaluateEntityDiscoveryCanary(
     return details.value === true;
   } catch (error) {
     console.error(JSON.stringify({ event: 'entity_discovery_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
+
+// Grok realtime voice is separately admitted from operating rooms and text
+// features.  This keeps a provider-key or adapter deployment from exposing a
+// browser voice surface before the intended tenant/user canary is enabled.
+export async function evaluateTaraGrokCanary(
+  env: TaraGrokFlagEnv, orgId: string, userId: string, email: string,
+): Promise<boolean> {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!validUuid(orgId) || !validUuid(userId) || !normalizedEmail) return false;
+  if (!['local', 'enigma', 'production'].includes(env.ENVIRONMENT)) return false;
+  try {
+    const details = await env.FLAGS.getBooleanDetails(
+      env.TARA_GROK_FLAG || 'tara_grok_voice_v1', false,
+      { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, email: normalizedEmail, environment: env.ENVIRONMENT },
+    );
+    return details.value === true;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'tara_grok_flag_error', org_id: orgId, user_id: userId,
       message: error instanceof Error ? error.message : String(error) }));
     return false;
   }

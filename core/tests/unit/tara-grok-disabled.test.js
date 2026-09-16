@@ -1,18 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createTaraGrokRuntime, taraGrokEnabled } from '../../src/tara/grok-runtime.js';
+import { createTaraGrokRuntime } from '../../src/tara/grok-runtime.js';
 import { resolveTaraProviderCandidates } from '../../src/tara/provider-policy.js';
 
-const previous = process.env.TARA_GROK_ENABLED;
-test.after(() => {
-  if (previous === undefined) delete process.env.TARA_GROK_ENABLED;
-  else process.env.TARA_GROK_ENABLED = previous;
-});
-
-test('runtime rejects direct Grok selection when disabled', async () => {
-  process.env.TARA_GROK_ENABLED = 'false';
-  assert.equal(taraGrokEnabled(), false);
+test('runtime rejects Grok selection when Flagship denies the authenticated user', async () => {
 
   const current = {
     defaultProvider: 'deepgram', revision: 1, deepgramConfig: {}, grokConfig: {},
@@ -23,7 +15,7 @@ test('runtime rejects direct Grok selection when disabled', async () => {
       update: async () => { throw new Error('must not update disabled provider'); },
     },
   };
-  const handler = createTaraGrokRuntime({ prisma });
+  const handler = createTaraGrokRuntime({ prisma, isGrokAdmitted: async () => false });
   let reply;
   const handled = await handler({
     pathname: '/api/tara/runtime-config', method: 'PATCH',
@@ -36,8 +28,7 @@ test('runtime rejects direct Grok selection when disabled', async () => {
   assert.deepEqual(reply, { body: { error: 'provider_disabled', provider: 'grok' }, status: 409 });
 });
 
-test('provider policy never probes Grok when disabled', async () => {
-  process.env.TARA_GROK_ENABLED = 'false';
+test('outbound provider policy never probes Grok without its own admission contract', async () => {
   const probes = [];
   const runtime = {
     defaultProvider: 'grok', revision: 3,

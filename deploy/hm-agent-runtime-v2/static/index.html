@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HIVEMIND Agent Runtime</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #12151a;
+    --panel-2: #171b21;
+    --border: #232a33;
+    --text: #e6e9ee;
+    --muted: #8b95a3;
+    --accent: #f6821f;      /* Cloudflare orange */
+    --accent-dim: #b35c12;
+    --user: #1d2733;
+    --ok: #3fb950;
+    --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    background: var(--panel); flex: 0 0 auto;
+  }
+  header .logo {
+    width: 22px; height: 22px; border-radius: 4px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+  }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; padding: 3px 8px;
+    border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
+  }
+  .pill.ok { color: var(--ok); border-color: #1f3d24; }
+  .pill.err { color: var(--err); border-color: #4a1f1f; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* ---- sidebar ---- */
+  aside {
+    width: 300px; flex: 0 0 auto; border-right: 1px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column; min-height: 0;
+  }
+  .side-section { padding: 12px; border-bottom: 1px solid var(--border); }
+  .side-section h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 0 0 8px; font-weight: 600;
+  }
+  label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 4px; }
+  input, select, textarea {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 9px; font-size: 13px; font-family: var(--sans);
+  }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent-dim); }
+  textarea { resize: vertical; min-height: 60px; font-family: var(--mono); font-size: 12px; }
+  button {
+    background: var(--accent); color: #0b0d10; border: none; border-radius: 6px;
+    padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: var(--sans);
+  }
+  button:hover { background: #ff9a3d; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.ghost {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    font-weight: 500;
+  }
+  button.ghost:hover { background: var(--panel-2); }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+
+  .sessions { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
+  .session-item {
+    padding: 8px 10px; border-radius: 6px; cursor: pointer;
+    border: 1px solid transparent; margin-bottom: 4px;
+  }
+  .session-item:hover { background: var(--panel-2); }
+  .session-item.active { background: var(--panel-2); border-color: var(--accent-dim); }
+  .session-item .name { font-size: 13px; }
+  .session-item .meta { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+
+  /* ---- chat ---- */
+  section.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .messages { flex: 1; overflow-y: auto; padding: 20px; min-height: 0; }
+  .msg { max-width: 780px; margin: 0 auto 16px; display: flex; gap: 10px; }
+  .msg .avatar {
+    width: 26px; height: 26px; border-radius: 5px; flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; font-family: var(--mono);
+  }
+  .msg.user .avatar { background: var(--user); color: var(--muted); }
+  .msg.assistant .avatar { background: var(--accent); color: #0b0d10; }
+  .msg .body { flex: 1; min-width: 0; }
+  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; font-family: var(--mono); }
+  .msg .text {
+    white-space: pre-wrap; word-wrap: break-word; line-height: 1.55;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  .msg.user .text { background: var(--user); }
+  .msg .text.thinking {
+    color: var(--muted); font-style: italic; border-style: dashed;
+    font-size: 13px;
+  }
+  .tool {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; margin-top: 6px;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .tool .tname { color: var(--accent); }
+
+  .composer { border-top: 1px solid var(--border); padding: 12px 20px; background: var(--panel); }
+  .composer-inner { max-width: 780px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
+  .composer textarea { min-height: 44px; max-height: 180px; font-family: var(--sans); font-size: 14px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 15vh; }
+  .empty code { font-family: var(--mono); color: var(--accent); }
+  .log { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"></div>
+  <div>
+    <h1>HIVEMIND Agent Runtime</h1>
+    <div class="sub">AgentScope 2.0.8 · Cloudflare AI Gateway → DeepSeek V4 Flash</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill" id="health-pill">checking…</span>
+  <span class="pill" id="user-pill">—</span>
+</header>
+
+<main>
+  <aside>
+    <div class="side-section">
+      <h2>Identity</h2>
+      <label for="bearer">Bearer token (hm-core verified)</label>
+      <input id="bearer" type="password" placeholder="paste a user token" />
+      <label for="apiKey">X-API-Key (internal / master)</label>
+      <input id="apiKey" type="password" placeholder="service-to-service key" />
+      <label for="userId">X-HM-User-Id (with internal key)</label>
+      <input id="userId" value="demo" />
+      <div class="row" style="margin-top:8px">
+        <button class="ghost" id="btn-connect">Connect</button>
+      </div>
+      <div class="log" id="auth-log" style="margin-top:6px"></div>
+    </div>
+
+    <div class="side-section">
+      <h2>Setup</h2>
+      <label for="credName">Credential name</label>
+      <input id="credName" value="cf-gw" />
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="deepseek/deepseek-v4-flash">deepseek/deepseek-v4-flash</option>
+        <option value="deepseek/deepseek-v4.1-flash">deepseek/deepseek-v4.1-flash</option>
+      </select>
+      <label for="sysPrompt">System prompt</label>
+      <textarea id="sysPrompt">You are a helpful assistant running on the HIVEMIND agent runtime.</textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="btn-setup">Create agent + session</button>
+      </div>
+      <div class="log" id="setup-log" style="margin-top:8px"></div>
+    </div>
+
+    <div class="side-section" style="border-bottom:none; padding-bottom:4px">
+      <h2>Sessions</h2>
+    </div>
+    <div class="sessions" id="sessions"></div>
+  </aside>
+
+  <section class="chat">
+    <div class="messages" id="messages">
+      <div class="empty">
+        No session yet.<br />
+        Click <code>Create agent + session</code> to start.
+      </div>
+    </div>
+    <div class="composer">
+      <div class="composer-inner">
+        <textarea id="input" placeholder="Send a message… (Enter to send, Shift+Enter for newline)" disabled></textarea>
+        <button id="btn-send" disabled>Send</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    userId: "demo",
+    agentId: null,
+    sessionId: null,
+    credentialId: null,
+    es: null,
+    abort: null,
+    streaming: false,
+    // reply_id -> DOM node for the in-progress assistant bubble
+    live: new Map(),
+  };
+
+  const api = (path, opts = {}) =>
+    fetch(path, {
+      ...opts,
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(),
+        ...(opts.headers || {}),
+      },
+    });
+
+  // Auth: the service now resolves the caller through hm-core identity.
+  // Two shapes are accepted:
+  //   - internal: X-API-Key (master) + X-HM-User-Id  (what hm-core sends)
+  //   - user:     Authorization: Bearer <token>      (verified by hm-core)
+  // The dev X-User-ID header only works when AGENTSCOPE_ALLOW_DEV_AUTH=1.
+  function authHeaders() {
+    const h = {};
+    const token = $("bearer").value.trim();
+    const apiKey = $("apiKey").value.trim();
+    const uid = $("userId").value.trim();
+    if (token) h["Authorization"] = "Bearer " + token;
+    if (apiKey) h["X-API-Key"] = apiKey;
+    if (uid) h["X-HM-User-Id"] = uid;
+    return h;
+  }
+
+  const log = (msg) => { $("setup-log").textContent = msg; };
+
+  // ---------- health ----------
+  async function checkHealth() {
+    const pill = $("health-pill");
+    try {
+      // /livez is unauthenticated; /health needs credentials and reports the
+      // per-component topology.
+      const live = await fetch("/livez");
+      if (!live.ok) throw new Error("livez " + live.status);
+      const r = await api("/health");
+      if (r.status === 401) {
+        pill.textContent = "up · auth required";
+        pill.className = "pill";
+        $("auth-log").textContent = "set a bearer token or internal key";
+        return;
+      }
+      const d = await r.json();
+      pill.textContent = "healthy · v" + d.version;
+      pill.className = "pill ok";
+      $("auth-log").textContent = "authenticated";
+    } catch (e) {
+      pill.textContent = "unreachable";
+      pill.className = "pill err";
+    }
+  }
+
+  // ---------- setup: credential -> agent -> session ----------
+  async function setup() {
+    $("btn-setup").disabled = true;
+    try {
+      state.userId = $("userId").value.trim() || "demo";
+      $("user-pill").textContent = state.userId;
+
+      log("creating credential…");
+      const credRes = await api("/credential/", {
+        method: "POST",
+        body: JSON.stringify({
+          data: {
+            type: "cloudflare_gateway_credential",
+            name: $("credName").value.trim() || "cf-gw",
+            api_key: "gateway-managed",
+          },
+        }),
+      });
+      if (!credRes.ok) throw new Error("credential: " + credRes.status + " " + (await credRes.text()));
+      const cred = await credRes.json();
+      state.credentialId = cred.credential_id || cred.id || (cred.data && cred.data.id);
+      log("credential " + state.credentialId);
+
+      log("creating agent…");
+      const agentRes = await api("/agent/", {
+        method: "POST",
+        body: JSON.stringify({
+          name: "Runtime Demo Agent",
+          system_prompt: $("sysPrompt").value,
+        }),
+      });
+      if (!agentRes.ok) throw new Error("agent: " + agentRes.status + " " + (await agentRes.text()));
+      const agent = await agentRes.json();
+      state.agentId = agent.agent_id || agent.id || (agent.data && agent.data.id);
+      log("agent " + state.agentId);
+
+      log("creating session…");
+      const sessRes = await api("/sessions/", {
+        method: "POST",
+        body: JSON.stringify({
+          agent_id: state.agentId,
+          chat_model_config: {
+            type: "cloudflare_gateway_credential",
+            credential_id: state.credentialId,
+            model: $("model").value,
+            parameters: { max_tokens: 2048 },
+          },
+        }),
+      });
+      if (!sessRes.ok) throw new Error("session: " + sessRes.status + " " + (await sessRes.text()));
+      const sess = await sessRes.json();
+      state.sessionId = sess.session_id || sess.id || (sess.data && sess.data.id);
+      log("session " + state.sessionId);
+
+      $("input").disabled = false;
+      $("btn-send").disabled = false;
+      $("messages").innerHTML = "";
+      subscribe();
+      await refreshSessions();
+      log("ready ✓");
+    } catch (e) {
+      log("ERROR: " + e.message);
+      console.error(e);
+    } finally {
+      $("btn-setup").disabled = false;
+    }
+  }
+
+  // ---------- SSE ----------
+  // NOTE: the browser's EventSource CANNOT set custom headers, and this service
+  // authenticates via the X-User-ID header — so EventSource gets a 422 and no
+  // events ever arrive. We therefore stream with fetch() + ReadableStream,
+  // which does support headers, and parse the SSE frames by hand.
+  async function subscribe() {
+    if (state.abort) state.abort.abort();
+    const abort = new AbortController();
+    state.abort = abort;
+    const url = `/sessions/${state.sessionId}/stream?agent_id=${encodeURIComponent(state.agentId)}`;
+    try {
+      const res = await fetch(url, {
+        headers: { ...authHeaders(), Accept: "text/event-stream" },
+        signal: abort.signal,
+      });
+      if (!res.ok || !res.body) {
+        addMessage("assistant", "stream failed: " + res.status);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line.
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of frame.split("\n")) {
+            if (!line.startsWith("data:")) continue;   // skip ":" heartbeats
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+            try { handleEvent(JSON.parse(payload)); } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") console.error("stream error", e);
+    }
+  }
+
+  function handleEvent(e) {
+    const t = e.type;
+    const rid = e.reply_id || "default";
+
+    if (t === "REPLY_START") {
+      state.streaming = true;
+      const node = addMessage("assistant", "", { streaming: true });
+      state.live.set(rid, node);
+      return;
+    }
+    if (t === "TEXT_BLOCK_DELTA") {
+      const node = state.live.get(rid);
+      if (node) node.text.textContent += (e.delta || e.text || "");
+      return;
+    }
+    if (t === "THINKING_BLOCK_DELTA") {
+      const node = state.live.get(rid);
+      if (node) {
+        if (!node.thinking) {
+          node.thinking = document.createElement("div");
+          node.thinking.className = "text thinking";
+          node.body.insertBefore(node.thinking, node.text);
+        }
+        node.thinking.textContent += (e.delta || e.text || "");
+      }
+      return;
+    }
+    if (t === "TOOL_CALL_START" || t === "TOOL_CALL_END") {
+      const node = state.live.get(rid);
+      if (node) {
+        const el = document.createElement("div");
+        el.className = "tool";
+        el.innerHTML = '<span class="tname">' + (e.name || e.tool_name || "tool") + "</span> " +
+          escapeHtml(JSON.stringify(e.input || e.arguments || {}, null, 0));
+        node.body.appendChild(el);
+      }
+      return;
+    }
+    if (t === "TOOL_RESULT_END") {
+      const node = state.live.get(rid);
+      if (node) {
+        const el = document.createElement("div");
+        el.className = "tool";
+        el.textContent = "→ " + truncate(JSON.stringify(e.output ?? e.result ?? ""), 600);
+        node.body.appendChild(el);
+      }
+      return;
+    }
+    if (t === "REPLY_END") {
+      state.streaming = false;
+      const node = state.live.get(rid);
+      if (node) {
+        node.text.classList.remove("streaming");
+        if (e.error) {
+          const err = document.createElement("div");
+          err.className = "tool";
+          err.style.color = "var(--err)";
+          err.textContent = "error: " + JSON.stringify(e.error);
+          node.body.appendChild(err);
+        }
+        state.live.delete(rid);
+      }
+      return;
+    }
+    if (t === "REQUIRE_USER_CONFIRM") {
+      addMessage("assistant", "[confirmation required] " + JSON.stringify(e));
+      return;
+    }
+  }
+
+  // ---------- rendering ----------
+  function addMessage(role, text, opts = {}) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = role === "user" ? "U" : "AI";
+    const body = document.createElement("div");
+    body.className = "body";
+    const who = document.createElement("div");
+    who.className = "who";
+    who.textContent = role === "user" ? state.userId : "assistant";
+    const txt = document.createElement("div");
+    txt.className = "text" + (opts.streaming ? " streaming" : "");
+    txt.textContent = text;
+    body.appendChild(who);
+    body.appendChild(txt);
+    wrap.appendChild(avatar);
+    wrap.appendChild(body);
+    $("messages").appendChild(wrap);
+    $("messages").scrollTop = $("messages").scrollHeight;
+    return { wrap, body, text: txt, thinking: null };
+  }
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const truncate = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
+
+  // ---------- send ----------
+  async function send() {
+    const input = $("input");
+    const text = input.value.trim();
+    if (!text || !state.sessionId) return;
+    input.value = "";
+    addMessage("user", text);
+    const r = await api("/chat/", {
+      method: "POST",
+      body: JSON.stringify({
+        agent_id: state.agentId,
+        session_id: state.sessionId,
+        input: { name: state.userId, role: "user", content: [{ type: "text", text }] },
+      }),
+    });
+    if (!r.ok) {
+      addMessage("assistant", "send failed: " + r.status + " " + (await r.text()));
+    }
+  }
+
+  // ---------- sessions list ----------
+  async function refreshSessions() {
+    if (!state.agentId) return;
+    const r = await api(`/sessions/?agent_id=${encodeURIComponent(state.agentId)}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const list = d.sessions || d.data || d || [];
+    const box = $("sessions");
+    box.innerHTML = "";
+    (Array.isArray(list) ? list : []).forEach((s) => {
+      const rec = s.session || s;
+      const el = document.createElement("div");
+      el.className = "session-item" + (rec.id === state.sessionId ? " active" : "");
+      el.innerHTML = '<div class="name">' + escapeHtml(rec.name || "(unnamed)") + "</div>" +
+        '<div class="meta">' + escapeHtml(rec.id || "") + "</div>";
+      el.onclick = () => {
+        state.sessionId = rec.id;
+        $("messages").innerHTML = "";
+        subscribe();
+        refreshSessions();
+      };
+      box.appendChild(el);
+    });
+  }
+
+  // ---------- wire up ----------
+  $("btn-connect").onclick = () => {
+    state.userId = $("userId").value.trim() || "demo";
+    $("user-pill").textContent = state.userId;
+    checkHealth();
+  };  $("btn-setup").onclick = setup;
+  $("btn-send").onclick = send;
+  $("input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  checkHealth();
+  $("user-pill").textContent = state.userId;
+})();
+</script>
+</body>
+</html>

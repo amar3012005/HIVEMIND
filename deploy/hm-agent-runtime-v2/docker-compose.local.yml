@@ -1,0 +1,140 @@
+# hm-agent-runtime-v2 — singulance-local overlay
+#
+# Joins the local Singulance stack (`hivemind-network`) so the control plane can
+# dispatch WorkRuns to it, while keeping AgentScope's own Redis separate from
+# hm-core's.
+#
+# Run alongside the base local stack:
+#   docker compose \
+#     -f docker-compose.local-stack.yml \
+#     -f docker-compose.local-services.yml \
+#     -f deploy/hm-agent-runtime-v2/docker-compose.local.yml \
+#     up -d --build
+#
+# Why a separate overlay and not an edit to docker-compose.local-services.yml:
+# the runtime is a NEW service with its own image, its own Redis, and its own
+# lifecycle. Keeping it in its own file means the local stack can be brought up
+# without it (and vice versa) — and the same file is the seam a future
+# production compose reuses.
+#
+# Networking: the runtime joins `hivemind-network` (the external bridge the
+# local stack creates) so `control-plane` can reach it at
+# `http://agent-runtime:8000`. It does NOT publish a host port — the local
+# stack reaches it by service name, and nothing outside the network should.
+
+name: hm-agent-runtime-v2-local
+
+services:
+  # AgentScope's OWN storage + message bus. Deliberately separate from
+  # hm-core's redis: the runtime's session/schedule/team state is its own, and
+  # keeping them apart lets either side be reset independently.
+  agent-runtime-redis:
+    image: redis:7-alpine
+    container_name: hm-agent-runtime-local-redis
+    command:
+      - redis-server
+      # Persist: AgentScope state (sessions, schedules, teams) lives here.
+      # Without this a container restart silently loses every session.
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - agent-runtime-redis-data:/data
+    networks:
+      - hivemind-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  agent-runtime:
+    build:
+      context: ../..                          # repo root
+      dockerfile: deploy/hm-agent-runtime-v2/Dockerfile
+      args:
+        DOCKER_GID: ${DOCKER_GID:-0}
+    image: hm-agent-runtime-v2:local
+    container_name: hm-agent-runtime-local
+    # No host port: reachable only inside hivemind-network, by service name.
+    expose:
+      - "8000"
+    env_file:
+      - path: deploy/hm-agent-runtime-v2/.env
+        required: false
+    environment:
+      # --- AgentScope state (its own Redis, not hm-core's) ---
+      AGENTSCOPE_REDIS_HOST: agent-runtime-redis
+      AGENTSCOPE_REDIS_PORT: "6379"
+      AGENTSCOPE_REDIS_DB: "0"
+      AGENTSCOPE_WORKSPACES: /data/workspaces
+      # --- single process owns timers + channel connections ---
+      AGENTSCOPE_ENABLE_SCHEDULER: "1"
+      AGENTSCOPE_ENABLE_CHANNEL_WORKER: "1"
+      AGENTSCOPE_ENABLE_HUBS: "0"
+      AGENTSCOPE_DOWNLOAD_SECRET: ${AGENTSCOPE_DOWNLOAD_SECRET:-local-agent-runtime-download-secret}
+      # --- hm-core identity ---
+      # Same master key the local stack uses, so the control plane's
+      # X-API-Key + X-HM-User-Id headers authenticate here unchanged.
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      # The control plane is the Core API surface for bearer verification.
+      HM_CORE_URL: ${HM_CORE_URL:-http://control-plane:3000}
+      HM_CORE_VERIFY_PATH: ${HM_CORE_VERIFY_PATH:-/api/auth/verify}
+      # LOCAL ONLY. Accepts the unauthenticated X-HM-User-Id header so the
+      # runtime is usable before hm-core auth is fully wired. Never enable on a
+      # reachable host.
+      AGENTSCOPE_ALLOW_DEV_AUTH: ${AGENTSCOPE_ALLOW_DEV_AUTH:-1}
+      # --- hm-core bridge: WorkRun -> session + event forwarding ---
+      # ON by default locally: the whole point of this overlay is the wired path.
+      HM_FORWARD_ENABLED: ${HM_FORWARD_ENABLED:-1}
+      HM_CORE_EVENT_PATH: ${HM_CORE_EVENT_PATH:-/internal/hyper/turn-event}
+      # --- sandbox backend ---
+      # local = no sandbox (single-tenant). Switch to e2b before multi-tenant.
+      AGENTSCOPE_WORKSPACE_BACKEND: ${AGENTSCOPE_WORKSPACE_BACKEND:-local}
+      AGENTSCOPE_WORKSPACE_ISOLATION: ${AGENTSCOPE_WORKSPACE_ISOLATION:-per_session}
+      AGENTSCOPE_WORKSPACE_TTL: ${AGENTSCOPE_WORKSPACE_TTL:-3600}
+      AGENTSCOPE_SANDBOX_IMAGE: ${AGENTSCOPE_SANDBOX_IMAGE:-python:3.12-slim}
+      AGENTSCOPE_SANDBOX_NODE_VERSION: ${AGENTSCOPE_SANDBOX_NODE_VERSION:-20}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      # --- Cloudflare AI Gateway (same gateway as hm-core) ---
+      CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
+      AGENTSCOPE_GATEWAY_DEBUG: ${AGENTSCOPE_GATEWAY_DEBUG:-0}
+      AGENTSCOPE_LOG_LEVEL: ${AGENTSCOPE_LOG_LEVEL:-INFO}
+      # --- direct-routing fallback (only when the gateway is disabled) ---
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - agent-runtime-workspaces:/data/workspaces
+    networks:
+      - hivemind-network
+    depends_on:
+      agent-runtime-redis:
+        condition: service_healthy
+    healthcheck:
+      # /livez is unauthenticated by design; /health requires credentials.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  agent-runtime-redis-data:
+    name: hm-agent-runtime-local-redis-data
+  agent-runtime-workspaces:
+    name: hm-agent-runtime-local-workspaces
+
+networks:
+  # Created by docker-compose.local-stack.yml; this overlay joins it.
+  hivemind-network:
+    name: hivemind-network
+    external: true

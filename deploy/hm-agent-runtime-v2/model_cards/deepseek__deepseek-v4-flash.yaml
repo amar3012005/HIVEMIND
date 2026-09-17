@@ -1,0 +1,30 @@
+name: deepseek/deepseek-v4-flash
+label: DeepSeek V4 Flash
+status: active
+
+# Verified live against the gateway's OpenRouter route:
+#   model id served      : deepseek/deepseek-v4-flash
+#   OpenRouter name      : "DeepSeek: DeepSeek V4 Flash 0423"
+#   provider context     : 1024000  (OpenRouter listing: 1048576)
+#   max_completion_tokens: 384000
+#   modality             : text -> text
+#   latency observed     : ~2.6s for a 10-token reply
+
+input_types:
+  - text/plain
+
+output_types:
+  - text/plain
+
+# Use the provider's own figure rather than OpenRouter's rounded 1048576, so
+# AgentScope's context-compression arithmetic matches what the upstream allows.
+context_size: 1024000
+output_size: 384000
+
+parameter_overrides:
+  max_tokens:
+    maximum: 384000
+  # Voice is a TTS-only parameter; hide it so the frontend does not render a
+  # field this model cannot use.
+  voice:
+    hidden: true

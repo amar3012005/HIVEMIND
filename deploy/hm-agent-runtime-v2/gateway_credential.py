@@ -29,6 +29,7 @@ credential-type change, not a code change.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any, Literal, Type
@@ -38,7 +39,13 @@ from pydantic import ConfigDict
 from agentscope.credential import CredentialBase, OpenAICredential
 from agentscope.model import OpenAIChatModel, ModelCard
 
-from cloudflare_gateway import gateway_client_kwargs, gateway_base_url, enabled
+from cloudflare_gateway import (
+    MODEL_CALL_DEADLINE_S,
+    deadline_stream,
+    enabled,
+    gateway_base_url,
+    gateway_client_kwargs,
+)
 
 # Where the gateway-routed model cards live. ``ChatModelBase.list_models()``
 # defaults to a ``_models`` directory sitting next to the *subclass's* source
@@ -138,6 +145,19 @@ class CloudflareGatewayChatModel(OpenAIChatModel):
             client_kwargs=merged_client_kwargs,
             **kwargs,
         )
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        deadline = MODEL_CALL_DEADLINE_S
+        try:
+            result = await asyncio.wait_for(super().__call__(*args, **kwargs), timeout=deadline)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"model call exceeded wall-clock deadline of {deadline:g}s "
+                f"(model={self.model})",
+            ) from exc
+        if hasattr(result, "__aiter__"):
+            return deadline_stream(result, deadline, self.model)
+        return result
 
 
 def register() -> list[type[CredentialBase]]:

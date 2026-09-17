@@ -71,6 +71,41 @@ TTL = float(os.getenv("AGENTSCOPE_WORKSPACE_TTL", "3600"))
 SANDBOX_IMAGE = os.getenv("AGENTSCOPE_SANDBOX_IMAGE", "python:3.12-slim")
 NODE_VERSION = os.getenv("AGENTSCOPE_SANDBOX_NODE_VERSION", "20")
 
+# Skill directories seeded into every brand-new workspace.
+#
+# AgentScope copies these into `skills/.seed` on first start, then equips each
+# agent's own partition from that template. The agent sees them through the
+# native Skill viewer — a Skill explains *how* to do something; the tools that
+# perform the operation stay in `extra_agent_tools`. Seeding them here is what
+# makes the playbook catalog reachable without a custom SkillHub.
+#
+# Each directory must contain a `SKILL.md` whose YAML front matter has BOTH
+# `name` and `description` — AgentScope yields a Skill only for files that have
+# both, and silently skips the rest.
+SKILLS_DIR = os.getenv(
+    "AGENTSCOPE_SKILLS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills"),
+)
+
+
+def _skill_paths() -> list[str]:
+    """Every immediate subdirectory of SKILLS_DIR that holds a SKILL.md.
+
+    Returns the *category* directories (business/, market/, outreach/, …) rather
+    than each leaf: AgentScope copies a skill path recursively, so passing the
+    category keeps the catalog's grouping intact inside the workspace.
+    """
+    if not os.path.isdir(SKILLS_DIR):
+        _log.warning("skills dir %s does not exist; no skills will be seeded", SKILLS_DIR)
+        return []
+    paths = []
+    for entry in sorted(os.listdir(SKILLS_DIR)):
+        full = os.path.join(SKILLS_DIR, entry)
+        if os.path.isdir(full) and not entry.startswith("."):
+            paths.append(full)
+    return paths
+
+
 # Backends whose workspace state lives on the local host. Behind a load
 # balancer these are unsafe — the warning below is the guard.
 _SINGLE_NODE = {"local", "bubblewrap", "apple", "docker"}
@@ -106,7 +141,13 @@ def build_workspace_manager(basedir: str) -> Any:
             "AGENTSCOPE_WORKSPACE_BACKEND=docker (or e2b) before any "
             "multi-tenant use.",
         )
-        return LocalWorkspaceManager(basedir=basedir, isolation=isolation)
+        skills = _skill_paths()
+        _log.info("seeding %d skill path(s) from %s", len(skills), SKILLS_DIR)
+        return LocalWorkspaceManager(
+            basedir=basedir,
+            isolation=isolation,
+            skill_paths=skills,
+        )
 
     if BACKEND == "bubblewrap":
         from agentscope.app.workspace_manager import BubblewrapWorkspaceManager

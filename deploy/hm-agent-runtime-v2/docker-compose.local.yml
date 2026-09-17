@@ -90,6 +90,18 @@ services:
       # ON by default locally: the whole point of this overlay is the wired path.
       HM_FORWARD_ENABLED: ${HM_FORWARD_ENABLED:-1}
       HM_CORE_EVENT_PATH: ${HM_CORE_EVENT_PATH:-/internal/hyper/turn-event}
+      # --- model-call wall-clock deadline ---
+      # Bounds a hung model stream so a WorkRun always reaches
+      # completed/failed/cancelled. This is a WALL-CLOCK deadline on the whole
+      # stream, not a per-read socket timeout: a streaming completion keeps
+      # sending chunks, so an idle-read timeout never fires and the run hangs
+      # forever (that is exactly how dfaba765 stalled for 38 minutes).
+      #
+      # 180s is generous for a normal turn but WILL cut off a legitimate long
+      # generation (large synthesis, slow provider). Raise it here rather than
+      # removing it — an unbounded run is worse than a truncated one, because a
+      # truncated run reports a failure while a hung run reports nothing.
+      AGENTSCOPE_MODEL_CALL_DEADLINE_S: ${AGENTSCOPE_MODEL_CALL_DEADLINE_S:-180}
       # --- sandbox backend ---
       # local = no sandbox (single-tenant). Switch to e2b before multi-tenant.
       AGENTSCOPE_WORKSPACE_BACKEND: ${AGENTSCOPE_WORKSPACE_BACKEND:-local}

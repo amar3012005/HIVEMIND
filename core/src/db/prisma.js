@@ -114,6 +114,16 @@ function buildRealClient() {
     prisma = new PrismaClient({
       datasources: { db: { url: tunedUrl } },
       log: process.env.PRISMA_LOG === '1' ? ['warn', 'error'] : ['error'],
+      // Interactive-transaction defaults. Prisma's built-in 5s timeout is too
+      // tight for read-modify-write on growing JSONB columns (HyperTurn.lines)
+      // and for advisory-lock transactions; when it fires mid-flight the tx is
+      // already closed and the next statement throws P2028, which surfaces as a
+      // 500 and stalls the caller. Give every interactive tx real headroom.
+      // Per-call options still override these.
+      transactionOptions: {
+        maxWait: Number(process.env.PRISMA_TX_MAX_WAIT_MS || 10_000),
+        timeout: Number(process.env.PRISMA_TX_TIMEOUT_MS || 30_000),
+      },
     });
     installTenantIsolationMiddleware(prisma);
   }

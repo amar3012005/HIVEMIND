@@ -132,3 +132,7 @@ references/obsidian-3d-graph/
 references/paperclip/
 # ICARUS Harness state is worktree-local and never part of product releases.
 .icarus/
+
+# Python bytecode (runtime overlay)
+__pycache__/
+*.pyc

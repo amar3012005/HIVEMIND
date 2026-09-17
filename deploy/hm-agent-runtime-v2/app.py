@@ -56,7 +56,9 @@ import cloudflare_gateway as gateway
 import hm_auth
 import hm_bridge
 import extra_agent_tools
+import agent_middlewares
 from gateway_credential import CloudflareGatewayOpenAICredential
+from resource_access import HiveMindResourceAccessPolicy
 
 # --------------------------------------------------------------------------
 # Configuration (env-driven so the same image runs anywhere)
@@ -81,6 +83,7 @@ ENABLE_CHANNEL_WORKER = os.getenv("AGENTSCOPE_ENABLE_CHANNEL_WORKER", "1") == "1
 # dependency we do not need to boot, and an unreachable registry should not be
 # able to make startup noisy. Flip to "1" when you want the MCP/Skill pages.
 ENABLE_HUBS = os.getenv("AGENTSCOPE_ENABLE_HUBS", "0") == "1"
+_WORKRUN_PERMISSION = os.getenv("AGENTSCOPE_WORKRUN_PERMISSION_MODE", "bypass").strip().lower()
 
 
 def _log(msg: str) -> None:
@@ -282,6 +285,8 @@ app = create_app(
     # runs once per agent assembly and receives the resolved principal, so every
     # tool call is scoped by hm-core rather than by anything the model controls.
     extra_agent_tools=extra_agent_tools.hivemind_tools,
+    extra_agent_middlewares=agent_middlewares.hivemind_agent_middlewares,
+    resource_access_policy=HiveMindResourceAccessPolicy(),
     # Cloudflare AI Gateway credential type — routes provider calls through the
     # same gateway as hm-core. Registered unconditionally so the type is always
     # selectable; when the gateway env vars are absent the class falls back to
@@ -396,17 +401,14 @@ async def get_current_user_id(
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None, alias="X-User-ID"),
     x_hm_user_id: str | None = Header(default=None, alias="X-HM-User-Id"),
+    x_hm_org_id: str | None = Header(default=None, alias="X-HM-Org-Id"),
 ) -> str:
-    """Resolve the caller to hm-core's canonical user id.
-
-    `X-HM-User-Id` is the header hm-core's `buildInternalHeaders()` emits
-    alongside the master key, so the control plane needs no new client code.
-    """
     try:
         principal = await hm_auth.resolve_principal(
             api_key=x_api_key,
             authorization=authorization,
             legacy_user_id=x_hm_user_id or x_user_id,
+            org_id=x_hm_org_id,
         )
     except hm_auth.AuthError as exc:
         raise HTTPException(
@@ -414,7 +416,7 @@ async def get_current_user_id(
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
-    return principal.user_id
+    return principal.tenancy_key
 
 
 app.dependency_overrides[_default_user_dep] = get_current_user_id

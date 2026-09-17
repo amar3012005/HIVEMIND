@@ -61,6 +61,8 @@ from agentscope.permission import (
 )
 from agentscope.tool import ToolBase, ToolChunk
 
+from hm_auth import parse_tenancy_key
+
 _log = logging.getLogger("hm-agent-runtime.tools")
 
 HM_CORE_URL = os.getenv("HM_CORE_URL", "").strip().rstrip("/")
@@ -165,8 +167,9 @@ class _HiveMindToolBase(ToolBase):
 
     def __init__(self, user_id: str, org_id: Optional[str] = None) -> None:
         super().__init__()
-        self._user_id = user_id
-        self._org_id = org_id
+        hm_user, hm_org = parse_tenancy_key(user_id)
+        self._user_id = hm_user
+        self._org_id = org_id or hm_org
 
     async def check_permissions(
         self,
@@ -527,23 +530,176 @@ something would work."""
         return _ok(data)
 
 
+class WebReadTool(_HiveMindToolBase):
+    name: str = "hivemind_web_read"
+    description: str = "Read a public URL via Cloudflare Browser Run markdown."
+
+    class Params(BaseModel):
+        url: str = Field(description="http(s) URL to read.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, url: str) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/web-read",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"url": url},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), url=url)
+        return _ok(data)
+
+
+class BrowserMarkdownTool(_HiveMindToolBase):
+    name: str = "hivemind_browser_markdown"
+    description: str = (
+        "Render a public URL via the HyperAgent Playwright service "
+        "(hivemind-playwright /v1/crawl) and return markdown."
+    )
+
+    class Params(BaseModel):
+        url: str = Field(description="http(s) URL.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, url: str) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/browser/markdown",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"url": url},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), url=url)
+        return _ok(data)
+
+
+class BrowserSnapshotTool(_HiveMindToolBase):
+    name: str = "hivemind_browser_snapshot"
+    description: str = (
+        "Render a public URL via hivemind-playwright and return markdown plus links."
+    )
+
+    class Params(BaseModel):
+        url: str = Field(description="http(s) URL.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, url: str) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/browser/snapshot",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"url": url},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), url=url)
+        return _ok(data)
+
+
+class ComposioSearchToolsTool(_HiveMindToolBase):
+    name: str = "hivemind_composio_search_tools"
+    description: str = (
+        "Discover this org's connected Composio tools (COMPOSIO_SEARCH_TOOLS) "
+        "for a use_case. Call this FIRST for mailbox/CRM/Slack/LinkedIn work. "
+        "Reuse the returned session_id. Never invent a slug. If no toolkits "
+        "are connected, stop — the user connects apps in Connectors, not here."
+    )
+
+    class Params(BaseModel):
+        use_case: str = Field(description="What you need to do.")
+        toolkits: list[str] = Field(default_factory=list)
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, use_case: str, toolkits: Optional[list[str]] = None) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/composio/session/search",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"use_case": use_case, "toolkits": toolkits or []},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), use_case=use_case)
+        return _ok(data)
+
+
+class ComposioSessionExecuteTool(_HiveMindToolBase):
+    name: str = "hivemind_composio_session_execute"
+    description: str = (
+        "Execute one slug returned by hivemind_composio_search_tools on the "
+        "same session_id (COMPOSIO_MULTI_EXECUTE_TOOL). Mutations return "
+        "executed / approval_required / denied from hm-core."
+    )
+    is_read_only: bool = False
+
+    class Params(BaseModel):
+        session_id: str
+        tool_slug: str
+        args: dict = Field(default_factory=dict)
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, session_id: str, tool_slug: str, args: Optional[dict] = None) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/composio/session/execute",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"session_id": session_id, "tool_slug": tool_slug, "args": args or {}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), tool_slug=tool_slug)
+        return _ok(data)
+
+
+class HyperagentProfilesTool(_HiveMindToolBase):
+    name: str = "hivemind_hyperagent_profiles"
+    description: str = "List this org's HyperAgent profiles. Never invent employees."
+
+    class Params(BaseModel):
+        """No parameters."""
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/hyperagent-profiles",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                method="GET",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        return _ok(data)
+
+
 # ---------------------------------------------------------------------------
 # The factory
 # ---------------------------------------------------------------------------
 
-# The capability set for the first vertical slice. Deliberately small: every
-# tool here is one the prospect-research acceptance test actually needs. Adding
-# a capability is adding a class above and a line here.
 _TOOL_CLASSES = (
     CompanyContextTool,
     RecallTool,
     ListProspectsTool,
     SaveProspectTool,
     WebSearchTool,
+    WebReadTool,
+    BrowserMarkdownTool,
+    BrowserSnapshotTool,
     SaveMemoryTool,
     RecordArtifactTool,
     ComposioToolsTool,
     ComposioExecuteTool,
+    ComposioSearchToolsTool,
+    ComposioSessionExecuteTool,
+    HyperagentProfilesTool,
 )
 
 

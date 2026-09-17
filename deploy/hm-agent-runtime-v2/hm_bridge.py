@@ -48,6 +48,11 @@ from typing import Any, Optional
 
 import httpx
 
+# `parse_tenancy_key` unwraps the opaque `org:{orgId}:user:{userId}` key back to
+# hm-core's raw ids. The identity block hm-core validates must carry the raw
+# UUIDs, not the wrapped key — see `build_execution_identity`.
+from hm_auth import parse_tenancy_key
+
 _log = logging.getLogger("hm-agent-runtime.bridge")
 
 HM_CORE_URL = os.getenv("HM_CORE_URL", "").strip().rstrip("/")
@@ -171,14 +176,26 @@ def build_execution_identity(
 
     `execution_id == turn_id`: one turn owns one Director run and every event,
     work order, verification and repair it produces.
+
+    **The tenancy key must be unwrapped here.** AgentScope keys its own records
+    on the opaque `org:{orgId}:user:{userId}` string, so `binding.user_id`
+    carries that wrapped form. hm-core's `hyper_rooms.user_id` column holds the
+    raw UUID, and its validator compares the two directly — sending the wrapped
+    key fails every field check and returns 409 on every event. The WorkRun sink
+    (`/internal/workruns/{id}/event`) does not validate identity, which is why
+    only the turn feed broke.
     """
+    # `binding.user_id` is the tenancy key; `binding.org_id` may be absent when
+    # hm-core did not send it. Both are recoverable from the key itself, so the
+    # identity is correct even when only the key is present.
+    raw_user_id, key_org_id = parse_tenancy_key(binding.user_id)
     return {
         "contract": EXECUTION_CONTRACT,
         "execution_id": binding.turn_id,
         "room_id": binding.room_id,
         "turn_id": binding.turn_id,
-        "user_id": binding.user_id,
-        "org_id": binding.org_id or "",
+        "user_id": raw_user_id,
+        "org_id": binding.org_id or key_org_id or "",
         "epoch": 1,
     }
 

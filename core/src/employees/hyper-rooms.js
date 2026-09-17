@@ -117,6 +117,28 @@ export function buildIdempotencyKey({ roomId, seq, userMessage }) {
 }
 
 /**
+ * Interactive-transaction budget for the HyperTurn read-modify-write.
+ *
+ * The default Prisma interactive timeout is 5s. `lines` is a JSONB array that
+ * grows with every event on a turn, so the read + JSON serialize + write cost
+ * grows with turn length and with concurrent appends to the same row. A long
+ * Work Room turn (65+ events) routinely blew past 5s, the transaction expired
+ * mid-flight, `hyperTurn.update()` threw P2028, the caller returned 500, and
+ * the turn-feed stalled. Give the transaction real headroom and retry the
+ * transient expiry/write-conflict classes instead of surfacing them as 500s.
+ */
+const TURN_TX_OPTIONS = { timeout: 30_000, maxWait: 10_000 };
+const TURN_TX_RETRIES = 3;
+
+/** Prisma error codes that are safe to retry: expired tx + write conflict. */
+function isRetryableTurnTxError(err) {
+  const code = String(err?.code || '');
+  if (code === 'P2028' || code === 'P2034') return true;
+  const message = String(err?.message || '');
+  return /Transaction already closed|expired transaction|write conflict|deadlock detected/i.test(message);
+}
+
+/**
  * Append a JSONL event to a HyperTurn.lines column transactionally.
  * Prisma jsonb arrays don't support atomic push, so we read-modify-write
  * inside a serializable transaction.
@@ -126,10 +148,13 @@ export function buildIdempotencyKey({ roomId, seq, userMessage }) {
  * @param {object} event   JSONL event ({t, ts, ...})
  */
 export async function appendTurnEvent(prisma, turnId, event) {
-  const result = await prisma.$transaction(async (tx) => {
+  const runAppend = () => prisma.$transaction(async (tx) => {
+    // One read for both columns — the previous version issued a second
+    // findUnique for activeAgents inside the same transaction, doubling the
+    // work the timeout had to cover.
     const row = await tx.hyperTurn.findUnique({
       where: { id: turnId },
-      select: { lines: true },
+      select: { lines: true, activeAgents: true },
     });
     if (!row) throw new Error(`HyperTurn not found: ${turnId}`);
     const lines = Array.isArray(row.lines) ? row.lines : [];
@@ -144,8 +169,7 @@ export async function appendTurnEvent(prisma, turnId, event) {
     let activeAgents;
     if (event?.t === 'agent_activated' || event?.t === 'agent_assignment_started'
         || event?.t === 'agent_assignment_completed' || event?.t === 'agent_waiting') {
-      const current = await tx.hyperTurn.findUnique({ where: { id: turnId }, select: { activeAgents: true } }).catch(() => null);
-      const agents = Array.isArray(current?.activeAgents) ? [...current.activeAgents] : [];
+      const agents = Array.isArray(row.activeAgents) ? [...row.activeAgents] : [];
       const key = String(event.agent_instance_id || event.agent || '');
       const index = agents.findIndex((agent) => String(agent.agent_instance_id || agent.agent || '') === key);
       const projection = {
@@ -165,7 +189,21 @@ export async function appendTurnEvent(prisma, turnId, event) {
       data: { lines, ...(activeAgents ? { activeAgents } : {}) },
     });
     return { stamped, appended: true };
-  });
+  }, TURN_TX_OPTIONS);
+
+  let result;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      result = await runAppend();
+      break;
+    } catch (err) {
+      if (attempt >= TURN_TX_RETRIES || !isRetryableTurnTxError(err)) throw err;
+      // Exponential backoff with jitter so concurrent appenders to the same
+      // turn de-synchronize instead of colliding again on the retry.
+      const backoffMs = 50 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 50);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
   if (result.appended) publishTurnEvent(turnId, result.stamped);
   try {
     await prisma.$executeRawUnsafe(

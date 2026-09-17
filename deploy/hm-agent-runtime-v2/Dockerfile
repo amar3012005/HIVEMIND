@@ -36,6 +36,14 @@ COPY deploy/hm-agent-runtime-v2/workspace_backend.py /app/workspace_backend.py
 # The `extra_agent_tools` factory. app.py imports this at module load, so a
 # missing COPY is a hard ImportError at container start, not a degraded feature.
 COPY deploy/hm-agent-runtime-v2/extra_agent_tools.py /app/extra_agent_tools.py
+COPY deploy/hm-agent-runtime-v2/agent_middlewares.py /app/agent_middlewares.py
+COPY deploy/hm-agent-runtime-v2/resource_access.py /app/resource_access.py
+
+# Skill catalog seeded into every new workspace (see workspace_backend.py).
+# AgentScope copies these into `skills/.seed` and equips each agent's partition
+# from that template, so the playbook methods reach the agent through the native
+# Skill viewer. A missing COPY here is silent: the agent simply has no skills.
+COPY deploy/hm-agent-runtime-v2/skills /app/skills
 
 # Model cards for the gateway-routed DeepSeek models. Tells the frontend the
 # real context/output limits and modality, instead of relying on defaults.

@@ -68,14 +68,33 @@ _VERIFY_TIMEOUT = float(os.getenv("HM_CORE_VERIFY_TIMEOUT", "5"))
 class Principal:
     """A resolved caller identity.
 
-    `user_id` is the AgentScope tenant boundary. `org_id` is carried for
-    logging/forwarding and for org-scoped policy decisions hm-core may add.
+    AgentScope keys every record on one opaque ``user_id``. Inject
+    ``org:{orgId}:user:{userId}`` as that string. ``user_id`` here remains
+    hm-core's UUID.
     """
 
     user_id: str
     org_id: Optional[str] = None
     scopes: tuple[str, ...] = ()
     is_internal: bool = False
+
+    @property
+    def tenancy_key(self) -> str:
+        if self.org_id:
+            return f"org:{self.org_id}:user:{self.user_id}"
+        return f"user:{self.user_id}"
+
+
+def parse_tenancy_key(key: str) -> tuple[str, Optional[str]]:
+    raw = (key or "").strip()
+    if raw.startswith("org:") and ":user:" in raw:
+        rest = raw[len("org:") :]
+        org_id, _, user_id = rest.partition(":user:")
+        if org_id and user_id:
+            return user_id, org_id
+    if raw.startswith("user:"):
+        return raw[len("user:") :], None
+    return raw, None
 
 
 class AuthError(Exception):
@@ -173,6 +192,7 @@ async def resolve_principal(
     api_key: Optional[str],
     authorization: Optional[str],
     legacy_user_id: Optional[str],
+    org_id: Optional[str] = None,
 ) -> Principal:
     """Resolve a caller to a Principal, or raise AuthError.
 
@@ -187,9 +207,10 @@ async def resolve_principal(
                 "internal key presented without X-HM-User-Id; hm-core must "
                 "propagate the resolved principal",
             )
+        hm_user, hm_org = parse_tenancy_key(legacy_user_id)
         return Principal(
-            user_id=legacy_user_id,
-            org_id=None,
+            user_id=hm_user,
+            org_id=org_id or hm_org,
             scopes=("*",),
             is_internal=True,
         )
@@ -211,7 +232,8 @@ async def resolve_principal(
             "authentication and must never be enabled in production.",
             legacy_user_id,
         )
-        return Principal(user_id=legacy_user_id, scopes=("*",))
+        hm_user, hm_org = parse_tenancy_key(legacy_user_id)
+        return Principal(user_id=hm_user, org_id=org_id or hm_org, scopes=("*",))
 
     raise AuthError("no credentials presented")
 

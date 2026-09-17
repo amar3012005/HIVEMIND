@@ -59,8 +59,9 @@ transmitted** (see ``CloudflareGatewayOpenAICredential``).
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import httpx
 
@@ -68,9 +69,43 @@ import httpx
 # OpenRouter ids ("deepseek/deepseek-v4-flash").
 OPENROUTER_ROUTE = "openrouter"
 
-# Timeout for a single model call. Agent turns can be long; this bounds a hang
-# without cutting off a legitimate slow generation.
-DEFAULT_TIMEOUT_S = 120.0
+CONNECT_TIMEOUT_S = float(os.getenv("AGENTSCOPE_GATEWAY_CONNECT_TIMEOUT_S", "10"))
+READ_IDLE_TIMEOUT_S = float(os.getenv("AGENTSCOPE_GATEWAY_READ_IDLE_TIMEOUT_S", "45"))
+WRITE_TIMEOUT_S = float(os.getenv("AGENTSCOPE_GATEWAY_WRITE_TIMEOUT_S", "30"))
+MODEL_CALL_DEADLINE_S = float(os.getenv("AGENTSCOPE_MODEL_CALL_DEADLINE_S", "180"))
+DEFAULT_TIMEOUT_S = MODEL_CALL_DEADLINE_S
+
+
+async def deadline_stream(
+    stream: AsyncGenerator[Any, None],
+    deadline_s: float,
+    model: str,
+) -> AsyncGenerator[Any, None]:
+    loop = asyncio.get_running_loop()
+    expires_at = loop.time() + deadline_s
+    aiter = stream.__aiter__()
+    try:
+        while True:
+            remaining = expires_at - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"model stream exceeded wall-clock deadline of {deadline_s:g}s "
+                    f"(model={model})",
+                )
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    f"model stream exceeded wall-clock deadline of {deadline_s:g}s "
+                    f"(model={model})",
+                ) from exc
+            yield chunk
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
 
 def _env(name: str, default: str = "") -> str:
@@ -196,7 +231,12 @@ def build_gateway_http_client() -> httpx.AsyncClient:
             "request": [_strip_authorization],
             "response": [_log_rejection],
         },
-        timeout=httpx.Timeout(DEFAULT_TIMEOUT_S, connect=10.0),
+        timeout=httpx.Timeout(
+            connect=CONNECT_TIMEOUT_S,
+            read=READ_IDLE_TIMEOUT_S,
+            write=WRITE_TIMEOUT_S,
+            pool=CONNECT_TIMEOUT_S,
+        ),
         follow_redirects=True,
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )

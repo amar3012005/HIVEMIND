@@ -118,6 +118,16 @@ import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
+import {
+  handleInternalRecallRoute,
+  handleInternalSaveMemoryRoute,
+  handleInternalCompanyContextRoute,
+  handleInternalWebSearchRoute,
+  handleInternalRecordArtifactRoute,
+  handleInternalSaveProspectRoute,
+  handleInternalComposioExecuteRoute,
+  handleInternalComposioToolsRoute,
+} from './routes/internal-hivemind.js';
 import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret, requireSessionSecret } from './security/internal-auth.js';
@@ -9121,9 +9131,12 @@ Write the persona now.`;
     const expected = process.env.HIVEMIND_MASTER_API_KEY;
     if (!expected || callerKey !== expected) return jsonResponse(res, { error: 'master key required' }, 403);
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const orgId = String(url.searchParams.get('org_id') || '');
-    const userId = String(url.searchParams.get('user_id') || '');
-    const query = String(url.searchParams.get('query') || '').trim().toLowerCase().slice(0, 240);
+    // The principal arrives as headers from the agent runtime (which has no
+    // session) and as query params from the legacy sidecar callers. Headers win
+    // when present so one route serves both without a second, divergent path.
+    const orgId = String(req.headers['x-hm-org-id'] || url.searchParams.get('org_id') || '');
+    const userId = String(req.headers['x-hm-user-id'] || url.searchParams.get('user_id') || '');
+    const query = String(url.searchParams.get('query') || url.searchParams.get('q') || '').trim().toLowerCase().slice(0, 240);
     const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 50), 100));
     if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)) {
       return jsonResponse(res, { error: 'org_id and user_id are required' }, 400);
@@ -14052,6 +14065,49 @@ Write the persona now.`;
         return jsonResponse(res, { error: err.message }, 500);
       }
     }
+
+    // ─── Internal HIVE-MIND capability endpoints ──────────────
+    // The hm-core side of the `extra_agent_tools` contract. The agent runtime is
+    // a separate service with no database credentials, so it reaches these over
+    // HTTP with the internal key plus the resolved principal. Every handler
+    // resolves the principal from the headers (never the body) and delegates to a
+    // service hm-core already owns — hm-core stays the tenancy authority.
+    if (pathname.startsWith('/internal/hivemind/') || pathname === '/internal/hyper/prospects') {
+      const apiKey = req.headers['x-api-key']
+        || req.headers['authorization']?.replace(/^Bearer\s+/i, '')
+        || '';
+      if (!hasInternalApiKey(apiKey)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+
+      if (pathname === '/internal/hivemind/recall' && req.method === 'POST') {
+        return handleInternalRecallRoute({ req, res, jsonResponse, parseBody, prisma });
+      }
+      if (pathname === '/internal/hivemind/memories' && req.method === 'POST') {
+        return handleInternalSaveMemoryRoute({ req, res, jsonResponse, parseBody, prisma });
+      }
+      if (pathname === '/internal/hivemind/company-context' && req.method === 'GET') {
+        return handleInternalCompanyContextRoute({ req, res, jsonResponse, prisma });
+      }
+      if (pathname === '/internal/hivemind/web-search' && req.method === 'POST') {
+        return handleInternalWebSearchRoute({ req, res, jsonResponse, parseBody, prisma });
+      }
+      if (pathname === '/internal/hivemind/artifacts' && req.method === 'POST') {
+        return handleInternalRecordArtifactRoute({ req, res, jsonResponse, parseBody, prisma });
+      }
+      if (pathname === '/internal/hivemind/composio/execute' && req.method === 'POST') {
+        return handleInternalComposioExecuteRoute({
+          req, res, jsonResponse, parseBody, prisma, composioService,
+        });
+      }
+      if (pathname === '/internal/hivemind/composio/tools' && req.method === 'GET') {
+        return handleInternalComposioToolsRoute({ req, res, jsonResponse, prisma, composioService });
+      }
+      if (pathname === '/internal/hyper/prospects' && req.method === 'POST') {
+        return handleInternalSaveProspectRoute({ req, res, jsonResponse, parseBody, prisma });
+      }
+      // GET /internal/hyper/prospects is served by the earlier route, which now
+      // reads the principal from headers as well as query params.
+    }
+    // ─── End internal HIVE-MIND capability endpoints ──────────
 
     // GET /v1/hyper-rooms/:roomId/artifacts — CSI artifact read
     const artifactsMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/artifacts$/);

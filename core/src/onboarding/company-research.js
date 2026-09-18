@@ -1,4 +1,5 @@
 import { PlaywrightServiceRuntime } from '../web/playwright-service-runtime.js';
+import { cfCrawlWebsite, cfCaptureScreenshot, cfParallelSearch, cloudflareBrowserEnabled, cloudflareParallelSearchEnabled } from './cloudflare-research.js';
 
 const FIRECRAWL_BASE_URL = 'https://api.firecrawl.dev/v2';
 const SOCIAL_PLATFORMS = [
@@ -310,7 +311,17 @@ export async function searchCompanyMarket(query, {
   country = '',
   includeDomains = [],
 } = {}) {
-  if (!apiKey || !String(query || '').trim()) return [];
+  if (!String(query || '').trim()) return [];
+  // Cloudflare Parallel Search via AI Gateway is the primary transport — a
+  // single request replaces the Firecrawl/Tavily submit+poll loop. Firecrawl
+  // search remains the explicit fallback when the gateway is not configured.
+  if (cloudflareParallelSearchEnabled()) {
+    const objective = [cleanString(query, 400), cleanString(location, 120), cleanString(country, 80)]
+      .filter(Boolean).join(' ');
+    const results = await cfParallelSearch(objective, { limit });
+    if (results.length) return results;
+  }
+  if (!apiKey) return [];
   const countryValue = cleanString(country, 80).toLowerCase();
   const countryCode = /^[a-z]{2}$/i.test(countryValue) ? countryValue.toUpperCase() : COUNTRY_CODES.get(countryValue);
   try {
@@ -338,6 +349,12 @@ export async function searchCompanyMarket(query, {
 export async function captureWebsiteScreenshot(websiteUrl, {
   apiKey = process.env.FIRECRAWL_API_KEY,
 } = {}) {
+  // Cloudflare Browser Rendering is the primary screenshot transport (replaces
+  // Playwright timeouts); Firecrawl remains the fallback when CF is unset.
+  if (cloudflareBrowserEnabled()) {
+    const cfScreenshot = await cfCaptureScreenshot(websiteUrl);
+    if (cfScreenshot) return cfScreenshot;
+  }
   if (!apiKey) return null;
   try {
     const payload = await firecrawlRequest('/scrape', {
@@ -376,6 +393,21 @@ export async function researchCompanyWebsite(websiteUrl, {
   onProgress = () => {},
   pollDelays = Array(10).fill(2000),
 } = {}) {
+  // Cloudflare Browser Rendering /crawl is the primary first-party transport —
+  // one async job replaces the Firecrawl scrape+crawl pair and removes the
+  // missing-Firecrawl-key failure mode entirely. Firecrawl remains the
+  // explicit fallback when CF Browser Rendering is not configured.
+  if (cloudflareBrowserEnabled()) {
+    const cfResult = await cfCrawlWebsite(websiteUrl, { maxPages, includeCrawl, onProgress, pollDelays });
+    if (cfResult.provider === 'cf-browser-rendering') {
+      cfResult.social_profiles = verifiedSocialProfiles(cfResult.pages);
+      cfResult.contacts = extractCompanyContacts(cfResult.pages);
+      return cfResult;
+    }
+    if (cfResult.error && cfResult.error !== 'not_configured') {
+      onProgress('Cloudflare crawl was unavailable; trying Firecrawl');
+    }
+  }
   if (!apiKey) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
     const limit = Math.min(6, Math.max(3, Number(maxPages) || 5));

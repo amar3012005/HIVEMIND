@@ -25,7 +25,11 @@ export function cloudflareBrowserEnabled() { return cfConfig().enabled; }
 function parallelConfig() {
   const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
   const gatewayId = String(process.env.CLOUDFLARE_AI_GATEWAY_ID || '').trim();
-  const apiKey = String(process.env.PARALLEL_API_KEY || '').trim();
+  // The gateway token doubles as the Parallel provider credential when the
+  // account stores the Parallel key BYOK-side (verified live: gateway token
+  // as x-api-key returns 200 from /parallel/v1beta/search). A dedicated
+  // PARALLEL_API_KEY still takes precedence when set.
+  const apiKey = String(process.env.PARALLEL_API_KEY || process.env.CLOUDFLARE_AI_GATEWAY_TOKEN || '').trim();
   return { accountId, gatewayId, apiKey, enabled: Boolean(accountId && gatewayId && apiKey) };
 }
 

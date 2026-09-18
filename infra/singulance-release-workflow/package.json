@@ -1,0 +1,12 @@
+{
+  "name": "singulance-release-workflow",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npx wrangler deploy",
+    "dev": "npx wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "4.127.1"
+  }
+}

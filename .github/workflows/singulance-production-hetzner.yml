@@ -1,0 +1,61 @@
+name: SINGULANCE production Hetzner
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Expected origin/singulance-main SHA (optional)
+        required: false
+        type: string
+      services:
+        description: Canonical quick-deploy service
+        required: true
+        type: choice
+        options:
+          - core
+          - control-plane
+          - employees
+      requested_by:
+        description: Who triggered the Cloudflare Workflow
+        required: false
+        type: string
+
+concurrency:
+  group: singulance-production-hetzner
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: quick-deploy.sh singulance-main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.ref == 'refs/heads/singulance-main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: singulance-main
+      - name: Refuse anything except origin/singulance-main
+        run: |
+          git fetch origin singulance-main
+          HEAD=$(git rev-parse HEAD)
+          MAIN=$(git rev-parse origin/singulance-main)
+          echo "HEAD=$HEAD origin/singulance-main=$MAIN requested=${{ github.event.inputs.sha }}"
+          test "$HEAD" = "$MAIN"
+          if [ -n "${{ github.event.inputs.sha }}" ]; then
+            test "$HEAD" = "${{ github.event.inputs.sha }}"
+          fi
+      - name: SSH canonical release
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SINGULANCE_SSH_HOST }}
+          username: ${{ secrets.SINGULANCE_SSH_USER || 'root' }}
+          key: ${{ secrets.SINGULANCE_SSH_KEY }}
+          script_stop: true
+          command_timeout: 25m
+          script: |
+            set -euo pipefail
+            export RELEASE_SESSION_ID="gha-${{ github.run_id }}"
+            export RELEASE_MIN_DISK_GB="${RELEASE_MIN_DISK_GB:-12}"
+            /root/quick-deploy.sh singulance-main ${{ github.event.inputs.services }}
+      - name: Canary API
+        run: curl -fsS -o /dev/null https://api.singulancelabs.com/health

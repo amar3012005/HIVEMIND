@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "singulance-release",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-18",
+  "observability": { "enabled": true },
+  "workflows": [
+    {
+      "name": "singulance-production-release",
+      "binding": "RELEASE",
+      "class_name": "SingulanceProductionRelease"
+    }
+  ]
+}

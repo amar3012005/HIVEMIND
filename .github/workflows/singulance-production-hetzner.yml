@@ -48,7 +48,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SINGULANCE_SSH_HOST }}
-          username: ${{ secrets.SINGULANCE_SSH_USER || 'root' }}
+          username: ${{ secrets.SINGULANCE_SSH_USER }}
           key: ${{ secrets.SINGULANCE_SSH_KEY }}
           script_stop: true
           command_timeout: 25m

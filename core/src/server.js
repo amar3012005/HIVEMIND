@@ -19768,21 +19768,42 @@ exit \$RC
 
               const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
               const qdrantKey = process.env.QDRANT_API_KEY || '';
+              const perTenant = process.env.QDRANT_PER_TENANT === 'true';
+              const legacyEvidence = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
               const deletePoints = async (collection, points) => {
                 if (!qdrantUrl || points.length === 0) return;
-                const response = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                  body: JSON.stringify({ points }),
-                });
-                // A legacy collection may not exist; other failures must be
-                // surfaced so this endpoint never falsely reports an erasure.
-                if (!response.ok && response.status !== 404) throw new Error(`Qdrant ${collection} delete failed (${response.status})`);
+                // Shared legacy evidence is huge; wait=true 408s and used to
+                // fail closed the whole company reset. Org containers stay
+                // wait=true. 404 = collection gone. 408/504 on the legacy
+                // evidence name is a skip, not a 500.
+                const wait = collection === legacyEvidence ? 'false' : 'true';
+                let response;
+                try {
+                  response = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=${wait}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                    body: JSON.stringify({ points }),
+                    signal: AbortSignal.timeout(20000),
+                  });
+                } catch (err) {
+                  if (collection === legacyEvidence) {
+                    console.warn(`[delete-all] ${collection} delete skipped: ${err.message}`);
+                    return;
+                  }
+                  throw err;
+                }
+                if (!response.ok && response.status !== 404) {
+                  if (collection === legacyEvidence && (response.status === 408 || response.status === 504)) {
+                    console.warn(`[delete-all] ${collection} delete skipped (${response.status})`);
+                    return;
+                  }
+                  throw new Error(`Qdrant ${collection} delete failed (${response.status})`);
+                }
               };
               const collections = Array.from(new Set([
-                ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                ...(perTenant && orgId ? [`org_${orgId}`] : []),
                 'HIVEMIND_PERSONAL',
-                process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence',
+                ...(perTenant ? [] : [legacyEvidence]),
               ]));
               for (const collection of collections) {
                 await deletePoints(collection, memoryIds);

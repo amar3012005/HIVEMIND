@@ -113,6 +113,7 @@ import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
+import { narrativeLanguageInstruction, normalizePreferredLanguage } from './hyper/preferred-language.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
@@ -11831,7 +11832,7 @@ Write the persona now.`;
     }
 
     // ── HyperAgents onboarding (Polsia-style company genesis) ──────────────
-    // POST /v1/hyper/onboarding/start { website_url, goal? } → kicks an async
+    // POST /v1/hyper/onboarding/start { website_url, goal?, preferred_language? } → kicks an async
     // pipeline that reads the company website, drafts a grounded profile +
     // mission (persisted to HIVEMIND memory), assembles a starting team, plans
     // first tasks and provisions an HQ room. The FE polls /status and renders
@@ -11964,6 +11965,8 @@ Write the persona now.`;
       if (!host) return jsonResponse(res, { error: 'valid website_url is required' }, 400);
       const userGoal = typeof body.goal === 'string' ? body.goal.trim().slice(0, 500) : '';
       const claimedCompanyLocation = typeof body.company_location === 'string' ? body.company_location.trim().slice(0, 240) : '';
+      const preferredLanguage = normalizePreferredLanguage(body.preferred_language);
+      const languageRule = narrativeLanguageInstruction(preferredLanguage);
 
       const job = { lines: [], done: false, error: null, startedAt: Date.now(), result: null, timings: {} };
       _hyperOnboardJobs.set(orgId, job);
@@ -11983,7 +11986,7 @@ Write the persona now.`;
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
           body: JSON.stringify({
             model: 'llama-3.3-70b-versatile',
-            messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+            messages: [{ role: 'system', content: `${sys}\n\n${languageRule}` }, { role: 'user', content: user }],
             temperature: 0.5,
             max_tokens: maxTokens,
             ...(json ? { response_format: { type: 'json_object' } } : {}),
@@ -12592,6 +12595,7 @@ Write the persona now.`;
           const resultPayload = {
             company: companyName,
             website: siteUrl,
+            preferred_language: preferredLanguage,
             screenshot: screenshot || null,
             website_visual_source: websiteVisualSource,
             screenshot_pending: true,

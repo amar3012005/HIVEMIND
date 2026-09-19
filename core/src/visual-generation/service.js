@@ -16,11 +16,29 @@ function publicEvent(row) { return { ...row, id: String(row.id) }; }
 function publicJob(job, events = []) {
   return {
     job_id: job.id, contract_version: job.contractVersion, status: job.status, stage: job.currentStage,
+    instruction: job.instruction, source: job.source || {},
     progress: job.progress, use_case: job.useCase, output: { mode: job.outputMode, count: job.requestedCount, aspect_ratios: job.aspectRatios },
     quality: job.quality, model_policy: job.modelPolicy, production_spec: job.productionSpec || {}, assets: job.assets || [],
     error: job.error || null, terminal_reason: job.terminalReason || null, workflow_instance_id: job.workflowInstanceId || null,
     created_at: job.createdAt, updated_at: job.updatedAt, events: events.map(publicEvent),
   };
+}
+
+export async function listVisualGenerationJobs({ prisma, orgId, userId, roomId, limit = 12 } = {}) {
+  if (!prisma || !UUID.test(String(orgId)) || !UUID.test(String(userId))) {
+    throw visualError('authenticated tenant context is required', 401, 'visual_generation_unauthorized');
+  }
+  if (!UUID.test(String(roomId))) throw visualError('room_id must be a UUID');
+  const membership = await prisma.userOrganization.findFirst({
+    where: { orgId, userId, isActive: true }, select: { userId: true },
+  });
+  if (!membership) throw visualError('active organization membership is required', 403, 'visual_generation_forbidden');
+  const jobs = await prisma.visualGenerationJob.findMany({
+    where: { orgId, userId, roomId },
+    orderBy: { createdAt: 'desc' },
+    take: Math.max(1, Math.min(24, Number(limit) || 12)),
+  });
+  return { jobs: jobs.map((job) => publicJob(job)) };
 }
 
 export function normalizeVisualGenerationRequest(input = {}) {

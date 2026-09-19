@@ -9876,6 +9876,18 @@ exit \$RC
       // Shared visual-production capability. Every authenticated agent and UI
       // surface enters through the same tenant-scoped job ledger; no caller can
       // supply another user's company context or Brand DNA.
+      if (pathname === '/api/visual-generation/jobs' && req.method === 'GET') {
+        try {
+          const { listVisualGenerationJobs } = await import('./visual-generation/service.js');
+          return jsonResponse(res, await listVisualGenerationJobs({
+            prisma, orgId, userId,
+            roomId: url.searchParams.get('room_id'),
+            limit: url.searchParams.get('limit') || 12,
+          }));
+        } catch (error) {
+          return jsonResponse(res, { error: error.code || 'visual_generation_list_failed', message: error.message }, error.status || 500);
+        }
+      }
       if (pathname === '/api/visual-generation/jobs' && req.method === 'POST') {
         try {
           const result = await startVisualGenerationFromAgent({

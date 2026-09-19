@@ -4,6 +4,7 @@ import {
   DurableVisualGenerationLifecycle,
   createVisualGenerationJob,
   getVisualGenerationJob,
+  listVisualGenerationJobs,
   normalizeVisualGenerationRequest,
 } from '../../src/visual-generation/service.js';
 
@@ -25,6 +26,7 @@ function fakePrisma() {
     visualGenerationJob: {
       findUnique: async ({ where }) => where.id ? (state.job?.id === where.id ? state.job : null) : (state.job?.orgId === where.orgId_userId_idempotencyKey.orgId && state.job?.userId === where.orgId_userId_idempotencyKey.userId && state.job?.idempotencyKey === where.orgId_userId_idempotencyKey.idempotencyKey ? state.job : null),
       findFirst: async ({ where }) => state.job && matches(state.job, where) ? state.job : null,
+      findMany: async ({ where, take = 12 }) => (state.job && matches(state.job, where) ? [state.job] : []).slice(0, take),
       create: async ({ data }) => (state.job = { id: JOB, contractVersion: 'visual.production.v1', productionSpec: {}, assets: [], error: null, terminalReason: null, workflowInstanceId: null, createdAt: new Date(), updatedAt: new Date(), ...data }),
       update: async ({ where, data }) => { assert.equal(where.id, JOB); state.job = { ...state.job, ...data, updatedAt: new Date() }; return state.job; },
     },
@@ -96,4 +98,22 @@ test('hydrates verified Brand DNA, records progress, and accepts only complete t
   const completed = await lifecycle.complete({ job_id: JOB, production_spec: { subject: 'verified product' }, assets: [receipt] });
   assert.equal(completed.status, 'completed'); assert.equal(completed.progress, 100); assert.equal(completed.assets[0].r2_key, receipt.r2_key);
   await assert.rejects(() => getVisualGenerationJob({ prisma, orgId: ORG, userId: OTHER, jobId: JOB }), /not found/);
+});
+
+test('lists only the authenticated users durable jobs for one room', async () => {
+  const prisma = fakePrisma();
+  const roomId = '55555555-5555-4555-8555-555555555555';
+  prisma.state.job = {
+    id: JOB, orgId: ORG, userId: USER, roomId, contractVersion: 'visual.production.v1',
+    instruction: 'Create a premium launch hero.', source: { kind: 'agent', room_id: roomId },
+    status: 'running', currentStage: 'critiquing', progress: 70, requestedCount: 1,
+    useCase: 'room_visual', outputMode: 'single', aspectRatios: ['16:9'], quality: 'quality',
+    modelPolicy: 'auto', productionSpec: {}, assets: [], error: null, terminalReason: null,
+    workflowInstanceId: `visual-generation-${JOB}-v1`, createdAt: new Date(), updatedAt: new Date(),
+  };
+  const result = await listVisualGenerationJobs({ prisma, orgId: ORG, userId: USER, roomId });
+  assert.equal(result.jobs.length, 1);
+  assert.equal(result.jobs[0].instruction, 'Create a premium launch hero.');
+  assert.equal(result.jobs[0].source.room_id, roomId);
+  await assert.rejects(() => listVisualGenerationJobs({ prisma, orgId: ORG, userId: OTHER, roomId }), /membership/);
 });

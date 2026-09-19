@@ -67,7 +67,7 @@ export async function cfCrawlWebsite(websiteUrl, {
     // additional pages. No sequential waits anywhere.
     const homepagePromise = browserRenderingRequest('markdown', {
       url: websiteUrl,
-      gotoOptions: { waitUntil: 'networkidle2', timeout: 45000 },
+      gotoOptions: { waitUntil: 'load', timeout: 30000 },
     }, { timeoutMs: 60_000 })
       .then((response) => response.json().catch(() => ({})))
       .then((data) => String(data?.result || '').replace(/\u0000/g, '').trim())
@@ -107,7 +107,7 @@ export async function cfCrawlWebsite(websiteUrl, {
         try {
           const response = await browserRenderingRequest('markdown', {
             url: pageUrl,
-            gotoOptions: { waitUntil: 'networkidle2', timeout: 30000 },
+            gotoOptions: { waitUntil: 'load', timeout: 20000 },
           }, { timeoutMs: 45_000 });
           const data = await response.json().catch(() => ({}));
           const content = String(data?.result || '').replace(/\u0000/g, '').trim();
@@ -210,7 +210,7 @@ export async function cfCaptureScreenshot(websiteUrl) {
       url: websiteUrl,
       screenshotOptions: { fullPage: false },
       viewport: { width: 1280, height: 720 },
-      gotoOptions: { waitUntil: 'networkidle2', timeout: 45_000 },
+      gotoOptions: { waitUntil: 'load', timeout: 30_000 },
     }, { timeoutMs: 60_000 });
     const buffer = await response.arrayBuffer();
     let binary = '';

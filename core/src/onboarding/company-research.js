@@ -398,7 +398,7 @@ export async function researchCompanyWebsite(websiteUrl, {
   // missing-Firecrawl-key failure mode entirely. Firecrawl remains the
   // explicit fallback when CF Browser Rendering is not configured.
   if (cloudflareBrowserEnabled()) {
-    const cfResult = await cfCrawlWebsite(websiteUrl, { maxPages, includeCrawl, onProgress, pollDelays });
+    const cfResult = await cfCrawlWebsite(websiteUrl, { limit: maxPages, maxPages, includeCrawl, onProgress, pollDelays });
     if (cfResult.provider === 'cf-browser-rendering') {
       cfResult.social_profiles = verifiedSocialProfiles(cfResult.pages);
       cfResult.contacts = extractCompanyContacts(cfResult.pages);

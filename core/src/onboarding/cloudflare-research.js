@@ -53,9 +53,15 @@ async function browserRenderingRequest(path, body, { timeoutMs = 30_000 } = {}) 
  */
 export async function cfCrawlWebsite(websiteUrl, {
   limit = 6,
+  maxPages,
   onProgress = () => {},
-  pollDelays = Array(10).fill(2000),
+  pollDelays,
 } = {}) {
+  // Callers pass maxPages (researchCompanyWebsite contract); honor it.
+  if (!limit && maxPages) limit = maxPages;
+  // Fast poll: 8 x 1.25s = 10s budget (was 10 x 2s = 20s minimum even when
+  // the crawl job finished in ~5s). The parallel direct fetches cover the gap.
+  if (!pollDelays) pollDelays = Array(8).fill(1250);
   if (!cloudflareBrowserEnabled()) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
     const { accountId, apiToken } = cfConfig();

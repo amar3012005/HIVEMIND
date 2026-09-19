@@ -12108,10 +12108,22 @@ Write the persona now.`;
           // capture still falls through to the existing Firecrawl/official
           // image fallbacks below.
           const screenshotCapturePromise = captureWebsiteScreenshotWithPlaywright(homepageUrl);
-          const [homepage, firecrawlResearch, initialCoverage] = await Promise.all([
+          const [homepage, firecrawlResearch, initialCoverage, marketCoverage] = await Promise.all([
             fetchPage(homepageUrl),
             researchCompanyWebsite(homepageUrl, { maxPages: 5, includeCrawl: false, onProgress: say }),
             searchCompanyMarket(`"${host}" company official LinkedIn Instagram Facebook X YouTube contact competitors`, { limit: 10 }),
+            // Parallel market fan-out: three concurrent searches (competitors,
+            // market/industry, news) — each is one Parallel Search call (~2-5s),
+            // so the fan-out adds almost no wall time but triples the evidence.
+            Promise.all([
+              searchCompanyMarket(`${companyGuess} competitors alternatives`, { limit: 6 }),
+              searchCompanyMarket(`${companyGuess} industry market customers`, { limit: 6 }),
+              searchCompanyMarket(`${companyGuess} news announcements funding`, { limit: 6 }),
+            ]).then(([competitors, market, news]) => [
+              ...competitors.map((r) => ({ ...r, evidence_scope: 'external-market' })),
+              ...market.map((r) => ({ ...r, evidence_scope: 'external-market' })),
+              ...news.map((r) => ({ ...r, evidence_scope: 'external-market' })),
+            ]).catch(() => []),
           ]);
           markTiming('source_collection');
           const directHomepage = {
@@ -12155,12 +12167,16 @@ Write the persona now.`;
           const research = [];
 
           say('Drafting your company profile');
-          let profile;
+          // UNIFIED SYNTHESIS: profile + mission + starter tasks in ONE LLM call.
+          // All three derive from the same first-party sources, so one strong
+          // JSON prompt replaces three sequential calls (~4-6s total vs ~12-15s).
+          const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
+          let unified = null;
           try {
-            profile = JSON.parse(await llm(
-              'You resolve a company identity from FIRST-PARTY website evidence. Output ONLY JSON: {"name":"","industry":"","business_model":"","capabilities":[""],"tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":[],"tone":"","opportunities":["",""],"risks":["",""],"location":"","location_city":"","location_region":"","location_country":"","location_evidence_url":"","location_source":"","evidence_gaps":[""]}. Rules: (1) every factual field must be supported by supplied first-party sources or the explicitly labeled user claim; (2) never substitute a similarly named company; (3) location means company HQ/operating location. Prefer an explicit contact/imprint/legal-page location and set location_source=first_party. If the site has no location but USER-PROVIDED COMPANY LOCATION is present, preserve it exactly and set location_source=user_claim; (4) never infer location from TLD, language, audience, or desired market; (5) if location is absent from both sources, return empty and list it in evidence_gaps; (6) competitors remain empty unless the company itself names them; (7) use the exact website brand name. Keep prose concise.',
-              `Requested website: ${siteUrl}\nCanonical domain: ${host}\nUSER-PROVIDED COMPANY LOCATION: ${claimedCompanyLocation || '(none)'}\nUser goal: ${userGoal || '(none stated)'}\n\nFIRST-PARTY SOURCES ONLY:\n${siteText || '(website unavailable; keep unsupported fields empty)'}`,
-              { json: true, maxTokens: 1100 },
+            unified = JSON.parse(await llm(
+              'You resolve a company identity, mission, and starter tasks from FIRST-PARTY website evidence. Output ONLY JSON: {"profile":{"name":"","industry":"","business_model":"","capabilities":[""],"tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":[],"tone":"","opportunities":["",""],"risks":["",""],"location":"","location_city":"","location_region":"","location_country":"","location_evidence_url":"","location_source":"","evidence_gaps":[""]},"mission":"","tasks":[{"room_tag":"","title":"","detail":"","deliverable":""}]}. PROFILE rules: (1) every factual field must be supported by supplied first-party sources or the explicitly labeled user claim; (2) never substitute a similarly named company; (3) location means company HQ/operating location. Prefer an explicit contact/imprint/legal-page location and set location_source=first_party. If the site has no location but USER-PROVIDED COMPANY LOCATION is present, preserve it exactly and set location_source=user_claim; (4) never infer location from TLD, language, audience, or desired market; (5) if location is absent from both sources, return empty and list it in evidence_gaps; (6) competitors remain empty unless the company itself names them; (7) use the exact website brand name. MISSION: crisp 2-3 sentences grounded in the profile. TASKS: one immediately useful task for EVERY supplied room tag, each used exactly once. Titles action-oriented, max 10 words. Details 30-60 words, company-specific, explaining work, evidence, decision, and business value. Deliverables name one concrete output in max 8 words. Research verifies unknowns; other rooms consume verified company evidence instead of inventing claims. No generic filler. Keep prose concise.',
+              `ROOMS: ${JSON.stringify(starterRooms.map((roomDefinition) => ({ room_tag: roomDefinition.key, purpose: roomDefinition.purpose })))}\nRequested website: ${siteUrl}\nCanonical domain: ${host}\nUSER-PROVIDED COMPANY LOCATION: ${claimedCompanyLocation || '(none)'}\nUser goal: ${userGoal || '(none stated)'}\n\nFIRST-PARTY SOURCES ONLY:\n${siteText || '(website unavailable; keep unsupported fields empty)'}`,
+              { json: true, maxTokens: 2600 },
             ));
           } catch {
             profile = { name: companyGuess, industry: '', business_model: '', capabilities: [], tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [], location: '', location_city: '', location_region: '', location_country: '', location_evidence_url: '', evidence_gaps: ['Company profile synthesis unavailable'] };
@@ -12170,6 +12186,10 @@ Write the persona now.`;
             websiteUrl: homepageUrl,
             claimedLocation: claimedCompanyLocation,
           });
+          // Unified-call outputs: mission + starter tasks come from the same
+          // synthesis (null when the unified call failed → downstream fallbacks).
+          const unifiedMission = String(unified?.mission || '').trim();
+          const unifiedTasks = Array.isArray(unified?.tasks) ? unified.tasks : [];
           profile.social_profiles = Array.isArray(firecrawlResearch.social_profiles)
             ? firecrawlResearch.social_profiles
             : [];
@@ -12195,10 +12215,9 @@ Write the persona now.`;
             if (!findings.length) findings = await webSearch(evidenceQuery, { limit: 10 });
             return findings;
           })();
-          const missionPromise = llm(
-            'Write a crisp 2-3 sentence company mission statement grounded in the profile. Output only the mission text.',
-            JSON.stringify(profile), { maxTokens: 200 },
-          ).catch(() => `Build ${companyName} into the category leader.`);
+          const missionPromise = Promise.resolve(
+            unifiedMission || `Build ${companyName} into the category leader.`
+          );
           let [coverage, mission] = await Promise.all([coveragePromise, missionPromise]);
           profile.social_profiles = verifiedSocialProfiles(pages, coverage, {
             includeSearchCandidates: true,
@@ -12238,12 +12257,9 @@ Write the persona now.`;
             mission,
           }, { maxChars: 1600 });
 
-          const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
-          const starterTaskGenerationPromise = llm(
-            'Create one immediately useful starter task for EVERY supplied HyperAgents expertise room. Output ONLY JSON: {"tasks":[{"room_tag":"","title":"","detail":"","deliverable":""}]}. Use each room_tag exactly once and do not add tags. Titles must be action-oriented and at most 10 words. Each detail must be 30-60 words, company-specific, and explain the work, evidence, decision, and business value. Each deliverable must name one concrete output in at most 8 words. Research must verify unknowns; other rooms must consume verified company evidence instead of inventing claims. Do not create generic content for its own sake.',
-            `ROOMS: ${JSON.stringify(starterRooms.map((roomDefinition) => ({ room_tag: roomDefinition.key, purpose: roomDefinition.purpose })))}\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}\nCURRENT SOURCES: ${JSON.stringify(research.slice(0, 6))}${userGoal ? `\nUSER PRIORITY: ${userGoal}` : ''}`,
-            { json: true, maxTokens: 1800 },
-          ).catch(() => null);
+          const starterTaskGenerationPromise = Promise.resolve(
+            unifiedTasks.length ? { tasks: unifiedTasks } : null
+          );
 
           say('Assembling your team');
           // One company per org: retire the prior company's agents + rooms + canon
@@ -12445,8 +12461,23 @@ Write the persona now.`;
               content: `COMPETITORS of ${companyName}: ${(profile.competitors || []).join(', ') || '(none identified)'}.\nMARKET RESEARCH:\n${research.map((r) => `• ${r.title}: ${r.snippet}`).join('\n')}`.slice(0, 6000) },
             { title: `${companyName} — Operating context`, memoryType: 'summary', authorityLevel: 'verified',
               content: companyContext },
+            // Crawled first-party pages filed as company artifacts — every page
+            // the onboarding read becomes recallable evidence for agents.
+            ...pages.filter((page) => page.url && (page.content || page.text || '').trim()).slice(0, 8).map((page) => ({
+              title: `${companyName} — Website page: ${(page.title || page.url || '').slice(0, 80)}`,
+              memoryType: 'fact',
+              authorityLevel: 'verified',
+              content: `FIRST-PARTY PAGE (${page.purpose || 'company'}) — ${page.url}\n\n${String(page.content || page.text || '').slice(0, 2500)}`,
+              tags: [...canonTags, `source-page:${page.url.slice(0, 120)}`],
+            })),
           ];
-          await Promise.all(sections.map((section) => saveMemory({ ...section, tags: canonTags })));
+          // Memory filing + profile facts + domain rooms run in BACKGROUND:
+          // the user enters the workspace as soon as the HQ room + company
+          // state exist. Recall warms up moments later; nothing user-visible
+          // waits on these writes.
+          void (async () => {
+            try {
+              await Promise.all(sections.map((section) => saveMemory({ ...section, tags: section.tags || canonTags })));
 
           // Mirror the company identity into ORG-SCOPED profile facts so the
           // /hivemind/app/profile page + the get_user_profile chat tool show the
@@ -12489,10 +12520,16 @@ Write the persona now.`;
                 key: fact.key, value: String(fact.value).slice(0, fact.key === 'company:operating_context' ? 2400 : 900),
                 confidence: 0.95, sourceMemoryId: null,
               }).catch(() => {})));
-          } catch (err) {
-            console.warn('[onboarding] company→profile facts failed (non-fatal):', err.message);
-          }
-          markTiming('memory_and_profile');
+            } catch (err) {
+              console.warn('[onboarding] company→profile facts failed (non-fatal):', err.message);
+            }
+              markTiming('memory_and_profile');
+              console.info('[hyper-onboarding] background filing complete', JSON.stringify({ org_id: orgId, company: companyName }));
+            } catch (bgErr) {
+              console.warn('[hyper-onboarding] background filing failed:', bgErr.message);
+            }
+          })();
+          markTiming('memory_filing_dispatched');
 
           say('Planning your first tasks');
           let tasks = [];
@@ -12608,6 +12645,7 @@ Write the persona now.`;
               `${companyName} — Company profile`,
               ...(research.length ? [`${companyName} — Market research`] : []),
               `${companyName} — Mission`,
+              ...pages.filter((page) => page.url).slice(0, 8).map((page) => `${companyName} — Page: ${(() => { try { return new URL(page.url).pathname.replace(/\//g, ' ').trim() || 'Homepage'; } catch { return 'Page'; } })()}`),
             ],
             team: rankedTeam.slice(0, 6).map((x) => ({ id: x.id, name: x.name, role: x.roleArchetype || null })),
             room_id: room.id,
@@ -12616,18 +12654,22 @@ Write the persona now.`;
             onboarding_duration_ms: Date.now() - job.startedAt,
             onboarding_timings_ms: job.timings,
           };
-          try {
-            resultPayload.domain_rooms = await ensureDomainRooms({
-              prisma,
-              orgId,
-              userId,
-              participantIds,
-              company: resultPayload,
-            });
-          } catch (e) {
-            console.warn('[hyper-onboarding] domain rooms failed:', e.message);
-            resultPayload.domain_rooms = [];
-          }
+          // Domain rooms provision in background — they only need
+          // participantIds + company context, all available in resultPayload.
+          void (async () => {
+            try {
+              resultPayload.domain_rooms = await ensureDomainRooms({
+                prisma,
+                orgId,
+                userId,
+                participantIds,
+                company: resultPayload,
+              });
+            } catch (e) {
+              console.warn('[hyper-onboarding] domain rooms failed:', e.message);
+              resultPayload.domain_rooms = [];
+            }
+          })();
           markTiming('workspace_provisioning');
           resultPayload.onboarding_duration_ms = Date.now() - job.startedAt;
           resultPayload.onboarding_timings_ms = { ...job.timings, total: resultPayload.onboarding_duration_ms };

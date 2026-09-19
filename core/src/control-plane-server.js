@@ -23,7 +23,6 @@ import {
 } from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
-import { createZitadelEmailIdentity } from './control-plane/zitadel-email-identity.js';
 import { createEmailIdentityService, EMAIL_AUTH_PUBLIC_RESPONSE, normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from './auth/email-identity-service.js';
 import { cleanIdentityName, isGenericDisplayName, providerDisplayNameForExisting } from './identity/canonical-profile.js';
 import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/email-turnstile.js';
@@ -2636,6 +2635,40 @@ async function upsertUserFromZitadel(userInfo) {
   return created;
 }
 
+async function upsertVerifiedEmailUser(email) {
+  if (!prisma) throw new Error('Database unavailable');
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) throw new Error('Verified email is invalid');
+  const localPart = normalizedEmail.split('@')[0].replace(/[^a-z0-9._-]/gi, '').slice(0, 48) || 'member';
+  const compatibilitySubject = `email:${crypto.createHash('sha256').update(normalizedEmail).digest('hex')}`;
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.upsert({
+      where: { email: normalizedEmail },
+      update: { lastActiveAt: new Date() },
+      create: {
+        zitadelUserId: compatibilitySubject,
+        email: normalizedEmail,
+        displayName: localPart,
+        locale: 'en',
+        lastActiveAt: new Date(),
+      },
+    });
+    await tx.userIdentity.upsert({
+      where: { provider_providerSubject: { provider: 'email', providerSubject: normalizedEmail } },
+      update: { userId: user.id, normalizedEmail, verifiedAt: new Date() },
+      create: {
+        userId: user.id,
+        provider: 'email',
+        providerSubject: normalizedEmail,
+        normalizedEmail,
+        verifiedAt: new Date(),
+        isPrimary: true,
+      },
+    });
+    return user;
+  });
+}
+
 function resolveCoreTarget(req, org = null) {
   return resolveTierCore({
     origin: req?.headers?.origin || '',
@@ -4896,8 +4929,7 @@ const server = http.createServer(async (req, res) => {
           ? emailSignupAdmission(emailIdentity.signupTicket(verified.challenge))
           : null;
         if (!admission) return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
-        const provisioned = await createZitadelEmailIdentity(verified.email);
-        user = await upsertUserFromZitadel({ sub: provisioned.userId, email: verified.email, email_verified: true, name: provisioned.displayName, locale: 'en' });
+        user = await upsertVerifiedEmailUser(verified.email);
       } else {
         await prisma.userIdentity.upsert({
           where: { provider_providerSubject: { provider: 'email', providerSubject: verified.email } },

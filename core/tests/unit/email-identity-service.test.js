@@ -49,3 +49,11 @@ test('resend rotates the credential and restores a full verification window', as
   assert.match(source, /attempts: 0, verifiedAt: null, expiresAt: new Date\(now\.getTime\(\) \+ EXPIRY_MS\)/);
   assert.match(source, /otpHash: digest\(otp, 'otp'\), linkTokenHash: digest\(linkToken, 'link'\)/);
 });
+
+test('verified invitation signup provisions a native email identity without a Zitadel management dependency', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8'));
+  assert.match(source, /async function upsertVerifiedEmailUser\(email\)/);
+  assert.match(source, /provider: 'email'/);
+  assert.match(source, /user = await upsertVerifiedEmailUser\(verified\.email\)/);
+  assert.doesNotMatch(source, /createZitadelEmailIdentity\(verified\.email\)/);
+});

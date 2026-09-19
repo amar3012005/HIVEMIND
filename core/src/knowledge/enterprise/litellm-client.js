@@ -8,7 +8,7 @@
  */
 
 import fetch from 'node-fetch';
-import { cloudflareGatewayEnabled, gatewayFirstFetch, gatewayProviderForUrl } from '../../llm/cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, cloudflareGatewayConfig, gatewayFirstFetch, gatewayProviderForUrl } from '../../llm/cloudflare-gateway.js';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
 import { recordAiUsage, resolveAiModelPolicy } from '../../llm/ai-governance.js';
@@ -179,6 +179,29 @@ function pickRoute(model) {
       base: (process.env.QWEN_INGEST_BASE_URL || 'https://synthesize.singulancelabs.com/v1').replace(/\/+$/, ''),
       key: '', provider: 'qwen-ingest', wireModel: process.env.QWEN_INGEST_WIRE_MODEL || 'qwen3-ingest',
     };
+  }
+  // Cloudflare AI Gateway first (verified live 2026-09-19): Groq-family models
+  // route through the gateway's Groq provider — gatewayFirstFetch rewrites the
+  // api.groq.com URL onto the gateway and the gateway serves its own BYOK
+  // origin key, so an exhausted/direct provider key on this box is irrelevant.
+  // Gemini routes through the gateway compat endpoint pinned to the
+  // google-ai-studio backend (measured cheapest; see PROVIDER_PREFERENCE).
+  // This branch outranks LLM_PRIMARY=openrouter so extraction no longer dies
+  // on OpenRouter 403 key-limit errors.
+  if (cloudflareGatewayEnabled()) {
+    if (FORCE_GROQ_FOR_MODELS.test(model || '')) {
+      return { base: GROQ_BASE_URL, key: GROQ_KEY, provider: 'groq' };
+    }
+    if (/gemini/i.test(model || '')) {
+      const config = cloudflareGatewayConfig();
+      const base = String(process.env.CLOUDFLARE_AI_GATEWAY_BASE_URL || 'https://gateway.ai.cloudflare.com').replace(/\/+$/, '');
+      return {
+        base: `${base}/v1/${encodeURIComponent(config.accountId)}/${encodeURIComponent(config.gatewayId)}/compat`,
+        key: config.token,
+        provider: 'cf-gateway-compat',
+        wireModel: `google-ai-studio/${model}`,
+      };
+    }
   }
   if (LLM_PRIMARY === 'openrouter' && OPENROUTER_KEY) {
     return { base: OPENROUTER_BASE_URL, key: OPENROUTER_KEY, provider: 'openrouter' };

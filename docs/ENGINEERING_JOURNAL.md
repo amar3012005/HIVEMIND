@@ -2294,3 +2294,21 @@ git diff --check: passed (line-ending warnings only)
 - This is committed implementation work only. No Worker deployment, Flagship
   mutation, migration application, shared Docker rebuild, `singulance-local`
   merge, or production action occurred.
+
+## 2026-09-19 UTC — AgentScope WorkRun source-parity candidate committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/workrun-source-parity`
+- Base / commit: `869e09f2e6c08896bebfff52081b095b09809556` -> `cd17b7eb4b0fd3a2f16c575535fcd7e05c2617c7`
+- Scope: recovered A1/A3/A4 WorkRun control-plane and AgentScope runtime source,
+  immutable-image COPY contract, on-disk domain skills, grouped-tool activation,
+  event forwarding, Composio subject coverage, and stale-run recovery helper.
+- Verification: focused Node suite -> 14 pass, 0 fail; runtime-image Python
+  suite -> 7 pass, 0 fail; image `hm-agent-runtime-v2:workrun-source-parity-20260919-r3`
+  built with AgentScope `2.0.8` and 13 SKILL.md files; `git diff --check` passed.
+- Production: not deployed; shared local preview not rebuilt.
+- Rollback: revert `cd17b7eb4b0fd3a2f16c575535fcd7e05c2617c7` from the integration branch.
+- Next: merge this pushed branch through a clean permanent `singulance-local`
+  integration worktree, rebuild only the affected local services, then run the
+  post-rebuild A3 native reset-tools acceptance.

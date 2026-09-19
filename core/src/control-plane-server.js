@@ -12705,13 +12705,17 @@ Write the persona now.`;
             .then((started) => started.accepted ? started.completion : null)
             .catch((error) => console.warn('[hyper-onboarding] day-0 lifecycle failed:', error.message));
           void (async () => {
-            const capturedScreenshot = await screenshotCapturePromise;
-            let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
-            let finalSource = finalScreenshot ? 'playwright-screenshot' : null;
+            // Quality order: CF Browser Rendering (waitUntil 'load' — fully
+            // loaded page) FIRST; the Playwright capture fires at
+            // domcontentloaded + ~150ms settle and catches the buffering/
+            // loading state on JS-heavy sites, so it is the FALLBACK only.
+            const cfScreenshot = await captureWebsiteScreenshot(homepage.url || homepageUrl);
+            let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: cfScreenshot, orgId });
+            let finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
             if (!finalScreenshot) {
-              const firecrawlScreenshot = await captureWebsiteScreenshot(homepage.url || homepageUrl);
-              finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: firecrawlScreenshot, orgId });
-              finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
+              const capturedScreenshot = await screenshotCapturePromise;
+              finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
+              finalSource = finalScreenshot ? 'playwright-screenshot' : null;
             }
             if (!finalScreenshot) {
               finalScreenshot = await storeOfficialWebsiteVisual({ html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId });

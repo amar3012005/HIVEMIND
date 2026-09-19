@@ -29,7 +29,7 @@ import { getOpsToolsManifest, invokeOpsTool, isOpsTool } from './ops-release-gat
 const CONFIG = {
   publicBaseUrl: process.env.HIVEMIND_PUBLIC_BASE_URL
     || process.env.HIVEMIND_EXTERNAL_URL
-    || 'https://core.hivemind.davinciai.eu:8050',
+    || 'https://core.singulancelabs.com',
   internalBaseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL
     || process.env.HIVEMIND_BASE_URL
     || null,

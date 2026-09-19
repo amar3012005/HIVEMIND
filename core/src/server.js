@@ -2895,7 +2895,7 @@ const CONTEXT_CACHE_TTL_MS = Number(process.env.HIVEMIND_CONTEXT_CACHE_TTL_MS ||
 const aggregateCache = new Map();
 
 // OAuth 2.1 authorization code + refresh token stores
-const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050';
+const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.singulancelabs.com';
 const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'web.search', 'tools.invoke', 'workspace.connect', 'mcp.connect'];
 const OAUTH_SCOPE_TO_INTERNAL = {
   'memory.read': 'memory:read',
@@ -5277,7 +5277,7 @@ const server = http.createServer(async (req, res) => {
       const template = fs.readFileSync(path.join(CORE_SCRIPTS_ROOT, 'claude-mcp-installer.sh'), 'utf-8');
       const apiKey = url.searchParams.get('api_key') || '';
       const content = template
-        .replaceAll('__DIRECT_MCP_ENDPOINT__', 'https://core.hivemind.davinciai.eu:8050/api/mcp')
+        .replaceAll('__DIRECT_MCP_ENDPOINT__', 'https://core.singulancelabs.com/api/mcp')
         .replaceAll('__HAS_API_KEY__', apiKey ? '1' : '0')
         .replaceAll('__API_KEY__', apiKey)
         .replaceAll('__PLATFORM__', platform);
@@ -5298,7 +5298,7 @@ const server = http.createServer(async (req, res) => {
       const template = fs.readFileSync(path.join(CORE_SCRIPTS_ROOT, 'claude-mcp-installer.ps1'), 'utf-8');
       const apiKey = url.searchParams.get('api_key') || '';
       const content = template
-        .replaceAll('__DIRECT_MCP_ENDPOINT__', 'https://core.hivemind.davinciai.eu:8050/api/mcp')
+        .replaceAll('__DIRECT_MCP_ENDPOINT__', 'https://core.singulancelabs.com/api/mcp')
         .replaceAll('__HAS_API_KEY__', apiKey ? '1' : '0')
         .replaceAll('__API_KEY__', apiKey);
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -5319,7 +5319,7 @@ const server = http.createServer(async (req, res) => {
   //
   // Why this exists: until we run `npm publish`, `npx @hivemind/cli` can't
   // resolve. npx happily accepts a tarball URL directly, so the same UX
-  // works via `npx -y https://core.hivemind.davinciai.eu:8050/install/cli.tgz setup`.
+  // works via `npx -y https://core.singulancelabs.com/install/cli.tgz setup`.
   // The cli.sh wraps that in a curl|bash for users who don't want to type
   // the URL.
   // ── Chrome extension download ─────────────────────────────────────────
@@ -5451,7 +5451,7 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/install/cli.sh' && req.method === 'GET') {
     const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
-    const host = (req.headers['x-forwarded-host'] || req.headers.host || 'core.hivemind.davinciai.eu:8050').toString();
+    const host = (req.headers['x-forwarded-host'] || req.headers.host || 'core.singulancelabs.com').toString();
     const base = `${proto}://${host}`;
     const apiKey = url.searchParams.get('api_key') || '';
     // Heredoc-safe — escape $ that should reach bash, leave ${} in the
@@ -5654,7 +5654,7 @@ exit \$RC
     const rawHost = (xfHost || req.headers.host || '').toString().split(',')[0].trim();
     if (!rawHost) return OAUTH_BASE_URL;
     // Caddy proxies hivemind.davinciai.eu (Vercel-rewritten) to the same
-    // hm-core container as core.hivemind.davinciai.eu:8050. Whichever
+    // hm-core container. Whichever
     // host Caddy forwards, normalize to the canonical FE host so issuer
     // matches what Claude sees in the address bar when it fetched the
     // discovery doc.
@@ -16867,7 +16867,7 @@ exit \$RC
 
               // Verify OIDC token from Pub/Sub
               const expectedAudience = process.env.GCP_PUBSUB_AUDIENCE
-                || `${process.env.HIVEMIND_PUBLIC_URL || 'https://core.hivemind.davinciai.eu:8050'}/api/connectors/gmail/pubsub-webhook`;
+                || `${process.env.HIVEMIND_PUBLIC_URL || 'https://core.singulancelabs.com'}/api/connectors/gmail/pubsub-webhook`;
               const authValid = await verifyPubSubAuth(
                 req.headers['authorization'] || '',
                 expectedAudience,

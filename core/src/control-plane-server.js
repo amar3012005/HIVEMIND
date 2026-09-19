@@ -12172,6 +12172,7 @@ Write the persona now.`;
           // JSON prompt replaces three sequential calls (~4-6s total vs ~12-15s).
           const starterRooms = DOMAIN_ROOM_DEFINITIONS.filter((roomDefinition) => roomDefinition.key !== 'general');
           let unified = null;
+          let profile;
           try {
             unified = JSON.parse(await llm(
               'You resolve a company identity, mission, and starter tasks from FIRST-PARTY website evidence. Output ONLY JSON: {"profile":{"name":"","industry":"","business_model":"","capabilities":[""],"tagline":"","what_it_does":"","icp":"","offer":"","positioning":"","competitors":[],"tone":"","opportunities":["",""],"risks":["",""],"location":"","location_city":"","location_region":"","location_country":"","location_evidence_url":"","location_source":"","evidence_gaps":[""]},"mission":"","tasks":[{"room_tag":"","title":"","detail":"","deliverable":""}]}. PROFILE rules: (1) every factual field must be supported by supplied first-party sources or the explicitly labeled user claim; (2) never substitute a similarly named company; (3) location means company HQ/operating location. Prefer an explicit contact/imprint/legal-page location and set location_source=first_party. If the site has no location but USER-PROVIDED COMPANY LOCATION is present, preserve it exactly and set location_source=user_claim; (4) never infer location from TLD, language, audience, or desired market; (5) if location is absent from both sources, return empty and list it in evidence_gaps; (6) competitors remain empty unless the company itself names them; (7) use the exact website brand name. MISSION: crisp 2-3 sentences grounded in the profile. TASKS: one immediately useful task for EVERY supplied room tag, each used exactly once. Titles action-oriented, max 10 words. Details 30-60 words, company-specific, explaining work, evidence, decision, and business value. Deliverables name one concrete output in max 8 words. Research verifies unknowns; other rooms consume verified company evidence instead of inventing claims. No generic filler. Keep prose concise.',
@@ -12181,6 +12182,7 @@ Write the persona now.`;
           } catch {
             profile = { name: companyGuess, industry: '', business_model: '', capabilities: [], tagline: '', what_it_does: '', icp: '', offer: '', positioning: '', competitors: [], tone: '', opportunities: [], risks: [], location: '', location_city: '', location_region: '', location_country: '', location_evidence_url: '', evidence_gaps: ['Company profile synthesis unavailable'] };
           }
+          if (!profile && unified?.profile) profile = unified.profile;
           profile = normalizeCompanyProfile(profile, {
             fallbackName: companyGuess,
             websiteUrl: homepageUrl,
@@ -12248,6 +12250,9 @@ Write the persona now.`;
             ...item,
             evidence_scope: isFirstPartyUrl(item.url, homepageUrl) ? 'first-party-search' : 'external-market',
           })));
+          // Fan-out market evidence (competitors / industry / news) — appended
+          // after the identity filter so third-party coverage survives.
+          research.push(...(marketCoverage || []).filter((item) => item && item.url && !research.some((r) => r.url === item.url)));
           markTiming('mission_and_market');
 
           const companyContext = buildCompanyOperatingContext({

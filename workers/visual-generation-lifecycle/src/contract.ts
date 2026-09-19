@@ -39,3 +39,10 @@ export function safeProductionSpec(value: any, fallback: any) {
 }
 
 export function assetPrefix(trigger: VisualTrigger) { return `org/${trigger.org_id}/visual-generation/${trigger.job_id}/`; }
+
+export function imageContentType(bytes: Uint8Array, declared = '') {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp';
+  return declared.startsWith('image/') ? declared : 'application/octet-stream';
+}

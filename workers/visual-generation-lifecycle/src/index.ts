@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { assetPrefix, dimensionsForAspect, safeProductionSpec, type VisualTrigger, validTrigger, workflowInstanceId } from './contract';
+import { assetPrefix, dimensionsForAspect, imageContentType, safeProductionSpec, type VisualTrigger, validTrigger, workflowInstanceId } from './contract';
 
 type Env = {
   VISUAL_GENERATION_WORKFLOW: Workflow<VisualTrigger>; VISUAL_GENERATION_QUEUE: Queue<VisualTrigger>; VISUAL_ASSETS: R2Bucket; AI: Ai;
@@ -49,20 +49,20 @@ async function aiText(env: Env, prompt: string) {
   return { model, value: parseJson(result) };
 }
 async function resultBytes(result: any): Promise<{ bytes: Uint8Array; contentType: string }> {
-  if (result instanceof Response) return { bytes: new Uint8Array(await result.arrayBuffer()), contentType: result.headers.get('content-type') || 'image/png' };
-  if (result instanceof ReadableStream) return { bytes: new Uint8Array(await new Response(result).arrayBuffer()), contentType: 'image/png' };
+  if (result instanceof Response) { const bytes = new Uint8Array(await result.arrayBuffer()); return { bytes, contentType: imageContentType(bytes, result.headers.get('content-type') || '') }; }
+  if (result instanceof ReadableStream) { const bytes = new Uint8Array(await new Response(result).arrayBuffer()); return { bytes, contentType: imageContentType(bytes) }; }
   const encoded = result?.image || result?.result?.image || result?.data?.[0]?.b64_json;
   if (typeof encoded === 'string') {
     const raw = encoded.includes(',') ? encoded.slice(encoded.indexOf(',') + 1) : encoded; const binary = atob(raw);
-    return { bytes: Uint8Array.from(binary, (character) => character.charCodeAt(0)), contentType: 'image/png' };
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0)); return { bytes, contentType: imageContentType(bytes) };
   }
   throw new Error('visual_model_empty_response');
 }
-async function generate(env: Env, prompt: string, aspect: string, quality: string, reference?: Uint8Array): Promise<Generated> {
+async function generate(env: Env, prompt: string, aspect: string, quality: string, reference?: Generated): Promise<Generated> {
   const model = quality === 'fast' ? (env.VISUAL_FAST_MODEL || '@cf/black-forest-labs/flux-2-klein-4b') : (env.VISUAL_QUALITY_MODEL || '@cf/black-forest-labs/flux-2-dev');
   const dimensions = dimensionsForAspect(aspect, false); const form = new FormData();
   form.append('prompt', prompt); form.append('width', String(dimensions.width)); form.append('height', String(dimensions.height));
-  if (reference?.length) form.append('input_image_0', new Blob([new Uint8Array(reference).buffer as ArrayBuffer], { type: 'image/png' }), 'style-anchor.png');
+  if (reference?.bytes.length) form.append('input_image_0', new Blob([new Uint8Array(reference.bytes).buffer as ArrayBuffer], { type: reference.contentType }), `style-anchor.${reference.contentType === 'image/jpeg' ? 'jpg' : reference.contentType === 'image/webp' ? 'webp' : 'png'}`);
   const serialized = new Response(form); const result = await (env.AI as any).run(model, { multipart: { body: serialized.body, contentType: serialized.headers.get('content-type') } }, env.AI_GATEWAY_ID ? { gateway: { id: env.AI_GATEWAY_ID } } : undefined);
   const image = await resultBytes(result); if (!image.bytes.length || image.bytes.length > 15 * 1024 * 1024) throw new Error('visual_model_invalid_image_size');
   return { ...image, model, prompt };
@@ -92,9 +92,11 @@ async function critique(env: Env, image: Generated, spec: any) {
 }
 async function hash(bytes: Uint8Array) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes).buffer as ArrayBuffer))].map((value) => value.toString(16).padStart(2, '0')).join(''); }
 async function storeGenerated(env: Env, trigger: VisualTrigger, generated: Generated, key: string, role: string): Promise<StoredGenerated> {
+  const extension = generated.contentType === 'image/jpeg' ? 'jpg' : generated.contentType === 'image/webp' ? 'webp' : 'png';
+  const resolvedKey = key.replace(/\.(?:png|jpe?g|webp)$/i, `.${extension}`);
   const digest = await hash(generated.bytes);
-  await env.VISUAL_ASSETS.put(key, generated.bytes, { httpMetadata: { contentType: generated.contentType }, customMetadata: { org_id: trigger.org_id, job_id: trigger.job_id, asset_role: role, content_hash: digest, model: generated.model } });
-  return { r2_key: key, content_type: generated.contentType, content_hash: digest, model: generated.model, prompt_hash: await hash(new TextEncoder().encode(generated.prompt)) };
+  await env.VISUAL_ASSETS.put(resolvedKey, generated.bytes, { httpMetadata: { contentType: generated.contentType }, customMetadata: { org_id: trigger.org_id, job_id: trigger.job_id, asset_role: role, content_hash: digest, model: generated.model } });
+  return { r2_key: resolvedKey, content_type: generated.contentType, content_hash: digest, model: generated.model, prompt_hash: await hash(new TextEncoder().encode(generated.prompt)) };
 }
 async function loadGenerated(env: Env, stored: StoredGenerated): Promise<Generated> {
   const object = await env.VISUAL_ASSETS.get(stored.r2_key); if (!object) throw new Error('visual_working_asset_missing');
@@ -131,7 +133,7 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
       }
       failedStage = 'generating_master';
       let master = await step.do('generate-master', { retries: { limit: 6, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
-        const reference = anchor ? (await loadGenerated(this.env, anchor)).bytes : undefined;
+        const reference = anchor ? await loadGenerated(this.env, anchor) : undefined;
         const generated = await generate(this.env, finalPrompt(direction.production_spec, direction.production_spec.variants[0], Boolean(anchor)), aspects[0], quality, reference);
         return store(this.env, trigger, generated, 0, aspects[0], 'master');
       }) as any;
@@ -140,7 +142,7 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
       const review = await step.do('critique-master', { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' }, timeout: '10 minutes' }, async () => critique(this.env, await loadGenerated(this.env, master), direction.production_spec)) as any;
       await step.do('event-critique', () => report(this.env, trigger, 'critiquing', 'critiquing', 70, review.needs_revision ? 'Visual critic requested one bounded revision.' : 'Master visual passed the quality review.', review));
       if (review.needs_revision) master = await step.do('revise-master-once', { retries: { limit: 5, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
-        const reference = anchor ? (await loadGenerated(this.env, anchor)).bytes : undefined;
+        const reference = anchor ? await loadGenerated(this.env, anchor) : undefined;
         const generated = await generate(this.env, `${finalPrompt(direction.production_spec, direction.production_spec.variants[0], Boolean(anchor))}\nSenior critic correction: ${review.revision_instruction || 'Improve specificity, composition, brand fit, and production polish.'}`, aspects[0], quality, reference);
         return store(this.env, trigger, generated, 0, aspects[0], 'master');
       }) as any;
@@ -148,7 +150,7 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
       failedStage = 'generating_variants';
       for (let index = 1; index < count; index += 1) {
         const variant = await step.do(`generate-variant-${index}`, { retries: { limit: 6, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
-          const reference = anchor ? (await loadGenerated(this.env, anchor)).bytes : undefined;
+          const reference = anchor ? await loadGenerated(this.env, anchor) : undefined;
           const generated = await generate(this.env, finalPrompt(direction.production_spec, direction.production_spec.variants[index], Boolean(anchor)), aspects[index % aspects.length], quality, reference);
           return store(this.env, trigger, generated, index, aspects[index % aspects.length], 'variant');
         }) as any;

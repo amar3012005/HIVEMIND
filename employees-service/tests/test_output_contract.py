@@ -38,6 +38,15 @@ def test_explicit_visual_guide_is_artifact():
     assert should_run_render_gate(c) is True
 
 
+def test_explicit_generated_image_uses_durable_visual_contract():
+    c = resolve_output_contract(
+        user_message="Create three coordinated 16:9 campaign visuals for the launch"
+    )
+    assert c["intended_output"] == "artifact"
+    assert c["artifact_required"] is True
+    assert c["artifact_kind"] == "generated_image"
+
+
 def test_explicit_deck_is_artifact():
     c = resolve_output_contract(user_message="Make a pitch deck for EU buyers", room_kind="branding")
     assert c["intended_output"] == "artifact"

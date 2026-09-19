@@ -22,6 +22,14 @@ EXPLICIT_VISUAL = re.compile(
     re.I,
 )
 
+EXPLICIT_IMAGE_GENERATION = re.compile(
+    r"(?:\b(?:generate|create|make|produce|render|design)\b.{0,100}"
+    r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative)\b|"
+    r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative)\b.{0,100}"
+    r"\b(?:generate|create|make|produce|render|design)\b)",
+    re.I | re.S,
+)
+
 EXPLICIT_FILE = re.compile(
     r"\b(?:spreadsheet|workbook|\.csv\b|xlsx|word\s+document|google\s+doc)\b",
     re.I,
@@ -43,6 +51,11 @@ def explicit_visual_request(user_message: str) -> bool:
     return bool(EXPLICIT_VISUAL.search(user_message or ""))
 
 
+def explicit_image_generation_request(user_message: str) -> bool:
+    """Return true only for an explicit request to produce raster visual work."""
+    return bool(EXPLICIT_IMAGE_GENERATION.search(user_message or ""))
+
+
 def explicit_file_request(user_message: str) -> bool:
     return bool(EXPLICIT_FILE.search(user_message or ""))
 
@@ -55,13 +68,22 @@ def resolve_output_contract(
     execution_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     profile = dict(execution_profile or {})
-    profile_requires_visual = profile.get("visual_artifact_required") is True
-    visual = bool(profile_requires_visual or explicit_visual_request(user_message))
+    allowed_outputs = {
+        str(item).strip().lower()
+        for item in (profile.get("allowed_outputs") or [])
+        if str(item).strip()
+    }
+    profile_requires_visual = bool(
+        profile.get("visual_artifact_required") is True
+        or (allowed_outputs == {"artifact"} and profile.get("required_artifacts"))
+    )
+    generated_image = explicit_image_generation_request(user_message)
+    visual = bool(profile_requires_visual or generated_image or explicit_visual_request(user_message))
     file_req = explicit_file_request(user_message)
     evidence = bool(profile.get("evidence_required")) or evidence_required_from_text(user_message)
     if visual:
         intended = "artifact"
-        artifact_kind = "interactive_document"
+        artifact_kind = "generated_image" if generated_image else "interactive_document"
     elif file_req:
         intended = "document"
         artifact_kind = None

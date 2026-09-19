@@ -70,6 +70,7 @@ from .hyper.execution_profiles import (
     profile_registry_manifest,
 )
 from .hyper.output_contract import (
+    explicit_image_generation_request,
     labeled_unverified_draft,
     resolve_output_contract,
     should_run_render_gate,
@@ -560,6 +561,76 @@ async def _save_room_decision(
     except Exception as exc:  # noqa: BLE001
         log.warning("decision-sink: save failed room=%s err=%s", room_id, exc)
         return None
+
+
+_VISUAL_COUNT_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8,
+}
+
+
+def _room_visual_job_payload(req: "RoomTurnRequest", room_kind: str) -> Dict[str, Any]:
+    """Compile one bounded durable visual request from an explicit room ask."""
+    message = str(req.user_message or "").strip()
+    count = 1
+    numeric = re.search(r"\b([2-8])\s+(?:coordinated\s+)?(?:images|visuals|graphics|creatives)\b", message, re.I)
+    if numeric:
+        count = int(numeric.group(1))
+    else:
+        worded = re.search(r"\b(two|three|four|five|six|seven|eight)\s+(?:coordinated\s+)?(?:images|visuals|graphics|creatives)\b", message, re.I)
+        if worded:
+            count = _VISUAL_COUNT_WORDS[worded.group(1).lower()]
+        elif re.search(r"\b(?:image|visual|graphic|creative)\s+(?:set|series)\b|\bmultiple\s+(?:images|visuals|graphics|creatives)\b", message, re.I):
+            count = 3
+    ratios: List[str] = []
+    for ratio in re.findall(r"(?<!\d)(1:1|16:9|9:16|4:3|3:4|4:5)(?!\d)", message):
+        if ratio not in ratios:
+            ratios.append(ratio)
+    if not ratios:
+        ratios = ["1:1"]
+    use_case = (
+        "campaign_social"
+        if room_kind == "campaign" or re.search(r"\b(?:campaign|social|ad creative)\b", message, re.I)
+        else "room_visual"
+    )
+    return {
+        "instruction": message,
+        "use_case": use_case,
+        "output": {
+            "mode": "set" if count > 1 else "single",
+            "count": count,
+            "aspect_ratios": ratios,
+            "quality": "quality",
+        },
+        "model_policy": "auto",
+        "source": {"kind": "room_director", "room_id": req.room_id},
+        "idempotency_key": f"room-visual:{req.turn_id}",
+    }
+
+
+async def _queue_room_visual_generation(req: "RoomTurnRequest", room_kind: str) -> Dict[str, Any]:
+    settings = get_settings()
+    master = settings.hivemind_master_api_key
+    if not master:
+        raise RuntimeError("visual_generation_master_key_unconfigured")
+    async with httpx.AsyncClient(
+        base_url=settings.hivemind_core_url,
+        timeout=httpx.Timeout(20.0, connect=5.0),
+        headers={
+            "Authorization": f"Bearer {master}",
+            "X-API-Key": master,
+            "X-HM-User-Id": req.user_id,
+            "X-HM-Org-Id": req.org_id,
+            "Content-Type": "application/json",
+        },
+    ) as client:
+        response = await client.post(
+            "/api/visual-generation/jobs",
+            json=_room_visual_job_payload(req, room_kind),
+            headers={"X-Idempotency-Key": f"room-visual:{req.turn_id}"},
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _extract_memory_rows(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3977,6 +4048,49 @@ async def _orchestrate_single_agent(
         _output_contract.get("evidence_required"),
         (_work_room_profile or {}).get("profile_id") or "none",
     )
+    # Explicit generated images are not HTML artifacts. Admit one idempotent
+    # durable job at the Director boundary; the independent workflow owns Brand
+    # DNA, art direction, generation, critique, storage, and retries.
+    if (_output_contract.get("artifact_kind") == "generated_image"
+            and explicit_image_generation_request(req.user_message or "")):
+        try:
+            visual_job = await _queue_room_visual_generation(req, _room_kind)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "visual_job_queued",
+                "job_id": visual_job.get("job_id"),
+                "status": visual_job.get("status") or "queued",
+                "stage": visual_job.get("stage") or "queued",
+                "replayed": visual_job.get("replayed") is True,
+            })
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "final_report",
+                "title": "Visual production started",
+                "markdown": "Your visual is rendering in this room. The production card will update through art direction, generation, critique, and final delivery.",
+                "summary": "A durable, brand-grounded visual job is rendering in this room.",
+            })
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "seal", "cost_tokens": 0, "status": "complete",
+                "duration_ms": int((time.time() - started) * 1000),
+                "engine": "durable-visual-generation",
+                "visual_job_id": visual_job.get("job_id"),
+            })
+            return RoomTurnResponse(
+                ok=True, cost_tokens=0, status="complete",
+                result={"visual_job": visual_job},
+                summary="A durable visual job is rendering in this room.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[single] visual job admission failed room=%s turn=%s", req.room_id, req.turn_id)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "warning", "code": "visual_generation_admission_failed",
+                "note": "The visual workflow could not accept this request yet. Retry the same room message safely.",
+            })
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "seal", "cost_tokens": 0, "status": "blocked",
+                "duration_ms": int((time.time() - started) * 1000),
+                "engine": "durable-visual-generation",
+            })
+            return RoomTurnResponse(ok=False, cost_tokens=0, status="blocked", summary=str(exc)[:300])
     _m_recon = canonical_hyper_model(
         getattr(req, "agentic_model", None)
         or os.environ.get("HYPER_MODEL_RECON")

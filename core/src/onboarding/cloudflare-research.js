@@ -59,8 +59,21 @@ export async function cfCrawlWebsite(websiteUrl, {
   if (!cloudflareBrowserEnabled()) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
   try {
     const { accountId, apiToken } = cfConfig();
-    onProgress(`Crawling up to ${limit} first-party pages with Cloudflare Browser Rendering`);
-    const startResponse = await browserRenderingRequest('crawl', {
+    onProgress(`Reading the official homepage and crawling first-party pages with Cloudflare Browser Rendering`);
+
+    // ALL fetching is parallel: the direct homepage markdown fetch starts
+    // immediately (fast path, ~2-4s) and the crawl job starts at the same
+    // time. Whichever finishes first wins; the crawl only contributes
+    // additional pages. No sequential waits anywhere.
+    const homepagePromise = browserRenderingRequest('markdown', {
+      url: websiteUrl,
+      gotoOptions: { waitUntil: 'networkidle2', timeout: 45000 },
+    }, { timeoutMs: 60_000 })
+      .then((response) => response.json().catch(() => ({})))
+      .then((data) => String(data?.result || '').replace(/\u0000/g, '').trim())
+      .catch(() => '');
+
+    const crawlPromise = browserRenderingRequest('crawl', {
       url: websiteUrl,
       limit: Math.min(10, Math.max(3, Number(limit) || 6)),
       depth: 1,
@@ -69,40 +82,109 @@ export async function cfCrawlWebsite(websiteUrl, {
       crawlPurposes: ['search', 'ai-input'],
       contentUse: 'reference',
       options: { includeExternalLinks: false, includeSubdomains: false },
-    }, { timeoutMs: 15_000 });
-    const startData = await startResponse.json().catch(() => ({}));
-    const jobId = startData?.result;
-    if (!jobId) throw new Error('crawl_job_not_created');
+    }, { timeoutMs: 15_000 })
+      .then((response) => response.json().catch(() => ({})))
+      .then((startData) => String(startData?.result || '') || null)
+      .catch(() => null);
 
-    const boundedPollDelays = (Array.isArray(pollDelays) && pollDelays.length ? pollDelays : Array(10).fill(2000))
-      .slice(0, 12).map((value) => Math.max(0, Number(value) || 0));
-    let status = null;
-    for (const delayMs of boundedPollDelays) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-      const pollResponse = await fetch(
-        `${BROWSER_RENDERING_BASE}/${cfConfig().accountId}/browser-rendering/crawl/${encodeURIComponent(jobId)}?limit=100`,
-        { headers: { Authorization: `Bearer ${cfConfig().apiToken}` }, signal: AbortSignal.timeout(15_000) },
-      );
-      if (!pollResponse.ok) throw new Error(`crawl_poll_${pollResponse.status}`);
-      status = await pollResponse.json().catch(() => ({}));
-      const result = status?.result || {};
-      if (result.status === 'completed') break;
-      if (['errored', 'cancelled_by_user', 'cancelled_due_to_limits', 'cancelled_due_to_timeout'].includes(result.status)) {
-        throw new Error(`crawl_${result.status}`);
-      }
+    const homepageMarkdown = await homepagePromise;
+    const jobId = await crawlPromise;
+
+    const sameOrigin = (link) => {
+      try {
+        return new URL(link).hostname.replace(/^www\./, '') === new URL(websiteUrl).hostname.replace(/^www\./, '')
+          && !/\.(png|jpe?g|svg|gif|css|js|pdf|ico|webp)$/i.test(link);
+      } catch { return false; }
+    };
+
+    // Parallel page fetchers: extract same-site nav links from the homepage
+    // markdown and fetch every one concurrently via /markdown.
+    const fetchPagesInParallel = async (links, seen) => {
+      const targets = [...new Set(links)]
+        .filter((link) => link && !seen.has(link.replace(/\/$/, '')))
+        .slice(0, Math.max(0, wanted - seen.size));
+      const fetched = await Promise.all(targets.map(async (pageUrl) => {
+        try {
+          const response = await browserRenderingRequest('markdown', {
+            url: pageUrl,
+            gotoOptions: { waitUntil: 'networkidle2', timeout: 30000 },
+          }, { timeoutMs: 45_000 });
+          const data = await response.json().catch(() => ({}));
+          const content = String(data?.result || '').replace(/\u0000/g, '').trim();
+          if (!content) return null;
+          return { url: pageUrl, title: '', description: '', content: content.slice(0, 9000), links: [], purpose: 'company', provider: 'cf-browser-rendering' };
+        } catch { return null; }
+      }));
+      return fetched.filter(Boolean);
+    };
+
+    const wanted = Math.min(10, Math.max(3, Number(limit) || 6));
+    const pages = [];
+    const seen = new Set();
+    if (homepageMarkdown) {
+      pages.push({ url: websiteUrl, title: '', description: '', content: homepageMarkdown.slice(0, 9000), links: [], purpose: 'company', provider: 'cf-browser-rendering' });
+      seen.add(websiteUrl.replace(/\/$/, ''));
     }
-    const result = status?.result || {};
-    if (result.status !== 'completed') throw new Error('crawl_poll_timeout');
-    const records = Array.isArray(result.records) ? result.records : [];
-    const pages = records.map((record) => ({
-      url: record?.url || record?.metadata?.url || '',
-      title: String(record?.metadata?.title || '').slice(0, 300),
-      description: String(record?.metadata?.description || '').slice(0, 500),
-      content: String(record?.markdown || '').replace(/\u0000/g, '').trim().slice(0, 9000),
-      links: [],
-      purpose: 'company',
-      provider: 'cf-browser-rendering',
-    })).filter((page) => page.content && page.url);
+
+    const result = { total: wanted, browserSecondsUsed: 0, status: homepageMarkdown ? 'completed' : null };
+
+    // Crawl job results (may be empty — the job can complete with most URLs
+    // still queued; the direct fetches above already cover the gap).
+    if (jobId && homepageMarkdown) {
+      // Extract nav links from the homepage markdown and fetch pages
+      // in parallel NOW, concurrent with the crawl job polling.
+      const navLinks = [...homepageMarkdown.matchAll(/\((https?:\/\/[^)\s]+)\)/g)]
+        .map((match) => match[1])
+        .filter(sameOrigin);
+      const parallelFetchPromise = fetchPagesInParallel(navLinks, seen);
+
+      // Poll the crawl job concurrently.
+      const boundedPollDelays = (Array.isArray(pollDelays) && pollDelays.length ? pollDelays : Array(10).fill(2000))
+        .slice(0, 12).map((value) => Math.max(0, Number(value) || 0));
+      let crawlResult = null;
+      for (const delayMs of boundedPollDelays) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        try {
+          const pollResponse = await fetch(
+            `${BROWSER_RENDERING_BASE}/${cfConfig().accountId}/browser-rendering/crawl/${encodeURIComponent(jobId)}?limit=100&status=completed`,
+            { headers: { Authorization: `Bearer ${cfConfig().apiToken}` }, signal: AbortSignal.timeout(15_000) },
+          );
+          if (!pollResponse.ok) break;
+          const pollData = await pollResponse.json().catch(() => ({}));
+          crawlResult = pollData?.result || null;
+          if (crawlResult?.status === 'completed') break;
+          if (['errored', 'cancelled_by_user', 'cancelled_due_to_limits', 'cancelled_due_to_timeout'].includes(crawlResult?.status || '')) break;
+        } catch { break; }
+      }
+      if (crawlResult?.status === 'completed') {
+        result.total = Number(crawlResult.total || result.total);
+        result.browserSecondsUsed = Number(crawlResult.browserSecondsUsed || 0);
+        for (const record of (Array.isArray(crawlResult.records) ? crawlResult.records : [])) {
+          const url = record?.url || record?.metadata?.url || '';
+          const content = String(record?.markdown || '').replace(/\u0000/g, '').trim().slice(0, 9000);
+          if (url && content && !seen.has(url.replace(/\/$/, ''))) {
+            pages.push({ url, title: String(record?.metadata?.title || '').slice(0, 300), description: String(record?.metadata?.description || '').slice(0, 500), content, links: [], purpose: 'company', provider: 'cf-browser-rendering' });
+            seen.add(url.replace(/\/$/, ''));
+          }
+        }
+      }
+      // Merge the parallel direct fetches (they raced the crawl polling).
+      const extra = await parallelFetchPromise;
+      for (const page of extra) {
+        if (!seen.has(page.url.replace(/\/$/, ''))) {
+          pages.push(page);
+          seen.add(page.url.replace(/\/$/, ''));
+        }
+      }
+    } else if (homepageMarkdown) {
+      // No crawl job — still fetch nav pages in parallel.
+      const navLinks = [...homepageMarkdown.matchAll(/\((https?:\/\/[^)\s]+)\)/g)]
+        .map((match) => match[1])
+        .filter(sameOrigin);
+      const extra = await fetchPagesInParallel(navLinks, seen);
+      pages.push(...extra);
+    }
+
     if (!pages.length) throw new Error('crawl_returned_no_usable_pages');
     onProgress(`Read ${pages.length} first-party pages in one bounded crawl`);
     return {

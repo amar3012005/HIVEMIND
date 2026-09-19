@@ -116,6 +116,7 @@ import { narrativeLanguageInstruction, normalizePreferredLanguage } from './hype
 import { resolveHqTurnRoute } from './hyper/hq-turn-routing.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { persistOnboardingWebArtifacts, readOnboardingWebArtifact, renderOnboardingWebArtifactPreview } from './onboarding/web-artifacts.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
@@ -12173,7 +12174,11 @@ Write the persona now.`;
             provider: 'direct',
           };
           let pages = mergeCompanyResearchPages(firecrawlResearch.pages, [directHomepage], homepageUrl, { limit: 6 });
-          if (firecrawlResearch.provider !== 'firecrawl') {
+          // A successful Cloudflare crawl is first-class evidence just like a
+          // successful Firecrawl result. Only replace pages when both rendered
+          // providers failed; the old != firecrawl condition discarded every
+          // Cloudflare page and left only the direct HTML fallback.
+          if (firecrawlResearch.provider === 'fallback') {
             if (firecrawlResearch.error && firecrawlResearch.error !== 'not_configured') {
               say('Firecrawl was unavailable; using direct first-party website reading');
             }
@@ -12486,6 +12491,13 @@ Write the persona now.`;
           // org-canon = the pinned "always company context" marker; company-profile
           // = the stable canon lane; pinned = never-decay; source tag = provenance.
           const canonTags = ['org-canon', 'company-profile', 'pinned', 'onboarding', 'source:hyperagents-onboarding', ...entityTags];
+          // Preserve the actual crawl result as immutable tenant-scoped evidence.
+          // The memory projection below remains intact for recall, while these
+          // records give people and rooms a stable, inspectable source object.
+          const webArtifacts = await persistOnboardingWebArtifacts({
+            prisma, orgId, userId, companyName, pages,
+          });
+          const webArtifactByUrl = new Map(webArtifacts.map((artifact) => [artifact.url, artifact]));
           const sections = [
             { title: `${companyName} — Company profile`, memoryType: 'summary',
               content: `COMPANY IDENTITY — ${companyName}${profile.tagline ? ` ("${profile.tagline}")` : ''}. ${profile.what_it_does || ''} Website: ${siteUrl}.${profile.location ? ` Company location: ${profile.location}.` : ''}` },
@@ -12511,8 +12523,8 @@ Write the persona now.`;
               title: `${companyName} — Website page: ${(page.title || page.url || '').slice(0, 80)}`,
               memoryType: 'fact',
               authorityLevel: 'verified',
-              content: `FIRST-PARTY PAGE (${page.purpose || 'company'}) — ${page.url}\n\n${String(page.content || page.text || '').slice(0, 2500)}`,
-              tags: [...canonTags, `source-page:${page.url.slice(0, 120)}`],
+              content: `FIRST-PARTY PAGE (${page.purpose || 'company'}) — ${page.url}\nWEB ARTIFACT: ${webArtifactByUrl.get(page.url)?.id || '(not available)'}\n\n${String(page.content || page.text || '').slice(0, 9000)}`,
+              tags: [...canonTags, `source-page:${page.url.slice(0, 120)}`, ...(webArtifactByUrl.get(page.url)?.id ? [`web-artifact:${webArtifactByUrl.get(page.url).id}`] : [])],
             })),
           ];
           // Memory filing + profile facts + domain rooms run in BACKGROUND:
@@ -12684,6 +12696,7 @@ Write the persona now.`;
             company_location: profile.location || null,
             profile, mission, company_context: companyContext, tasks,
             research: research.slice(0, 10),
+            web_artifacts: webArtifacts,
             source_pages: pages.slice(0, 12).map((page) => ({ url: page.url || '', title: page.title || '', purpose: page.purpose || 'company' })).filter((page) => page.url),
             documents: [
               `${companyName} — Company profile`,
@@ -12872,6 +12885,47 @@ Write the persona now.`;
         if (!started.accepted) return jsonResponse(res, started);
         void started.completion.catch((error) => console.warn('[hyper-company] day-0 report failed:', error.message));
         return jsonResponse(res, { ok: true, accepted: true, status: 'sending', version: DAY_ZERO_REPORT_VERSION }, 202);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // GET /v1/hyper/company/web-artifacts/:id[/preview] — tenant-scoped raw
+    // onboarding crawl evidence. The JSON form is available to product
+    // surfaces and agents; preview renders the same captured body for people.
+    const companyWebArtifactMatch = pathname.match(/^\/v1\/hyper\/company\/web-artifacts\/([0-9a-f-]{36})(?:\/(preview))?$/);
+    if (companyWebArtifactMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const artifact = await readOnboardingWebArtifact({
+          prisma,
+          artifactId: companyWebArtifactMatch[1],
+          orgId: current.session.orgId,
+        });
+        if (!artifact) return jsonResponse(res, { error: 'Web artifact not found' }, 404);
+        if (companyWebArtifactMatch[2] === 'preview') {
+          const html = renderOnboardingWebArtifactPreview(artifact);
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': Buffer.byteLength(html),
+            'Cache-Control': 'private, max-age=300',
+            'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'",
+          });
+          res.end(html);
+          return;
+        }
+        return jsonResponse(res, {
+          ok: true,
+          contract: 'hivemind.onboarding-web-artifact.v1',
+          artifact: {
+            id: artifact.id,
+            source_url: artifact.sourceUrl,
+            content_type: artifact.contentType,
+            created_at: artifact.createdAt,
+            ...(artifact.payload && typeof artifact.payload === 'object' ? artifact.payload : {}),
+          },
+        });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

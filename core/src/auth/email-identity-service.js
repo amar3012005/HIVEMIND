@@ -148,6 +148,7 @@ export function createEmailIdentityService({ prisma, publicBaseUrl }) {
       const linkToken = crypto.randomBytes(32).toString('base64url');
       const updated = await tx.emailAuthChallenge.update({ where: { id: challengeId }, data: {
         otpHash: digest(otp, 'otp'), linkTokenHash: digest(linkToken, 'link'),
+        attempts: 0, verifiedAt: null, expiresAt: new Date(now.getTime() + EXPIRY_MS),
         resendCount: { increment: 1 }, resendAvailableAt: new Date(now.getTime() + RESEND_MS),
       } });
       const outbox = await createOutbox(tx, updated, open(row.email_ciphertext), otp, linkToken);

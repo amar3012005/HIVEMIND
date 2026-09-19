@@ -43,3 +43,9 @@ test('email login defaults fail closed instead of silently selecting account cre
   assert.match(source, /MAX_STARTS_PER_EMAIL/);
   assert.match(source, /requestFingerprintHash/);
 });
+
+test('resend rotates the credential and restores a full verification window', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../../src/auth/email-identity-service.js', import.meta.url), 'utf8'));
+  assert.match(source, /attempts: 0, verifiedAt: null, expiresAt: new Date\(now\.getTime\(\) \+ EXPIRY_MS\)/);
+  assert.match(source, /otpHash: digest\(otp, 'otp'\), linkTokenHash: digest\(linkToken, 'link'\)/);
+});

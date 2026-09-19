@@ -208,27 +208,74 @@ export async function cfCrawlWebsite(websiteUrl, {
   }
 }
 
-/** Sync PNG screenshot via Browser Rendering. Returns a data URI or null. */
-export async function cfCaptureScreenshot(websiteUrl) {
+const CAPTURE_READY_SCRIPT = `(() => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+  const visibleImages = () => Array.from(document.images).filter((image) => {
+    const rect = image.getBoundingClientRect();
+    return rect.width > 80 && rect.height > 50 && rect.bottom > 0 && rect.right > 0
+      && rect.top < window.innerHeight && rect.left < window.innerWidth;
+  });
+  const blockingConsent = () => Array.from(document.querySelectorAll('[role="dialog"], [class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i]')).some((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const text = String(element.textContent || '').toLowerCase();
+    const coverage = (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight);
+    return ['fixed', 'sticky'].includes(style.position) && coverage >= 0.28 && /(cookie|consent|privacy|accept all)/.test(text);
+  });
+  (async () => {
+    await document.fonts?.ready?.catch?.(() => {});
+    await Promise.all(visibleImages().map(async (image) => {
+      if (!image.complete) await Promise.race([new Promise((resolve) => { image.addEventListener('load', resolve, { once: true }); image.addEventListener('error', resolve, { once: true }); }), wait(5000)]);
+      await image.decode?.().catch?.(() => {});
+    }));
+    await nextFrame();
+    await nextFrame();
+    if (!blockingConsent()) document.documentElement.setAttribute('data-hivemind-capture-ready', 'true');
+  })();
+})();`;
+
+export function isAcceptableHomepageScreenshot(buffer, contentType = '') {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer || 0);
+  if (!String(contentType).toLowerCase().includes('image/png') || bytes.byteLength < 20_000) return false;
+  const png = [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value);
+  if (!png || bytes.byteLength < 24) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getUint32(16) >= 1200 && view.getUint32(20) >= 700;
+}
+
+/** Validated real-browser PNG with bounded retry. Returns a data URI or null. */
+export async function cfCaptureScreenshot(websiteUrl, {
+  request = browserRenderingRequest,
+  retryDelays = [0, 1500, 3500],
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
   if (!cloudflareBrowserEnabled()) return null;
-  try {
-    const response = await browserRenderingRequest('screenshot', {
-      url: websiteUrl,
-      screenshotOptions: { fullPage: false },
-      viewport: { width: 1280, height: 720 },
-      gotoOptions: { waitUntil: 'load', timeout: 30_000 },
-    }, { timeoutMs: 60_000 });
-    const buffer = await response.arrayBuffer();
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+    if (retryDelays[attempt]) await sleep(retryDelays[attempt]);
+    try {
+      const response = await request('screenshot', {
+        url: websiteUrl,
+        addScriptTag: [{ id: 'hivemind-capture-readiness', content: CAPTURE_READY_SCRIPT }],
+        screenshotOptions: { fullPage: false, type: 'png', optimizeForSpeed: false },
+        viewport: { width: 1440, height: 900, deviceScaleFactor: 1, isMobile: false },
+        gotoOptions: { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 60_000 },
+        waitForSelector: { selector: 'html[data-hivemind-capture-ready="true"]', visible: true, timeout: 20_000 },
+        waitForTimeout: 900 + attempt * 600,
+        actionTimeout: 120_000,
+        bestAttempt: false,
+      }, { timeoutMs: 120_000 });
+      const buffer = await response.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      if (!isAcceptableHomepageScreenshot(bytes, response.headers.get('content-type'))) {
+        throw new Error('screenshot_quality_rejected');
+      }
+      return `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
+    } catch (error) {
+      console.warn('[onboarding-cf] screenshot attempt failed:', attempt + 1, error.message);
     }
-    return `data:image/png;base64,${btoa(binary)}`;
-  } catch (error) {
-    console.warn('[onboarding-cf] screenshot failed:', error.message);
-    return null;
   }
+  return null;
 }
 
 /**

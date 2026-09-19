@@ -114,7 +114,7 @@ import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailM
 import { groqFetch } from './llm/groq-fallback.js';
 import { narrativeLanguageInstruction, normalizePreferredLanguage } from './hyper/preferred-language.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
-import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
+import { buildCompanyOperatingContext, captureWebsiteScreenshot, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
@@ -1110,7 +1110,7 @@ async function storeOfficialWebsiteVisual({ html, pageUrl, orgId }) {
   return null;
 }
 
-async function storeFirecrawlWebsiteVisual({ screenshot, orgId }) {
+async function storeRenderedWebsiteVisual({ screenshot, orgId }) {
   if (!screenshot) return null;
   try {
     let image = null;
@@ -1118,7 +1118,7 @@ async function storeFirecrawlWebsiteVisual({ screenshot, orgId }) {
     if (dataMatch) {
       const buffer = Buffer.from(dataMatch[2], 'base64');
       const contentType = buffer.length <= HYPER_VISUAL_MAX_BYTES ? verifiedImageType(buffer, dataMatch[1]) : null;
-      if (contentType) image = { buffer, contentType, sourceUrl: 'firecrawl-screenshot' };
+      if (contentType) image = { buffer, contentType, sourceUrl: 'cloudflare-browser-screenshot' };
     } else if (/^https:\/\//i.test(String(screenshot))) {
       image = await fetchWebsiteImage(String(screenshot));
     }
@@ -1129,9 +1129,15 @@ async function storeFirecrawlWebsiteVisual({ screenshot, orgId }) {
     try { fs.rmSync(paths.screenshot, { force: true }); } catch { /* best-effort */ }
     return `/v1/hyper/company/screenshot?v=${Date.now()}`;
   } catch (error) {
-    console.warn('[hyper-onboarding] Firecrawl screenshot skipped:', error.message);
+    console.warn('[hyper-onboarding] browser screenshot skipped:', error.message);
     return null;
   }
+}
+
+async function captureValidatedHomepageVisual({ websiteUrl, orgId }) {
+  const rendered = await captureWebsiteScreenshot(websiteUrl);
+  const screenshot = await storeRenderedWebsiteVisual({ screenshot: rendered, orgId });
+  return screenshot ? { screenshot, source: 'cloudflare-browser-rendering' } : null;
 }
 
 // ── HyperAgents nightly operating cycle (Polsia's "works while you sleep") ──
@@ -11978,6 +11984,37 @@ Write the persona now.`;
       });
     }
 
+    if (pathname === '/v1/hyper/onboarding/screenshot/retry' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (!await requirePrivilegedAgentAccess(req, res, current)) return;
+      const orgId = current.session.orgId;
+      const job = _hyperOnboardJobs.get(orgId);
+      const websiteUrl = job?.result?.website;
+      if (!job?.done || !job.result || !websiteUrl) return jsonResponse(res, { error: 'completed onboarding not found' }, 404);
+      if (job.result.screenshot_pending) return jsonResponse(res, { ok: true, already_running: true }, 202);
+      job.result = { ...job.result, screenshot: null, website_visual_source: null, screenshot_pending: true, screenshot_error: null };
+      void (async () => {
+        const visual = await captureValidatedHomepageVisual({ websiteUrl, orgId });
+        job.result.screenshot = visual?.screenshot || null;
+        job.result.website_visual_source = visual?.source || null;
+        job.result.screenshot_pending = false;
+        job.result.screenshot_error = visual ? null : 'website_capture_failed';
+        job.lines.push({ ts: Date.now(), text: visual ? 'Website preview ready' : 'Website capture failed — retry when the homepage is available' });
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
+            JSON.stringify({ _company: job.result }), job.result.room_id,
+          );
+        } catch (error) { console.warn('[hyper-onboarding] website preview retry persist failed:', error.message); }
+      })().catch((error) => {
+        job.result.screenshot_pending = false;
+        job.result.screenshot_error = 'website_capture_failed';
+        console.warn('[hyper-onboarding] website preview retry failed:', error.message);
+      });
+      return jsonResponse(res, { ok: true }, 202);
+    }
+
     if (pathname === '/v1/hyper/onboarding/start' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -12134,12 +12171,6 @@ Write the persona now.`;
               return { url: resolvedUrl, text: stripHtml(html), html, links: discoverHttpLinks(html, resolvedUrl) };
             } catch { return { url: pageUrl, text: '', html: '', links: [] }; } finally { clearTimeout(t); }
           };
-          // Start the customer-visible browser capture with the very first
-          // onboarding work.  It is deliberately independent: semantic
-          // discovery must never wait for a slow page render, and a failed
-          // capture still falls through to the existing Firecrawl/official
-          // image fallbacks below.
-          const screenshotCapturePromise = captureWebsiteScreenshotWithPlaywright(homepageUrl);
           const [homepage, firecrawlResearch, initialCoverage, marketCoverage] = await Promise.all([
             fetchPage(homepageUrl),
             researchCompanyWebsite(homepageUrl, { maxPages: 5, includeCrawl: false, onProgress: say }),
@@ -12737,28 +12768,14 @@ Write the persona now.`;
             .then((started) => started.accepted ? started.completion : null)
             .catch((error) => console.warn('[hyper-onboarding] day-0 lifecycle failed:', error.message));
           void (async () => {
-            // Quality order: CF Browser Rendering (waitUntil 'load' — fully
-            // loaded page) FIRST; the Playwright capture fires at
-            // domcontentloaded + ~150ms settle and catches the buffering/
-            // loading state on JS-heavy sites, so it is the FALLBACK only.
-            const cfScreenshot = await captureWebsiteScreenshot(homepage.url || homepageUrl);
-            let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: cfScreenshot, orgId });
-            let finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
-            if (!finalScreenshot) {
-              const capturedScreenshot = await screenshotCapturePromise;
-              finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
-              finalSource = finalScreenshot ? 'playwright-screenshot' : null;
-            }
-            if (!finalScreenshot) {
-              finalScreenshot = await storeOfficialWebsiteVisual({ html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId });
-              finalSource = finalScreenshot ? 'official-site-image' : null;
-            }
-            resultPayload.screenshot = finalScreenshot;
-            resultPayload.website_visual_source = finalSource;
+            const visual = await captureValidatedHomepageVisual({ websiteUrl: homepage.url || homepageUrl, orgId });
+            resultPayload.screenshot = visual?.screenshot || null;
+            resultPayload.website_visual_source = visual?.source || null;
             resultPayload.screenshot_pending = false;
+            resultPayload.screenshot_error = visual ? null : 'website_capture_failed';
             job.result = resultPayload;
-            if (finalScreenshot) say('Website preview ready');
-            else say('Website preview unavailable — using a branded company card');
+            if (visual) say('Website preview ready');
+            else say('Website capture failed — retry when the homepage is available');
             try {
               await prisma.$executeRawUnsafe(
                 'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',

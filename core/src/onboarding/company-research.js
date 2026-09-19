@@ -346,28 +346,12 @@ export async function searchCompanyMarket(query, {
   }
 }
 
-export async function captureWebsiteScreenshot(websiteUrl, {
-  apiKey = process.env.FIRECRAWL_API_KEY,
-} = {}) {
-  // Cloudflare Browser Rendering is the primary screenshot transport (replaces
-  // Playwright timeouts); Firecrawl remains the fallback when CF is unset.
-  if (cloudflareBrowserEnabled()) {
-    const cfScreenshot = await cfCaptureScreenshot(websiteUrl);
-    if (cfScreenshot) return cfScreenshot;
-  }
-  if (!apiKey) return null;
-  try {
-    const payload = await firecrawlRequest('/scrape', {
-      url: websiteUrl,
-      formats: [{ type: 'screenshot', fullPage: false, quality: 70, viewport: { width: 1280, height: 720 } }],
-      waitFor: 0,
-      timeout: 25000,
-      maxAge: 86400000,
-    }, { apiKey, timeoutMs: 30000 });
-    return cleanString((payload?.data || payload)?.screenshot, 2000000) || null;
-  } catch {
-    return null;
-  }
+export async function captureWebsiteScreenshot(websiteUrl) {
+  // Homepage visuals are evidence: only a live Cloudflare browser render is
+  // accepted. Static HTML, cached scrape screenshots, and social images are
+  // not substitutes for the page the user actually submitted.
+  if (!cloudflareBrowserEnabled()) return null;
+  return cfCaptureScreenshot(websiteUrl);
 }
 
 export async function captureWebsiteScreenshotWithPlaywright(websiteUrl, {

@@ -4,6 +4,7 @@ import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnb
 import { renderDayZeroPortraitV8 } from '../email/templates/day0-portrait-v8.js';
 import { buildDayZeroOnboardingReport } from '../email/templates/day0-company-onboarding.js';
 import { resolvePublicAppUrl } from '../public-frontend-url.js';
+import { createHash } from 'node:crypto';
 
 const SENDING_LEASE_MS = 10 * 60 * 1000;
 
@@ -134,6 +135,7 @@ export async function startDayZeroOnboardingReport({
       const v8Report = buildDayZeroOnboardingReport(dashboardCompany, { appUrl });
       const print = { report: v8Report, html: renderDayZeroPortraitV8(v8Report, { screenshotDataUri, orgId }) };
       const pdf = await renderPdf(print.html);
+      const pdfSha256 = createHash('sha256').update(pdf).digest('hex');
       const delivery = await sendEmail({
         templateId: 'day0_company_onboarding',
         to: recipient.email,
@@ -157,7 +159,7 @@ export async function startDayZeroOnboardingReport({
         `UPDATE "hivemind"."hyper_rooms"
             SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
           WHERE id = $2::uuid AND org_id = $3::uuid`,
-        JSON.stringify({ ...claimState, status: 'sent', sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null }),
+        JSON.stringify({ ...claimState, status: 'sent', sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null, report_url: appUrl, pdf_sha256: pdfSha256, pdf_bytes: pdf.length }),
         row.id, orgId,
       );
       return { ok: true, status: 'sent', version: DAY_ZERO_REPORT_VERSION, reissue, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted' };

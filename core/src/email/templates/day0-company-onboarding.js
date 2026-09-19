@@ -4,7 +4,9 @@ import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEm
 // Delivery version is deliberately part of the generated artefact contract.
 // A newer renderer can therefore be reissued once without treating a browser
 // refresh as permission to resend a lifecycle message.
-export const DAY_ZERO_REPORT_VERSION = 'day-0-v7';
+// A version bump makes the new print-safe visual artifact eligible for one
+// controlled lifecycle reissue while preserving the original delivery receipt.
+export const DAY_ZERO_REPORT_VERSION = 'day-0-v8';
 
 function clean(value, limit = 360) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);

@@ -53,6 +53,9 @@ test('Day 0 reissues an older renderer once, retains its receipt, and sends the 
   assert.deepEqual(prisma.writes[0].reissued_from, { version: 'day-0-v2', sent_at: '2026-09-01T10:00:00.000Z', message_id: 'old-message', provider: null });
   assert.equal(prisma.writes.at(-1).status, 'sent');
   assert.equal(prisma.writes.at(-1).message_id, 'new-message');
+  assert.equal(prisma.writes.at(-1).report_url, 'https://next.singulancelabs.com/hivemind/app/employees/mycompany');
+  assert.equal(prisma.writes.at(-1).pdf_sha256.length, 64);
+  assert.equal(prisma.writes.at(-1).pdf_bytes, 3);
 });
 
 test('Day 0 does not resend the current renderer version', async () => {

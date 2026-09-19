@@ -91,7 +91,7 @@ export function renderDayZeroPortraitV8(report, { screenshotDataUri = '', orgId 
         <h2 class="rh2">We recruited ${report.teamCount} AI HyperAgent${report.teamCount === 1 ? '' : 's'} to run ${escapeHtml(report.companyName)}.</h2>
         <p class="rlede">Each operates with a distinct role and clear operating responsibility — grounded in the company record filed during onboarding.</p>
         <div class="rrule"></div>
-        <div style="display:grid;gap:3mm">${report.team.map((member) => `<div class="ragent"><div class="ragent-avatar" style="background:${member.background};border-color:${member.color}">${member.avatarSvg}</div><div><div class="ragent-name">${escapeHtml(member.name)}</div><div class="ragent-role" style="color:${member.color}">${escapeHtml(member.role.toUpperCase())}</div><div class="ragent-copy">${escapeHtml(member.oneLiner)}</div></div></div>`).join('')}</div>`,
+        <div style="display:grid;gap:3mm">${report.team.map((member) => `<div class="ragent"><div class="ragent-avatar" style="background:${member.background};border-color:${member.color}">${member.avatarSvg}</div><div><div class="ragent-name">${escapeHtml(member.name)}</div><div class="ragent-role" style="color:${member.color}">${escapeHtml(member.role.toUpperCase())}</div></div><div class="ragent-copy">${escapeHtml(member.oneLiner)}</div></div>`).join('')}</div>`,
     }),
     // ── First moves + memory
     reportPage({

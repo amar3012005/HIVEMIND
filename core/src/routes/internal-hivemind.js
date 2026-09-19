@@ -49,9 +49,17 @@ const BACKING_TIMEOUT_MS = Number(process.env.HM_INTERNAL_TOOL_TIMEOUT_MS || 60_
  * data. A caller that DOES know the org may send it; it is then verified
  * against membership rather than trusted.
  */
+function unwrapTenancyKey(raw) {
+  const value = String(raw || '').trim();
+  const wrapped = value.match(/^org:([0-9a-f-]{36}):user:([0-9a-f-]{36})$/i);
+  if (wrapped) return { orgId: wrapped[1], userId: wrapped[2] };
+  return { userId: value, orgId: null };
+}
+
 async function resolvePrincipal(req, prisma) {
-  const userId = String(req.headers['x-hm-user-id'] || '').trim();
-  const headerOrgId = String(req.headers['x-hm-org-id'] || '').trim();
+  const parsed = unwrapTenancyKey(req.headers['x-hm-user-id']);
+  const userId = parsed.userId;
+  const headerOrgId = String(req.headers['x-hm-org-id'] || parsed.orgId || '').trim();
   if (!UUID_RE.test(userId)) return { userId, orgId: null, error: 'invalid_user' };
 
   if (UUID_RE.test(headerOrgId)) {
@@ -238,18 +246,34 @@ export async function handleInternalCompanyContextRoute({ req, res, jsonResponse
       principal.orgId,
     );
     const hq = rows?.[0];
+    const operatorRow = await prisma.user.findUnique({
+      where: { id: principal.userId },
+      select: { id: true, email: true, displayName: true },
+    }).catch(() => null);
+    const displayName = String(operatorRow?.displayName || '').trim();
+    const emailLocal = String(operatorRow?.email || '').split('@')[0] || '';
+    const givenName = displayName.split(/\s+/).filter(Boolean)[0] || null;
+    const operator = operatorRow ? {
+      user_id: operatorRow.id,
+      email: operatorRow.email || null,
+      full_name: displayName || emailLocal || null,
+      given_name: givenName,
+      preferred_name: givenName,
+    } : null;
     if (!hq) {
       // Not an error: an org that has not onboarded has no profile yet. The
       // agent must be told that plainly so it does not invent a target market.
       return jsonResponse(res, {
         status: 'completed',
         company: null,
+        operator,
         note: 'No company profile is on file for this organization. Onboarding has not been completed.',
       });
     }
     const company = typeof hq.company === 'string' ? JSON.parse(hq.company) : hq.company;
     return jsonResponse(res, {
       status: 'completed',
+      operator,
       company: {
         name: company?.name || hq.name || null,
         profile: company?.profile || null,
@@ -523,6 +547,44 @@ export async function handleInternalComposioExecuteRoute({
  * org has connected: listing every toolkit Composio offers would invite the
  * model to call one that has no grant behind it.
  */
+export async function handleInternalResourceAccessRoute({
+  req, res, jsonResponse, prisma,
+}) {
+  if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+  const principal = await resolvePrincipal(req, prisma);
+  const invalid = principalError(jsonResponse, res, principal);
+  if (invalid) return invalid;
+  // Owner isolation is the default. Cross-owner shares are not stored yet.
+  return jsonResponse(res, { status: 'completed', refs: [] });
+}
+
+export async function handleInternalPlaybookListRoute({
+  req, res, jsonResponse, prisma,
+}) {
+  if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+  const principal = await resolvePrincipal(req, prisma);
+  const invalid = principalError(jsonResponse, res, principal);
+  if (invalid) return invalid;
+  const { listPlaybooks } = await import('../employees/playbook-catalog.js');
+  return jsonResponse(res, { status: 'completed', playbooks: listPlaybooks() });
+}
+
+export async function handleInternalPlaybookGetRoute({
+  req, res, jsonResponse, parseBody, prisma,
+}) {
+  if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+  const principal = await resolvePrincipal(req, prisma);
+  const invalid = principalError(jsonResponse, res, principal);
+  if (invalid) return invalid;
+  const body = await parseBody(req).catch(() => ({}));
+  const id = String(body?.id || '').trim();
+  if (!id) return jsonResponse(res, { error: 'id is required' }, 400);
+  const { getPlaybook } = await import('../employees/playbook-catalog.js');
+  const playbook = getPlaybook(id);
+  if (!playbook) return jsonResponse(res, { error: 'unknown playbook' }, 404);
+  return jsonResponse(res, { status: 'completed', playbook });
+}
+
 export async function handleInternalComposioToolsRoute({
   req, res, jsonResponse, prisma, composioService,
 }) {

@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Optional
 
 import httpx
@@ -61,8 +62,6 @@ from agentscope.permission import (
 )
 from agentscope.tool import ToolBase, ToolChunk
 
-from hm_auth import parse_tenancy_key
-
 _log = logging.getLogger("hm-agent-runtime.tools")
 
 HM_CORE_URL = os.getenv("HM_CORE_URL", "").strip().rstrip("/")
@@ -73,6 +72,20 @@ MASTER_API_KEY = os.getenv("HIVEMIND_MASTER_API_KEY", "").strip()
 _TOOL_TIMEOUT = float(os.getenv("HM_TOOL_TIMEOUT", "60"))
 
 
+_TENANCY_RE = re.compile(
+    r"^org:([0-9a-f-]{36}):user:([0-9a-f-]{36})$",
+    re.I,
+)
+
+
+def _split_principal(user_id: str, org_id: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """AgentScope may key tenants as org:{org}:user:{user}. hm-core wants UUIDs."""
+    match = _TENANCY_RE.match(str(user_id or "").strip())
+    if match:
+        return match.group(2), org_id or match.group(1)
+    return str(user_id or "").strip(), org_id
+
+
 def _headers(user_id: str, org_id: Optional[str] = None) -> dict[str, str]:
     """hm-core's internal-auth headers.
 
@@ -80,13 +93,14 @@ def _headers(user_id: str, org_id: Optional[str] = None) -> dict[str, str]:
     the master key plus the resolved principal. hm-core treats the principal as
     authoritative only because the key proves the caller is a trusted service.
     """
+    user_uuid, org_uuid = _split_principal(user_id, org_id)
     headers = {
         "X-API-Key": MASTER_API_KEY,
-        "X-HM-User-Id": user_id,
+        "X-HM-User-Id": user_uuid,
         "Content-Type": "application/json",
     }
-    if org_id:
-        headers["X-HM-Org-Id"] = org_id
+    if org_uuid:
+        headers["X-HM-Org-Id"] = org_uuid
     return headers
 
 
@@ -117,6 +131,32 @@ async def _call_hm_core(
         return resp.json()
     except ValueError:
         return {"raw": resp.text[:2000]}
+
+
+def _compat_schema(schema: dict) -> dict:
+    """DeepSeek/OpenAI-style tools reject JSON Schema anyOf [string, null]."""
+    import copy
+
+    node = copy.deepcopy(schema or {})
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            if "anyOf" in obj and isinstance(obj["anyOf"], list):
+                types = [x.get("type") for x in obj["anyOf"] if isinstance(x, dict)]
+                if "string" in types:
+                    obj.pop("anyOf", None)
+                    obj["type"] = "string"
+                elif "integer" in types:
+                    obj.pop("anyOf", None)
+                    obj["type"] = "integer"
+            for val in obj.values():
+                walk(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(node)
+    return node
 
 
 def _ok(payload: Any) -> ToolChunk:
@@ -165,11 +205,16 @@ class _HiveMindToolBase(ToolBase):
     is_read_only: bool = True
     is_external_tool: bool = False
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        schema = getattr(cls, "input_schema", None)
+        if isinstance(schema, dict):
+            cls.input_schema = _compat_schema(schema)
+
     def __init__(self, user_id: str, org_id: Optional[str] = None) -> None:
         super().__init__()
-        hm_user, hm_org = parse_tenancy_key(user_id)
-        self._user_id = hm_user
-        self._org_id = org_id or hm_org
+        self._user_id = user_id
+        self._org_id = org_id
 
     async def check_permissions(
         self,
@@ -274,19 +319,23 @@ class CompanyContextTool(_HiveMindToolBase):
 
     name: str = "hivemind_company_context"
 
-    description: str = """Read the organization's company profile: what the \
-company does, its ideal customer profile, positioning, and operating context.
+    description: str = """Read the organization's company profile AND the \
+operator (the human you are talking to): full name, given/preferred name, \
+email, plus what the company does, ICP, positioning, and operating context.
 
-Call this FIRST on any task that depends on who the company is or who it sells \
-to. Without it you are guessing at the target, and a guessed target produces \
-prospects that do not qualify."""
+Call this FIRST on any identity question ("what is my name") and on any task \
+that depends on who the company is. The `operator` object is authoritative \
+for the user's name — do not invent a preferred name if it is present, and \
+do not leave it blank in your reply."""
 
     class Params(BaseModel):
-        """No parameters — the profile is resolved from the caller's principal."""
+        """Optional note so the JSON schema is not an empty object (some models reject that)."""
+
+        note: Optional[str] = Field(default=None, description="Optional. Do not set.")
 
     input_schema: dict = Params.model_json_schema()
 
-    async def call(self) -> ToolChunk:
+    async def call(self, note: Optional[str] = None) -> ToolChunk:
         try:
             data = await _call_hm_core(
                 "/internal/hivemind/company-context",
@@ -459,6 +508,55 @@ artifact is not an artifact."""
         return _ok(data)
 
 
+class PlaybookListTool(_HiveMindToolBase):
+    """Compact catalog of global/org playbooks. No keyword routing."""
+
+    name: str = "PlaybookList"
+    description: str = """List available playbooks (id, name, description, scope).
+Call this when the WorkRun playbook is General, then PlaybookGet the one you choose."""
+
+    class Params(BaseModel):
+        note: str = Field(default="", description="Unused.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, note: str = "") -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/playbooks",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                method="GET",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        return _ok(data)
+
+
+class PlaybookGetTool(_HiveMindToolBase):
+    """Full playbook instructions after the agent chooses an id."""
+
+    name: str = "PlaybookGet"
+    description: str = """Load full instructions for one playbook id from PlaybookList."""
+
+    class Params(BaseModel):
+        id: str = Field(description="Playbook id, e.g. global:prospect-discovery")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, id: str) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/playbooks/get",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"id": id},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), id=id)
+        return _ok(data)
+
+
 class ComposioToolsTool(_HiveMindToolBase):
     """List the third-party toolkits this organization has connected."""
 
@@ -472,11 +570,11 @@ actually have a grant behind them, so you do not attempt a call the \
 organization has not authorized."""
 
     class Params(BaseModel):
-        """No parameters — the connected set is resolved from the caller's org."""
+        note: Optional[str] = Field(default=None, description="Optional. Do not set.")
 
     input_schema: dict = Params.model_json_schema()
 
-    async def call(self) -> ToolChunk:
+    async def call(self, note: Optional[str] = None) -> ToolChunk:
         try:
             data = await _call_hm_core(
                 "/internal/hivemind/composio/tools",
@@ -486,6 +584,12 @@ organization has not authorized."""
             )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
+        if isinstance(data, dict) and not data.get("connected_toolkits"):
+            data = {
+                **data,
+                "need_connect": True,
+                "note": "No third-party apps are connected. If the user named an app, they must connect it before you can read it.",
+            }
         return _ok(data)
 
 
@@ -526,157 +630,11 @@ something would work."""
                 body={"tool": tool, "args": args or {}},
             )
         except Exception as exc:  # noqa: BLE001
-            return _err(str(exc), tool=tool)
-        return _ok(data)
-
-
-class WebReadTool(_HiveMindToolBase):
-    name: str = "hivemind_web_read"
-    description: str = "Read a public URL via Cloudflare Browser Run markdown."
-
-    class Params(BaseModel):
-        url: str = Field(description="http(s) URL to read.")
-
-    input_schema: dict = Params.model_json_schema()
-
-    async def call(self, url: str) -> ToolChunk:
-        try:
-            data = await _call_hm_core(
-                "/internal/hivemind/web-read",
-                user_id=self._user_id,
-                org_id=self._org_id,
-                body={"url": url},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc), url=url)
-        return _ok(data)
-
-
-class BrowserMarkdownTool(_HiveMindToolBase):
-    name: str = "hivemind_browser_markdown"
-    description: str = (
-        "Render a public URL via the HyperAgent Playwright service "
-        "(hivemind-playwright /v1/crawl) and return markdown."
-    )
-
-    class Params(BaseModel):
-        url: str = Field(description="http(s) URL.")
-
-    input_schema: dict = Params.model_json_schema()
-
-    async def call(self, url: str) -> ToolChunk:
-        try:
-            data = await _call_hm_core(
-                "/internal/hivemind/browser/markdown",
-                user_id=self._user_id,
-                org_id=self._org_id,
-                body={"url": url},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc), url=url)
-        return _ok(data)
-
-
-class BrowserSnapshotTool(_HiveMindToolBase):
-    name: str = "hivemind_browser_snapshot"
-    description: str = (
-        "Render a public URL via hivemind-playwright and return markdown plus links."
-    )
-
-    class Params(BaseModel):
-        url: str = Field(description="http(s) URL.")
-
-    input_schema: dict = Params.model_json_schema()
-
-    async def call(self, url: str) -> ToolChunk:
-        try:
-            data = await _call_hm_core(
-                "/internal/hivemind/browser/snapshot",
-                user_id=self._user_id,
-                org_id=self._org_id,
-                body={"url": url},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc), url=url)
-        return _ok(data)
-
-
-class ComposioSearchToolsTool(_HiveMindToolBase):
-    name: str = "hivemind_composio_search_tools"
-    description: str = (
-        "Discover this org's connected Composio tools (COMPOSIO_SEARCH_TOOLS) "
-        "for a use_case. Call this FIRST for mailbox/CRM/Slack/LinkedIn work. "
-        "Reuse the returned session_id. Never invent a slug. If no toolkits "
-        "are connected, stop — the user connects apps in Connectors, not here."
-    )
-
-    class Params(BaseModel):
-        use_case: str = Field(description="What you need to do.")
-        toolkits: list[str] = Field(default_factory=list)
-
-    input_schema: dict = Params.model_json_schema()
-
-    async def call(self, use_case: str, toolkits: Optional[list[str]] = None) -> ToolChunk:
-        try:
-            data = await _call_hm_core(
-                "/internal/hivemind/composio/session/search",
-                user_id=self._user_id,
-                org_id=self._org_id,
-                body={"use_case": use_case, "toolkits": toolkits or []},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc), use_case=use_case)
-        return _ok(data)
-
-
-class ComposioSessionExecuteTool(_HiveMindToolBase):
-    name: str = "hivemind_composio_session_execute"
-    description: str = (
-        "Execute one slug returned by hivemind_composio_search_tools on the "
-        "same session_id (COMPOSIO_MULTI_EXECUTE_TOOL). Mutations return "
-        "executed / approval_required / denied from hm-core."
-    )
-    is_read_only: bool = False
-
-    class Params(BaseModel):
-        session_id: str
-        tool_slug: str
-        args: dict = Field(default_factory=dict)
-
-    input_schema: dict = Params.model_json_schema()
-
-    async def call(self, session_id: str, tool_slug: str, args: Optional[dict] = None) -> ToolChunk:
-        try:
-            data = await _call_hm_core(
-                "/internal/hivemind/composio/session/execute",
-                user_id=self._user_id,
-                org_id=self._org_id,
-                body={"session_id": session_id, "tool_slug": tool_slug, "args": args or {}},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc), tool_slug=tool_slug)
-        return _ok(data)
-
-
-class HyperagentProfilesTool(_HiveMindToolBase):
-    name: str = "hivemind_hyperagent_profiles"
-    description: str = "List this org's HyperAgent profiles. Never invent employees."
-
-    class Params(BaseModel):
-        """No parameters."""
-
-    input_schema: dict = Params.model_json_schema()
-
-    async def call(self) -> ToolChunk:
-        try:
-            data = await _call_hm_core(
-                "/internal/hivemind/hyperagent-profiles",
-                user_id=self._user_id,
-                org_id=self._org_id,
-                method="GET",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc))
+            msg = str(exc)
+            toolkit = tool.split("_")[0].lower() if tool else None
+            if any(s in msg.lower() for s in ("not connected", "no grant", "409", "unauthorized", "no connected")):
+                return _err(msg, tool=tool, need_connect=True, toolkit=toolkit)
+            return _err(msg, tool=tool)
         return _ok(data)
 
 
@@ -684,22 +642,21 @@ class HyperagentProfilesTool(_HiveMindToolBase):
 # The factory
 # ---------------------------------------------------------------------------
 
+# The capability set for the first vertical slice. Deliberately small: every
+# tool here is one the prospect-research acceptance test actually needs. Adding
+# a capability is adding a class above and a line here.
 _TOOL_CLASSES = (
     CompanyContextTool,
     RecallTool,
     ListProspectsTool,
     SaveProspectTool,
     WebSearchTool,
-    WebReadTool,
-    BrowserMarkdownTool,
-    BrowserSnapshotTool,
     SaveMemoryTool,
     RecordArtifactTool,
+    PlaybookListTool,
+    PlaybookGetTool,
     ComposioToolsTool,
     ComposioExecuteTool,
-    ComposioSearchToolsTool,
-    ComposioSessionExecuteTool,
-    HyperagentProfilesTool,
 )
 
 
@@ -727,7 +684,8 @@ async def hivemind_tools(
     across tenants in production. hm-core resolves the org from the user
     instead, because the user→org mapping is hm-core's data.
     """
-    tools: list[ToolBase] = [cls(user_id, None) for cls in _TOOL_CLASSES]
+    user_uuid, org_uuid = _split_principal(user_id, None)
+    tools: list[ToolBase] = [cls(user_uuid, org_uuid) for cls in _TOOL_CLASSES]
     _log.info(
         "assembled %d HIVE-MIND tools for user=%s agent=%s session=%s",
         len(tools),

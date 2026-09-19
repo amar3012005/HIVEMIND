@@ -42,94 +42,8 @@ model User {
   seoSearchConsoleProperties SeoSearchConsoleProperty[] @relation("UserSeoSearchConsoleProperties")
   billingCheckouts           BillingCheckout[]
   webhookSubscriptions      WebhookSubscription[]
-  identities                UserIdentity[]
-  authIdentityEvents        AuthIdentityEvent[]
-  harnessSessions           HarnessSession[]
 
   @@map("users")
-}
-
-model UserIdentity {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId          String    @map("user_id") @db.Uuid
-  provider        String    @db.VarChar(32)
-  providerSubject String    @map("provider_subject") @db.VarChar(255)
-  normalizedEmail String?   @map("normalized_email") @db.VarChar(255)
-  verifiedAt      DateTime? @map("verified_at") @db.Timestamptz(6)
-  isPrimary       Boolean   @default(false) @map("is_primary")
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([provider, providerSubject])
-  @@index([userId])
-  @@index([normalizedEmail])
-  @@map("user_identities")
-}
-
-model EmailAuthChallenge {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  emailCiphertext   String    @map("email_ciphertext") @db.Text
-  emailLookupHash   String    @map("email_lookup_hash") @db.VarChar(64)
-  otpHash           String    @map("otp_hash") @db.VarChar(128)
-  linkTokenHash     String    @map("link_token_hash") @db.VarChar(128)
-  intent            String    @default("auto") @db.VarChar(16)
-  returnTo          String    @map("return_to") @db.Text
-  environment       String    @db.VarChar(16)
-  flagMode          String    @map("flag_mode") @db.VarChar(16)
-  attempts          Int       @default(0)
-  resendCount       Int       @default(0) @map("resend_count")
-  expiresAt         DateTime  @map("expires_at") @db.Timestamptz(6)
-  resendAvailableAt DateTime  @map("resend_available_at") @db.Timestamptz(6)
-  verifiedAt        DateTime? @map("verified_at") @db.Timestamptz(6)
-  consumedAt        DateTime? @map("consumed_at") @db.Timestamptz(6)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  outbox            AuthEmailOutbox[]
-  events            AuthIdentityEvent[]
-
-  @@index([emailLookupHash, createdAt(sort: Desc)])
-  @@index([expiresAt])
-  @@map("email_auth_challenges")
-}
-
-model AuthEmailOutbox {
-  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  challengeId       String             @map("challenge_id") @db.Uuid
-  environment       String             @db.VarChar(16)
-  processingVersion Int                @default(1) @map("processing_version")
-  payloadCiphertext String             @map("payload_ciphertext") @db.Text
-  status            String             @default("pending") @db.VarChar(24)
-  attempt           Int                @default(0)
-  providerMessageId String?            @map("provider_message_id") @db.VarChar(255)
-  providerStatus    String?            @map("provider_status") @db.VarChar(32)
-  nextAttemptAt     DateTime?          @map("next_attempt_at") @db.Timestamptz(6)
-  sentAt            DateTime?          @map("sent_at") @db.Timestamptz(6)
-  terminalAt        DateTime?          @map("terminal_at") @db.Timestamptz(6)
-  lastError         Json?              @map("last_error") @db.JsonB
-  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  challenge         EmailAuthChallenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
-
-  @@index([status, nextAttemptAt])
-  @@index([challengeId])
-  @@map("auth_email_outbox")
-}
-
-model AuthIdentityEvent {
-  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String?             @map("user_id") @db.Uuid
-  challengeId String?             @map("challenge_id") @db.Uuid
-  eventType   String              @map("event_type") @db.VarChar(64)
-  outcome     String              @db.VarChar(24)
-  metadata    Json                @default("{}") @db.JsonB
-  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-  user        User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
-  challenge   EmailAuthChallenge? @relation(fields: [challengeId], references: [id], onDelete: SetNull)
-
-  @@index([userId, createdAt(sort: Desc)])
-  @@index([challengeId, createdAt(sort: Desc)])
-  @@map("auth_identity_events")
 }
 
 /// Multi-tenant organizations with EU data residency settings
@@ -203,7 +117,6 @@ model Organization {
   // user_id/project_id/layer). Null until provisioned.
   vectorContainer              String?            @map("vector_container") @db.VarChar(255)
   apiKeys                      ApiKey[]           @relation("OrgApiKeys")
-  memoryBoxConnection          MemoryBoxConnection?
   memories                     Memory[]           @relation("OrgMemories")
   invites                      OrgInvite[]
   projects                     Project[]
@@ -214,7 +127,6 @@ model Organization {
   pageIndexNodes               PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig                    OrgSsoConfig?      @relation("OrgSsoConfig")
   hyperRooms                   HyperRoom[]        @relation("OrgHyperRooms")
-  harnessSessions              HarnessSession[]
   seoSearchConsoleProperties   SeoSearchConsoleProperty[] @relation("OrgSeoSearchConsoleProperties")
   seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
   zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
@@ -1243,8 +1155,6 @@ model Memory {
   derivation                                                  MemoryDerivation?
   evidenceLinks                                               MemoryEvidenceLink[]
   entityMentions                                              EntityMention[]
-  claimEvidenceLinks                                          ClaimEvidenceLink[]
-  projectionState                                             MemoryProjectionState?
 
   // Phase 1 Cognition Loop: synthesis quality metadata
   // synthesisConfidence: LLM-scored confidence (0.0–1.0) for canonical-fact / synthesis-bridge outputs
@@ -2006,11 +1916,6 @@ model KnowledgeIngestJob {
   stage             String    @default("accepted") @db.VarChar(48)
   progress          Int       @default(0)
   processingVersion Int       @default(1) @map("processing_version")
-  orchestrationMode String    @default("bullmq") @map("orchestration_mode") @db.VarChar(32)
-  workflowInstanceId String?  @map("workflow_instance_id") @db.VarChar(160)
-  pipelineVersion   Int       @default(1) @map("pipeline_version")
-  sourceObjectKey   String?   @map("source_object_key") @db.VarChar(700)
-  sourceObjectEtag  String?   @map("source_object_etag") @db.VarChar(160)
   attempt           Int       @default(0)
   queueJobId        String?   @map("queue_job_id") @db.VarChar(160)
   documentId        String?   @map("document_id") @db.Uuid
@@ -2026,45 +1931,13 @@ model KnowledgeIngestJob {
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
-  steps             KnowledgeIngestStep[]
 
   @@index([orgId, userId, createdAt(sort: Desc)])
   @@index([orgId, status, updatedAt])
   @@index([orgId, scopeKey, checksum])
   @@index([orgId, ingestMode, status])
   @@index([queueJobId])
-  @@index([workflowInstanceId])
   @@map("knowledge_ingest_jobs")
-}
-
-/// Idempotent, lease-backed receipts for an external durable orchestrator.
-/// Large artifacts stay in object storage; this table records only hashes,
-/// references, coverage and terminal verification evidence.
-model KnowledgeIngestStep {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  jobId             String    @map("job_id") @db.Uuid
-  processingVersion Int       @map("processing_version")
-  stageKey          String    @map("stage_key") @db.VarChar(64)
-  shardKey          String    @default("root") @map("shard_key") @db.VarChar(160)
-  status            String    @default("pending") @db.VarChar(24)
-  attempt           Int       @default(0)
-  inputDigest       String?   @map("input_digest") @db.VarChar(128)
-  outputRefs        Json      @default("{}") @map("output_refs")
-  coverage          Json      @default("{}")
-  leaseUntil        DateTime? @map("lease_until") @db.Timestamptz(6)
-  leaseToken        String?   @map("lease_token") @db.Uuid
-  errorCode         String?   @map("error_code") @db.VarChar(80)
-  errorMessage      String?   @map("error_message")
-  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
-  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  job               KnowledgeIngestJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-
-  @@unique([jobId, processingVersion, stageKey, shardKey])
-  @@index([jobId, processingVersion, status])
-  @@index([status, leaseUntil])
-  @@map("knowledge_ingest_steps")
 }
 
 /// Exactly-once settlement markers for billable Knowledge Base metrics.
@@ -2471,38 +2344,6 @@ model ApiKey {
   @@map("api_keys")
 }
 
-/// Canonical control-plane record for a tenant-owned Memory Box. The legacy
-/// byod-agents.json file is a compatibility projection consumed by Core; it is
-/// never the authority for credentials or lifecycle state.
-model MemoryBoxConnection {
-  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId                 String    @unique @map("org_id") @db.Uuid
-  boxId                 String    @unique @map("box_id") @db.Uuid
-  transport             String    @default("custom_https") @db.VarChar(32)
-  endpoint              String?   @db.Text
-  credentialHash        String?   @map("credential_hash") @db.VarChar(64)
-  credentialVersion     Int       @default(1) @map("credential_version")
-  state                 String    @default("REGISTERED") @db.VarChar(32)
-  desiredRelease        String?   @map("desired_release") @db.VarChar(120)
-  observedRelease       String?   @map("observed_release") @db.VarChar(120)
-  protocolVersion       String?   @map("protocol_version") @db.VarChar(64)
-  schemaVersion         Int?      @map("schema_version")
-  capabilities          String[]  @default([])
-  tunnelId              String?   @map("tunnel_id") @db.VarChar(64)
-  lastHeartbeatAt       DateTime? @map("last_heartbeat_at") @db.Timestamptz(6)
-  lastReachableAt       DateTime? @map("last_reachable_at") @db.Timestamptz(6)
-  consecutiveFailures   Int       @default(0) @map("consecutive_failures")
-  metadata              Json      @default("{}") @db.JsonB
-  registeredAt          DateTime  @default(now()) @map("registered_at") @db.Timestamptz(6)
-  revokedAt             DateTime? @map("revoked_at") @db.Timestamptz(6)
-  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  organization          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  @@index([state, lastHeartbeatAt])
-  @@map("memory_box_connections")
-}
-
 /// Registered agents with role, model version, and skill manifest
 model OpAgent {
   id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -2730,26 +2571,6 @@ model UserProfile {
   @@index([userId, category])
   @@index([userId, orgId, projectId], map: "user_profiles_user_org_project_idx")
   @@map("user_profiles")
-}
-
-/// Canonical workspace facts. These are deliberately separate from UserProfile:
-/// they describe an organization, are written only by an owner/admin through the
-/// control plane, and are never a target for chat, ingestion, or agent tools.
-model OrganizationProfile {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
-  orgId           String    @map("org_id") @db.Uuid
-  key             String    @db.VarChar(120)
-  value           String    @db.Text
-  category        String    @default("identity") @db.VarChar(50)
-  version         Int       @default(1)
-  updatedByUserId String?   @map("updated_by_user_id") @db.Uuid
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
-
-  @@unique([orgId, key])
-  @@index([orgId, deletedAt], map: "organization_profiles_org_deleted_idx")
-  @@map("organization_profiles")
 }
 
 model OrgUsage {
@@ -3161,19 +2982,15 @@ model OrgSsoConfig {
 
 enum MemoryType {
   fact
-  event
-  decision
   preference
-  goal
-  commitment
-  policy
-  procedure
+  decision
   lesson
-  summary
-  synthesis
-  conversation
-  // Legacy compatibility only. New relationships are graph edges.
+  goal
+  event
   relationship
+  synthesis
+  summary
+  conversation
 }
 
 enum RelationshipType {
@@ -3183,9 +3000,6 @@ enum RelationshipType {
   Contradicts
   PartOf
   Mentions
-  GroundedIn
-  DependsOn
-  Implies
 }
 
 enum VisibilityScope {
@@ -3261,7 +3075,6 @@ model DigitalEmployee {
   creator               User           @relation("UserCreatedEmployees", fields: [createdBy], references: [id])
   events                SlackEvent[]
   intents               ActionIntent[]
-  hyperRuntime          HyperAgentRuntime?
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -3351,10 +3164,6 @@ model HyperWorkOrder {
   ownerEmployeeId     String?  @map("owner_employee_id") @db.Uuid
   ownerSlug           String?  @map("owner_slug") @db.VarChar(120)
   ownerLane           String?  @map("owner_lane") @db.VarChar(40)
-  agentInstanceId     String?  @map("agent_instance_id") @db.VarChar(180)
-  workflowInstanceId  String?  @map("workflow_instance_id") @db.VarChar(180)
-  runtimeMode         String   @default("off") @map("runtime_mode") @db.VarChar(32)
-  processingVersion   Int      @default(1) @map("processing_version")
   selectedSkills      Json     @default("[]") @map("selected_skills") @db.JsonB
   requiredEvidence    Json     @default("[]") @map("required_evidence") @db.JsonB
   acceptanceCriteria  Json     @default("[]") @map("acceptance_criteria") @db.JsonB
@@ -3381,8 +3190,61 @@ model HyperWorkOrder {
   @@index([hqCycleId, status])
   @@index([orgId, runtimeEpoch, status])
   @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")
-  @@index([agentInstanceId, status], map: "hyper_work_orders_agent_status_idx")
   @@map("hyper_work_orders")
+}
+
+/// WorkRun — the durable unit of work hm-core hands down to the agent runtime.
+///
+/// Distinct from HyperWorkOrder on purpose. A HyperWorkOrder is the *intra-room*
+/// execution substrate: a Room Director creates one per bounded step inside a
+/// turn, scoped to a room and a turn. A WorkRun is the *cross-system* seam — it
+/// is what hm-core owns and what the AgentScope Agent Service executes. It
+/// outlives a browser session, it is what resumes after a disconnect, and it is
+/// the row the UI renders progress from.
+///
+/// The runtime never learns what a WorkRun is beyond the id it is handed;
+/// hm-core never learns what an AgentScope session is beyond the id stored here.
+/// That boundary is the point of the seam.
+model WorkRun {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String    @map("org_id") @db.Uuid
+  userId             String    @map("user_id") @db.Uuid
+  employeeId         String?   @map("employee_id") @db.Uuid
+  roomId             String?   @map("room_id") @db.Uuid
+  /// The HyperTurn this run executes. Required by the runtime's event-forwarding
+  /// path: hm-core's inbound sink re-derives the execution identity from the
+  /// persisted HyperTurn row and answers 409 on any mismatch.
+  turnId             String?   @unique @map("turn_id") @db.Uuid
+  goal               String    @db.Text
+  /// queued | starting | running | waiting_approval | paused | completed | failed | cancelled
+  status             String    @default("queued") @db.VarChar(32)
+  /// AgentScope coordinates. Null until the runtime answers POST /workrun/.
+  agentscopeSessionId String?  @map("agentscope_session_id") @db.VarChar(120)
+  workspaceId        String?   @map("workspace_id") @db.VarChar(160)
+  teamId             String?   @map("team_id") @db.VarChar(120)
+  /// Selected HyperAgent persona + playbook, resolved by hm-core before the
+  /// runtime is called. Stored as data so the runtime stays domain-agnostic.
+  hyperagentSlug     String?   @map("hyperagent_slug") @db.VarChar(120)
+  playbookId         String?   @map("playbook_id") @db.VarChar(120)
+  playbookVersion    String?   @map("playbook_version") @db.VarChar(40)
+  /// Free-form scope handed to the agent (company, project, filters). Data, not code.
+  scope              Json      @default("{}") @map("scope") @db.JsonB
+  /// Normalized event vocabulary the UI renders. Append-only, capped by the writer.
+  events             Json      @default("[]") @map("events") @db.JsonB
+  /// Artifact pointers registered back from the workspace. Pointers, not bytes.
+  resultArtifactIds  Json      @default("[]") @map("result_artifact_ids") @db.JsonB
+  result             Json      @default("{}") @map("result") @db.JsonB
+  error              String?   @db.Text
+  startedAt          DateTime? @map("started_at") @db.Timestamptz(6)
+  heartbeatAt        DateTime? @map("heartbeat_at") @db.Timestamptz(6)
+  completedAt        DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([orgId, status])
+  @@index([status, heartbeatAt])
+  @@map("work_runs")
 }
 
 /// HyperWorkResult — append-only worker attempt output. The final Room
@@ -3455,12 +3317,6 @@ model HyperTurn {
   verificationVerdict Json @default("{}") @map("verification_verdict") @db.JsonB
   lastProgressAt DateTime @default(now()) @map("last_progress_at") @db.Timestamptz(6)
   terminalReason String? @map("terminal_reason") @db.Text
-  grokRuntimeMode String @default("off") @map("grok_runtime_mode") @db.VarChar(32)
-  grokRuntimeVersion Int @default(1) @map("grok_runtime_version")
-  grokWorkflowInstanceId String? @map("grok_workflow_instance_id") @db.VarChar(180)
-  activeAgents Json @default("[]") @map("active_agents") @db.JsonB
-  controlState Json @default("{\"action\":\"run\",\"revision\":0}") @map("control_state") @db.JsonB
-  steeringMessages Json @default("[]") @map("steering_messages") @db.JsonB
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
   runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)
@@ -3473,96 +3329,6 @@ model HyperTurn {
   @@index([runtimePlaybookRunId, runtimeCheckpointSequence])
   @@index([runtimePlaybookRunId, runtimeStageId, runtimeAttempt])
   @@map("hyper_turns")
-}
-
-/// Stable Cloudflare-backed identity for one organization-scoped employee.
-/// Task context remains Room/Turn scoped; this row contains only capability,
-/// availability and durable runtime projection metadata.
-model HyperAgentRuntime {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId               String   @map("org_id") @db.Uuid
-  employeeId          String   @unique @map("employee_id") @db.Uuid
-  agentInstanceId     String   @unique @map("agent_instance_id") @db.VarChar(180)
-  processingVersion   Int      @default(1) @map("processing_version")
-  status              String   @default("idle") @db.VarChar(24)
-  capabilityManifest  Json     @default("{}") @map("capability_manifest") @db.JsonB
-  preferences         Json     @default("{}") @db.JsonB
-  currentAssignments  Json     @default("[]") @map("current_assignments") @db.JsonB
-  lastHeartbeatAt     DateTime? @map("last_heartbeat_at") @db.Timestamptz(6)
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  employee            DigitalEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  routines            HyperAgentRoutine[]
-
-  @@unique([orgId, employeeId])
-  @@index([orgId, status])
-  @@map("hyper_agent_runtimes")
-}
-
-/// Immutable, validated capability material. Runtime code selects these rows;
-/// it never hard-codes department skills into the executor.
-model HyperAgentSkillVersion {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId              String   @map("org_id") @db.Uuid
-  skillKey           String   @map("skill_key") @db.VarChar(120)
-  version            Int      @default(1)
-  status             String   @default("draft") @db.VarChar(24)
-  manifest           Json     @default("{}") @db.JsonB
-  validationReceipts Json     @default("[]") @map("validation_receipts") @db.JsonB
-  createdBy          String?  @map("created_by") @db.Uuid
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  activatedAt        DateTime? @map("activated_at") @db.Timestamptz(6)
-
-  @@unique([orgId, skillKey, version])
-  @@index([orgId, status])
-  @@map("hyper_agent_skill_versions")
-}
-
-/// A schedule points at an immutable playbook version. Cloudflare wakes the
-/// agent; PostgreSQL remains authoritative for status and next-run metadata.
-model HyperAgentRoutine {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId              String   @map("org_id") @db.Uuid
-  roomId             String   @map("room_id") @db.Uuid
-  agentRuntimeId     String   @map("agent_runtime_id") @db.Uuid
-  playbookId         String   @map("playbook_id") @db.VarChar(120)
-  playbookVersion    Int      @map("playbook_version")
-  scheduleType       String   @map("schedule_type") @db.VarChar(24)
-  scheduleExpression String   @map("schedule_expression") @db.VarChar(160)
-  status             String   @default("active") @db.VarChar(24)
-  authorityPolicy    Json     @default("{}") @map("authority_policy") @db.JsonB
-  workflowInstanceId String?  @map("workflow_instance_id") @db.VarChar(180)
-  nextRunAt          DateTime? @map("next_run_at") @db.Timestamptz(6)
-  lastRunAt          DateTime? @map("last_run_at") @db.Timestamptz(6)
-  createdBy          String   @map("created_by") @db.Uuid
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  agentRuntime       HyperAgentRuntime @relation(fields: [agentRuntimeId], references: [id], onDelete: Cascade)
-
-  @@unique([orgId, roomId, playbookId, playbookVersion, scheduleExpression])
-  @@index([orgId, status, nextRunAt])
-  @@map("hyper_agent_routines")
-}
-
-/// Provider actions and browser/Sandbox operations require durable receipts.
-/// A successful HTTP response without this row is not completion evidence.
-model HyperToolReceipt {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId          String   @map("org_id") @db.Uuid
-  roomId         String   @map("room_id") @db.Uuid
-  turnId         String   @map("turn_id") @db.Uuid
-  workOrderId    String   @map("work_order_id") @db.Uuid
-  agentInstanceId String  @map("agent_instance_id") @db.VarChar(180)
-  actionKey      String   @map("action_key") @db.VarChar(160)
-  adapter        String   @db.VarChar(80)
-  status         String   @db.VarChar(24)
-  providerReceipt Json    @default("{}") @map("provider_receipt") @db.JsonB
-  artifactRefs   Json     @default("[]") @map("artifact_refs") @db.JsonB
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  @@unique([orgId, actionKey])
-  @@index([workOrderId, status])
-  @@map("hyper_tool_receipts")
 }
 
 /// HyperClaim — a durable, queryable claim/hypothesis/synthesis artifact emitted
@@ -4214,11 +3980,8 @@ model CanonicalEntity {
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   memoryLinks MemoryEntityLink[]
-  subjectClaims CanonicalClaim[] @relation("CanonicalClaimSubject")
-  objectClaims  CanonicalClaim[] @relation("CanonicalClaimObject")
 
   @@index([organizationId, entityKind])
-  @@unique([organizationId, identityKey], map: "canonical_entities_org_identity_key")
   @@index([organizationId, entityKind, normalizedName], map: "canonical_entities_org_kind_normalized_idx")
   @@index([aliases], type: Gin)
   @@index([emailDomains], type: Gin)
@@ -4238,112 +4001,6 @@ model MemoryEntityLink {
   @@id([memoryId, entityId, role])
   @@index([entityId])
   @@map("memory_entity_links")
-}
-
-/// Versioned registry for the bounded predicates accepted by the canonical graph.
-model CanonicalPredicate {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name                String   @db.VarChar(80)
-  version             Int      @default(1)
-  aliases             String[] @default([])
-  inverseName         String?  @map("inverse_name") @db.VarChar(80)
-  subjectKinds        String[] @default([]) @map("subject_kinds")
-  objectKinds         String[] @default([]) @map("object_kinds")
-  riskClass           String   @default("low") @map("risk_class") @db.VarChar(20)
-  active              Boolean  @default(true)
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  claims              CanonicalClaim[]
-
-  @@unique([name, version])
-  @@index([aliases], type: Gin)
-  @@map("canonical_predicates")
-}
-
-/// A factual edge between canonical entities (or an entity and a literal).
-/// It is intentionally separate from `relationships`, which stores memory lineage only.
-model CanonicalClaim {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizationId      String   @map("organization_id") @db.Uuid
-  claimKey            String   @map("claim_key") @db.VarChar(128)
-  kind                String   @default("entity_relation") @db.VarChar(40)
-  subjectEntityId     String   @map("subject_entity_id") @db.Uuid
-  predicateId         String   @map("predicate_id") @db.Uuid
-  objectEntityId      String?  @map("object_entity_id") @db.Uuid
-  objectLiteral       Json?    @map("object_literal")
-  qualifiers          Json     @default("{}")
-  confidence          Decimal  @default(1.00) @db.Decimal(4, 3)
-  assertionStatus     String   @default("user_asserted") @map("assertion_status") @db.VarChar(32)
-  lifecycleStatus     String   @default("active") @map("lifecycle_status") @db.VarChar(24)
-  validFrom           DateTime? @map("valid_from") @db.Timestamptz(6)
-  validTo             DateTime? @map("valid_to") @db.Timestamptz(6)
-  knownAt             DateTime @default(now()) @map("known_at") @db.Timestamptz(6)
-  processingVersion   Int      @default(1) @map("processing_version")
-  sourceDigest        String   @map("source_digest") @db.VarChar(64)
-  supersedesClaimId   String?  @map("supersedes_claim_id") @db.Uuid
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  subject             CanonicalEntity @relation("CanonicalClaimSubject", fields: [subjectEntityId], references: [id], onDelete: Restrict)
-  objectEntity        CanonicalEntity? @relation("CanonicalClaimObject", fields: [objectEntityId], references: [id], onDelete: Restrict)
-  predicate           CanonicalPredicate @relation(fields: [predicateId], references: [id], onDelete: Restrict)
-  supersedes          CanonicalClaim? @relation("ClaimSupersession", fields: [supersedesClaimId], references: [id], onDelete: SetNull)
-  supersededBy        CanonicalClaim[] @relation("ClaimSupersession")
-  evidence            ClaimEvidenceLink[]
-
-  @@unique([organizationId, claimKey])
-  @@index([organizationId, subjectEntityId, predicateId])
-  @@index([organizationId, objectEntityId])
-  @@index([organizationId, validFrom, validTo])
-  @@map("canonical_claims")
-}
-
-model ClaimEvidenceLink {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  claimId     String   @map("claim_id") @db.Uuid
-  memoryId    String   @map("memory_id") @db.Uuid
-  documentId  String?  @map("document_id") @db.Uuid
-  segmentId   String?  @map("segment_id") @db.Uuid
-  exactQuote  String?  @map("exact_quote")
-  startOffset Int?     @map("start_offset")
-  endOffset   Int?     @map("end_offset")
-  sourceDigest String  @map("source_digest") @db.VarChar(64)
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  claim       CanonicalClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
-  memory      Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-
-  @@unique([claimId, memoryId, sourceDigest])
-  @@index([memoryId])
-  @@map("claim_evidence_links")
-}
-
-model MemoryProjectionState {
-  memoryId          String   @id @map("memory_id") @db.Uuid
-  organizationId    String   @map("organization_id") @db.Uuid
-  admittedMode      String   @default("off") @map("admitted_mode") @db.VarChar(16)
-  processingVersion Int      @default(1) @map("processing_version")
-  memoryStatus      String   @default("complete") @map("memory_status") @db.VarChar(20)
-  entitiesStatus    String   @default("pending") @map("entities_status") @db.VarChar(20)
-  claimsStatus      String   @default("pending") @map("claims_status") @db.VarChar(20)
-  lineageStatus     String   @default("complete") @map("lineage_status") @db.VarChar(20)
-  vectorStatus      String   @default("pending") @map("vector_status") @db.VarChar(20)
-  remoteStatus      String?  @map("remote_status") @db.VarChar(20)
-  receipt           Json?
-  lastError         String?  @map("last_error")
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  memory            Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-
-  @@index([organizationId, claimsStatus])
-  @@map("memory_projection_states")
-}
-
-model CanonicalProjectionNonce {
-  nonce      String   @id @db.VarChar(200)
-  expiresAt  DateTime @map("expires_at") @db.Timestamptz(6)
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  @@index([expiresAt])
-  @@map("canonical_projection_nonces")
 }
 
 // Entity review queue — fuzzy match candidates 0.70-0.95 surface here.
@@ -4609,239 +4266,9 @@ model CognitionRun {
   triggeredBy       String?   @map("triggered_by") @db.Uuid
   startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   finishedAt        DateTime? @map("finished_at") @db.Timestamptz(6)
-  workflowInstanceId String?   @unique @map("workflow_instance_id") @db.VarChar(100)
-  pipelineVersion    Int       @default(1) @map("pipeline_version")
-  triggerKey         String?   @map("trigger_key") @db.VarChar(160)
-  latchedFlags       Json      @default("{}") @map("latched_flags")
-  scopeSnapshot      Json      @default("{}") @map("scope_snapshot")
-  currentStage       String?   @map("current_stage") @db.VarChar(48)
-  progress           Int       @default(0)
-  candidateCount     Int       @default(0) @map("candidate_count")
-  acceptedCount      Int       @default(0) @map("accepted_count")
-  rejectedCount      Int       @default(0) @map("rejected_count")
-  quarantinedCount   Int       @default(0) @map("quarantined_count")
-  publishedCount     Int       @default(0) @map("published_count")
-  profileUpdateCount Int       @default(0) @map("profile_update_count")
-  relationshipCount  Int       @default(0) @map("relationship_count")
-  vectorCount        Int       @default(0) @map("vector_count")
-  modelRoute          String?   @map("model_route") @db.VarChar(160)
-  embeddingModel      String?   @map("embedding_model") @db.VarChar(160)
-  tokenCount          Int       @default(0) @map("token_count")
-  costMicros          BigInt    @default(0) @map("cost_micros")
-  heartbeatAt         DateTime? @map("heartbeat_at") @db.Timestamptz(6)
-  cancelledAt         DateTime? @map("cancelled_at") @db.Timestamptz(6)
-  recoveryStatus      String?   @map("recovery_status") @db.VarChar(32)
-  terminalReason      String?   @map("terminal_reason")
-  steps               CognitionStep[]
-  candidates          DreamCandidate[]
-  profileRevisions    SubjectProfileRevision[]
 
   @@index([orgId, startedAt(sort: Desc)])
-  @@index([orgId, pipelineVersion, status])
-  @@unique([orgId, triggerKey, pipelineVersion])
   @@map("cognition_run")
-}
-
-model CognitionStep {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  runId           String    @map("run_id") @db.Uuid
-  pipelineVersion Int       @map("pipeline_version")
-  stageKey        String    @map("stage_key") @db.VarChar(48)
-  shardKey        String    @default("root") @map("shard_key") @db.VarChar(160)
-  status          String    @default("pending") @db.VarChar(24)
-  attempt         Int       @default(0)
-  inputDigest     String    @map("input_digest") @db.VarChar(64)
-  outputReceipt   Json      @default("{}") @map("output_receipt")
-  counters        Json      @default("{}")
-  leaseExpiresAt  DateTime? @map("lease_expires_at") @db.Timestamptz(6)
-  error           Json?
-  startedAt       DateTime? @map("started_at") @db.Timestamptz(6)
-  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  run             CognitionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-
-  @@unique([runId, pipelineVersion, stageKey, shardKey])
-  @@index([status, leaseExpiresAt])
-  @@map("cognition_steps")
-}
-
-/// Durable, tenant-scoped lifecycle for browser-derived visual intelligence.
-/// Source bytes live in R2; this table retains only bounded evidence metadata,
-/// artifact references, and the authoritative stage/state receipt.
-model VisualIntelligenceRun {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId              String   @map("org_id") @db.Uuid
-  userId             String   @map("user_id") @db.Uuid
-  jobId              String   @map("job_id") @db.Uuid
-  roomId             String?  @map("room_id") @db.Uuid
-  workflowInstanceId String?  @unique @map("workflow_instance_id") @db.VarChar(140)
-  processingVersion  Int      @map("processing_version")
-  mode               String   @db.VarChar(32)
-  browserSession     String?  @map("browser_session") @db.VarChar(40)
-  deliverable        String   @db.VarChar(64)
-  status             String   @default("running") @db.VarChar(24)
-  currentStage       String?  @map("current_stage") @db.VarChar(48)
-  progress           Int      @default(0)
-  urls               Json     @default("[]")
-  latchedFlags       Json     @default("{}") @map("latched_flags")
-  sourceRefs         Json     @default("[]") @map("source_refs")
-  artifact           Json     @default("{}")
-  error              Json?
-  terminalReason     String?  @map("terminal_reason") @db.VarChar(180)
-  heartbeatAt        DateTime? @map("heartbeat_at") @db.Timestamptz(6)
-  startedAt          DateTime @default(now()) @map("started_at") @db.Timestamptz(6)
-  finishedAt         DateTime? @map("finished_at") @db.Timestamptz(6)
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  steps              VisualIntelligenceStep[]
-
-  @@unique([orgId, jobId, processingVersion])
-  @@index([orgId, userId, createdAt(sort: Desc)])
-  @@index([status, heartbeatAt])
-  @@map("visual_intelligence_runs")
-}
-
-/// Exactly-once checkpoint/lease record for every visual-intelligence stage.
-model VisualIntelligenceStep {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  runId           String   @map("run_id") @db.Uuid
-  stageKey        String   @map("stage_key") @db.VarChar(48)
-  shardKey        String   @default("root") @map("shard_key") @db.VarChar(160)
-  status          String   @default("pending") @db.VarChar(24)
-  attempt         Int      @default(0)
-  inputDigest     String   @map("input_digest") @db.VarChar(64)
-  outputReceipt   Json     @default("{}") @map("output_receipt")
-  counters        Json     @default("{}")
-  leaseExpiresAt  DateTime? @map("lease_expires_at") @db.Timestamptz(6)
-  error           Json?
-  startedAt       DateTime? @map("started_at") @db.Timestamptz(6)
-  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  run             VisualIntelligenceRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-
-  @@unique([runId, stageKey, shardKey])
-  @@index([status, leaseExpiresAt])
-  @@map("visual_intelligence_steps")
-}
-
-model SubjectProfile {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId             String    @map("org_id") @db.Uuid
-  subjectType       String    @map("subject_type") @db.VarChar(32)
-  subjectKey        String    @map("subject_key") @db.VarChar(180)
-  displayName       String    @map("display_name") @db.VarChar(240)
-  aliases           String[]  @default([])
-  importance        Float     @default(0)
-  pinned            Boolean   @default(false)
-  active            Boolean   @default(true)
-  stableProjection  Json      @default("[]") @map("stable_projection")
-  dynamicProjection Json      @default("[]") @map("dynamic_projection")
-  projectionVersion Int       @default(0) @map("projection_version")
-  lastActivityAt    DateTime? @map("last_activity_at") @db.Timestamptz(6)
-  lastReconciledAt  DateTime? @map("last_reconciled_at") @db.Timestamptz(6)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  facts             SubjectProfileFact[]
-  revisions         SubjectProfileRevision[]
-  candidates        DreamCandidate[]
-
-  @@unique([orgId, subjectType, subjectKey])
-  @@index([orgId, active, importance(sort: Desc)])
-  @@index([orgId, lastActivityAt(sort: Desc)])
-  @@map("subject_profiles")
-}
-
-model SubjectProfileFact {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  profileId         String    @map("profile_id") @db.Uuid
-  factKey           String    @map("fact_key") @db.VarChar(180)
-  value             String
-  category          String    @db.VarChar(48)
-  temporalClass     String    @map("temporal_class") @db.VarChar(32)
-  confidence        Float
-  status            String    @default("active") @db.VarChar(24)
-  revision          Int       @default(1)
-  evidenceMemoryIds String[]  @default([]) @map("evidence_memory_ids") @db.Uuid
-  derivationIds     String[]  @default([]) @map("derivation_ids") @db.Uuid
-  supersedesId      String?   @map("supersedes_id") @db.Uuid
-  validFrom         DateTime? @map("valid_from") @db.Timestamptz(6)
-  validTo           DateTime? @map("valid_to") @db.Timestamptz(6)
-  lastConfirmedAt   DateTime? @map("last_confirmed_at") @db.Timestamptz(6)
-  expiresAt         DateTime? @map("expires_at") @db.Timestamptz(6)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  profile           SubjectProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
-
-  @@unique([profileId, factKey, revision])
-  @@index([profileId, status, temporalClass])
-  @@index([expiresAt])
-  @@map("subject_profile_facts")
-}
-
-model SubjectProfileRevision {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  profileId      String    @map("profile_id") @db.Uuid
-  runId          String    @map("run_id") @db.Uuid
-  version        Int
-  changedFactIds String[]  @default([]) @map("changed_fact_ids") @db.Uuid
-  verification   Json      @default("{}")
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  profile        SubjectProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
-  run            CognitionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-
-  @@unique([profileId, version])
-  @@index([runId])
-  @@map("subject_profile_revisions")
-}
-
-model DreamCandidate {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  runId             String    @map("run_id") @db.Uuid
-  orgId             String    @map("org_id") @db.Uuid
-  subjectProfileId  String?   @map("subject_profile_id") @db.Uuid
-  deterministicHash String    @map("deterministic_hash") @db.VarChar(64)
-  type              String    @db.VarChar(40)
-  claim             String
-  sourceMemoryIds   String[]  @default([]) @map("source_memory_ids") @db.Uuid
-  confidence        Float     @default(0)
-  risk              String    @default("low") @db.VarChar(24)
-  verdict           String    @default("pending") @db.VarChar(24)
-  publicationStatus String    @default("pending") @map("publication_status") @db.VarChar(24)
-  rejectionReasons  String[]  @default([]) @map("rejection_reasons")
-  scopeSnapshot     Json      @default("{}") @map("scope_snapshot")
-  verifierReceipt   Json      @default("{}") @map("verifier_receipt")
-  publishedMemoryId String?   @map("published_memory_id") @db.Uuid
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  run               CognitionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  subjectProfile    SubjectProfile? @relation(fields: [subjectProfileId], references: [id], onDelete: SetNull)
-
-  @@unique([orgId, deterministicHash])
-  @@index([runId, verdict, publicationStatus])
-  @@index([subjectProfileId, createdAt(sort: Desc)])
-  @@map("dream_candidates")
-}
-
-model DerivationReceipt {
-  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId              String    @map("org_id") @db.Uuid
-  candidateId        String?   @map("candidate_id") @db.Uuid
-  fromMemoryId       String    @map("from_memory_id") @db.Uuid
-  toMemoryId         String    @map("to_memory_id") @db.Uuid
-  relationshipType   RelationshipType @map("relationship_type")
-  status             String    @default("queued") @db.VarChar(24)
-  attempts           Int       @default(0)
-  verifierModel      String?   @map("verifier_model") @db.VarChar(160)
-  verifierPromptHash String?   @map("verifier_prompt_hash") @db.VarChar(64)
-  receipt            Json      @default("{}")
-  error              Json?
-  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  processedAt        DateTime? @map("processed_at") @db.Timestamptz(6)
-
-  @@unique([orgId, fromMemoryId, toMemoryId, relationshipType])
-  @@index([status, createdAt])
-  @@map("derivation_receipts")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -4970,84 +4397,11 @@ model MeetingSession {
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   finalizedAt       DateTime? @map("finalized_at") @db.Timestamptz(6)
-  orchestrationMode String    @default("legacy") @map("orchestration_mode") @db.VarChar(24)
-  pipelineVersion   Int       @default(1) @map("pipeline_version")
-  workflowInstanceId String?  @map("workflow_instance_id")
-  latchedFlags      Json      @default("{}") @map("latched_flags")
-  recordingPolicyId String?   @map("recording_policy_id") @db.Uuid
-  recordingPolicyVersion Int? @map("recording_policy_version")
-  authorizationStatus String  @default("legacy_attested") @map("authorization_status") @db.VarChar(32)
-  authorizationSnapshotId String? @map("authorization_snapshot_id") @db.Uuid
-  purposes          Json      @default("[]")
-  storagePlacement  String?   @map("storage_placement") @db.VarChar(32)
-  gatewayRoute      String?   @map("gateway_route")
-  sttModel          String?   @map("stt_model")
-  insightsModel     String?   @map("insights_model")
-  embeddingModel    String?   @map("embedding_model")
-  currentStage      String?   @map("current_stage") @db.VarChar(64)
-  progress          Int       @default(0)
-  recoveryStatus    String?   @map("recovery_status") @db.VarChar(32)
-  publicationAllowed Boolean  @default(false) @map("publication_allowed")
-  processingRestricted Boolean @default(false) @map("processing_restricted")
-  audioRetentionDeadline DateTime? @map("audio_retention_deadline") @db.Timestamptz(6)
 
   @@index([orgId, userId, status, updatedAt(sort: Desc)], map: "meeting_sessions_org_user_status_idx")
   @@index([status, finalizationNextAttemptAt, updatedAt], map: "meeting_sessions_finalization_retry_idx")
   @@index([finalizedMeetingId], map: "meeting_sessions_finalized_meeting_idx")
   @@map("meeting_sessions")
-}
-
-model MeetingRecordingPolicy {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId String @map("org_id") @db.Uuid
-  version Int
-  status String @default("draft") @db.VarChar(24)
-  controllerName String @map("controller_name")
-  privacyContact String @map("privacy_contact")
-  countryCode String @map("country_code") @db.VarChar(2)
-  recordingJurisdiction String @map("recording_jurisdiction")
-  lawfulBasis Json @default("{}") @map("lawful_basis")
-  purposes Json @default("[]")
-  specialCategoryCondition String? @map("special_category_condition")
-  nationalRecordingRule String @map("national_recording_rule")
-  internalConsentMode String @default("participant_authorization") @map("internal_consent_mode") @db.VarChar(32)
-  externalConsentMode String @default("strict_participant_authorization") @map("external_consent_mode") @db.VarChar(32)
-  processors Json @default("[]")
-  retention Json @default("{}")
-  dpiaStatus String @default("required") @map("dpia_status") @db.VarChar(24)
-  dpiaReference String? @map("dpia_reference")
-  dpiaApprovedBy String? @map("dpia_approved_by") @db.Uuid
-  dpiaApprovedAt DateTime? @map("dpia_approved_at") @db.Timestamptz(6)
-  approvedBy String? @map("approved_by") @db.Uuid
-  approvedAt DateTime? @map("approved_at") @db.Timestamptz(6)
-  effectiveAt DateTime? @map("effective_at") @db.Timestamptz(6)
-  supersededAt DateTime? @map("superseded_at") @db.Timestamptz(6)
-  createdBy String @map("created_by") @db.Uuid
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
-  @@unique([orgId, version])
-  @@map("meeting_recording_policies")
-}
-
-model MeetingPipelineStep {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  sessionId String @map("session_id") @db.Uuid
-  orgId String @map("org_id") @db.Uuid
-  pipelineVersion Int @map("pipeline_version")
-  stageKey String @map("stage_key") @db.VarChar(64)
-  shardKey String @default("0") @map("shard_key") @db.VarChar(128)
-  status String @default("pending") @db.VarChar(24)
-  attempt Int @default(0)
-  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
-  inputDigest String? @map("input_digest") @db.VarChar(64)
-  outputReceipt Json? @map("output_receipt")
-  coverageCounters Json @default("{}") @map("coverage_counters")
-  structuredError Json? @map("structured_error")
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
-  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
-  @@unique([sessionId, pipelineVersion, stageKey, shardKey])
-  @@map("meeting_pipeline_steps")
 }
 
 /// P1 — progressive durable transcript. Each 10-min recording segment is persisted
@@ -5360,157 +4714,6 @@ model HyperTurnEventOutbox {
   turn        HyperTurn @relation(fields: [turnId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   @@unique([turnId, eventId])
   @@map("hyper_turn_event_outbox")
-}
-
-model DurableChatTurn {
-  id                String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId             String                  @map("org_id") @db.Uuid
-  userId            String                  @map("user_id") @db.Uuid
-  threadDigest      String?                 @map("thread_digest") @db.Char(64)
-  idempotencyKey    String                  @map("idempotency_key") @db.VarChar(180)
-  orchestrationMode String                  @default("off") @map("orchestration_mode") @db.VarChar(24)
-  status            String                  @default("accepted") @db.VarChar(32)
-  currentPhase      String                  @default("accepted") @map("current_phase") @db.VarChar(40)
-  requestPayload    Json                    @map("request_payload") @db.JsonB
-  scopeSnapshot     Json                    @default("{}") @map("scope_snapshot") @db.JsonB
-  responsePayload   Json?                   @map("response_payload") @db.JsonB
-  error             Json?                   @db.JsonB
-  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime                @default(now()) @map("updated_at") @db.Timestamptz(6)
-  completedAt       DateTime?               @map("completed_at") @db.Timestamptz(6)
-  checkpoints       DurableChatCheckpoint[]
-  events            DurableChatEvent[]
-
-  @@unique([orgId, idempotencyKey], map: "durable_chat_turns_org_idempotency_key")
-  @@index([orgId, userId, updatedAt(sort: Desc)], map: "durable_chat_turns_tenant_updated_idx")
-  @@index([threadDigest, updatedAt(sort: Desc)], map: "durable_chat_turns_thread_updated_idx")
-  @@map("durable_chat_turns")
-}
-
-model DurableChatCheckpoint {
-  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  turnId         String          @map("turn_id") @db.Uuid
-  phase          String          @db.VarChar(40)
-  status         String          @default("pending") @db.VarChar(24)
-  attempt        Int             @default(1)
-  inputDigest    String?         @map("input_digest") @db.Char(64)
-  receipt        Json            @default("{}") @db.JsonB
-  error          Json?           @db.JsonB
-  leaseToken     String?         @map("lease_token") @db.Uuid
-  leaseExpiresAt DateTime?       @map("lease_expires_at") @db.Timestamptz(6)
-  startedAt      DateTime        @default(now()) @map("started_at") @db.Timestamptz(6)
-  completedAt    DateTime?       @map("completed_at") @db.Timestamptz(6)
-  updatedAt      DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
-  turn           DurableChatTurn @relation(fields: [turnId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@unique([turnId, phase], map: "durable_chat_checkpoints_turn_phase_key")
-  @@index([status, leaseExpiresAt], map: "durable_chat_checkpoints_recovery_idx")
-  @@map("durable_chat_checkpoints")
-}
-
-model DurableChatEvent {
-  id        BigInt          @id @default(autoincrement())
-  turnId    String          @map("turn_id") @db.Uuid
-  sequence  Int
-  eventType String          @map("event_type") @db.VarChar(80)
-  event     Json            @db.JsonB
-  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  turn      DurableChatTurn @relation(fields: [turnId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@unique([turnId, sequence], map: "durable_chat_events_turn_sequence_key")
-  @@index([turnId, createdAt], map: "durable_chat_events_turn_created_idx")
-  @@map("durable_chat_events")
-}
-
-model DurableChatContinuation {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tokenHash      String    @unique @map("token_hash") @db.Char(64)
-  parentTurnId   String?   @map("parent_turn_id") @db.Uuid
-  orgId          String    @map("org_id") @db.Uuid
-  userId         String    @map("user_id") @db.Uuid
-  payload        Json      @db.JsonB
-  status         String    @default("pending") @db.VarChar(24)
-  leaseToken     String?   @map("lease_token") @db.Uuid
-  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
-  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
-  consumedAt     DateTime? @map("consumed_at") @db.Timestamptz(6)
-
-  @@index([orgId, userId, status, expiresAt], map: "durable_chat_continuations_tenant_status_idx")
-  @@index([status, leaseExpiresAt], map: "durable_chat_continuations_recovery_idx")
-  @@map("durable_chat_continuations")
-}
-
-/// Session state owned and created by the native DeepSeek Harness Postgres
-/// provider. The control plane only mints short-lived admission tickets and
-/// must never create rows in this table.
-model HarnessSession {
-  id                    String                @id @db.VarChar(180)
-  orgId                 String                @map("org_id") @db.Uuid
-  userId                String                @map("user_id") @db.Uuid
-  projectId             String?               @map("project_id") @db.Uuid
-  scopeKind             String                @default("organization") @map("scope_kind") @db.VarChar(24)
-  profile               String                @default("hivemind-chat") @db.VarChar(64)
-  variation             String                @db.VarChar(16)
-  status                String                @default("active") @db.VarChar(24)
-  /// Exact native Harness SessionHeader JSON envelope.
-  header                Json                  @default("{}") @db.JsonB
-  title                 String?               @db.VarChar(500)
-  revision              BigInt                @default(0)
-  inheritedEventCount   BigInt                @default(0) @map("inherited_event_count")
-  eventCount            BigInt                @default(0) @map("event_count")
-  createdAt             DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt             DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  closedAt              DateTime?             @map("closed_at") @db.Timestamptz(6)
-  org                   Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  user                  User                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  events                HarnessSessionEvent[]
-  leases                HarnessSessionLease[]
-
-  @@unique([id, orgId, userId], map: "harness_sessions_tenant_identity_key")
-  @@index([orgId, userId, updatedAt(sort: Desc)], map: "harness_sessions_tenant_updated_idx")
-  @@index([status, updatedAt(sort: Desc)], map: "harness_sessions_status_updated_idx")
-  @@index([orgId, projectId, updatedAt(sort: Desc)], map: "harness_sessions_project_updated_idx")
-  @@map("harness_sessions")
-}
-
-model HarnessSessionEvent {
-  id        BigInt         @id @default(autoincrement())
-  sessionId String         @map("session_id") @db.VarChar(180)
-  orgId     String         @map("org_id") @db.Uuid
-  userId    String         @map("user_id") @db.Uuid
-  sequence  BigInt
-  eventType String         @map("event_type") @db.VarChar(80)
-  /// Exact native Harness SessionEvent JSON envelope. The typed columns above
-  /// are indexed projections and must be verified against this source value.
-  payload   Json           @default("{}") @db.JsonB
-  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  session   HarnessSession @relation(fields: [sessionId, orgId, userId], references: [id, orgId, userId], onDelete: Cascade, onUpdate: NoAction)
-
-  @@unique([sessionId, sequence], map: "harness_session_events_session_sequence_key")
-  @@index([sessionId, createdAt], map: "harness_session_events_session_created_idx")
-  @@index([orgId, userId, createdAt], map: "harness_session_events_tenant_created_idx")
-  @@map("harness_session_events")
-}
-
-model HarnessSessionLease {
-  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  sessionId    String         @unique(map: "harness_session_leases_session_key") @map("session_id") @db.VarChar(180)
-  orgId        String         @map("org_id") @db.Uuid
-  userId       String         @map("user_id") @db.Uuid
-  holderId     String         @map("holder_id") @db.Text
-  tokenHash    String         @unique @map("token_hash") @db.Char(64)
-  fencingToken BigInt         @default(0) @map("fencing_token")
-  acquiredAt   DateTime       @default(now()) @map("acquired_at") @db.Timestamptz(6)
-  heartbeatAt  DateTime       @default(now()) @map("heartbeat_at") @db.Timestamptz(6)
-  expiresAt    DateTime       @map("expires_at") @db.Timestamptz(6)
-  releasedAt   DateTime?      @map("released_at") @db.Timestamptz(6)
-  session      HarnessSession @relation(fields: [sessionId, orgId, userId], references: [id, orgId, userId], onDelete: Cascade, onUpdate: NoAction)
-
-  @@index([expiresAt], map: "harness_session_leases_recovery_idx")
-  @@index([orgId, userId, expiresAt], map: "harness_session_leases_tenant_expiry_idx")
-  @@map("harness_session_leases")
 }
 
 model PromotionCode {

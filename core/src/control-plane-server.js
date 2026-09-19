@@ -21,9 +21,6 @@ import {
 } from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
-import { createZitadelEmailIdentity } from './control-plane/zitadel-email-identity.js';
-import { createEmailIdentityService, EMAIL_AUTH_PUBLIC_RESPONSE, normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from './auth/email-identity-service.js';
-import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/email-turnstile.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
@@ -66,7 +63,6 @@ import {
   revokeEnterpriseInvitation,
   rotateEnterpriseInvitationSecrets,
   normalizeEnterpriseInvitationInput,
-  updateEnterpriseInvitationMaxInvites,
 } from './billing/enterprise-invitation-service.js';
 import {
   publicAccessApplication,
@@ -78,8 +74,7 @@ import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './bi
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import { UsageService } from './billing/usage-service.js';
-import { CreditService } from './billing/credit-service.js';
-import { DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
+import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -89,13 +84,9 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
-import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
-import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
-import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
-import { renderHumationAvatarSvg } from './email/humation-avatar.js';
+import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
-import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
+import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
@@ -108,7 +99,6 @@ import { activateHqAfterOnboarding, appendHqEvent, FIRST_LIFE_OBJECTIVE, resetHq
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
-import { grokModeAtLeast as grokModeAtLeastGlobal } from './hyperagents/grok-runtime-client.js';
 import {
   getRuntimeRole,
   shouldRunRecurringMaintenanceJobs,
@@ -127,25 +117,16 @@ import {
   handleInternalSaveProspectRoute,
   handleInternalComposioExecuteRoute,
   handleInternalComposioToolsRoute,
+  handleInternalPlaybookListRoute,
+  handleInternalPlaybookGetRoute,
+  handleInternalResourceAccessRoute,
 } from './routes/internal-hivemind.js';
-import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
-import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
-import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret, requireSessionSecret } from './security/internal-auth.js';
+import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
-import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
-import {
-  deliverDayOneFirstMove,
-  isAuthorizedDayOneRequest,
-  isDayOneWorkflowEnabled,
-  listEligibleDayOneCompanies,
-  notifyDayOneWorkflowCompletion,
-  prepareDayOneFirstMove,
-  scheduleDayOneWorkflow,
-} from './lifecycle/day1-first-move.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -153,21 +134,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // render). Keyed by sessionId; cleared naturally on process restart.
 const _welcomedSessions = new Set();
 const PROJECT_ROOT = path.join(__dirname, '..');
-
-async function memoryBoxBrokerRequest(route, body) {
-  const base = String(process.env.BYOD_BROKER_URL || 'http://byod-broker:8790').replace(/\/$/, '');
-  const response = await fetch(`${base}${route}`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(process.env.BYOD_BROKER_INTERNAL_TOKEN ? { 'x-hivemind-internal-token': process.env.BYOD_BROKER_INTERNAL_TOKEN } : {}),
-    },
-    body: JSON.stringify(body || {}),
-    signal: AbortSignal.timeout(5000),
-  });
-  const payload = await response.json().catch(() => ({ error: 'Memory Box broker returned an invalid response' }));
-  return { status: response.status, payload };
-}
 
 function loadLocalEnv(envPath) {
   if (!fs.existsSync(envPath)) {
@@ -210,7 +176,6 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     'https://admin.hivemind.singulancelabs.com',
     'https://singulancelabs.com',
     'https://www.singulancelabs.com',
-    'https://chat.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -264,11 +229,7 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
-const emailIdentity = createEmailIdentityService({ prisma, publicBaseUrl: defaultFrontendBaseUrl });
-const emailPostLoginRedirect = `${defaultFrontendBaseUrl.replace(/\/$/, '')}/hivemind/app/overview?auth=callback`;
-const emailAllowedOrigins = [new URL(defaultFrontendBaseUrl).origin];
-configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
-const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
+const { configureAiGovernance, listModelGovernance, listModelPrices, replaceModelPrice, totalAiCost, upsertModelPolicy, userCostSummary } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
 async function taraProviderFor(orgId) {
@@ -284,56 +245,6 @@ const planEnforcer = new PlanEnforcer(
 );
 const controlUsageService = new UsageService({ prisma, planEnforcer, usageTracker: controlUsageTracker });
 planEnforcer.setUsageService(controlUsageService);
-const controlCreditService = new CreditService({
-  prisma,
-  planStore: { getOrgPlan: async (orgId) => (await getEffectivePlan(prisma, orgId)).plan },
-  usageService: controlUsageService,
-});
-planEnforcer.setCreditService(controlCreditService);
-
-// One accounting boundary for every executed HyperAgent turn. Turn creation has
-// several legitimate entry points (manual chat, task kickoff, HQ routing,
-// resume, and scheduled runtime), but every execution reports a seal event to
-// Control. The turn id is therefore the canonical idempotency key for both the
-// credit ledger and the established Usage-page projection.
-async function meterHyperAgentTurn(turnId) {
-  if (!turnId) return { metered: false, reason: 'missing_turn_id' };
-  const turn = await prisma.hyperTurn.findUnique({
-    where: { id: turnId },
-    select: { room: { select: { orgId: true, userId: true } } },
-  });
-  const orgId = turn?.room?.orgId;
-  const userId = turn?.room?.userId;
-  if (!orgId) return { metered: false, reason: 'turn_not_found' };
-
-  // The execution already happened, so the established Usage projection must
-  // reflect it even if the account exhausted its credit allowance while an
-  // autonomous kickoff was running. The next admission is then blocked by the
-  // updated projection instead of silently losing this run.
-  await controlUsageService.record({
-    orgId,
-    userId,
-    type: 'hyperAgentRuns',
-    quantity: 1,
-    source: 'hyperagents',
-    idempotencyKey: `hyperagent-run:${turnId}`,
-    metadata: { turn_id: turnId },
-  });
-
-  const creditKey = `hyperagent:turn:${turnId}`;
-  const credit = await controlCreditService.reserve({
-    orgId,
-    userId,
-    service: 'hyperagent_turn',
-    units: 1,
-    source: 'hyperagents',
-    idempotencyKey: creditKey,
-    metadata: { turn_id: turnId },
-  });
-  if (!credit.admitted) return { metered: true, creditSettled: false, reason: 'credits_exhausted', check: credit.check };
-  await controlCreditService.settle({ orgId, idempotencyKey: creditKey });
-  return { metered: true, creditSettled: true, duplicate: Boolean(credit.duplicate) };
-}
 
 function dummyCheckoutAllowed(orgId) {
   if (process.env.BILLING_DUMMY_CHECKOUT_ENABLED !== 'true') return false;
@@ -386,19 +297,17 @@ class PlanCapacityError extends Error {
   }
 }
 
-function teamSeatCapacityError(plan, limit, current) {
-  const error = new PlanCapacityError('Seat', plan, limit, current);
-  // All self-serve plans currently have one seat. Do not send someone through
-  // a chain of one-seat upgrades when the requested action is team invitation.
-  error.suggestedPlan = plan.id === 'enterprise' ? null : 'enterprise';
-  return error;
-}
-
-async function createHyperRoom(data) {
-  // Room count is no longer a billable capacity. HyperAgent work is governed
-  // by the canonical monthly credit ledger when turns execute, so creating a
-  // durable room must not consume or be blocked by a legacy plan allowance.
-  return prisma.hyperRoom.create({ data });
+async function createHyperRoomWithinPlan(data) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:rooms:${data.orgId}`);
+    const { plan } = await getEffectivePlan(tx, data.orgId);
+    const limit = plan.limits?.maxHyperRooms ?? -1;
+    if (limit > 0) {
+      const current = await countQuotaHyperRooms(tx, data.orgId);
+      if (current >= limit) throw new PlanCapacityError('HyperAgents room', plan, limit, current);
+    }
+    return tx.hyperRoom.create({ data });
+  });
 }
 
 // ── HQ dispatcher (P4) ─────────────────────────────────────────────────────
@@ -450,7 +359,7 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
     participantIds = emps.map((e) => e.id);
   }
   const name = `${_HQ_KIND_LABEL[kind] || 'Work'} desk`;
-  const room = await createHyperRoom({
+  const room = await createHyperRoomWithinPlan({
     orgId, userId: session.userId, name, template: 'auto',
     participantIds, goal: `${_HQ_KIND_LABEL[kind]} work routed from HQ`,
     agentConnectors: { _kind: kind }, roomMode: 'runtime',
@@ -474,7 +383,7 @@ async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles,
       const limit = plan.limits?.maxUsers ?? -1;
       if (limit > 0) {
         const current = await tx.userOrganization.count({ where: { orgId, isActive: true } });
-        if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
+        if (current >= limit) throw new PlanCapacityError('Seat', plan, limit, current);
       }
     }
     const membership = await tx.userOrganization.upsert({
@@ -496,50 +405,13 @@ async function createMembershipWithinPlan(data) {
     const limit = plan.limits?.maxUsers ?? -1;
     if (limit > 0) {
       const current = await tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } });
-      if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
+      if (current >= limit) throw new PlanCapacityError('Seat', plan, limit, current);
     }
     return tx.userOrganization.upsert({
       where: { userId_orgId: { userId: data.userId, orgId: data.orgId } },
       update: { ...data, isActive: true, deactivatedAt: null },
       create: { ...data, isActive: true },
     });
-  });
-}
-
-// Pending invitations reserve a seat as well as accepted memberships. Without
-// that reservation a one-seat workspace could issue unlimited invitations and
-// only reject people after they had accepted an email. The advisory lock makes
-// concurrent browser tabs and bulk requests observe one capacity boundary.
-async function assertInviteCapacityWithinPlan({ orgId, additionalSeats = 1, now = new Date() }) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
-    const { plan } = await getEffectivePlan(tx, orgId);
-    const limit = plan.limits?.maxUsers ?? -1;
-    if (limit <= 0) return { plan, limit, current: 0 };
-    const [activeMembers, pendingInvites] = await Promise.all([
-      tx.userOrganization.count({ where: { orgId, isActive: true } }),
-      tx.orgInvite.count({ where: { orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
-    ]);
-    const current = activeMembers + pendingInvites;
-    if (current + additionalSeats > limit) throw teamSeatCapacityError(plan, limit, current);
-    return { plan, limit, current };
-  });
-}
-
-async function createOrgInviteWithinPlan(data, now = new Date()) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${data.orgId}`);
-    const { plan } = await getEffectivePlan(tx, data.orgId);
-    const limit = plan.limits?.maxUsers ?? -1;
-    if (limit > 0) {
-      const [activeMembers, pendingInvites] = await Promise.all([
-        tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } }),
-        tx.orgInvite.count({ where: { orgId: data.orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
-      ]);
-      const current = activeMembers + pendingInvites;
-      if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
-    }
-    return tx.orgInvite.create({ data });
   });
 }
 
@@ -567,13 +439,12 @@ async function upsertConnectorWithinPlan(orgId, connectorInput) {
 // Map the internal resource label + plan id to the FE plan-limit contract so the global
 // <PlanLimitModal> (shared/planLimit.js) fires instead of the caller seeing a raw 402.
 const _PLAN_LIMIT_RESOURCE_KEY = {
+  'HyperAgents room': 'hyperRooms',
   'user': 'users',
-  'seat': 'users',
-  'Seat': 'users',
   'connector': 'connectors',
   'project': 'projects',
 };
-const _PLAN_LIMIT_NEXT = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise_onboarding: 'enterprise', enterprise: null };
+const _PLAN_LIMIT_NEXT = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
 
 function capacityErrorResponse(res, error) {
   const planId = error.plan;
@@ -590,7 +461,7 @@ function capacityErrorResponse(res, error) {
     plan: planId,
     limit: error.limit,
     current: error.current,
-    suggested_plan: error.suggestedPlan ?? (Object.prototype.hasOwnProperty.call(_PLAN_LIMIT_NEXT, planId) ? _PLAN_LIMIT_NEXT[planId] : null),
+    suggested_plan: Object.prototype.hasOwnProperty.call(_PLAN_LIMIT_NEXT, planId) ? _PLAN_LIMIT_NEXT[planId] : null,
     upgrade_url: '/hivemind/app/billing',
   }, 402);
 }
@@ -746,21 +617,12 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     try {
       const live = await prisma.hyperTurn.findMany({
         where: { status: 'live' },
-        select: {
-          id: true, roomId: true, userMessage: true, lines: true,
-          grokRuntimeMode: true, executionPhase: true,
-        },
+        select: { id: true, roomId: true, userMessage: true, lines: true },
         take: 50,
       });
       const liveIds = new Set(live.map((t) => t.id));
       for (const k of [..._sweepSeen.keys()]) if (!liveIds.has(k)) { _sweepSeen.delete(k); _sweepKicked.delete(k); }
       for (const t of live) {
-        // Cloudflare Workflow owns durable turns and performs its own retries.
-        // The legacy sidecar sweeper must never launch a parallel executor.
-        if (grokModeAtLeastGlobal(t.grokRuntimeMode, 'durable_assignments')) {
-          _sweepSeen.delete(t.id);
-          continue;
-        }
         const empty = !Array.isArray(t.lines) || t.lines.length === 0;
         if (!empty) { _sweepSeen.delete(t.id); continue; }
         const ticks = (_sweepSeen.get(t.id) || 0) + 1;
@@ -1101,6 +963,9 @@ async function storeFirecrawlWebsiteVisual({ screenshot, orgId }) {
 // summary email. HARD-GUARDED: flag default-OFF + per-org daily token cap —
 // autonomous spend without a cap is Polsia's admitted, margin-killing mistake.
 const HYPER_CYCLE_ENABLED = String(process.env.HYPER_CYCLE_ENABLED || 'false').toLowerCase() === 'true';
+// Starting a room is an internal scheduler action. Generic start emails are
+// disabled by default; typed lifecycle workflows own customer delivery.
+const HYPER_CYCLE_START_EMAIL_ENABLED = String(process.env.HYPER_CYCLE_START_EMAIL_ENABLED || 'false').toLowerCase() === 'true';
 const HYPER_CYCLE_HOUR_UTC = parseInt(process.env.HYPER_CYCLE_HOUR_UTC || '5', 10); // 05 UTC ≈ 07:00 DE
 const HYPER_DAILY_TOKEN_CAP = parseInt(process.env.HYPER_DAILY_TOKEN_CAP || '200000', 10);
 if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
@@ -1160,7 +1025,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
         }
         if (!roomId) {
           const participantIds = (state.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-          const taskRoom = await createHyperRoom({
+          const taskRoom = await createHyperRoomWithinPlan({
               userId: hq.user_id, orgId: hq.org_id,
               name: task.title.slice(0, 120), participantIds,
               template: 'auto', permanentLeadId: participantIds.slice().sort()[0] || null,
@@ -1200,29 +1065,32 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
         task.status = 'active'; task.room_id = roomId;
         await persist();
         console.log(`[hyper-cycle] org ${hq.org_id}: kicked "${task.title}" (spent today ${spent} tok)`);
-        // Morning summary email to the owner (best-effort).
-        try {
-          const owner = await prisma.user.findUnique({ where: { id: hq.user_id }, select: { email: true, displayName: true } });
-          if (owner?.email && !owner.email.endsWith('@local.hivemind.dev')) {
-            const doneCount = (state.tasks || []).filter((x) => x.status === 'done').length;
-            const todoCount = (state.tasks || []).filter((x) => x.status === 'todo').length;
-            const { sendSystemEmail } = await import('./email/email-service.js');
-            sendSystemEmail({
-              templateId: 'announcement',
-              to: owner.email,
-              vars: {
-                name: (owner.displayName || owner.email).split(' ')[0],
-                subject: `${state.company}: your AI team started "${task.title}"`,
-                heading: 'Your AI team is on it',
-                preheader: `Overnight cycle for ${state.company}`,
-                body: `While you were away, your HyperAgents team picked up the next task for ${state.company}:\n\n"${task.title}" — ${task.detail || ''}\n\nProgress: ${doneCount} done · ${todoCount} still queued.\nOpen the room to review the deliverable and steer the next step.`,
-                cta: 'Open your workspace',
-                appUrl: 'https://singulancelabs.com/hivemind/app/employees',
-                year: String(new Date().getFullYear()),
-              },
-            }).catch((e) => console.warn('[hyper-cycle] summary email failed:', e.message));
-          }
-        } catch { /* email best-effort */ }
+        // The scheduler always dispatches the work. This legacy generic email
+        // is strictly opt-in so it cannot masquerade as a lifecycle delivery.
+        if (HYPER_CYCLE_START_EMAIL_ENABLED) {
+          try {
+            const owner = await prisma.user.findUnique({ where: { id: hq.user_id }, select: { email: true, displayName: true } });
+            if (owner?.email && !owner.email.endsWith('@local.hivemind.dev')) {
+              const doneCount = (state.tasks || []).filter((x) => x.status === 'done').length;
+              const todoCount = (state.tasks || []).filter((x) => x.status === 'todo').length;
+              const { sendSystemEmail } = await import('./email/email-service.js');
+              sendSystemEmail({
+                templateId: 'announcement',
+                to: owner.email,
+                vars: {
+                  name: (owner.displayName || owner.email).split(' ')[0],
+                  subject: `${state.company}: your AI team started "${task.title}"`,
+                  heading: 'Your AI team is on it',
+                  preheader: `Overnight cycle for ${state.company}`,
+                  body: `While you were away, your HyperAgents team picked up the next task for ${state.company}:\n\n"${task.title}" — ${task.detail || ''}\n\nProgress: ${doneCount} done · ${todoCount} still queued.\nOpen the room to review the deliverable and steer the next step.`,
+                  cta: 'Open your workspace',
+                  appUrl: 'https://singulancelabs.com/hivemind/app/employees',
+                  year: String(new Date().getFullYear()),
+                },
+              }).catch((e) => console.warn('[hyper-cycle] summary email failed:', e.message));
+            }
+          } catch { /* email best-effort */ }
+        }
       } catch (e) {
         console.warn('[hyper-cycle] org tick failed:', e.message);
       }
@@ -1232,7 +1100,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
     if (new Date().getUTCHours() !== HYPER_CYCLE_HOUR_UTC) return;
     runNightlyCycle().catch((e) => console.warn('[hyper-cycle] run failed:', e.message));
   }, 55 * 60 * 1000);
-  console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day)`);
+  console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day, start-email=${HYPER_CYCLE_START_EMAIL_ENABLED ? 'enabled' : 'disabled'})`);
 }
 
 let hqScheduler = null;
@@ -1316,9 +1184,6 @@ function dispatchHyperRoomTurn(body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: payload,
-    timeoutMs: grokModeAtLeastGlobal(payload?.grok_runtime_mode, 'durable_assignments')
-      ? 30 * 60 * 1000
-      : 90_000,
   });
 }
 
@@ -1344,19 +1209,9 @@ function requestsGrowthStage(message) {
 
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = requireAdminSecret();
-// Keep the platform-console passcode separate from HIVEMIND_ADMIN_SECRET.
-// The latter also authenticates internal administrative paths and must remain
-// high-entropy; a human-entered console code must never silently replace it.
-const PLATFORM_ADMIN_PASSCODE = requireSecret('HIVEMIND_PLATFORM_ADMIN_PASSCODE', [], {
-  allowDevFallback: true,
-  devFallback: '126301',
-});
 const PLATFORM_ADMIN_COOKIE = 'hm_platform_admin';
 const PLATFORM_ADMIN_TTL_SECONDS = 15 * 60;
 const PLATFORM_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-// Workspace invitations are deliberately short-lived: the email is an
-// authentication-bearing join link, so delivery and expiry must agree.
-const WORKSPACE_INVITATION_TTL_MS = 24 * 60 * 60 * 1000;
 const PLATFORM_UNLOCK_MAX_ATTEMPTS = 5;
 const PLATFORM_UNLOCK_WINDOW_MS = 15 * 60 * 1000;
 const platformUnlockAttempts = new Map();
@@ -1369,12 +1224,6 @@ const SIGNUP_ADMISSION_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const signupAdmissionAttempts = new Map();
 const PERSONAL_SIGNUP_INVITATION_CODE = String(process.env.PERSONAL_INVITATION_CODE || '').trim();
 const SIGNUP_ADMISSION_SECRET = process.env.HIVEMIND_SIGNUP_ADMISSION_SECRET || CONFIG.sessionSecret || ADMIN_SECRET;
-// Runtime beta waitlist — public, unauthenticated form (marketing site), so it
-// gets its own modest per-IP throttle rather than reusing the auth attempt
-// limiters above (this endpoint never grants access, it only queues an email).
-const RUNTIME_WAITLIST_ATTEMPT_MAX = 5;
-const RUNTIME_WAITLIST_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
-const runtimeWaitlistAttempts = new Map();
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -1628,84 +1477,6 @@ function signupAdmissionFromRequest(url) {
   return verify('personal') || verify('enterprise');
 }
 
-// A workspace invite is also an account-provisioning admission for its named
-// recipient.  It is intentionally verified twice: once before we put its
-// opaque token in the short-lived OAuth state, and again after OAuth returns
-// with a verified email.  The invitation is not consumed here; the existing
-// POST /v1/join/:token path remains the only membership-mutating operation.
-async function workspaceInviteAdmissionFromRequest(url) {
-  const token = String(url.searchParams.get('workspace_invite') || '').trim();
-  if (!token || !prisma) return null;
-  const invite = await prisma.orgInvite.findUnique({
-    where: { token },
-    select: { token: true, email: true, usedAt: true, revokedAt: true, expiresAt: true },
-  }).catch(() => null);
-  if (!invite || !invite.email || invite.usedAt || invite.revokedAt || invite.expiresAt.getTime() <= Date.now()) return null;
-  return { token: invite.token, email: invite.email ? String(invite.email).toLowerCase() : null };
-}
-
-async function workspaceInviteMatchesAuthenticatedEmail(token, email) {
-  if (!token || !email || !prisma) return false;
-  const invite = await prisma.orgInvite.findUnique({
-    where: { token },
-    select: { email: true, usedAt: true, revokedAt: true, expiresAt: true },
-  }).catch(() => null);
-  if (!invite || invite.usedAt || invite.revokedAt || invite.expiresAt.getTime() <= Date.now()) return false;
-  return Boolean(invite.email) && String(invite.email).toLowerCase() === String(email).toLowerCase();
-}
-
-async function verifyEmailTurnstile(token, req) {
-  const remoteIp = String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || '');
-  return verifyEmailTurnstileResponse({ token, remoteIp });
-}
-
-async function dispatchAuthEmailOutbox(outboxId) {
-  const claimed = await emailIdentity.claimOutbox(outboxId).catch(() => null);
-  if (!claimed) return;
-  const { email, otp, fragmentUrl } = claimed.payload;
-  const rendered = {
-    subject: 'Your SINGULANCE sign-in code',
-    text: `Your one-time sign-in code is ${otp}. It expires in 10 minutes.\n\nYou can also continue securely here: ${fragmentUrl}\n\nOpening the link alone does not sign you in.`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#111"><p style="font-size:12px;letter-spacing:.15em;color:#117dff">SINGULANCE · SECURE SIGN IN</p><h1 style="font-size:24px">Your sign-in code</h1><p style="font-size:34px;font-weight:700;letter-spacing:.3em">${otp}</p><p>This code expires in 10 minutes and can be used once.</p><p><a href="${fragmentUrl}" style="display:inline-block;background:#117dff;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none">Continue securely</a></p><p style="font-size:12px;color:#666">Opening this link does not sign you in automatically. Confirm in the browser to finish.</p></div>`,
-  };
-  const delivery = await sendRenderedSystemEmail({ to: email, rendered, templateId: 'email_identity_sign_in' });
-  await emailIdentity.settleOutbox(outboxId, { ok: delivery.ok, status: delivery.status, messageId: delivery.messageId, code: delivery.error });
-  if (!delivery.ok) throw new Error('Auth email delivery failed');
-}
-
-async function enqueueAuthEmailOutbox(outboxId) {
-  const queueUrl = String(process.env.AUTH_EMAIL_QUEUE_URL || '');
-  const secret = String(process.env.AUTH_EMAIL_QUEUE_SECRET || '');
-  if (!queueUrl || !secret) return dispatchAuthEmailOutbox(outboxId);
-  const response = await fetch(`${queueUrl.replace(/\/$/, '')}/enqueue`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-auth-email-secret': secret },
-    body: JSON.stringify({ outbox_id: outboxId, environment: process.env.HIVEMIND_LOCAL_MODE === 'true' ? 'local' : 'production', processing_version: 1 }),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!response.ok) throw new Error(`Auth email Queue admission failed (${response.status})`);
-}
-
-async function effectiveEmailIdentityMode() {
-  const flagUrl = String(process.env.AUTH_EMAIL_FLAG_URL || '');
-  const secret = String(process.env.AUTH_EMAIL_QUEUE_SECRET || '');
-  const localMode = process.env.HIVEMIND_LOCAL_MODE === 'true';
-  const configuredMode = resolveEmailIdentityMode();
-  if (!flagUrl) return resolveEmailIdentityMode();
-  // A local preview may deliberately omit the Worker secret.  In that one
-  // explicitly marked environment, use its local feature configuration so the
-  // preview proves the email flow; every non-local environment remains
-  // fail-closed when Flagship cannot be reached or authenticated.
-  if (!secret) return localMode ? configuredMode : 'off';
-  try {
-    const response = await fetch(`${flagUrl.replace(/\/$/, '')}/mode`, {
-      headers: { 'x-auth-email-secret': secret }, signal: AbortSignal.timeout(3000),
-    });
-    if (!response.ok) return localMode ? configuredMode : 'off';
-    const payload = await response.json();
-    return ['off', 'shadow', 'primary', 'email_only'].includes(payload.mode) ? payload.mode : 'off';
-  } catch { return localMode ? configuredMode : 'off'; }
-}
-
 async function platformUserExists({ sub, email }) {
   if (!prisma) return false;
   const user = await prisma.user.findFirst({
@@ -1734,14 +1505,7 @@ function getPlatformAdminSession(req) {
   const expected = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}:${operatorToken}`).digest('base64url');
   if (!secretsMatch(signature, expected)) return null;
   const operator = normalizePlatformOperator(Buffer.from(operatorToken, 'base64url').toString('utf8'));
-  if (!operator) return null;
-  // audit_logs.session_id is a UUID column.  The platform-admin cookie is not
-  // a database session, but we still need a stable, non-sensitive correlation
-  // id for its short lifetime.  Derive an RFC-4122-shaped value from the
-  // signed cookie rather than passing a raw hash into Prisma's UUID field.
-  const digest = crypto.createHash('sha256').update(raw).digest('hex');
-  const sessionId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
-  return { operator, expiresAt: Number(expiresAt), sessionId };
+  return operator ? { operator, expiresAt: Number(expiresAt), sessionId: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32) } : null;
 }
 
 function hasPlatformAdminCookie(req) {
@@ -1800,23 +1564,9 @@ function recordSignupAdmissionAttempt(req, accepted) {
     : { startedAt: now, count: 1 });
 }
 
-function runtimeWaitlistLimited(req) {
-  const attempt = runtimeWaitlistAttempts.get(platformUnlockClient(req));
-  return Boolean(attempt && attempt.startedAt + RUNTIME_WAITLIST_ATTEMPT_WINDOW_MS > Date.now()
-    && attempt.count >= RUNTIME_WAITLIST_ATTEMPT_MAX);
-}
-
-function recordRuntimeWaitlistAttempt(req) {
-  const key = platformUnlockClient(req);
-  const now = Date.now(); const previous = runtimeWaitlistAttempts.get(key);
-  runtimeWaitlistAttempts.set(key, previous && previous.startedAt + RUNTIME_WAITLIST_ATTEMPT_WINDOW_MS > now
-    ? { ...previous, count: previous.count + 1 }
-    : { startedAt: now, count: 1 });
-}
-
 function classifyPlatformUser(user) {
   const plans = (user.organizations || []).map((membership) => membership.org?.plan || 'free');
-  const b2b = plans.some((plan) => ['scale', 'enterprise_onboarding', 'enterprise', 'managed'].includes(String(plan).toLowerCase()));
+  const b2b = plans.some((plan) => ['scale', 'enterprise', 'managed'].includes(String(plan).toLowerCase()));
   const lastActiveAt = user.lastActiveAt || null;
   const active = lastActiveAt && Date.now() - new Date(lastActiveAt).getTime() <= PLATFORM_ACTIVE_WINDOW_MS;
   return { tier: b2b ? 'b2b' : 'b2c', active: Boolean(active), plans: [...new Set(plans)] };
@@ -2137,10 +1887,7 @@ function applyCorsHeaders(req, res) {
     res.setHeader('Vary', 'Origin');
   }
 
-  // The platform model-policy editor persists changes with PUT.  Keep this
-  // list aligned with the routes we expose so browsers do not reject the
-  // authenticated cross-origin preflight before it reaches the handler.
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   // Idempotency-Key is used by durable mutation clients, including workspace
   // invitation creation. Leaving it out makes browsers reject the preflight
   // before the server can provide exactly-once semantics.
@@ -2172,20 +1919,7 @@ async function getCurrentSession(req) {
     return null;
   }
   const session = await sessionStore.getSession(sessionId);
-  if (!session) return null;
-  // Bootstrap calls getCurrentSession directly. Apply the local-preview
-  // boundary here as well so it can never advertise a historical org to the
-  // frontend before a protected route has a chance to reject that session.
-  if (process.env.HIVEMIND_LOCAL_MODE === 'true') {
-    const org = session.orgId
-      ? await prisma.organization.findUnique({ where: { id: session.orgId }, select: { zitadelOrgId: true } }).catch(() => null)
-      : null;
-    if (org?.zitadelOrgId !== 'local-preview-org') {
-      await sessionStore.destroySession(sessionId);
-      return null;
-    }
-  }
-  return { sessionId, session };
+  return session ? { sessionId, session } : null;
 }
 
 async function requireSession(req, res) {
@@ -2194,27 +1928,11 @@ async function requireSession(req, res) {
     jsonResponse(res, { error: 'Unauthorized' }, 401);
     return null;
   }
-  // A browser can retain a signed cookie from an earlier local experiment.
-  // In local mode that session must never quietly select a historical org:
-  // force it through the email-verified preview login, which issues the
-  // dedicated local-preview owner session.
-  if (process.env.HIVEMIND_LOCAL_MODE === 'true') {
-    const org = current.session.orgId
-      ? await prisma.organization.findUnique({ where: { id: current.session.orgId }, select: { zitadelOrgId: true } }).catch(() => null)
-      : null;
-    if (org?.zitadelOrgId !== 'local-preview-org') {
-      await sessionStore.destroySession(current.sessionId);
-      jsonResponse(res, { error: 'Local preview sign-in required', code: 'LOCAL_PREVIEW_SESSION_REQUIRED' }, 401, {
-        'Set-Cookie': clearSessionCookie(),
-      });
-      return null;
-    }
-  }
   return current;
 }
 
 async function getOrgMembership(userId, orgId) {
-  if (!prisma || !isCanonicalUuid(userId) || !isCanonicalUuid(orgId)) return null;
+  if (!prisma || !userId || !orgId) return null;
   return prisma.userOrganization.findUnique({
     where: { userId_orgId: { userId, orgId } },
     include: {
@@ -2230,10 +1948,6 @@ async function getOrgMembership(userId, orgId) {
       },
     },
   });
-}
-
-function isCanonicalUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
 }
 
 function canManageOrg(role) {
@@ -2307,8 +2021,7 @@ async function validateInviteScopes(orgId, teamIds, projectIds) {
 }
 
 async function resolveCurrentOrg(userId, preferredOrgId = null) {
-  if (!isCanonicalUuid(userId)) return { org: null, role: null };
-  if (preferredOrgId && isCanonicalUuid(preferredOrgId)) {
+  if (preferredOrgId) {
     const preferred = await prisma?.userOrganization.findUnique({
       where: { userId_orgId: { userId, orgId: preferredOrgId } },
       include: { org: true },
@@ -2326,51 +2039,37 @@ async function resolveCurrentOrg(userId, preferredOrgId = null) {
   return { org: membership.org, role: membership.role || 'member' };
 }
 
-// Login admission needs only the tenant id. Keep this narrow so a future
-// Organization read-model column cannot make a valid identity session fail.
-async function resolveSessionOrg(userId) {
-  if (!isCanonicalUuid(userId)) return { org: null, role: null };
-  const membership = await prisma?.userOrganization.findFirst({
-    where: { userId, isActive: true },
-    select: { orgId: true, role: true },
-    orderBy: [{ joinedAt: 'desc' }, { invitedAt: 'desc' }],
-  });
-  if (!membership) return { org: null, role: null };
-  return { org: { id: membership.orgId }, role: membership.role || 'member' };
-}
-
 async function upsertUserFromZitadel(userInfo) {
   if (!prisma) {
     throw new Error('Database unavailable');
   }
 
-  const normalizedEmail = normalizeEmail(userInfo.email);
-  const linkedIdentity = await prisma.userIdentity.findUnique({
-    where: { provider_providerSubject: { provider: 'zitadel', providerSubject: userInfo.sub } },
-    include: { user: true },
+  let existing = await prisma.user.findUnique({
+    where: { zitadelUserId: userInfo.sub }
   });
-  let existing = linkedIdentity?.user || await prisma.user.findUnique({ where: { zitadelUserId: userInfo.sub } });
 
   // Fallback: find by email (handles re-auth or manual user creation)
-  if (!existing && normalizedEmail) {
-    existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (!existing && userInfo.email) {
+    existing = await prisma.user.findUnique({ where: { email: userInfo.email } });
   }
 
   if (existing) {
-    // SCIM and other identities are additive. Never replace the canonical
-    // compatibility subject merely because the verified address is shared.
+    // SCIM-binding hook: a User row created via SCIM has a synthetic
+    // zitadelUserId like 'scim:<orgId>:<email>'. When that user later
+    // signs in via SSO, we replace the placeholder with the real Zitadel
+    // sub and audit the crossover so admins can see "this account was
+    // pre-provisioned by SCIM and just bound to a real IdP login."
     const wasScimSeed = typeof existing.zitadelUserId === 'string' && existing.zitadelUserId.startsWith('scim:');
-    const updated = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.update({ where: { id: existing.id }, data: {
-        email: normalizedEmail || existing.email, displayName: userInfo.name || existing.displayName,
-        avatarUrl: userInfo.picture || existing.avatarUrl, locale: userInfo.locale || existing.locale, lastActiveAt: new Date(),
-      } });
-      await tx.userIdentity.upsert({
-        where: { provider_providerSubject: { provider: 'zitadel', providerSubject: userInfo.sub } },
-        update: { userId: user.id, normalizedEmail, verifiedAt: userInfo.email_verified === false ? null : new Date() },
-        create: { userId: user.id, provider: 'zitadel', providerSubject: userInfo.sub, normalizedEmail, verifiedAt: userInfo.email_verified === false ? null : new Date(), isPrimary: existing.zitadelUserId === userInfo.sub },
-      });
-      return user;
+    const updated = await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        zitadelUserId: userInfo.sub,
+        email: userInfo.email,
+        displayName: userInfo.name,
+        avatarUrl: userInfo.picture,
+        locale: userInfo.locale || existing.locale,
+        lastActiveAt: new Date()
+      }
     });
     if (wasScimSeed) {
       try {
@@ -2382,24 +2081,23 @@ async function upsertUserFromZitadel(userInfo) {
           action: 'update',
           resourceType: 'user',
           oldValue: { zitadelUserId: existing.zitadelUserId },
-          newValue: { linkedProvider: 'zitadel' },
-          metadata: { source: 'sso_login', additive_identity: true },
+          newValue: { zitadelUserId: userInfo.sub },
+          metadata: { source: 'sso_login', via_email_fallback: true },
         }).catch(() => {});
       } catch { /* audit best-effort */ }
     }
     return updated;
   }
 
-  const created = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({ data: {
-      zitadelUserId: userInfo.sub, email: normalizedEmail, displayName: userInfo.name,
-      avatarUrl: userInfo.picture, locale: userInfo.locale || 'en', lastActiveAt: new Date(),
-    } });
-    await tx.userIdentity.create({ data: {
-      userId: user.id, provider: 'zitadel', providerSubject: userInfo.sub,
-      normalizedEmail, verifiedAt: userInfo.email_verified === false ? null : new Date(), isPrimary: true,
-    } });
-    return user;
+  const created = await prisma.user.create({
+    data: {
+      zitadelUserId: userInfo.sub,
+      email: userInfo.email,
+      displayName: userInfo.name,
+      avatarUrl: userInfo.picture,
+      locale: userInfo.locale || 'en',
+      lastActiveAt: new Date()
+    }
   });
   // A user identity alone does not have a trustworthy personal/enterprise
   // profile. Deliver the welcome only once its workspace is activated.
@@ -2526,7 +2224,6 @@ async function buildAnonymousBootstrapPayload(req) {
 
 async function buildBootstrapPayload(user, req, preferredOrgId = null) {
   const { org, role } = await resolveCurrentOrg(user.id, preferredOrgId);
-  const effectivePlan = org ? (await getEffectivePlan(prisma, org.id)).plan : null;
   const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
   const core = resolveCoreTarget(req, org);
   const coreHealth = await getCoreHealth(core.internalUrl);
@@ -2544,8 +2241,7 @@ async function buildBootstrapPayload(user, req, preferredOrgId = null) {
       id: org.id,
       name: org.name,
       slug: org.slug,
-      plan: effectivePlan?.id || org.plan || 'free',
-      plan_name: effectivePlan?.name || org.plan || 'Free',
+      plan: org.plan || 'free',
       hosting_mode: org.hostingMode || 'managed',
       memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode),
       memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode)),
@@ -2996,16 +2692,7 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     const coreUrl = new URL(path, CONFIG.coreApiBaseUrl);
     if (query) coreUrl.search = query;
 
-    const headers = {
-      // Core is replaced in-place during canonical releases. Do not reuse a
-      // pooled socket that may still point at the retired container.
-      Connection: 'close',
-      // A proxy retry must preserve one commercial/request identity. Core uses
-      // this value for its chat credit reservation idempotency contract.
-      'X-Idempotency-Key': String(
-        req.headers['x-idempotency-key'] || req.headers['x-request-id'] || crypto.randomUUID(),
-      ).slice(0, 180),
-    };
+    const headers = {};
 
     // Forward content-type for POST/multipart
     if (req.headers['content-type']) {
@@ -3020,7 +2707,6 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     // tracked separately.) Upload is POST so it is never retried below, and the
     // pipeline is checksum-idempotent regardless.
     const isSlowIngest = /\/knowledge\/(upload|document|ingest)/i.test(path) || /\/ingest(\/|$)/i.test(path);
-    const isNativeChat = method === 'POST' && /^\/api\/chat(?:\?|$)/i.test(path) && !rawBody;
     const coreResp = await internalFetch(coreUrl.toString(), {
       service: 'hm-core',
       method,
@@ -3030,9 +2716,6 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
       userId: session.userId || '',
       orgId: session.orgId || '',
       timeoutMs: isSlowIngest ? 300_000 : 90_000,
-      // Retry only errors that prove the TCP connection was never established.
-      // Never retry a timeout/reset after Core may have started a model call.
-      retryOnConnectFailure: isNativeChat,
     });
     const contentType = coreResp.headers.get('content-type') || 'application/json';
 
@@ -3070,80 +2753,8 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     res.writeHead(coreResp.status, { 'Content-Type': contentType });
     res.end(respBody);
   } catch (err) {
-    const causeCode = err?.cause?.code || err?.code || null;
-    // Core restarts create a short expected connect-refused window. The caller
-    // still receives an explicit retryable 503, but routine health/read polls
-    // must not flood production logs during that bounded deployment window.
-    if (causeCode !== 'ECONNREFUSED' || process.env.PROXY_VERBOSE === '1') {
-      console.error('[proxy] Error forwarding to core:', err.message, causeCode ? `cause=${causeCode}` : '');
-    }
-    jsonResponse(res, {
-      error: 'core_temporarily_unavailable',
-      message: 'HIVEMIND is briefly unavailable. Please retry this request.',
-      retry_after_seconds: 2,
-    }, 503);
-  }
-}
-
-async function proxyKnowledgeWorkflowToCore(req, res, pathname) {
-  const enabled = knowledgeWorkflowEnabled();
-  const expected = process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '';
-  const actual = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (!enabled || !secretsMatch(actual, expected)) {
-    return jsonResponse(res, { error: 'Unauthorized' }, 401);
-  }
-  if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed' }, 405);
-  const body = await parseBody(req);
-  try {
-    const coreResp = await fetch(new URL(pathname, CONFIG.coreApiBaseUrl), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${expected}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(90_000),
-    });
-    const responseBody = await coreResp.text();
-    res.writeHead(coreResp.status, { 'Content-Type': coreResp.headers.get('content-type') || 'application/json' });
-    return res.end(responseBody);
-  } catch (error) {
-    return jsonResponse(res, {
-      error: 'core_temporarily_unavailable',
-      message: 'The ingestion core is temporarily unavailable.',
-    }, 503);
-  }
-}
-
-async function proxyCanonicalProjectionToCore(req, res, pathname) {
-  if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed' }, 405);
-  const allowedHeaders = [
-    'content-type', 'x-hivemind-timestamp', 'x-hivemind-nonce',
-    'x-hivemind-content-sha256', 'x-hivemind-signature',
-  ];
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > 4096) return jsonResponse(res, { error: 'payload_too_large' }, 413);
-    chunks.push(chunk);
-  }
-  const rawBody = Buffer.concat(chunks);
-  const headers = Object.fromEntries(allowedHeaders
-    .filter((name) => req.headers[name])
-    .map((name) => [name, req.headers[name]]));
-  try {
-    const coreResp = await fetch(new URL(pathname, CONFIG.coreApiBaseUrl), {
-      method: 'POST', headers, body: rawBody, signal: AbortSignal.timeout(90_000),
-    });
-    const responseBody = await coreResp.text();
-    res.writeHead(coreResp.status, { 'Content-Type': coreResp.headers.get('content-type') || 'application/json' });
-    return res.end(responseBody);
-  } catch {
-    return jsonResponse(res, {
-      error: 'core_temporarily_unavailable',
-      message: 'The canonical projection core is temporarily unavailable.',
-    }, 503);
+    console.error('[proxy] Error forwarding to core:', err.message);
+    jsonResponse(res, { error: 'Proxy error', detail: err.message }, 502);
   }
 }
 
@@ -3306,52 +2917,6 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
 
-  if (await handleHarnessChatBootstrapRoute({
-    req,
-    res,
-    pathname,
-    prisma,
-    requireSession,
-    parseBody,
-    jsonResponse,
-    redisConfig: CONFIG,
-  })) return;
-  // Cloudflare Workflows is the durable clock for Day 1. These endpoints are
-  // deliberately service-token-only; browser sessions and generic API keys
-  // cannot start complimentary autonomous work or deliver lifecycle mail.
-  if (pathname.startsWith('/internal/lifecycle/day1/')) {
-    if (!isAuthorizedDayOneRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!isDayOneWorkflowEnabled()) return jsonResponse(res, { error: 'day1_feature_disabled', retryable: false }, 403);
-    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
-    const body = await parseBody(req).catch(() => ({}));
-    if (pathname === '/internal/lifecycle/day1/eligible') {
-      const companies = await listEligibleDayOneCompanies({ prisma, limit: body.limit });
-      return jsonResponse(res, { companies });
-    }
-    const orgId = String(body.org_id || '');
-    const hqRoomId = String(body.hq_room_id || '');
-    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(hqRoomId)) {
-      return jsonResponse(res, { error: 'org_id and hq_room_id are required' }, 400);
-    }
-    try {
-      if (pathname === '/internal/lifecycle/day1/prepare') {
-        const result = await prepareDayOneFirstMove({
-          prisma, orgId, hqRoomId,
-          workflowInstanceId: String(body.workflow_instance_id || ''),
-          dispatchTurn: dispatchHyperRoomTurn,
-        });
-        return jsonResponse(res, result, result.status === 'sent' ? 200 : 202);
-      }
-      if (pathname === '/internal/lifecycle/day1/deliver') {
-        return jsonResponse(res, await deliverDayOneFirstMove({ prisma, orgId, hqRoomId }));
-      }
-      return jsonResponse(res, { error: 'Not found' }, 404);
-    } catch (error) {
-      const retryable = ['day1_turn_not_ready', 'day1_turn_not_complete', 'day1_delivery_in_progress'].includes(error.message);
-      return jsonResponse(res, { error: error.message, retryable }, retryable ? 409 : 422);
-    }
-  }
-
   // Attach SSO context early (subdomain-based org routing; no-op on non-subdomain hosts)
   if (prisma) await attachSsoContext(req, prisma);
 
@@ -3400,11 +2965,8 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
     if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
     const body = await parseBody(req).catch(() => ({}));
-    // Platform Admin is a single operator console. Do not take an arbitrary
-    // display name from the browser: it was not identity proof and made the
-    // compact/mobile unlock unnecessarily two-step.
-    const operator = 'platform_admin';
-    if (!secretsMatch(body?.passcode, PLATFORM_ADMIN_PASSCODE)) {
+    const operator = normalizePlatformOperator(body?.operator_name);
+    if (!secretsMatch(body?.passkey, ADMIN_SECRET) || !operator) {
       recordPlatformUnlockFailure(req);
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
@@ -3456,14 +3018,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') return jsonResponse(res, { policies: await listModelGovernance(), prices: await listModelPrices() });
     try {
       const body = await parseBody(req).catch(() => ({}));
-      const input = normalizeModelPolicyInput(body);
-      const policy = await upsertModelPolicy({ ...input, operator: operator.operator });
+      const policy = await upsertModelPolicy({ useCase: body.use_case, primaryModel: body.primary_model,
+        secondaryModel: body.secondary_model || null, operator: operator.operator });
       await audit({ eventType: 'platform.model_policy_updated', eventCategory: 'ai_governance', action: 'update',
-        // A policy use case is a natural key (for example, `chat_planner`),
-        // while AuditLog.resource_id is explicitly UUID-typed.  Preserve the
-        // key in immutable metadata instead of writing an invalid UUID.
-        resourceType: 'ai_model_policy', resourceId: null,
-        metadata: { operator: operator.operator, policy_use_case: policy.use_case, primary_model: policy.primary_model, secondary_model: policy.secondary_model, revision: policy.revision },
+        resourceType: 'ai_model_policy', resourceId: policy.use_case,
+        metadata: { operator: operator.operator, primary_model: policy.primary_model, secondary_model: policy.secondary_model, revision: policy.revision },
         ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
       return jsonResponse(res, { policy });
     } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
@@ -3489,22 +3048,9 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/admin/api/platform/ai-costs' && req.method === 'GET') {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    try {
-      const intelligence = await platformCreditIntelligence({
-        query: url.searchParams.get('q') || '', limit: url.searchParams.get('limit') || 200,
-        period: url.searchParams.get('period') || 'month',
-      });
-      return jsonResponse(res, intelligence);
-    } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
-  }
-
-  const aiCostDetailMatch = pathname.match(/^\/admin\/api\/platform\/ai-costs\/([0-9a-f-]+)$/i);
-  if (aiCostDetailMatch && req.method === 'GET') {
-    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    try {
-      return jsonResponse(res, await platformCreditAccountDetail(aiCostDetailMatch[1], { period: url.searchParams.get('period') || 'month' }));
-    } catch (error) { return jsonResponse(res, { error: error.message }, error.message === 'Billing account not found' ? 404 : 400); }
+    const users = await userCostSummary({ query: url.searchParams.get('q') || '', limit: url.searchParams.get('limit') || 200 });
+    const total = await totalAiCost();
+    return jsonResponse(res, { currency: 'USD', ...total, users });
   }
 
   if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {
@@ -3535,10 +3081,7 @@ const server = http.createServer(async (req, res) => {
       employees = (snapshot.logs || []).map((entry) =>
         `[${entry.timestamp}] [${String(entry.type || 'info').toUpperCase()}] ${entry.line || ''}`);
     } catch (error) {
-      // Log aggregation is an optional read surface. A missing Employees log
-      // endpoint must not manufacture a fresh warning on every dashboard poll.
-      // Runtime health owns component availability; the log feed stays empty.
-      employees = [];
+      employees = [`[${new Date().toISOString()}] [WARN] Employees logs unavailable: ${error.message}`];
     }
     const mixed = [
       ...core.map((line) => ({ line, source: 'core' })),
@@ -3588,7 +3131,7 @@ const server = http.createServer(async (req, res) => {
   // enterprise invitations keep using their secure invitation lifecycle.
   if (pathname === '/admin/api/platform/email/templates' && req.method === 'GET') {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    return jsonResponse(res, { templates: [{ id: 'custom', label: 'Custom message' }, ...Object.entries(ADMIN_EMAIL_TEMPLATES).map(([id, label]) => ({ id, label }))], sender_domains: ADMIN_EMAIL_SENDER_DOMAINS });
+    return jsonResponse(res, { templates: Object.entries(ADMIN_EMAIL_TEMPLATES).map(([id, label]) => ({ id, label })) });
   }
   if (pathname === '/admin/api/platform/email/preview' && req.method === 'POST') {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
@@ -3596,11 +3139,8 @@ const server = http.createServer(async (req, res) => {
       const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
         appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
       });
-      const templateRendered = message.templateId === 'custom' ? null : renderTemplate(message.templateId, message.vars);
-      const rendered = message.templateId === 'custom'
-        ? renderAdminComposerMessage(message)
-        : (message.visual ? templateRendered : renderAdminComposerMessage({ ...message, subject: templateRendered.subject, body: templateRendered.text, visual: false }));
-      return jsonResponse(res, { template_id: message.templateId, from: message.from, recipients: message.recipients, subject: rendered.subject, text: rendered.text, html: rendered.html, visual: message.visual });
+      const rendered = renderTemplate(message.templateId, message.vars);
+      return jsonResponse(res, { template_id: message.templateId, subject: rendered.subject, text: rendered.text, html: rendered.html });
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }
@@ -3612,28 +3152,14 @@ const server = http.createServer(async (req, res) => {
       const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
         appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
       });
-      const templateRendered = message.templateId === 'custom' ? null : renderTemplate(message.templateId, message.vars);
-      const rendered = message.templateId === 'custom'
-        ? renderAdminComposerMessage(message)
-        : (message.visual ? templateRendered : renderAdminComposerMessage({ ...message, subject: templateRendered.subject, body: templateRendered.text, visual: false }));
-      const results = [];
-      for (let index = 0; index < message.recipients.length; index += 1) {
-        const to = message.recipients[index];
-        // Deliberately sequential: avoids burst delivery and keeps receipts attributable.
-        // eslint-disable-next-line no-await-in-loop
-        const delivery = await sendRenderedSystemEmail({ to, from: message.from, rendered, templateId: message.templateId === 'custom' ? 'admin_custom' : message.templateId });
-        results.push({ to, ...delivery });
-      }
-      const sent = results.filter((result) => result.ok).length;
-      const failed = results.length - sent;
-      const delivery = results[0] || { ok: false, error: 'no_recipient' };
+      const delivery = await sendSystemEmail({ templateId: message.templateId, to: message.to, vars: message.vars });
       await audit({
-        eventType: failed === 0 ? 'commercial.admin_email_sent' : 'commercial.admin_email_delivery_failed',
+        eventType: delivery.ok ? 'commercial.admin_email_sent' : 'commercial.admin_email_delivery_failed',
         eventCategory: 'billing', action: 'create', resourceType: 'system_email', resourceId: crypto.randomUUID(),
-        metadata: { operator: operator.operator, session_id: operator.sessionId, template_id: message.templateId, sender_domain: message.fromAddress.split('@')[1], recipient_count: results.length, sent, failed, provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, safe_error: failed ? 'partial_or_total_failure' : null },
+        metadata: { operator: operator.operator, session_id: operator.sessionId, template_id: message.templateId, recipient_domain: message.to.split('@')[1], provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, safe_error: delivery.error || null },
         ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin',
       });
-      return jsonResponse(res, { ok: failed === 0, total: results.length, sent, failed, provider: delivery.provider || null, delivery_status: failed ? 'partial_or_failed' : (delivery.deliveryStatus || 'accepted'), results: results.map(({ to, ok, provider, deliveryStatus, error }) => ({ to, ok, provider, delivery_status: deliveryStatus, error })) }, failed === 0 ? 200 : (sent ? 207 : 502));
+      return jsonResponse(res, { ok: delivery.ok, provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, error: delivery.ok ? null : (delivery.error || 'delivery_failed') }, delivery.ok ? 200 : 502);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }
@@ -3867,7 +3393,7 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), audit: auditRows, entitlement_grants: grants });
   }
 
-  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied|update-max-invites)$/i);
+  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied)$/i);
   if (adminInvitationAction && req.method === 'POST') {
     const operator = getPlatformAdminSession(req);
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
@@ -3907,18 +3433,6 @@ const server = http.createServer(async (req, res) => {
         await audit({ eventType: 'commercial.enterprise_invitation_extended', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
           metadata: { operator: operator.operator, session_id: operator.sessionId, invitation_expires_at: updated.invitationExpiresAt }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
         return jsonResponse(res, { invitation: publicEnterpriseInvitation(updated) });
-      }
-      if (action === 'update-max-invites') {
-        const updated = await updateEnterpriseInvitationMaxInvites({
-          prisma,
-          invitationId,
-          maxInvites: body.max_invites,
-          monthlyCredits: body.monthly_credits,
-        });
-        await audit({ eventType: 'commercial.enterprise_invitation_max_invites_updated', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId, max_invites: updated.invitation.max_invites, max_users: updated.invitation.max_users, monthly_credits: updated.invitation.onboarding_monthly_credits, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null },
-          ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { invitation: updated.invitation, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null });
       }
       if (action === 'code-copied') {
         await audit({ eventType: 'commercial.enterprise_invitation_code_copied', eventCategory: 'billing', action: 'read', resourceType: 'enterprise_invitation', resourceId: invitationId,
@@ -4112,101 +3626,127 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Self-host (BYOD) enrollment ─────────────────────────────
-  if ((pathname === '/v1/selfhost/bootstrap' || pathname === '/v1/selfhost/canary-bootstrap') && req.method === 'POST') {
-    const releaseChannel = pathname === '/v1/selfhost/canary-bootstrap' ? 'canary' : 'stable';
-    const current = await requireSession(req, res);
-    if (!current) return;
-    const orgId = current.session.orgId;
-    if (!orgId) return jsonResponse(res, { error: 'No active organization' }, 409);
-    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
-    if (!membership) return;
-    const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { hostingMode: true } }).catch(() => null);
-    if (org?.hostingMode !== 'self_host') return jsonResponse(res, { error: 'Memory Box enrollment is available only for self-hosted organizations' }, 409);
-    const canaryAllowlist = new Set(String(process.env.MEMORY_BOX_CANARY_ORG_ALLOWLIST || '').split(',').map((value) => value.trim()).filter(Boolean));
-    const canaryEligible = process.env.MEMORY_BOX_CANARY_ENROLLMENT_ENABLED === 'true' && canaryAllowlist.has(orgId);
-    if (releaseChannel === 'canary' && !canaryEligible) {
-      return jsonResponse(res, { error: 'Memory Box canary enrollment is not enabled for this organization' }, 403);
-    }
-    try {
-      const readiness = await memoryBoxBrokerRequest('/v1/selfhost/readiness', { orgId, channel: releaseChannel });
-      if (readiness.status !== 200 || readiness.payload?.ready !== true) {
-        return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
-          code: 'memory_box_automatic_setup_unavailable', readiness: readiness.payload || null,
-          ...(releaseChannel === 'stable' && canaryEligible ? { canary_eligible: true } : {}) }, 503);
-      }
-    } catch (error) {
-      return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
-        code: 'memory_box_automatic_setup_unavailable',
-        ...(releaseChannel === 'stable' && canaryEligible ? { canary_eligible: true } : {}) }, 503);
-    }
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-    const issued = await createPersistedApiKey(prisma, {
-      userId: current.session.userId, orgId, keyKind: 'service', createdByUserId: current.session.userId,
-      name: `Memory Box ${releaseChannel} enrollment`, description: `Single-use organization-bound Memory Box ${releaseChannel} enrollment credential`,
-      scopes: ['selfhost:bootstrap'], expiresAt, rateLimitPerMinute: 12,
-      createdByIp: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null,
-      userAgent: String(req.headers['user-agent'] || '').slice(0, 512) || null,
-    });
-    return jsonResponse(res, { enrollment_token: issued.rawKey, expires_at: expiresAt.toISOString(), org_id: orgId, channel: releaseChannel }, 201);
-  }
-
-  // Stable facade; the dedicated broker is the sole lifecycle writer.
-  if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register' || pathname === '/v1/selfhost/report') && req.method === 'POST') {
+  // A self-hosted DATA box validates its API key here → learns its org; then registers its tunnel
+  // endpoints (Postgres + Qdrant). We record them in the shared registry file the core reads, so core
+  // routes that org's memory data to the customer's box. Global user/org info stays in central PG.
+  if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register') && req.method === 'POST') {
     const body = await parseBody(req).catch(() => null);
-    if (!body) return jsonResponse(res, { error: 'Invalid JSON body' }, 400);
-    try {
-      const result = await memoryBoxBrokerRequest(pathname, body);
-      return jsonResponse(res, result.payload, result.status);
-    } catch (error) {
-      return jsonResponse(res, { error: 'Memory Box broker unavailable', detail: error.message }, 503);
+    const apiKey = (body?.apiKey || '').toString();
+    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+    const orgId = rec.orgId;
+    if (pathname === '/v1/selfhost/enroll') {
+      return jsonResponse(res, { ok: true, orgId });
     }
+    // register: record the customer's tunnel endpoints into the shared registry file (defaults to the
+    // shared core↔control volume — the file existing is what activates self-host; no env flip needed).
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+    if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl && !body.agentUrl) return jsonResponse(res, { error: 'agentUrl (Model B) or pgUrl/qdrantUrl required' }, 400);
+    // Phase 9 — transport security: an agent URL must be HTTPS, OR plain http only over a PRIVATE/
+    // encrypted path (loopback, Tailscale CGNAT 100.64/10 or *.ts.net, RFC1918 LAN). Cleartext http to
+    // a PUBLIC host would expose memory content + the bearer token on the wire → reject.
+    const _agentUrl = (body.agentUrl || body.instanceUrl || '').trim();
+    if (_agentUrl) {
+      let secure = false;
+      try {
+        const u = new URL(_agentUrl);
+        if (u.protocol === 'https:') secure = true;
+        else if (u.protocol === 'http:') {
+          const h = u.hostname;
+          const oct = h.split('.').map(Number);
+          const isLoopback = h === 'localhost' || h === '::1' || oct[0] === 127;
+          const isTailscale = h.endsWith('.ts.net') || (oct[0] === 100 && oct[1] >= 64 && oct[1] <= 127); // CGNAT 100.64.0.0/10
+          const isRfc1918 = oct[0] === 10 || (oct[0] === 192 && oct[1] === 168) || (oct[0] === 172 && oct[1] >= 16 && oct[1] <= 31);
+          secure = isLoopback || isTailscale || isRfc1918;
+        }
+      } catch { secure = false; }
+      if (!secure) return jsonResponse(res, { error: 'agentUrl must be https:// (or http only over a private/Tailscale/LAN address). Cleartext http to a public host is rejected — it would expose memory content and the agent token.', code: 'INSECURE_AGENT_URL' }, 400);
+    }
+    try {
+      const fs = await import('node:fs');
+      let reg = {};
+      try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
+      reg[orgId] = {
+        url: (body.agentUrl || body.instanceUrl || '').replace(/\/$/, ''), // hm-agent http (.amr self-host, Model B); empty for hybrid
+        token: body.agentToken || '',
+        pgUrl: body.pgUrl || '',                          // customer Postgres (via tunnel)
+        qdrantUrl: (body.qdrantUrl || '').replace(/\/$/, ''), // customer Qdrant (via tunnel)
+        kind: 'selfhost',
+      };
+      writeJsonAtomically(regFile, reg);
+    } catch (e) {
+      return jsonResponse(res, { error: `registry write failed: ${e.message}` }, 500);
+    }
+    // Reuse PROD migrations to create the memory-subgraph schema in the customer's Postgres (the same
+    // `prisma migrate deploy` prod runs, just pointed at their DB via the tunnel). Idempotent; the
+    // global tables it also creates sit unused (global queries route to central). No rebuild.
+    let migrated = false;
+    let migrateError = null;
+    if (body.pgUrl) {
+      try {
+        const { exec } = await import('node:child_process');
+        // Apply the CURRENT Prisma schema to the customer/agent Postgres via `db push` — always in
+        // sync with the live client (no stale hand-maintained DDL, no schema drift). The pgUrl carries
+        // ?schema=hivemind so tables land in the hivemind schema; global tables it also creates sit
+        // unused (global queries route to central). Idempotent.
+        const cmd = 'node_modules/.bin/prisma db push --skip-generate --accept-data-loss --schema=prisma/schema.prisma';
+        await new Promise((resolve, reject) => {
+          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 180000, shell: '/bin/sh' },
+            (err, stdout, stderr) => (err ? reject(new Error((stderr || stdout || err.message).slice(0, 400))) : resolve()));
+        });
+        migrated = true;
+        console.log(`[selfhost] customer PG schema synced (db push) org=${orgId}`);
+      } catch (e) {
+        migrateError = e.message;
+        console.warn(`[selfhost] customer PG migrate failed org=${orgId}: ${e.message}`);
+      }
+    }
+    return jsonResponse(res, { ok: true, orgId, migrated, ...(migrateError ? { migrateError } : {}) });
   }
 
   // Rotate a self-hosted agent bearer token without an immediate outage. Core
   // tries the new token first and accepts the old token only during this short
   // grace period, giving the customer time to update and restart their Box.
   if (pathname === '/v1/selfhost/rotate-agent-token' && req.method === 'POST') {
-    const current = await requireSession(req, res); if (!current) return;
-    const orgId = current.session.orgId;
-    if (!orgId) return jsonResponse(res, { error: 'No active organization' }, 409);
-    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId); if (!membership) return;
+    const body = await parseBody(req).catch(() => null);
+    const apiKey = (body?.apiKey || '').toString();
+    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
     try {
-      const result = await memoryBoxBrokerRequest(pathname, { orgId });
-      return jsonResponse(res, result.payload, result.status);
+      let reg = {};
+      try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* no registry */ }
+      const entry = reg[rec.orgId];
+      if (!entry?.url || !entry?.token) return jsonResponse(res, { error: 'no agent registered for this organization' }, 409);
+      const graceExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      const previousTokens = (Array.isArray(entry.previousTokens) ? entry.previousTokens : [])
+        .filter((item) => item?.token && new Date(item.expiresAt).getTime() > Date.now())
+        .slice(-2);
+      previousTokens.push({ token: entry.token, expiresAt: graceExpiresAt });
+      const agentToken = crypto.randomBytes(32).toString('base64url');
+      reg[rec.orgId] = { ...entry, token: agentToken, previousTokens };
+      writeJsonAtomically(regFile, reg);
+      return jsonResponse(res, { ok: true, agentToken, grace_expires_at: graceExpiresAt });
     } catch (error) {
-      return jsonResponse(res, { error: 'Memory Box broker unavailable', detail: error.message }, 503);
+      return jsonResponse(res, { error: `agent token rotation failed: ${error.message}` }, 500);
     }
   }
-  if (pathname === '/v1/selfhost/disenroll' && req.method === 'POST') {
-    const current = await requireSession(req, res); if (!current) return;
-    const orgId = current.session.orgId;
-    if (!orgId) return jsonResponse(res, { error: 'No active organization' }, 409);
-    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId); if (!membership) return;
-    try {
-      const result = await memoryBoxBrokerRequest('/v1/byod/disenroll', { orgId });
-      return jsonResponse(res, result.payload, result.status);
-    } catch (error) {
-      return jsonResponse(res, { error: 'Memory Box broker unavailable', detail: error.message }, 503);
-    }
-  }
+
   // Self-host connection status — the FE polls this during onboarding to show "waiting → connected".
   // POST { apiKey } (key in body, never the URL). Resolves org → reads the shared registry → reports
   // whether an agent is registered and (best-effort) reachable.
   if (pathname === '/v1/selfhost/status' && req.method === 'POST') {
     const body = await parseBody(req).catch(() => null);
     const apiKey = (body?.apiKey || '').toString();
-    const boxToken = (body?.boxToken || '').toString();
     // Resolve org by API key (onboarding poll) OR by session (Settings, no raw key on hand).
     let statusOrgId = null;
-    if (boxToken) {
-      const credentialHash = crypto.createHash('sha256').update(boxToken).digest('hex');
-      const rec = await prisma.memoryBoxConnection.findFirst({ where: { credentialHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
-      if (!rec?.orgId) return jsonResponse(res, { error: 'invalid Memory Box credential' }, 401);
-      statusOrgId = rec.orgId;
-    } else if (apiKey) {
+    if (apiKey) {
       const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-      const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, select: { orgId: true } }).catch(() => null);
+      const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
       if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
       statusOrgId = rec.orgId;
     } else {
@@ -4224,180 +3764,40 @@ const server = http.createServer(async (req, res) => {
       }
       if (!statusOrgId) return jsonResponse(res, { registered: false, reachable: false });
     }
+    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+    let entry = null;
     try {
-      const result = await memoryBoxBrokerRequest('/v1/selfhost/status', boxToken ? { boxToken } : { orgId: statusOrgId });
-      if (result.status >= 500) throw new Error(result.payload?.error || 'Memory Box broker unavailable');
-      return jsonResponse(res, result.payload, result.status);
-    } catch (error) {
-      const last = await prisma.memoryBoxConnection.findUnique({ where: { orgId: statusOrgId }, select: {
-        orgId: true, boxId: true, transport: true, endpoint: true, state: true, desiredRelease: true,
-        observedRelease: true, protocolVersion: true, schemaVersion: true, capabilities: true,
-        lastHeartbeatAt: true, lastReachableAt: true, consecutiveFailures: true, registeredAt: true, revokedAt: true,
-      } }).catch(() => null);
-      if (last && !last.revokedAt) return jsonResponse(res, { registered: true, reachable: null, stale: true,
-        orgId: last.orgId, boxId: last.boxId, transport: last.transport, endpoint: last.endpoint, state: last.state,
-        desiredRelease: last.desiredRelease, observedRelease: last.observedRelease, protocolVersion: last.protocolVersion,
-        schemaVersion: last.schemaVersion, capabilities: last.capabilities, lastHeartbeatAt: last.lastHeartbeatAt,
-        lastReachableAt: last.lastReachableAt, consecutiveFailures: last.consecutiveFailures, registeredAt: last.registeredAt,
-        warning: 'Memory Box broker unavailable; showing last known state' }, 200);
-      return jsonResponse(res, { registered: false, reachable: null, stale: true, state: 'UNAVAILABLE', error: 'Memory Box broker unavailable' }, 503);
+      const fs = await import('node:fs');
+      const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+      entry = reg[statusOrgId] || null;
+    } catch { /* no registry yet */ }
+    if (!entry || !(entry.url || entry.pgUrl || entry.qdrantUrl)) {
+      return jsonResponse(res, { registered: false, reachable: false });
     }
-  }
-
-  // ─── Unified email-first authentication ───────────────────────
-  if (pathname.startsWith('/internal/auth-email/outbox/') && pathname.endsWith('/deliver') && req.method === 'POST') {
-    if (!process.env.AUTH_EMAIL_QUEUE_SECRET || !secretsMatch(req.headers['x-auth-email-secret'], process.env.AUTH_EMAIL_QUEUE_SECRET)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    const outboxId = pathname.split('/')[4];
-    await dispatchAuthEmailOutbox(outboxId);
-    return jsonResponse(res, { ok: true });
-  }
-  if (pathname === '/auth/email/config' && req.method === 'GET') {
-    const mode = await effectiveEmailIdentityMode();
-    return jsonResponse(res, {
-      mode,
-      enabled: mode === 'primary' || mode === 'email_only',
-      email_only: mode === 'email_only',
-      turnstile_site_key: process.env.TURNSTILE_EMAIL_AUTH_SITE_KEY || null,
-      default_redirect_to: emailPostLoginRedirect,
-    });
-  }
-
-  if (pathname === '/auth/email/start' && req.method === 'POST') {
-    const mode = await effectiveEmailIdentityMode();
-    if (mode !== 'primary' && mode !== 'email_only') return jsonResponse(res, { error: 'Not found' }, 404);
-    const startedAt = Date.now();
-    try {
-      const body = await parseBody(req);
-      const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req);
-      const returnTo = safeReturnTo(body?.return_to, emailPostLoginRedirect, emailAllowedOrigins);
-      let started = { accepted: false };
-      if (turnstileOk) started = await emailIdentity.start({
-        email: body?.email, intent: body?.intent, returnTo, mode,
-        environment: process.env.HIVEMIND_LOCAL_MODE === 'true' ? 'local' : 'production',
-      });
-      if (started.outboxId) setImmediate(() => enqueueAuthEmailOutbox(started.outboxId).catch((error) => console.error('[email-auth] delivery dispatch failed', { outboxId: started.outboxId, error: error.message })));
-      const elapsed = Date.now() - startedAt;
-      if (elapsed < 180) await new Promise((resolve) => setTimeout(resolve, 180 - elapsed));
-      return jsonResponse(res, { ...EMAIL_AUTH_PUBLIC_RESPONSE, challenge_id: started.challengeId || crypto.randomUUID() }, 202);
-    } catch (error) {
-      console.error('[email-auth] start failed', { error: error.message });
-      return jsonResponse(res, { ...EMAIL_AUTH_PUBLIC_RESPONSE, challenge_id: crypto.randomUUID() }, 202);
-    }
-  }
-
-  if (pathname === '/auth/email/resend' && req.method === 'POST') {
-    const mode = await effectiveEmailIdentityMode();
-    if (mode !== 'primary' && mode !== 'email_only') return jsonResponse(res, { error: 'Not found' }, 404);
-    const body = await parseBody(req).catch(() => ({}));
-    const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req).catch(() => false);
-    const result = turnstileOk && isCanonicalUuid(String(body?.challenge_id || ''))
-      ? await emailIdentity.resend(String(body.challenge_id)).catch(() => ({ ok: false })) : { ok: false };
-    if (result.outboxId) setImmediate(() => enqueueAuthEmailOutbox(result.outboxId).catch(() => {}));
-    return jsonResponse(res, { ok: true, resend_after_seconds: 30, message: 'If the challenge is active, a new code is on its way.' }, 202);
-  }
-
-  if (pathname === '/auth/email/verify' && req.method === 'POST') {
-    const mode = await effectiveEmailIdentityMode();
-    if (mode !== 'primary' && mode !== 'email_only') return jsonResponse(res, { error: 'Not found' }, 404);
-    try {
-      const body = await parseBody(req);
-      if (!isCanonicalUuid(String(body?.challenge_id || ''))) throw new Error('invalid');
-      const verified = await emailIdentity.verify({ challengeId: String(body.challenge_id), code: body?.code, linkToken: body?.link_token });
-      if (!verified.ok) return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
-      let user = await prisma.user.findUnique({ where: { email: verified.email } });
-      if (user?.deletedAt) return jsonResponse(res, { ok: false, error: 'This account is unavailable.' }, 403);
-      if (!user) {
-        const provisioned = await createZitadelEmailIdentity(verified.email);
-        user = await upsertUserFromZitadel({ sub: provisioned.userId, email: verified.email, email_verified: true, name: provisioned.displayName, locale: 'en' });
-      } else {
-        await prisma.userIdentity.upsert({
-          where: { provider_providerSubject: { provider: 'email', providerSubject: verified.email } },
-          update: { userId: user.id, normalizedEmail: verified.email, verifiedAt: new Date() },
-          create: { userId: user.id, provider: 'email', providerSubject: verified.email, normalizedEmail: verified.email, verifiedAt: new Date(), isPrimary: false },
-        });
-        user = await prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } });
-      }
-      const membership = await resolveSessionOrg(user.id);
-      if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
-      const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
-      const redirectTo = safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
-      return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
-    } catch (error) {
-      console.error('[email-auth] verification failed', { error: error.message });
-      return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
-    }
-  }
-
-  // Deprecated preview-only bypass retained behind its old kill switch for
-  // rollback. New preview and production clients use /auth/email/* above.
-  // ─── Local preview email sign-in ──────────────────────────────
-  if (pathname === '/auth/local-preview/request' && req.method === 'POST') {
-    if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {
-      return jsonResponse(res, { error: 'Not found' }, 404);
-    }
-    try {
-      const body = await parseBody(req);
-      const email = String(body?.email || '').trim().toLowerCase();
-      const allowlist = new Set(String(process.env.HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST || '').split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean));
-      if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) || !allowlist.has(email)) {
-        return jsonResponse(res, { ok: true, message: 'If this address is approved for preview, a sign-in link is on its way.' }, 202);
-      }
-      let returnTo = CONFIG.postLoginRedirect;
+    // Best-effort reachability ping (Model B agent /health), 2.5s budget — never blocks the answer.
+    let reachable = false;
+    if (entry.url) {
       try {
-        const candidate = new URL(String(body?.return_to || ''));
-        const approved = new URL(CONFIG.postLoginRedirect);
-        if (candidate.origin === approved.origin && candidate.pathname.startsWith('/hivemind/')) returnTo = candidate.toString();
-      } catch {}
-      const state = await sessionStore.createAuthState({ kind: 'local_preview_email', email, returnTo });
-      const baseUrl = (process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`).replace(/\/$/, '');
-      const loginUrl = `${baseUrl}/auth/local-preview/verify?state=${encodeURIComponent(state)}`;
-      const delivery = await sendRenderedSystemEmail({ templateId: 'local_preview_sign_in', to: email, rendered: {
-        subject: 'Your Singulance local preview sign-in link',
-        text: `Open this one-time sign-in link to continue to local preview:\n\n${loginUrl}\n\nThis link expires shortly.`,
-        html: `<p>Open this one-time link to continue to local preview.</p><p><a href="${loginUrl}">Sign in to local preview</a></p><p>This link expires shortly.</p>`,
-      } });
-      if (!delivery.ok) return jsonResponse(res, { error: 'Preview email delivery is unavailable.' }, 503);
-      return jsonResponse(res, { ok: true, message: 'Check your email for a one-time sign-in link.' }, 202);
-    } catch {
-      return jsonResponse(res, { error: 'Unable to start preview sign-in' }, 500);
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2500);
+        const r = await fetch(`${entry.url}/health`, {
+          headers: entry.token ? { authorization: `Bearer ${entry.token}` } : {},
+          signal: ctrl.signal,
+        }).catch(() => null);
+        clearTimeout(t);
+        reachable = !!(r && r.ok);
+      } catch { /* unreachable */ }
     }
-  }
-
-  if (pathname === '/auth/local-preview/verify' && req.method === 'GET') {
-    if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') return jsonResponse(res, { error: 'Not found' }, 404);
-    try {
-      const authState = await sessionStore.consumeAuthState(url.searchParams.get('state') || '');
-      if (!authState || authState.kind !== 'local_preview_email' || !authState.email) return jsonResponse(res, { error: 'This preview sign-in link is invalid or has expired.' }, 400);
-      const user = await upsertUserFromZitadel({
-        sub: `local-preview:${authState.email}`,
-        email: authState.email,
-        name: authState.email.split('@')[0] || 'Local Preview',
-        locale: 'en',
-      });
-      // Always pin preview sessions to a dedicated local organization. Reusing
-      // the user's first historical membership could select a stale/inactive
-      // organization and made the HyperAgent onboarding permission checks fail.
-      const org = await prisma.organization.upsert({
-        where: { zitadelOrgId: 'local-preview-org' },
-        update: { name: 'Local Preview', slug: 'local-preview', plan: 'scale', hostingMode: 'managed' },
-        create: {
-          zitadelOrgId: 'local-preview-org',
-          name: 'Local Preview',
-          slug: 'local-preview',
-          plan: 'scale',
-          hostingMode: 'managed',
-        },
-      });
-      await prisma.userOrganization.upsert({
-        where: { userId_orgId: { userId: user.id, orgId: org.id } },
-        update: { isActive: true, role: 'owner', roles: ['org_owner'], joinedAt: new Date() },
-        create: { userId: user.id, orgId: org.id, role: 'owner', roles: ['org_owner'], isActive: true, joinedAt: new Date() },
-      });
-      const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: org.id });
-      return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, 500);
-    }
+    // Phase 10: surface outbox health (push lag + DLQ) so the view shows degradation, not just green/red.
+    let outbox = null;
+    try { const { getOutboxStats } = await import('./memory/outbox.js'); outbox = await getOutboxStats(statusOrgId); } catch { /* non-fatal */ }
+    return jsonResponse(res, {
+      registered: true,
+      reachable,
+      kind: entry.kind || 'selfhost',
+      transport: entry.url ? 'agent' : (entry.pgUrl ? 'postgres' : 'qdrant'),
+      outbox, // { pending, dead, oldestUnackedAgeMs, lastAckedAt } | null
+    });
   }
 
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
@@ -4410,14 +3810,11 @@ const server = http.createServer(async (req, res) => {
     }
     const returnToValue = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
     const admission = signupAdmissionFromRequest(url);
-    const workspaceInvite = await workspaceInviteAdmissionFromRequest(url);
     if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
-    if (url.searchParams.get('workspace_invite') && !workspaceInvite) return jsonResponse(res, { error: 'Workspace invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
       returnTo: returnToValue,
       provider: 'google',
       signupAdmission: admission,
-      workspaceInviteToken: workspaceInvite?.token || null,
     });
     // Encode return_to in the state itself as a fallback (base64 suffix after UUID)
     // Format: <stateId>.<base64_return_to> — Google passes this back unchanged
@@ -4518,10 +3915,7 @@ const server = http.createServer(async (req, res) => {
       console.log(`[google-auth] Upserting user...`);
       const googleSub = `google:${userInfo.id}`;
       const existingPlatformUser = await platformUserExists({ sub: googleSub, email: userInfo.email });
-      const workspaceInviteAccepted = authState.workspaceInviteToken
-        ? await workspaceInviteMatchesAuthenticatedEmail(authState.workspaceInviteToken, userInfo.email)
-        : false;
-      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted) {
+      if (!existingPlatformUser && !authState.signupAdmission) {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel({
@@ -4743,42 +4137,6 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { invitation: { account_type: 'personal', invitation_expires_at: new Date(admission.expiresAt * 1000).toISOString() } });
   }
 
-  // ─── Runtime beta waitlist — public, unauthenticated ───────────────
-  // Fire-and-forget confirmation email only; there is no durable store for
-  // this list yet (see decision-docs if one gets added — a queryable
-  // waitlist would need its own Prisma model + migration, which is a real
-  // schema decision, not something to slip in silently here).
-  if (pathname === '/auth/runtime-waitlist' && req.method === 'POST') {
-    if (runtimeWaitlistLimited(req)) {
-      return jsonResponse(res, { error: 'Too many requests, try again later.', code: 'rate_limited' }, 429);
-    }
-    recordRuntimeWaitlistAttempt(req);
-    const body = await parseBody(req).catch(() => ({}));
-    const email = String(body.email || '').trim().toLowerCase();
-    const name = String(body.name || '').trim().slice(0, 120);
-    const useCase = String(body.use_case || body.useCase || '').trim().slice(0, 600);
-    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!EMAIL_RE.test(email)) {
-      return jsonResponse(res, { error: 'A valid email address is required.', code: 'invalid_email' }, 400);
-    }
-    const delivery = await sendSystemEmail({
-      templateId: 'runtime_waitlist_confirmation',
-      to: email,
-      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
-      vars: {
-        email,
-        nameSuffix: name ? `, ${name}` : '',
-        useCase: useCase || 'Not specified yet — no worries, tell us when your seat opens up.',
-      },
-    });
-    // Never expose provider/delivery detail to the caller — a slow or
-    // misconfigured mail provider must not read as "the waitlist failed."
-    if (!delivery.ok && !delivery.skipped) {
-      console.warn('[runtime-waitlist] confirmation email failed:', delivery.error);
-    }
-    return jsonResponse(res, { ok: true });
-  }
-
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {
     if (signupAdmissionLimited(req)) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
@@ -4815,13 +4173,10 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
     }
     const admission = signupAdmissionFromRequest(url);
-    const workspaceInvite = await workspaceInviteAdmissionFromRequest(url);
     if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
-    if (url.searchParams.get('workspace_invite') && !workspaceInvite) return jsonResponse(res, { error: 'Workspace invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
       returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect,
       signupAdmission: admission,
-      workspaceInviteToken: workspaceInvite?.token || null,
     });
     const authorizeOptions = {};
     if (url.searchParams.get('login_hint')) {
@@ -4869,10 +4224,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const { userInfo } = await zitadelClient.exchangeAndResolveUser(code);
       const existingPlatformUser = await platformUserExists({ sub: userInfo.sub, email: userInfo.email });
-      const workspaceInviteAccepted = authState.workspaceInviteToken
-        ? await workspaceInviteMatchesAuthenticatedEmail(authState.workspaceInviteToken, userInfo.email)
-        : false;
-      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted) {
+      if (!existingPlatformUser && !authState.signupAdmission) {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel(userInfo);
@@ -5423,12 +4775,7 @@ const server = http.createServer(async (req, res) => {
         id: org.id,
         name: org.name,
         slug: org.slug,
-        plan: enterpriseInvitationRedemption
-          ? 'enterprise_onboarding'
-          : (signupPromotion?.promotion?.version?.base_plan || org.plan || provisionPlan),
-        plan_name: enterpriseInvitationRedemption
-          ? 'Enterprise Onboarding'
-          : null,
+        plan: signupPromotion?.promotion?.version?.base_plan || org.plan || provisionPlan,
         hosting_mode: org.hostingMode || hostingMode,
         memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode),
         memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
@@ -5436,8 +4783,6 @@ const server = http.createServer(async (req, res) => {
         promotion: signupPromotion?.termsSnapshot || null,
         enterprise_onboarding: enterpriseInvitationRedemption ? {
           active: true,
-          plan: 'enterprise_onboarding',
-          plan_name: 'Enterprise Onboarding',
           ends_at: enterpriseInvitationRedemption.onboardingEndsAt,
           account_type: enterpriseInvitationRedemption.invitation.account_type,
           hosting_mode: enterpriseInvitationRedemption.invitation.hosting_mode,
@@ -5446,127 +4791,6 @@ const server = http.createServer(async (req, res) => {
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
     });
-  }
-
-  // Workspace identity is a durable, organization-scoped profile. It is kept
-  // out of UserProfile on purpose: chat, ingestion and agent tools can read it
-  // through Core context, but only an owner/admin can change it here.
-  const organizationProfileMatch = pathname.match(/^\/v1\/orgs\/([0-9a-f-]{36})\/profile$/);
-  if (organizationProfileMatch) {
-    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const current = await requireSession(req, res);
-    if (!current) return;
-    const orgId = organizationProfileMatch[1];
-    const membership = await getActiveOrganizationMembership(prisma, {
-      userId: current.session.userId,
-      orgId,
-    });
-    if (!membership) return jsonResponse(res, { error: 'Resource not found' }, 404);
-
-    const organization = await prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { id: true, name: true, slug: true, plan: true, dataResidencyRegion: true },
-    });
-    if (!organization) return jsonResponse(res, { error: 'Resource not found' }, 404);
-
-    const serialize = (facts) => ({
-      id: organization.id,
-      name: organization.name,
-      slug: organization.slug,
-      plan: organization.plan || 'free',
-      hosting_mode: 'managed',
-      data_residency_region: organization.dataResidencyRegion || 'eu-central',
-      company_profile: Object.fromEntries(facts.map((fact) => [fact.key.replace(/^company\./, ''), fact.value])),
-      facts: facts.map(({ id, key, value, category, version, updatedAt }) => ({ id, key, value, category, version, updated_at: updatedAt })),
-    });
-
-    if (req.method === 'GET') {
-      const facts = await prisma.organizationProfile.findMany({
-        where: { orgId, deletedAt: null },
-        orderBy: [{ category: 'asc' }, { key: 'asc' }],
-      });
-      return jsonResponse(res, {
-        organization: serialize(facts),
-        can_edit: isOrganizationAdmin(membership) || canManageOrg(membership.role),
-      });
-    }
-
-    if (req.method === 'PATCH') {
-      const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
-      if (!admin) return;
-      const body = (await parseBody(req)) || {};
-      const companyProfile = body.company_profile;
-      if (!companyProfile || typeof companyProfile !== 'object' || Array.isArray(companyProfile)) {
-        return jsonResponse(res, { error: 'company_profile object is required' }, 400);
-      }
-      const allowedKeys = new Set(['website', 'industry', 'description', 'audience', 'mission']);
-      const entries = Object.entries(companyProfile)
-        .filter(([key]) => allowedKeys.has(key))
-        .map(([key, value]) => [key, typeof value === 'string' ? value.trim() : '']);
-      if (!entries.length) return jsonResponse(res, { error: 'No supported organization profile fields provided' }, 400);
-      if (entries.some(([, value]) => value.length > 4000)) {
-        return jsonResponse(res, { error: 'Organization profile values must be at most 4000 characters' }, 400);
-      }
-
-      const changed = await prisma.$transaction(async (tx) => {
-        const results = [];
-        for (const [key, value] of entries) {
-          const canonicalKey = `company.${key}`;
-          const existing = await tx.organizationProfile.findUnique({
-            where: { orgId_key: { orgId, key: canonicalKey } },
-          });
-          if (!value) {
-            if (existing && !existing.deletedAt) {
-              await tx.organizationProfile.update({
-                where: { id: existing.id },
-                data: { deletedAt: new Date(), version: { increment: 1 }, updatedByUserId: current.session.userId },
-              });
-              results.push({ key: canonicalKey, action: 'deleted', previousValue: existing.value });
-            }
-            continue;
-          }
-          const row = await tx.organizationProfile.upsert({
-            where: { orgId_key: { orgId, key: canonicalKey } },
-            update: {
-              value,
-              category: 'identity',
-              version: { increment: 1 },
-              updatedByUserId: current.session.userId,
-              deletedAt: null,
-            },
-            create: {
-              orgId,
-              key: canonicalKey,
-              value,
-              category: 'identity',
-              updatedByUserId: current.session.userId,
-            },
-          });
-          results.push({ key: canonicalKey, action: existing ? 'updated' : 'created', previousValue: existing?.value || null, row });
-        }
-        return results;
-      });
-      await audit({
-        userId: current.session.userId,
-        organizationId: orgId,
-        eventType: 'organization_profile.updated',
-        eventCategory: 'data_modification',
-        action: 'update',
-        resourceType: 'organization_profile',
-        metadata: { changed: changed.map(({ key, action }) => ({ key, action })) },
-        oldValue: Object.fromEntries(changed.filter((item) => item.previousValue !== null).map((item) => [item.key, item.previousValue])),
-        newValue: Object.fromEntries(changed.filter((item) => item.row).map((item) => [item.key, item.row.value])),
-        ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
-        userAgent: req.headers['user-agent'] || null,
-      });
-      const facts = await prisma.organizationProfile.findMany({
-        where: { orgId, deletedAt: null },
-        orderBy: [{ category: 'asc' }, { key: 'asc' }],
-      });
-      return jsonResponse(res, { organization: serialize(facts), changed: changed.map(({ key, action }) => ({ key, action })) });
-    }
-
-    return jsonResponse(res, { error: 'Method not allowed' }, 405);
   }
 
   // POST /v1/orgs/:orgId/invites/bulk — invite MULTIPLE people in one go.
@@ -5581,13 +4805,6 @@ const server = http.createServer(async (req, res) => {
     const orgId = inviteBulkMatch[1];
     const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
     if (!membership) return;
-
-    try {
-      await assertInviteCapacityWithinPlan({ orgId });
-    } catch (error) {
-      if (error instanceof PlanCapacityError) return capacityErrorResponse(res, error);
-      throw error;
-    }
 
     const body = await parseBody(req);
     const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -5621,7 +4838,7 @@ const server = http.createServer(async (req, res) => {
     }).catch(() => null);
     const inviterName = inviter?.displayName || inviter?.email || 'your admin';
     const orgName = membership.org.name || 'your team';
-    const expiresAt = new Date(Date.now() + WORKSPACE_INVITATION_TTL_MS);
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
     const expiresOn = expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
     const results = [];
@@ -5641,13 +4858,15 @@ const server = http.createServer(async (req, res) => {
           }
         }
         const token = crypto.randomBytes(24).toString('hex');
-        const invite = await createOrgInviteWithinPlan({
-          orgId, email, role: bulkRole, roles: bulkRoles,
-          teamIds: [], projectIds: bulkProjectIds, token, expiresAt,
-          createdBy: current.session.userId,
-          // Delivery is accounted for only after the recipient provider has
-          // accepted the message. A created invite is not necessarily sent.
-          sendCount: 0,
+        const invite = await prisma.orgInvite.create({
+          data: {
+            orgId, email, role: bulkRole, roles: bulkRoles,
+            teamIds: [], projectIds: bulkProjectIds, token, expiresAt,
+            createdBy: current.session.userId,
+            // Delivery is accounted for only after the recipient provider has
+            // accepted the message. A created invite is not necessarily sent.
+            sendCount: 0,
+          },
         });
         const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
         queueWorkspaceInvitationDelivery({
@@ -5722,7 +4941,7 @@ const server = http.createServer(async (req, res) => {
       : inviteRoles[0] || 'member';
 
     const inviteEmail = typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null;
-    const expiresAt   = new Date(Date.now() + WORKSPACE_INVITATION_TTL_MS);
+    const expiresAt   = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
     const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
       ? req.headers['idempotency-key'].trim().slice(0, 200)
       : null;
@@ -5732,22 +4951,23 @@ const server = http.createServer(async (req, res) => {
     let reusedInvite = Boolean(invite);
     if (!invite) {
       try {
-        invite = await createOrgInviteWithinPlan({
-          orgId,
-          email: inviteEmail,
-          role: legacyRoleReverse,
-          roles: inviteRoles,
-          teamIds,
-          projectIds,
-          token,
-          expiresAt,
-          createdBy: current.session.userId,
-          idempotencyKey,
-          // Do not make the list claim delivery before the provider confirms it.
-          sendCount: 0,
+        invite = await prisma.orgInvite.create({
+          data: {
+            orgId,
+            email: inviteEmail,
+            role: legacyRoleReverse,
+            roles: inviteRoles,
+            teamIds,
+            projectIds,
+            token,
+            expiresAt,
+            createdBy: current.session.userId,
+            idempotencyKey,
+            // Do not make the list claim delivery before the provider confirms it.
+            sendCount: 0,
+          },
         });
       } catch (err) {
-        if (err instanceof PlanCapacityError) return capacityErrorResponse(res, err);
         // Parallel clicks with the same idempotency key race at the database
         // boundary. Resolve the winner instead of returning a false failure.
         if (idempotencyKey && err?.code === 'P2002') {
@@ -5987,7 +5207,7 @@ const server = http.createServer(async (req, res) => {
 
     const newExpiresAt = new Date(Math.max(
       invite.expiresAt?.getTime?.() || 0,
-      Date.now() + WORKSPACE_INVITATION_TTL_MS,
+      Date.now() + 7 * 24 * 3600 * 1000,
     ));
 
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
@@ -7019,8 +6239,7 @@ const server = http.createServer(async (req, res) => {
     }));
 
     // Overlay nango_connections so Nango-finalized OAuth shows as connected
-    const connectorDebug = process.env.CONNECTOR_OVERLAY_VERBOSE === '1';
-    if (connectorDebug) console.log(`[v1/connectors] overlay start userId=${current.session.userId} orgId=${current.session.orgId}`);
+    console.log(`[v1/connectors] overlay start userId=${current.session.userId} orgId=${current.session.orgId}`);
     try {
       if (prisma?.nangoConnection) {
         const NANGO_TO_REGISTRY = {
@@ -7041,7 +6260,7 @@ const server = http.createServer(async (req, res) => {
           where,
           select: { providerKey: true, connectionId: true, connectedAt: true },
         });
-        if (connectorDebug) console.log(`[v1/connectors] overlay where=${JSON.stringify(where)} rows=${nangoRows.length} keys=${nangoRows.map(r => r.providerKey).join(',')}`);
+        console.log(`[v1/connectors] overlay where=${JSON.stringify(where)} rows=${nangoRows.length} keys=${nangoRows.map(r => r.providerKey).join(',')}`);
         const overlayByProvider = {};
         for (const row of nangoRows) {
           const regId = NANGO_TO_REGISTRY[row.providerKey] || row.providerKey;
@@ -7079,7 +6298,7 @@ const server = http.createServer(async (req, res) => {
           });
           promoted++;
         }
-        if (connectorDebug) console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
+        console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
       }
     } catch (nangoErr) {
       console.warn('[v1/connectors] nango overlay failed:', nangoErr.message);
@@ -7094,10 +6313,7 @@ const server = http.createServer(async (req, res) => {
         const orgId = current.session.orgId || current.session.org_id;
         if (orgId) {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
-          const accounts = await composioService.listConnectedAccounts(orgId, {
-            userId: current.session.userId,
-            includeLegacyOrg: true,
-          });
+          const accounts = await composioService.listConnectedAccounts(orgId);
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
             const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
@@ -7174,7 +6390,6 @@ const server = http.createServer(async (req, res) => {
       // it passes it along so a toolkit with no ops-curated auth config yet
       // gets one auto-provisioned instead of 400ing.
       const link = await composioService.createConnectLink(toolkitSlug, orgId, {
-        userId: current.session.userId,
         callbackUrl,
         toolkitMeta: body.toolkit_meta && typeof body.toolkit_meta === 'object' ? {
           composioManagedAuthSchemes: Array.isArray(body.toolkit_meta.composio_managed_auth_schemes) ? body.toolkit_meta.composio_managed_auth_schemes : [],
@@ -7215,9 +6430,7 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req).catch(() => ({}));
       const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
       if (!apiKey) return jsonResponse(res, { error: 'api_key is required' }, 400);
-      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey, {
-        userId: current.session.userId,
-      });
+      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey);
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_connect_started', eventCategory: 'connectors', action: 'create',
@@ -7246,10 +6459,7 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
-      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, {
-        userId: current.session.userId,
-        includeLegacyOrg: true,
-      });
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug);
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
@@ -7284,10 +6494,7 @@ const server = http.createServer(async (req, res) => {
         });
       const [page, accounts] = await Promise.all([
         pagePromise,
-        orgId ? composioService.listConnectedAccounts(orgId, {
-          userId: current.session.userId,
-          includeLegacyOrg: true,
-        }).catch(() => []) : Promise.resolve([]),
+        orgId ? composioService.listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
       ]);
       // Real per-org connection state, not something the FE has to remember
       // client-side across reloads — the "connected" flag here reflects
@@ -7670,10 +6877,7 @@ const server = http.createServer(async (req, res) => {
       const orgId = current.session.orgId || current.session.org_id;
       if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
       try {
-        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id, {
-          userId: current.session.userId,
-          includeLegacyOrg: true,
-        });
+        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id);
         return jsonResponse(res, { success: removed > 0, provider: providerId });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
@@ -7856,10 +7060,14 @@ const server = http.createServer(async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
     const unreadOnly = url.searchParams.get('unread') === 'true';
     try {
-      const where = { orgId: current.session.orgId, userId: current.session.userId, ...(unreadOnly ? { readAt: null } : {}) };
+      // This endpoint powers the "Your workspace lifecycle" panel. It is not
+      // a general activity feed: only deliberately typed lifecycle events may
+      // enter it, regardless of how an email or other generic activity started.
+      const lifecycleWhere = { orgId: current.session.orgId, userId: current.session.userId, type: { startsWith: 'lifecycle.' } };
+      const where = { ...lifecycleWhere, ...(unreadOnly ? { readAt: null } : {}) };
       const [items, unread] = await Promise.all([
         prisma.workspaceNotification.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit }),
-        prisma.workspaceNotification.count({ where: { orgId: current.session.orgId, userId: current.session.userId, readAt: null } }),
+        prisma.workspaceNotification.count({ where: { ...lifecycleWhere, readAt: null } }),
       ]);
       return jsonResponse(res, { items, unread });
     } catch {
@@ -9974,54 +9182,6 @@ Write the persona now.`;
   {
     const { deriveCsiLane, buildIdempotencyKey, preflightTurn } = await import('./employees/hyper-rooms.js');
 
-    const hyperSkillActivateMatch = pathname.match(/^\/v1\/hyper-agent-skills\/([0-9a-f-]{36})\/activate$/);
-    if (pathname === '/v1/hyper-agent-skills' && ['GET', 'POST'].includes(req.method)) {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      if (req.method === 'GET') {
-        const skills = await prisma.hyperAgentSkillVersion.findMany({
-          where: { orgId: current.session.orgId }, orderBy: [{ skillKey: 'asc' }, { version: 'desc' }],
-        });
-        return jsonResponse(res, { skills });
-      }
-      const { evaluateGrokRuntime, grokModeAtLeast } = await import('./hyperagents/grok-runtime-client.js');
-      const decision = await evaluateGrokRuntime({ orgId: current.session.orgId, userId: current.session.userId });
-      if (!grokModeAtLeast(decision.mode, 'skills')) return jsonResponse(res, { error: 'Agent skills are not enabled' }, 403);
-      const body = await parseBody(req).catch(() => ({}));
-      const skillKey = String(body.skill_key || '').trim().toLowerCase();
-      const version = Number(body.version || 1);
-      const manifest = body.manifest && typeof body.manifest === 'object' && !Array.isArray(body.manifest) ? body.manifest : null;
-      const serialized = JSON.stringify(manifest || {});
-      if (!/^[a-z0-9][a-z0-9._-]{2,119}$/.test(skillKey) || !Number.isInteger(version) || version < 1
-          || !manifest || serialized.length > 30000 || /"(?:secret|token|password|api_key)"\s*:/i.test(serialized)) {
-        return jsonResponse(res, { error: 'invalid or unsafe skill manifest' }, 400);
-      }
-      const skill = await prisma.hyperAgentSkillVersion.create({ data: {
-        orgId: current.session.orgId, skillKey, version, manifest,
-        validationReceipts: Array.isArray(body.validation_receipts) ? body.validation_receipts.slice(0, 10) : [],
-        createdBy: current.session.userId,
-      } }).catch((error) => ({ error }));
-      if (skill.error) return jsonResponse(res, { error: 'Skill version already exists' }, 409);
-      return jsonResponse(res, { skill }, 201);
-    }
-    if (hyperSkillActivateMatch && req.method === 'POST') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const skill = await prisma.hyperAgentSkillVersion.findFirst({
-        where: { id: hyperSkillActivateMatch[1], orgId: current.session.orgId },
-      });
-      if (!skill) return jsonResponse(res, { error: 'Skill not found' }, 404);
-      const receipts = Array.isArray(skill.validationReceipts) ? skill.validationReceipts : [];
-      const distinctTasks = new Set(receipts.map((row) => String(row?.work_order_id || '')).filter(Boolean));
-      if (distinctTasks.size < 2) {
-        return jsonResponse(res, { error: 'Skill requires successful validation on two different work orders' }, 409);
-      }
-      const activated = await prisma.hyperAgentSkillVersion.update({
-        where: { id: skill.id }, data: { status: 'active', activatedAt: new Date() },
-      });
-      return jsonResponse(res, { skill: activated });
-    }
-
     // GET /v1/hyper-rooms — list current user's rooms
     if (pathname === '/v1/hyper-rooms' && req.method === 'GET') {
       const current = await requireSession(req, res);
@@ -10220,7 +9380,7 @@ Write the persona now.`;
           projectId = proj.id;
         }
         if (!await requirePrivilegedAgentAccess(req, res, current, projectId)) return;
-        const room = await createHyperRoom({
+        const room = await createHyperRoomWithinPlan({
             userId: current.session.userId,
             orgId: current.session.orgId,
             name,
@@ -10981,7 +10141,7 @@ Write the persona now.`;
           // Marketplace specialists take the room seats ahead of legacy generics.
           const rankedTeam = [...team].sort((a, b) => Number(_isSpecialist(b)) - Number(_isSpecialist(a)));
           const participantIds = rankedTeam.map((t) => t.id).slice(0, 5);
-          const room = await createHyperRoom({
+          const room = await createHyperRoomWithinPlan({
               userId, orgId,
               name: `${companyName} — HQ`,
               participantIds,
@@ -11007,7 +10167,6 @@ Write the persona now.`;
             company_location: profile.location || null,
             profile, mission, company_context: companyContext, tasks,
             research: research.slice(0, 10),
-            source_pages: pages.slice(0, 12).map((page) => ({ url: page.url || '', title: page.title || '', purpose: page.purpose || 'company' })).filter((page) => page.url),
             documents: [
               `${companyName} — Company profile`,
               ...(research.length ? [`${companyName} — Market research`] : []),
@@ -11080,9 +10239,6 @@ Write the persona now.`;
                 JSON.stringify({ _company: resultPayload }), room.id,
               );
             } catch (error) { console.warn('[hyper-onboarding] website preview persist failed:', error.message); }
-            // Do not send Day-0 from the background scrape. It is claimed
-            // exactly once after the completed record is visibly loaded in
-            // "Your Company" (POST /v1/hyper/company/day0-report).
           })();
           console.info('[hyper-onboarding] timing', JSON.stringify({
             org_id: orgId,
@@ -11155,148 +10311,6 @@ Write the persona now.`;
       }
     }
 
-    // Public, immutable avatar asset used by lifecycle emails. It renders the
-    // same Humation package, stable seed, and role palette as AgentAvatar.jsx.
-    if (pathname === '/v1/public/humation-avatar.svg' && req.method === 'GET') {
-      const seed = String(url.searchParams.get('seed') || '').trim().slice(0, 160);
-      const roleArchetype = String(url.searchParams.get('role') || 'Communicator').trim().slice(0, 40);
-      if (!seed) return jsonResponse(res, { error: 'seed_required' }, 400);
-      const svg = renderHumationAvatarSvg({ id: seed, name: roleArchetype, roleArchetype }, { size: 72 });
-      res.writeHead(200, {
-        'Content-Type': 'image/svg+xml; charset=utf-8',
-        'Content-Length': Buffer.byteLength(svg),
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Content-Type-Options': 'nosniff',
-      });
-      return res.end(svg);
-    }
-
-    // POST /v1/hyper/company/day0-report — the CompanyDashboard calls this
-    // only after it has rendered the completed company payload. The database
-    // claim makes delivery idempotent across refreshes, tabs, and retries:
-    // one organization gets one Day-0 report, not one per scrape or page load.
-    if (pathname === '/v1/hyper/company/day0-report' && req.method === 'POST') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      try {
-        const rows = await prisma.$queryRawUnsafe(
-          `SELECT id, "agent_connectors"->'_company' AS company
-             FROM "hivemind"."hyper_rooms"
-            WHERE org_id = $1::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL
-            ORDER BY created_at DESC LIMIT 1`,
-          current.session.orgId,
-        );
-        const row = rows?.[0];
-        if (!row?.company) return jsonResponse(res, { error: 'not_onboarded' }, 404);
-        const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
-        const deliveryState = company?.day0_report_email || {};
-        const already = deliveryState.status;
-        const claimedMs = Date.parse(deliveryState.claimed_at || '');
-        const sendingLeaseActive = already === 'sending'
-          && Number.isFinite(claimedMs)
-          && Date.now() - claimedMs < 10 * 60 * 1000;
-        if (already === 'sent' || sendingLeaseActive) {
-          return jsonResponse(res, { ok: true, accepted: false, status: already });
-        }
-
-        const claimedAt = new Date().toISOString();
-        const claimState = { version: 'day-0-v2', status: 'sending', claimed_at: claimedAt };
-        const claimed = await prisma.$queryRawUnsafe(
-          `UPDATE "hivemind"."hyper_rooms"
-              SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
-            WHERE id = $2::uuid
-              AND (
-                COALESCE("agent_connectors" #>> '{_company,day0_report_email,status}', '') NOT IN ('sending', 'sent')
-                OR (
-                  "agent_connectors" #>> '{_company,day0_report_email,status}' = 'sending'
-                  AND COALESCE(("agent_connectors" #>> '{_company,day0_report_email,claimed_at}')::timestamptz, to_timestamp(0)) < now() - interval '10 minutes'
-                )
-              )
-          RETURNING id`,
-          JSON.stringify(claimState), row.id,
-        );
-        if (!claimed?.length) return jsonResponse(res, { ok: true, accepted: false, status: 'sending' });
-
-        const employees = await prisma.digitalEmployee.findMany({
-          where: { orgId: current.session.orgId, archivedAt: null },
-          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, persona: true },
-          take: 12,
-        }).catch(() => []);
-        const dashboardCompany = {
-          ...company,
-          // The report receives the same live employee list that the page
-          // renders, instead of the earlier onboarding-only team snapshot.
-          team: employees.map((employee) => ({
-            id: employee.id,
-            slug: employee.slug,
-            name: employee.name,
-            avatarUrl: employee.avatarUrl,
-            roleArchetype: employee.roleArchetype || 'Communicator',
-            persona: employee.persona,
-          })),
-        };
-        const ownerId = current.session.userId;
-        const orgId = current.session.orgId;
-        const roomId = row.id;
-        void (async () => {
-          try {
-            const recipient = await prisma.user.findUnique({ where: { id: ownerId }, select: { email: true } });
-            if (!recipient?.email) throw new Error('day0_report_recipient_missing');
-            const appUrl = `${String(process.env.HIVEMIND_APP_URL || 'https://next.singulancelabs.com/hivemind/app').replace(/\/$/, '')}/employees/mycompany`;
-            const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl });
-            const print = renderDayZeroOnboardingReportHtml(dashboardCompany, { appUrl });
-            const pdf = await renderDayZeroOnboardingPdf(print.html);
-            const delivery = await sendRenderedSystemEmail({
-              templateId: 'day0_company_onboarding', to: recipient.email, rendered,
-              attachments: [{ filename: `${dashboardCompany.company.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 72) || 'company'}-day-0-onboarding-report.pdf`, type: 'application/pdf', content: pdf }],
-              notification: {
-                orgId,
-                userId: ownerId,
-                type: 'lifecycle.email.sent',
-                title: `Your ${dashboardCompany.company} Day-0 report is in your inbox`,
-                body: 'Your onboarding report and new AI HyperAgents are ready.',
-                resourceType: 'hyper_company',
-                resourceId: roomId,
-                href: appUrl,
-                data: { lifecycle_day: 0, company: dashboardCompany.company },
-              },
-            });
-            if (!delivery.ok) throw new Error(`day0_report_delivery_${delivery.reason || 'failed'}`);
-            const sentAt = new Date().toISOString();
-            await prisma.$executeRawUnsafe(
-              `UPDATE "hivemind"."hyper_rooms"
-                  SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
-                WHERE id = $2::uuid AND org_id = $3::uuid`,
-              JSON.stringify({ version: 'day-0-v2', status: 'sent', claimed_at: claimedAt, sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null }),
-              roomId, orgId,
-            );
-            // The email receipt is the Day-0 lifecycle boundary. Hand Day 1 to
-            // Cloudflare's durable clock only after that receipt exists. A
-            // transient workflow handoff does not rewrite a delivered Day-0
-            // email; the handoff is independently observable and retryable.
-            const dayOne = await scheduleDayOneWorkflow({
-              orgId, hqRoomId: roomId, onboardedAt: dashboardCompany.onboarded_at,
-            });
-            if (!dayOne.ok && !dayOne.skipped) {
-              console.warn('[hyper-company] day-1 workflow scheduling failed:', dayOne.reason);
-            }
-          } catch (error) {
-            console.warn('[hyper-company] day-0 report failed:', error.message);
-            await prisma.$executeRawUnsafe(
-              `UPDATE "hivemind"."hyper_rooms"
-                  SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
-                WHERE id = $2::uuid AND org_id = $3::uuid`,
-              JSON.stringify({ version: 'day-0-v2', status: 'failed', claimed_at: claimedAt, failed_at: new Date().toISOString(), failure_reason: String(error.message || 'delivery_failed').slice(0, 240) }),
-              roomId, orgId,
-            ).catch((persistError) => console.warn('[hyper-company] day-0 report state failed:', persistError.message));
-          }
-        })();
-        return jsonResponse(res, { ok: true, accepted: true, status: 'sending' }, 202);
-      } catch (err) {
-        return jsonResponse(res, { error: err.message }, 500);
-      }
-    }
-
     // GET /v1/hyper/company — the HyperAgents hero dashboard state. Reads the
     // company payload persisted on the newest HQ room (agent_connectors._company)
     // and overlays live team + rooms. 404 when the org never onboarded.
@@ -11316,7 +10330,7 @@ Write the persona now.`;
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const employees = await prisma.digitalEmployee.findMany({
           where: { orgId: current.session.orgId, archivedAt: null },
-          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, persona: true, status: true },
+          select: { id: true, name: true, roleArchetype: true, status: true },
           take: 12,
         }).catch(() => []);
         // Closed-loop outcomes summary (7d) for the dashboard tile. Zeros when
@@ -11340,18 +10354,7 @@ Write the persona now.`;
             replies: Number(o.replies || 0), bookings: Number(o.bookings || 0),
           };
         } catch { /* zeros */ }
-        const onboardedAtMs = Date.parse(company.onboarded_at || '');
-        const lifecycleDay = Number.isFinite(onboardedAtMs)
-          ? Math.max(0, Math.floor((Date.now() - onboardedAtMs) / 86_400_000))
-          : 0;
-        return jsonResponse(res, {
-          onboarded: true,
-          hq_room_id: row.id,
-          company,
-          employees,
-          outcomes,
-          lifecycle: { day: lifecycleDay, onboarded_at: company.onboarded_at || null },
-        });
+        return jsonResponse(res, { onboarded: true, hq_room_id: row.id, company, employees, outcomes });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -11839,7 +10842,7 @@ Write the persona now.`;
           task.room_id = null;
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-        const taskRoom = await createHyperRoom({
+        const taskRoom = await createHyperRoomWithinPlan({
             userId: current.session.userId,
             orgId: current.session.orgId,
             name: task.title.slice(0, 120),
@@ -11940,162 +10943,7 @@ Write the persona now.`;
     const roomWorkPlanMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan$/);
     const roomWorkPlanResumeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/resume$/);
     const roomWorkPlanHandoffMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/handoff$/);
-    const roomTurnControlMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/control$/);
-    const roomRealtimeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/realtime$/);
-    const roomRoutinesMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/routines$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
-
-    if (roomRealtimeMatch && req.method === 'GET') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const roomId = roomRealtimeMatch[1];
-      const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
-        select: { id: true },
-      });
-      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-      const { createGrokRealtimeTicket, evaluateGrokRuntime, grokModeAtLeast } = await import('./hyperagents/grok-runtime-client.js');
-      const decision = await evaluateGrokRuntime({ orgId: current.session.orgId, userId: current.session.userId });
-      if (!grokModeAtLeast(decision.mode, 'persistent_agents')) {
-        return jsonResponse(res, { error: 'Realtime Agent gateway is disabled' }, 409);
-      }
-      const ticket = createGrokRealtimeTicket({
-        orgId: current.session.orgId, userId: current.session.userId, roomId,
-      });
-      return jsonResponse(res, {
-        runtime_mode: decision.mode,
-        room_instance_id: ticket.roomInstanceId,
-        websocket_url: ticket.websocketUrl,
-        expires_in: ticket.expiresIn,
-        fallback_stream: `/v1/hyper-rooms/${roomId}/turns/{turn_id}/stream`,
-      });
-    }
-
-    if (roomRoutinesMatch && ['GET', 'POST'].includes(req.method)) {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const roomId = roomRoutinesMatch[1];
-      const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
-        select: { id: true, participantIds: true },
-      });
-      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-      if (req.method === 'GET') {
-        const routines = await prisma.hyperAgentRoutine.findMany({
-          where: { orgId: current.session.orgId, roomId }, orderBy: { createdAt: 'desc' },
-        });
-        return jsonResponse(res, { routines });
-      }
-      const { evaluateGrokRuntime, grokModeAtLeast, scheduleGrokRoutine } = await import('./hyperagents/grok-runtime-client.js');
-      const decision = await evaluateGrokRuntime({ orgId: current.session.orgId, userId: current.session.userId });
-      if (!grokModeAtLeast(decision.mode, 'routines')) {
-        return jsonResponse(res, { error: 'HyperAgent routines are not enabled' }, 403);
-      }
-      const body = await parseBody(req).catch(() => ({}));
-      const employeeId = String(body.employee_id || '');
-      const scheduleType = String(body.schedule_type || '');
-      const scheduleExpression = String(body.schedule_expression || '').trim();
-      const playbookId = String(body.playbook_id || '').trim();
-      const playbookVersion = Number(body.playbook_version || 1);
-      if (!room.participantIds.includes(employeeId) || !playbookId || playbookId.length > 120
-          || !Number.isInteger(playbookVersion) || playbookVersion < 1
-          || !['delay', 'interval', 'cron'].includes(scheduleType)) {
-        return jsonResponse(res, { error: 'invalid routine contract' }, 400);
-      }
-      if ((scheduleType === 'cron' && (scheduleExpression.split(/\s+/).length !== 5 || scheduleExpression.length > 160))
-          || (scheduleType !== 'cron' && (!/^\d+$/.test(scheduleExpression)
-            || Number(scheduleExpression) < 30 || Number(scheduleExpression) > 604800))) {
-        return jsonResponse(res, { error: 'invalid schedule expression' }, 400);
-      }
-      const runtime = await prisma.hyperAgentRuntime.findFirst({
-        where: { orgId: current.session.orgId, employeeId },
-      });
-      if (!runtime) return jsonResponse(res, { error: 'Persistent agent runtime not provisioned' }, 409);
-      const routine = await prisma.hyperAgentRoutine.create({ data: {
-        orgId: current.session.orgId, roomId, agentRuntimeId: runtime.id,
-        playbookId, playbookVersion, scheduleType, scheduleExpression,
-        authorityPolicy: body.authority_policy && typeof body.authority_policy === 'object' ? body.authority_policy : {},
-        createdBy: current.session.userId,
-      } });
-      try {
-        const receipt = await scheduleGrokRoutine({
-          orgId: current.session.orgId, userId: current.session.userId,
-          agentInstanceId: runtime.agentInstanceId, mode: decision.mode,
-          routineId: routine.id, scheduleType, scheduleExpression,
-        });
-        const updated = await prisma.hyperAgentRoutine.update({
-          where: { id: routine.id }, data: { workflowInstanceId: String(receipt.schedule_id || '') || null },
-        });
-        return jsonResponse(res, { routine: updated }, 201);
-      } catch (error) {
-        await prisma.hyperAgentRoutine.delete({ where: { id: routine.id } }).catch(() => {});
-        return jsonResponse(res, { error: error.message }, 503);
-      }
-    }
-
-    if (roomTurnControlMatch && ['GET', 'POST'].includes(req.method)) {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const [, roomId, turnId] = roomTurnControlMatch;
-      const turn = await prisma.hyperTurn.findFirst({
-        where: { id: turnId, roomId, room: { orgId: current.session.orgId, archivedAt: null } },
-        select: { id: true, status: true, grokWorkflowInstanceId: true, controlState: true, steeringMessages: true },
-      });
-      if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
-      if (req.method === 'GET') return jsonResponse(res, {
-        turn_id: turnId, status: turn.status, control: turn.controlState,
-        steering_messages: turn.steeringMessages || [],
-      });
-      if (['complete', 'failed', 'cost_capped'].includes(turn.status)) {
-        return jsonResponse(res, { error: 'Turn is already terminal' }, 409);
-      }
-      const body = await parseBody(req).catch(() => ({}));
-      const action = String(body.action || '').trim().toLowerCase();
-      if (!['pause', 'resume', 'cancel', 'steer'].includes(action)) {
-        return jsonResponse(res, { error: 'action must be pause, resume, cancel, or steer' }, 400);
-      }
-      const message = String(body.message || '').trim();
-      if (action === 'steer' && (!message || message.length > 4000)) {
-        return jsonResponse(res, { error: 'steer requires a message up to 4000 characters' }, 400);
-      }
-      const updated = await prisma.$transaction(async (tx) => {
-        const locked = await tx.$queryRawUnsafe(
-          `SELECT control_state, steering_messages FROM "hivemind"."hyper_turns"
-            WHERE id=$1::uuid AND room_id=$2::uuid FOR UPDATE`, turnId, roomId,
-        );
-        const prior = locked?.[0]?.control_state || { action: 'run', revision: 0 };
-        const revision = Number(prior.revision || 0) + 1;
-        const control = {
-          action: action === 'resume' || action === 'steer' ? 'run' : action,
-          revision, requested_by: current.session.userId, requested_at: new Date().toISOString(),
-          ...(action === 'steer' ? { message } : {}),
-        };
-        const messages = Array.isArray(locked?.[0]?.steering_messages) ? locked[0].steering_messages : [];
-        const steering = action === 'steer'
-          ? [...messages, { revision, message, user_id: current.session.userId, created_at: control.requested_at }].slice(-50)
-          : messages;
-        await tx.hyperTurn.update({ where: { id: turnId }, data: {
-          controlState: control, steeringMessages: steering,
-          ...(action === 'cancel' ? {
-            status: 'failed', sealedAt: new Date(), terminalReason: 'cancelled_by_user', executionPhase: 'CANCELLED',
-          } : {}),
-        } });
-        return { control, revision };
-      });
-      const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
-      await appendTurnEvent(prisma, turnId, {
-        t: action === 'steer' ? 'agent_steered' : `agent_${action}d`,
-        control_revision: updated.revision, ...(message ? { message } : {}),
-      });
-      if (turn.grokWorkflowInstanceId) {
-        const { controlGrokRoomWorkflow } = await import('./hyperagents/grok-runtime-client.js');
-        const workflowAction = action === 'cancel' ? 'terminate' : action === 'steer' ? null : action;
-        if (workflowAction) await controlGrokRoomWorkflow({
-          workflowInstanceId: turn.grokWorkflowInstanceId, action: workflowAction,
-        }).catch((error) => console.warn('[grok-hyperagents] workflow control failed:', error.message));
-      }
-      return jsonResponse(res, { ok: true, turn_id: turnId, control: updated.control }, 202);
-    }
 
     // GET /v1/hyper-rooms/:id/work-plan — one continuous, durable projection
     // for a human Work Room. This reads the existing work-order ledger; it never
@@ -12113,7 +10961,6 @@ Write the persona now.`;
       const rows = await prisma.$queryRawUnsafe(
         `SELECT wo.id, wo.turn_id, wo.plan_step_id, wo.depends_on, wo.kind, wo.status,
                 wo.title, wo.objective, wo.owner_slug, wo.owner_lane, wo.error,
-                wo.agent_instance_id, wo.workflow_instance_id, wo.runtime_mode, wo.processing_version,
                 wo.wait_for, wo.handoff,
                 wo.attempt, wo.created_at, wo.started_at, wo.completed_at, wo.updated_at,
                 latest.summary AS latest_summary
@@ -12140,10 +10987,7 @@ Write the persona now.`;
           depends_on: Array.isArray(row.depends_on) ? row.depends_on : [],
           status: projectedStatus,
           title: row.title, objective: row.objective, kind: row.kind,
-           owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
-           agent_instance_id: row.agent_instance_id || null,
-           workflow_instance_id: row.workflow_instance_id || null,
-           runtime_mode: row.runtime_mode || 'off', processing_version: Number(row.processing_version || 1),
+          owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
           attempt: Number(row.attempt || 0), blocker: row.error || null,
           waiting: row.wait_for && typeof row.wait_for === 'object' ? row.wait_for : null,
           handoff: row.handoff && typeof row.handoff === 'object' ? row.handoff : null,
@@ -13296,31 +12140,10 @@ Write the persona now.`;
       const pre = preflightTurn({ room, userMessage });
       if (pre) return jsonResponse(res, pre, 400);
 
-      const meteredTurnId = requestedTurnId || crypto.randomUUID();
-      const hyperCreditKey = `hyperagent:turn:${meteredTurnId}`;
-      const hyperCredit = await controlCreditService.reserve({
-        orgId: current.session.orgId, userId: current.session.userId,
-        service: 'hyperagent_turn', units: 1, source: 'hyperagents',
-        idempotencyKey: hyperCreditKey, metadata: { room_id: roomId },
-      });
-      if (!hyperCredit.admitted) return jsonResponse(res, planLimitBody(hyperCredit.check, 'credits'), 402);
-
       const runLimit = await planEnforcer.checkLimit(current.session.orgId, 'hyperAgentRuns', 1);
       if (!runLimit.allowed) {
-        if (!hyperCredit.duplicate) await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
         return jsonResponse(res, planLimitBody(runLimit, 'hyperAgentRuns'), runLimit.status || 429);
       }
-
-      // Fail-closed, cumulative Flagship decision. The value is latched on the
-      // turn before any execution begins; a later flag change cannot move an
-      // in-flight turn between the legacy and durable runtimes.
-      const { evaluateGrokRuntime, grokModeAtLeast, grokWorkflowId } = await import('./hyperagents/grok-runtime-client.js');
-      const grokDecision = await evaluateGrokRuntime({
-        orgId: current.session.orgId, userId: current.session.userId,
-      });
-      const grokWorkflowInstanceId = grokModeAtLeast(grokDecision.mode, 'durable_assignments')
-        ? grokWorkflowId(meteredTurnId, grokDecision.version)
-        : null;
 
       // Sequence is monotonic per room. Atomic via SELECT max + insert
       // wrapped in serializable transaction.
@@ -13345,23 +12168,13 @@ Write the persona now.`;
 
           const created = await tx.hyperTurn.create({
             data: {
-              id: meteredTurnId,
+              ...(requestedTurnId ? { id: requestedTurnId } : {}),
               roomId,
               seq: nextSeq,
               userMessage,
               status: 'live',
               idempotencyKey: key,
               lines: [],
-              grokRuntimeMode: grokDecision.mode,
-              grokRuntimeVersion: grokDecision.version,
-              grokWorkflowInstanceId,
-              // Durable turns are owned by the Cloudflare Workflow from the
-              // instant they are admitted. Leaving them at ACCEPTED allowed
-              // the legacy stuck-turn sweeper to launch a second Employees
-              // executor before the Workflow claimed GROK_RUNNING.
-              executionPhase: grokModeAtLeast(grokDecision.mode, 'durable_assignments')
-                ? 'GROK_QUEUED'
-                : 'ACCEPTED',
             },
           });
           await tx.hyperRoom.update({
@@ -13372,20 +12185,7 @@ Write the persona now.`;
           return created;
         });
 
-        if (createdNew) {
-          await controlUsageService.record({
-            orgId: current.session.orgId,
-            userId: current.session.userId,
-            type: 'hyperAgentRuns',
-            quantity: 1,
-            source: 'hyperagents',
-            idempotencyKey: `hyperagent-run:${turn.id}`,
-            metadata: { turn_id: turn.id, room_id: roomId },
-          });
-          if (!hyperCredit.duplicate) await controlCreditService.settle({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
-        } else if (!hyperCredit.duplicate) {
-          await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
-        }
+        if (createdNew) planEnforcer.recordUsage(current.session.orgId, 'hyperAgentRuns', 1);
 
         const isIndependentGrowthRun = room.agentConnectors?._domain_home === true
           && String(room.roomTag || room.room_tag || 'general') === 'general'
@@ -13481,9 +12281,6 @@ Write the persona now.`;
             room_goal: room.goal || '',
             room_mode: roomExecutionMode(room),
             task_tag: isHq ? 'HQ' : roomExecutionTag(room),
-            grok_runtime_mode: grokDecision.mode,
-            grok_runtime_version: grokDecision.version,
-            grok_workflow_instance_id: grokWorkflowInstanceId,
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -13492,52 +12289,10 @@ Write the persona now.`;
             console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
           }
         };
-        if (grokModeAtLeast(grokDecision.mode, 'durable_assignments')) {
-          const { startGrokRoomWorkflow } = await import('./hyperagents/grok-runtime-client.js');
-          try {
-            await startGrokRoomWorkflow({
-              turnId: turn.id, roomId, orgId: current.session.orgId, userId: current.session.userId,
-              mode: grokDecision.mode, version: grokDecision.version,
-            });
-          } catch (error) {
-            const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
-            await appendTurnEvent(prisma, turn.id, {
-              t: 'error', code: 'grok_workflow_admission_failed', message: error.message,
-            });
-            await sealTurn(prisma, turn.id, { status: 'failed', event: {
-              t: 'seal', status: 'failed', error: error.message, cost_tokens: 0,
-            } });
-            return jsonResponse(res, { turn_id: turn.id, status: 'failed', error: error.message }, 503);
-          }
-        } else {
-          if (grokModeAtLeast(grokDecision.mode, 'persistent_agents')) {
-            const { provisionGrokRoster } = await import('./hyperagents/grok-runtime-client.js');
-            try {
-              await provisionGrokRoster({
-                turnId: turn.id, roomId, orgId: current.session.orgId, userId: current.session.userId,
-                mode: grokDecision.mode, version: grokDecision.version,
-              });
-            } catch (error) {
-              const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
-              await appendTurnEvent(prisma, turn.id, {
-                t: 'error', code: 'grok_agent_provision_failed', message: error.message,
-              });
-              await sealTurn(prisma, turn.id, { status: 'failed', event: {
-                t: 'seal', status: 'failed', error: error.message, cost_tokens: 0,
-              } });
-              return jsonResponse(res, { turn_id: turn.id, status: 'failed', error: error.message }, 503);
-            }
-          }
-          setImmediate(() => dispatchSidecar().catch(err => console.warn('[hyper-rooms] async sidecar dispatch failed:', err.message)));
-        }
+        setImmediate(() => dispatchSidecar().catch(err => console.warn('[hyper-rooms] async sidecar dispatch failed:', err.message)));
 
-        return jsonResponse(res, {
-          turn_id: turn.id, status: turn.status,
-          runtime_mode: grokDecision.mode,
-          workflow_instance_id: grokWorkflowInstanceId,
-        }, 202);
+        return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
       } catch (err) {
-        if (!hyperCredit.duplicate) await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey }).catch(() => {});
         console.warn('[hyper-rooms] turn create failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -13584,218 +12339,6 @@ Write the persona now.`;
     // ─── Internal hook: sidecar writes turn events back here ───
     // Sidecar POSTs each JSONL event during execution; we append it to
     // the row and let any open SSE subscriber pick it up on next poll.
-    const grokRoutineTriggerMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/routines\/([0-9a-f-]{36})\/trigger$/i);
-    if (grokRoutineTriggerMatch && req.method === 'POST') {
-      const { verifyGrokWorkflowSecret, evaluateGrokRuntime, grokModeAtLeast, grokWorkflowId, startGrokRoomWorkflow } = await import('./hyperagents/grok-runtime-client.js');
-      if (!verifyGrokWorkflowSecret(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-      const rows = await prisma.$queryRawUnsafe(
-        `SELECT routine.*, runtime.agent_instance_id, room.user_id, room.participant_ids,
-                room.goal, room.project_id, room.room_mode, room.room_tag
-           FROM "hivemind"."hyper_agent_routines" routine
-           JOIN "hivemind"."hyper_agent_runtimes" runtime ON runtime.id=routine.agent_runtime_id
-           JOIN "hivemind"."hyper_rooms" room ON room.id=routine.room_id
-          WHERE routine.id=$1::uuid AND routine.status='active' AND room.archived_at IS NULL`,
-        grokRoutineTriggerMatch[1],
-      );
-      const routine = rows?.[0];
-      if (!routine) return jsonResponse(res, { error: 'Routine not found' }, 404);
-      const decision = await evaluateGrokRuntime({ orgId: String(routine.org_id), userId: String(routine.user_id) });
-      if (!grokModeAtLeast(decision.mode, 'routines')) return jsonResponse(res, { error: 'Routine feature disabled' }, 403);
-      const bucket = Math.floor(Date.now() / 60000);
-      const idempotencyKey = crypto.createHash('sha256').update(`routine:${routine.id}:${bucket}`).digest('hex').slice(0, 64);
-      const turn = await prisma.$transaction(async (tx) => {
-        const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
-        if (existing) return existing;
-        const last = await tx.hyperTurn.findFirst({ where: { roomId: String(routine.room_id) }, orderBy: { seq: 'desc' }, select: { seq: true } });
-        const created = await tx.hyperTurn.create({ data: {
-          roomId: String(routine.room_id), seq: Number(last?.seq || 0) + 1,
-          userMessage: `Execute playbook ${routine.playbook_id} version ${routine.playbook_version} for scheduled routine ${routine.id}.`,
-          status: 'live', idempotencyKey, lines: [], grokRuntimeMode: decision.mode,
-          grokRuntimeVersion: decision.version,
-        } });
-        const workflowInstanceId = grokWorkflowId(created.id, decision.version);
-        return tx.hyperTurn.update({ where: { id: created.id }, data: { grokWorkflowInstanceId: workflowInstanceId } });
-      });
-      await startGrokRoomWorkflow({
-        turnId: turn.id, roomId: String(routine.room_id), orgId: String(routine.org_id),
-        userId: String(routine.user_id), mode: decision.mode, version: decision.version,
-      });
-      await prisma.hyperAgentRoutine.update({ where: { id: String(routine.id) }, data: { lastRunAt: new Date() } });
-      return jsonResponse(res, { ok: true, turn_id: turn.id }, 202);
-    }
-
-    const grokAssignmentMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/work-orders\/([0-9a-f-]{36})\/(prepare|reconcile)$/i);
-    if (grokAssignmentMatch && req.method === 'POST') {
-      const { verifyGrokWorkflowSecret, normalizeGrokRuntimeMode, grokAssignmentWorkflowId } = await import('./hyperagents/grok-runtime-client.js');
-      if (!verifyGrokWorkflowSecret(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-      const body = await parseBody(req).catch(() => ({}));
-      const rows = await prisma.$queryRawUnsafe(
-        `SELECT wo.*, turn.grok_runtime_mode, turn.grok_runtime_version,
-                room.org_id AS room_org_id, room.user_id AS room_user_id,
-                result.id AS result_id, result.status AS result_status,
-                result.evidence AS result_evidence, result.artifacts AS result_artifacts,
-                (SELECT count(*)::int FROM "hivemind"."hyper_tool_receipts" receipt
-                  WHERE receipt.work_order_id=wo.id AND receipt.status='completed') AS receipt_count
-           FROM "hivemind"."hyper_work_orders" wo
-           JOIN "hivemind"."hyper_turns" turn ON turn.id=wo.turn_id
-           JOIN "hivemind"."hyper_rooms" room ON room.id=wo.room_id
-           LEFT JOIN LATERAL (
-             SELECT id, status, evidence, artifacts FROM "hivemind"."hyper_work_results"
-              WHERE work_order_id=wo.id ORDER BY attempt DESC, created_at DESC LIMIT 1
-           ) result ON true
-          WHERE wo.id=$1::uuid`, grokAssignmentMatch[1],
-      );
-      const order = rows?.[0];
-      const valid = order && String(order.room_org_id) === String(body.org_id)
-        && String(order.room_user_id) === String(body.user_id)
-        && String(order.turn_id) === String(body.turn_id)
-        && String(order.room_id) === String(body.room_id)
-        && String(order.agent_instance_id) === String(body.agent_instance_id)
-        && normalizeGrokRuntimeMode(order.grok_runtime_mode) === normalizeGrokRuntimeMode(body.mode)
-        && Number(order.grok_runtime_version) === Number(body.processing_version);
-      if (!valid) return jsonResponse(res, { error: 'Assignment not found' }, 404);
-      if (grokAssignmentMatch[2] === 'prepare') {
-        const workflowId = grokAssignmentWorkflowId(order.id, order.processing_version);
-        await prisma.$executeRawUnsafe(
-          `UPDATE "hivemind"."hyper_work_orders" SET workflow_instance_id=$1, updated_at=now()
-            WHERE id=$2::uuid AND org_id=$3::uuid`, workflowId, order.id, order.org_id,
-        );
-        return jsonResponse(res, { ok: true, work_order_id: String(order.id), workflow_instance_id: workflowId });
-      }
-      if (!['completed', 'failed', 'rejected'].includes(String(order.status))) {
-        return jsonResponse(res, { error: 'assignment_not_terminal', retryable: true, status: order.status }, 409);
-      }
-      if (order.status !== 'completed' || order.result_status !== 'completed') {
-        return jsonResponse(res, { error: order.error || 'assignment_failed', retryable: false }, 422);
-      }
-      const requiresReceipt = Array.isArray(order.required_evidence)
-        && order.required_evidence.some((value) => /provider[_ -]?receipt|external[_ -]?action/i.test(String(value)));
-      if (requiresReceipt && Number(order.receipt_count || 0) < 1) {
-        return jsonResponse(res, { error: 'required_provider_receipt_missing', retryable: false }, 422);
-      }
-      return jsonResponse(res, {
-        ok: true, work_order_id: String(order.id), result_id: String(order.result_id),
-        evidence: order.result_evidence || [], artifacts: order.result_artifacts || [],
-      });
-    }
-
-    const grokWorkflowMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/turns\/([0-9a-f-]{36})\/(prepare|execute|reconcile)$/i);
-    if (grokWorkflowMatch && req.method === 'POST') {
-      const { verifyGrokWorkflowSecret, normalizeGrokRuntimeMode } = await import('./hyperagents/grok-runtime-client.js');
-      if (!verifyGrokWorkflowSecret(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-      const body = await parseBody(req).catch(() => ({}));
-      const turnId = grokWorkflowMatch[1];
-      const action = grokWorkflowMatch[2];
-      const turn = await prisma.hyperTurn.findUnique({ where: { id: turnId }, include: { room: true } });
-      if (!turn || turn.room.orgId !== body.org_id) return jsonResponse(res, { error: 'Not found' }, 404);
-      if (turn.grokRuntimeMode !== normalizeGrokRuntimeMode(body.mode)
-          || Number(turn.grokRuntimeVersion) !== Number(body.processing_version)) {
-        return jsonResponse(res, { error: 'latched_runtime_mismatch', retryable: false }, 409);
-      }
-      if (action === 'prepare') {
-        const participants = turn.room.participantIds?.length
-          ? await prisma.digitalEmployee.findMany({
-              where: { id: { in: turn.room.participantIds }, orgId: turn.room.orgId, archivedAt: null, status: { not: 'paused' } },
-              select: {
-                id: true, slug: true, name: true, roleArchetype: true,
-                tools: true, enabledConnectors: true, status: true,
-              },
-            })
-          : [];
-        const manifests = [];
-        for (const employee of participants) {
-          const digest = crypto.createHash('sha256')
-            .update(`${turn.room.orgId}:${employee.id}:v${turn.grokRuntimeVersion}`).digest('hex').slice(0, 32);
-          const manifest = {
-            employee_id: employee.id,
-            agent_instance_id: `ha-${digest}-v${turn.grokRuntimeVersion}`,
-            slug: employee.slug, name: employee.name,
-            lane: deriveCsiLane(employee), tools: employee.tools || [],
-            connectors: employee.enabledConnectors || [], status: employee.status,
-            processing_version: turn.grokRuntimeVersion,
-          };
-          await prisma.hyperAgentRuntime.upsert({
-            where: { employeeId: employee.id },
-            create: {
-              orgId: turn.room.orgId, employeeId: employee.id,
-              agentInstanceId: manifest.agent_instance_id,
-              processingVersion: turn.grokRuntimeVersion, capabilityManifest: manifest,
-            },
-            update: {
-              processingVersion: turn.grokRuntimeVersion, capabilityManifest: manifest,
-            },
-          });
-          manifests.push(manifest);
-        }
-        const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
-        await appendTurnEvent(prisma, turn.id, {
-          t: 'roster_evaluated', runtime_mode: turn.grokRuntimeMode,
-          processing_version: turn.grokRuntimeVersion, agents: manifests,
-        });
-        return jsonResponse(res, { ok: true, agents: manifests });
-      }
-      if (action === 'reconcile') {
-        if (!['complete', 'failed', 'cost_capped'].includes(turn.status)) {
-          return jsonResponse(res, { error: 'turn_not_terminal', retryable: true, status: turn.status }, 409);
-        }
-        const unfinishedAssignments = await prisma.hyperWorkOrder.count({
-          where: {
-            turnId: turn.id,
-            status: { notIn: ['completed', 'failed', 'blocked', 'cancelled'] },
-          },
-        });
-        if (unfinishedAssignments > 0) {
-          return jsonResponse(res, {
-            error: 'durable_assignments_not_terminal', retryable: true,
-            unfinished_assignments: unfinishedAssignments,
-          }, 409);
-        }
-        const failed = turn.status !== 'complete';
-        return jsonResponse(res, {
-          ok: !failed, terminal: true, status: turn.status,
-          verification: turn.verificationVerdict || {}, active_agents: turn.activeAgents || [],
-          ...(failed ? { error: turn.terminalReason || 'turn_failed', retryable: false } : {}),
-        }, failed ? 422 : 200);
-      }
-
-      if (['complete', 'failed', 'cost_capped'].includes(turn.status)) {
-        return jsonResponse(res, { ok: turn.status === 'complete', terminal: true, reused: true, status: turn.status });
-      }
-      const claim = await prisma.$executeRawUnsafe(
-        `UPDATE "hivemind"."hyper_turns"
-            SET execution_phase='GROK_RUNNING', last_progress_at=now(), terminal_reason=NULL
-          WHERE id=$1::uuid AND (
-            execution_phase IN ('ACCEPTED','GROK_QUEUED')
-            OR (execution_phase='GROK_RUNNING' AND last_progress_at < now() - interval '10 minutes')
-          )`,
-        turn.id,
-      );
-      if (!claim) return jsonResponse(res, { error: 'turn_execution_already_claimed', retryable: true }, 409);
-      const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
-      await appendTurnEvent(prisma, turn.id, {
-        t: 'workflow_started', workflow_instance_id: turn.grokWorkflowInstanceId,
-        runtime_mode: turn.grokRuntimeMode, processing_version: turn.grokRuntimeVersion,
-      });
-      try {
-        const response = await dispatchHyperRoomTurn({
-          room_id: turn.roomId, turn_id: turn.id, user_id: turn.room.userId, org_id: turn.room.orgId,
-          user_message: turn.userMessage, participant_ids: turn.room.participantIds || [],
-          project_id: turn.room.projectId || null, room_goal: turn.room.goal || '',
-          room_mode: roomExecutionMode(turn.room), task_tag: roomExecutionTag(turn.room),
-          grok_runtime_mode: turn.grokRuntimeMode,
-          grok_runtime_version: turn.grokRuntimeVersion,
-          grok_workflow_instance_id: turn.grokWorkflowInstanceId,
-          callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
-        });
-        return jsonResponse(res, { ok: true, dispatched: true, response: response || null });
-      } catch (error) {
-        await prisma.hyperTurn.update({
-          where: { id: turn.id }, data: { executionPhase: 'GROK_QUEUED', terminalReason: String(error.message || error) },
-        }).catch(() => {});
-        return jsonResponse(res, { error: error.message, retryable: true }, 503);
-      }
-    }
-
     if (pathname === '/internal/hyper/turn-event' && req.method === 'POST') {
       const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
       const routeResult = await handleInternalHyperTurnEventRoute({
@@ -13811,67 +12354,6 @@ Write the persona now.`;
       if (routeResult?.statusCode) return routeResult;
       const { body } = routeResult || {};
       try {
-        const realtimeScope = await prisma.hyperTurn.findUnique({
-          where: { id: body.turn_id },
-          select: {
-            roomId: true, grokRuntimeMode: true,
-            room: { select: { orgId: true } },
-          },
-        }).catch(() => null);
-        if (realtimeScope) {
-          const { grokModeAtLeast, publishGrokRoomEvent } = await import('./hyperagents/grok-runtime-client.js');
-          if (grokModeAtLeast(realtimeScope.grokRuntimeMode, 'persistent_agents')) {
-            void publishGrokRoomEvent({
-              orgId: realtimeScope.room.orgId, roomId: realtimeScope.roomId, event: body.event,
-            }).catch((error) => console.warn('[grok-hyperagents] realtime publish failed:', error.message));
-          }
-        }
-        if (body.event?.t === 'agent_tool_receipt' && body.event.work_order_id
-            && body.event.agent_instance_id) {
-          const scope = await prisma.hyperTurn.findUnique({
-            where: { id: body.turn_id }, select: { roomId: true, room: { select: { orgId: true } } },
-          });
-          const workOrder = scope && await prisma.hyperWorkOrder.findFirst({
-            where: {
-              id: String(body.event.work_order_id), turnId: body.turn_id,
-              roomId: scope.roomId, orgId: scope.room.orgId,
-              agentInstanceId: String(body.event.agent_instance_id),
-            }, select: { id: true },
-          });
-          if (!workOrder) throw new Error('tool_receipt_scope_mismatch');
-          const actionKey = crypto.createHash('sha256')
-            .update(String(body.event.action_key || body.event.event_id || '')).digest('hex');
-          await prisma.hyperToolReceipt.create({ data: {
-            orgId: scope.room.orgId, roomId: scope.roomId, turnId: body.turn_id,
-            workOrderId: workOrder.id, agentInstanceId: String(body.event.agent_instance_id),
-            actionKey, adapter: String(body.event.adapter || 'tool').slice(0, 80),
-            status: String(body.event.status || 'completed').slice(0, 24),
-            providerReceipt: body.event.provider_receipt || {},
-            artifactRefs: Array.isArray(body.event.artifact_refs) ? body.event.artifact_refs : [],
-          } }).catch((error) => {
-            if (error?.code !== 'P2002') throw error;
-          });
-        }
-        if (body.event?.t === 'agent_assignment_started' && body.event.work_order_id
-            && body.event.agent_instance_id) {
-          const runtime = await prisma.hyperTurn.findUnique({
-            where: { id: body.turn_id },
-            select: {
-              roomId: true, grokRuntimeMode: true, grokRuntimeVersion: true,
-              room: { select: { orgId: true, userId: true } },
-            },
-          });
-          const { grokModeAtLeast, startGrokAssignmentWorkflow } = await import('./hyperagents/grok-runtime-client.js');
-          if (runtime && grokModeAtLeast(runtime.grokRuntimeMode, 'durable_assignments')) {
-            await startGrokAssignmentWorkflow({
-              turnId: body.turn_id, roomId: runtime.roomId,
-              workOrderId: body.event.work_order_id,
-              agentInstanceId: body.event.agent_instance_id,
-              orgId: runtime.room.orgId, userId: runtime.room.userId,
-              mode: runtime.grokRuntimeMode, version: runtime.grokRuntimeVersion,
-            });
-          }
-        }
         if (body.event.t === 'growth_plan_contract') {
           try {
             const sourceTurn = await prisma.hyperTurn.findUnique({
@@ -13902,16 +12384,6 @@ Write the persona now.`;
         const { handleCampaignRoomEvent } = await import('./campaigns/pipeline.js');
         await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
         if (body.event.t === 'seal') {
-          // Reconcile product usage at the one lifecycle boundary shared by
-          // every execution path. This is idempotent with the manual-turn
-          // admission path and covers task/HQ/runtime-created turns that never
-          // pass through POST /v1/hyper-rooms/:id/turns.
-          try {
-            const metering = await meterHyperAgentTurn(body.turn_id);
-            if (!metering.metered) console.warn('[hyper-meter] turn not metered', body.turn_id, metering.reason);
-          } catch (meterError) {
-            console.warn('[hyper-meter] reconciliation failed:', body.turn_id, meterError.message);
-          }
           // METER the turn's LLM token cost against the org's plan. HyperAgents was a billing dead-end
           // (cost_tokens stored on hyperTurn but never billed). Resolve org from the turn's room → record.
           try {
@@ -13967,18 +12439,6 @@ Write the persona now.`;
           try {
             await recordHqActivity(prisma, body.turn_id, body.event);
           } catch (e) { console.warn('[hq-activity] hook failed:', e.message); }
-
-          // A Day-1 Workflow may already be waiting for this seal. Workflows
-          // buffers early events, so this is safe even when the room finishes
-          // before the instance reaches waitForEvent. Delivery remains gated
-          // by the persisted sealed turn inside deliverDayOneFirstMove.
-          void notifyDayOneWorkflowCompletion({
-            prisma,
-            turnId: body.turn_id,
-            status: body.event.status || 'complete',
-          }).then((result) => {
-            if (!result.ok && !result.skipped) console.warn('[day1] completion event failed:', result.reason);
-          }).catch((error) => console.warn('[day1] completion event failed:', error.message));
         }
 
         // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──
@@ -14052,62 +12512,12 @@ Write the persona now.`;
           logger.warn({ err: _artifactErr.message, turn_id: body.turn_id }, '[hyper-rooms] artifact persist failed (best-effort)');
         }
 
-        const controlTurn = await prisma.hyperTurn.findUnique({
-          where: { id: body.turn_id }, select: { controlState: true, steeringMessages: true },
-        }).catch(() => null);
-        return jsonResponse(res, {
-          ...(routeResult?.response || { ok: true }),
-          control: controlTurn?.controlState || { action: 'run', revision: 0 },
-          steering_messages: controlTurn?.steeringMessages || [],
-        });
+        return jsonResponse(res, { ok: true });
       } catch (err) {
         console.warn('[hyper-rooms] turn-event append failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
     }
-
-    // ─── Internal HIVE-MIND capability endpoints ──────────────
-    // The hm-core side of the `extra_agent_tools` contract. The agent runtime is
-    // a separate service with no database credentials, so it reaches these over
-    // HTTP with the internal key plus the resolved principal. Every handler
-    // resolves the principal from the headers (never the body) and delegates to a
-    // service hm-core already owns — hm-core stays the tenancy authority.
-    if (pathname.startsWith('/internal/hivemind/') || pathname === '/internal/hyper/prospects') {
-      const apiKey = req.headers['x-api-key']
-        || req.headers['authorization']?.replace(/^Bearer\s+/i, '')
-        || '';
-      if (!hasInternalApiKey(apiKey)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-
-      if (pathname === '/internal/hivemind/recall' && req.method === 'POST') {
-        return handleInternalRecallRoute({ req, res, jsonResponse, parseBody, prisma });
-      }
-      if (pathname === '/internal/hivemind/memories' && req.method === 'POST') {
-        return handleInternalSaveMemoryRoute({ req, res, jsonResponse, parseBody, prisma });
-      }
-      if (pathname === '/internal/hivemind/company-context' && req.method === 'GET') {
-        return handleInternalCompanyContextRoute({ req, res, jsonResponse, prisma });
-      }
-      if (pathname === '/internal/hivemind/web-search' && req.method === 'POST') {
-        return handleInternalWebSearchRoute({ req, res, jsonResponse, parseBody, prisma });
-      }
-      if (pathname === '/internal/hivemind/artifacts' && req.method === 'POST') {
-        return handleInternalRecordArtifactRoute({ req, res, jsonResponse, parseBody, prisma });
-      }
-      if (pathname === '/internal/hivemind/composio/execute' && req.method === 'POST') {
-        return handleInternalComposioExecuteRoute({
-          req, res, jsonResponse, parseBody, prisma, composioService,
-        });
-      }
-      if (pathname === '/internal/hivemind/composio/tools' && req.method === 'GET') {
-        return handleInternalComposioToolsRoute({ req, res, jsonResponse, prisma, composioService });
-      }
-      if (pathname === '/internal/hyper/prospects' && req.method === 'POST') {
-        return handleInternalSaveProspectRoute({ req, res, jsonResponse, parseBody, prisma });
-      }
-      // GET /internal/hyper/prospects is served by the earlier route, which now
-      // reads the principal from headers as well as query params.
-    }
-    // ─── End internal HIVE-MIND capability endpoints ──────────
 
     // GET /v1/hyper-rooms/:roomId/artifacts — CSI artifact read
     const artifactsMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/artifacts$/);
@@ -14136,52 +12546,462 @@ Write the persona now.`;
       }
       return jsonResponse(res, result);
     }
-
-    // Generated HyperRoom artifacts are tenant-scoped SourceArtifacts. HTML is
-    // served with a restrictive CSP and rendered by the frontend in a sandboxed
-    // iframe; previews are immutable browser-validation receipts.
-    const hyperArtifactMatch = pathname.match(/^\/v1\/hyper-artifacts\/([0-9a-f-]{36})(?:\/(preview))?$/);
-    if (hyperArtifactMatch && req.method === 'GET') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const artifact = await readHyperArtifact({
-        prisma,
-        artifactId: hyperArtifactMatch[1],
-        orgId: current.session.orgId,
-      });
-      if (!artifact) return jsonResponse(res, { error: 'Artifact not found' }, 404);
-      const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload : {};
-      if (hyperArtifactMatch[2] === 'preview') {
-        const viewport = url.searchParams.get('viewport') === 'mobile' ? 'mobile' : 'desktop';
-        const encoded = payload.previews?.[viewport];
-        if (!encoded) return jsonResponse(res, { error: 'Artifact preview unavailable' }, 404);
-        const image = Buffer.from(String(encoded), 'base64');
-        res.writeHead(200, {
-          'Content-Type': 'image/jpeg',
-          'Content-Length': image.length,
-          'Cache-Control': 'private, max-age=31536000, immutable',
-          'X-Content-Type-Options': 'nosniff',
-        });
-        res.end(image);
-        return;
-      }
-      const html = String(payload.html || '');
-      if (!html) return jsonResponse(res, { error: 'Artifact content unavailable' }, 404);
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Content-Length': Buffer.byteLength(html),
-        'Cache-Control': 'private, max-age=31536000, immutable',
-        'Content-Security-Policy': "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
-        'Cross-Origin-Resource-Policy': 'same-origin',
-        'X-Content-Type-Options': 'nosniff',
-        'X-Frame-Options': 'SAMEORIGIN',
-        'Referrer-Policy': 'no-referrer',
-      });
-      res.end(html);
-      return;
-    }
   }
   // ─── End Hyper Agents Rooms ───────────────────────────────
+
+  // ═══════════════════════════════════════════════════════════
+  // WorkRuns — the durable unit of work handed to the agent runtime
+  // ═══════════════════════════════════════════════════════════
+  // A WorkRun is what hm-core owns and what the AgentScope Agent Service
+  // executes. It outlives a browser session: closing the tab does not stop it,
+  // and reopening the UI re-attaches to the same run.
+  //
+  //   POST   /v1/workruns                 create + dispatch
+  //   GET    /v1/workruns                 list the caller's runs
+  //   GET    /v1/workruns/:id             one run (poll fallback)
+  //   GET    /v1/workruns/:id/stream      SSE progress
+  //   POST   /v1/workruns/:id/cancel      cancel
+  //   POST   /internal/workruns/:id/event runtime event sink (internal key)
+  //
+  // The runtime never learns what a WorkRun is beyond the id it is handed;
+  // hm-core never learns what an AgentScope session is beyond the id it stores.
+  // ═══════════════════════════════════════════════════════════
+  {
+    const {
+      dispatchWorkRun,
+      applyRuntimeEvent,
+      completeWorkRun,
+      transitionWorkRun,
+      WORK_RUN_STATUS,
+      isTerminal,
+    } = await import('./employees/work-runs.js');
+
+    const WORKRUN_ID_RE = /^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/cancel|\/session\/messages|\/session\/stream|\/chat)?$/;
+
+    // POST /v1/workruns — create a run and hand it to the runtime.
+    if (pathname === '/v1/workruns' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const goal = typeof body.goal === 'string' ? body.goal.trim() : '';
+      if (!goal) return jsonResponse(res, { error: 'goal is required' }, 400);
+
+      // The composer sends only goal + hyperagent + playbook + scope. Everything
+      // else — org, user, room, employee — is resolved here, because hm-core is
+      // the authority on identity and the client is not.
+      const hyperagentSlug = typeof body.hyperagent === 'string' ? body.hyperagent.trim() : null;
+      const playbookId = typeof body.playbook === 'string' ? body.playbook.trim() : null;
+
+      // Resolve the employee from the slug when one was named. A slug that does
+      // not resolve is a client error, not a silent fallback to a default agent.
+      let employeeId = null;
+      if (hyperagentSlug) {
+        const emp = await prisma.digitalEmployee.findFirst({
+          where: { orgId: current.session.orgId, slug: hyperagentSlug },
+          select: { id: true },
+        });
+        if (!emp) {
+          return jsonResponse(res, { error: `unknown hyperagent: ${hyperagentSlug}` }, 400);
+        }
+        employeeId = emp.id;
+      }
+
+      try {
+        const { workRun, turnId } = await dispatchWorkRun({
+          prisma,
+          orgId: current.session.orgId,
+          userId: current.session.userId,
+          goal,
+          employeeId,
+          roomId: typeof body.room_id === 'string' ? body.room_id : null,
+          hyperagentSlug,
+          playbookId,
+          playbookVersion: typeof body.playbook_version === 'string' ? body.playbook_version : null,
+          scope: body.scope && typeof body.scope === 'object' ? body.scope : {},
+          chatModelConfig: body.chat_model_config && typeof body.chat_model_config === 'object'
+            ? body.chat_model_config
+            : null,
+        });
+        return jsonResponse(res, { workrun: workRun, turn_id: turnId }, 202);
+      } catch (err) {
+        console.warn('[workruns] dispatch failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 502);
+      }
+    }
+
+    // GET /v1/workruns — the caller's runs, newest first.
+    if (pathname === '/v1/workruns' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
+      const status = url.searchParams.get('status');
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT id, org_id, user_id, employee_id, room_id, turn_id, goal, status,
+                agentscope_session_id, workspace_id, team_id, hyperagent_slug,
+                playbook_id, playbook_version, scope, result_artifact_ids,
+                result, error, started_at, heartbeat_at, completed_at,
+                created_at, updated_at
+           FROM "hivemind"."work_runs"
+          WHERE user_id = $1::uuid
+            AND ($2::text IS NULL OR status = $2)
+          ORDER BY created_at DESC
+          LIMIT $3`,
+        current.session.userId,
+        status || null,
+        limit,
+      );
+      return jsonResponse(res, { workruns: rows || [] });
+    }
+
+    const workRunMatch = pathname.match(WORKRUN_ID_RE);
+    if (workRunMatch) {
+      const [, workRunId, sub] = workRunMatch;
+
+      // GET /v1/workruns/:id/stream — SSE progress.
+      // The UI renders these events instead of inventing state client-side.
+      if (sub === '/events' && req.method === 'GET') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const after = Number(url.searchParams.get('after') || 0) || 0;
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT events FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid`,
+          workRunId,
+          current.session.userId,
+        );
+        if (!rows?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        const events = Array.isArray(rows[0].events) ? rows[0].events : [];
+        const sliced = events.filter((e) => Number(e?.seq || 0) > after);
+        return jsonResponse(res, { events: sliced, last_seq: events.reduce((m, e) => Math.max(m, Number(e?.seq || 0)), 0) });
+      }
+
+      if (sub === '/stream' && req.method === 'GET') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const owned = await prisma.$queryRawUnsafe(
+          'SELECT id FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid',
+          workRunId,
+          current.session.userId,
+        );
+        if (!owned?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+
+        // Poll the row rather than holding an in-process emitter. The run is
+        // driven by a *different* service, so an in-process bus would miss every
+        // event the runtime writes; the row is the only shared truth. The
+        // interval is short because this is a progress feed, not a transcript.
+        let cursor = 0;
+        let alive = true;
+        const POLL_MS = Number(process.env.WORKRUN_STREAM_POLL_MS || 1000);
+
+        const heartbeat = setInterval(() => {
+          if (!alive) return;
+          try { res.write(':\n\n'); } catch { alive = false; }
+        }, 15_000);
+
+        const close = () => {
+          alive = false;
+          clearInterval(heartbeat);
+          clearInterval(poll);
+          try { res.end(); } catch { /* already closed */ }
+        };
+
+        const poll = setInterval(async () => {
+          if (!alive) return;
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT status, events, result, error, result_artifact_ids,
+                      agentscope_session_id, workspace_id, team_id, completed_at
+                 FROM "hivemind"."work_runs" WHERE id = $1::uuid`,
+              workRunId,
+            );
+            const row = rows?.[0];
+            if (!row) { close(); return; }
+            const events = Array.isArray(row.events) ? row.events : [];
+            for (let i = cursor; i < events.length; i += 1) {
+              res.write(`id: ${i}\n`);
+              res.write(`event: ${events[i].t || 'event'}\n`);
+              res.write(`data: ${JSON.stringify(events[i])}\n\n`);
+            }
+            cursor = events.length;
+            // Terminal state: emit the final frame then close, so the client
+            // does not have to poll to learn the run ended.
+            if (isTerminal(row.status)) {
+              res.write(`event: workrun.state\ndata: ${JSON.stringify({
+                status: row.status,
+                result: row.result,
+                error: row.error,
+                artifact_ids: row.result_artifact_ids,
+                session_id: row.agentscope_session_id,
+                workspace_id: row.workspace_id,
+                team_id: row.team_id,
+                completed_at: row.completed_at,
+              })}\n\n`);
+              close();
+            }
+          } catch (err) {
+            if (alive) {
+              try {
+                res.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
+              } catch { alive = false; }
+            }
+          }
+        }, POLL_MS);
+
+        req.on('close', () => { if (alive) close(); });
+        return;
+      }
+
+      // AgentScope session, proxied through hm-core (browser never talks to the runtime).
+      if (sub === '/session/messages' && req.method === 'GET') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const owned = await prisma.$queryRawUnsafe(
+          'SELECT id, agentscope_session_id FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid',
+          workRunId,
+          current.session.userId,
+        );
+        if (!owned?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        try {
+          const bind = await internalFetch(`${(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '')}/workrun/${workRunId}`, {
+            service: 'hm-agent-runtime',
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            timeoutMs: 15_000,
+          });
+          const binding = await bind.json().catch(() => ({}));
+          if (!bind.ok) return jsonResponse(res, { error: binding.detail || 'runtime binding missing' }, bind.status === 404 ? 404 : 502);
+          const sid = binding.session_id || owned[0].agentscope_session_id;
+          const aid = binding.agent_id;
+          const msg = await internalFetch(
+            `${(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '')}/sessions/${encodeURIComponent(sid)}/messages?agent_id=${encodeURIComponent(aid)}&limit=100`,
+            { service: 'hm-agent-runtime', userId: current.session.userId, orgId: current.session.orgId, timeoutMs: 20_000 },
+          );
+          const payload = await msg.json().catch(() => ({}));
+          return jsonResponse(res, payload, msg.status);
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 502);
+        }
+      }
+
+      if (sub === '/session/stream' && req.method === 'GET') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const owned = await prisma.$queryRawUnsafe(
+          'SELECT id, agentscope_session_id FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid',
+          workRunId,
+          current.session.userId,
+        );
+        if (!owned?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        try {
+          const bind = await internalFetch(`${(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '')}/workrun/${workRunId}`, {
+            service: 'hm-agent-runtime',
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            timeoutMs: 15_000,
+          });
+          const binding = await bind.json().catch(() => ({}));
+          if (!bind.ok) return jsonResponse(res, { error: binding.detail || 'runtime binding missing' }, bind.status === 404 ? 404 : 502);
+          const sid = binding.session_id || owned[0].agentscope_session_id;
+          const aid = binding.agent_id;
+          const runtimeBase = (process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
+          const { buildInternalHeaders } = await import('./internal/internal-fetch.js');
+          const upstream = await fetch(
+            `${runtimeBase}/sessions/${encodeURIComponent(sid)}/stream?agent_id=${encodeURIComponent(aid)}`,
+            { headers: buildInternalHeaders({ userId: current.session.userId, orgId: current.session.orgId }) },
+          );
+          if (!upstream.ok || !upstream.body) {
+            return jsonResponse(res, { error: `runtime stream ${upstream.status}` }, 502);
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+          const reader = upstream.body.getReader();
+          const decoder = new TextDecoder();
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              res.write(decoder.decode(value, { stream: true }));
+            }
+          } finally {
+            try { res.end(); } catch { /* closed */ }
+          }
+        } catch (err) {
+          if (!res.headersSent) return jsonResponse(res, { error: err.message }, 502);
+          try { res.end(); } catch { /* closed */ }
+        }
+        return;
+      }
+
+      if (sub === '/chat' && req.method === 'POST') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const body = await parseBody(req).catch(() => ({}));
+        try {
+          const runtimeBase = (process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
+          const bind = await internalFetch(`${runtimeBase}/workrun/${workRunId}`, {
+            service: 'hm-agent-runtime',
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            timeoutMs: 15_000,
+          });
+          const binding = await bind.json().catch(() => ({}));
+          if (!bind.ok) return jsonResponse(res, { error: binding.detail || 'runtime binding missing' }, 404);
+          const text = String(body?.text || body?.goal || '').trim();
+          const input = (body?.input && typeof body.input === 'object' && Array.isArray(body.input.content))
+            ? body.input
+            : {
+                name: 'user',
+                role: 'user',
+                content: [{ type: 'text', text }],
+              };
+          if (!String(input.content?.[0]?.text || '').trim()) {
+            return jsonResponse(res, { error: 'text is required' }, 400);
+          }
+          const chat = await internalFetch(`${runtimeBase}/chat/`, {
+            service: 'hm-agent-runtime',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: {
+              agent_id: binding.agent_id,
+              session_id: binding.session_id,
+              input,
+            },
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            timeoutMs: 20_000,
+          });
+          const payload = await chat.json().catch(() => ({}));
+          return jsonResponse(res, payload, chat.status);
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 502);
+        }
+      }
+
+      // POST /v1/workruns/:id/cancel
+      if (sub === '/cancel' && req.method === 'POST') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const owned = await prisma.$queryRawUnsafe(
+          'SELECT id, status FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid',
+          workRunId,
+          current.session.userId,
+        );
+        if (!owned?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        const outcome = await transitionWorkRun(prisma, workRunId, WORK_RUN_STATUS.CANCELLED);
+        if (!outcome.ok) {
+          return jsonResponse(res, { error: outcome.reason, from: outcome.from }, 409);
+        }
+        return jsonResponse(res, { workrun: outcome.run });
+      }
+
+      // GET /v1/workruns/:id — poll fallback for clients that cannot hold SSE.
+      if (!sub && req.method === 'GET') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const rows = await prisma.$queryRawUnsafe(
+          'SELECT * FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid',
+          workRunId,
+          current.session.userId,
+        );
+        if (!rows?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        return jsonResponse(res, { workrun: rows[0] });
+      }
+    }
+
+    // POST /internal/workruns/:id/event — the runtime's event sink.
+    // Internal-key authenticated: this is service-to-service, and the runtime
+    // is the only caller. The event arrives in AgentScope's vocabulary and is
+    // normalized here, so neither side learns the other's event names.
+    const internalEventMatch = pathname.match(/^\/internal\/workruns\/([0-9a-f-]{36})\/event$/);
+    if (internalEventMatch && req.method === 'POST') {
+      const apiKey = req.headers['x-api-key']
+        || req.headers['authorization']?.replace(/^Bearer\s+/i, '')
+        || '';
+      if (!hasInternalApiKey(apiKey)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+      const body = await parseBody(req).catch(() => null);
+      if (!body?.event) return jsonResponse(res, { error: 'event is required' }, 400);
+      const workRunId = internalEventMatch[1];
+      try {
+        const result = await applyRuntimeEvent(prisma, workRunId, body.event);
+        // An explicit completion signal from the runtime closes the run with its
+        // result. Kept separate from the event normalization because completion
+        // carries a payload the event vocabulary does not model.
+        if (body.complete) {
+          await completeWorkRun(prisma, workRunId, {
+            result: body.result || {},
+            error: body.error || null,
+          });
+        }
+        return jsonResponse(res, { ok: true, ...result });
+      } catch (err) {
+        console.warn('[workruns] event apply failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+  }
+  // ─── End WorkRuns ─────────────────────────────────────────
+
+  // ─── Internal HIVE-MIND capability endpoints ──────────────
+  // The hm-core side of the `extra_agent_tools` contract. The agent runtime is
+  // a separate service with no database credentials, so it reaches these over
+  // HTTP with the internal key plus the resolved principal. Every handler
+  // resolves the principal from the headers (never the body) and delegates to a
+  // service hm-core already owns — hm-core stays the tenancy authority.
+  if (pathname.startsWith('/internal/hivemind/') || pathname === '/internal/hyper/prospects') {
+    const apiKey = req.headers['x-api-key']
+      || req.headers['authorization']?.replace(/^Bearer\s+/i, '')
+      || '';
+    if (!hasInternalApiKey(apiKey)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+
+    if (pathname === '/internal/hivemind/recall' && req.method === 'POST') {
+      return handleInternalRecallRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    if (pathname === '/internal/hivemind/memories' && req.method === 'POST') {
+      return handleInternalSaveMemoryRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    if (pathname === '/internal/hivemind/company-context' && req.method === 'GET') {
+      return handleInternalCompanyContextRoute({ req, res, jsonResponse, prisma });
+    }
+    if (pathname === '/internal/hivemind/web-search' && req.method === 'POST') {
+      return handleInternalWebSearchRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    if (pathname === '/internal/hivemind/artifacts' && req.method === 'POST') {
+      return handleInternalRecordArtifactRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    if (pathname === '/internal/hivemind/composio/execute' && req.method === 'POST') {
+      return handleInternalComposioExecuteRoute({
+        req, res, jsonResponse, parseBody, prisma, composioService,
+      });
+    }
+    if (pathname === '/internal/hivemind/composio/tools' && req.method === 'GET') {
+      return handleInternalComposioToolsRoute({ req, res, jsonResponse, prisma, composioService });
+    }
+    if (pathname === '/internal/hivemind/playbooks' && req.method === 'GET') {
+      return handleInternalPlaybookListRoute({ req, res, jsonResponse, prisma });
+    }
+    if (pathname === '/internal/hivemind/resource-access' && req.method === 'GET') {
+      return handleInternalResourceAccessRoute({ req, res, jsonResponse, prisma });
+    }
+    if (pathname === '/internal/hivemind/playbooks/get' && req.method === 'POST') {
+      return handleInternalPlaybookGetRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    if (pathname === '/internal/hyper/prospects' && req.method === 'POST') {
+      return handleInternalSaveProspectRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    // GET /internal/hyper/prospects is served by the earlier route (line ~8332),
+    // which now reads the principal from headers as well as query params.
+  }
+  // ─── End internal HIVE-MIND capability endpoints ──────────
 
   // ─── Referral campaigns and redemption ────────────────────
   // Preview is session-authenticated so campaigns are not an anonymous code
@@ -14317,7 +13137,12 @@ Write the persona now.`;
       const { knowledgeBaseUploads: _uploadTelemetry, ...usage } = await usageTracker.getUsage(orgId);
       const { knowledgeBaseUploads: _cumulativeUploadTelemetry, ...cumulative } = await usageTracker.getCumulativeUsage(orgId);
       const limitCheck = await usageTracker.checkLimits(orgId, plan);
-      const usageSummary = await planEnforcer.getUsageSummary(orgId);
+      const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
+      const usageSummary = await new PlanEnforcer(
+        prisma,
+        { getOrgPlan: async () => plan },
+        usageTracker,
+      ).getUsageSummary(orgId);
       return jsonResponse(res, {
         plan: {
           id: plan.id,
@@ -14358,7 +13183,6 @@ Write the persona now.`;
         cumulative_usage: cumulative,
         warnings: limitCheck.warnings || [],
         reminders: usageSummary.reminders || [],
-        credit_contract: 'monthly-credit-ledger-v1',
         exceeded: limitCheck.exceeded || [],
         stripe_enabled: billingMod.isEnabled(),
         all_plans: catalogPlans.map(p => ({
@@ -15255,22 +14079,6 @@ Write the persona now.`;
   }
 
   // ─── Proxy Routes (session-cookie → core API with master key) ─────
-  // Hosted local Cloudflare Workflows cannot call a loopback-only Core URL.
-  // This narrow service-to-service bridge is disabled outside explicit local
-  // mode and authenticates with the same dedicated Workflow secret at both
-  // boundaries. It never creates a browser session and never maps arbitrary
-  // paths into Core.
-  if (/^\/internal\/knowledge-ingest\/v1\/jobs\/[0-9a-f-]{36}\/(?:stages\/(?:acquire|materialize(?:\/(?:start|status))?|reconcile)|fail)$/.test(pathname)) {
-    return proxyKnowledgeWorkflowToCore(req, res, pathname);
-  }
-
-  // Cloudflare canonical-projection requests are authenticated and replay
-  // fenced by Core. Preserve their exact bytes and signature headers; never
-  // expose an arbitrary internal-path proxy or translate them into a session.
-  if (/^\/internal\/canonical-projection\/v1\/memories\/[0-9a-f-]{36}\/stages\/(?:load|reconstruct|resolve|normalize|persist|reconcile|complete|failed)$/.test(pathname)) {
-    return proxyCanonicalProjectionToCore(req, res, pathname);
-  }
-
   if (pathname.startsWith('/v1/proxy/')) {
     const current = await requireSession(req, res);
     if (!current) return;
@@ -15283,20 +14091,16 @@ Write the persona now.`;
       corePath = pathname.replace('/v1/proxy/', '/api/');
     }
 
-    const requestContentType = (req.headers['content-type'] || '').toLowerCase();
-    const isMultipart = requestContentType.startsWith('multipart/');
-    const isAudio = requestContentType.startsWith('audio/');
+    const isMultipart = (req.headers['content-type'] || '').startsWith('multipart/');
 
     // Read body: raw Buffer for multipart, parsed JSON for everything else
     let body = undefined;
     let rawBody = undefined;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if (isMultipart || isAudio) {
+      if (isMultipart) {
         try {
-          const maxRawBytes = isAudio
-            ? Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24) * 1024 * 1024
-            : Number(process.env.KNOWLEDGE_MULTIPART_MAX_BYTES || 52 * 1024 * 1024);
-          rawBody = (await parseBodyWithRaw(req, maxRawBytes)).raw;
+          const maxMultipartBytes = Number(process.env.KNOWLEDGE_MULTIPART_MAX_BYTES || 52 * 1024 * 1024);
+          rawBody = (await parseBodyWithRaw(req, maxMultipartBytes)).raw;
         } catch (error) {
           return jsonResponse(res, {
             error: error.code || 'payload_too_large',

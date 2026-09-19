@@ -276,18 +276,25 @@ export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
 /**
  * Execute one Composio tool for an org's connected account.
  *
- * @param {string} orgId — Composio user_id (tenant key)
+ * @param {string} orgId — the org whose connection is being used
  * @param {string} toolSlug — real Composio slug (e.g. 'LINKEDIN_GET_MY_INFO'),
  *   NOT the namespaced composio_<toolkit>_<slug> function name — callers
  *   dispatching from a tool_call should read `_composio.slug` off the
  *   matched schema from getSession()/getToolkitTools() rather than parse it
  *   back out of the function name.
  * @param {object} args — tool arguments
+ * @param {{ userId?: string }} [opts] — the connecting user. Composio keys a
+ *   connected account by an opaque `user_id` subject, and this deployment uses
+ *   `hivemind:<userId>` (see `composioConnectionSubject`). Executing under the
+ *   bare org id targets a DIFFERENT subject than the one the Connectors page
+ *   connected under, so the call fails with "no connected account" even though
+ *   the toolkit is visibly connected. Pass the same subject the connect flow
+ *   used.
  * @returns {Promise<{ successful: boolean, data: any, error: string|null }>}
  */
-export async function executeTool(orgId, toolSlug, args = {}) {
+export async function executeTool(orgId, toolSlug, args = {}, opts = {}) {
   const result = await composioPost(`/api/v3.1/tools/execute/${encodeURIComponent(toolSlug)}`, {
-    user_id: orgId,
+    user_id: composioConnectionSubject(orgId, opts),
     arguments: args || {},
     version: 'latest',
   });

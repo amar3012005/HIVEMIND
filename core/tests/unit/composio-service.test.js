@@ -35,3 +35,34 @@ test('Composio execution uses the v3.1 catalog with tenant-scoped structured arg
     else process.env.COMPOSIO_API_KEY = originalKey;
   }
 });
+
+test('Composio execute uses the connected HIVE user subject and makes one provider call', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.COMPOSIO_API_KEY;
+  const calls = [];
+  process.env.COMPOSIO_API_KEY = 'test-key';
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({ successful: true, data: { receipt: 'provider-receipt' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const { executeTool } = await import(`../../src/connectors/composio/composio-service.js?subject=${Date.now()}`);
+    const result = await executeTool(
+      'org-a',
+      'GOOGLESHEETS_CREATE_GOOGLE_SHEET1',
+      { title: 'receipt lookup only' },
+      { userId: 'user-a' },
+    );
+    assert.equal(result.successful, true);
+    assert.equal(calls.length, 1);
+    assert.equal(JSON.parse(calls[0].options.body).user_id, 'hivemind:user-a');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;
+    else process.env.COMPOSIO_API_KEY = originalKey;
+  }
+});

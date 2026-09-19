@@ -20,6 +20,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import Redis from 'ioredis';
+import { getOpsToolsManifest, invokeOpsTool, isOpsTool } from './ops-release-gateway.js';
 
 // ==========================================
 // Configuration
@@ -1436,7 +1437,7 @@ Use when you need what was posted in a known channel recently (e.g. monitoring a
     return tools.filter(t => !WRITE_TOOLS.has(t.name));
   }
 
-  return tools;
+  return [...tools, ...getOpsToolsManifest({ isMaster: options.isMaster === true })];
 }
 
 /**
@@ -2121,7 +2122,11 @@ export function handleInitialize(params, userId, orgId) {
  */
 export function handleToolsList(userId, orgId, options = {}) {
   return {
-    tools: generateToolsManifest(userId, orgId, { scopes: options.scopes, platform: options.platform })
+    tools: generateToolsManifest(userId, orgId, {
+      scopes: options.scopes,
+      platform: options.platform,
+      isMaster: options.isMaster === true,
+    })
   };
 }
 
@@ -2345,6 +2350,19 @@ function buildRelationship(relationship, relatedTo) {
 export async function handleToolCall(params, userId, orgId, apiClient, options = {}) {
   const { name, arguments: args } = params;
   const isMaster = options.isMaster === true;
+
+  if (isOpsTool(name)) {
+    if (!isMaster) return formatToolContent({ error: 'Operator access is required for SINGULANCE deployment tools.' });
+    try {
+      const result = await invokeOpsTool(name, args, {
+        requestedBy: `mcp:${userId || 'operator'}`,
+        fetchImpl: options.opsGatewayFetch || fetch,
+      });
+      return formatToolContent(result);
+    } catch (error) {
+      return formatToolContent({ ok: false, error: `Ops Gateway request failed: ${error.message}` });
+    }
+  }
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

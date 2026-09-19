@@ -5598,7 +5598,7 @@ exit \$RC
         result = {};
         break;
       case 'tools/list':
-        result = handleToolsList(userId, orgId, { scopes: consumer.scopes || ['*'] });
+        result = handleToolsList(userId, orgId, { scopes: consumer.scopes || ['*'], isMaster: !!consumer.master });
         break;
       case 'tools/call':
         result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!consumer.master });
@@ -9452,7 +9452,7 @@ exit \$RC
             break;
           case 'tools/list':
             // Connection-token path: scopes stored in connection context, default to ['*'] for issued tokens
-            result = handleToolsList(pathUserId, connectionOrgId, { scopes: connection?.scopes || ['*'] });
+            result = handleToolsList(pathUserId, connectionOrgId, { scopes: connection?.scopes || ['*'], isMaster: !!connection?.master });
             break;
           case 'tools/call':
             result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient, { isMaster: !!connection?.master });
@@ -10027,7 +10027,7 @@ exit \$RC
             result = {};
             break;
           case 'tools/list':
-            result = handleToolsList(userId, orgId, { scopes: principal.scopes || [] });
+            result = handleToolsList(userId, orgId, { scopes: principal.scopes || [], isMaster: !!principal?.master });
             break;
           case 'tools/call':
             result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!principal?.master });

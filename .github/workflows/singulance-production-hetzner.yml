@@ -10,11 +10,11 @@ on:
       services:
         description: Canonical quick-deploy service
         required: true
-        type: choice
-        options:
-          - core
-          - control-plane
-          - employees
+        type: string
+      harness_image:
+        description: Immutable Harness image digest when services includes harness-runner
+        required: false
+        type: string
       requested_by:
         description: Who triggered the Cloudflare Workflow
         required: false
@@ -56,6 +56,10 @@ jobs:
             set -euo pipefail
             export RELEASE_SESSION_ID="gha-${{ github.run_id }}"
             export RELEASE_MIN_DISK_GB="${RELEASE_MIN_DISK_GB:-12}"
-            /root/quick-deploy.sh singulance-main ${{ github.event.inputs.services }}
+            if [ -n "${{ github.event.inputs.harness_image }}" ]; then
+              export HIVEMIND_HARNESS_IMAGE="${{ github.event.inputs.harness_image }}"
+            fi
+            IFS=',' read -r -a services <<< "${{ github.event.inputs.services }}"
+            /root/quick-deploy.sh singulance-main "${services[@]}"
       - name: Canary API
         run: curl -fsS -o /dev/null https://api.singulancelabs.com/health

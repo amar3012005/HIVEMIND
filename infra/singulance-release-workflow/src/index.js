@@ -30,6 +30,10 @@ export default {
       const instance = await env.RELEASE.create({
         params: {
           artifact: body.artifact,
+          sha: body.sha,
+          services: body.services,
+          image: body.image,
+          note: body.note,
           requestedBy: body.requested_by || request.headers.get('x-requested-by') || 'unknown',
         },
       });
@@ -38,6 +42,7 @@ export default {
           instanceId: instance.id,
           status: '/v1/release/' + instance.id,
           artifact: body.artifact,
+          sha: body.sha,
         },
         { status: 202, headers: CORS },
       );

@@ -66,6 +66,41 @@ test('hosted MCP revocation invalidates signed tokens across lookups', async () 
   assert.equal(await hostedService.getHostedServerByToken(descriptor.connection.token, userId), null);
 });
 
+test('configured operator MCP tokens discover and invoke the Ops Gateway tools', async () => {
+  const originalEnv = {
+    SINGULANCE_OPS_GATEWAY_URL: process.env.SINGULANCE_OPS_GATEWAY_URL,
+    SINGULANCE_OPS_GATEWAY_TOKEN: process.env.SINGULANCE_OPS_GATEWAY_TOKEN,
+  };
+  process.env.SINGULANCE_OPS_GATEWAY_URL = 'https://ops.example.test';
+  process.env.SINGULANCE_OPS_GATEWAY_TOKEN = 'test-token';
+  try {
+    const hostedService = await loadHostedServiceModule(`hosted-mcp-ops=${Date.now()}`);
+    const userId = '00000000-0000-4000-8000-000000000333';
+    const visible = hostedService.handleToolsList(userId, 'org-1', { isMaster: true });
+    const hidden = hostedService.handleToolsList(userId, 'org-1', { isMaster: false });
+    assert.ok(visible.tools.some((tool) => tool.name === 'deploy_cloudflare_frontend'));
+    assert.equal(hidden.tools.some((tool) => tool.name === 'deploy_cloudflare_frontend'), false);
+
+    const result = await hostedService.handleToolCall({
+      name: 'deploy_cloudflare_frontend',
+      arguments: { sha: 'a'.repeat(40) },
+    }, userId, 'org-1', null, {
+      isMaster: true,
+      opsGatewayFetch: async (url, init) => {
+        assert.equal(url, 'https://ops.example.test/v1/release');
+        assert.equal(JSON.parse(init.body).artifact, 'frontend');
+        return new Response(JSON.stringify({ instanceId: 'release_123' }), { status: 202 });
+      },
+    });
+    assert.equal(JSON.parse(result.content[0].text).instanceId, 'release_123');
+  } finally {
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('hivemind_chat_context returns the server packet and escalates anchored fact recall once', async () => {
   const hostedService = await loadHostedServiceModule(`hosted-mcp-context=${Date.now()}`);
   const calls = [];

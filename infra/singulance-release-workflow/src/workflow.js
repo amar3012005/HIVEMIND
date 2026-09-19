@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 
-/** @typedef {'frontend' | 'core' | 'control-plane' | 'employees'} Artifact */
+/** @typedef {'frontend' | 'core' | 'control-plane' | 'employees' | 'core-services' | 'harness-runner'} Artifact */
 
 const ARTIFACTS = {
   frontend: {
@@ -34,11 +34,26 @@ const ARTIFACTS = {
     service: 'employees',
     canary: 'https://api.singulancelabs.com/health',
   },
+  'core-services': {
+    owner: 'amar3012005',
+    repo: 'HIVEMIND',
+    ref: 'singulance-main',
+    workflow: 'singulance-production-hetzner.yml',
+    canary: 'https://api.singulancelabs.com/health',
+  },
+  'harness-runner': {
+    owner: 'amar3012005',
+    repo: 'HIVEMIND',
+    ref: 'singulance-main',
+    workflow: 'singulance-production-hetzner.yml',
+    service: 'harness-runner',
+    canary: 'https://api.singulancelabs.com/health',
+  },
 };
 
 export class SingulanceProductionRelease extends WorkflowEntrypoint {
   /**
-   * @param {{ payload: { artifact: Artifact, requestedBy?: string } }} event
+ * @param {{ payload: { artifact: Artifact, sha?: string, services?: string[], image?: string, requestedBy?: string } }} event
    * @param {import('cloudflare:workers').WorkflowStep} step
    */
   async run(event, step) {
@@ -55,6 +70,10 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
       );
       if (!res.ok) throw new Error(`github ref ${spec.ref} → ${res.status}`);
       const body = await res.json();
+      const requestedSha = String(event.payload?.sha || '').trim();
+      if (requestedSha && requestedSha !== body.sha) {
+        throw new Error(`requested SHA ${requestedSha} is not current ${spec.repo}@${spec.ref} (${body.sha})`);
+      }
       return { sha: body.sha, ref: spec.ref, repo: `${spec.owner}/${spec.repo}` };
     });
 
@@ -68,6 +87,8 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
           inputs: {
             sha: sha.sha,
             ...(spec.service ? { services: spec.service } : {}),
+            ...(event.payload?.services ? { services: event.payload.services.join(',') } : {}),
+            ...(event.payload?.image ? { harness_image: event.payload.image } : {}),
             requested_by: event.payload.requestedBy || 'cloudflare-workflow',
           },
         }),

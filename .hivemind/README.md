@@ -60,10 +60,12 @@ descriptions are the live contract.
 
 ### Harness runner
 
-1. Push the exact Harness SHA.
-2. Use `deploy_harness_runner` in `hivemind-chat` mode with that SHA.
-3. It creates an immutable runner image, recreates only `hivemind-harness-runner`, and reports the
-   previous image. Verify health, bootstrap, and the changed chat behavior.
+1. Build and push an immutable Harness image from the exact pushed Harness SHA through the Harness
+   release path.
+2. Use `deploy_harness_runner` with the matching pushed HIVE-MIND SHA and that image digest.
+3. It recreates only `hivemind-harness-runner` (and its tunnel companion), reports the previous
+   image, and preserves the rest of the stack. Verify health, bootstrap, and the changed chat
+   behavior.
 
 Do not deploy a frontend-only change through container tooling, and do not rebuild Core or Harness
 for an unrelated Worker deployment.

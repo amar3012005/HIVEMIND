@@ -101,3 +101,61 @@ export function lifecyclePortraitReportShell({ title, pages, reportLabel = 'LIFE
   @page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:${CARTESIA.paper};color:${CARTESIA.ink};font-family:${CARTESIA.sans}}.portrait-page{position:relative;width:210mm;height:297mm;overflow:hidden;background:${CARTESIA.paper};page-break-after:always}.portrait-page:last-child{page-break-after:auto}.global-brand{position:fixed;z-index:5;top:6.5mm;left:10mm}.brand-lockup{display:flex;align-items:center;gap:2mm}.brand-lockup svg{width:8mm;height:8mm}.brand-word{font-size:12px;line-height:13px;font-weight:800;letter-spacing:-.4px}.brand-sub{margin-top:1px;font:700 4px/6px ${CARTESIA.mono};letter-spacing:1px;color:#999}.brand-sub span{color:${CARTESIA.blue}}.portrait-body{height:297mm;padding:25mm 11mm 16mm}.report-section{break-inside:avoid}.report-section+.report-section{margin-top:6mm;padding-top:6mm;border-top:1px solid ${CARTESIA.line}}.report-head{display:none}.report-body{padding:0}.split{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:6mm;height:auto;align-items:start}.split.reverse>.copy-panel{order:2}.split.reverse>.visual-panel{order:1}.copy-panel{display:flex;min-width:0;flex-direction:column;justify-content:flex-start}.visual-panel{min-width:0;align-self:start}.eyebrow{font:700 5px/8px ${CARTESIA.mono};letter-spacing:1.4px;color:${CARTESIA.blue};text-transform:uppercase}.display{margin:2mm 0 0;font-size:23px;line-height:22px;letter-spacing:-1px}.lede{margin:2mm 0 0;font-size:8px;line-height:12px;color:${CARTESIA.body}}.rule{border-top:1px solid ${CARTESIA.line};margin:3mm 0}.facts{display:grid;gap:1mm;margin-top:2mm}.fact{font-size:6.5px;line-height:9px;color:${CARTESIA.ink};padding-left:4mm;position:relative}.fact:before{content:'✓';position:absolute;left:0;color:${CARTESIA.blue}}.browser{background:#fff;border:1px solid ${CARTESIA.line};box-shadow:0 4mm 9mm rgba(10,10,10,.07);break-inside:avoid}.browser-top{height:7mm;border-bottom:1px solid ${CARTESIA.line};padding:2mm 3mm;display:flex;align-items:center}.traffic{width:4px;height:4px;border-radius:50%;margin-right:3px}.red{background:#ff6b5f}.amber{background:#f4bc4f}.green{background:#52c66d}.browser-label{margin-left:4px;font:700 4px/6px ${CARTESIA.mono};letter-spacing:.8px;color:#999}.browser-body{padding:3.5mm}.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid ${CARTESIA.line};border-bottom:1px solid ${CARTESIA.line};margin-top:3mm}.stat{padding:2mm}.stat+.stat{border-left:1px solid ${CARTESIA.line}}.stat-label{font:700 4px/6px ${CARTESIA.mono};letter-spacing:.8px;color:#999}.stat-value{margin-top:1mm;font-size:15px;font-weight:800}.roster{display:grid;gap:.5mm}.person{display:grid;grid-template-columns:11mm 23mm 1fr;gap:1.5mm;align-items:center;padding:1.2mm 0;border-bottom:1px solid #eeeae4;break-inside:avoid}.person-avatar{width:10mm;height:10mm;border-radius:50%;overflow:hidden;background:#fff4f8;border:1px solid #f6c5dc}.person-avatar svg{display:block;width:100%;height:100%}.person-name{font-size:7px;font-weight:800}.person-role{margin-top:.5mm;font:700 3.5px/5px ${CARTESIA.mono};letter-spacing:.4px}.person-one-line{font-size:5px;line-height:7px;color:${CARTESIA.body}}.card-list{display:grid;grid-template-columns:1fr 1fr;gap:1.5mm}.card{padding:2mm;border:1px solid ${CARTESIA.line};background:#fff;break-inside:avoid}.card-kicker{font:700 4px/6px ${CARTESIA.mono};letter-spacing:.8px;color:${CARTESIA.blue}}.card-title{margin-top:.7mm;font-size:6.5px;line-height:8.5px;font-weight:700}.card-copy{margin-top:.7mm;font-size:5px;line-height:7px;color:${CARTESIA.body}}.stripe{height:4mm;border-top:1px solid ${CARTESIA.line};border-bottom:1px solid ${CARTESIA.line};background:repeating-linear-gradient(90deg,transparent 0,transparent 2px,rgba(0,0,0,.035) 2px,rgba(0,0,0,.035) 3px)}.global-footer{position:fixed;z-index:5;left:10mm;right:10mm;bottom:6mm;padding-top:2mm;border-top:1px solid ${CARTESIA.line};display:flex;justify-content:space-between;font:700 5px/8px ${CARTESIA.mono};letter-spacing:1px;color:#999}.global-footer span:last-child{color:${CARTESIA.blue}}
   </style></head><body><div class="global-brand">${brandLockup({ compact: true })}</div><footer class="global-footer"><span>SINGULANCE · HIVEMIND OPERATING SYSTEM</span><span>${escapeHtml(reportLabel)}</span></footer>${portraitPages.join('')}</body></html>`;
 }
+// == v2 portrait report system ============================================
+// Real typography (Space Grotesk display + IBM Plex Mono labels) loaded from
+// Google Fonts - verified reachable from the hm-playwright PDF renderer.
+// Every tenant gets SINGULANCE branding; company identity is data, never a
+// template branch.
+export const REPORT_FONTS_LINK = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">';
+export const REPORT_DISPLAY = "'Space Grotesk','Noto Sans',Arial,sans-serif";
+export const REPORT_MONO = "'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
+
+export function reportPage({ body, pageNumber = 1, totalPages = 1, footerWord = '' }) {
+  return `<section class="rpage"><main class="rbody">${body}</main><footer class="rfoot"><span class="rfoot-brand">SINGULANCE &middot; HIVEMIND OPERATING SYSTEM</span><span class="rfoot-word">${escapeHtml(footerWord)}</span><span class="rfoot-num">${String(pageNumber).padStart(2, '0')} / ${String(totalPages).padStart(2, '0')}</span></footer></section>`;
+}
+
+export function reportShell({ title, pages, reportLabel = 'LIFECYCLE REPORT' }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>${REPORT_FONTS_LINK}<style>
+  @page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:${CARTESIA.paper};color:${CARTESIA.ink};font-family:${REPORT_DISPLAY};-webkit-font-smoothing:antialiased}
+  .rpage{position:relative;width:210mm;height:297mm;overflow:hidden;background:${CARTESIA.paper};page-break-after:always}
+  .rpage:last-child{page-break-after:auto}
+  .rbody{height:297mm;padding:26mm 14mm 22mm;display:flex;flex-direction:column}.rpage+.rpage .rbody{padding-top:34mm}
+  .rfoot{position:absolute;left:14mm;right:14mm;bottom:9mm;display:flex;justify-content:space-between;align-items:baseline;padding-top:2.5mm;border-top:1px solid ${CARTESIA.line};font:600 6.5px/9px ${REPORT_MONO};letter-spacing:1.2px;color:${CARTESIA.muted}}
+  .rfoot-brand{color:${CARTESIA.ink}}.rfoot-word{color:${CARTESIA.blue}}
+  .reyebrow{font:700 7px/10px ${REPORT_MONO};letter-spacing:2px;color:${CARTESIA.blue};text-transform:uppercase}
+  .rh1{margin:4mm 0 0;font-size:34px;line-height:1.04;letter-spacing:-1.4px;font-weight:700}
+  .rh2{margin:2.5mm 0 0;font-size:20px;line-height:1.12;letter-spacing:-.6px;font-weight:700}
+  .rlede{margin:3.5mm 0 0;font-size:10.5px;line-height:16px;color:${CARTESIA.body}}
+  .rrule{border-top:1px solid ${CARTESIA.line};margin:5mm 0}
+  .rstats{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid ${CARTESIA.line};background:#fff}
+  .rstat{padding:4.5mm}.rstat+.rstat{border-left:1px solid ${CARTESIA.line}}
+  .rstat b{display:block;font-size:26px;font-weight:700;letter-spacing:-1px}
+  .rstat span{font:600 6px/9px ${REPORT_MONO};letter-spacing:1.4px;color:${CARTESIA.muted};text-transform:uppercase}
+  .rcard{border:1px solid ${CARTESIA.line};background:#fff;padding:4.5mm;break-inside:avoid}
+  .rcard-kicker{font:700 6px/9px ${REPORT_MONO};letter-spacing:1.4px;color:${CARTESIA.blue};text-transform:uppercase}
+  .rcard-title{margin-top:1.5mm;font-size:11px;line-height:15px;font-weight:600}
+  .rcard-copy{margin-top:1.5mm;font-size:8.5px;line-height:13px;color:${CARTESIA.body}}
+  .rgrid2{display:grid;grid-template-columns:1fr 1fr;gap:3.5mm}
+  .rfact{font-size:9px;line-height:14px;color:${CARTESIA.ink};padding-left:4.5mm;position:relative;margin-top:2mm}
+  .rfact:before{content:'→';position:absolute;left:0;color:${CARTESIA.blue};font-weight:700}
+  .rchip{display:inline-block;font:600 6.5px/10px ${REPORT_MONO};letter-spacing:.8px;padding:1mm 2.5mm;border:1px solid ${CARTESIA.line};background:#fff;text-transform:uppercase}
+  .rshot{width:100%;border:1px solid ${CARTESIA.line};background:#fff;box-shadow:0 3mm 8mm rgba(10,10,10,.06)}
+  .rshot img{display:block;width:100%;height:auto}
+  .rshot-bar{height:6mm;border-bottom:1px solid ${CARTESIA.line};display:flex;align-items:center;padding:0 3mm;gap:1.5mm;background:#fff}
+  .rshot-dot{width:5px;height:5px;border-radius:50%}
+  .rshot-url{margin-left:2mm;font:500 6px/8px ${REPORT_MONO};letter-spacing:.6px;color:${CARTESIA.muted}}
+  .ragent{display:grid;grid-template-columns:16mm 1fr;gap:3.5mm;padding:4mm;border:1px solid ${CARTESIA.line};background:#fff;break-inside:avoid}
+  .ragent-avatar{width:15mm;height:15mm;border-radius:50%;overflow:hidden;border:1px solid ${CARTESIA.line}}
+  .ragent-avatar svg{display:block;width:100%;height:100%}
+  .ragent-name{font-size:12px;font-weight:700;letter-spacing:-.2px}
+  .ragent-role{margin-top:.8mm;font:700 6px/9px ${REPORT_MONO};letter-spacing:1.2px;text-transform:uppercase}
+  .ragent-copy{margin-top:1.5mm;font-size:8.5px;line-height:13px;color:${CARTESIA.body}}
+  .rnum{font:700 12px/14px ${REPORT_MONO};color:${CARTESIA.blue};letter-spacing:0}
+  .ritem{display:grid;grid-template-columns:10mm 1fr;gap:2.5mm;padding:3mm 0;border-bottom:1px solid ${CARTESIA.line};break-inside:avoid}
+  .ritem:last-child{border-bottom:0}
+  .rcover-band{position:absolute;top:0;left:0;right:0;height:2.5mm;background:linear-gradient(90deg,${CARTESIA.blue} 0,#22d3ee 45%,#a855f7 100%)}
+  .rquote{padding:5mm;background:${CARTESIA.ink};color:#fff}
+  .rquote q{font-size:12.5px;line-height:19px;font-weight:600}
+  .rquote-by{margin-top:3mm;font:700 6px/9px ${REPORT_MONO};letter-spacing:1.4px;color:#83b6ed}
+  </style></head><body><div style="position:fixed;z-index:5;top:6.5mm;left:14mm">${brandLockup({ compact: true })}</div>${pages.join('')}</body></html>`;
+}

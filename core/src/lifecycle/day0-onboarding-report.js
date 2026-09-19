@@ -1,6 +1,8 @@
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
 import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../email/templates/day0-company-onboarding.js';
+import { renderDayZeroPortraitV8 } from '../email/templates/day0-portrait-v8.js';
+import { buildDayZeroOnboardingReport } from '../email/templates/day0-company-onboarding.js';
 import { resolvePublicAppUrl } from '../public-frontend-url.js';
 
 const SENDING_LEASE_MS = 10 * 60 * 1000;
@@ -111,7 +113,26 @@ export async function startDayZeroOnboardingReport({
       const appBase = resolvePublicAppUrl();
       const appUrl = appBase.endsWith('/employees/mycompany') ? appBase : `${appBase}/employees/mycompany`;
       const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl });
-      const print = renderDayZeroOnboardingReportHtml(dashboardCompany, { appUrl });
+      // v8 portrait report: real typography + the actual website screenshot
+      // captured during onboarding (read from the shared data volume).
+      let screenshotDataUri = '';
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        const shotDir = path.join(process.env.HIVEMIND_DATA_DIR || '/app/data', 'hyper-screenshots');
+        let contentType = 'image/jpeg';
+        let shotPath = path.join(shotDir, `${orgId}.jpg`);
+        if (!fs.existsSync(shotPath)) {
+          shotPath = path.join(shotDir, `${orgId}.image`);
+          try { contentType = JSON.parse(fs.readFileSync(`${shotPath}.json`, 'utf8')).contentType || contentType; } catch { /* default */ }
+        }
+        if (fs.existsSync(shotPath)) {
+          const buf = fs.readFileSync(shotPath);
+          if (buf.length && buf.length < 3_000_000) screenshotDataUri = `data:${contentType};base64,${buf.toString('base64')}`;
+        }
+      } catch (shotErr) { console.warn('[day0] screenshot embed skipped:', shotErr.message); }
+      const v8Report = buildDayZeroOnboardingReport(dashboardCompany, { appUrl });
+      const print = { report: v8Report, html: renderDayZeroPortraitV8(v8Report, { screenshotDataUri, orgId }) };
       const pdf = await renderPdf(print.html);
       const delivery = await sendEmail({
         templateId: 'day0_company_onboarding',

@@ -113,6 +113,7 @@ import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './ema
 import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { narrativeLanguageInstruction, normalizePreferredLanguage } from './hyper/preferred-language.js';
+import { resolveHqTurnRoute } from './hyper/hq-turn-routing.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
@@ -450,32 +451,7 @@ async function createHyperRoom(data) {
 // the right kind room, and RUNS THERE — HQ stays a control room, not a work log.
 // Mirrors the sidecar keyword classifier (hyper/skills.resolve_room_kind) so no
 // round-trip is needed. Off-switch: HQ_DISPATCH=off.
-const _HQ_KIND_KEYWORDS = [
-  ['outreach', ['outreach', 'cold email', 'prospect', 'lead gen', 'leads', 'sales call', 'book meeting', 'reach out', 'sales sheet', 'campaign']],
-  ['research', ['competitor', 'market research', 'landscape', 'icp', 'market size', 'segment', 'industry trend', 'analyze market', 'research']],
-  ['content', ['content', 'blog', 'social', 'post', 'newsletter', 'seo', 'copy', 'article', 'brand']],
-  ['strategy', ['strategy', 'roadmap', 'prioriti', 'decision', 'invest', 'pivot', 'pricing', 'business model', 'go-to-market', 'gtm']],
-];
 const _HQ_KIND_LABEL = { outreach: 'Outreach', research: 'Research', content: 'Content', strategy: 'Strategy' };
-
-function classifyHqKind(message) {
-  const hay = String(message || '').toLowerCase();
-  for (const [kind, words] of _HQ_KIND_KEYWORDS) {
-    if (words.some((w) => hay.includes(w))) return kind;
-  }
-  return null;
-}
-// A short greeting/status stays in HQ (direct answer). A work verb OR a
-// substantive question (already classified to a kind) routes to that kind's room.
-function isHqWorkRequest(message) {
-  const m = String(message || '').trim();
-  if (m.length < 12) return false;
-  if (/\b(find|design|create|build|write|draft|prepare|research|analyze|generate|plan|make|produce|reach out|send|compose|map|identify)\b/i.test(m)) return true;
-  // A classified question ("should we…", "is it worth…", "how do we…") is work
-  // for that desk — route it. (classifyHqKind already gated to a real topic.)
-  if (m.length >= 20 && (/\?/.test(m) || /\b(should|could|would|is it worth|do we|how do we|what if|which)\b/i.test(m))) return true;
-  return false;
-}
 
 async function findOrCreateKindRoom(session, hqRoom, kind, message) {
   const orgId = session.orgId;
@@ -14652,8 +14628,9 @@ Write the persona now.`;
       if (process.env.HQ_DISPATCH !== 'off' && !body.action && userMessage.trim()) {
         const isHq = room.agentConnectors && typeof room.agentConnectors === 'object'
           && Object.prototype.hasOwnProperty.call(room.agentConnectors, '_company');
-        const kind = isHq ? classifyHqKind(userMessage) : null;
-        if (kind && isHqWorkRequest(userMessage)) {
+        const hqRoute = isHq ? resolveHqTurnRoute(userMessage) : null;
+        const kind = hqRoute?.kind || null;
+        if (hqRoute?.dispatch) {
           try {
             const target = await findOrCreateKindRoom(current.session, room, kind, userMessage);
             // Create + kick the turn in the TARGET room (idempotent seq).

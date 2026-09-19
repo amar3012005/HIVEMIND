@@ -4219,7 +4219,7 @@ async def _orchestrate_single_agent(
     # Conversational turns are complete when the lead replies. Do not reinterpret
     # a greeting as an operating task by adding a plan, verifier, journal entry,
     # or second brochure-style final report after the chat fast path returns.
-    if result.get("turn_mode") == "chat":
+    if result.get("turn_mode") in {"chat", "direct"}:
         await _emit({
             "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
             "duration_ms": int((time.time() - started) * 1000), "engine": "single",

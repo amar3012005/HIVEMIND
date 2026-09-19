@@ -7691,6 +7691,41 @@ class Director:
         return {"cost_tokens": self.tokens, "final_text": reply, "transcript": self.transcript,
                 "gather_count": 0, "tool_calls": 0, "sim_report": None, "turn_mode": "chat"}
 
+    async def _direct_turn(self, t0: float) -> Dict[str, Any]:
+        """Answer a bounded direct question through the selected lead.
+
+        Direct is an execution path, not merely a prose-length hint: it must not
+        manufacture reactors, work orders, a report, or a goalkeeper failure.
+        Explicit @mentions are handled earlier by the mention fast-path.
+        """
+        lead = self.participants[0] if self.participants else {}
+        lead_name = lead.get("name") or lead.get("slug") or "the room lead"
+        lane = lead.get("_lane") or "Communicator"
+        company = (self.company_brief or "").strip()
+        system = (
+            _now_block()
+            + self._company_identity_block()
+            + f"You are {lead_name}, the {lane} leading this HIVEMIND room. "
+              "The user asked a bounded direct question. Answer it yourself as a concise, "
+              "useful colleague. Do not narrate orchestration, assign reactors, invent a report, "
+              "or suggest unrelated work. Use only supplied company context; mark unsupported "
+              "specifics UNVERIFIED. Match the user's language."
+            + (f"\n\nCOMPANY CONTEXT:\n{company[:5000]}" if company else "")
+            + self._lang_directive()
+        )
+        msg = await self._groq(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": (self.user_message or "")[:4000]}],
+            force_text=True, temp=0.4, bucket="chat",
+        )
+        reply = ((msg or {}).get("content") or "").strip() or (
+            f"{lead_name} could not answer this turn because the model was unreachable. Please retry."
+        )
+        await self.emit({"t": "line", "agent": lead.get("slug") or "director",
+                         "kind": "lead", "content": reply, "direct": True})
+        return {"cost_tokens": self.tokens, "final_text": reply, "transcript": self.transcript,
+                "gather_count": 0, "tool_calls": 0, "sim_report": None, "turn_mode": "direct"}
+
     async def _emit_work_brief(self, plan: Dict[str, Any]) -> None:
         """Give the user one immediate, natural-language account of the work ahead.
 
@@ -8036,6 +8071,12 @@ class Director:
         # pipeline ending in a fabricated report.
         if str(plan.get("turn_mode") or "task").lower() == "chat":
             return await self._chat_turn(t0)
+        if (self.response_depth == "direct"
+                and str(plan.get("output_family") or "text").lower() == "text"
+                and not plan.get("post_output_actions")
+                and not plan.get("work_orders")
+                and not plan.get("turn_plan")):
+            return await self._direct_turn(t0)
         # AGENTIC TASK ENGINE — a genuinely autonomous multi-step ReAct loop
         # (real tool-calling, dynamic tool-group equipping, native plan/
         # subtask decomposition) instead of this Director's own fixed

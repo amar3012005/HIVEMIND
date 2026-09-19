@@ -13,10 +13,10 @@ const SHA = 'a'.repeat(40);
 const DIGEST = `registry.example/hivemind/harness-chat@sha256:${'b'.repeat(64)}`;
 
 test('Ops deployment tools are exposed only to configured operator MCP tokens', () => {
-  assert.equal(getOpsToolsManifest({ isMaster: false, env }).length, 0);
-  assert.equal(getOpsToolsManifest({ isMaster: true, env: {} }).length, 0);
+  assert.equal(getOpsToolsManifest({ isOperator: false, env }).length, 0);
+  assert.equal(getOpsToolsManifest({ isOperator: true, env: {} }).length, 0);
   assert.deepEqual(
-    getOpsToolsManifest({ isMaster: true, env }).map((tool) => tool.name),
+    getOpsToolsManifest({ isOperator: true, env }).map((tool) => tool.name),
     ['deploy_cloudflare_frontend', 'deploy_core_services', 'deploy_harness_runner', 'get_release_status'],
   );
 });

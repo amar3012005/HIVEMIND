@@ -80,6 +80,8 @@ test('configured operator MCP tokens discover and invoke the Ops Gateway tools',
     const hidden = hostedService.handleToolsList(userId, 'org-1', { isMaster: false });
     assert.ok(visible.tools.some((tool) => tool.name === 'deploy_cloudflare_frontend'));
     assert.equal(hidden.tools.some((tool) => tool.name === 'deploy_cloudflare_frontend'), false);
+    const scoped = hostedService.handleToolsList(userId, 'org-1', { scopes: ['ops:deploy'] });
+    assert.ok(scoped.tools.some((tool) => tool.name === 'deploy_cloudflare_frontend'));
 
     const result = await hostedService.handleToolCall({
       name: 'deploy_cloudflare_frontend',

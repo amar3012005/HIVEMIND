@@ -21,8 +21,12 @@ export default {
 
     if (request.method === 'GET' && url.pathname.startsWith('/v1/release/')) {
       const id = url.pathname.slice('/v1/release/'.length);
-      const instance = await env.RELEASE.get(id);
-      return Response.json(await instance.status(), { headers: CORS });
+      try {
+        const instance = await env.RELEASE.get(id);
+        return Response.json(await instance.status(), { headers: CORS });
+      } catch {
+        return Response.json({ error: 'release_not_found', instanceId: id }, { status: 404, headers: CORS });
+      }
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/release') {

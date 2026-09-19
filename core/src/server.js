@@ -5601,7 +5601,7 @@ exit \$RC
         result = handleToolsList(userId, orgId, { scopes: consumer.scopes || ['*'], isMaster: !!consumer.master });
         break;
       case 'tools/call':
-        result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!consumer.master });
+        result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!consumer.master, scopes: consumer.scopes || ['*'] });
         break;
       case 'resources/list':
         result = handleResourcesList(userId, orgId);
@@ -9455,7 +9455,7 @@ exit \$RC
             result = handleToolsList(pathUserId, connectionOrgId, { scopes: connection?.scopes || ['*'], isMaster: !!connection?.master });
             break;
           case 'tools/call':
-            result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient, { isMaster: !!connection?.master });
+            result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient, { isMaster: !!connection?.master, scopes: connection?.scopes || ['*'] });
             break;
           case 'resources/list':
             result = handleResourcesList(pathUserId, connectionOrgId);
@@ -10030,7 +10030,7 @@ exit \$RC
             result = handleToolsList(userId, orgId, { scopes: principal.scopes || [], isMaster: !!principal?.master });
             break;
           case 'tools/call':
-            result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!principal?.master });
+            result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!principal?.master, scopes: principal.scopes || [] });
             break;
           case 'resources/list':
             result = handleResourcesList(userId, orgId);

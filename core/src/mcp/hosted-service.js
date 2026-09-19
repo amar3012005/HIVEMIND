@@ -502,6 +502,7 @@ function generateToolsManifest(userId, orgId, options = {}) {
   // Core HIVEMIND memory tools retain their established default-access
   // behavior. Only provider-spending Web capabilities require explicit scope.
   const canWrite = scopes.length === 0 || hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
+  const isOpsOperator = options.isMaster === true || scopeSet.has('ops:deploy');
 
   const tools = [
     {
@@ -1434,10 +1435,10 @@ Use when you need what was posted in a known channel recently (e.g. monitoring a
       'hivemind_set_assistant_name', 'hivemind_set_voice',
       'hivemind_slack_post', 'hivemind_slack_react',
     ]);
-    return tools.filter(t => !WRITE_TOOLS.has(t.name));
+    return [...tools.filter(t => !WRITE_TOOLS.has(t.name)), ...getOpsToolsManifest({ isOperator: isOpsOperator })];
   }
 
-  return [...tools, ...getOpsToolsManifest({ isMaster: options.isMaster === true })];
+  return [...tools, ...getOpsToolsManifest({ isOperator: isOpsOperator })];
 }
 
 /**
@@ -2350,9 +2351,10 @@ function buildRelationship(relationship, relatedTo) {
 export async function handleToolCall(params, userId, orgId, apiClient, options = {}) {
   const { name, arguments: args } = params;
   const isMaster = options.isMaster === true;
+  const isOpsOperator = isMaster || new Set(options.scopes || []).has('ops:deploy');
 
   if (isOpsTool(name)) {
-    if (!isMaster) return formatToolContent({ error: 'Operator access is required for SINGULANCE deployment tools.' });
+    if (!isOpsOperator) return formatToolContent({ error: 'The ops:deploy capability is required for SINGULANCE deployment tools.' });
     try {
       const result = await invokeOpsTool(name, args, {
         requestedBy: `mcp:${userId || 'operator'}`,

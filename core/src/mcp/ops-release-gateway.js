@@ -26,8 +26,8 @@ export function isOpsTool(name) {
   return OPS_TOOL_NAMES.has(name);
 }
 
-export function getOpsToolsManifest({ isMaster = false, env = process.env } = {}) {
-  if (!isMaster || !config(env).enabled) return [];
+export function getOpsToolsManifest({ isOperator = false, env = process.env } = {}) {
+  if (!isOperator || !config(env).enabled) return [];
 
   return [
     {

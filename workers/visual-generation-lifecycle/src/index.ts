@@ -59,7 +59,7 @@ async function resultBytes(result: any): Promise<{ bytes: Uint8Array; contentTyp
   throw new Error('visual_model_empty_response');
 }
 async function generate(env: Env, prompt: string, aspect: string, quality: string, reference?: Generated): Promise<Generated> {
-  const model = quality === 'fast' ? (env.VISUAL_FAST_MODEL || '@cf/black-forest-labs/flux-2-klein-4b') : (env.VISUAL_QUALITY_MODEL || '@cf/black-forest-labs/flux-2-dev');
+  const model = quality === 'fast' ? (env.VISUAL_FAST_MODEL || '@cf/black-forest-labs/flux-2-klein-4b') : (env.VISUAL_QUALITY_MODEL || '@cf/black-forest-labs/flux-2-klein-9b');
   const dimensions = dimensionsForAspect(aspect, false); const form = new FormData();
   form.append('prompt', prompt); form.append('width', String(dimensions.width)); form.append('height', String(dimensions.height));
   if (reference?.bytes.length) form.append('input_image_0', new Blob([new Uint8Array(reference.bytes).buffer as ArrayBuffer], { type: reference.contentType }), `style-anchor.${reference.contentType === 'image/jpeg' ? 'jpg' : reference.contentType === 'image/webp' ? 'webp' : 'png'}`);
@@ -68,7 +68,7 @@ async function generate(env: Env, prompt: string, aspect: string, quality: strin
   return { ...image, model, prompt };
 }
 async function generateAnchor(env: Env, prompt: string, quality: string): Promise<Generated> {
-  const model = quality === 'fast' ? (env.VISUAL_FAST_MODEL || '@cf/black-forest-labs/flux-2-klein-4b') : (env.VISUAL_QUALITY_MODEL || '@cf/black-forest-labs/flux-2-dev');
+  const model = quality === 'fast' ? (env.VISUAL_FAST_MODEL || '@cf/black-forest-labs/flux-2-klein-4b') : (env.VISUAL_QUALITY_MODEL || '@cf/black-forest-labs/flux-2-klein-9b');
   const form = new FormData(); form.append('prompt', `${prompt}\nCreate a square visual-system anchor: composition, palette, lighting, materials and subject language only. No text or logos.`); form.append('width', '504'); form.append('height', '504');
   const serialized = new Response(form); const result = await (env.AI as any).run(model, { multipart: { body: serialized.body, contentType: serialized.headers.get('content-type') } }, env.AI_GATEWAY_ID ? { gateway: { id: env.AI_GATEWAY_ID } } : undefined);
   const image = await resultBytes(result); return { ...image, model, prompt };

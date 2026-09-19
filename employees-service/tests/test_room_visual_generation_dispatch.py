@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
-from hivemind_employees.api_hyper_rooms import _room_visual_job_payload
+from hivemind_employees.api_hyper_rooms import (
+    _campaign_post_visual_payload,
+    _room_visual_job_payload,
+)
 
 
 def _request(message: str):
@@ -34,3 +37,26 @@ def test_room_visual_payload_builds_coordinated_sets():
     assert payload["output"]["mode"] == "set"
     assert payload["output"]["count"] == 4
     assert payload["output"]["aspect_ratios"] == ["1:1", "4:5"]
+
+
+def test_linkedin_post_report_queues_one_coordinated_visual_per_post():
+    payload = _campaign_post_visual_payload(
+        _request("Generate me 3 posts for my LinkedIn campaign"),
+        "general",
+        "Post 1\nVisual: hybrid heating system\nPost 2\nVisual: hot water infographic\nPost 3\nVisual: longevity timeline",
+    )
+    assert payload is not None
+    assert payload["use_case"] == "campaign_social"
+    assert payload["output"] == {
+        "mode": "set", "count": 3, "aspect_ratios": ["4:5"], "quality": "quality",
+    }
+    assert "one for each approved post" in payload["instruction"]
+    assert "hot water infographic" in payload["instruction"]
+    assert payload["source"]["kind"] == "room_director_campaign_report"
+    assert payload["idempotency_key"] == "room-visual-report:turn-visual-canary"
+
+
+def test_non_campaign_report_does_not_auto_queue_visuals():
+    assert _campaign_post_visual_payload(
+        _request("Write three hiring interview questions"), "general", "Questions...",
+    ) is None

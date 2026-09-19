@@ -9,7 +9,7 @@
     "VISUAL_ART_DIRECTOR_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     "VISUAL_CRITIC_MODEL": "@cf/meta/llama-3.2-11b-vision-instruct",
     "VISUAL_FAST_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
-    "VISUAL_QUALITY_MODEL": "@cf/black-forest-labs/flux-2-dev"
+    "VISUAL_QUALITY_MODEL": "@cf/black-forest-labs/flux-2-klein-9b"
   },
   "ai": { "binding": "AI" },
   "queues": {

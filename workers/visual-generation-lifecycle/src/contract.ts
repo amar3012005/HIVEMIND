@@ -21,7 +21,10 @@ export function dimensionsForAspect(aspect: string, anchor = false) {
 
 export function safeProductionSpec(value: any, fallback: any) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-  const text = (field: string, defaultValue = '') => String(source[field] || defaultValue).trim().slice(0, 3000);
+  const text = (field: string, defaultValue = '') => {
+    const value = source[field] ?? defaultValue;
+    return (typeof value === 'object' ? JSON.stringify(value) : String(value)).trim().slice(0, 3000);
+  };
   const list = (field: string, max = 12) => (Array.isArray(source[field]) ? source[field] : []).map((item: unknown) => String(item).trim().slice(0, 500)).filter(Boolean).slice(0, max);
   const variants = (Array.isArray(source.variants) ? source.variants : []).slice(0, fallback.count).map((row: any, index: number) => ({
     index, purpose: String(row?.purpose || `Visual ${index + 1}`).slice(0, 300), variation: String(row?.variation || `A distinct composition for output ${index + 1}`).slice(0, 1200),

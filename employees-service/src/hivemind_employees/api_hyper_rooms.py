@@ -608,7 +608,51 @@ def _room_visual_job_payload(req: "RoomTurnRequest", room_kind: str) -> Dict[str
     }
 
 
-async def _queue_room_visual_generation(req: "RoomTurnRequest", room_kind: str) -> Dict[str, Any]:
+_CAMPAIGN_POST_REQUEST = re.compile(
+    r"\b(?:linkedin|social(?:\s+media)?)\b.{0,80}\b(?:post|posts|campaign)\b|"
+    r"\b(?:post|posts|campaign)\b.{0,80}\b(?:linkedin|social(?:\s+media)?)\b",
+    re.I | re.S,
+)
+
+
+def _campaign_post_visual_payload(
+    req: "RoomTurnRequest", room_kind: str, final_text: str,
+) -> Optional[Dict[str, Any]]:
+    """Turn an approved multi-post campaign report into one coordinated image set."""
+    message = str(req.user_message or "").strip()
+    if not _CAMPAIGN_POST_REQUEST.search(message):
+        return None
+    numeric = re.search(r"\b([2-8])\s+(?:linkedin\s+|social(?:\s+media)?\s+)?posts?\b", message, re.I)
+    worded = re.search(
+        r"\b(two|three|four|five|six|seven|eight)\s+(?:linkedin\s+|social(?:\s+media)?\s+)?posts?\b",
+        message, re.I,
+    )
+    count = int(numeric.group(1)) if numeric else (
+        _VISUAL_COUNT_WORDS[worded.group(1).lower()] if worded else 1
+    )
+    if count < 2:
+        return None
+    payload = _room_visual_job_payload(req, room_kind)
+    payload["instruction"] = (
+        f"Create {count} coordinated campaign visuals, one for each approved post below. "
+        "Treat each post's Visual direction, headline, objective, audience, and grounded claims as its specific brief. "
+        "Use the server-provided company context and verified Brand DNA. Keep a shared art direction across the set, "
+        "but give every post a distinct composition. Do not render words or logos inside the generated pixels; "
+        "copy and exact brand marks are composed separately.\n\n"
+        f"ORIGINAL REQUEST:\n{message[:2000]}\n\nAPPROVED CAMPAIGN REPORT:\n{str(final_text or '')[:14000]}"
+    )
+    payload["use_case"] = "campaign_social"
+    payload["output"] = {
+        "mode": "set", "count": count, "aspect_ratios": ["4:5"], "quality": "quality",
+    }
+    payload["source"] = {"kind": "room_director_campaign_report", "room_id": req.room_id}
+    payload["idempotency_key"] = f"room-visual-report:{req.turn_id}"
+    return payload
+
+
+async def _queue_room_visual_generation(
+    req: "RoomTurnRequest", room_kind: str, payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     settings = get_settings()
     master = settings.hivemind_master_api_key
     if not master:
@@ -626,8 +670,8 @@ async def _queue_room_visual_generation(req: "RoomTurnRequest", room_kind: str) 
     ) as client:
         response = await client.post(
             "/api/visual-generation/jobs",
-            json=_room_visual_job_payload(req, room_kind),
-            headers={"X-Idempotency-Key": f"room-visual:{req.turn_id}"},
+            json=payload or _room_visual_job_payload(req, room_kind),
+            headers={"X-Idempotency-Key": str((payload or {}).get("idempotency_key") or f"room-visual:{req.turn_id}")},
         )
         response.raise_for_status()
         return response.json()
@@ -4829,6 +4873,29 @@ async def _orchestrate_single_agent(
         sources=result.get("source_receipts") or [],
         web_intel_used=bool(result.get("source_receipts")),
     ))
+
+    # A multi-post social campaign is both copy and visual work. Let the normal
+    # Director finish and ground the post copy first, then hand the approved
+    # report to the durable visual workflow as a coordinated image set.
+    _campaign_visual_payload = _campaign_post_visual_payload(req, _room_kind, final_text)
+    if status == "complete" and _campaign_visual_payload:
+        try:
+            _campaign_visual_job = await _queue_room_visual_generation(
+                req, _room_kind, _campaign_visual_payload,
+            )
+            await _emit({
+                "t": "visual_job_queued",
+                "job_id": _campaign_visual_job.get("job_id"),
+                "status": _campaign_visual_job.get("status") or "queued",
+                "stage": _campaign_visual_job.get("stage") or "queued",
+                "replayed": _campaign_visual_job.get("replayed") is True,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[single] campaign visual admission failed room=%s turn=%s", req.room_id, req.turn_id)
+            await _emit({
+                "t": "warning", "code": "campaign_visual_admission_failed",
+                "note": "The campaign copy is complete, but its coordinated visuals could not be queued yet. Retry this turn safely.",
+            })
 
     # Persist compact episodic continuity for every run after the final report exists.
     # This never blocks sealing and is distinct from room/employee operating playbooks.

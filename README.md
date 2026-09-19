@@ -1,5 +1,10 @@
 # HIVE-MIND
 
+> **SINGULANCE engineering agents:** start with [`.hivemind/README.md`](.hivemind/README.md).
+> It contains the current production branch convention and the direct Ops Gateway paths for
+> Cloudflare frontend, Core containers, and the Harness runner. The historical setup instructions
+> below are product background, not the deployment procedure for SINGULANCE production.
+
 **Sovereign European AI Memory Platform**
 
 A self-hosted, EU-compliant memory engine for AI applications. Replicates Supermemory.ai with full data sovereignty—no US CLOUD Act exposure.

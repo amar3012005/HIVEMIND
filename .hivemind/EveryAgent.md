@@ -3,36 +3,26 @@
 This directory is the repository's versioned ground truth for engineering work. It applies to every
 agent and every worktree derived from this branch.
 
-## Start
+## Fast start
 
-1. Read `CONTRACT.json`, `ROUTING.json`, and `BRANCH.json`.
-2. Resolve the requested branch/ref; do not substitute `main` or a convenient checkout.
-3. Work in a clean task worktree. Preserve unrelated changes.
-4. Select exactly one platform skill using `ROUTING.json`. Load a second skill only when the task
-   genuinely crosses its named boundary.
-5. State the owned files, verification command(s), and rollback boundary before a material edit.
+1. Read `.hivemind/README.md` and select the one relevant skill using `ROUTING.json`.
+2. Start from local `production-base` (which tracks `origin/singulance-main`) and create a new
+   task branch/worktree. Do not try to check out `singulance-main` locally.
+3. Implement the requested change, run the focused check for the boundary you changed, then commit
+   and push the task branch.
+4. For a release, follow the selected skill's owning artifact path and verify the changed public
+   route. Record the deployed revision and rollback identity in the normal release record.
 
 ## Execution
 
 - Prefer the smallest complete change that fixes the demonstrated boundary.
-- Keep company memory in HIVE Core; use task-ledger infrastructure only when it is configured and
-  relevant. A missing optional ledger is not a reason to stop ordinary implementation.
-- Use the environment-specific release manifest and `platform-release` for deployments. Never patch a running container
-  or copy secrets from another environment.
-- Use immutable artifacts, recreate only affected services, and verify the real route after release.
-- Treat browser/UI proof, authorization, durable state, and provider receipts as distinct evidence.
-
-## Model routing
-
-- **Luna:** execute an already validated deterministic manifest.
-- **Terra:** default for one bounded feature, bug, test, or frontend/backend repair.
-- **Sol:** diagnose an unknown or cross-service contract problem and produce a bounded manifest.
-- **Astra:** security/tenant boundaries, irreversible migrations, or final production review.
-
-Escalation is a handoff note with the failing boundary and evidence, not a blanket stop condition.
+- Work directly; optional ledgers, model routing, and broad legacy guidance do not block a normal
+  feature or release.
+- The selected skill is the procedure. Use the Ops Gateway when available for deployments instead
+  of reconstructing server commands or editing live containers.
+- Recreate only the owning service and verify its real route after release.
 
 ## Finish
 
-Record the source SHA, changed files, tests, artifact/deployment identity if any, and rollback target
-in the task's PR, release record, or configured task ledger. Never store secrets, raw environment
-values, credentials, private prompts, or provider payloads there.
+Report the source SHA, changed files, focused check, deployed artifact/version when applicable, and
+rollback identity. Never put credentials or raw environment values in a commit or task note.

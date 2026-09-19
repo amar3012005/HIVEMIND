@@ -1,20 +1,21 @@
 # SINGULANCE Branch Protocol
 
-This is the working model for Codex, Claude, humans, and any other agent editing
-HIVEMIND. It prevents sessions from overwriting each other while keeping the
-production deploy path fast.
+This is a historical branch/release reference. For current Codex, Claude, Grok, and other agent
+work, [`.hivemind/README.md`](../.hivemind/README.md) and the selected platform skill take
+precedence. In particular, use local `production-base` as the task base and reserve
+`origin/singulance-main` for promotion; this avoids the ambiguous checked-out branch error from
+legacy worktrees.
 
-If another document conflicts with this file about branch ownership, this file
-wins. Production deployment is still governed by
-`SINGULANCE-ONBOARD/DEPLOYMENT.md` and `docs/PRODUCTION_RELEASE_PROTOCOL.md`.
+For legacy branches, retain the historical details below. Current production task work uses the
+`.hivemind` guide and its selected skill.
 
 ## Core Model
 
 ```text
-work branch   -> review/rebase -> singulance-main -> quick-deploy -> production
+production-base -> task branch -> origin/singulance-main -> Ops Gateway -> production
 ```
 
-- `singulance-main` is the only deploy branch.
+- `origin/singulance-main` is the only deploy branch. Local work starts from `production-base`.
 - Agents do not commit directly to `singulance-main` during feature work.
 - Every session works on its own branch or worktree.
 - Integration happens by rebasing on latest `origin/singulance-main`, resolving

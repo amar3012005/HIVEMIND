@@ -1,7 +1,8 @@
 # SINGULANCE Production Release Protocol
 
-This is the mandatory release authority for Codex, Claude, humans, and CI.
-If another document conflicts with this file, this file wins.
+This is a detailed historical/reference runbook. For normal agent releases, the concise authority
+is [`.hivemind/README.md`](../.hivemind/README.md) plus the selected `platform-release` skill,
+which uses the Ops Gateway for Cloudflare, Core services, and Harness runner deployments.
 
 ## Non-negotiable invariants
 
@@ -124,4 +125,3 @@ Only after acceptance:
 ## Agent completion report
 
 Every deployment report must state: release ID, parent SHA, frontend SHA, running image digests, migrations, tests, authenticated checks, public checks, error-log result, rollback reference, and any intentionally untested external side effect.
-

@@ -1,8 +1,10 @@
 {
   "version": 1,
-  "branch": "singulance-main",
+  "branch": "production-base",
+  "localBase": "production-base",
+  "promotionRef": "origin/singulance-main",
   "environment": "production",
-  "role": "Canonical production source. It is not a fallback for local or Enigma work.",
+  "role": "Canonical production source. Local task work starts from production-base; promote completed work to origin/singulance-main.",
   "release": {
     "artifact": "immutable image or Worker version from this exact source SHA",
     "rollback": "previous recorded artifact or Worker version",

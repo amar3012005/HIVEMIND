@@ -1,6 +1,7 @@
 {
   "environment": "production",
-  "ref": "singulance-main",
+  "localBase": "production-base",
+  "ref": "origin/singulance-main",
   "releaseMode": "canonical immutable release",
   "note": "Use the canonical server release path and record the artifact, health result, canary, and rollback target."
 }

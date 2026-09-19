@@ -1,8 +1,9 @@
 # SINGULANCE agent entrypoint
 
-Read [`.hivemind/EveryAgent.md`](.hivemind/EveryAgent.md) before working in this repository.
-It is the sole repository-level operating contract for Codex, Claude, Grok, and other coding agents.
+Start with [`.hivemind/README.md`](.hivemind/README.md), then load the one relevant skill from
+[`.hivemind/ROUTING.json`](.hivemind/ROUTING.json). This is the concise, current operating guide
+for Codex, Claude, Grok, and other coding agents.
 
-Do not load broad local skill catalogs or legacy `.claude` guidance. Select exactly one relevant
-platform skill through [`.hivemind/ROUTING.json`](.hivemind/ROUTING.json), then use the task's
-branch and environment constraints from [`.hivemind/BRANCH.json`](.hivemind/BRANCH.json).
+Use `production-base` as this project's local starting branch. It tracks
+`origin/singulance-main`; task branches must be new names such as `codex/<task>`. Do not switch a
+shared checkout to `singulance-main`—that name is the remote promotion target, not a task branch.

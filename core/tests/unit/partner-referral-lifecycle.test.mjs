@@ -83,7 +83,7 @@ test('Wolfgang URL creates a reusable card-free trial and atomically grants the 
   const { prisma, db } = inMemoryPrisma();
   const created = await createPartnerReferralCampaign({ prisma, baseUrl: 'https://next.singulancelabs.com', input: {
     referrer_display_name: 'Wolfgang', referrer_email: 'wolfgang@example.com', code: 'WOLFX2026', account_type: 'enterprise_managed', base_plan: 'scale', trial_days: 30,
-    monthly_credits: 10000, discount_kind: 'percentage', discount_percent: 100, fallback_action: 'free', max_redemptions: 25,
+    total_credits: 10000, discount_kind: 'percentage', discount_percent: 100, fallback_action: 'free', max_redemptions: 25,
   } });
   const token = new URL(created.campaign.invitation_url).searchParams.get('referral_token');
   assert.match(created.campaign.invitation_url, /\/hivemind\/invite\?referral_token=/);
@@ -94,14 +94,17 @@ test('Wolfgang URL creates a reusable card-free trial and atomically grants the 
   assert.equal(preview.preview.offer.remaining_activations, 25);
   assert.equal(db.promotions[0].billingMode, 'entitlement_only');
   assert.equal(db.promotions[0].status, 'active');
-  assert.deepEqual(db.versions[0].commercialTerms, { kind: 'trial', trial_days: 30 });
+  assert.deepEqual(db.versions[0].commercialTerms, { kind: 'trial', trial_days: 30, credit_pool: 'grant_lifetime' });
+  assert.equal(db.versions[0].basePlan, 'enterprise');
+  assert.equal(db.versions[0].fallbackAction, 'manual_review');
   assert.equal(db.promotions[0].codeHint, null);
   const redeemed = await redeemPartnerReferral({ prisma, tx: prisma, token, orgId: db.organizations[0].id, userId: '33333333-3333-4333-8333-333333333333', email: 'invitee@example.com' });
-  assert.equal(redeemed.promotion.version.base_plan, 'scale');
+  assert.equal(redeemed.promotion.version.base_plan, 'enterprise');
+  assert.equal(redeemed.grant.source, 'partner_referral');
   assert.equal(db.promotions[0].redemptionCount, 1);
   assert.equal(db.campaigns[0].acceptedCount, 1);
   assert.equal(db.redemptions[0].partnerReferralCampaignId, db.campaigns[0].id);
-  assert.equal(db.organizations[0].plan, 'scale');
+  assert.equal(db.organizations[0].plan, 'enterprise');
   assert.equal(redeemed.termsSnapshot.promotion.version.limits.monthlyCredits, 10000);
   assert.equal(redeemed.termsSnapshot.promotion.version.account_type, 'enterprise_managed');
   await assert.rejects(
@@ -114,11 +117,14 @@ test('partner referral administration lists campaigns without a nonexistent Prom
   const { prisma } = inMemoryPrisma();
   await createPartnerReferralCampaign({ prisma, baseUrl: 'https://next.singulancelabs.com', input: {
     referrer_display_name: 'Wolfgang', referrer_email: 'wolfgang@example.com', code: 'WOLFX-LIST', account_type: 'personal', base_plan: 'plus', trial_days: 14,
-    monthly_credits: 2000, discount_kind: 'none', fallback_action: 'free', max_redemptions: 5,
+    total_credits: 2000, discount_kind: 'none', fallback_action: 'free', max_redemptions: 5,
   } });
   const campaigns = await listPartnerReferralCampaigns({ prisma, baseUrl: 'https://next.singulancelabs.com' });
   assert.equal(campaigns.length, 1);
   assert.equal(campaigns[0].offer.monthly_credits, 2000);
+  assert.equal(campaigns[0].offer.total_credits, 2000);
+  assert.equal(campaigns[0].offer.plan, 'enterprise');
+  assert.equal(campaigns[0].offer.account_type, 'enterprise_managed');
   assert.equal(campaigns[0].internal_name, 'Wolfgang partner invitation');
 });
 
@@ -126,7 +132,7 @@ test('expired and exhausted partner links fail closed', async () => {
   const { prisma, db } = inMemoryPrisma();
   const created = await createPartnerReferralCampaign({ prisma, baseUrl: 'https://next.singulancelabs.com', input: {
     referrer_display_name: 'Wolfgang', referrer_email: 'wolfgang@example.com', code: 'WOLFX-LIMIT', account_type: 'personal', base_plan: 'plus', trial_days: 14,
-    monthly_credits: 2000, discount_kind: 'none', fallback_action: 'free', max_redemptions: 1,
+    total_credits: 2000, discount_kind: 'none', fallback_action: 'free', max_redemptions: 1,
   } });
   const token = new URL(created.campaign.invitation_url).searchParams.get('referral_token');
   db.promotions[0].endsAt = new Date('2026-01-01T00:00:00.000Z');
@@ -140,7 +146,7 @@ test('delivery receipt records sent and failed Day-0 attempts', async () => {
   const { prisma, db } = inMemoryPrisma();
   const created = await createPartnerReferralCampaign({ prisma, baseUrl: 'https://next.singulancelabs.com', input: {
     referrer_display_name: 'Wolfgang', referrer_email: 'wolfgang@example.com', code: 'WOLFX-SEND', account_type: 'personal', base_plan: 'free', trial_days: 7,
-    monthly_credits: 500, discount_kind: 'none', fallback_action: 'free', max_redemptions: 50,
+    total_credits: 500, discount_kind: 'none', fallback_action: 'free', max_redemptions: 50,
   } });
   await markPartnerReferralDelivery({ prisma, campaignId: created.campaign.campaign_id, delivery: { ok: false, error: 'provider unavailable' } });
   assert.equal(db.campaigns[0].deliveryStatus, 'failed');

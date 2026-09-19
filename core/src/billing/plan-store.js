@@ -27,7 +27,7 @@ export class PlanStore {
       // Plan catalog versions are platform-admin changes and must affect the
       // next admission in every process. Do not retain an in-process cap cache.
       this._cache.set(orgId, { plan, expiresAt: Date.now() });
-      return plan;
+      return { ...plan, entitlement };
     } catch {
       return getPlan('free');
     }

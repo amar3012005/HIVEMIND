@@ -67,6 +67,7 @@ function normalizeCommercialTerms(value) {
     if (!Number.isInteger(days) || days < 1 || days > 365) throw new Error('trial_days must be 1..365');
     out.trial_days = days;
   }
+  if (terms.credit_pool === 'grant_lifetime') out.credit_pool = 'grant_lifetime';
   if (terms.percent_off != null) {
     const percent = Number(terms.percent_off);
     if (!Number.isInteger(percent) || percent < 1 || percent > 100) throw new Error('percent_off must be 1..100');
@@ -247,11 +248,12 @@ export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, us
     const claimed = await tx.promotion.updateMany({ where: { id: promotion.id, status: 'active', ...(promotion.maxRedemptions == null ? {} : { redemptionCount: { lt: promotion.maxRedemptions } }) }, data: { redemptionCount: { increment: 1 } } });
     if (claimed.count !== 1) throw new Error('promotion unavailable');
     const endsAt = promotionEnd(promotion, version, now);
-    const grant = await tx.entitlementGrant.create({ data: { orgId, promotionId: promotion.id, source: 'promotion', status: 'active', startsAt: now, endsAt, fallbackAction: version.fallbackAction } });
+    const source = partnerReferralCampaignId ? 'partner_referral' : 'promotion';
+    const grant = await tx.entitlementGrant.create({ data: { orgId, promotionId: promotion.id, source, status: 'active', startsAt: now, endsAt, fallbackAction: version.fallbackAction } });
     const entitlementVersion = await tx.entitlementVersion.create({ data: { grantId: grant.id, version: 1, planId: version.basePlan, limits: version.limits,
       accountType: version.accountType, hostingMode: version.hostingMode, storageMode: version.storageMode,
       commercialTerms: version.commercialTerms, effectiveFrom: now, transitionReason: 'promotion_redemption' } });
-    await tx.organizationEntitlement.create({ data: { orgId, source: 'promotion', phase: 'grant', planId: version.basePlan, limits: version.limits, effectiveFrom: now, effectiveUntil: endsAt } });
+    await tx.organizationEntitlement.create({ data: { orgId, source, phase: 'grant', planId: version.basePlan, limits: version.limits, effectiveFrom: now, effectiveUntil: endsAt } });
     if (applyProfile) {
       await tx.organization.update({ where: { id: orgId }, data: { plan: version.basePlan, accountType: version.accountType, hostingMode: version.hostingMode, memoryStorageMode: version.storageMode, subscriptionStatus: 'active', trialEndsAt: endsAt } });
       // Forward-only fix: route this org to .amr the moment it's promoted, not
@@ -315,11 +317,9 @@ export async function getEffectivePromotionEntitlement(prisma, orgId, now = new 
     orderBy: { startsAt: 'desc' },
   });
   if (!grant) return null;
-  if (grant.status === 'suspended' || grant.status === 'revoked') {
-    return { grant, status: grant.status, version: null };
-  }
-  if (grant.endsAt && grant.endsAt <= now) return { grant, status: grant.fallbackAction === 'manual_review' ? 'manual_review' : 'expired', version: null };
   const version = await prisma.entitlementVersion.findFirst({ where: { grantId: grant.id, effectiveFrom: { lte: now }, OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: now } }] }, orderBy: { version: 'desc' } });
+  if (grant.status === 'suspended' || grant.status === 'revoked') return { grant, status: grant.status, version };
+  if (grant.endsAt && grant.endsAt <= now) return { grant, status: grant.fallbackAction === 'manual_review' ? 'manual_review' : 'expired', version };
   return version ? { grant, version, status: 'active' } : null;
 }
 

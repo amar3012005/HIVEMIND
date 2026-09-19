@@ -53,6 +53,7 @@ function publicOffer(row) {
       hosting_mode: version?.hostingMode,
       storage_mode: version?.storageMode,
       trial_days: Number(terms.trial_days || 0),
+      total_credits: Number(version?.limits?.monthlyCredits || 0),
       monthly_credits: Number(version?.limits?.monthlyCredits || 0),
       max_redemptions: row.promotion?.maxRedemptions ?? null,
       redemption_count: Number(row.promotion?.redemptionCount || 0),
@@ -122,11 +123,11 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
   if (!EMAIL.test(referrerEmail)) throw new Error('a valid referrer_email is required');
   const trialDays = Number(input.trial_days);
   if (!Number.isInteger(trialDays) || trialDays < 1 || trialDays > 365) throw new Error('trial_days must be 1..365');
-  const monthlyCredits = Number(input.monthly_credits);
-  if (!Number.isSafeInteger(monthlyCredits) || monthlyCredits < 0 || monthlyCredits > 100_000_000) throw new Error('monthly_credits is invalid');
+  const totalCredits = Number(input.total_credits ?? input.monthly_credits);
+  if (!Number.isSafeInteger(totalCredits) || totalCredits < 1 || totalCredits > 100_000_000) throw new Error('total_credits is invalid');
   // A partner invitation is a reusable trial grant. It intentionally never
   // creates a coupon, Checkout session, or payment-method requirement.
-  const terms = { kind: 'trial', trial_days: trialDays };
+  const terms = { kind: 'trial', trial_days: trialDays, credit_pool: 'grant_lifetime' };
   const language = String(input.language || 'en').toLowerCase() === 'de' ? 'de' : 'en';
   const created = await prisma.$transaction(async (tx) => {
     const promotion = await createPromotion({ prisma, tx, input: {
@@ -134,11 +135,11 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
       visibility: 'invite_only',
       status: 'active',
       billing_mode: 'entitlement_only',
-      account_type: input.account_type || 'personal',
-      base_plan: input.base_plan || 'free',
-      limits: { monthlyCredits },
+      account_type: input.account_type === 'enterprise_self_hosted' ? 'enterprise_self_hosted' : 'enterprise_managed',
+      base_plan: 'enterprise',
+      limits: { monthlyCredits: totalCredits },
       commercial_terms: terms,
-      fallback_action: input.fallback_action || 'free',
+      fallback_action: 'manual_review',
       max_redemptions: input.max_redemptions,
       per_email_max: 1,
       starts_at: input.starts_at,

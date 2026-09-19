@@ -28,5 +28,7 @@ export function planLimitBody(check, resource) {
     remaining: c.remaining ?? null,
     suggested_plan: suggested,
     upgrade_url: '/hivemind/app/billing',
+    referral_trial: c.referralTrial === true,
+    commercial_action: c.referralTrial === true ? 'talk_to_founder' : null,
   };
 }

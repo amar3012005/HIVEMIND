@@ -331,7 +331,7 @@ const controlUsageService = new UsageService({ prisma, planEnforcer, usageTracke
 planEnforcer.setUsageService(controlUsageService);
 const controlCreditService = new CreditService({
   prisma,
-  planStore: { getOrgPlan: async (orgId) => (await getEffectivePlan(prisma, orgId)).plan },
+  planStore: { getOrgPlan: async (orgId) => { const resolved = await getEffectivePlan(prisma, orgId); return { ...resolved.plan, entitlement: resolved.entitlement }; } },
   usageService: controlUsageService,
 });
 planEnforcer.setCreditService(controlCreditService);

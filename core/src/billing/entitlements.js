@@ -141,6 +141,8 @@ export async function getEffectivePlan(prisma, orgId) {
         accountType: promotion.version.accountType,
         hostingMode: promotion.version.hostingMode,
         storageMode: promotion.version.storageMode,
+        promotionId: promotion.grant.promotionId,
+        commercialTerms: promotion.version.commercialTerms,
       },
     };
   }
@@ -153,6 +155,8 @@ export async function getEffectivePlan(prisma, orgId) {
         phase: promotion.status,
         planId: 'free', limits: {}, effectiveFrom: promotion.grant.startsAt,
         effectiveUntil: promotion.grant.endsAt, status: promotion.status, grantId: promotion.grant.id,
+        promotionId: promotion.grant.promotionId,
+        commercialTerms: promotion.version?.commercialTerms || {},
       },
     };
   }

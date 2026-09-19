@@ -7,6 +7,34 @@ function monthWindow(now = new Date()) {
   return { start, end, key: start.toISOString().slice(0, 7) };
 }
 
+function creditWindow(plan, now = new Date()) {
+  const entitlement = plan?.entitlement;
+  if (entitlement?.commercialTerms?.credit_pool === 'grant_lifetime') {
+    const start = new Date(entitlement.effectiveFrom);
+    const end = entitlement.effectiveUntil ? new Date(entitlement.effectiveUntil) : now;
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+      return { start, end, key: `grant:${entitlement.grantId}`, lifetime: true };
+    }
+  }
+  return { ...monthWindow(now), lifetime: false };
+}
+
+function referralTrialCheck(plan) {
+  const entitlement = plan?.entitlement;
+  if (entitlement?.source !== 'partner_referral') return null;
+  if (!['manual_review', 'expired', 'suspended', 'revoked'].includes(entitlement.status)) return null;
+  return {
+    allowed: false,
+    status: 402,
+    reason: 'Your referral trial has ended. Talk to the founder to continue.',
+    plan: 'enterprise',
+    limit: plan?.limits?.monthlyCredits ?? null,
+    current: null,
+    remaining: 0,
+    referralTrial: true,
+  };
+}
+
 export class CreditService {
   constructor({ prisma, planStore, usageService }) {
     this.prisma = prisma;
@@ -17,7 +45,7 @@ export class CreditService {
   async getSummary(orgId, userId = null, tx = this.prisma, prefetchedPlan = null) {
     const plan = prefetchedPlan || await this.planStore.getOrgPlan(orgId);
     const included = Number(plan?.limits?.monthlyCredits ?? 0);
-    const { start, end, key } = monthWindow();
+    const { start, end, key, lifetime } = creditWindow(plan);
     const userClause = userId ? ' AND initiating_user_id = $4::uuid' : '';
     const params = userId ? [orgId, start, end, userId] : [orgId, start, end];
     const rows = await tx.$queryRawUnsafe(
@@ -45,11 +73,12 @@ export class CreditService {
     // The credit ledger remains responsible for reservations/idempotency, but
     // it must not become a second usage truth that starts at rollout time.
     const canonicalRows = await tx.$queryRawUnsafe(
-      `SELECT COALESCE("searchQueries",0)::text AS searches,
-              COALESCE("knowledgeBasePages",0)::text AS kb_pages,
-              COALESCE("hyperAgentRuns",0)::text AS hyperagent_runs
+      `SELECT COALESCE(SUM("searchQueries"),0)::text AS searches,
+              COALESCE(SUM("knowledgeBasePages"),0)::text AS kb_pages,
+              COALESCE(SUM("hyperAgentRuns"),0)::text AS hyperagent_runs
          FROM "OrgUsage"
-        WHERE "orgId"=$1::uuid AND "month"=$2 LIMIT 1`, orgId, key,
+        WHERE "orgId"=$1::uuid AND "month">=$2 AND "month"<=$3`, orgId,
+      start.toISOString().slice(0, 7), end.toISOString().slice(0, 7),
     );
     const canonical = canonicalRows[0] || {};
     const searches = Number(canonical.searches || 0);
@@ -93,7 +122,8 @@ export class CreditService {
       plan: plan?.id || 'free', included, used, reserved, remaining, unlimited,
       percent_used: unlimited || included === 0 ? 0 : Math.min(100, Math.round(((used + reserved) / included) * 100)),
       percent_remaining: unlimited || included === 0 ? 100 : Math.max(0, 100 - Math.min(100, Math.round(((used + reserved) / included) * 100))),
-      period: key, period_start: start.toISOString(), period_end: end.toISOString(), reset_at: end.toISOString(),
+      period: key, period_start: start.toISOString(), period_end: end.toISOString(), reset_at: lifetime ? null : end.toISOString(),
+      credit_pool: lifetime ? 'grant_lifetime' : 'monthly',
       breakdown,
       calculation: {
         source: 'canonical_usage_projection',
@@ -120,8 +150,10 @@ export class CreditService {
     // own Prisma reads and previously consumed most of the default five-second
     // transaction lifetime before the reservation SQL ran.
     const plan = await this.planStore.getOrgPlan(orgId);
+    const terminalReferral = referralTrialCheck(plan);
+    if (terminalReferral) return { admitted: false, check: terminalReferral };
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${monthWindow().key}`);
+      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${creditWindow(plan).key}`);
       const existing = await tx.$queryRawUnsafe(
         `SELECT id,state,quantity,metadata FROM hivemind.usage_events WHERE org_id=$1::uuid AND idempotency_key=$2 LIMIT 1`, orgId, key,
       );
@@ -130,7 +162,7 @@ export class CreditService {
         if (existing[0].state === 'released') {
           const summary = await this.getSummary(orgId, null, tx, plan);
           if (!summary.unlimited && quantity > summary.remaining) {
-            return { admitted: false, check: { allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining } };
+            return { admitted: false, check: { allowed: false, status: 402, reason: summary.credit_pool === 'grant_lifetime' ? 'Referral trial credits exhausted' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.credit_pool === 'grant_lifetime' } };
           }
           const revived = await tx.$queryRawUnsafe(
             `UPDATE hivemind.usage_events SET state='reserved',released_at=NULL
@@ -143,7 +175,7 @@ export class CreditService {
       }
       const summary = await this.getSummary(orgId, null, tx, plan);
       if (!summary.unlimited && quantity > summary.remaining) {
-        return { admitted: false, check: { allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining } };
+        return { admitted: false, check: { allowed: false, status: 402, reason: summary.credit_pool === 'grant_lifetime' ? 'Referral trial credits exhausted' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.credit_pool === 'grant_lifetime' } };
       }
       const rows = await tx.$queryRawUnsafe(
         `INSERT INTO hivemind.usage_events (org_id,initiating_user_id,source,metric,quantity,state,idempotency_key,metadata)
@@ -166,8 +198,10 @@ export class CreditService {
   async adjustReservation({ orgId, idempotencyKey, service, units }) {
     const quantity = creditCost(service, units);
     const plan = await this.planStore.getOrgPlan(orgId);
+    const terminalReferral = referralTrialCheck(plan);
+    if (terminalReferral) return { adjusted: false, admitted: false, check: terminalReferral };
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${monthWindow().key}`);
+      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${creditWindow(plan).key}`);
       const rows = await tx.$queryRawUnsafe(
         `SELECT id,state,quantity,metadata FROM hivemind.usage_events WHERE org_id=$1::uuid AND idempotency_key=$2 FOR UPDATE`, orgId, idempotencyKey,
       );
@@ -177,7 +211,7 @@ export class CreditService {
       if (event.state !== 'reserved' || event.metadata?.service !== service) throw new Error('credit reservation is not adjustable');
       const summary = await this.getSummary(orgId, null, tx, plan);
       const available = summary.unlimited ? Number.MAX_SAFE_INTEGER : summary.remaining + Number(event.quantity || 0);
-      if (quantity > available) return { adjusted: false, admitted: false, check: { allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining } };
+      if (quantity > available) return { adjusted: false, admitted: false, check: { allowed: false, status: 402, reason: summary.credit_pool === 'grant_lifetime' ? 'Referral trial credits exhausted' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.credit_pool === 'grant_lifetime' } };
       await tx.$executeRawUnsafe(
         `UPDATE hivemind.usage_events SET quantity=$3::bigint,metadata=metadata || $4::jsonb WHERE org_id=$1::uuid AND idempotency_key=$2 AND state='reserved'`,
         orgId, idempotencyKey, quantity, JSON.stringify({ units: Math.max(0, Math.ceil(Number(units) || 0)) }),

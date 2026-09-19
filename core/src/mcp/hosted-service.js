@@ -1364,6 +1364,20 @@ Use after submitting a web job — call every 3-5 seconds until status is "done"
     });
   }
 
+  // Shared visual production is available to every authenticated agent with
+  // write access. Status remains visible to read-only clients for jobs already
+  // created by the same tenant/user.
+  tools.push({
+    name: 'hivemind_generate_visual',
+    description: 'Start a durable designer-grade visual job. HIVE loads company context and verified Brand DNA server-side, creates the art direction, generates and critiques a master, then produces a consistent set when requested. Returns job_id immediately; poll hivemind_visual_status and surface its new stage events.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {
+      instruction: { type: 'string' }, use_case: { type: 'string', enum: ['campaign_social', 'campaign_ad', 'room_visual', 'presentation', 'website', 'product', 'editorial', 'general'] },
+      output: { type: 'object', properties: { mode: { type: 'string', enum: ['single', 'set'] }, count: { type: 'integer', minimum: 1, maximum: 8 }, aspect_ratios: { type: 'array', items: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4', '4:5'] }, maxItems: 8 }, quality: { type: 'string', enum: ['fast', 'balanced', 'quality'] } } },
+      model_policy: { type: 'string', enum: ['auto', 'fast', 'quality'] }, idempotency_key: { type: 'string' },
+    }, required: ['instruction'] },
+  });
+  tools.push({ name: 'hivemind_visual_status', description: 'Read a visual job plus durable stage events. Pass after_event_id from the previous response to stream only later stages; continue until completed or failed.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string' }, after_event_id: { type: 'string' } }, required: ['job_id'] } });
+
   // ── Slack action tools (Digital Employee scope: slack:act) ──
   const hasSlackAct = hasAll || !scopeSet.has('!slack');
   if (hasSlackAct) {
@@ -1433,6 +1447,7 @@ Use when you need what was posted in a known channel recently (e.g. monitoring a
       'hivemind_save_conversation', 'hivemind_create_project', 'hivemind_ingest_code',
       'hivemind_log_decision', 'hivemind_track_refactor', 'hivemind_test_coverage',
       'hivemind_set_assistant_name', 'hivemind_set_voice',
+      'hivemind_generate_visual',
       'hivemind_slack_post', 'hivemind_slack_react',
     ]);
     return [...tools.filter(t => !WRITE_TOOLS.has(t.name)), ...getOpsToolsManifest({ isOperator: isOpsOperator })];
@@ -3221,6 +3236,16 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           title: args.title,
           tags: args.tags,
         });
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_generate_visual': {
+        const res = await apiClient.post('/api/visual-generation/jobs', args);
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_visual_status': {
+        const res = await apiClient.get(`/api/visual-generation/jobs/${args.job_id}`, { params: { after_event_id: args.after_event_id || 0 } });
         return formatToolContent(res);
       }
 

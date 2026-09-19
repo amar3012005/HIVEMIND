@@ -17,6 +17,7 @@ def test_no_configured_tools_gets_the_wide_default_including_recall():
     assert tools == [
         "hivemind_recall", "hivemind_list_memories", "hivemind_get_memory",
         "hivemind_traverse_graph", "hivemind_query_with_ai", "hivemind_save_memory",
+        "hivemind_generate_visual", "hivemind_visual_status",
     ]
 
 
@@ -30,12 +31,14 @@ def test_configured_tools_missing_recall_get_it_merged_in():
     tools = resolve_agent_tool_names(["gmail_search"])
     assert "hivemind_recall" in tools
     assert "gmail_search" in tools
+    assert "hivemind_generate_visual" in tools
+    assert "hivemind_visual_status" in tools
 
 
 def test_configured_tools_already_including_recall_are_not_duplicated():
     tools = resolve_agent_tool_names(["hivemind_recall", "gmail_search"])
     assert tools.count("hivemind_recall") == 1
-    assert tools == ["hivemind_recall", "gmail_search"]
+    assert tools == ["hivemind_recall", "gmail_search", "hivemind_generate_visual", "hivemind_visual_status"]
 
 
 def test_verifier_sentinel_toolless_list_is_left_untouched():

@@ -85,4 +85,13 @@ describe('MCP tools visibility gating', () => {
     // Core tools still present
     expect(names).toContain('hivemind_save_memory');
   });
+
+  it('exposes visual status to read clients and generation only to write clients', () => {
+    const readOnly = toolNames(handleToolsList('u1', 'o1', { scopes: ['memory:read'] }));
+    expect(readOnly).toContain('hivemind_visual_status');
+    expect(readOnly).not.toContain('hivemind_generate_visual');
+    const writer = toolNames(handleToolsList('u1', 'o1', { scopes: ['memory:write'] }));
+    expect(writer).toContain('hivemind_visual_status');
+    expect(writer).toContain('hivemind_generate_visual');
+  });
 });

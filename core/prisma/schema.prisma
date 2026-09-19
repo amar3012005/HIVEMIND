@@ -5555,3 +5555,65 @@ model VisualIntelligenceStep {
   @@index([status, leaseExpiresAt])
   @@map("visual_intelligence_steps")
 }
+
+/// Provider-independent visual production job. Binary image bytes remain in
+/// R2; this row is the tenant-scoped source of truth for intent, progress,
+/// lineage, and final asset receipts.
+model VisualGenerationJob {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  roomId             String?  @map("room_id") @db.Uuid
+  campaignId         String?  @map("campaign_id") @db.Uuid
+  actionId           String?  @map("action_id") @db.Uuid
+  idempotencyKey     String   @map("idempotency_key") @db.VarChar(180)
+  workflowInstanceId String?  @unique @map("workflow_instance_id") @db.VarChar(180)
+  contractVersion    String   @default("visual.production.v1") @map("contract_version") @db.VarChar(48)
+  instruction        String   @db.Text
+  useCase            String   @map("use_case") @db.VarChar(64)
+  outputMode         String   @map("output_mode") @db.VarChar(16)
+  requestedCount     Int      @map("requested_count")
+  aspectRatios       Json     @default("[]") @map("aspect_ratios")
+  quality            String   @default("quality") @db.VarChar(24)
+  modelPolicy        String   @default("auto") @map("model_policy") @db.VarChar(32)
+  source             Json     @default("{}")
+  status             String   @default("queued") @db.VarChar(24)
+  currentStage       String   @default("queued") @map("current_stage") @db.VarChar(48)
+  progress           Int      @default(0)
+  brandDnaRef        Json     @default("{}") @map("brand_dna_ref")
+  companyContext     Json     @default("{}") @map("company_context")
+  productionSpec     Json     @default("{}") @map("production_spec")
+  assets             Json     @default("[]")
+  error              Json?
+  terminalReason     String?  @map("terminal_reason") @db.VarChar(180)
+  heartbeatAt        DateTime? @map("heartbeat_at") @db.Timestamptz(6)
+  startedAt          DateTime? @map("started_at") @db.Timestamptz(6)
+  finishedAt         DateTime? @map("finished_at") @db.Timestamptz(6)
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  events             VisualGenerationEvent[]
+
+  @@unique([orgId, userId, idempotencyKey])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@index([status, heartbeatAt])
+  @@map("visual_generation_jobs")
+}
+
+/// Append-only progress stream for visual production. Agents poll by event id;
+/// browser clients may consume the same ledger through SSE.
+model VisualGenerationEvent {
+  id        BigInt   @id @default(autoincrement())
+  jobId     String   @map("job_id") @db.Uuid
+  eventKey  String   @map("event_key") @db.VarChar(120)
+  stage     String   @db.VarChar(48)
+  status    String   @db.VarChar(24)
+  progress  Int
+  message   String   @db.VarChar(300)
+  data      Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  job       VisualGenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, eventKey])
+  @@index([jobId, id])
+  @@map("visual_generation_events")
+}

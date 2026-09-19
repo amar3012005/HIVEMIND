@@ -366,6 +366,8 @@ _DEFAULT_HIVEMIND_TOOLS = [
     "hivemind_traverse_graph",
     "hivemind_query_with_ai",
     "hivemind_save_memory",
+    "hivemind_generate_visual",
+    "hivemind_visual_status",
 ]
 
 
@@ -391,7 +393,11 @@ def resolve_agent_tool_names(configured_tools: Optional[List[str]]) -> List[str]
         return list(_DEFAULT_HIVEMIND_TOOLS)
     if any(str(t).startswith("_") for t in configured_tools):
         return list(configured_tools)
-    return list(dict.fromkeys(list(configured_tools) + ["hivemind_recall"]))
+    return list(dict.fromkeys(list(configured_tools) + [
+        "hivemind_recall",
+        "hivemind_generate_visual",
+        "hivemind_visual_status",
+    ]))
 
 
 def build_react_agent(

@@ -470,6 +470,32 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'hivemind_generate_visual',
+      description: 'Start the shared durable visual-production pipeline for a single image or coordinated image set. The pipeline loads verified company context and Brand DNA server-side, creates professional art direction, generates and critiques a master, then produces consistent variants. Returns a job_id immediately; use hivemind_visual_status to stream stage receipts. Never claim the visuals are complete until status=completed.',
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          instruction: { type: 'string', description: 'What the visual must communicate, the use context, and any concrete subject requirements.' },
+          use_case: { type: 'string', enum: ['campaign_social', 'campaign_ad', 'room_visual', 'presentation', 'website', 'product', 'editorial', 'general'], default: 'general' },
+          output: { type: 'object', properties: { mode: { type: 'string', enum: ['single', 'set'], default: 'single' }, count: { type: 'integer', minimum: 1, maximum: 8, default: 1 }, aspect_ratios: { type: 'array', items: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4', '4:5'] }, maxItems: 8 }, quality: { type: 'string', enum: ['fast', 'balanced', 'quality'], default: 'quality' } } },
+          model_policy: { type: 'string', enum: ['auto', 'fast', 'quality'], default: 'auto' },
+          idempotency_key: { type: 'string', description: 'Stable caller key for safe retries. Omit only when the exact same request should deduplicate automatically.' },
+        },
+        required: ['instruction'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'hivemind_visual_status',
+      description: 'Read a visual-production job and every new durable stage event. Pass after_event_id from the prior response to receive only later events. Keep polling while status is queued or running; completed returns final asset receipts.',
+      parameters: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string' }, after_event_id: { type: 'string', default: '0' } }, required: ['job_id'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hivemind_web_job_status',
       description: 'Poll web_search / web_crawl until done.',
       parameters: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'] },

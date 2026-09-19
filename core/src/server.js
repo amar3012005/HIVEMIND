@@ -700,6 +700,16 @@ async function startVisualIntelligenceFromAgent({ orgId, userId, urls, roomId = 
   return startVisualIntelligenceWorkflow({ orgId, userId, urls, roomId });
 }
 
+async function startVisualGenerationFromAgent({ orgId, userId, input, idempotencyKey = null }) {
+  const { createVisualGenerationJob } = await import('./visual-generation/service.js');
+  return createVisualGenerationJob({ prisma, orgId, userId, input, idempotencyKey });
+}
+
+async function getVisualGenerationFromAgent({ orgId, userId, jobId, afterEventId = 0 }) {
+  const { getVisualGenerationJob } = await import('./visual-generation/service.js');
+  return getVisualGenerationJob({ prisma, orgId, userId, jobId, afterEventId });
+}
+
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   scheduleRecurringMaintenanceJob({
@@ -4603,6 +4613,8 @@ const server = http.createServer(async (req, res) => {
       runWebCrawlJob,
       runWebSearchJob,
       startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
+      startVisualGeneration: startVisualGenerationFromAgent,
+      getVisualGenerationStatus: getVisualGenerationFromAgent,
       prisma,
       accessContext: null,
     };
@@ -6536,6 +6548,31 @@ exit \$RC
       return jsonResponse(res, { error: 'not_found', retryable: false }, 404);
     } catch (error) {
       return jsonResponse(res, { error: error.message, retryable: error.retryable !== false }, error.retryable === false ? 422 : 500);
+    }
+  }
+
+  // Visual Generation is a separate Queue + Workflow lifecycle from Brand DNA.
+  // Only the Cloudflare Worker receives this service credential; product agents
+  // use the authenticated /api routes below.
+  if (pathname.startsWith('/internal/visual-generation/')) {
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed', retryable: false }, 405);
+    if (process.env.VISUAL_GENERATION_WORKFLOW_ENABLED === 'false') return jsonResponse(res, { error: 'visual_generation_disabled', retryable: false }, 403);
+    const expected = String(process.env.HIVEMIND_VISUAL_GENERATION_SECRET || process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const expectedBuf = Buffer.from(expected); const suppliedBuf = Buffer.from(supplied);
+    if (!expected || expectedBuf.length !== suppliedBuf.length || !crypto.timingSafeEqual(expectedBuf, suppliedBuf)) return jsonResponse(res, { error: 'unauthorized', retryable: false }, 401);
+    let visualBody;
+    try { visualBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body', retryable: false }, 400); }
+    try {
+      const { DurableVisualGenerationLifecycle } = await import('./visual-generation/service.js');
+      const lifecycle = new DurableVisualGenerationLifecycle({ prisma });
+      if (pathname === '/internal/visual-generation/context') return jsonResponse(res, await lifecycle.context(visualBody));
+      if (pathname === '/internal/visual-generation/event') return jsonResponse(res, await lifecycle.record(visualBody));
+      if (pathname === '/internal/visual-generation/complete') return jsonResponse(res, await lifecycle.complete(visualBody));
+      if (pathname === '/internal/visual-generation/fail') return jsonResponse(res, await lifecycle.fail(visualBody));
+      return jsonResponse(res, { error: 'not_found', retryable: false }, 404);
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || error.message, message: error.message, retryable: error.retryable !== false }, error.status || (error.retryable === false ? 422 : 500));
     }
   }
 
@@ -9836,6 +9873,62 @@ exit \$RC
       const effectiveContainerTag = resolvedContainerTag
         || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
 
+      // Shared visual-production capability. Every authenticated agent and UI
+      // surface enters through the same tenant-scoped job ledger; no caller can
+      // supply another user's company context or Brand DNA.
+      if (pathname === '/api/visual-generation/jobs' && req.method === 'POST') {
+        try {
+          const result = await startVisualGenerationFromAgent({
+            orgId, userId, input: body,
+            idempotencyKey: req.headers['x-idempotency-key'] || body?.idempotency_key || null,
+          });
+          return jsonResponse(res, result, result.replayed ? 200 : 202);
+        } catch (error) {
+          return jsonResponse(res, { error: error.code || 'visual_generation_create_failed', message: error.message, job_id: error.jobId || null }, error.status || 500);
+        }
+      }
+      const visualStatusMatch = pathname.match(/^\/api\/visual-generation\/jobs\/([0-9a-f-]+)$/i);
+      if (visualStatusMatch && req.method === 'GET') {
+        try {
+          return jsonResponse(res, await getVisualGenerationFromAgent({ orgId, userId, jobId: visualStatusMatch[1], afterEventId: url.searchParams.get('after_event_id') || 0 }));
+        } catch (error) {
+          return jsonResponse(res, { error: error.code || 'visual_generation_status_failed', message: error.message }, error.status || 500);
+        }
+      }
+      const visualEventsMatch = pathname.match(/^\/api\/visual-generation\/jobs\/([0-9a-f-]+)\/events$/i);
+      if (visualEventsMatch && req.method === 'GET') {
+        try {
+          let afterEventId = Number(req.headers['last-event-id'] || url.searchParams.get('after_event_id') || 0);
+          // Authorize before opening the stream.
+          await getVisualGenerationFromAgent({ orgId, userId, jobId: visualEventsMatch[1], afterEventId });
+          res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+          const deadline = Date.now() + 25_000; let closed = false; req.on('close', () => { closed = true; });
+          while (!closed && Date.now() < deadline) {
+            const snapshot = await getVisualGenerationFromAgent({ orgId, userId, jobId: visualEventsMatch[1], afterEventId });
+            for (const event of snapshot.events || []) { afterEventId = Math.max(afterEventId, Number(event.id) || 0); res.write(`id: ${event.id}\nevent: visual_stage\ndata: ${JSON.stringify(event)}\n\n`); }
+            if (['completed', 'failed', 'cancelled'].includes(snapshot.status)) { res.write(`event: visual_terminal\ndata: ${JSON.stringify({ status: snapshot.status, job_id: snapshot.job_id })}\n\n`); break; }
+            res.write(`event: ping\ndata: ${JSON.stringify({ job_id: snapshot.job_id, stage: snapshot.stage, progress: snapshot.progress })}\n\n`);
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          if (!closed) res.end(); return;
+        } catch (error) {
+          if (!res.headersSent) return jsonResponse(res, { error: error.code || 'visual_generation_stream_failed', message: error.message }, error.status || 500);
+          res.end(); return;
+        }
+      }
+      const visualAssetMatch = pathname.match(/^\/api\/visual-generation\/jobs\/([0-9a-f-]+)\/assets\/([^/]+)$/i);
+      if (visualAssetMatch && req.method === 'GET') {
+        try {
+          const { readVisualAsset } = await import('./visual-generation/service.js');
+          const result = await readVisualAsset({ prisma, orgId, userId, jobId: visualAssetMatch[1], assetId: decodeURIComponent(visualAssetMatch[2]) });
+          const bytes = Buffer.from(await result.response.arrayBuffer());
+          res.writeHead(200, { 'Content-Type': result.response.headers.get('content-type') || result.asset.content_type || 'image/png', 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', ETag: result.asset.content_hash });
+          res.end(bytes); return;
+        } catch (error) {
+          return jsonResponse(res, { error: error.code || 'visual_asset_read_failed', message: error.message }, error.status || 500);
+        }
+      }
+
       // ── ICARUS optional organizational authority ───────────────────────
       // A narrow read-only projection; authenticated principal identity is the authority.
       if (pathname === '/api/icarus/authority/snapshot' && req.method === 'GET') {
@@ -12072,6 +12165,8 @@ exit \$RC
                     runWebCrawlJob,
                     runWebSearchJob,
                     startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
+                    startVisualGeneration: startVisualGenerationFromAgent,
+                    getVisualGenerationStatus: getVisualGenerationFromAgent,
                   },
                 });
               } finally {
@@ -24919,6 +25014,8 @@ exit \$RC
                     runWebCrawlJob,
                     runWebSearchJob,
                     startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
+                    startVisualGeneration: startVisualGenerationFromAgent,
+                    getVisualGenerationStatus: getVisualGenerationFromAgent,
                     _trace: { traceId: crypto.randomUUID() },
                   },
                   apiKey: groqKey, onEvent: emit,
@@ -25228,6 +25325,8 @@ exit \$RC
                         runWebCrawlJob,
                         runWebSearchJob,
                         startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
+                        startVisualGeneration: startVisualGenerationFromAgent,
+                        getVisualGenerationStatus: getVisualGenerationFromAgent,
                       },
                       onEvent: emit,
                       streamAnswer: true,
@@ -25323,6 +25422,8 @@ exit \$RC
                     runWebCrawlJob,
                     runWebSearchJob,
                     startVisualIntelligenceWorkflow: startVisualIntelligenceFromAgent,
+                    startVisualGeneration: startVisualGenerationFromAgent,
+                    getVisualGenerationStatus: getVisualGenerationFromAgent,
                   },
                   onEvent: durableSink ? (event) => durableSink.push(event) : null,
                 });

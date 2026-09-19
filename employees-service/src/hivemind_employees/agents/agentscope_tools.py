@@ -1657,6 +1657,64 @@ def build_hivemind_toolkit(
                 return _tool_response(r.json())
         tk.register_tool_function(save_memory)
 
+    if "hivemind_generate_visual" in enabled_tool_names:
+        def generate_visual(
+            instruction: str,
+            use_case: str = "general",
+            mode: str = "single",
+            count: int = 1,
+            aspect_ratios: str = "1:1",
+            quality: str = "quality",
+            model_policy: str = "auto",
+            idempotency_key: str = "",
+        ) -> ToolResponse:
+            """Queue a durable, brand-grounded visual production job.
+
+            Use this whenever the user requests an image or image set. The service
+            independently loads verified company context and Brand DNA, art-directs,
+            generates, critiques, revises once if needed, and stores final assets.
+            It returns immediately with a job id; use hivemind_visual_status to follow it.
+
+            Args:
+                instruction: What the visual must communicate and where it will be used.
+                use_case: general, campaign_social, campaign_ad, room_visual, presentation, website, product, or editorial.
+                mode: single or set.
+                count: Number of final images, 1-8.
+                aspect_ratios: Comma-separated ratios such as 1:1,16:9,4:5.
+                quality: quality, balanced, or fast.
+                model_policy: auto, fast, or quality model selection.
+                idempotency_key: Stable retry key when available.
+            """
+            provenance = _TURN_PROVENANCE.get() or {}
+            body = {
+                "instruction": instruction,
+                "use_case": use_case,
+                "output": {
+                    "mode": mode,
+                    "count": min(max(int(count), 1), 8),
+                    "aspect_ratios": [value.strip() for value in aspect_ratios.split(",") if value.strip()],
+                },
+                "quality": quality,
+                "model_policy": model_policy,
+                "source": {"kind": "agent", "room_id": provenance.get("room_id")},
+            }
+            if idempotency_key:
+                body["idempotency_key"] = idempotency_key
+            with _client(api_key, user_id, org_id) as c:
+                response = c.post("/api/visual-generation/jobs", json=body)
+                response.raise_for_status()
+                return _tool_response(response.json())
+        tk.register_tool_function(generate_visual)
+
+    if "hivemind_visual_status" in enabled_tool_names:
+        def visual_status(job_id: str) -> ToolResponse:
+            """Read durable stage progress and final asset receipts for a visual job."""
+            with _client(api_key, user_id, org_id) as c:
+                response = c.get(f"/api/visual-generation/jobs/{job_id}")
+                response.raise_for_status()
+                return _tool_response(response.json())
+        tk.register_tool_function(visual_status)
+
     # ── Read-only graph + temporal tools ─────────────────────────────
 
     if "hivemind_list_memories" in enabled_tool_names:

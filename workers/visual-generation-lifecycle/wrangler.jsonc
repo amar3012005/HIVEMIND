@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-visual-generation",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "HIVEMIND_VISUAL_API_URL": "https://core.singulancelabs.com",
+    "VISUAL_ART_DIRECTOR_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "VISUAL_CRITIC_MODEL": "@cf/meta/llama-3.2-11b-vision-instruct",
+    "VISUAL_FAST_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
+    "VISUAL_QUALITY_MODEL": "@cf/black-forest-labs/flux-2-dev"
+  },
+  "ai": { "binding": "AI" },
+  "queues": {
+    "producers": [{ "binding": "VISUAL_GENERATION_QUEUE", "queue": "hivemind-visual-generation" }],
+    "consumers": [{ "queue": "hivemind-visual-generation", "max_batch_size": 10, "max_batch_timeout": 3, "max_retries": 8, "dead_letter_queue": "hivemind-visual-generation-dlq", "max_concurrency": 10, "retry_delay": 30 }]
+  },
+  "workflows": [{ "name": "hivemind-visual-generation-workflow", "binding": "VISUAL_GENERATION_WORKFLOW", "class_name": "VisualGenerationWorkflow", "limits": { "steps": 25000 } }],
+  "r2_buckets": [{ "binding": "VISUAL_ASSETS", "bucket_name": "hivemind-visual-intelligence-artifacts" }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

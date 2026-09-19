@@ -141,5 +141,37 @@ def build_hivemind_tools(
                 return json.dumps(r.json())
         tools.append(FunctionTool.from_function(save_memory))
 
+    if "hivemind_generate_visual" in enabled_tool_names:
+        def generate_visual(instruction: str, use_case: str = "general", mode: str = "single",
+                            count: int = 1, aspect_ratios: str = "1:1",
+                            quality: str = "quality", model_policy: str = "auto",
+                            idempotency_key: str = "") -> str:
+            """Queue a durable, brand-grounded visual production job."""
+            body = {
+                "instruction": instruction,
+                "use_case": use_case,
+                "output": {"mode": mode, "count": min(max(int(count), 1), 8),
+                           "aspect_ratios": [v.strip() for v in aspect_ratios.split(",") if v.strip()]},
+                "quality": quality,
+                "model_policy": model_policy,
+                "source": {"kind": "agent"},
+            }
+            if idempotency_key:
+                body["idempotency_key"] = idempotency_key
+            with _client(api_key) as c:
+                response = c.post("/api/visual-generation/jobs", json=body)
+                response.raise_for_status()
+                return json.dumps(response.json())
+        tools.append(FunctionTool.from_function(generate_visual))
+
+    if "hivemind_visual_status" in enabled_tool_names:
+        def visual_status(job_id: str) -> str:
+            """Read durable stage progress and final assets for a visual job."""
+            with _client(api_key) as c:
+                response = c.get(f"/api/visual-generation/jobs/{job_id}")
+                response.raise_for_status()
+                return json.dumps(response.json())
+        tools.append(FunctionTool.from_function(visual_status))
+
     log.info("Built %d HIVEMIND tools for employee API key", len(tools))
     return tools

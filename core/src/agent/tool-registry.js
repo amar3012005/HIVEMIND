@@ -1779,6 +1779,19 @@ const TOOL_HANDLERS = {
     }
   },
 
+  async hivemind_generate_visual(args, ctx) {
+    if (!ctx.startVisualGeneration) return { error: 'visual_generation_workflow_not_configured' };
+    try {
+      return await ctx.startVisualGeneration({ orgId: ctx.orgId, userId: ctx.userId, input: { ...args, source: { ...(args.source || {}), ...(ctx.roomId ? { room_id: ctx.roomId } : {}) } }, idempotencyKey: args.idempotency_key || null });
+    } catch (error) { return { error: error.code || 'visual_generation_failed', message: error.message, job_id: error.jobId || null }; }
+  },
+
+  async hivemind_visual_status(args, ctx) {
+    if (!ctx.getVisualGenerationStatus) return { error: 'visual_generation_status_not_configured' };
+    try { return await ctx.getVisualGenerationStatus({ orgId: ctx.orgId, userId: ctx.userId, jobId: args.job_id, afterEventId: args.after_event_id || 0 }); }
+    catch (error) { return { error: error.code || 'visual_generation_status_failed', message: error.message }; }
+  },
+
   async hivemind_web_job_status(args, ctx) {
     if (!ctx.webJobStore) return { error: 'web intel not configured' };
     const job = await ctx.webJobStore.get(args.job_id, { userId: ctx.userId, orgId: ctx.orgId });

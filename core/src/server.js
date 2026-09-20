@@ -52,6 +52,8 @@ import { requireAdminSecret, requireSessionSecret } from './security/internal-au
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { isOrganizationAdmin } from './workspace/access-policy.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
+import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
+import { configureSystemEmailNotificationSink } from './email/email-service.js';
 import { resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
@@ -532,6 +534,7 @@ installConsoleCapture('core');
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
+configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
 const { configureAiGovernance, recordAiUsage } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 // Production Web Intelligence must use durable tenant-scoped state. The

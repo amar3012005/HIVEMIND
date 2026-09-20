@@ -523,7 +523,7 @@ artifact is not an artifact."""
 
 
 class PlaybookListTool(_HiveMindToolBase):
-    """Compact catalog of global/org playbooks. No keyword routing."""
+    """Compact catalog of global, org, and WorkRun-local playbooks. No keyword routing."""
 
     name: str = "PlaybookList"
     description: str = """List available playbooks (id, name, description, scope).

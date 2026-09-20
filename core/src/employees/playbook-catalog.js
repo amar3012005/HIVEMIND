@@ -59,7 +59,11 @@ function scopedPlaybooks(value, scope) {
     return {
       id: safeScopedId(object.id || object.slug || object.name, index, scope),
       name: String(object.name || object.title || `Organization playbook ${index + 1}`).trim(),
-      description: String(object.description || 'Organization-specific operating guidance.').trim(),
+      description: String(object.description || (
+        scope === 'local'
+          ? 'WorkRun-local operating guidance.'
+          : 'Organization-specific operating guidance.'
+      )).trim(),
       scope,
       instructions,
     };

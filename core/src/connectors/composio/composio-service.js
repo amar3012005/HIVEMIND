@@ -197,6 +197,19 @@ export async function getSession(orgId) {
 const TOOL_SCHEMA_CACHE = new Map(); // toolkitSlug -> { at, tools }
 const TOOL_SCHEMA_TTL_MS = 10 * 60 * 1000;
 
+// Composio owns the tool metadata.  We only allow an immediate external read
+// when its descriptor explicitly says so; absent or unfamiliar metadata is a
+// write by default and therefore goes through HIVE's durable approval gate.
+// Never derive this from a provider/tool name — that would become a brittle,
+// provider-specific policy engine.
+function isExplicitlyReadOnly(tool) {
+  const annotations = tool?.annotations || tool?.annotation || {};
+  return tool?.readOnly === true
+    || tool?.read_only === true
+    || annotations?.readOnlyHint === true
+    || annotations?.read_only_hint === true;
+}
+
 export async function getToolkitTools(toolkitSlug) {
   const cached = TOOL_SCHEMA_CACHE.get(toolkitSlug);
   if (cached && Date.now() - cached.at < TOOL_SCHEMA_TTL_MS) return cached.tools;
@@ -225,10 +238,34 @@ export async function getToolkitTools(toolkitSlug) {
     // Kept alongside the OpenAI-shaped fields (ignored by the LLM, read by
     // executeTool's caller) so dispatch doesn't need to re-derive the real
     // Composio slug from the namespaced function name.
-    _composio: { toolkit: toolkitSlug, slug: tool.slug },
+    _composio: {
+      toolkit: toolkitSlug,
+      slug: tool.slug,
+      readOnly: isExplicitlyReadOnly(tool),
+    },
   }));
   TOOL_SCHEMA_CACHE.set(toolkitSlug, { at: Date.now(), tools });
   return tools;
+}
+
+/**
+ * Return the server-resolved policy for one *connected* Composio tool.
+ *
+ * This is deliberately not supplied by a model or browser request.  A model
+ * cannot upgrade a write to a read by adding a flag to its arguments, and a
+ * disconnected tool cannot be used as an accidental capability catalogue.
+ */
+export async function getConnectedToolPolicy(orgId, toolSlug) {
+  const requested = String(toolSlug || '').trim();
+  if (!requested) return null;
+  const session = await getSession(orgId);
+  const matched = session.tools.find((tool) => tool?._composio?.slug === requested);
+  if (!matched) return null;
+  return {
+    toolkit: matched._composio.toolkit,
+    slug: matched._composio.slug,
+    readOnly: matched._composio.readOnly === true,
+  };
 }
 
 // ---------------------------------------------------------------------------

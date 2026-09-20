@@ -615,6 +615,58 @@ export async function handleInternalComposioExecuteRoute({
   if (!toolSlug) return jsonResponse(res, { error: 'tool is required' }, 400);
   const args = body?.args && typeof body.args === 'object' ? body.args : {};
 
+  // HIVE resolves the provider's own descriptor before dispatch.  The caller
+  // never supplies an access flag: unknown metadata is deliberately treated
+  // as a write, which is safer than allowing a newly-added provider action to
+  // bypass the approval boundary.
+  let policy = null;
+  try {
+    policy = typeof composioService.getConnectedToolPolicy === 'function'
+      ? await composioService.getConnectedToolPolicy(principal.orgId, toolSlug)
+      : null;
+  } catch (err) {
+    return jsonResponse(res, { error: `could not resolve connected tool policy: ${err.message}` }, 502);
+  }
+  if (!policy) {
+    return jsonResponse(res, { error: 'tool is not available through an active organization connection', tool: toolSlug }, 404);
+  }
+
+  if (!policy.readOnly) {
+    // Reuse the single PendingWrite authority used by the connector runtime
+    // and browser chat.  This persists the immutable arguments, gives the
+    // user a durable approval receipt, and ensures the provider is never
+    // reached before a human authorization exists.  It is intentionally not
+    // an AgentScope RequireUserConfirm event: a generic runtime confirmation
+    // card must not suspend this WorkRun's stream.
+    const { ApprovalStore } = await import('../connectors/runtime/approval-store.js');
+    const approval = await new ApprovalStore({ prisma }).gateWrite({
+      tool: { name: toolSlug, access: 'write', approval: 'required' },
+      connectorId: 'composio',
+      connection: { connectionId: policy.toolkit },
+      input: args,
+      context: {
+        orgId: principal.orgId,
+        userId: principal.userId,
+        // A request id is only an idempotency namespace; it is never an
+        // authorization input.  The internal proxy supplies one when present.
+        requestId: String(req.headers['x-request-id'] || '').trim() || null,
+      },
+    });
+    if (approval.status === 'approval_required') {
+      return jsonResponse(res, {
+        status: 'approval_required',
+        tool: toolSlug,
+        approval: approval.approval,
+        message: approval.content?.[0]?.text || 'Awaiting external-action approval',
+      }, 200);
+    }
+    return jsonResponse(res, {
+      status: approval.status || 'failed',
+      tool: toolSlug,
+      error: approval.content?.[0]?.text || 'unable to persist external-action approval',
+    }, 503);
+  }
+
   try {
     const result = await composioService.executeTool(principal.orgId, toolSlug, args);
     if (!result?.successful) {

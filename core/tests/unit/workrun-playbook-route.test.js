@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   handleInternalCompanyRecordsRoute,
+  handleInternalComposioExecuteRoute,
   handleInternalPlaybookGetRoute,
   handleInternalPlaybookListRoute,
 } from '../../src/routes/internal-hivemind.js';
@@ -149,4 +150,62 @@ test('the selected global playbook stores its resolved completion contract on th
   });
   assert.deepEqual(JSON.parse(harness.queries[1].params[3]).completion_contract,
     harness.response().body.playbook.completion_contract);
+});
+
+test('connected external writes become durable approvals before Composio is called', async () => {
+  let response;
+  let executeCalls = 0;
+  const pending = new Map();
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: ORG_ID }) },
+    pendingWrite: {
+      findUnique: async ({ where: { idempotencyKey } }) => pending.get(idempotencyKey) || null,
+      create: async ({ data }) => {
+        const row = { id: '44444444-4444-4444-8444-444444444444', ...data };
+        pending.set(data.idempotencyKey, row);
+        return row;
+      },
+    },
+  };
+  await handleInternalComposioExecuteRoute({
+    req: { headers: { 'x-hm-user-id': USER_ID, 'x-hm-org-id': ORG_ID, 'x-request-id': 'request-1' } },
+    res: {},
+    parseBody: async () => ({ tool: 'GMAIL_SEND_EMAIL', args: { to: 'person@example.test', body: 'Hello' } }),
+    jsonResponse: (_res, body, status = 200) => { response = { body, status }; return response; },
+    prisma,
+    composioService: {
+      isComposioConfigured: () => true,
+      getConnectedToolPolicy: async () => ({ toolkit: 'gmail', slug: 'GMAIL_SEND_EMAIL', readOnly: false }),
+      executeTool: async () => { executeCalls += 1; return { successful: true, data: {} }; },
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'approval_required');
+  assert.equal(response.body.tool, 'GMAIL_SEND_EMAIL');
+  assert.equal(response.body.approval.id, '44444444-4444-4444-8444-444444444444');
+  assert.equal(executeCalls, 0);
+  assert.equal([...pending.values()][0].status, 'draft');
+  assert.deepEqual([...pending.values()][0].toolArgs, { to: 'person@example.test', body: 'Hello' });
+});
+
+test('only an explicitly read-only connected Composio descriptor executes directly', async () => {
+  let response;
+  let received = null;
+  await handleInternalComposioExecuteRoute({
+    req: { headers: { 'x-hm-user-id': USER_ID, 'x-hm-org-id': ORG_ID } },
+    res: {},
+    parseBody: async () => ({ tool: 'GMAIL_LIST_MESSAGES', args: { max_results: 3 } }),
+    jsonResponse: (_res, body, status = 200) => { response = { body, status }; return response; },
+    prisma: { userOrganization: { findFirst: async () => ({ orgId: ORG_ID }) } },
+    composioService: {
+      isComposioConfigured: () => true,
+      getConnectedToolPolicy: async () => ({ toolkit: 'gmail', slug: 'GMAIL_LIST_MESSAGES', readOnly: true }),
+      executeTool: async (orgId, tool, args) => { received = { orgId, tool, args }; return { successful: true, data: { messages: [] } }; },
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'completed');
+  assert.deepEqual(received, { orgId: ORG_ID, tool: 'GMAIL_LIST_MESSAGES', args: { max_results: 3 } });
 });

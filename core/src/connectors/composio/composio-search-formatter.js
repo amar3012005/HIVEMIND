@@ -27,7 +27,14 @@ export function namedRecipient(message) {
 }
 
 export function isWriteIntentMessage(message) {
-  const text = String(message || '');
+  // Safety guardrails such as "Do not send, draft, label, modify, delete, or
+  // save anything" describe prohibited effects, not requested writes. Remove
+  // the negated tail of a clause before classifying intent, while preserving
+  // an earlier affirmative request ("Draft this. Do not send it.").
+  const text = String(message || '').replace(
+    /\b(?:do\s+not|don't|never)\b[^.!?;\n]*/gi,
+    ' ',
+  );
   if (/\b(send|draft|publish|create|share this|write a|write an?|write e-?mail|write mail|e-?mail to|mail to|message to|reply to|forward this)\b/i.test(text)) return true;
   if (/\b(send|write)\b/i.test(text) && /\b(e-?mails?|mail|gmail|message)\b/i.test(text)) return true;
   return false;
@@ -36,7 +43,7 @@ export function isWriteIntentMessage(message) {
 export function isReadLookupUseCase(message) {
   if (isWriteIntentMessage(message)) return false;
   const text = String(message || '');
-  if (/\b(what|think|last|latest|show|get|read|about my|did i|have i|was my|recent|list|inbox)\b/i.test(text)) return true;
+  if (/\b(what|think|find|last|latest|newest|show|get|read|about my|did i|have i|was my|recent|list|inbox)\b/i.test(text)) return true;
   if (/\be-?mails?\b/i.test(text) && !/\b(write|send|draft|to)\b/i.test(text)) return true;
   return false;
 }

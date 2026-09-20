@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { executeHivemindCustomTool, nativeNameFromComposioSlug } from '../connectors/composio/hivemind-custom-toolkit.js';
 import { formatComposioSearch, formatKnownFields, isReadLookupUseCase } from '../connectors/composio/composio-search-formatter.js';
 import { isProgressiveHarnessEnabled, resolveHarnessIntent, chooseProgressiveAction, buildProgressiveSynthesisMessages, boundedEvidence, parseProgressiveObject, buildProgressiveConversationContext, reviewProgressiveArguments, PROGRESSIVE_HARNESS_MODEL } from './progressive-harness.js';
+import { decideRuntimeStage } from './decision-gateway-service.js';
 
 const memoryRuns = new Map();
 
@@ -101,7 +102,11 @@ export function isMailboxMessageRequest(message) {
 export function requestedResultLimit(message, fallback = null) {
   const text = String(message || '');
   const match = text.match(/\b(?:last|latest|recent|newest|show|list|get|read)?\s*(\d{1,2})\s+(?:email|emails|e-mail|e-mails|mail|mails|message|messages|thread|threads)\b/i);
-  if (!match) return fallback;
+  if (!match) {
+    const singleton = /\b(?:last|latest|newest)\s+(?:email|e-mail|mail|message|thread)\b/i.test(text)
+      || /\b(?:only|exactly)\s+(?:that\s+)?one\s+(?:email|e-mail|mail|message|thread)\b/i.test(text);
+    return singleton ? 1 : fallback;
+  }
   return Math.max(1, Math.min(50, Number(match[1])));
 }
 
@@ -413,8 +418,14 @@ export function rowsFromToolData(data) {
     const title = item.full_name || item.name || item.title || item.subject
       || (typeof item.snippet === 'string' ? item.snippet : '')
       || nested.title || item.facetName || '';
-    const extra = nested.channelTitle || item.channelTitle || item.owner?.login
-      || item.description || nested.description || '';
+    const emailDetails = [
+      item.sender || item.from || '',
+      item.messageTimestamp || item.receivedAt || item.received_at || item.date || '',
+    ].filter(Boolean).map(cellText);
+    const extra = emailDetails.length
+      ? emailDetails.join(' — ')
+      : (nested.channelTitle || item.channelTitle || item.owner?.login
+        || item.description || nested.description || '');
     if (!title || /adTargetingFacet|urn:li:ad/i.test(String(title))) return null;
     return { title: cellText(title).slice(0, 80), extra: cellText(extra).slice(0, 80) };
   }).filter(Boolean);
@@ -1601,6 +1612,13 @@ export async function runDurableComposioAgent({
   choice = null,
 } = {}) {
   const emit = onEvent || (() => {});
+  const decisionStage = ctx?.decisionStage || decideRuntimeStage;
+  const emitDecision = (event) => {
+    emit({ type: 'decision', ...event });
+    if (event.source === 'jev' || event.source === 'deterministic') {
+      console.info(`[JevDecision] ${JSON.stringify({ runtime: 'legacy-durable', ...event })}`);
+    }
+  };
   const db = prisma || ctx?.prisma || null;
   const picked = choice || ctx?.durableChoice || null;
   const run = await getOrCreateAgentRun({ prisma: db, ctx, message, choice: picked });
@@ -1905,6 +1923,70 @@ export async function runDurableComposioAgent({
         kind: 'search', status: 'error', summary: run.scratch.search_error, extra: { executor: 'composio' },
       });
       return { ok: false, error: run.scratch.search_error };
+    }
+    if (Array.isArray(discovery?.tools) && discovery.tools.length > 0) {
+      let decision;
+      try {
+        decision = await decisionStage({
+          runtime: 'legacy',
+          stage: 'composio_selection',
+          turn_id: run.id,
+          user_query: message,
+          actor_id: ctx?.userId,
+          context: run.scratch.conversation_context || null,
+          discovery: {
+            sessionId: discovery.sessionId || null,
+            workflowSessionId: discovery.workflowSessionId || null,
+            tools: discovery.tools,
+            toolkitConnectionStatuses: discovery.toolkitConnectionStatuses || {},
+          },
+          progress: {
+            completed_receipts: (run.steps || []).slice(-8),
+            selected_tool_slugs: (run.scratch.primary_tool_slugs || []).slice(-12),
+          },
+        }, {
+          env: ctx?.decisionEnv || process.env,
+          provider: ctx?.decisionProvider || null,
+          signal: ctx?._signal || null,
+        });
+      } catch (error) {
+        decision = {
+          status: 'defer', selected: null, authoritative: false,
+          receipt: { source: 'fallback', reason: String(error?.message || error || 'decision_gateway_unavailable').slice(0, 240) },
+        };
+      }
+      emitDecision({
+        stage: 'composio_selection', status: decision.status,
+        selected: decision.selected || null,
+        source: decision.receipt?.source || 'fallback',
+        authoritative: decision.authoritative === true,
+        probability: decision.receipt?.probability ?? null,
+        margin: decision.receipt?.margin ?? null,
+        request_id: decision.receipt?.requestId || null,
+        run_id: run.id,
+      });
+      if (decision.status === 'selected' && decision.authoritative === true && String(decision.selected || '').startsWith('use:')) {
+        const selected = String(decision.selected).slice(4);
+        const available = new Set([
+          ...(discovery.primaryToolSlugs || []),
+          ...(discovery.relatedToolSlugs || []),
+          ...discovery.tools.map((tool) => tool?._composio?.slug).filter(Boolean),
+        ]);
+        if (available.has(selected)) {
+          discovery = {
+            ...discovery,
+            tools: discovery.tools.filter((tool) => tool?._composio?.slug === selected),
+            primaryToolSlugs: [selected],
+            relatedToolSlugs: [],
+            recommendedPlanSteps: (discovery.recommendedPlanSteps || []).filter((step) => (
+              String(step?.tool_slug || step?.toolSlug || '') === selected
+            )),
+          };
+          run.scratch.decision_selection = {
+            stage: 'composio_selection', selected_tool_slug: selected, authoritative: true,
+          };
+        }
+      }
     }
     const peopleSearch = /find a person email address|email address of a person/i.test(String(queryMessage || ''));
     const listSearch = /look up existing|list the authenticated user's latest/i.test(String(queryMessage || ''));

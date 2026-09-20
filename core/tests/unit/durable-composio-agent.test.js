@@ -45,6 +45,8 @@ test('LinkedIn create-post is a write and last-post questions are read-only', ()
   assert.equal(isReadOnlyRequest('what were my latest emails?'), true);
   assert.equal(isReadOnlyRequest('write email to rama about Amars professional life'), false);
   assert.equal(isReadOnlyRequest('send rama, about information about the company'), false);
+  assert.equal(isReadOnlyRequest('Use Gmail to find the newest message from Griseldis. Do not send, draft, label, modify, delete, or save anything.'), true);
+  assert.equal(isReadOnlyRequest('Draft an email to Griseldis. Do not send it.'), false);
   assert.equal(isWriteSlug('GMAIL_REPLY_TO_THREAD'), true);
   assert.equal(isWriteSlug('GMAIL_MODIFY_THREAD_LABELS'), true);
   assert.equal(isWriteSlug('GMAIL_FETCH_EMAILS'), false);
@@ -848,6 +850,55 @@ test('durable production path uses Session search and Session execution, never c
   assert.deepEqual(result.run.scratch.plan, ['GMAIL_FETCH_EMAILS']);
 });
 
+test('legacy durable path lets Jev narrow Composio discovery and preserves read-only guardrails', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const events = [];
+  const decisions = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_jev_legacy' }; },
+    async discoverSessionTools() {
+      const tools = [
+        { function: { description: 'Fetch matching email messages', parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail', read_only: true } },
+        { function: { description: 'Add a label to a message', parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_ADD_LABEL_TO_EMAIL', toolkit: 'gmail', read_only: false } },
+      ];
+      return {
+        sessionId: 'trs_jev_legacy', tools,
+        primaryToolSlugs: tools.map((tool) => tool._composio.slug),
+        relatedToolSlugs: [],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+      };
+    },
+    async executeToolsParallel(_org, calls) {
+      executed.push(...calls);
+      return calls.map(() => ({ successful: true, data: { messages: [{ sender: 'Griseldis', subject: 'Returning your MacBook', received_at: '2026-09-19T09:00:00Z' }] } }));
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'Use Gmail to find the newest message from Griseldis. Return only that one message. Do not send, draft, label, modify, delete, or save anything.',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 'legacy-jev-read-only',
+      decisionStage: async (input) => {
+        decisions.push(input);
+        return { status: 'selected', selected: 'use:GMAIL_FETCH_EMAILS', authoritative: true, receipt: { source: 'jev', probability: 0.98, margin: 0.94 } };
+      },
+      synthesizeDurableAnswer: async () => 'Griseldis — Returning your MacBook — 2026-09-19T09:00:00Z',
+      _tracedDispatch: async () => ({ memories: [] }),
+    },
+    onEvent: (event) => events.push(event),
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(decisions.length, 1);
+  assert.equal(decisions[0].stage, 'composio_selection');
+  assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
+  assert.deepEqual(executed.map((call) => call.slug), ['GMAIL_FETCH_EMAILS']);
+  assert.equal(executed[0].arguments.max_results, 1);
+  assert.ok(events.some((event) => event.type === 'decision' && event.selected === 'use:GMAIL_FETCH_EMAILS' && event.source === 'jev'));
+  assert.equal(result.inputRequests?.length || 0, 0);
+});
+
 test('connect link uses the HIVEMIND callback origin so OAuth returns to chat', async () => {
   resetDurableAgentMemory();
   let captured = null;
@@ -1042,6 +1093,20 @@ test('summarizeToolData lists thread snippets', () => {
   });
   assert.match(text, /Travel report card is in/);
   assert.match(text, /Invoice attached/);
+});
+
+test('email table projection preserves sender and received timestamp', () => {
+  const rows = rowsFromToolData({ messages: [{
+    subject: 'Re: Returning your MacBook',
+    sender: 'Griseldis Voigt <voigt@example.test>',
+    messageTimestamp: '2026-09-05T09:14:31Z',
+    messageText: 'Private message body must not be projected into the compact table.',
+  }] });
+  assert.deepEqual(rows, [{
+    title: 'Re: Returning your MacBook',
+    extra: 'Griseldis Voigt <voigt@example.test> — 2026-09-05T09:14:31Z',
+  }]);
+  assert.equal(markdownTableFromRows(rows).includes('Private message body'), false);
 });
 
 test('summarizeToolData decodes GitHub README base64', () => {

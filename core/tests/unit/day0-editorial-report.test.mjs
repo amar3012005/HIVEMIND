@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildDayZeroOnboardingReport, renderDayZeroOnboardingEmail } from '../../src/email/templates/day0-company-onboarding.js';
 import { renderDayZeroPortraitV8 } from '../../src/email/templates/day0-portrait-v8.js';
+import { renderDayZeroOnboardingPdf } from '../../src/email/day0-company-report-pdf.js';
 
 const company = {
   company: 'Canary Company',
@@ -30,12 +31,13 @@ test('Day 0 PDF uses the flowing Day 1 editorial grammar without changing the em
   const email = renderDayZeroOnboardingEmail(company, { appUrl: 'https://next.example.test/company' });
 
   assert.match(html, /@page\{size:A4 portrait/);
-  assert.match(html, /@page\{size:A4 portrait;margin:24mm 15mm 18mm\}/);
+  assert.match(html, /@page\{size:A4 portrait;margin:24mm 0 18mm\}/);
   assert.match(html, /id="day0-print-pagination"/);
-  assert.match(html, /\.head\{position:fixed/);
-  assert.match(html, /\.foot\{position:fixed/);
+  assert.match(html, /\.page\{padding:0 15mm/);
+  assert.match(html, /\.head\{display:none\}/);
+  assert.doesNotMatch(html, /position:fixed/);
+  assert.doesNotMatch(html, /print-document/);
   assert.match(html, /page-break-inside:avoid/);
-  assert.match(html, /SINGULANCE · HIVEMIND OPERATING SYSTEM/);
   assert.equal((html.match(/class="page"/g) || []).length, 1);
   assert.match(html, /HIVEMIND · COMPANY AWAKENING COMPLETE/);
   assert.match(html, /SOURCE &amp; EVIDENCE LEDGER · 07/);
@@ -69,4 +71,28 @@ test('Day 0 attachment retains onboarding material beyond the old dashboard-card
   assert.match(html, /Research item 12/);
   assert.match(html, /Onboarding document 16/);
   assert.match(html, /First move 12/);
+});
+
+test('Day 0 PDF asks Chromium for native repeated branding outside the content flow', async () => {
+  const originalToken = process.env.PLAYWRIGHT_SERVICE_TOKEN;
+  process.env.PLAYWRIGHT_SERVICE_TOKEN = 'unit-test-token';
+  let requestBody;
+  try {
+    await renderDayZeroOnboardingPdf('<html><body>report</body></html>', {
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(init.body);
+        return new Response(new Uint8Array([37, 80, 68, 70]));
+      },
+    });
+  } finally {
+    if (originalToken === undefined) delete process.env.PLAYWRIGHT_SERVICE_TOKEN;
+    else process.env.PLAYWRIGHT_SERVICE_TOKEN = originalToken;
+  }
+  assert.equal(requestBody.display_header_footer, true);
+  assert.equal(requestBody.prefer_css_page_size, false);
+  assert.deepEqual(requestBody.margin, { top: '24mm', right: '0mm', bottom: '18mm', left: '0mm' });
+  assert.match(requestBody.header_template, /SINGULANCE/);
+  assert.match(requestBody.footer_template, /SINGULANCE · HIVEMIND OPERATING SYSTEM/);
+  assert.match(requestBody.footer_template, /pageNumber/);
+  assert.match(requestBody.footer_template, /totalPages/);
 });

@@ -41,10 +41,9 @@ export function renderDayZeroPortraitV8(report, { screenshotDataUri = '' } = {})
   const confirmations = report.confirmations.map((item) => `<div class="confirmation">${escapeHtml(item)}</div>`);
 
   const printCss = `<style id="day0-print-pagination">
-  @page{size:A4 portrait;margin:24mm 15mm 18mm}
-  body{background:#fff}p{orphans:3;widows:3}.page{padding:0;background:#fff}
-  .head{position:fixed;z-index:10;top:-19mm;left:0;right:0;height:14mm;padding:0 0 3mm;background:#fff}
-  .foot{position:fixed;z-index:10;left:0;right:0;bottom:-13mm;height:9mm;margin:0;padding-top:2.5mm;background:#fff}
+  @page{size:A4 portrait;margin:24mm 0 18mm}
+  body{background:#fff}p{orphans:3;widows:3}.page{padding:0 15mm;background:#fff}
+  .head{display:none}
   .intro{padding-top:3mm}.report-section{break-inside:auto;page-break-inside:auto}
   .section-head{break-after:avoid;page-break-after:avoid}.section-head+h2,h2+.lede{break-before:avoid;page-break-before:avoid}
   .row,.fact,.confirmation,.mission,.character-strip,.browser,.stats,.cta{break-inside:avoid;page-break-inside:avoid}
@@ -60,6 +59,6 @@ export function renderDayZeroPortraitV8(report, { screenshotDataUri = '' } = {})
   ${section('COMPANY MEMORY','06', `<h2>What HIVEMIND filed for recall.</h2><p class="lede">These retained documents can ground future rooms, decisions, and agent actions.</p>${rows(documents, { numbered: true })}`)}
   ${section('SOURCE & EVIDENCE LEDGER','07', `<h2>Every company claim starts with a retained source.</h2>${rows(sources, { numbered: true })}`)}
   ${report.confirmations.length ? section('HUMAN CONFIRMATION','08', `<h2>The model knows where it still needs you.</h2><div class="confirmations">${confirmations.join('')}</div>`) : ''}
-  <section class="cta"><div class="eyebrow" style="color:#d7eaff">YOUR COMPANY IS READY</div><h2>Continue inside HIVEMIND.</h2><p>Review the company model, inspect the retained evidence, meet your HyperAgents, and begin the first move.</p><a href="${escapeHtml(report.reportUrl)}">OPEN YOUR COMPANY →</a></section><footer class="foot"><span>SINGULANCE · HIVEMIND OPERATING SYSTEM</span><span>DAY 0 · COMPANY AWAKENING</span></footer></main></body></html>`;
+  <section class="cta"><div class="eyebrow" style="color:#d7eaff">YOUR COMPANY IS READY</div><h2>Continue inside HIVEMIND.</h2><p>Review the company model, inspect the retained evidence, meet your HyperAgents, and begin the first move.</p><a href="${escapeHtml(report.reportUrl)}">OPEN YOUR COMPANY →</a></section></main></body></html>`;
   return html.replace('</head>', `${printCss}</head>`);
 }

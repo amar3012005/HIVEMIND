@@ -745,7 +745,25 @@ async function renderPdf(input) {
   const page = await context.newPage();
   try {
     await page.setContent(html, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
-    const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' } });
+    const displayHeaderFooter = input?.display_header_footer === true;
+    const boundedTemplate = (value) => typeof value === 'string' ? value.slice(0, 20_000) : '';
+    const requestedMargin = input?.margin && typeof input.margin === 'object' ? input.margin : {};
+    const safeMargin = (side, fallback = '0mm') => {
+      const value = String(requestedMargin[side] || fallback);
+      return /^\d+(?:\.\d+)?(?:mm|cm|in|px)$/.test(value) ? value : fallback;
+    };
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: input?.prefer_css_page_size !== false,
+      displayHeaderFooter,
+      headerTemplate: displayHeaderFooter ? boundedTemplate(input.header_template) : undefined,
+      footerTemplate: displayHeaderFooter ? boundedTemplate(input.footer_template) : undefined,
+      margin: {
+        top: safeMargin('top'), right: safeMargin('right'),
+        bottom: safeMargin('bottom'), left: safeMargin('left'),
+      },
+    });
     if (!pdf.length || pdf.length > MAX_PDF_BYTES) throw Object.assign(new Error('pdf_too_large'), { status: 413 });
     return pdf;
   } finally { await context.close().catch(() => {}); }

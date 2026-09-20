@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Split HIVE extra_agent_tools into AgentScope ToolGroups.
+"""Progressively expose HIVE and native AgentScope capabilities.
 
-extra_factory tools are merged into Toolkit `tools=` (the reserved basic
-group). Native grouping is ToolGroup + reset_tools. We wrap get_toolkit so
-PlaybookList/Get stay basic; everything else is a named group.
+AgentScope's stock toolkit places workspace, planning, team, and caller-extra
+tools in the always-active ``basic`` group.  HIVE must not make the workspace
+or team controls model-visible before the agent has selected a playbook and
+created a native Task plan.  This adapter keeps only planning, playbook
+selection, and cancellation in ``basic``; the stock AgentScope objects remain
+their own ToolGroups and are activated through ``reset_tools``.
+
+This is deliberately a toolkit assembly patch, not an execution loop.  The
+AgentScope session still owns task state, tool calls, cancellation, and event
+ordering.
 """
 from __future__ import annotations
 
@@ -23,6 +30,13 @@ HIVEMIND_NAMES = {
 WEB_NAMES = {"hivemind_web_search"}
 APPS_NAMES = {"hivemind_composio_tools", "hivemind_composio_execute"}
 BASIC_NAMES = {"PlaybookList", "PlaybookGet"}
+TEAM_TOOL_NAMES = {
+    "TeamCreate",
+    "TeamDelete",
+    "TeamSay",
+    "AgentCreate",
+    "AgentInvite",
+}
 
 
 def partition_hive_tools(tools: list[ToolBase]) -> dict[str, list[ToolBase]]:
@@ -50,7 +64,10 @@ def partition_hive_tools(tools: list[ToolBase]) -> dict[str, list[ToolBase]]:
 
 def extra_groups_for(tools: list[ToolBase]) -> tuple[list[ToolBase], list[ToolGroup]]:
     buckets = partition_hive_tools(tools)
-    basic = buckets["basic"] + buckets["other"]
+    # Unknown extras must not silently become always-visible capabilities.
+    # Extra factories are an extension seam, so make an owner explicitly opt
+    # into basic exposure by adding its tool name to BASIC_NAMES.
+    basic = buckets["basic"]
     groups: list[ToolGroup] = []
     if buckets["hivemind"]:
         groups.append(
@@ -79,7 +96,64 @@ def extra_groups_for(tools: list[ToolBase]) -> tuple[list[ToolBase], list[ToolGr
                 tools=buckets["connected_apps"],
             ),
         )
+    if buckets["other"]:
+        groups.append(
+            ToolGroup(
+                name="runtime_extensions",
+                description="Additional HIVE runtime capabilities for a bounded task.",
+                instructions="Activate only when the current planned task requires one of these capabilities.",
+                tools=buckets["other"],
+            ),
+        )
     return basic, groups
+
+
+def separate_native_tool_groups(toolkit: Any, workspace_tool_names: set[str]) -> None:
+    """Move stock AgentScope workspace/team capabilities out of ``basic``.
+
+    ``get_toolkit`` returns real ToolBase instances.  Moving those exact
+    instances (rather than rebuilding them) preserves their session-bound
+    state and schemas.  Skills and MCPs live with workspace tools because a
+    selected skill can only be used after its workspace capability is active.
+    """
+    basic_group = next((group for group in toolkit.tool_groups if group.name == "basic"), None)
+    if basic_group is None:
+        return
+
+    workspace_tools = [
+        tool for tool in basic_group.tools if getattr(tool, "name", "") in workspace_tool_names
+    ]
+    team_tools = [
+        tool for tool in basic_group.tools if getattr(tool, "name", "") in TEAM_TOOL_NAMES
+    ]
+    moved_names = {getattr(tool, "name", "") for tool in workspace_tools + team_tools}
+    basic_group.tools = [
+        tool for tool in basic_group.tools if getattr(tool, "name", "") not in moved_names
+    ]
+
+    if workspace_tools or basic_group.skills_or_loaders or basic_group.mcps:
+        toolkit.tool_groups.append(
+            ToolGroup(
+                name="workspace",
+                description="Read and write the task workspace, and load workspace skills or MCP tools when a planned task requires them.",
+                instructions="Use only after the playbook is selected and the relevant AgentScope Task explains the workspace work.",
+                tools=workspace_tools,
+                skills_or_loaders=basic_group.skills_or_loaders,
+                mcps=basic_group.mcps,
+            ),
+        )
+        basic_group.skills_or_loaders = []
+        basic_group.mcps = []
+
+    if team_tools:
+        toolkit.tool_groups.append(
+            ToolGroup(
+                name="team_tools",
+                description="Create, coordinate, and close an AgentScope team for work that needs explicit delegation.",
+                instructions="Do not create a team by default. Activate only when the selected playbook or task plan requires delegated work.",
+                tools=team_tools,
+            ),
+        )
 
 
 def patch_get_toolkit() -> None:
@@ -91,6 +165,12 @@ def patch_get_toolkit() -> None:
 
     async def grouped_get_toolkit(*args: Any, extra_factory=None, **kwargs: Any):
         captured: list[ToolBase] = []
+        workspace = kwargs.get("workspace")
+        workspace_tool_names: set[str] = set()
+        if workspace is not None:
+            workspace_tool_names = {
+                getattr(tool, "name", "") for tool in await workspace.list_tools()
+            }
 
         async def capture(user_id: str, agent_id: str, session_id: str) -> list[ToolBase]:
             if extra_factory is None:
@@ -100,6 +180,7 @@ def patch_get_toolkit() -> None:
             return basic
 
         toolkit = await orig(*args, extra_factory=capture, **kwargs)
+        separate_native_tool_groups(toolkit, workspace_tool_names)
         _basic, groups = extra_groups_for(captured)
         for group in groups:
             if all(g.name != group.name for g in toolkit.tool_groups):

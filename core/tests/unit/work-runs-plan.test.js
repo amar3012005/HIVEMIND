@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeAgentScopeEvent, WORK_RUN_EVENT } from '../../src/employees/work-runs.js';
+import {
+  applyRuntimeEvent,
+  normalizeAgentScopeEvent,
+  WORK_RUN_EVENT,
+} from '../../src/employees/work-runs.js';
 
 describe('WorkRun Task tools → plan events (Phase 1)', () => {
   it('maps TaskCreate start to plan.updated, not a generic tool', () => {
@@ -46,5 +50,38 @@ describe('WorkRun Task tools → plan events (Phase 1)', () => {
     assert.equal(ev.reply_id, 'reply-1');
     assert.equal(ev.call_id, 'bash-1');
     assert.deepEqual(ev.tool_calls, [toolCall]);
+  });
+
+  it('recovers a tool name on result events from the matching call id', async () => {
+    const appended = [];
+    const prisma = {
+      $queryRawUnsafe: async (sql, ...params) => {
+        if (sql.startsWith('SELECT id, status, events')) {
+          return [{
+            id: '11111111-1111-4111-8111-111111111111',
+            status: 'running',
+            events: [{
+              t: WORK_RUN_EVENT.TOOL_STARTED,
+              tool: 'hivemind_recall',
+              call_id: 'tool_1',
+            }],
+          }];
+        }
+        if (sql.startsWith('UPDATE "hivemind"."work_runs"')) {
+          appended.push(JSON.parse(params[2])[0]);
+          return [{ id: '11111111-1111-4111-8111-111111111111', status: 'running' }];
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      },
+    };
+
+    const result = await applyRuntimeEvent(prisma, '11111111-1111-4111-8111-111111111111', {
+      type: 'TOOL_RESULT_END',
+      tool_call_id: 'tool_1',
+    });
+
+    assert.deepEqual(result, { applied: true });
+    assert.equal(appended[0].t, WORK_RUN_EVENT.TOOL_COMPLETED);
+    assert.equal(appended[0].tool, 'hivemind_recall');
   });
 });

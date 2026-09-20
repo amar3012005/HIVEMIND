@@ -556,12 +556,28 @@ export async function applyRuntimeEvent(prisma, workRunId, agentScopeEvent) {
   if (!normalized) return { applied: false, reason: 'not_ui_relevant' };
 
   const run = await prisma.$queryRawUnsafe(
-    'SELECT id, status FROM "hivemind"."work_runs" WHERE id = $1::uuid',
+    'SELECT id, status, events FROM "hivemind"."work_runs" WHERE id = $1::uuid',
     workRunId,
   );
   const row = run?.[0];
   if (!row) return { applied: false, reason: 'not_found' };
   if (isTerminal(row.status)) return { applied: false, reason: 'terminal' };
+
+  // AgentScope's TOOL_RESULT_END does not always repeat tool_call_name. The
+  // call id is durable, so recover the original name from its matching start
+  // event. This keeps one identifiable tool row in the UI instead of a
+  // generic completed action or a duplicate row.
+  if (
+    normalized.t === WORK_RUN_EVENT.TOOL_COMPLETED
+    && !normalized.tool
+    && normalized.call_id
+    && Array.isArray(row.events)
+  ) {
+    const started = [...row.events].reverse().find((event) => (
+      event?.t === WORK_RUN_EVENT.TOOL_STARTED && event.call_id === normalized.call_id
+    ));
+    if (started?.tool) normalized.tool = started.tool;
+  }
 
   await appendWorkRunEvent(prisma, workRunId, normalized);
 

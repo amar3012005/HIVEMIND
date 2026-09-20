@@ -2265,3 +2265,31 @@ slides that find no unique anchor get a page instead of `null`.
   lifecycle suite passed **41/41**, including Day 0 completion/Day 1 scheduling,
   timezone/DST behavior, Day 2 next-local-morning eligibility, durable inbox
   first delivery, no-repeat dismissal/action, and referral exhaustion rules.
+
+## 2026-09-20 UTC — Governed Room visual-production pipeline
+
+- Released HIVE commit `ff78aea03372860e5b55c6471e3466b32b0a945f`.
+  Core and Employees are healthy on immutable images `sha-61af15ba`; their
+  rollback images are both `sha-fa774881`. Harness, Control Plane, Voice, and
+  the frontend were not rebuilt or recreated.
+- Room visual intent now waits for the Director's completed research,
+  specialist contributions, verification, and final synthesis. The durable
+  handoff carries that approved synthesis, output cardinality, receipts, and
+  agent preferences into the independent Cloudflare visual workflow.
+- The workflow selects a versioned production skill, creates an exact shot
+  plan, derives visual language from verified first-party website evidence,
+  generates the master, uses the approved master as the reference for the
+  remaining shots, and rejects incomplete or unreviewed assets. Raw production
+  prompts stay out of the Room UI.
+- Cloudflare Worker `hivemind-visual-generation` is live as version
+  `745c8234-7f16-4c65-8106-fc0cc0ef14f3`; rollback version is
+  `918c8a68-4f87-4ee0-aa83-16b1878c56a8`. The EU-incompatible Llama vision
+  critic was replaced with Cloudflare Qwen 3.8 27B and malformed critic
+  receipts now fail closed.
+- Verification: **67** focused Employees tests, **5** Core visual-service
+  tests, **10** Worker tests, Worker TypeScript checking, and Worker deploy
+  validation passed. Authenticated production Room job
+  `6bae428d-72e7-4884-9075-2d3bb260b180` completed with three distinct 4:5
+  assets. A browser reload restored the same in-conversation Visual Studio card
+  with `3 images ready`, `100% QUALITY`, and all three assets marked
+  `Rendered + reviewed`.

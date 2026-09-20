@@ -6580,6 +6580,24 @@ exit \$RC
     let visualBody;
     try { visualBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body', retryable: false }, 400); }
     try {
+      if (pathname === '/internal/visual-generation/render-openrouter') {
+        const model = String(visualBody.model || 'meta/muse-image');
+        if (model !== 'meta/muse-image') return jsonResponse(res, { error: 'visual_model_not_allowed', retryable: false }, 422);
+        const prompt = String(visualBody.prompt || '').trim();
+        const references = Array.isArray(visualBody.input_references) ? visualBody.input_references : [];
+        if (!prompt || prompt.length > 30_000 || references.length > 2 || references.some((value) => typeof value !== 'string' || !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/i.test(value) || value.length > 4_000_000)) {
+          return jsonResponse(res, { error: 'invalid_visual_openrouter_request', retryable: false }, 422);
+        }
+        const { generateCampaignImage } = await import('./campaigns/image-provider.js');
+        const generated = await generateCampaignImage({
+          prompt,
+          aspectRatio: String(visualBody.aspect_ratio || 'auto'),
+          model,
+          inputReferences: references,
+          signal: AbortSignal.timeout(180_000),
+        });
+        return jsonResponse(res, { provider: generated.provider, model: generated.model, content_type: generated.contentType, b64_json: generated.bytes.toString('base64'), usage: generated.usage || {} });
+      }
       const { DurableVisualGenerationLifecycle } = await import('./visual-generation/service.js');
       const lifecycle = new DurableVisualGenerationLifecycle({ prisma });
       if (pathname === '/internal/visual-generation/context') return jsonResponse(res, await lifecycle.context(visualBody));

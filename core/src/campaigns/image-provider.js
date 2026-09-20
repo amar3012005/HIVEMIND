@@ -1,4 +1,5 @@
 const OPENROUTER_IMAGE_URL = 'https://openrouter.ai/api/v1/images';
+import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 export const DEFAULT_CAMPAIGN_IMAGE_MODEL = 'openai/gpt-image-1-mini';
 
 export class CampaignImageProviderError extends Error {
@@ -21,8 +22,9 @@ export function normalizeImageAspectRatio(value) {
 
 export async function generateCampaignImage({ prompt, aspectRatio = '16:9', model = DEFAULT_CAMPAIGN_IMAGE_MODEL, inputReferences = [], signal } = {}) {
   const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
-  if (!apiKey) throw new CampaignImageProviderError('Image generation is not configured', { status: 503, code: 'campaign_image_provider_unavailable' });
-  const response = await fetch(OPENROUTER_IMAGE_URL, {
+  const gatewayByok = cloudflareGatewayEnabled() && Boolean(gatewayByokAlias('openrouter'));
+  if (!apiKey && !gatewayByok) throw new CampaignImageProviderError('Image generation is not configured', { status: 503, code: 'campaign_image_provider_unavailable' });
+  const response = await gatewayFirstFetch(OPENROUTER_IMAGE_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,

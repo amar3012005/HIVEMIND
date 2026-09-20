@@ -9,7 +9,9 @@
     "VISUAL_ART_DIRECTOR_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     "VISUAL_CRITIC_MODEL": "@cf/qwen/qwen3.8-27b",
     "VISUAL_FAST_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
-    "VISUAL_QUALITY_MODEL": "@cf/black-forest-labs/flux-2-klein-9b"
+    "VISUAL_QUALITY_MODEL": "@cf/black-forest-labs/flux-2-klein-9b",
+    "VISUAL_QUALITY_PROVIDER": "openrouter",
+    "VISUAL_OPENROUTER_IMAGE_MODEL": "meta/muse-image"
   },
   "ai": { "binding": "AI" },
   "queues": {

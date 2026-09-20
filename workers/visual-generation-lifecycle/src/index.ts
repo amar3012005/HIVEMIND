@@ -7,7 +7,7 @@ import { parseModelJson } from './model-json';
 type Env = {
   VISUAL_GENERATION_WORKFLOW: Workflow<VisualTrigger>; VISUAL_GENERATION_QUEUE: Queue<VisualTrigger>; VISUAL_ASSETS: R2Bucket; AI: Ai;
   HIVEMIND_VISUAL_API_URL: string; HIVEMIND_VISUAL_GENERATION_SECRET: string; VISUAL_ART_DIRECTOR_MODEL?: string; VISUAL_CRITIC_MODEL?: string;
-  VISUAL_FAST_MODEL?: string; VISUAL_QUALITY_MODEL?: string; AI_GATEWAY_ID?: string;
+  VISUAL_FAST_MODEL?: string; VISUAL_QUALITY_MODEL?: string; VISUAL_QUALITY_PROVIDER?: string; VISUAL_OPENROUTER_IMAGE_MODEL?: string; AI_GATEWAY_ID?: string;
 };
 type ContextReceipt = { job: any; request: any; company_context: any; brand_dna: any; website_visual_reference?: { kind?: string; path?: string } | null };
 type Generated = { bytes: Uint8Array; contentType: string; model: string; prompt: string };
@@ -51,6 +51,22 @@ async function resultBytes(result: any): Promise<{ bytes: Uint8Array; contentTyp
   throw new Error('visual_model_empty_response');
 }
 async function generate(env: Env, prompt: string, aspect: string, quality: string, references: Generated[] = []): Promise<Generated> {
+  if (quality !== 'fast' && (env.VISUAL_QUALITY_PROVIDER || '').toLowerCase() === 'openrouter') {
+    const model = env.VISUAL_OPENROUTER_IMAGE_MODEL || 'meta/muse-image';
+    const result = await core(env, '/internal/visual-generation/render-openrouter', {
+      model,
+      prompt,
+      aspect_ratio: aspect,
+      input_references: references.slice(0, 2).map(imageDataUrl),
+    });
+    const encoded = String(result?.b64_json || '');
+    if (!encoded) throw new Error('visual_openrouter_empty_response');
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const contentType = String(result?.content_type || 'image/png').toLowerCase();
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(contentType) || !bytes.length || bytes.length > 15 * 1024 * 1024) throw new Error('visual_openrouter_invalid_image');
+    return { bytes, contentType, model: `openrouter/${model}`, prompt };
+  }
   const model = quality === 'fast' ? (env.VISUAL_FAST_MODEL || '@cf/black-forest-labs/flux-2-klein-4b') : (env.VISUAL_QUALITY_MODEL || '@cf/black-forest-labs/flux-2-klein-9b');
   const dimensions = dimensionsForAspect(aspect, false); const form = new FormData();
   form.append('prompt', prompt); form.append('width', String(dimensions.width)); form.append('height', String(dimensions.height));

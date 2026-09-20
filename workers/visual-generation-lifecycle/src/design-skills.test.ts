@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { modelPrompt, validateShotPlan } from './design-skills';
+import { parseModelJson } from './model-json';
 
 describe('production design contracts', () => {
+  it('retains structured Workers AI JSON instead of silently replacing art direction with a fallback', () => {
+    const contract = { skill_id: 'social', variants: [{ purpose: 'Introduce shared memory', variation: 'Interconnected paper archive illustration' }] };
+    for (const response of [contract, { response: contract }, { result: { response: contract } }, { response: JSON.stringify(contract) }]) {
+      expect(parseModelJson(response)).toEqual(contract);
+      expect(() => validateShotPlan(parseModelJson(response), 1)).not.toThrow();
+    }
+  });
   it('rejects incomplete, repeated or unskilled shot sets', () => {
     const shot = { purpose: 'Introduce the product', variation: 'Product macro in warm editorial light' };
     expect(() => validateShotPlan({ skill_id: 'social', variants: [shot] }, 3)).toThrow();

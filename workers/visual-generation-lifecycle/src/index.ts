@@ -2,6 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { NonRetryableError } from 'cloudflare:workflows';
 import { assetPrefix, dimensionsForAspect, imageContentType, safeProductionSpec, type VisualTrigger, validTrigger, workflowInstanceId } from './contract';
 import { DESIGN_SKILLS, modelPrompt, validateShotPlan } from './design-skills';
+import { parseModelJson } from './model-json';
 
 type Env = {
   VISUAL_GENERATION_WORKFLOW: Workflow<VisualTrigger>; VISUAL_GENERATION_QUEUE: Queue<VisualTrigger>; VISUAL_ASSETS: R2Bucket; AI: Ai;
@@ -26,9 +27,7 @@ async function report(env: Env, trigger: VisualTrigger, eventKey: string, stage:
   return core(env, '/internal/visual-generation/event', { job_id: trigger.job_id, event_key: eventKey, stage, progress, message, data });
 }
 function parseJson(value: unknown) {
-  const text = typeof value === 'string' ? value : String((value as any)?.response || (value as any)?.result?.response || '');
-  const match = text.match(/\{[\s\S]*\}/); if (!match) return {};
-  try { return JSON.parse(match[0]); } catch { return {}; }
+  return parseModelJson(value);
 }
 function artDirectionPrompt(context: ContextReceipt) {
   return `You are the SINGULANCE Visual Production Director. Convert the supplied request and verified company evidence into one production-ready JSON art-direction contract. Be specific enough that an image model can execute it without interpretation. Use only verified Brand DNA and company facts; never invent a logo, product, customer, award, statistic, interface, or outcome claim. Prefer a concrete subject, scene, composition, camera/lens, lighting, materials, palette and emotional tone. Generated imagery must contain no words, letters, numbers, watermarks, captions, UI labels, or pseudo-text; exact brand marks and copy are composed later. For a set, define coordinated but meaningfully different variants that all share one visual system. Return JSON only with: communication_objective, audience, subject, scene, composition, camera, lighting, materials, palette, emotional_tone, brand_rules[], required_elements[], forbidden_elements[], unsupported_claims[], text_policy, master_prompt, variants:[{purpose,variation}].\nINPUT:\n${JSON.stringify(context).slice(0, 45_000)}`;

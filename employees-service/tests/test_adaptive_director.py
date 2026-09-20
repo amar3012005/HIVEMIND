@@ -217,8 +217,28 @@ def test_explicit_output_family_overrides_visual_planner_label(monkeypatch):
     contract = director._build_turn_contract(plan)
 
     assert plan["output_family"] == "image"
+    assert director.artifact_intent["kind"] == "generated_image"
+    assert director.artifact_intent["medium"] == "image_generation"
     assert contract["output_contract"]["output_family"] == "image"
-    assert contract["output_contract"]["formats"] == ["html", "pdf"]
+    assert contract["output_contract"]["formats"] == ["png", "webp"]
+
+
+def test_director_selected_image_is_deferred_as_generated_image_intent(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(message="Create the strongest final campaign deliverable")
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(_planner_payload(
+            output_family="image", execution_engine="agentic", artifact_intent=None,
+        ))}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["execution_engine"] == "debate"
+    assert plan["artifact_intent"]["kind"] == "generated_image"
+    assert director.artifact_intent["medium"] == "image_generation"
+    assert director.intended_output == "artifact"
 
 
 def test_source_evidence_excludes_skills_and_agent_work_results():

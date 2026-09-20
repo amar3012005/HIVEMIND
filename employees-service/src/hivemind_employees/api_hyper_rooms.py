@@ -70,7 +70,6 @@ from .hyper.execution_profiles import (
     profile_registry_manifest,
 )
 from .hyper.output_contract import (
-    explicit_image_generation_request,
     labeled_unverified_draft,
     resolve_output_contract,
     should_run_render_gate,
@@ -648,6 +647,72 @@ def _campaign_post_visual_payload(
     payload["source"] = {"kind": "room_director_campaign_report", "room_id": req.room_id}
     payload["idempotency_key"] = f"room-visual-report:{req.turn_id}"
     return payload
+
+
+def _director_final_visual_payload(
+    req: "RoomTurnRequest",
+    room_kind: str,
+    final_text: str,
+    result: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Compile the final image brief only after the Director has finished."""
+    result = result if isinstance(result, dict) else {}
+    campaign_payload = _campaign_post_visual_payload(req, room_kind, final_text)
+    if campaign_payload:
+        return campaign_payload
+
+    output_contract = result.get("output_contract") if isinstance(result.get("output_contract"), dict) else {}
+    artifact_intent = result.get("artifact_intent") if isinstance(result.get("artifact_intent"), dict) else {}
+    selected_image = bool(
+        str(output_contract.get("artifact_kind") or "").strip().lower() == "generated_image"
+        or str(artifact_intent.get("kind") or "").strip().lower() == "generated_image"
+        or str(result.get("output_family") or "").strip().lower() == "image"
+    )
+    if not selected_image:
+        return None
+
+    payload = _room_visual_job_payload(req, room_kind)
+    work_results = [
+        {
+            "owner": item.get("owner") or item.get("owner_slug"),
+            "title": item.get("title"),
+            "text": str(item.get("text") or "")[:1600],
+        }
+        for item in (result.get("work_results") or [])[:8]
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+    completed_context = {
+        "artifact_intent": artifact_intent or None,
+        "output_contract": output_contract or None,
+        "source_receipts": (result.get("source_receipts") or [])[:12],
+        "specialist_results": work_results,
+        "campaign_bundle": result.get("campaign_bundle") if isinstance(result.get("campaign_bundle"), dict) else None,
+    }
+    payload["instruction"] = (
+        "Create the final visual artifact selected by the Director. The room has already completed its "
+        "required research, specialist work, grounding, and final synthesis. Treat the approved final "
+        "synthesis as the primary creative brief and the completed context as constraints. Resolve the "
+        "composition, subject, visual hierarchy, and output format from all of that completed work; do not "
+        "fall back to the opening request alone. Use the server-provided company context and verified Brand "
+        "DNA. Do not invent claims, numbers, logos, or copy inside the generated pixels.\n\n"
+        f"ORIGINAL REQUEST:\n{str(req.user_message or '')[:2400]}\n\n"
+        f"APPROVED FINAL SYNTHESIS:\n{str(final_text or '')[:16000]}\n\n"
+        f"COMPLETED ROOM CONTEXT:\n{json.dumps(completed_context, ensure_ascii=False)[:14000]}"
+    )
+    payload["source"] = {"kind": "room_director_final_synthesis", "room_id": req.room_id}
+    payload["idempotency_key"] = f"room-visual-final:{req.turn_id}"
+    return payload
+
+
+def _visual_delivery_ready(
+    status: str, verification: Optional[Dict[str, Any]], final_text: str,
+) -> bool:
+    """Admit final visual rendering only after the governed room result passes."""
+    if str(status or "").strip().lower() != "complete" or len(str(final_text or "").strip()) < 40:
+        return False
+    if isinstance(verification, dict) and verification:
+        return verification.get("met") is True and verification.get("grounded_ok") is True
+    return True
 
 
 async def _queue_room_visual_generation(
@@ -4092,49 +4157,6 @@ async def _orchestrate_single_agent(
         _output_contract.get("evidence_required"),
         (_work_room_profile or {}).get("profile_id") or "none",
     )
-    # Explicit generated images are not HTML artifacts. Admit one idempotent
-    # durable job at the Director boundary; the independent workflow owns Brand
-    # DNA, art direction, generation, critique, storage, and retries.
-    if (_output_contract.get("artifact_kind") == "generated_image"
-            and explicit_image_generation_request(req.user_message or "")):
-        try:
-            visual_job = await _queue_room_visual_generation(req, _room_kind)
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "visual_job_queued",
-                "job_id": visual_job.get("job_id"),
-                "status": visual_job.get("status") or "queued",
-                "stage": visual_job.get("stage") or "queued",
-                "replayed": visual_job.get("replayed") is True,
-            })
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "final_report",
-                "title": "Visual production started",
-                "markdown": "Your visual is rendering in this room. The production card will update through art direction, generation, critique, and final delivery.",
-                "summary": "A durable, brand-grounded visual job is rendering in this room.",
-            })
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "seal", "cost_tokens": 0, "status": "complete",
-                "duration_ms": int((time.time() - started) * 1000),
-                "engine": "durable-visual-generation",
-                "visual_job_id": visual_job.get("job_id"),
-            })
-            return RoomTurnResponse(
-                ok=True, cost_tokens=0, status="complete",
-                result={"visual_job": visual_job},
-                summary="A durable visual job is rendering in this room.",
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("[single] visual job admission failed room=%s turn=%s", req.room_id, req.turn_id)
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "warning", "code": "visual_generation_admission_failed",
-                "note": "The visual workflow could not accept this request yet. Retry the same room message safely.",
-            })
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "seal", "cost_tokens": 0, "status": "blocked",
-                "duration_ms": int((time.time() - started) * 1000),
-                "engine": "durable-visual-generation",
-            })
-            return RoomTurnResponse(ok=False, cost_tokens=0, status="blocked", summary=str(exc)[:300])
     _m_recon = canonical_hyper_model(
         getattr(req, "agentic_model", None)
         or os.environ.get("HYPER_MODEL_RECON")
@@ -4874,28 +4896,34 @@ async def _orchestrate_single_agent(
         web_intel_used=bool(result.get("source_receipts")),
     ))
 
-    # A multi-post social campaign is both copy and visual work. Let the normal
-    # Director finish and ground the post copy first, then hand the approved
-    # report to the durable visual workflow as a coordinated image set.
-    _campaign_visual_payload = _campaign_post_visual_payload(req, _room_kind, final_text)
-    if status == "complete" and _campaign_visual_payload:
+    # Planning may select a visual deliverable, but rendering is deliberately
+    # last: research, specialist work, synthesis, and governance above must all
+    # finish first. The durable workflow receives the approved final result,
+    # not merely the user's opening prompt.
+    _final_visual_payload = _director_final_visual_payload(req, _room_kind, final_text, result)
+    if _final_visual_payload and _visual_delivery_ready(status, _gv, final_text):
         try:
-            _campaign_visual_job = await _queue_room_visual_generation(
-                req, _room_kind, _campaign_visual_payload,
+            _final_visual_job = await _queue_room_visual_generation(
+                req, _room_kind, _final_visual_payload,
             )
             await _emit({
                 "t": "visual_job_queued",
-                "job_id": _campaign_visual_job.get("job_id"),
-                "status": _campaign_visual_job.get("status") or "queued",
-                "stage": _campaign_visual_job.get("stage") or "queued",
-                "replayed": _campaign_visual_job.get("replayed") is True,
+                "job_id": _final_visual_job.get("job_id"),
+                "status": _final_visual_job.get("status") or "queued",
+                "stage": _final_visual_job.get("stage") or "queued",
+                "replayed": _final_visual_job.get("replayed") is True,
             })
         except Exception as exc:  # noqa: BLE001
-            log.exception("[single] campaign visual admission failed room=%s turn=%s", req.room_id, req.turn_id)
+            log.exception("[single] final visual admission failed room=%s turn=%s", req.room_id, req.turn_id)
             await _emit({
-                "t": "warning", "code": "campaign_visual_admission_failed",
-                "note": "The campaign copy is complete, but its coordinated visuals could not be queued yet. Retry this turn safely.",
+                "t": "warning", "code": "visual_generation_admission_failed",
+                "note": "The governed room result is complete, but its final visual could not be queued yet. Retry this turn safely.",
             })
+    elif _final_visual_payload:
+        await _emit({
+            "t": "warning", "code": "visual_generation_deferred",
+            "note": "Visual generation was deferred because the required room work or grounding checks did not complete.",
+        })
 
     # Persist compact episodic continuity for every run after the final report exists.
     # This never blocks sealing and is distinct from room/employee operating playbooks.

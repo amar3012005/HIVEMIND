@@ -2,7 +2,9 @@ from types import SimpleNamespace
 
 from hivemind_employees.api_hyper_rooms import (
     _campaign_post_visual_payload,
+    _director_final_visual_payload,
     _room_visual_job_payload,
+    _visual_delivery_ready,
 )
 
 
@@ -60,3 +62,35 @@ def test_non_campaign_report_does_not_auto_queue_visuals():
     assert _campaign_post_visual_payload(
         _request("Write three hiring interview questions"), "general", "Questions...",
     ) is None
+
+
+def test_director_selected_image_uses_completed_room_result_as_final_brief():
+    payload = _director_final_visual_payload(
+        _request("Develop the launch concept and produce its final visual"),
+        "general",
+        "Approved synthesis: lead with the verified modular system and buyer outcome.",
+        {
+            "output_family": "image",
+            "output_contract": {"artifact_kind": "generated_image"},
+            "artifact_intent": {
+                "kind": "generated_image", "purpose": "launch visual", "audience": "buyers",
+            },
+            "source_receipts": [{"title": "Verified product page"}],
+            "work_results": [{"owner": "Researcher", "title": "Buyer check", "text": "Verified buyer concern."}],
+        },
+    )
+    assert payload is not None
+    assert payload["source"]["kind"] == "room_director_final_synthesis"
+    assert payload["idempotency_key"] == "room-visual-final:turn-visual-canary"
+    assert "APPROVED FINAL SYNTHESIS" in payload["instruction"]
+    assert "Verified buyer concern" in payload["instruction"]
+    assert "opening request alone" in payload["instruction"]
+
+
+def test_visual_delivery_waits_for_completed_grounded_room_result():
+    approved = {"met": True, "grounded_ok": True}
+    synthesis = "A sufficiently detailed final synthesis for rendering."
+    assert _visual_delivery_ready("complete", approved, synthesis) is True
+    assert _visual_delivery_ready("blocked", approved, synthesis) is False
+    assert _visual_delivery_ready("complete", {"met": False, "grounded_ok": True}, synthesis) is False
+    assert _visual_delivery_ready("complete", {"met": True, "grounded_ok": False}, synthesis) is False

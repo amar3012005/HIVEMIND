@@ -4985,7 +4985,8 @@ class Director:
             } else "text"
         )
         output_formats = (
-            ["html", "pdf"] if output_family in {"report", "presentation", "document", "image"}
+            ["png", "webp"] if output_family == "image"
+            else ["html", "pdf"] if output_family in {"report", "presentation", "document"}
             else ["csv", "xlsx"] if output_family == "spreadsheet"
             else ["json"] if output_family == "data" else ["md"]
         )
@@ -5490,9 +5491,9 @@ class Director:
                 "type": ["object", "null"],
                 "properties": {
                     "kind": {"type": "string", "enum": [
-                        "presentation", "interactive_document", "dashboard"
+                        "presentation", "interactive_document", "dashboard", "generated_image"
                     ]},
-                    "medium": {"type": "string", "enum": ["html"]},
+                    "medium": {"type": "string", "enum": ["html", "image_generation"]},
                     "purpose": {"type": "string"},
                     "audience": {"type": "string"},
                     "quality_profile": {"type": "string", "enum": [
@@ -5661,14 +5662,15 @@ class Director:
             output_contract = getattr(self, "output_contract", None) or {}
             if output_contract.get("artifact_required"):
                 sysp += (
-                    "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact when "
-                    "a presentation, explorable document, or dashboard materially "
+                    "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact or a "
+                    "generated_image when a final raster visual materially "
                     "completes the ACTIVE request better than prose. This capability belongs to every Room; decide "
                     "from the requested outcome, never the Room name. Use null for normal answers, greetings, email, "
                     "or external Docs/Sheets/Notion writes. Preserve the requested medium exactly: use kind=presentation "
                     "for a deck, pitch deck, slides, briefing presentation, or slide-by-slide request; use kind=dashboard "
                     "only when the user asks for monitoring, a dashboard, console, or recurring metric exploration; "
-                    "otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
+                    "use kind=generated_image with medium=image_generation for a final raster image or coordinated "
+                    "image set; otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
                     "dashboard. Describe purpose and audience without choosing a theme "
                     "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
                     " A requested wireframe, prototype, journey map, flow visualization, system diagram, or other "
@@ -5676,7 +5678,8 @@ class Director:
                     "asked for slides or a dashboard. A request to explain, advise, summarize, or write without a "
                     "visual deliverable remains textual and uses null. When artifact_intent is not null, choose "
                     "execution_engine=debate so the governed final-output adapter receives the complete evidence board "
-                    "instead of returning early through agentic execution."
+                    "instead of returning early through agentic execution. generated_image is only an intent at this "
+                    "stage; its independent renderer is admitted after the final synthesis and governance gates."
                     + profile_contract
                 )
             else:
@@ -5814,8 +5817,12 @@ class Director:
                 and bool((getattr(self, "output_contract", None) or {}).get("artifact_required"))):
             raw = plan.get("artifact_intent") if isinstance(plan.get("artifact_intent"), dict) else {}
             plan["artifact_intent"] = {
-                "kind": "presentation" if explicit_family == "presentation" else "interactive_document",
-                "medium": "html",
+                "kind": (
+                    "presentation" if explicit_family == "presentation" else
+                    "generated_image" if explicit_family == "image" else
+                    "interactive_document"
+                ),
+                "medium": "image_generation" if explicit_family == "image" else "html",
                 "purpose": str(raw.get("purpose") or message or "visual deliverable")[:240],
                 "audience": str(raw.get("audience") or "intended reader")[:160],
                 "quality_profile": str(raw.get("quality_profile") or "editorial"),
@@ -5830,12 +5837,12 @@ class Director:
                 and artifact_intent_allowed(getattr(self, "output_contract", {}) or {}, plan.get("artifact_intent"))):
             raw_intent = plan["artifact_intent"]
             artifact_kind = str(raw_intent.get("kind") or "interactive_document").strip()
-            if artifact_kind not in {"presentation", "interactive_document", "dashboard"}:
+            if artifact_kind not in {"presentation", "interactive_document", "dashboard", "generated_image"}:
                 artifact_kind = "interactive_document"
             self.artifact_intent = {
                 "contract": "artifact-intent.v1",
                 "kind": artifact_kind,
-                "medium": "html",
+                "medium": "image_generation" if artifact_kind == "generated_image" else "html",
                 "purpose": str(raw_intent.get("purpose") or "visual deliverable").strip()[:240],
                 "audience": str(raw_intent.get("audience") or "intended reader").strip()[:160],
                 "quality_profile": str(raw_intent.get("quality_profile") or "editorial").strip(),
@@ -5883,7 +5890,29 @@ class Director:
             }
             plan["artifact_intent"] = dict(self.artifact_intent)
             plan["execution_engine"] = "debate"
+        # The Director may determine that the requested final deliverable is a
+        # raster image even when the opening text did not contain a narrow image
+        # keyword. Record that choice as intent only. The API admits the
+        # independent renderer after the full evidence/work/synthesis gates.
+        if (_visual_artifacts_enabled()
+                and self.artifact_intent is None
+                and str(plan.get("turn_mode") or "task") == "task"
+                and str(plan.get("output_family") or "").strip().lower() == "image"):
+            self.artifact_intent = {
+                "contract": "artifact-intent.v1",
+                "kind": "generated_image",
+                "medium": "image_generation",
+                "purpose": str(self.user_message or "final visual deliverable")[:240],
+                "audience": "intended user",
+                "quality_profile": "editorial",
+                "creative_freedom": "high",
+                "requirements": [],
+            }
+            plan["artifact_intent"] = dict(self.artifact_intent)
+            plan["execution_engine"] = "debate"
         if self.artifact_intent and (getattr(self, "output_contract", {}) or {}).get("artifact_required"):
+            self.intended_output = "artifact"
+        elif self.artifact_intent and self.artifact_intent.get("kind") == "generated_image":
             self.intended_output = "artifact"
         elif getattr(self, "output_contract", None):
             if not self.output_contract.get("artifact_required"):
@@ -8324,7 +8353,7 @@ class Director:
             else:
                 agent_answer = await self._try_direct_answer_hook()
                 final_text = agent_answer or await self._synthesize(forced_debate, transcript_json)
-        if self.artifact_intent:
+        if self.artifact_intent and self.artifact_intent.get("kind") != "generated_image":
             visual = await self._produce_visual_artifact(forced_debate, transcript_json)
             if visual:
                 artifact_receipt = visual["receipt"]
@@ -8423,6 +8452,7 @@ class Director:
             "runtime_stage_result": runtime_stage_result,
             "room_phase_result": room_phase_result,
             "artifact_intent": dict(self.artifact_intent) if self.artifact_intent else None,
+            "output_family": str(plan.get("output_family") or ""),
             "artifact_receipt": artifact_receipt,
             "debate_contract": turn_contract.get("debate_contract") or {},
             "roundtable_shadow": self._roundtable_shadow,

@@ -12,7 +12,7 @@ import { runtimeScopeProjection } from '../../src/employees/work-runs.js';
 test('PlaybookList exposes catalog metadata only', () => {
   const catalog = listPlaybooks();
   assert.ok(catalog.length > 0);
-  assert.deepEqual(Object.keys(catalog[0]).sort(), ['description', 'id', 'name', 'scope']);
+  assert.deepEqual(Object.keys(catalog[0]).sort(), ['description', 'id', 'name', 'scope', 'version']);
   assert.ok(catalog.some((playbook) => playbook.id === 'global:prospect-discovery'));
   assert.ok(catalog.every((playbook) => !Object.hasOwn(playbook, 'instructions')));
 });
@@ -39,6 +39,7 @@ test('org playbooks remain compact in list results and load only by returned id'
     name: 'Germany enterprise',
     description: 'Company-specific route for Germany.',
     scope: 'org',
+    version: '1.0.0',
   });
   assert.equal(getPlaybook('org:germany-enterprise', { orgPlaybooks }).instructions,
     'Use only verified German enterprise evidence.');
@@ -58,12 +59,14 @@ test('local WorkRun playbooks remain isolated from org and global catalog entrie
     name: 'Launch overlay',
     description: 'Current launch constraints.',
     scope: 'local',
+    version: '1.0.0',
   });
   assert.deepEqual(getPlaybook('local:launch-overlay', { localPlaybooks: local }), {
     id: 'local:launch-overlay',
     name: 'Launch overlay',
     description: 'Current launch constraints.',
     scope: 'local',
+    version: '1.0.0',
     instructions: 'Use the current approved launch inputs only.',
   });
 });
@@ -84,6 +87,7 @@ test('initial AgentScope context keeps local playbooks metadata-only', () => {
       name: 'Launch overlay',
       description: 'WorkRun-local operating guidance.',
       scope: 'local',
+      version: '1.0.0',
     }],
   });
   assert.doesNotMatch(JSON.stringify(projected), /never be injected/i);

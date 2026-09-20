@@ -593,7 +593,7 @@ export async function handleInternalPlaybookListRoute({
   let localPlaybook = null;
   if (sessionId) {
     const rows = await prisma.$queryRawUnsafe(
-      `SELECT r.room_playbook, w.scope
+      `SELECT w.id, r.room_playbook, w.scope
          FROM "hivemind"."work_runs" w
          JOIN "hivemind"."hyper_rooms" r ON r.id = w.room_id
         WHERE w.agentscope_session_id = $1
@@ -630,9 +630,10 @@ export async function handleInternalPlaybookGetRoute({
   const sessionId = String(body?.agentscope_session_id || '').trim();
   let roomPlaybook = null;
   let localPlaybook = null;
+  let workRunId = null;
   if (sessionId) {
     const rows = await prisma.$queryRawUnsafe(
-      `SELECT r.room_playbook, w.scope
+      `SELECT w.id, r.room_playbook, w.scope
          FROM "hivemind"."work_runs" w
          JOIN "hivemind"."hyper_rooms" r ON r.id = w.room_id
         WHERE w.agentscope_session_id = $1
@@ -645,6 +646,7 @@ export async function handleInternalPlaybookGetRoute({
     );
     roomPlaybook = rows?.[0]?.room_playbook || null;
     localPlaybook = rows?.[0]?.scope?.local_playbooks || null;
+    workRunId = rows?.[0]?.id || null;
   }
   const { getPlaybook, organizationPlaybooks, localPlaybooks } = await import('../employees/playbook-catalog.js');
   const playbook = getPlaybook(id, {
@@ -652,6 +654,21 @@ export async function handleInternalPlaybookGetRoute({
     localPlaybooks: localPlaybooks(localPlaybook),
   });
   if (!playbook) return jsonResponse(res, { error: 'unknown playbook' }, 404);
+  if (workRunId && sessionId) {
+    // PlaybookGet is the selection boundary. Persist a validated catalog id
+    // and version here, after resolving it under the bound session, instead
+    // of trusting a model-supplied value at WorkRun creation time.
+    await prisma.$queryRawUnsafe(
+      `UPDATE "hivemind"."work_runs"
+          SET playbook_id = $2, playbook_version = $3, updated_at = now()
+        WHERE id = $1::uuid AND user_id = $4::uuid AND org_id = $5::uuid`,
+      workRunId,
+      playbook.id,
+      playbook.version,
+      principal.userId,
+      principal.orgId,
+    );
+  }
   return jsonResponse(res, { status: 'completed', playbook });
 }
 

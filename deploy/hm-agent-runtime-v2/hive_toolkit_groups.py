@@ -113,8 +113,10 @@ def separate_native_tool_groups(toolkit: Any, workspace_tool_names: set[str]) ->
 
     ``get_toolkit`` returns real ToolBase instances.  Moving those exact
     instances (rather than rebuilding them) preserves their session-bound
-    state and schemas.  Skills and MCPs live with workspace tools because a
-    selected skill can only be used after its workspace capability is active.
+    state and schemas. Skills stay basic: AgentScope exposes only compact skill
+    metadata there, and its native SkillViewer loads full SKILL.md content on
+    demand. MCP clients stay with workspace tools because they are executable
+    capabilities, not metadata.
     """
     basic_group = next((group for group in toolkit.tool_groups if group.name == "basic"), None)
     if basic_group is None:
@@ -131,18 +133,16 @@ def separate_native_tool_groups(toolkit: Any, workspace_tool_names: set[str]) ->
         tool for tool in basic_group.tools if getattr(tool, "name", "") not in moved_names
     ]
 
-    if workspace_tools or basic_group.skills_or_loaders or basic_group.mcps:
+    if workspace_tools or basic_group.mcps:
         toolkit.tool_groups.append(
             ToolGroup(
                 name="workspace",
-                description="Read and write the task workspace, and load workspace skills or MCP tools when a planned task requires them.",
-                instructions="Use only after the playbook is selected and the relevant AgentScope Task explains the workspace work.",
+                description="Read and write the task workspace, and use workspace MCP tools when a planned task requires them.",
+                instructions="Use only after the playbook is selected, the relevant Skill is read, and an AgentScope Task explains the workspace work.",
                 tools=workspace_tools,
-                skills_or_loaders=basic_group.skills_or_loaders,
                 mcps=basic_group.mcps,
             ),
         )
-        basic_group.skills_or_loaders = []
         basic_group.mcps = []
 
     if team_tools:

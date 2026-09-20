@@ -240,6 +240,8 @@ def assemble_campaign_bundle(
     plan["creative_system"] = creative
 
     actions = [row for row in (plan.get("actions") or []) if isinstance(row, dict)]
+    visual_delivery = brief_payload.get("visual_delivery") if isinstance(brief_payload.get("visual_delivery"), dict) else {}
+    visuals_required = visual_delivery.get("required") is True
     primary_metric = str(((plan.get("measurement") or {}).get("primary_kpi") if isinstance(plan.get("measurement"), dict) else "") or "Campaign objective response")
     final_offset = max(0, (duration - 1) * 1440)
     for index, action in enumerate(actions):
@@ -267,7 +269,7 @@ def assemble_campaign_bundle(
         # "verified" still requires directly supporting verified evidence.
         action["claim_status"] = "verified" if claim_status == "claim" else claim_status
         creative_brief = action.get("creative_brief") if isinstance(action.get("creative_brief"), dict) else {}
-        required = creative_brief.get("required") is True
+        required = visuals_required or creative_brief.get("required") is True
         creative_brief["required"] = required
         if not required:
             for field in ("objective", "subject", "composition", "brand_style", "audience", "text_policy", "alt_text", "generation_prompt", "rationale", "lighting", "camera", "color_direction", "emotional_tone"):
@@ -295,7 +297,7 @@ def assemble_campaign_bundle(
     plan["requirement_coverage"] = [{
         "requirement_id": requirement,
         "strategy_sections": ["strategy", "actions"],
-        "action_ids": [action["id"] for action in actions if requirement == "goal" or requirement == f"channel:{action['channel']}"],
+        "action_ids": [action["id"] for action in actions if requirement == "goal" or requirement.startswith("delivery:") or requirement == f"channel:{action['channel']}"],
     } for requirement in requirements]
 
     prohibited = brief_payload.get("prohibited_claims")
@@ -570,6 +572,8 @@ def campaign_bundle_errors(
                 continue
             if str(item.get("status") or "") not in ("verified", "assumption", "missing"):
                 errors.append(f"evidence item {index + 1} needs a valid status")
+            if str(item.get("status") or "") == "verified" and str(item.get("source_type") or "") == "derived":
+                errors.append(f"evidence item {index + 1} cannot be verified from a derived source")
             for field in ("id", "claim", "source"):
                 if not _non_empty_string(item.get(field)):
                     errors.append(f"evidence item {index + 1} needs {field}")
@@ -605,6 +609,8 @@ def campaign_bundle_errors(
                 creative = action.get("creative_brief") or {}
                 if not isinstance(creative.get("required"), bool):
                     errors.append(f"action {action.get('id') or index + 1} creative_brief.required must be boolean")
+                if (brief_payload.get("visual_delivery") or {}).get("required") is True and creative.get("required") is not True:
+                    errors.append(f"action {action.get('id') or index + 1} must require a visual for this campaign")
                 if creative.get("required") is True:
                     legacy_concept = _non_empty_string(creative.get("concept")) and not _non_empty_string(creative.get("generation_prompt"))
                     if not legacy_concept:

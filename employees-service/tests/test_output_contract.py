@@ -51,7 +51,9 @@ def test_explicit_generated_image_uses_durable_visual_contract():
 def test_direct_visual_language_uses_durable_visual_contract_in_any_room():
     for message in (
         "I need a visual for this launch",
+        "I want three images for this campaign",
         "Give me a final visual",
+        "Build a law-firm campaign with three post images",
         "Create the campaign plan and a visual artifact",
         "Produce an image set after the research is complete",
     ):
@@ -170,6 +172,23 @@ def test_research_floor_applies_without_work_room_profile():
     assert plan["web_query"]
     assert plan["research_floor"] == "output_contract.evidence_required"
     assert plan["turn_mode"] == "task"
+
+
+def test_canonical_campaign_room_always_gets_company_and_market_research_floor():
+    from hivemind_employees.hyper.engine import Director
+
+    director = object.__new__(Director)
+    director.execution_profile = {}
+    director.user_message = "Build the accepted campaign"
+    director.room_kind = "campaign"
+    director.campaign_brief = {"campaign_id": "campaign-1", "goal": "Reach German law firms"}
+    director.output_contract = resolve_output_contract(user_message=director.user_message, room_kind="campaign")
+    director._web_budget = 1
+    plan = director._apply_research_floor({"recall_queries": [], "web_query": None, "connector_calls": []})
+    assert plan["recall_queries"] == ["Reach German law firms"]
+    assert plan["web_query"] == "Reach German law firms"
+    assert plan["research_floor"] == "campaign.contract.v1"
+    assert len(plan["research_claims"]) == 3
 
 
 def test_evidence_contract_extracts_the_explicit_company_url():

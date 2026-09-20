@@ -60,12 +60,21 @@ const ORGANIC_SOCIAL_CHANNELS = new Set([
   'pinterest', 'reddit', 'threads', 'bluesky', 'google_business',
 ]);
 
-export function campaignActionRanges({ durationDays = 14, intensity = 'FOCUSED', channels = [] } = {}) {
+export function campaignActionRanges({ durationDays = 14, intensity = 'FOCUSED', channels = [], actionCount = null } = {}) {
   const normalizedIntensity = String(intensity || 'FOCUSED').trim().toUpperCase();
   if (!CAMPAIGN_INTENSITIES.has(normalizedIntensity)) throw campaignError('Unknown campaign intensity', 400, 'invalid_campaign_intensity');
   const horizonIndex = Number(durationDays) <= 7 ? 0 : Number(durationDays) <= 14 ? 1 : 2;
   const expected = {};
-  for (const channel of channels) {
+  const explicitCount = actionCount == null ? null : Number(actionCount);
+  if (explicitCount != null && (!Number.isInteger(explicitCount) || explicitCount < Math.max(1, channels.length) || explicitCount > 24)) {
+    throw campaignError(`Action count must be between ${Math.max(1, channels.length)} and 24`, 400, 'invalid_campaign_action_count');
+  }
+  for (const [index, channel] of channels.entries()) {
+    if (explicitCount != null) {
+      const perChannel = Math.floor(explicitCount / channels.length) + (index < (explicitCount % channels.length) ? 1 : 0);
+      expected[channel] = { minimum: perChannel, maximum: perChannel };
+      continue;
+    }
     const range = ORGANIC_SOCIAL_CHANNELS.has(channel)
       ? CONTENT_ACTION_RANGES[normalizedIntensity][horizonIndex]
       : DIRECT_ACTION_RANGES[normalizedIntensity][horizonIndex];
@@ -78,6 +87,10 @@ export function campaignActionRanges({ durationDays = 14, intensity = 'FOCUSED',
     total_minimum: Object.values(expected).reduce((total, range) => total + range.minimum, 0),
     total_maximum: Object.values(expected).reduce((total, range) => total + range.maximum, 0),
   };
+}
+
+export function campaignStatusAfterPlanning(visualActionCount = 0) {
+  return Number(visualActionCount) > 0 ? 'PREPARING_ASSETS' : 'READY_FOR_APPROVAL';
 }
 
 export function canonicalJson(value) {
@@ -402,11 +415,12 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         } });
       }
     }
-    // The operating plan is useful before a visual render finishes. Keep images
-    // as asynchronous action work; launch preflight still requires each selected
-    // required asset, but the Room and dashboard do not wait on the image queue.
+    // A visual campaign is not approval-ready until every required asset exists.
+    // Keep the plan visible while the durable image queue works, but make the
+    // lifecycle truthful so neither the UI nor auto-launch can race the visuals.
+    const nextCampaignStatus = campaignStatusAfterPlanning(visualActionCount);
     await tx.campaign.update({ where: { id: run.campaignId }, data: {
-      status: 'READY_FOR_APPROVAL', currentPlanVersionId: plan.id, approvedPlanVersionId: null, lastError: null,
+      status: nextCampaignStatus, currentPlanVersionId: plan.id, approvedPlanVersionId: null, lastError: null,
     } });
     await tx.campaignChannel.updateMany({ where: { campaignId: run.campaignId }, data: { status: 'READY' } });
     await tx.campaignRun.update({ where: { id: run.id }, data: {
@@ -426,12 +440,12 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
         launch_blocker_count: Array.isArray(bundle.launch_plan?.blocked_by) ? bundle.launch_plan.blocked_by.length : 0,
       },
     } });
-    await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_ready', data: {
+    if (!visualActionCount) await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_ready', data: {
       campaign_id: run.campaignId, room_id: run.campaign.roomId, turn_id: run.turnId, plan_version_id: plan.id,
-      display: { title: run.campaign.name, objective: run.campaign.objective, channels: run.campaign.requestedChannels, action_count: bundle.actions.length, status: 'READY_FOR_APPROVAL', message: visualActionCount ? 'Your campaign plan is ready. Visuals are generating for selected actions.' : 'Your campaign plan is ready to review.' },
+      display: { title: run.campaign.name, objective: run.campaign.objective, channels: run.campaign.requestedChannels, action_count: bundle.actions.length, status: 'READY_FOR_APPROVAL', message: 'Your campaign plan is ready to review.' },
     } } });
     if (visualActionCount) await tx.campaignEvent.create({ data: { campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_asset_generation_queued', data: { plan_version_id: plan.id, action_count: visualActionCount, source: 'campaign_room' } } });
-    return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: 'READY_FOR_APPROVAL', visualActionCount };
+    return { ok: true, campaignId: run.campaignId, planVersionId: plan.id, version, status: nextCampaignStatus, visualActionCount };
   });
 }
 
@@ -531,7 +545,11 @@ export function normalizeCampaignInput(body = {}) {
     { id: 'goal', text: goal, source: 'user' },
     ...channels.map((channel) => ({ id: `channel:${channel}`, text: `Produce approval-ready ${channel} actions and state every launch prerequisite`, source: 'channel' })),
   ];
-  const cadence = campaignActionRanges({ durationDays, intensity: body.intensity || body.cadence?.preset || 'FOCUSED', channels });
+  const actionCount = body.action_count == null ? null : Number(body.action_count);
+  const visualsRequired = body.visuals_required === true || body.visual_delivery?.required === true;
+  const cadence = campaignActionRanges({ durationDays, intensity: body.intensity || body.cadence?.preset || 'FOCUSED', channels, actionCount });
+  if (actionCount != null) requirements.push({ id: 'delivery:action_count', text: `Produce exactly ${actionCount} campaign actions`, source: 'user' });
+  if (visualsRequired) requirements.push({ id: 'delivery:visuals', text: 'Produce one complete generated visual for every campaign action', source: 'user' });
   return {
     name, goal, objective, channels, autonomyMode, creationKey, requirements,
     sourceType: cleanText(body.source_type, 40, 'Source type') || null,
@@ -549,6 +567,8 @@ export function normalizeCampaignInput(body = {}) {
       geography: cleanStringList(body.geography, 100, 160, 'Geography'),
       languages: cleanStringList(body.languages, 50, 80, 'Languages'),
       duration_days: durationDays, cadence,
+      action_count: actionCount,
+      visual_delivery: { required: visualsRequired, count: visualsRequired ? actionCount : null, coherence: 'shared_campaign_system' },
       brand_constraints: cleanText(body.brand_constraints, 4000, 'Brand constraints'),
       prohibited_claims: cleanText(body.prohibited_claims, 4000, 'Prohibited claims'),
       success_metrics: cleanStringList(body.success_metrics, 30, 160, 'Success metrics'),

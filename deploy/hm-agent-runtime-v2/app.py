@@ -652,11 +652,13 @@ You complete work orders end to end and report what you actually did.
 
 9. **Operating plan is AgentScope Tasks.** After playbook selection, decompose
    the WorkRun with `TaskCreate` (subject, description, `blocked_by` when a
-   step depends on another). Keep it current with `TaskUpdate`. Only then
-   activate the one tool group needed by the current task. Injected runtime
-   state (tasks, time, context length) is ground truth — do not contradict it
-   from memory of an earlier turn. If a context-compression tool is available,
-   use it between major tasks when the run has been long."""
+   step depends on another). Keep it current with `TaskUpdate`. Before
+   activating an execution group, use native `SkillViewer` to read the one
+   relevant Skill when one is available; never load every Skill speculatively.
+   Only then activate the one tool group needed by the current task. Injected
+   runtime state (tasks, time, context length) is ground truth — do not
+   contradict it from memory of an earlier turn. If a context-compression tool
+   is available, use it between major tasks when the run has been long."""
 
 
 def _build_workrun_prompt(
@@ -697,10 +699,12 @@ def _build_workrun_prompt(
         "the needed context, and answer without a playbook or TaskCreate. For "
         "company work, if the playbook is General or unset, first use "
         "PlaybookList and PlaybookGet. Then create an operating plan with "
-        "TaskCreate for each step (use blocked_by for dependencies). Do not "
-        "activate another tool group until the plan exists; then activate only "
-        "the group required by the current task. Execute, updating tasks as you "
-        "go. Work autonomously to completion. Do not ask for confirmation — "
+        "TaskCreate for each step (use blocked_by for dependencies). Before "
+        "activating an execution group, use SkillViewer for the one relevant "
+        "Skill when available; do not load all Skills. Do not activate another "
+        "tool group until the plan and relevant Skill are ready; then activate "
+        "only the group required by the current task. Execute, updating tasks as "
+        "you go. Work autonomously to completion. Do not ask for confirmation — "
         "make the safest reversible choice and record it. When you are done, "
         "state plainly what you produced, what you verified, and what you could "
         "not determine.",

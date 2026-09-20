@@ -13,6 +13,8 @@ class WorkRunPromptTests(unittest.TestCase):
     def test_system_prompt_allows_grounded_answers_without_a_plan(self):
         prompt = _build_agent_system_prompt(None)
         self.assertIn("answer without a playbook or\n   task plan", prompt)
+        self.assertIn("SkillViewer", prompt)
+        self.assertIn("never load every Skill speculatively", prompt)
 
     def test_company_work_order_is_playbook_then_tasks_then_group(self):
         prompt = _build_workrun_prompt(
@@ -27,7 +29,8 @@ class WorkRunPromptTests(unittest.TestCase):
         self.assertIn("without a playbook or TaskCreate", prompt)
         company_work = prompt[prompt.index("For \"company work\""):] if "For \"company work\"" in prompt else prompt[prompt.index("For company work"):]
         self.assertLess(company_work.index("PlaybookList"), company_work.index("TaskCreate"))
-        self.assertLess(company_work.index("TaskCreate"), company_work.index("activate another tool group"))
+        self.assertLess(company_work.index("TaskCreate"), company_work.index("SkillViewer"))
+        self.assertLess(company_work.index("SkillViewer"), company_work.index("activate another tool group"))
 
 
 if __name__ == "__main__":

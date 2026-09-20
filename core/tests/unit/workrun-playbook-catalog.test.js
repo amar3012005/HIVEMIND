@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   getPlaybook,
   listPlaybooks,
+  localPlaybooks,
   organizationPlaybooks,
 } from '../../src/employees/playbook-catalog.js';
 
@@ -41,4 +42,27 @@ test('org playbooks remain compact in list results and load only by returned id'
   assert.equal(getPlaybook('org:germany-enterprise', { orgPlaybooks }).instructions,
     'Use only verified German enterprise evidence.');
   assert.equal(getPlaybook('org:missing', { orgPlaybooks }), null);
+});
+
+test('local WorkRun playbooks remain isolated from org and global catalog entries', () => {
+  const local = localPlaybooks({
+    id: 'launch-overlay',
+    name: 'Launch overlay',
+    description: 'Current launch constraints.',
+    instructions: 'Use the current approved launch inputs only.',
+  });
+  const catalog = listPlaybooks({ localPlaybooks: local });
+  assert.deepEqual(catalog.find((entry) => entry.id === 'local:launch-overlay'), {
+    id: 'local:launch-overlay',
+    name: 'Launch overlay',
+    description: 'Current launch constraints.',
+    scope: 'local',
+  });
+  assert.deepEqual(getPlaybook('local:launch-overlay', { localPlaybooks: local }), {
+    id: 'local:launch-overlay',
+    name: 'Launch overlay',
+    description: 'Current launch constraints.',
+    scope: 'local',
+    instructions: 'Use the current approved launch inputs only.',
+  });
 });

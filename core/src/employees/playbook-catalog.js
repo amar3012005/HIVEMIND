@@ -29,22 +29,22 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
   },
 ]);
 
-function safeLocalId(value, index) {
+function safeScopedId(value, index, scope) {
   const normalized = String(value || '')
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return `org:${normalized || `local-${index + 1}`}`;
+  return `${scope}:${normalized || `${scope}-${index + 1}`}`;
 }
 
-/** Convert an org-owned room playbook into compact catalog entries.
+/** Convert a scope-owned playbook payload into compact catalog entries.
  *
  * The durable room field predates this catalog and can be either one object,
  * an array, or `{ playbooks: [...] }`. Normalize at the catalog edge rather
  * than teaching the AgentScope runtime those legacy storage shapes.
  */
-export function organizationPlaybooks(value) {
+function scopedPlaybooks(value, scope) {
   const raw = Array.isArray(value)
     ? value
     : Array.isArray(value?.playbooks)
@@ -57,13 +57,25 @@ export function organizationPlaybooks(value) {
       : String(object.instructions || object.content || object.text || '').trim();
     if (!instructions) return null;
     return {
-      id: safeLocalId(object.id || object.slug || object.name, index),
+      id: safeScopedId(object.id || object.slug || object.name, index, scope),
       name: String(object.name || object.title || `Organization playbook ${index + 1}`).trim(),
       description: String(object.description || 'Organization-specific operating guidance.').trim(),
-      scope: 'org',
+      scope,
       instructions,
     };
   }).filter(Boolean);
+}
+
+export function organizationPlaybooks(value) {
+  return scopedPlaybooks(value, 'org');
+}
+
+// A local overlay is supplied only in the durable WorkRun scope, and is read
+// back only through the session-bound catalog endpoint.  It is intentionally
+// distinct from the room's org playbooks: neither scope leaks into another
+// WorkRun or becomes an always-injected system prompt.
+export function localPlaybooks(value) {
+  return scopedPlaybooks(value, 'local');
 }
 
 const BODIES = Object.freeze({
@@ -94,13 +106,13 @@ const BODIES = Object.freeze({
   ].join('\n'),
 });
 
-export function listPlaybooks({ orgPlaybooks = [] } = {}) {
-  return [...GLOBAL_PLAYBOOKS, ...orgPlaybooks]
+export function listPlaybooks({ orgPlaybooks = [], localPlaybooks: local = [] } = {}) {
+  return [...GLOBAL_PLAYBOOKS, ...orgPlaybooks, ...local]
     .map(({ id, name, description, scope }) => ({ id, name, description, scope }));
 }
 
-export function getPlaybook(id, { orgPlaybooks = [] } = {}) {
-  const meta = [...GLOBAL_PLAYBOOKS, ...orgPlaybooks].find((p) => p.id === id);
+export function getPlaybook(id, { orgPlaybooks = [], localPlaybooks: local = [] } = {}) {
+  const meta = [...GLOBAL_PLAYBOOKS, ...orgPlaybooks, ...local].find((p) => p.id === id);
   if (!meta) return null;
   return { ...meta, instructions: meta.instructions || BODIES[id] || '' };
 }

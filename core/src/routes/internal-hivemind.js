@@ -590,9 +590,10 @@ export async function handleInternalPlaybookListRoute({
   const body = parseBody ? await parseBody(req).catch(() => ({})) : {};
   const sessionId = String(body.agentscope_session_id || '').trim();
   let roomPlaybook = null;
+  let localPlaybook = null;
   if (sessionId) {
     const rows = await prisma.$queryRawUnsafe(
-      `SELECT r.room_playbook
+      `SELECT r.room_playbook, w.scope
          FROM "hivemind"."work_runs" w
          JOIN "hivemind"."hyper_rooms" r ON r.id = w.room_id
         WHERE w.agentscope_session_id = $1
@@ -604,11 +605,15 @@ export async function handleInternalPlaybookListRoute({
       principal.orgId,
     );
     roomPlaybook = rows?.[0]?.room_playbook || null;
+    localPlaybook = rows?.[0]?.scope?.local_playbooks || null;
   }
-  const { listPlaybooks, organizationPlaybooks } = await import('../employees/playbook-catalog.js');
+  const { listPlaybooks, organizationPlaybooks, localPlaybooks } = await import('../employees/playbook-catalog.js');
   return jsonResponse(res, {
     status: 'completed',
-    playbooks: listPlaybooks({ orgPlaybooks: organizationPlaybooks(roomPlaybook) }),
+    playbooks: listPlaybooks({
+      orgPlaybooks: organizationPlaybooks(roomPlaybook),
+      localPlaybooks: localPlaybooks(localPlaybook),
+    }),
   });
 }
 
@@ -624,9 +629,10 @@ export async function handleInternalPlaybookGetRoute({
   if (!id) return jsonResponse(res, { error: 'id is required' }, 400);
   const sessionId = String(body?.agentscope_session_id || '').trim();
   let roomPlaybook = null;
+  let localPlaybook = null;
   if (sessionId) {
     const rows = await prisma.$queryRawUnsafe(
-      `SELECT r.room_playbook
+      `SELECT r.room_playbook, w.scope
          FROM "hivemind"."work_runs" w
          JOIN "hivemind"."hyper_rooms" r ON r.id = w.room_id
         WHERE w.agentscope_session_id = $1
@@ -638,9 +644,13 @@ export async function handleInternalPlaybookGetRoute({
       principal.orgId,
     );
     roomPlaybook = rows?.[0]?.room_playbook || null;
+    localPlaybook = rows?.[0]?.scope?.local_playbooks || null;
   }
-  const { getPlaybook, organizationPlaybooks } = await import('../employees/playbook-catalog.js');
-  const playbook = getPlaybook(id, { orgPlaybooks: organizationPlaybooks(roomPlaybook) });
+  const { getPlaybook, organizationPlaybooks, localPlaybooks } = await import('../employees/playbook-catalog.js');
+  const playbook = getPlaybook(id, {
+    orgPlaybooks: organizationPlaybooks(roomPlaybook),
+    localPlaybooks: localPlaybooks(localPlaybook),
+  });
   if (!playbook) return jsonResponse(res, { error: 'unknown playbook' }, 404);
   return jsonResponse(res, { status: 'completed', playbook });
 }

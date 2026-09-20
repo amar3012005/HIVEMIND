@@ -30,6 +30,12 @@ test('Day 0 PDF uses the flowing Day 1 editorial grammar without changing the em
   const email = renderDayZeroOnboardingEmail(company, { appUrl: 'https://next.example.test/company' });
 
   assert.match(html, /@page\{size:A4 portrait/);
+  assert.match(html, /@page\{size:A4 portrait;margin:24mm 15mm 18mm\}/);
+  assert.match(html, /id="day0-print-pagination"/);
+  assert.match(html, /\.head\{position:fixed/);
+  assert.match(html, /\.foot\{position:fixed/);
+  assert.match(html, /page-break-inside:avoid/);
+  assert.match(html, /SINGULANCE · HIVEMIND OPERATING SYSTEM/);
   assert.equal((html.match(/class="page"/g) || []).length, 1);
   assert.match(html, /HIVEMIND · COMPANY AWAKENING COMPLETE/);
   assert.match(html, /SOURCE &amp; EVIDENCE LEDGER · 07/);

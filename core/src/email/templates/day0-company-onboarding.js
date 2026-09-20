@@ -6,7 +6,7 @@ import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEm
 // refresh as permission to resend a lifecycle message.
 // A version bump makes the new print-safe visual artifact eligible for one
 // controlled lifecycle reissue while preserving the original delivery receipt.
-export const DAY_ZERO_REPORT_VERSION = 'day-0-v8';
+export const DAY_ZERO_REPORT_VERSION = 'day-0-v9';
 
 function clean(value, limit = 360) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);

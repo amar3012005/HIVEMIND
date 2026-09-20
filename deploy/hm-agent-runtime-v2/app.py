@@ -724,6 +724,42 @@ async def _dispatch_chat(
     )
 
 
+async def _resume_workrun_confirmation(
+    *, user_id: str, agent_id: str, session_id: str, event: dict,
+) -> None:
+    """Resume a sandbox tool prompt without exposing an approval card.
+
+    HIVE authority gates for connected/external actions live in hm-core and are
+    deliberately unaffected. This only handles AgentScope's local workspace
+    permission event for an already isolated WorkRun.
+    """
+    from agentscope.app._router._chat import chat as _chat
+    from agentscope.app._router._schema._chat import ChatRequest
+
+    tool_calls = event.get("tool_calls") or []
+    reply_id = event.get("reply_id")
+    if not reply_id or not tool_calls:
+        raise ValueError("AgentScope confirmation event is missing continuation data")
+    await _chat(
+        request=ChatRequest(
+            agent_id=agent_id,
+            session_id=session_id,
+            input={
+                "type": "USER_CONFIRM_RESULT",
+                "reply_id": reply_id,
+                "confirm_results": [
+                    {"confirmed": True, "tool_call": call, "rules": None}
+                    for call in tool_calls
+                ],
+            },
+        ),
+        user_id=user_id,
+        chat_service=app.state.chat_service,
+        chat_run_registry=app.state.chat_run_registry,
+        message_bus=app.state.message_bus,
+    )
+
+
 async def _ensure_gateway_chat_model_config(user_id: str) -> dict:
     """Bind every WorkRun session to the gateway DeepSeek model.
 
@@ -874,6 +910,22 @@ async def create_workrun_session(
     )
     session_id = created.session_id
 
+    # AgentScope documents BYPASS for trusted unattended work in a sandbox.
+    # Every WorkRun already has a dedicated workspace/container; applying the
+    # mode here prevents routine Bash/file prompts while hm-core continues to
+    # own external-action authority and policy.
+    from agentscope.app._router._session import update_session as _update_session
+    from agentscope.app._router._schema._session import UpdateSessionRequest
+    await _update_session(
+        session_id=session_id,
+        body=UpdateSessionRequest(permission_mode=PermissionMode.BYPASS),
+        agent_id=resolved_agent_id,
+        user_id=user_id,
+        storage=app.state.storage,
+        access=app.state.resource_access_service,
+        message_bus=app.state.message_bus,
+    )
+
     # Read back the minted workspace id — hm-core stores it so a later WorkRun
     # can reuse the same workspace.
     workspace_id = session_body.get("workspace_id")
@@ -903,6 +955,12 @@ async def create_workrun_session(
         forwarder = EventForwarder(
             binding=binding,
             master_key=hm_auth._master_key(),
+            on_confirmation=lambda event: _resume_workrun_confirmation(
+                user_id=user_id,
+                agent_id=resolved_agent_id,
+                session_id=session_id,
+                event=event,
+            ),
         )
         stream_url = (
             f"http://127.0.0.1:8000/sessions/{session_id}/stream"

@@ -54,6 +54,28 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         await forwarder._forward(client, {"type": "CUSTOM"})
         self.assertEqual(client.posts, [])
 
+    async def test_workrun_confirmation_is_resumed_internally_not_forwarded(self):
+        client = _Client()
+        resumed = []
+
+        async def resume(event):
+            resumed.append(event)
+
+        forwarder = EventForwarder(
+            binding=self.binding,
+            master_key="test-key",
+            base_url="http://hm-core.test",
+            on_confirmation=resume,
+        )
+        event = {
+            "type": "REQUIRE_USER_CONFIRM",
+            "reply_id": "reply-1",
+            "tool_calls": [{"id": "call-1", "name": "Bash"}],
+        }
+        await forwarder._forward(client, event)
+        self.assertEqual(resumed, [event])
+        self.assertEqual(client.posts, [])
+
 
 if __name__ == "__main__":
     unittest.main()

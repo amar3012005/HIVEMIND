@@ -44,7 +44,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -198,6 +198,7 @@ class EventForwarder:
         master_key: str,
         base_url: str = HM_CORE_URL,
         event_path: str = HM_CORE_EVENT_PATH,
+        on_confirmation: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self._binding = binding
         self._master_key = master_key
@@ -207,6 +208,7 @@ class EventForwarder:
         self._stop = asyncio.Event()
         self._forwarded = 0
         self._failed = 0
+        self._on_confirmation = on_confirmation
 
     @property
     def stats(self) -> dict[str, int]:
@@ -271,6 +273,14 @@ class EventForwarder:
 
     async def _forward(self, client: httpx.AsyncClient, event: dict[str, Any]) -> None:
         if event.get("type") in _SKIP_EVENT_TYPES:
+            return
+
+        # WorkRuns execute inside their own AgentScope workspace/container.
+        # Tool-permission prompts in that sandbox are runtime mechanics, not
+        # HIVE authority grants. Resume them internally and keep them out of
+        # the product event stream; external actions remain governed by hm-core.
+        if event.get("type") == "REQUIRE_USER_CONFIRM" and self._on_confirmation is not None:
+            await self._on_confirmation(event)
             return
 
         # Two sinks, deliberately:

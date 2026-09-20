@@ -11,6 +11,7 @@ from hive_toolkit_groups import (
     partition_hive_tools,
     separate_native_tool_groups,
 )
+from extra_agent_tools import hivemind_tools
 
 
 class HiveToolkitGroupsTests(unittest.TestCase):
@@ -100,6 +101,26 @@ class HiveToolkitGroupsTests(unittest.TestCase):
         app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
         self.assertNotIn("custom_agent_cls=HiveWorkRunAgent", app_source)
         self.assertNotIn("activated_groups", app_source)
+
+    def test_focused_company_collections_are_available_only_via_hivemind_group(self):
+        async def verify():
+            tools = await hivemind_tools(
+                "11111111-1111-4111-8111-111111111111",
+                "agent-1",
+                "session-1",
+            )
+            groups = partition_hive_tools(tools)
+            names = {tool.name for tool in groups["hivemind"]}
+            self.assertTrue({
+                "hivemind_people",
+                "hivemind_projects",
+                "hivemind_objectives",
+                "hivemind_work",
+                "hivemind_artifacts",
+            }.issubset(names))
+            self.assertFalse(names & {tool.name for tool in groups["basic"]})
+
+        asyncio.run(verify())
 
 
 if __name__ == "__main__":

@@ -63,7 +63,8 @@ class HiveToolkitGroupsTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in groups["basic"].tools], ["TaskCreate"])
         self.assertEqual([tool.name for tool in groups["workspace"].tools], ["Bash", "Read"])
         self.assertEqual([tool.name for tool in groups["team_tools"].tools], ["TeamCreate"])
-        self.assertEqual(len(groups["workspace"].skills_or_loaders), 1)
+        self.assertEqual(len(groups["basic"].skills_or_loaders), 1)
+        self.assertEqual(groups["workspace"].skills_or_loaders, [])
         self.assertEqual(groups["workspace"].mcps, ["mcp-client"])
         self.assertIn("TeamCreate", TEAM_TOOL_NAMES)
 

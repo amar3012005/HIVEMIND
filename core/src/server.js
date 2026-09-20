@@ -6558,12 +6558,25 @@ exit \$RC
   // Only the Cloudflare Worker receives this service credential; product agents
   // use the authenticated /api routes below.
   if (pathname.startsWith('/internal/visual-generation/')) {
-    if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed', retryable: false }, 405);
     if (process.env.VISUAL_GENERATION_WORKFLOW_ENABLED === 'false') return jsonResponse(res, { error: 'visual_generation_disabled', retryable: false }, 403);
     const expected = String(process.env.HIVEMIND_VISUAL_GENERATION_SECRET || process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');
     const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const expectedBuf = Buffer.from(expected); const suppliedBuf = Buffer.from(supplied);
     if (!expected || expectedBuf.length !== suppliedBuf.length || !crypto.timingSafeEqual(expectedBuf, suppliedBuf)) return jsonResponse(res, { error: 'unauthorized', retryable: false }, 401);
+    if (pathname === '/internal/visual-generation/reference' && req.method === 'GET') {
+      const jobId = String(url.searchParams.get('job_id') || '');
+      const job = /^[0-9a-f-]{36}$/i.test(jobId) ? await prisma.visualGenerationJob.findUnique({ where: { id: jobId }, select: { orgId: true } }) : null;
+      if (!job) return jsonResponse(res, { error: 'visual_generation_job_not_found', retryable: false }, 404);
+      const root = path.join(process.env.HIVEMIND_DATA_DIR || '/app/data', 'hyper-screenshots');
+      const official = path.join(root, `${job.orgId}.image`); const screenshot = path.join(root, `${job.orgId}.jpg`);
+      const file = fs.existsSync(official) ? official : (fs.existsSync(screenshot) ? screenshot : null);
+      if (!file) return jsonResponse(res, { error: 'website_visual_not_available', retryable: false }, 404);
+      const metadataPath = path.join(root, `${job.orgId}.image.json`);
+      let contentType = file.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
+      try { contentType = String(JSON.parse(fs.readFileSync(metadataPath, 'utf8')).contentType || contentType); } catch { /* screenshot default */ }
+      res.writeHead(200, { 'content-type': contentType, 'cache-control': 'private, no-store' }); res.end(fs.readFileSync(file)); return;
+    }
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed', retryable: false }, 405);
     let visualBody;
     try { visualBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body', retryable: false }, 400); }
     try {

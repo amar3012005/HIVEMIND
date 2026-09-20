@@ -148,7 +148,16 @@ export class DurableVisualGenerationLifecycle {
     const brandRef = brand ? { run_id: brand.id, version: brand.artifact?.version || `visual-intelligence-v${brand.processingVersion}`, generated_at: brand.finishedAt, visual_generation_brief: brand.artifact?.visual_generation_brief || {}, analysis: brand.artifact?.analysis || {}, evidence: brand.artifact?.evidence || [] } : {};
     const updated = await this.prisma.visualGenerationJob.update({ where: { id: job.id }, data: { workflowInstanceId: workflowInstanceId || job.workflowInstanceId, status: 'running', currentStage: 'context', progress: PROGRESS.context, companyContext: company, brandDnaRef: brandRef, startedAt: job.startedAt || new Date(), heartbeatAt: new Date() } });
     await emit(this.prisma, job.id, { eventKey: 'context', stage: 'context', progress: PROGRESS.context, message: brand ? 'Company context and verified Brand DNA loaded.' : 'Company context loaded; no verified Brand DNA was available.', data: { brand_dna_available: Boolean(brand) } });
-    return { job: publicJob(updated), request: { instruction: job.instruction, use_case: job.useCase, output: { mode: job.outputMode, count: job.requestedCount, aspect_ratios: job.aspectRatios }, quality: job.quality, model_policy: job.modelPolicy }, company_context: company, brand_dna: brandRef };
+    return {
+      job: publicJob(updated),
+      request: { instruction: job.instruction, use_case: job.useCase, output: { mode: job.outputMode, count: job.requestedCount, aspect_ratios: job.aspectRatios }, quality: job.quality, model_policy: job.modelPolicy },
+      company_context: company,
+      brand_dna: brandRef,
+      // This endpoint is authenticated with the workflow secret and resolves
+      // the tenant's existing browser-rendered homepage capture. It is only a
+      // fallback when a completed Brand DNA run is unavailable.
+      website_visual_reference: brand ? null : { kind: 'homepage_screenshot', path: `/internal/visual-generation/reference?job_id=${encodeURIComponent(job.id)}` },
+    };
   }
 
   async record(input = {}) {

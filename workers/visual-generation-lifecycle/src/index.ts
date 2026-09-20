@@ -227,8 +227,13 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
       for (let index = 1; index < count; index += 1) {
         const variant = await step.do(`generate-variant-${index}`, { retries: { limit: 6, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
           const anchorReference = anchor ? await loadGenerated(this.env, anchor) : null;
-          const generated = await generate(this.env, finalPrompt(direction.production_spec, direction.production_spec.variants[index], Boolean(anchor)), aspects[index % aspects.length], quality, [anchorReference, ...generationReferences].filter(Boolean) as Generated[]);
-          const variantReview = await critique(this.env, generated, direction.production_spec);
+          const basePrompt = finalPrompt(direction.production_spec, direction.production_spec.variants[index], Boolean(anchor));
+          let generated = await generate(this.env, basePrompt, aspects[index % aspects.length], quality, [anchorReference, ...generationReferences].filter(Boolean) as Generated[]);
+          let variantReview = await critique(this.env, generated, direction.production_spec);
+          if (variantReview.warning || variantReview.needs_revision) {
+            generated = await generate(this.env, `${basePrompt}\nSenior critic correction: ${variantReview.revision_instruction || 'Remove unrequested text or marks and strengthen relevance, hierarchy and finish.'}`, aspects[index % aspects.length], quality, [anchorReference, ...generationReferences].filter(Boolean) as Generated[]);
+            variantReview = await critique(this.env, generated, direction.production_spec);
+          }
           if (variantReview.warning || variantReview.needs_revision) throw new Error('visual_variant_quality_not_accepted');
           return store(this.env, trigger, composeExactLogo(generated, logo, aspects[index % aspects.length]), index, aspects[index % aspects.length], 'variant');
         }) as any;

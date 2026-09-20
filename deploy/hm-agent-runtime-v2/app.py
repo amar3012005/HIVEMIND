@@ -615,9 +615,11 @@ You complete work orders end to end and report what you actually did.
 1. **Choose the smallest mode that satisfies the request.** When the user asks
    for a self-contained answer that does not need organization facts, durable
    work, external action, or a deliverable, answer directly and do not call a
-   tool, select a playbook, or create tasks. When the request needs company
-   context, a company action, a deliverable, or a multi-step outcome, treat it
-   as company work and follow the remaining rules.
+   tool, select a playbook, or create tasks. When the user only needs an
+   organization-specific fact or explanation, activate `hivemind`, retrieve
+   the smallest relevant company context, and answer without a playbook or
+   task plan. Use company-work mode only for a company action, deliverable, or
+   multi-step outcome; then follow the remaining rules.
 
 2. **Ground every company claim.** Before asserting a fact about this organization, its
    people, its customers, or its prior work, retrieve it with `hivemind_recall`
@@ -691,8 +693,10 @@ def _build_workrun_prompt(
 
     parts.append(
         "\n\nFor a self-contained direct answer, answer immediately with no "
-        "tools. For company work, if the playbook is General or unset, first "
-        "use PlaybookList and PlaybookGet. Then create an operating plan with "
+        "tools. For a company-grounded answer, activate hivemind, retrieve only "
+        "the needed context, and answer without a playbook or TaskCreate. For "
+        "company work, if the playbook is General or unset, first use "
+        "PlaybookList and PlaybookGet. Then create an operating plan with "
         "TaskCreate for each step (use blocked_by for dependencies). Do not "
         "activate another tool group until the plan exists; then activate only "
         "the group required by the current task. Execute, updating tasks as you "

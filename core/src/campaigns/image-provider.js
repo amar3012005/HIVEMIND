@@ -14,7 +14,7 @@ export class CampaignImageProviderError extends Error {
 
 export function normalizeImageAspectRatio(value) {
   const ratio = String(value || '').trim().toLowerCase();
-  if (['1:1', '3:2', '2:3', 'auto'].includes(ratio)) return ratio;
+  if (['1:1', '3:2', '2:3', '4:5', '5:4', 'auto'].includes(ratio)) return ratio;
   if (['16:9', '4:3', 'landscape'].includes(ratio)) return '3:2';
   if (['9:16', '3:4', 'portrait'].includes(ratio)) return '2:3';
   return 'auto';
@@ -24,6 +24,9 @@ export async function generateCampaignImage({ prompt, aspectRatio = '16:9', mode
   const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
   const gatewayByok = cloudflareGatewayEnabled() && Boolean(gatewayByokAlias('openrouter'));
   if (!apiKey && !gatewayByok) throw new CampaignImageProviderError('Image generation is not configured', { status: 503, code: 'campaign_image_provider_unavailable' });
+  // Muse currently accepts its own minimal image contract. Do not send
+  // OpenAI-specific quality/output controls that the model rejects.
+  const muse = model === 'meta/muse-image';
   const response = await gatewayFirstFetch(OPENROUTER_IMAGE_URL, {
     method: 'POST',
     headers: {
@@ -33,7 +36,8 @@ export async function generateCampaignImage({ prompt, aspectRatio = '16:9', mode
       'X-Title': 'Singulance Campaign OS',
     },
     body: JSON.stringify({
-      model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio), quality: 'medium', output_format: 'png',
+      model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio),
+      ...(!muse ? { quality: 'medium', output_format: 'png' } : {}),
       ...(Array.isArray(inputReferences) && inputReferences.length ? {
         input_references: inputReferences.slice(0, 4).map((url) => ({ type: 'image_url', image_url: { url } })),
       } : {}),

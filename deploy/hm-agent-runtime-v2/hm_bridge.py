@@ -62,8 +62,10 @@ FORWARD_ENABLED = os.getenv("HM_FORWARD_ENABLED", "0") == "1"
 EXECUTION_CONTRACT = "work-room-execution.v1"
 
 _FORWARD_TIMEOUT = float(os.getenv("HM_FORWARD_TIMEOUT", "10"))
-# Events that carry no information for hm-core and would just be noise.
-_SKIP_EVENT_TYPES = {"CUSTOM"}
+# Custom events are normally local UI noise. AgentScope's StateChangeMiddleware
+# is the exception: it publishes the authoritative native Task snapshot after a
+# TaskCreate/TaskUpdate. Keep that one typed projection durable in hm-core.
+_SKIP_EVENT_TYPES = set()
 
 
 @dataclass
@@ -273,6 +275,8 @@ class EventForwarder:
 
     async def _forward(self, client: httpx.AsyncClient, event: dict[str, Any]) -> None:
         if event.get("type") in _SKIP_EVENT_TYPES:
+            return
+        if event.get("type") == "CUSTOM" and event.get("name") != "state_updated":
             return
 
         # WorkRuns execute inside their own AgentScope workspace/container.

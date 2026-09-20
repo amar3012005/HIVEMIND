@@ -255,6 +255,26 @@ export function normalizeAgentScopeEvent(event) {
           ts,
         };
       }
+      if (name === 'state_updated') {
+        const tasks = event.value?.tasks_context?.tasks;
+        if (!Array.isArray(tasks)) return null;
+        // AgentScope owns the complete task state. Persist only the compact
+        // projection required to render/reconnect a WorkRun; never turn this
+        // event log into a second task database.
+        return {
+          t: WORK_RUN_EVENT.PLAN,
+          family: 'task',
+          tasks: tasks.map((task) => ({
+            id: task?.id || null,
+            subject: task?.subject || '',
+            description: task?.description || '',
+            state: task?.state || null,
+            blocked_by: Array.isArray(task?.blocked_by) ? task.blocked_by : [],
+            owner: task?.owner || null,
+          })),
+          ts,
+        };
+      }
       return null;
     }
 

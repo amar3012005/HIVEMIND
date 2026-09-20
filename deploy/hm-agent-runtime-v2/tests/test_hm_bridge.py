@@ -50,11 +50,22 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("complete", kwargs["json"])
         self.assertEqual(forwarder.stats, {"forwarded": 1, "failed": 0})
 
-    async def test_custom_events_are_not_forwarded(self):
+    async def test_unrelated_custom_events_are_not_forwarded(self):
         client = _Client()
         forwarder = EventForwarder(binding=self.binding, master_key="test-key", base_url="http://hm-core.test")
-        await forwarder._forward(client, {"type": "CUSTOM"})
+        await forwarder._forward(client, {"type": "CUSTOM", "name": "workspace.started"})
         self.assertEqual(client.posts, [])
+
+    async def test_state_updated_custom_event_is_forwarded_for_task_projection(self):
+        client = _Client()
+        forwarder = EventForwarder(binding=self.binding, master_key="test-key", base_url="http://hm-core.test")
+        await forwarder._forward(client, {
+            "type": "CUSTOM",
+            "name": "state_updated",
+            "value": {"tasks_context": {"tasks": []}},
+        })
+        self.assertEqual(len(client.posts), 1)
+        self.assertEqual(client.posts[0][1]["json"]["event"]["name"], "state_updated")
 
     async def test_workrun_confirmation_is_resumed_internally_not_forwarded(self):
         client = _Client()

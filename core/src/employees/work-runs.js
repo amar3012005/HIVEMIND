@@ -760,6 +760,77 @@ export async function failStaleWorkRuns(prisma, {
   return { attempted: (rows || []).length, failed, skipped };
 }
 
+/**
+ * Reattach hm-core to an already-created AgentScope session after a runtime
+ * process restart.  This deliberately does not call `/chat`: AgentScope
+ * sessions own their own replayable history, and dispatching the goal again
+ * would duplicate provider actions and artifacts.
+ *
+ * A scheduler/operator may call this before deciding that a stale heartbeat is
+ * a failure.  The runtime validates that the persisted session still exists;
+ * a lost AgentScope session is reported as a recoverable failure, never
+ * replaced behind the WorkRun's back.
+ */
+export async function recoverWorkRun({
+  prisma,
+  workRunId,
+  runtimeFetch = internalFetch,
+  logger = console,
+}) {
+  if (!workRunId) throw new Error('workRunId is required');
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id, org_id, user_id, employee_id, room_id, turn_id, status,
+            agentscope_session_id, workspace_id, hyperagent_slug
+       FROM "hivemind"."work_runs" WHERE id = $1::uuid`,
+    workRunId,
+  );
+  const run = rows?.[0];
+  if (!run) return { ok: false, reason: 'not_found' };
+  if (isTerminal(run.status)) return { ok: false, reason: 'terminal' };
+  if (!run.agentscope_session_id || !run.turn_id || !run.room_id) {
+    return { ok: false, reason: 'missing_runtime_binding' };
+  }
+
+  let payload;
+  try {
+    const response = await runtimeFetch(`${RUNTIME_URL()}/workrun/recover`, {
+      service: 'hm-agent-runtime',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        workrun_id: run.id,
+        agent_id: run.employee_id || run.hyperagent_slug || 'workrun-default',
+        turn_id: run.turn_id,
+        room_id: run.room_id,
+        org_id: run.org_id,
+        session_id: run.agentscope_session_id,
+        workspace_id: run.workspace_id || null,
+      },
+      userId: run.user_id,
+      orgId: run.org_id,
+      timeoutMs: 30_000,
+    });
+    payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || payload.error || `runtime returned ${response.status}`);
+  } catch (err) {
+    logger.warn?.(`[workrun] recovery failed for ${workRunId}: ${err.message}`);
+    return { ok: false, reason: 'runtime_recovery_failed', error: publicWorkRunError(err.message) };
+  }
+
+  const transitioned = await transitionWorkRun(prisma, run.id, WORK_RUN_STATUS.RUNNING, {
+    agentscopeSessionId: run.agentscope_session_id,
+    workspaceId: run.workspace_id || null,
+  });
+  if (!transitioned.ok) return transitioned;
+  await appendWorkRunEvent(prisma, run.id, {
+    t: WORK_RUN_EVENT.STATUS,
+    status: 'recovered',
+    session_id: run.agentscope_session_id,
+    ts: Date.now(),
+  });
+  return { ok: true, recovered: Boolean(payload?.recovered), run: transitioned.run };
+}
+
 export function describe() {
   return `runtime=${RUNTIME_URL()}`;
 }

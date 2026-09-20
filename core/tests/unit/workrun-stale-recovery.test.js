@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { failStaleWorkRuns, WORK_RUN_STATUS } from '../../src/employees/work-runs.js';
+import { failStaleWorkRuns, recoverWorkRun, WORK_RUN_STATUS } from '../../src/employees/work-runs.js';
 
 test('stale recovery only targets selected active states and records a public failure', async () => {
   const calls = [];
@@ -35,4 +35,44 @@ test('stale recovery refuses an invalid cutoff and cannot accidentally sweep eve
     () => failStaleWorkRuns({}, { before: new Date(), statuses: [] }),
     /non-empty array/,
   );
+});
+
+test('recovery reattaches to an existing AgentScope session without dispatching a second goal', async () => {
+  const calls = [];
+  const prisma = {
+    async $queryRawUnsafe(sql, ...params) {
+      calls.push({ sql, params });
+      if (sql.includes('SELECT id, org_id, user_id')) {
+        return [{
+          id: 'run-a', org_id: 'org-a', user_id: 'user-a', employee_id: null,
+          room_id: 'room-a', turn_id: 'turn-a', status: WORK_RUN_STATUS.RUNNING,
+          agentscope_session_id: 'session-a', workspace_id: 'workrun:run-a',
+          hyperagent_slug: 'researcher',
+        }];
+      }
+      if (sql.startsWith('SELECT id, status FROM "hivemind"."work_runs" WHERE id')) {
+        return [{ id: 'run-a', status: WORK_RUN_STATUS.RUNNING }];
+      }
+      if (sql.startsWith('UPDATE "hivemind"."work_runs" SET status')) return [{ id: 'run-a', status: WORK_RUN_STATUS.RUNNING }];
+      if (sql.startsWith('UPDATE "hivemind"."work_runs"\n        SET events')) return [{ id: 'run-a' }];
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+  let request;
+  const outcome = await recoverWorkRun({
+    prisma,
+    workRunId: 'run-a',
+    runtimeFetch: async (url, options) => {
+      request = { url, options };
+      return { ok: true, json: async () => ({ recovered: true }) };
+    },
+  });
+  assert.equal(outcome.ok, true);
+  assert.equal(request.url.endsWith('/workrun/recover'), true);
+  assert.deepEqual(request.options.body, {
+    workrun_id: 'run-a', agent_id: 'researcher', turn_id: 'turn-a', room_id: 'room-a',
+    org_id: 'org-a', session_id: 'session-a', workspace_id: 'workrun:run-a',
+  });
+  assert.ok(calls.some(({ sql }) => sql.includes('SET status = $2')));
+  assert.ok(calls.some(({ sql }) => sql.includes('SET events =')));
 });

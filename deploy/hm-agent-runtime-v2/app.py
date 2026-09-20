@@ -767,6 +767,37 @@ async def _dispatch_chat(
     )
 
 
+async def _ensure_workrun_forwarder(binding: WorkRunBinding) -> bool:
+    """Attach exactly one SSE forwarder to a durable WorkRun/session binding.
+
+    AgentScope retains the session and its event history in its own storage.
+    This helper only re-establishes HIVE's subscriber after an app restart; it
+    never sends a second user message and therefore cannot execute a WorkRun
+    twice.  The session stream replays buffered events to the new subscriber.
+    """
+    if not (hm_bridge.FORWARD_ENABLED and hm_bridge.HM_CORE_URL):
+        return False
+    if binding.workrun_id in _forwarders:
+        return False
+    forwarder = EventForwarder(
+        binding=binding,
+        master_key=hm_auth._master_key(),
+        on_confirmation=lambda event: _resume_workrun_confirmation(
+            user_id=binding.user_id,
+            agent_id=binding.agent_id,
+            session_id=binding.session_id,
+            event=event,
+        ),
+    )
+    stream_url = (
+        f"http://127.0.0.1:8000/sessions/{binding.session_id}/stream"
+        f"?agent_id={binding.agent_id}"
+    )
+    forwarder.start(stream_url, binding.user_id)
+    _forwarders[binding.workrun_id] = forwarder
+    return True
+
+
 async def _resume_workrun_confirmation(
     *, user_id: str, agent_id: str, session_id: str, event: dict,
 ) -> None:
@@ -994,23 +1025,7 @@ async def create_workrun_session(
     # strictly required — but starting first means the very first event is
     # forwarded live rather than replayed, which keeps the progress log's
     # timestamps honest.
-    if hm_bridge.FORWARD_ENABLED and hm_bridge.HM_CORE_URL:
-        forwarder = EventForwarder(
-            binding=binding,
-            master_key=hm_auth._master_key(),
-            on_confirmation=lambda event: _resume_workrun_confirmation(
-                user_id=user_id,
-                agent_id=resolved_agent_id,
-                session_id=session_id,
-                event=event,
-            ),
-        )
-        stream_url = (
-            f"http://127.0.0.1:8000/sessions/{session_id}/stream"
-            f"?agent_id={resolved_agent_id}"
-        )
-        forwarder.start(stream_url, user_id)
-        _forwarders[workrun_id] = forwarder
+    await _ensure_workrun_forwarder(binding)
 
     # ── Dispatch the goal ──
     # POST /chat returns immediately; all output arrives on the SSE stream the
@@ -1050,6 +1065,68 @@ async def create_workrun_session(
         "workspace_id": workspace_id,
         "created": True,
     }
+
+
+@app.post("/workrun/recover", tags=["workrun"], include_in_schema=True)
+async def recover_workrun_session(
+    body: dict,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Reattach HIVE forwarding to an existing AgentScope session.
+
+    This endpoint is for the hm-core recovery loop after a runtime restart. It
+    is intentionally separate from ``POST /workrun/``: reusing creation would
+    make a missing in-memory binding look like permission to create a new
+    session and replay the goal.
+    """
+    workrun_id = str(body.get("workrun_id") or "").strip()
+    agent_id = str(body.get("agent_id") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    turn_id = str(body.get("turn_id") or "").strip()
+    room_id = str(body.get("room_id") or "").strip()
+    missing = [
+        name for name, value in (("workrun_id", workrun_id), ("agent_id", agent_id),
+                                 ("session_id", session_id), ("turn_id", turn_id),
+                                 ("room_id", room_id)) if not value
+    ]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"missing required field(s): {', '.join(missing)}")
+
+    record = await app.state.storage.get_session(user_id, agent_id, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="the persisted AgentScope session no longer exists")
+    workspace_id = getattr(getattr(record, "config", None), "workspace_id", None)
+    requested_workspace_id = body.get("workspace_id")
+    if requested_workspace_id and workspace_id and requested_workspace_id != workspace_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="session workspace does not match the durable WorkRun binding")
+
+    binding = WorkRunBinding(
+        workrun_id=workrun_id,
+        user_id=user_id,
+        org_id=body.get("org_id"),
+        agent_id=agent_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        room_id=room_id,
+        workspace_id=workspace_id or requested_workspace_id,
+    )
+    existing = await _workrun_store.get(workrun_id)
+    if existing is not None:
+        if (existing.user_id != user_id or existing.session_id != session_id
+                or existing.agent_id != agent_id or existing.turn_id != turn_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="existing WorkRun binding does not match the recovery request")
+        started = await _ensure_workrun_forwarder(existing)
+        return {"workrun_id": workrun_id, "session_id": session_id,
+                "workspace_id": existing.workspace_id, "recovered": started}
+
+    await _workrun_store.put(binding)
+    started = await _ensure_workrun_forwarder(binding)
+    return {"workrun_id": workrun_id, "session_id": session_id,
+            "workspace_id": binding.workspace_id, "recovered": started}
 
 
 @app.get("/workrun/{workrun_id}", tags=["workrun"])

@@ -2246,3 +2246,22 @@ slides that find no unique anchor get a page instead of `null`.
 - Verification: focused lifecycle/announcement tests passed **22/22**;
   frontend type-check and production build passed; live Cloudflare chunks
   matched the artifact-reader chunks byte-for-byte.
+
+## 2026-09-20 UTC — Explicit artifact-reader authoring control
+
+- Released Da-vinci commit `c48f842e1a3a` through the frontend-only Cloudflare
+  path. Worker version `b05bfc81-8e19-4dff-a95c-3003bc7b7567` is at 100%; the
+  rollback Worker version is `a489e0a1-6f0d-4e86-88d0-ee2474daed27`.
+- Platform Admin now exposes a dedicated **Web artifact reader JSON** field,
+  rather than requiring an operator to embed an artifact reference in the
+  facts payload. Core still validates a web artifact UUID and allowed source
+  URL before publication.
+- No Core, Control Plane, Employees, Harness, Voice, database, or migration
+  action was part of this release. The public app route returned `200` after
+  deployment. The authenticated visual canary is explicitly pending a valid
+  platform-admin passcode in the browser profile; no passcode was guessed or
+  bypassed.
+- Verification: Da-vinci type-check and production Worker build passed. The
+  lifecycle suite passed **41/41**, including Day 0 completion/Day 1 scheduling,
+  timezone/DST behavior, Day 2 next-local-morning eligibility, durable inbox
+  first delivery, no-repeat dismissal/action, and referral exhaustion rules.

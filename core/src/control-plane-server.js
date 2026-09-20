@@ -12857,14 +12857,19 @@ Write the persona now.`;
           const binding = await bind.json().catch(() => ({}));
           if (!bind.ok) return jsonResponse(res, { error: binding.detail || 'runtime binding missing' }, 404);
           const text = String(body?.text || body?.goal || '').trim();
-          const input = (body?.input && typeof body.input === 'object' && Array.isArray(body.input.content))
+          const isHitlResult = body?.input
+            && typeof body.input === 'object'
+            && ['USER_CONFIRM_RESULT', 'EXTERNAL_EXECUTION_RESULT'].includes(String(body.input.type || '').toUpperCase());
+          const input = isHitlResult
             ? body.input
-            : {
+            : (body?.input && typeof body.input === 'object' && Array.isArray(body.input.content))
+              ? body.input
+              : {
                 name: 'user',
                 role: 'user',
                 content: [{ type: 'text', text }],
               };
-          if (!String(input.content?.[0]?.text || '').trim()) {
+          if (!isHitlResult && !String(input.content?.[0]?.text || '').trim()) {
             return jsonResponse(res, { error: 'text is required' }, 400);
           }
           const chat = await internalFetch(`${runtimeBase}/chat/`, {

@@ -209,6 +209,8 @@ export function normalizeAgentScopeEvent(event) {
         t: WORK_RUN_EVENT.APPROVAL_REQUESTED,
         tool: first.name || first.tool_name || null,
         call_id: first.id || first.tool_call_id || null,
+        reply_id: event.reply_id || null,
+        tool_calls: calls,
         // The full set, so a multi-tool confirmation is not silently reduced
         // to its first entry.
         tools: calls.map((c) => c?.name || c?.tool_name || null).filter(Boolean),

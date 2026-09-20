@@ -12902,6 +12902,32 @@ Write the persona now.`;
           current.session.userId,
         );
         if (!owned?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        try {
+          const bindingRes = await internalFetch(`${runtimeBase}/workrun/${workRunId}`, {
+            service: 'hm-agent-runtime',
+            method: 'GET',
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            timeoutMs: 10_000,
+          });
+          if (!bindingRes.ok) {
+            const details = await bindingRes.text().catch(() => '');
+            return jsonResponse(res, { error: `runtime binding lookup failed (${bindingRes.status}): ${details.slice(0, 200)}` }, 502);
+          }
+          const stopped = await internalFetch(`${runtimeBase}/workrun/${workRunId}/cancel`, {
+            service: 'hm-agent-runtime',
+            method: 'POST',
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            timeoutMs: 15_000,
+          });
+          if (!stopped.ok) {
+            const details = await stopped.text().catch(() => '');
+            return jsonResponse(res, { error: `runtime cancellation failed (${stopped.status}): ${details.slice(0, 200)}` }, 502);
+          }
+        } catch (err) {
+          return jsonResponse(res, { error: `runtime cancellation failed: ${err.message}` }, 502);
+        }
         const outcome = await transitionWorkRun(prisma, workRunId, WORK_RUN_STATUS.CANCELLED);
         if (!outcome.ok) {
           return jsonResponse(res, { error: outcome.reason, from: outcome.from }, 409);

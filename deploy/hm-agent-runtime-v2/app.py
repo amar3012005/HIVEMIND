@@ -1030,6 +1030,24 @@ async def get_workrun(
     }
 
 
+@app.post("/workrun/{workrun_id}/cancel", tags=["workrun"])
+async def cancel_workrun(
+    workrun_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Cancel the active AgentScope run bound to a HIVE WorkRun."""
+    binding = await _workrun_store.get(workrun_id)
+    if binding is None or binding.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    released = await app.state.session_service.cancel_session_run(binding.session_id)
+    return {
+        "workrun_id": workrun_id,
+        "session_id": binding.session_id,
+        "cancelled": True,
+        "lock_released": released,
+    }
+
+
 @app.delete("/workrun/{workrun_id}", tags=["workrun"])
 async def delete_workrun(
     workrun_id: str,

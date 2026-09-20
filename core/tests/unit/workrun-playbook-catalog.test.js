@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getPlaybook, listPlaybooks } from '../../src/employees/playbook-catalog.js';
+import {
+  getPlaybook,
+  listPlaybooks,
+  organizationPlaybooks,
+} from '../../src/employees/playbook-catalog.js';
 
 test('PlaybookList exposes catalog metadata only', () => {
   const catalog = listPlaybooks();
@@ -16,4 +20,25 @@ test('PlaybookGet returns the selected playbook body and rejects unknown ids', (
   assert.equal(playbook.id, 'global:prospect-discovery');
   assert.match(playbook.instructions, /sourced list of companies/i);
   assert.equal(getPlaybook('global:does-not-exist'), null);
+});
+
+test('org playbooks remain compact in list results and load only by returned id', () => {
+  const orgPlaybooks = organizationPlaybooks({
+    playbooks: [{
+      id: 'germany-enterprise',
+      name: 'Germany enterprise',
+      description: 'Company-specific route for Germany.',
+      instructions: 'Use only verified German enterprise evidence.',
+    }],
+  });
+  const catalog = listPlaybooks({ orgPlaybooks });
+  assert.deepEqual(catalog.at(-1), {
+    id: 'org:germany-enterprise',
+    name: 'Germany enterprise',
+    description: 'Company-specific route for Germany.',
+    scope: 'org',
+  });
+  assert.equal(getPlaybook('org:germany-enterprise', { orgPlaybooks }).instructions,
+    'Use only verified German enterprise evidence.');
+  assert.equal(getPlaybook('org:missing', { orgPlaybooks }), null);
 });

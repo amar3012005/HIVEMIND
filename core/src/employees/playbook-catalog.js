@@ -29,6 +29,43 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
   },
 ]);
 
+function safeLocalId(value, index) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `org:${normalized || `local-${index + 1}`}`;
+}
+
+/** Convert an org-owned room playbook into compact catalog entries.
+ *
+ * The durable room field predates this catalog and can be either one object,
+ * an array, or `{ playbooks: [...] }`. Normalize at the catalog edge rather
+ * than teaching the AgentScope runtime those legacy storage shapes.
+ */
+export function organizationPlaybooks(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : Array.isArray(value?.playbooks)
+      ? value.playbooks
+      : value ? [value] : [];
+  return raw.map((entry, index) => {
+    const object = entry && typeof entry === 'object' ? entry : {};
+    const instructions = typeof entry === 'string'
+      ? entry
+      : String(object.instructions || object.content || object.text || '').trim();
+    if (!instructions) return null;
+    return {
+      id: safeLocalId(object.id || object.slug || object.name, index),
+      name: String(object.name || object.title || `Organization playbook ${index + 1}`).trim(),
+      description: String(object.description || 'Organization-specific operating guidance.').trim(),
+      scope: 'org',
+      instructions,
+    };
+  }).filter(Boolean);
+}
+
 const BODIES = Object.freeze({
   'global:general': [
     'You are on the General playbook. First call PlaybookList.',
@@ -57,12 +94,13 @@ const BODIES = Object.freeze({
   ].join('\n'),
 });
 
-export function listPlaybooks() {
-  return GLOBAL_PLAYBOOKS.map(({ id, name, description, scope }) => ({ id, name, description, scope }));
+export function listPlaybooks({ orgPlaybooks = [] } = {}) {
+  return [...GLOBAL_PLAYBOOKS, ...orgPlaybooks]
+    .map(({ id, name, description, scope }) => ({ id, name, description, scope }));
 }
 
-export function getPlaybook(id) {
-  const meta = GLOBAL_PLAYBOOKS.find((p) => p.id === id);
+export function getPlaybook(id, { orgPlaybooks = [] } = {}) {
+  const meta = [...GLOBAL_PLAYBOOKS, ...orgPlaybooks].find((p) => p.id === id);
   if (!meta) return null;
-  return { ...meta, instructions: BODIES[id] || '' };
+  return { ...meta, instructions: meta.instructions || BODIES[id] || '' };
 }

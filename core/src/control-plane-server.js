@@ -13017,8 +13017,8 @@ Write the persona now.`;
     if (pathname === '/internal/hivemind/composio/tools' && req.method === 'GET') {
       return handleInternalComposioToolsRoute({ req, res, jsonResponse, prisma, composioService });
     }
-    if (pathname === '/internal/hivemind/playbooks' && req.method === 'GET') {
-      return handleInternalPlaybookListRoute({ req, res, jsonResponse, prisma });
+    if (pathname === '/internal/hivemind/playbooks' && (req.method === 'GET' || req.method === 'POST')) {
+      return handleInternalPlaybookListRoute({ req, res, jsonResponse, parseBody, prisma });
     }
     if (pathname === '/internal/hivemind/resource-access' && req.method === 'GET') {
       return handleInternalResourceAccessRoute({ req, res, jsonResponse, prisma });

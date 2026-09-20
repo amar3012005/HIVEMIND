@@ -581,14 +581,35 @@ export async function handleInternalResourceAccessRoute({
 }
 
 export async function handleInternalPlaybookListRoute({
-  req, res, jsonResponse, prisma,
+  req, res, jsonResponse, parseBody, prisma,
 }) {
   if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
   const principal = await resolvePrincipal(req, prisma);
   const invalid = principalError(jsonResponse, res, principal);
   if (invalid) return invalid;
-  const { listPlaybooks } = await import('../employees/playbook-catalog.js');
-  return jsonResponse(res, { status: 'completed', playbooks: listPlaybooks() });
+  const body = parseBody ? await parseBody(req).catch(() => ({})) : {};
+  const sessionId = String(body.agentscope_session_id || '').trim();
+  let roomPlaybook = null;
+  if (sessionId) {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT r.room_playbook
+         FROM "hivemind"."work_runs" w
+         JOIN "hivemind"."hyper_rooms" r ON r.id = w.room_id
+        WHERE w.agentscope_session_id = $1
+          AND w.user_id = $2::uuid
+          AND w.org_id = $3::uuid
+        LIMIT 1`,
+      sessionId,
+      principal.userId,
+      principal.orgId,
+    );
+    roomPlaybook = rows?.[0]?.room_playbook || null;
+  }
+  const { listPlaybooks, organizationPlaybooks } = await import('../employees/playbook-catalog.js');
+  return jsonResponse(res, {
+    status: 'completed',
+    playbooks: listPlaybooks({ orgPlaybooks: organizationPlaybooks(roomPlaybook) }),
+  });
 }
 
 export async function handleInternalPlaybookGetRoute({
@@ -601,8 +622,25 @@ export async function handleInternalPlaybookGetRoute({
   const body = await parseBody(req).catch(() => ({}));
   const id = String(body?.id || '').trim();
   if (!id) return jsonResponse(res, { error: 'id is required' }, 400);
-  const { getPlaybook } = await import('../employees/playbook-catalog.js');
-  const playbook = getPlaybook(id);
+  const sessionId = String(body?.agentscope_session_id || '').trim();
+  let roomPlaybook = null;
+  if (sessionId) {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT r.room_playbook
+         FROM "hivemind"."work_runs" w
+         JOIN "hivemind"."hyper_rooms" r ON r.id = w.room_id
+        WHERE w.agentscope_session_id = $1
+          AND w.user_id = $2::uuid
+          AND w.org_id = $3::uuid
+        LIMIT 1`,
+      sessionId,
+      principal.userId,
+      principal.orgId,
+    );
+    roomPlaybook = rows?.[0]?.room_playbook || null;
+  }
+  const { getPlaybook, organizationPlaybooks } = await import('../employees/playbook-catalog.js');
+  const playbook = getPlaybook(id, { orgPlaybooks: organizationPlaybooks(roomPlaybook) });
   if (!playbook) return jsonResponse(res, { error: 'unknown playbook' }, 404);
   return jsonResponse(res, { status: 'completed', playbook });
 }

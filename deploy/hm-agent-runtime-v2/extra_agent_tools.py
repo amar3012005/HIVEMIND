@@ -540,7 +540,7 @@ Call this when the WorkRun playbook is General, then PlaybookGet the one you cho
                 "/internal/hivemind/playbooks",
                 user_id=self._user_id,
                 org_id=self._org_id,
-                method="GET",
+                body={"agentscope_session_id": self._session_id},
             )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
@@ -564,7 +564,7 @@ class PlaybookGetTool(_HiveMindToolBase):
                 "/internal/hivemind/playbooks/get",
                 user_id=self._user_id,
                 org_id=self._org_id,
-                body={"id": id},
+                body={"id": id, "agentscope_session_id": self._session_id},
             )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc), id=id)

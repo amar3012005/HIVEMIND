@@ -70,6 +70,8 @@ from .hyper.execution_profiles import (
     profile_registry_manifest,
 )
 from .hyper.output_contract import (
+    explicit_image_generation_request,
+    is_deferred_generated_image,
     labeled_unverified_draft,
     resolve_output_contract,
     should_run_render_gate,
@@ -566,6 +568,39 @@ _VISUAL_COUNT_WORDS = {
     "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8,
 }
+
+_DIRECTOR_PROGRESS_NOTES = (
+    "Reading the request and company context…",
+    "Planning the deliverable and required checks…",
+    "Specialists are working through the brief…",
+    "Reconciling evidence, risks, and creative direction…",
+    "Preparing the governed final result…",
+)
+
+
+def _director_progress_note(tick: int) -> str:
+    return _DIRECTOR_PROGRESS_NOTES[max(0, int(tick)) % len(_DIRECTOR_PROGRESS_NOTES)]
+
+
+async def _emit_director_heartbeats(
+    emit: Callable[[Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]],
+    agent: str,
+    *,
+    interval: float = 6.0,
+) -> None:
+    """Keep a long Director call visibly alive without exposing internal prompts."""
+    started = time.monotonic()
+    tick = 0
+    while True:
+        await asyncio.sleep(interval)
+        await emit({
+            "t": "typing",
+            "agent": agent or "director",
+            "note": _director_progress_note(tick),
+            "phase": "director_working",
+            "elapsed_seconds": int(time.monotonic() - started),
+        })
+        tick += 1
 
 
 def _room_visual_job_payload(req: "RoomTurnRequest", room_kind: str) -> Dict[str, Any]:
@@ -2655,6 +2690,7 @@ async def _verify_turn(
     ))
     evidence = {
         "intended_output": plan.get("intended_output"),
+        "deferred_generated_image": is_deferred_generated_image(plan.get("output_contract") or {}),
         "done_criterion": plan.get("done_criterion"),
         "assignments": (
             list((plan.get("assignments") or {}).keys())
@@ -2693,6 +2729,11 @@ async def _verify_turn(
         '  "note": "<one sentence>"\n'
         '}\n'
         "Rules:\n"
+        "- DEFERRED GENERATED IMAGE: when deferred_generated_image=true, this verification pass judges the "
+        "approved production brief before the independent image workflow is queued. Set artifact_ok=true when "
+        "final_excerpt contains a substantive, grounded visual brief matching the requested count and medium. "
+        "Do not require produced_artifacts yet and do not report a missing image; the durable renderer is admitted "
+        "only after this verdict passes.\n"
         "- FIRST, branch on intended_output. If it is \"answer\" or \"decision\", the DELIVERABLE IS "
         "THE TEXT itself — there is NO external artifact to produce. Set artifact_ok=true whenever "
         "final_excerpt contains a substantive, on-topic answer/recommendation (steps, reasoning, a "
@@ -3518,6 +3559,26 @@ async def _verify_and_emit(
                 gaps = list(verdict.get("gaps") or [])
                 gaps.append("The requested interactive artifact did not pass production rendering checks.")
                 verdict["gaps"] = list(dict.fromkeys(gaps))
+        elif is_deferred_generated_image(contract):
+            # Image production intentionally starts after this governance pass,
+            # so artifact existence cannot be a prerequisite for admission.
+            artifact_gap_terms = (
+                "missing produced artifact", "artifact was not produced",
+                "artifact has not been produced", "no produced artifact",
+                "no artifact was produced", "no actual image", "image artifacts were not produced",
+                "not queued for approval", "no image artifacts",
+            )
+            verdict["gaps"] = [
+                gap for gap in (verdict.get("gaps") or [])
+                if not any(term in str(gap).casefold() for term in artifact_gap_terms)
+            ]
+            verdict["artifact_ok"] = bool(str(final_text or "").strip())
+            verdict["met"] = bool(
+                verdict.get("artifact_ok")
+                and verdict.get("assignments_ok")
+                and verdict.get("grounded_ok")
+                and not verdict.get("unsupported_claims")
+            )
         elif not should_run_render_gate(contract) and isinstance(plan.get("artifact_intent"), dict):
             plan["artifact_intent"] = None
         plan["verification"] = verdict
@@ -4179,6 +4240,15 @@ async def _orchestrate_single_agent(
         room_mode=req.room_mode or "runtime",
         execution_profile=_work_room_profile,
     )
+    # The active request owns the delivery medium. This defensive reconciliation
+    # keeps profile selection or stale room metadata from converting an explicit
+    # image request into the interactive HTML renderer.
+    if explicit_image_generation_request(req.user_message or ""):
+        _output_contract.update({
+            "intended_output": "artifact", "intendedOutput": "artifact",
+            "artifact_required": True, "artifactRequired": True,
+            "artifact_kind": "generated_image", "visual_enabled": True,
+        })
     log.info(
         "[single] output contract room=%s kind=%s mode=%s intended=%s artifact_required=%s evidence_required=%s profile=%s",
         req.room_id, _room_kind, req.room_mode or "runtime",
@@ -4368,6 +4438,12 @@ async def _orchestrate_single_agent(
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
+    # Model/provider waits can otherwise leave the room visually unchanged for
+    # tens of seconds. A bounded status heartbeat keeps the existing event
+    # stream alive without leaking prompts or fabricating completed work.
+    _heartbeat_task = asyncio.create_task(_emit_director_heartbeats(
+        _emit, (lead or {}).get("slug") or "director",
+    ))
     try:
         director_kwargs = {
             "user_message": req.user_message,
@@ -4413,6 +4489,12 @@ async def _orchestrate_single_agent(
         await _emit({"t": "seal", "cost_tokens": 0, "status": "failed",
                      "duration_ms": int((time.time() - started) * 1000)})
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
+    finally:
+        _heartbeat_task.cancel()
+        try:
+            await _heartbeat_task
+        except asyncio.CancelledError:
+            pass
 
     cost_tokens = int(result.get("cost_tokens") or 0)
     final_text = str(result.get("final_text") or "")
@@ -4640,7 +4722,10 @@ async def _orchestrate_single_agent(
         "output_contract": result.get("output_contract") or _output_contract,
         "artifact_intent": (
             result.get("artifact_intent")
-            if should_run_render_gate(result.get("output_contract") or _output_contract)
+            if (
+                should_run_render_gate(result.get("output_contract") or _output_contract)
+                or is_deferred_generated_image(result.get("output_contract") or _output_contract)
+            )
             else None
         ),
         "artifact_receipt": result.get("artifact_receipt"),

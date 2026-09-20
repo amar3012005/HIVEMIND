@@ -45,6 +45,7 @@ def test_explicit_generated_image_uses_durable_visual_contract():
     assert c["intended_output"] == "artifact"
     assert c["artifact_required"] is True
     assert c["artifact_kind"] == "generated_image"
+    assert should_run_render_gate(c) is False
 
 
 def test_direct_visual_language_uses_durable_visual_contract_in_any_room():
@@ -72,6 +73,22 @@ def test_direct_logo_request_uses_generated_image_contract_inside_campaign_room(
     assert c["intended_output"] == "artifact"
     assert c["artifact_required"] is True
     assert c["artifact_kind"] == "generated_image"
+
+
+def test_explicit_three_image_request_overrides_visual_profile_without_html_render_gate():
+    c = resolve_output_contract(
+        user_message="now if i were to do a instagram post for 3 imags, generate me 3 images",
+        room_kind="design",
+        room_mode="work",
+        execution_profile={
+            "profile_id": "design.artifact.v1",
+            "visual_artifact_required": True,
+            "allowed_outputs": ["artifact"],
+            "required_artifacts": ["visual"],
+        },
+    )
+    assert c["artifact_kind"] == "generated_image"
+    assert should_run_render_gate(c) is False
 
 
 def test_explicit_deck_is_artifact():

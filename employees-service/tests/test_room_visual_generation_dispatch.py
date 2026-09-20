@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from hivemind_employees.api_hyper_rooms import (
+    _director_progress_note,
     _campaign_action_visual_delivery,
     _campaign_post_visual_payload,
     _director_final_visual_payload,
@@ -41,6 +42,23 @@ def test_room_visual_payload_builds_coordinated_sets():
     assert payload["output"]["mode"] == "set"
     assert payload["output"]["count"] == 4
     assert payload["output"]["aspect_ratios"] == ["1:1", "4:5"]
+
+
+def test_room_visual_payload_understands_the_reported_instagram_request():
+    payload = _room_visual_job_payload(
+        _request("now if i were to do a instagram post for 3 imags, generate me 3 images"),
+        "design",
+    )
+    assert payload["output"]["mode"] == "set"
+    assert payload["output"]["count"] == 3
+    assert payload["source"]["turn_id"] == "turn-visual-canary"
+
+
+def test_director_progress_messages_rotate_without_exposing_prompts():
+    notes = [_director_progress_note(index) for index in range(6)]
+    assert notes[0] == notes[5]
+    assert len(set(notes[:5])) == 5
+    assert all("prompt" not in note.lower() for note in notes)
 
 
 def test_linkedin_post_report_queues_one_coordinated_visual_per_post():

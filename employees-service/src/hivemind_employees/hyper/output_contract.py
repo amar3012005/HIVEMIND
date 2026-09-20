@@ -57,6 +57,11 @@ def explicit_visual_request(user_message: str) -> bool:
 
 def explicit_image_generation_request(user_message: str) -> bool:
     """Return true only for an explicit request to produce raster visual work."""
+    # A visual *guide* is an interactive/document deliverable, not a request to
+    # synthesize image pixels. Keep that established render path distinct from
+    # direct image/visual generation.
+    if re.search(r"\bvisual\s+guide\b", user_message or "", re.I):
+        return False
     return bool(EXPLICIT_IMAGE_GENERATION.search(user_message or ""))
 
 
@@ -117,7 +122,20 @@ def artifact_intent_allowed(contract: Mapping[str, Any], planner_intent: Any) ->
 
 def should_run_render_gate(contract: Mapping[str, Any]) -> bool:
     intended = str(contract.get("intendedOutput") or contract.get("intended_output") or "answer").lower()
-    return intended == "artifact" and bool(contract.get("artifactRequired") or contract.get("artifact_required"))
+    artifact_kind = str(contract.get("artifact_kind") or "").strip().lower()
+    return (
+        intended == "artifact"
+        and artifact_kind != "generated_image"
+        and bool(contract.get("artifactRequired") or contract.get("artifact_required"))
+    )
+
+
+def is_deferred_generated_image(contract: Mapping[str, Any]) -> bool:
+    """Generated images are queued only after synthesis and governance."""
+    return (
+        str(contract.get("artifact_kind") or "").strip().lower() == "generated_image"
+        and bool(contract.get("artifactRequired") or contract.get("artifact_required"))
+    )
 
 
 def is_render_gap(gap: str) -> bool:

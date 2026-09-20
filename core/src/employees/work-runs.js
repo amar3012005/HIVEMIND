@@ -761,6 +761,65 @@ export async function failStaleWorkRuns(prisma, {
 }
 
 /**
+ * Reattach stale AgentScope-backed WorkRuns before an operator considers a
+ * failure transition. This is deliberately recovery-only: an unavailable
+ * runtime, missing session, or malformed binding remains visible for a later
+ * policy decision rather than being silently converted to a failed run.
+ *
+ * The maintenance-job singleton is responsible for cross-replica ownership.
+ * Reattachment itself is also safe to repeat: the runtime only restores the
+ * event forwarder for the persisted session and never dispatches `/chat`.
+ *
+ * @param {object} prisma
+ * @param {{ before: Date, statuses?: string[], limit?: number, runtimeFetch?: Function, logger?: object }} options
+ * @returns {Promise<{ attempted: number, recovered: number, skipped: number, failed: number }>}
+ */
+export async function recoverStaleWorkRuns(prisma, {
+  before,
+  statuses = [WORK_RUN_STATUS.STARTING, WORK_RUN_STATUS.RUNNING],
+  limit = 25,
+  runtimeFetch = internalFetch,
+  logger = console,
+} = {}) {
+  if (!(before instanceof Date) || Number.isNaN(before.valueOf())) {
+    throw new Error('before must be a valid Date');
+  }
+  if (!Array.isArray(statuses) || statuses.length === 0) {
+    throw new Error('statuses must be a non-empty array');
+  }
+  const boundedLimit = Math.max(1, Math.min(100, Number(limit) || 25));
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id FROM "hivemind"."work_runs"
+       WHERE status = ANY($1::text[])
+         AND agentscope_session_id IS NOT NULL
+         AND turn_id IS NOT NULL
+         AND room_id IS NOT NULL
+         AND COALESCE(heartbeat_at, started_at, created_at) < $2::timestamptz
+       ORDER BY COALESCE(heartbeat_at, started_at, created_at) ASC
+       LIMIT $3`,
+    statuses,
+    before.toISOString(),
+    boundedLimit,
+  );
+
+  let recovered = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const row of rows || []) {
+    const outcome = await recoverWorkRun({
+      prisma,
+      workRunId: row.id,
+      runtimeFetch,
+      logger,
+    });
+    if (outcome.ok) recovered += 1;
+    else if (['terminal', 'not_found', 'missing_runtime_binding', 'illegal_transition'].includes(outcome.reason)) skipped += 1;
+    else failed += 1;
+  }
+  return { attempted: (rows || []).length, recovered, skipped, failed };
+}
+
+/**
  * Reattach hm-core to an already-created AgentScope session after a runtime
  * process restart.  This deliberately does not call `/chat`: AgentScope
  * sessions own their own replayable history, and dispatching the goal again

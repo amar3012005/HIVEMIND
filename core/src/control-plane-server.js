@@ -104,6 +104,8 @@ import {
   shouldRunRecurringMaintenanceJobs,
   shouldStartHttpServer,
 } from './runtime/runtime-role.js';
+import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
+import { recoverStaleWorkRuns } from './employees/work-runs.js';
 import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
@@ -685,6 +687,33 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     }
   }, SWEEP_MS);
   console.log('[hyper-sweeper] stuck-turn re-kick sweeper active (15s)');
+}
+
+// ── AgentScope WorkRun recovery ──────────────────────────────────────────
+// The WorkRun table is HIVE's durable lifecycle projection, while AgentScope
+// owns the session and its execution state. If hm-agent-runtime restarts, a
+// stale heartbeat therefore means "reattach first", not "run the goal again"
+// and not an automatic failure. The singleton maintenance lock prevents two
+// hm-core replicas from attempting the same recovery batch.
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  const recoveryEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.WORKRUN_RECOVERY_ENABLED || 'true').toLowerCase());
+  const recoveryIntervalMs = Math.max(15_000, Number(process.env.WORKRUN_RECOVERY_INTERVAL_MS || 30_000));
+  const recoveryStaleMs = Math.max(recoveryIntervalMs, Number(process.env.WORKRUN_RECOVERY_STALE_MS || 60_000));
+  const recoveryLimit = Math.max(1, Math.min(100, Number(process.env.WORKRUN_RECOVERY_LIMIT || 25)));
+  scheduleRecurringMaintenanceJob({
+    enabled: recoveryEnabled,
+    prisma,
+    jobName: 'agentscope-workrun-recovery',
+    initialDelayMs: recoveryIntervalMs,
+    intervalMs: recoveryIntervalMs,
+    run: async () => {
+      const result = await recoverStaleWorkRuns(prisma, {
+        before: new Date(Date.now() - recoveryStaleMs),
+        limit: recoveryLimit,
+      });
+      if (result.attempted) console.info('[agentscope-workrun-recovery]', result);
+    },
+  });
 }
 
 const sessionStore = new ControlPlaneSessionStore(CONFIG);

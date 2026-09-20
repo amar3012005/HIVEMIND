@@ -17,6 +17,34 @@ function modeFromEnv(env) {
   return VALID_MODES.has(mode) ? mode : 'off';
 }
 
+function actorAllowlist(env) {
+  return new Set(String(env.JEV_DECISION_GATEWAY_USER_IDS || '')
+    .split(',').map(value => value.trim().toLowerCase()).filter(Boolean));
+}
+
+function decisionProviderConfig(env) {
+  const explicit = String(env.JEV_DECISIONS_URL || '').trim();
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim();
+  const gatewayId = String(env.CLOUDFLARE_AI_GATEWAY_ID || '').trim();
+  const gatewayToken = String(env.CLOUDFLARE_AI_GATEWAY_TOKEN || '').trim();
+  const provider = String(env.JEV_GATEWAY_PROVIDER || 'custom-decision-jev').trim().toLowerCase();
+  const alias = String(env.JEV_GATEWAY_BYOK_ALIAS || env.CLOUDFLARE_AI_GATEWAY_DECISION_JEV_BYOK_ALIAS || '').trim();
+  const gatewayEnabled = String(env.CLOUDFLARE_AI_GATEWAY_ENABLED || '').toLowerCase() === 'true';
+  if (!explicit && gatewayEnabled && accountId && gatewayId && gatewayToken && provider) {
+    const base = String(env.CLOUDFLARE_AI_GATEWAY_BASE_URL || 'https://gateway.ai.cloudflare.com').replace(/\/+$/, '');
+    return {
+      endpoint: `${base}/v1/${encodeURIComponent(accountId)}/${encodeURIComponent(gatewayId)}/${encodeURIComponent(provider)}/api/v1/systemone`,
+      apiKey: '',
+      headers: {
+        'cf-aig-authorization': `Bearer ${gatewayToken}`,
+        'cf-aig-skip-cache': 'true',
+        ...(alias ? { 'cf-aig-byok-alias': alias } : {}),
+      },
+    };
+  }
+  return { endpoint: explicit || undefined, apiKey: env.OPENROUTER_API_KEY, headers: {} };
+}
+
 function finiteThreshold(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 && number <= 1 ? number : fallback;
@@ -51,15 +79,25 @@ export async function decideRuntimeStage(input = {}, {
   const stage = boundedString(input.stage, 80);
   const runtime = input.runtime === 'harness' ? 'harness' : 'legacy';
   if (mode === 'off') return { status: 'defer', mode, stage: stage || null, reason: 'decision_gateway_off' };
+  const allowlist = actorAllowlist(env);
+  const actorId = boundedString(input.actor_id, 128).toLowerCase();
+  if (allowlist.size > 0 && (!actorId || !allowlist.has(actorId))) {
+    return { status: 'defer', mode, stage: stage || null, reason: 'decision_gateway_actor_not_allowed' };
+  }
+  if (allowlist.size === 0 && String(env.JEV_DECISION_GATEWAY_ALLOW_ALL || '').toLowerCase() !== 'true') {
+    return { status: 'defer', mode, stage: stage || null, reason: 'decision_gateway_allowlist_required' };
+  }
   if (!VALID_STAGES.has(stage)) return { status: 'defer', mode, stage: stage || null, reason: 'decision_stage_invalid' };
 
   const userQuery = boundedString(input.user_query, 4000);
   if (!userQuery) return { status: 'defer', mode, stage, reason: 'decision_query_required' };
 
+  const providerConfig = decisionProviderConfig(env);
   const gateway = new DecisionGateway({
     provider: provider || createOpenRouterJevProvider({
-      apiKey: env.OPENROUTER_API_KEY,
-      endpoint: env.JEV_DECISIONS_URL,
+      apiKey: providerConfig.apiKey,
+      endpoint: providerConfig.endpoint,
+      headers: providerConfig.headers,
       model: env.JEV_MODEL,
       timeoutMs: Number(env.JEV_TIMEOUT_MS || 3500),
     }),

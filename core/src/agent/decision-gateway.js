@@ -71,6 +71,7 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs, outerSignal) {
 export function createOpenRouterJevProvider({
   apiKey = process.env.OPENROUTER_API_KEY,
   endpoint = process.env.JEV_DECISIONS_URL || DEFAULT_ENDPOINT,
+  headers = {},
   model = process.env.JEV_MODEL || DEFAULT_MODEL,
   fetchImpl = globalThis.fetch,
   timeoutMs = Number(process.env.JEV_TIMEOUT_MS || 5000),
@@ -80,15 +81,19 @@ export function createOpenRouterJevProvider({
   if (typeof fetchImpl !== 'function') throw new TypeError('decision_provider_fetch_required');
 
   async function request({ state, questions, signal }) {
-    if (!apiKey) throw new Error('decision_provider_api_key_missing');
+    const preparedHeaders = new Headers(headers || {});
+    if (apiKey && !preparedHeaders.has('authorization') && !preparedHeaders.has('cf-aig-byok-alias')) {
+      preparedHeaders.set('authorization', `Bearer ${apiKey}`);
+    }
+    if (!preparedHeaders.has('authorization') && !preparedHeaders.has('cf-aig-byok-alias')) {
+      throw new Error('decision_provider_api_key_missing');
+    }
+    preparedHeaders.set('content-type', 'application/json');
+    preparedHeaders.set('http-referer', siteUrl);
+    preparedHeaders.set('x-title', siteName);
     const response = await fetchWithTimeout(fetchImpl, endpoint, {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-        'http-referer': siteUrl,
-        'x-title': siteName,
-      },
+      headers: preparedHeaders,
       body: JSON.stringify({ model, state: boundedProjection(state), questions }),
     }, timeoutMs, signal);
     if (!response.ok) throw new Error(`decision_provider_http_${response.status}:${clip(await response.text(), 240)}`);

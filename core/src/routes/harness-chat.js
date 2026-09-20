@@ -277,6 +277,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       const result = await decisionHandler({
         ...input,
         runtime: 'harness',
+        actor_id: claims.sub,
         // Identity is always server-derived. It is context for classification,
         // never an authorization input and never accepted from the runner body.
         context: {

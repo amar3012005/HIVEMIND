@@ -61,6 +61,28 @@ test('OpenRouter provider maps opaque option keys back to stable capability ids'
   assert.equal(requests[0].questions.decision.type, 'choice');
 });
 
+test('Jev provider accepts Cloudflare Gateway BYOK headers without a direct provider key', async () => {
+  let request;
+  const provider = createOpenRouterJevProvider({
+    apiKey: '',
+    endpoint: 'https://gateway.example/custom-decision-jev/api/v1/systemone',
+    headers: { 'cf-aig-authorization': 'Bearer gateway-token', 'cf-aig-byok-alias': 'default' },
+    fetchImpl: async (url, init) => {
+      request = { url: String(url), headers: new Headers(init.headers) };
+      return new Response(JSON.stringify({ answers: { decision: {
+        type: 'choice', choice: 'option_0', probabilities: { option_0: 0.97, option_1: 0.03 },
+      } } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const result = await provider.decideChoice({ state: 'hello', instructions: 'Choose.', options: [
+    { id: 'direct', criteria: 'Answer directly.' }, { id: 'tools', criteria: 'Use tools.' },
+  ] });
+  assert.equal(result.choice, 'direct');
+  assert.equal(request.url, 'https://gateway.example/custom-decision-jev/api/v1/systemone');
+  assert.equal(request.headers.get('cf-aig-byok-alias'), 'default');
+  assert.equal(request.headers.get('authorization'), null);
+});
+
 test('explicit operational app intent bypasses the initial decision call', async () => {
   let calls = 0;
   const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('should not run'); } } });

@@ -447,6 +447,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       try {
         decision = await decisionStage({
           runtime: 'legacy', stage: 'capability', turn_id: state.runId, user_query: message,
+          actor_id: ctx.userId,
           context: state.context,
           observation: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
           app_mentions: state.requestedToolkits,

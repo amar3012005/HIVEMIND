@@ -197,6 +197,7 @@ test('decision endpoint derives tenant scope and returns a non-executing selecti
   assert.equal(res.status, 200);
   assert.equal(res.body.selected, 'composio_search');
   assert.equal(calls[0].runtime, 'harness');
+  assert.equal(calls[0].actor_id, userId);
   assert.equal(calls[0].context.authenticated_scope.user_id, userId);
   assert.equal(calls[0].context.authenticated_scope.org_id, orgId);
 });

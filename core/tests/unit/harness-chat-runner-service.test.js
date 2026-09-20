@@ -45,6 +45,78 @@ test('scoped proxy forwards only allowlisted operation with server-derived tenan
   assert.ok(!calls[0].init.headers.authorization.includes(secret));
 });
 
+test('native Harness entity lookup maps to the canonical Core route with bounded query parameters', async () => {
+  const res = {};
+  const calls = [];
+  await handleHarnessChatBootstrapRoute({
+    req: {
+      method: 'GET',
+      url: '/internal/v1/harness-chat/core/api/entities?q=Solvis&limit=5&ignored=never',
+      headers: { authorization: `Bearer ${token()}` },
+    },
+    res,
+    pathname: '/internal/v1/harness-chat/core/api/entities',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({}),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: { coreApiBaseUrl: 'http://core.test' },
+    env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ matches: [{ canonical_name: 'Solvis GmbH' }] }));
+    },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(calls[0].url, 'http://core.test/api/entity-search?query=Solvis&limit=5');
+  assert.equal(calls[0].init.headers['x-hm-user-id'], userId);
+  assert.equal(calls[0].init.headers['x-hm-org-id'], orgId);
+});
+
+test('native Harness recall retries one bounded quick read when the primary provider times out', async () => {
+  const res = {};
+  const bodies = [];
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } },
+    res,
+    pathname: '/internal/v1/harness-chat/core/api/recall',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({ query_context: 'Solvis', max_memories: 15, scope_filter: 'organization' }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: { coreApiBaseUrl: 'http://core.test' },
+    env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) throw new DOMException('The operation timed out', 'TimeoutError');
+      return new Response(JSON.stringify({ results: [{ title: 'Solvis GmbH — Company profile' }], count: 1 }));
+    },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1].mode, 'quick');
+  assert.equal(bodies[1].max_memories, 5);
+  assert.equal(bodies[1].scope_filter, 'organization');
+  assert.equal(res.body.results[0].title, 'Solvis GmbH — Company profile');
+});
+
+test('native Harness recall reports bounded unavailability without asserting empty memory', async () => {
+  const res = {};
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } },
+    res,
+    pathname: '/internal/v1/harness-chat/core/api/recall',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({ query_context: 'who I am', max_memories: 5 }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: { coreApiBaseUrl: 'http://core.test' },
+    env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: async () => { throw new DOMException('The operation timed out', 'TimeoutError'); },
+  });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.error, 'memory_retrieval_timeout');
+  assert.equal(res.body.retryable, true);
+  assert.match(res.body.message, /No absence conclusion/);
+});
+
 test('scoped proxy forwards a save-status replay lookup without allowing other memory subroutes', async () => {
   const res = {};
   const calls = [];

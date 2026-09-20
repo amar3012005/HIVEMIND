@@ -33,6 +33,12 @@ const CORE_ROUTES = new Map([
   ['/api/profiles', new Set(['GET'])],
   ['/api/profiles/context', new Set(['GET'])],
   ['/api/recall', new Set(['POST'])],
+  // The native DeepSeek Harness runtime intentionally exposes the compact
+  // `/api/entities` contract. Core's canonical HTTP route is
+  // `/api/entity-search`; keep the translation at this authenticated proxy
+  // boundary so released runners do not need to know Core's internal route
+  // spelling.
+  ['/api/entities', new Set(['GET'])],
   ['/api/memories', new Set(['POST'])],
   // A completed HIVE save is reconciled through this bounded, tenant-scoped
   // receipt lookup after replay or a transport interruption. Keep it on the
@@ -40,6 +46,25 @@ const CORE_ROUTES = new Map([
   // route or a broad /api/memories wildcard would weaken that boundary.
   ['/api/memories/save-status', new Set(['GET'])],
 ]);
+const CORE_ROUTE_TARGETS = new Map([
+  ['/api/entities', '/api/entity-search'],
+]);
+const ENTITY_QUERY_KEYS = new Map([
+  ['q', 'query'],
+  ['limit', 'limit'],
+  ['scope', 'scope'],
+  ['project', 'project_id'],
+]);
+
+function boundedTimeout(value, fallback, max) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(Math.floor(parsed), max) : fallback;
+}
+
+function isRequestTimeout(error) {
+  return error?.name === 'AbortError' || error?.name === 'TimeoutError'
+    || /timed?\s*out|timeout/i.test(String(error?.message || ''));
+}
 
 function harnessCreditLimitResponse(summary) {
   const plan = summary?.plan || 'free';
@@ -247,18 +272,52 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   }
   let body;
   if (req.method !== 'GET') body = await parseBody(req).catch(() => null);
-  const target = new URL(corePath, redisConfig.coreApiBaseUrl);
+  const target = new URL(CORE_ROUTE_TARGETS.get(corePath) || corePath, redisConfig.coreApiBaseUrl);
+  if (corePath === '/api/entities') {
+    const incoming = new URL(req.url || pathname, 'http://harness.internal');
+    for (const [incomingKey, coreKey] of ENTITY_QUERY_KEYS) {
+      const value = incoming.searchParams.get(incomingKey);
+      if (value !== null) target.searchParams.set(coreKey, value);
+    }
+  }
   if (corePath === '/api/memories') target.searchParams.set('sync', 'true');
-  const upstream = await fetchImpl(target, {
+  const headers = {
+    accept: 'application/json', authorization: `Bearer ${getInternalApiKey()}`,
+    'x-hm-user-id': claims.sub, 'x-hm-org-id': claims.org_id,
+    ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+  };
+  const requestCore = (requestBody, timeoutMs) => fetchImpl(target, {
     method: req.method,
-    headers: {
-      accept: 'application/json', authorization: `Bearer ${getInternalApiKey()}`,
-      'x-hm-user-id': claims.sub, 'x-hm-org-id': claims.org_id,
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    redirect: 'manual', signal: AbortSignal.timeout(20_000),
+    headers,
+    ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }),
+    redirect: 'manual', signal: AbortSignal.timeout(timeoutMs),
   });
+  const primaryTimeoutMs = boundedTimeout(env.HIVE_HARNESS_CORE_PRIMARY_TIMEOUT_MS, 12_000, 17_000);
+  const fallbackTimeoutMs = boundedTimeout(env.HIVE_HARNESS_CORE_FALLBACK_TIMEOUT_MS, 4_000, 5_000);
+  let upstream;
+  try {
+    upstream = await requestCore(body, primaryTimeoutMs);
+  } catch (error) {
+    if (!isRequestTimeout(error) || corePath !== '/api/recall') throw error;
+    // A slow optional embedding/reliability provider must not consume the
+    // runner's complete 20-second tool budget. Retry once through Core's
+    // bounded quick-recall plan, preserving tenant and all hard filters.
+    try {
+      upstream = await requestCore({
+        ...(body || {}),
+        mode: 'quick',
+        max_memories: Math.min(Number(body?.max_memories || body?.limit || 5), 5),
+      }, fallbackTimeoutMs);
+    } catch (fallbackError) {
+      if (!isRequestTimeout(fallbackError)) throw fallbackError;
+      jsonResponse(res, {
+        error: 'memory_retrieval_timeout',
+        message: 'Memory retrieval exceeded its bounded deadline. No absence conclusion was made.',
+        retryable: true,
+      }, 503);
+      return true;
+    }
+  }
   const payload = await readJsonBounded(upstream);
   jsonResponse(res, payload, upstream.status);
   return true;

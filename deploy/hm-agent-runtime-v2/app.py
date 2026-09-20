@@ -60,6 +60,8 @@ import cloudflare_gateway as gateway
 import hm_auth
 import hm_bridge
 import extra_agent_tools
+import agent_middlewares
+import observability
 from gateway_credential import CloudflareGatewayOpenAICredential
 
 # --------------------------------------------------------------------------
@@ -321,6 +323,7 @@ def _install_model_reject_logger() -> None:
 
 _install_model_reject_logger()
 hive_toolkit_groups.patch_get_toolkit()
+observability.configure_tracing()
 
 
 app = create_app(
@@ -338,6 +341,10 @@ app = create_app(
     # runs once per agent assembly and receives the resolved principal, so every
     # tool call is scoped by hm-core rather than by anything the model controls.
     extra_agent_tools=extra_agent_tools.hivemind_tools,
+    # AgenticMemory and AgentScope-native OpenTelemetry spans. The workspace is
+    # passed by AgentScope itself, so no model-provided filesystem path enters
+    # either middleware.
+    extra_agent_middlewares=agent_middlewares.hivemind_agent_middlewares,
     resource_access_policy=hive_access_policy.HiveMindResourceAccessPolicy(),
     # Cloudflare AI Gateway credential type — routes provider calls through the
     # same gateway as hm-core. Registered unconditionally so the type is always

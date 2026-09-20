@@ -70,6 +70,13 @@ async def hivemind_agent_middlewares(
         _seed_composio_skill(str(workdir))
     except OSError as exc:
         _log.warning("could not seed composio skill: %s", exc)
-    from agentscope.middleware import AgenticMemoryMiddleware
+    from agentscope.middleware import AgenticMemoryMiddleware, TracingMiddleware
 
-    return [AgenticMemoryMiddleware(workdir=str(workdir))]
+    # These are AgentScope middlewares, attached to every assembled agent. The
+    # tracing middleware becomes a near-zero no-op until `setup_tracing()` has
+    # installed a real OpenTelemetry provider; keeping it here avoids a second
+    # execution/event pipeline when telemetry is enabled later.
+    return [
+        AgenticMemoryMiddleware(workdir=str(workdir)),
+        TracingMiddleware(),
+    ]

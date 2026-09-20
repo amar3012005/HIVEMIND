@@ -7,6 +7,7 @@ import {
   localPlaybooks,
   organizationPlaybooks,
 } from '../../src/employees/playbook-catalog.js';
+import { runtimeScopeProjection } from '../../src/employees/work-runs.js';
 
 test('PlaybookList exposes catalog metadata only', () => {
   const catalog = listPlaybooks();
@@ -65,4 +66,25 @@ test('local WorkRun playbooks remain isolated from org and global catalog entrie
     scope: 'local',
     instructions: 'Use the current approved launch inputs only.',
   });
+});
+
+test('initial AgentScope context keeps local playbooks metadata-only', () => {
+  const projected = runtimeScopeProjection({
+    project: 'launch',
+    local_playbooks: {
+      id: 'launch-overlay',
+      name: 'Launch overlay',
+      instructions: 'This must never be injected at L0.',
+    },
+  });
+  assert.deepEqual(projected, {
+    project: 'launch',
+    local_playbooks: [{
+      id: 'local:launch-overlay',
+      name: 'Launch overlay',
+      description: 'WorkRun-local operating guidance.',
+      scope: 'local',
+    }],
+  });
+  assert.doesNotMatch(JSON.stringify(projected), /never be injected/i);
 });

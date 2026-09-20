@@ -34,4 +34,17 @@ describe('WorkRun Task tools → plan events (Phase 1)', () => {
     assert.equal(ev.status, 'failed');
     assert.equal(ev.reason, 'error');
   });
+
+  it('preserves the parked reply and tool calls required for confirmation resume', () => {
+    const toolCall = { id: 'bash-1', name: 'Bash', input: { command: 'pwd' } };
+    const ev = normalizeAgentScopeEvent({
+      type: 'REQUIRE_USER_CONFIRM',
+      reply_id: 'reply-1',
+      tool_calls: [toolCall],
+    });
+    assert.equal(ev.t, WORK_RUN_EVENT.APPROVAL_REQUESTED);
+    assert.equal(ev.reply_id, 'reply-1');
+    assert.equal(ev.call_id, 'bash-1');
+    assert.deepEqual(ev.tool_calls, [toolCall]);
+  });
 });

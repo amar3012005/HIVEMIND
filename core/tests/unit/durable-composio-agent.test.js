@@ -1095,6 +1095,20 @@ test('summarizeToolData lists thread snippets', () => {
   assert.match(text, /Invoice attached/);
 });
 
+test('email table projection preserves sender and received timestamp', () => {
+  const rows = rowsFromToolData({ messages: [{
+    subject: 'Re: Returning your MacBook',
+    sender: 'Griseldis Voigt <voigt@example.test>',
+    messageTimestamp: '2026-09-05T09:14:31Z',
+    messageText: 'Private message body must not be projected into the compact table.',
+  }] });
+  assert.deepEqual(rows, [{
+    title: 'Re: Returning your MacBook',
+    extra: 'Griseldis Voigt <voigt@example.test> — 2026-09-05T09:14:31Z',
+  }]);
+  assert.equal(markdownTableFromRows(rows).includes('Private message body'), false);
+});
+
 test('summarizeToolData decodes GitHub README base64', () => {
   const text = summarizeToolData({
     encoding: 'base64',

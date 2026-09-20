@@ -418,8 +418,14 @@ export function rowsFromToolData(data) {
     const title = item.full_name || item.name || item.title || item.subject
       || (typeof item.snippet === 'string' ? item.snippet : '')
       || nested.title || item.facetName || '';
-    const extra = nested.channelTitle || item.channelTitle || item.owner?.login
-      || item.description || nested.description || '';
+    const emailDetails = [
+      item.sender || item.from || '',
+      item.messageTimestamp || item.receivedAt || item.received_at || item.date || '',
+    ].filter(Boolean).map(cellText);
+    const extra = emailDetails.length
+      ? emailDetails.join(' — ')
+      : (nested.channelTitle || item.channelTitle || item.owner?.login
+        || item.description || nested.description || '');
     if (!title || /adTargetingFacet|urn:li:ad/i.test(String(title))) return null;
     return { title: cellText(title).slice(0, 80), extra: cellText(extra).slice(0, 80) };
   }).filter(Boolean);

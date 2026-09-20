@@ -9,13 +9,17 @@ test('announcement input keeps only safe CTA destinations and typed display data
       eyebrow: 'hivemind — lifecycle',
       facts: [{ label: 'What changed', value: 'Research is ready.' }],
       agent_ids: ['lena', 'omar', 'lena'],
+      artifact: { type: 'web', id: '11111111-1111-4111-8111-111111111111', title: 'Homepage capture', url: 'https://example.test/' },
       cta: { label: 'Open report', href: '/hivemind/app/employees' },
     },
   });
   assert.deepEqual(result.content.agent_ids, ['lena', 'omar']);
   assert.equal(result.content.facts[0].label, 'What changed');
   assert.equal(result.content.cta.href, '/hivemind/app/employees');
+  assert.equal(result.content.artifact.id, '11111111-1111-4111-8111-111111111111');
+  assert.equal(result.content.artifact.url, 'https://example.test/');
   assert.throws(() => normalizeAnnouncementInput({ key: 'bad.link', title: 'Unsafe', content: { cta: { href: 'https://attacker.example' } } }), /destination is not allowed/);
+  assert.throws(() => normalizeAnnouncementInput({ key: 'bad.artifact', title: 'Unsafe', content: { artifact: { type: 'web', id: 'not-a-uuid' } } }), /web artifact UUID/);
 });
 
 test('announcement delivery persists an inbox record and never repeats after CTA action', async () => {

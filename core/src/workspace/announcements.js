@@ -3,6 +3,7 @@ import { createWorkspaceNotification } from './notifications.js';
 const STATUSES = new Set(['draft', 'scheduled', 'published', 'paused', 'archived']);
 const PLACEMENTS = new Set(['toast', 'dialog', 'reader', 'banner']);
 const MAX_FACTS = 6;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function text(value, limit) { return typeof value === 'string' ? value.trim().slice(0, limit) : ''; }
 function list(value, limit = 200) { return Array.isArray(value) ? [...new Set(value.map((item) => text(String(item), limit)).filter(Boolean))] : []; }
@@ -13,6 +14,29 @@ function allowedHref(value) {
   if (!href) return null;
   if (href.startsWith('/hivemind/')) return href;
   try { const url = new URL(href); return ['https:'].includes(url.protocol) && ['cal.com', 'www.cal.com', 'next.singulancelabs.com'].includes(url.hostname) ? url.href : null; } catch { return null; }
+}
+
+function safeSourceUrl(value) {
+  const href = text(value, 1000);
+  if (!href) return null;
+  try { const url = new URL(href); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; }
+}
+
+function artifactInput(value) {
+  const artifact = object(value);
+  if (!artifact.type && !artifact.id) return null;
+  const type = text(artifact.type || 'web', 24);
+  const id = text(artifact.id, 36);
+  if (type !== 'web' || !UUID.test(id)) throw new Error('announcement artifact must reference a web artifact UUID');
+  const url = artifact.url ? safeSourceUrl(artifact.url) : null;
+  if (artifact.url && !url) throw new Error('announcement artifact source URL is not allowed');
+  return {
+    type, id,
+    title: text(artifact.title, 180) || null,
+    url,
+    provider: text(artifact.provider, 48) || null,
+    content_chars: Math.max(0, Math.min(10_000_000, Number(artifact.content_chars) || 0)) || null,
+  };
 }
 
 export function normalizeAnnouncementInput(input = {}, { existing = null, operator = null } = {}) {
@@ -43,7 +67,7 @@ export function normalizeAnnouncementInput(input = {}, { existing = null, operat
       eyebrow: text(content.eyebrow, 80) || null,
       facts,
       agent_ids: agents,
-      artifact: object(content.artifact),
+      artifact: artifactInput(content.artifact),
       cta: primaryHref ? { label: text(cta.label, 80) || 'Open update', href: primaryHref } : null,
     },
     audience: {

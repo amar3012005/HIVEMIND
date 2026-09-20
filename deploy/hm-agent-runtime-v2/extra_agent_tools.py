@@ -211,10 +211,19 @@ class _HiveMindToolBase(ToolBase):
         if isinstance(schema, dict):
             cls.input_schema = _compat_schema(schema)
 
-    def __init__(self, user_id: str, org_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        user_id: str,
+        org_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self._user_id = user_id
         self._org_id = org_id
+        # This is minted by AgentScope, not supplied by the model.  It lets
+        # hm-core link a registered workspace artifact to the caller's durable
+        # WorkRun without making the WorkRun id part of a tool schema.
+        self._session_id = session_id
 
     async def check_permissions(
         self,
@@ -501,7 +510,12 @@ artifact is not an artifact."""
                 "/internal/hivemind/artifacts",
                 user_id=self._user_id,
                 org_id=self._org_id,
-                body={"path": path, "title": title, "content_type": content_type},
+                body={
+                    "path": path,
+                    "title": title,
+                    "content_type": content_type,
+                    "agentscope_session_id": self._session_id,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc), path=path)
@@ -685,7 +699,7 @@ async def hivemind_tools(
     instead, because the user→org mapping is hm-core's data.
     """
     user_uuid, org_uuid = _split_principal(user_id, None)
-    tools: list[ToolBase] = [cls(user_uuid, org_uuid) for cls in _TOOL_CLASSES]
+    tools: list[ToolBase] = [cls(user_uuid, org_uuid, session_id) for cls in _TOOL_CLASSES]
     _log.info(
         "assembled %d HIVE-MIND tools for user=%s agent=%s session=%s",
         len(tools),

@@ -179,6 +179,44 @@ test('scoped proxy rejects invalid token before tenant lookup', async () => {
   assert.equal(handled, true); assert.equal(res.status, 401);
 });
 
+test('decision endpoint derives tenant scope and returns a non-executing selection', async () => {
+  const res = {};
+  const calls = [];
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/core/decision',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({ stage: 'capability', user_query: 'Find my last Gmail message', context: { authenticated_scope: { user_id: 'forged' } } }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, fetchImpl: fetch,
+    decisionHandler: async (input) => {
+      calls.push(input);
+      return { status: 'selected', mode: 'active', stage: 'capability', selected: 'composio_search', authoritative: true };
+    },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.selected, 'composio_search');
+  assert.equal(calls[0].runtime, 'harness');
+  assert.equal(calls[0].context.authenticated_scope.user_id, userId);
+  assert.equal(calls[0].context.authenticated_scope.org_id, orgId);
+});
+
+test('decision endpoint converts internal failure to same-turn defer', async () => {
+  const res = {};
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/core/decision',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({ stage: 'capability', user_query: 'hello' }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret, JEV_DECISION_GATEWAY_MODE: 'active' }, fetchImpl: fetch,
+    decisionHandler: async () => { throw new Error('jev unavailable'); },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, 'defer');
+  assert.match(res.body.reason, /jev unavailable/);
+});
+
 test('project catalog exposes only policy-authorized project labels to the ticket subject', async () => {
   const res = {};
   const calls = [];

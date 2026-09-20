@@ -13,6 +13,7 @@ import {
 } from '../harness-chat/connected-app-receipts.js';
 import { getInternalApiKey } from '../security/internal-auth.js';
 import { TeamStore } from '../teams/team-store.js';
+import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -28,6 +29,7 @@ function legacyResponse(env, flagReceipt) {
 const INTERNAL_PREFIX = '/internal/v1/harness-chat/core';
 const RECEIPT_PREFIX = '/internal/v1/harness-chat/receipts';
 const CREDIT_OPERATION_PREFIX = '/internal/v1/harness-chat/credit-operations';
+const DECISION_PATH = '/decision';
 const CORE_ROUTES = new Map([
   ['/api/profile', new Set(['GET'])],
   ['/api/profiles', new Set(['GET'])],
@@ -160,7 +162,7 @@ async function scopedProjects(prisma, claims) {
   };
 }
 
-async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService }) {
+async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService, decisionHandler = decideRuntimeStage }) {
   const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
   const creditOperationRequest = pathname === CREDIT_OPERATION_PREFIX;
   if (!receiptRequest && !creditOperationRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
@@ -264,6 +266,33 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     return true;
   }
   const corePath = pathname.slice(INTERNAL_PREFIX.length);
+  if (corePath === DECISION_PATH) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    const input = await parseBody(req).catch(() => null);
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      jsonResponse(res, { status: 'defer', mode: 'off', stage: null, reason: 'decision_input_invalid' }, 200);
+      return true;
+    }
+    try {
+      const result = await decisionHandler({
+        ...input,
+        runtime: 'harness',
+        // Identity is always server-derived. It is context for classification,
+        // never an authorization input and never accepted from the runner body.
+        context: {
+          ...(input.context && typeof input.context === 'object' && !Array.isArray(input.context) ? input.context : {}),
+          authenticated_scope: { user_id: claims.sub, org_id: claims.org_id, project_id: claims.project_id || null },
+        },
+      }, { env, signal: req.signal });
+      jsonResponse(res, result, 200);
+    } catch (error) {
+      // Decisioning is an optimization seam. Its failure must never turn a
+      // healthy Harness request into an outage or suppress the current path.
+      jsonResponse(res, { status: 'defer', mode: env.JEV_DECISION_GATEWAY_MODE || 'off', stage: input.stage || null,
+        reason: String(error?.message || error || 'decision_gateway_unavailable').slice(0, 240) }, 200);
+    }
+    return true;
+  }
   if (corePath === '/projects' && req.method === 'GET') {
     try {
       const result = await scopedProjects(prisma, claims);
@@ -348,8 +377,9 @@ export async function handleHarnessChatBootstrapRoute({
   env = process.env,
   fetchImpl = globalThis.fetch,
   creditService,
+  decisionHandler,
 } = {}) {
-  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService })) return true;
+  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService, decisionHandler })) return true;
   const dedicatedNewSession = pathname === '/v1/harness-chat/new-session';
   if ((!dedicatedNewSession && pathname !== '/v1/harness-chat/bootstrap') || req.method !== 'POST') return false;
   const current = await requireSession(req, res);

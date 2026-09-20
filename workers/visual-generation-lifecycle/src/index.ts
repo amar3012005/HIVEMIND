@@ -38,7 +38,7 @@ function finalPrompt(spec: any, variant: any, useAnchor: boolean) {
 }
 async function aiText(env: Env, prompt: string) {
   const model = env.VISUAL_ART_DIRECTOR_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-  const result = await (env.AI as any).run(model, { messages: [{ role: 'system', content: 'Return strict JSON only.' }, { role: 'user', content: prompt }], temperature: 0.2, max_tokens: 2200 }, env.AI_GATEWAY_ID ? { gateway: { id: env.AI_GATEWAY_ID } } : undefined);
+  const result = await (env.AI as any).run(model, { messages: [{ role: 'system', content: 'Return one JSON object. The top-level skill_id is REQUIRED: choose exactly social, advertising, product, editorial, infographic, presentation, website, or identity. Include communication_objective, audience, subject, scene, composition, camera, lighting, materials, palette, emotional_tone, brand_rules, required_elements, forbidden_elements, unsupported_claims, text_policy, master_prompt and variants. Every variant requires purpose and variation. Do not omit skill_id.' }, { role: 'user', content: prompt }], temperature: 0.2, max_tokens: 4500, response_format: { type: 'json_object' } }, env.AI_GATEWAY_ID ? { gateway: { id: env.AI_GATEWAY_ID } } : undefined);
   return { model, value: parseJson(result) };
 }
 async function resultBytes(result: any): Promise<{ bytes: Uint8Array; contentType: string }> {

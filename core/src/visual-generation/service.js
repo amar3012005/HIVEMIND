@@ -152,6 +152,7 @@ export class DurableVisualGenerationLifecycle {
       job: publicJob(updated),
       request: { instruction: job.instruction, use_case: job.useCase, output: { mode: job.outputMode, count: job.requestedCount, aspect_ratios: job.aspectRatios }, quality: job.quality, model_policy: job.modelPolicy },
       company_context: company,
+      production_handoff: job.source?.production_handoff || null,
       brand_dna: brandRef,
       // This endpoint is authenticated with the workflow secret and resolves
       // the tenant's existing browser-rendered homepage capture. It is only a

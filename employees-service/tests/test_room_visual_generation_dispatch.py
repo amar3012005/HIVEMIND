@@ -129,6 +129,9 @@ def test_visual_delivery_waits_for_completed_grounded_room_result():
     assert _visual_delivery_ready("blocked", approved, synthesis) is False
     assert _visual_delivery_ready("complete", {"met": False, "grounded_ok": True}, synthesis) is False
     assert _visual_delivery_ready("complete", {"met": True, "grounded_ok": False}, synthesis) is False
+    assert _visual_delivery_ready("complete", None, synthesis) is False
+    assert _visual_delivery_ready("complete", approved, "The room could not produce a grounded answer this turn — the model was unreachable.") is False
+    assert _visual_delivery_ready("complete", {**approved, "verification_available": False}, synthesis) is False
 
 
 def test_campaign_director_image_selection_derives_multishot_count_from_actions():

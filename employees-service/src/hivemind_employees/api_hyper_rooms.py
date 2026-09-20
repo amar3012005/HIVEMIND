@@ -703,8 +703,6 @@ def _director_final_visual_payload(
     """Compile the final image brief only after the Director has finished."""
     result = result if isinstance(result, dict) else {}
     campaign_payload = _campaign_post_visual_payload(req, room_kind, final_text)
-    if campaign_payload:
-        return campaign_payload
 
     output_contract = result.get("output_contract") if isinstance(result.get("output_contract"), dict) else {}
     artifact_intent = result.get("artifact_intent") if isinstance(result.get("artifact_intent"), dict) else {}
@@ -713,10 +711,10 @@ def _director_final_visual_payload(
         or str(artifact_intent.get("kind") or "").strip().lower() == "generated_image"
         or str(result.get("output_family") or "").strip().lower() == "image"
     )
-    if not selected_image:
+    if not selected_image and not campaign_payload:
         return None
 
-    payload = _room_visual_job_payload(req, room_kind)
+    payload = campaign_payload or _room_visual_job_payload(req, room_kind)
     work_results = [
         {
             "owner": item.get("owner") or item.get("owner_slug"),
@@ -746,6 +744,13 @@ def _director_final_visual_payload(
     )
     payload["source"] = {
         "kind": "room_director_final_synthesis", "room_id": req.room_id, "turn_id": req.turn_id,
+        "production_handoff": {
+            "version": "room.visual-brief.v1",
+            "user_use_case": str(req.user_message or "")[:2400],
+            "approved_synthesis": str(final_text or "")[:16000],
+            **completed_context,
+            "agent_preferences": result.get("visual_preferences") or {},
+        },
     }
     payload["idempotency_key"] = f"room-visual-final:{req.turn_id}"
     return payload
@@ -784,9 +789,11 @@ def _visual_delivery_ready(
     """Admit final visual rendering only after the governed room result passes."""
     if str(status or "").strip().lower() != "complete" or len(str(final_text or "").strip()) < 40:
         return False
+    if re.search(r"model was unreachable|could not produce a grounded answer|no substantive answer|failed to (?:produce|deliver)|grounding.*withheld", str(final_text), re.I):
+        return False
     if isinstance(verification, dict) and verification:
-        return verification.get("met") is True and verification.get("grounded_ok") is True
-    return True
+        return verification.get("met") is True and verification.get("grounded_ok") is True and verification.get("verification_available", True) is not False
+    return False
 
 
 def _campaign_action_visual_delivery(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -4558,9 +4565,8 @@ async def _orchestrate_single_agent(
     # into a bounded, company-grounded production brief rather than allowing an
     # empty report to fail the visual admission gate.
     _result_contract = result.get("output_contract") if isinstance(result.get("output_contract"), dict) else _output_contract
-    if is_deferred_generated_image(_result_contract) and len(final_text.strip()) < 40:
-        final_text = _deferred_image_synthesis(req, _room_kind, company_name=_company_name)
-        result["final_text"] = final_text
+    # Missing synthesis is unfinished work, not permission to invent an approved
+    # brief. The visual admission gate below holds the render until a real retry.
     post_output_actions = [
         action for action in (result.get("post_output_actions") or [])
         if isinstance(action, dict) and action.get("explicit") is True

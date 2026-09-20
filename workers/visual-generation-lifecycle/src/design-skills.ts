@@ -48,6 +48,7 @@ export function modelPrompt(spec: any, shot: any, hasAnchor: boolean) {
     `Scene and subject: ${spec.subject}. ${spec.scene}.`,
     `Art direction: ${spec.composition}. ${spec.camera}. ${spec.lighting}. ${spec.materials}.`,
     `Visual system: ${spec.palette}. ${spec.emotional_tone}.`,
+    spec.reference_style ? `Verified website visual language: ${spec.reference_style}.` : '',
     visualBrandRules.length ? `Verified visual rules: ${visualBrandRules.join('; ')}.` : '',
     visualRequirements.length ? `Required visual subjects: ${visualRequirements.join('; ')}.` : '',
     'Use website screenshots for palette and visual language only. Preserve verified product identity when supplied. Do not reproduce screenshot text or layout.',

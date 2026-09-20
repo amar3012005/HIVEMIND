@@ -108,6 +108,25 @@ async function websiteFallbackReference(env: Env, context: ContextReceipt): Prom
   if (!bytes.length || bytes.length > 5 * 1024 * 1024) return null;
   return { bytes, contentType: imageContentType(bytes, response.headers.get('content-type') || ''), model: 'browser-rendered-homepage', prompt: '' };
 }
+async function describeVisualReference(env: Env, reference: Generated) {
+  const model = env.VISUAL_CRITIC_MODEL || '@cf/qwen/qwen3.8-27b';
+  const result = await (env.AI as any).run(model, {
+    messages: [
+      { role: 'system', content: 'Return one strict JSON object.' },
+      { role: 'user', content: [
+        { type: 'text', text: 'Analyze this verified first-party website image as visual evidence. Describe only reusable visual properties: palette with approximate hex colors, contrast, lighting, material/texture language, geometry, spacing, photography or illustration style, and overall mood. Ignore and do not transcribe any text, logo, UI, people identity, or layout. Return JSON: {palette:[], contrast, lighting, materials, geometry, style, mood}.' },
+        { type: 'image_url', image_url: { url: imageDataUrl(reference) } },
+      ] },
+    ],
+    max_completion_tokens: 1200,
+    reasoning_effort: 'low',
+    response_format: { type: 'json_object' },
+    temperature: 0,
+  }, env.AI_GATEWAY_ID ? { gateway: { id: env.AI_GATEWAY_ID } } : undefined);
+  const parsed = parseJson(result);
+  if (!Array.isArray(parsed.palette) || typeof parsed.style !== 'string') throw new Error('visual_reference_analysis_invalid');
+  return JSON.stringify(parsed).slice(0, 3000);
+}
 async function critique(env: Env, image: Generated, spec: any) {
   const model = env.VISUAL_CRITIC_MODEL || '@cf/qwen/qwen3.8-27b';
   let binary = ''; for (let offset = 0; offset < image.bytes.length; offset += 0x8000) binary += String.fromCharCode(...image.bytes.subarray(offset, offset + 0x8000));
@@ -173,12 +192,17 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
         return homepage ? [homepage] : [];
       });
       const logo = officialLogo(context);
+      const referenceStyle = evidence.length
+        ? await step.do('analyze-verified-visual-style', { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' }, timeout: '10 minutes' }, () => describeVisualReference(this.env, evidence[0])) as string
+        : '';
+      direction.production_spec.reference_style = referenceStyle;
+      const generationReferences = direction.production_spec.skill_id === 'product' ? evidence : [];
       await step.do('event-evidence', () => report(this.env, trigger, 'visual_evidence', 'context', 20, evidence.length ? 'Verified website visual evidence loaded for art direction.' : 'No verified visual reference was available; generating without inferred brand marks.', { reference_count: evidence.length, source: context.brand_dna?.run_id ? 'brand_dna_first_party_evidence' : (evidence.length ? 'browser_rendered_homepage' : 'none') }));
       let anchor: StoredGenerated | undefined;
       failedStage = 'generating_master';
       let masterWorking = await step.do('generate-master', { retries: { limit: 6, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
         const anchorReference = anchor ? await loadGenerated(this.env, anchor) : null;
-        const generated = await generate(this.env, `${finalPrompt(direction.production_spec, direction.production_spec.variants[0], Boolean(anchor))}\nVerified visual evidence is available for style only; no logo reproduction.`, aspects[0], quality, [anchorReference, ...evidence].filter(Boolean) as Generated[]);
+        const generated = await generate(this.env, finalPrompt(direction.production_spec, direction.production_spec.variants[0], Boolean(anchor)), aspects[0], quality, [anchorReference, ...generationReferences].filter(Boolean) as Generated[]);
         return storeGenerated(this.env, trigger, generated, `${assetPrefix(trigger)}working/master.png`, 'master_working');
       }) as any;
       await step.do('event-master', () => report(this.env, trigger, 'generating_master', 'generating_master', 58, 'Master visual generated.', { model: masterWorking.model }));
@@ -187,7 +211,7 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
       await step.do('event-critique', () => report(this.env, trigger, 'critiquing', 'critiquing', 70, review.needs_revision ? 'Visual critic requested one bounded revision.' : 'Master visual passed the quality review.', review));
       if (review.needs_revision) masterWorking = await step.do('revise-master-once', { retries: { limit: 5, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
         const anchorReference = anchor ? await loadGenerated(this.env, anchor) : null;
-        const generated = await generate(this.env, `${finalPrompt(direction.production_spec, direction.production_spec.variants[0], Boolean(anchor))}\nSenior critic correction: ${review.revision_instruction || 'Remove every word, letter, number, logo, watermark and pseudo-text while preserving a polished composition.'}`, aspects[0], quality, [anchorReference, ...evidence].filter(Boolean) as Generated[]);
+        const generated = await generate(this.env, `${finalPrompt(direction.production_spec, direction.production_spec.variants[0], Boolean(anchor))}\nSenior critic correction: ${review.revision_instruction || 'Remove every word, letter, number, logo, watermark and pseudo-text while preserving a polished composition.'}`, aspects[0], quality, [anchorReference, ...generationReferences].filter(Boolean) as Generated[]);
         return storeGenerated(this.env, trigger, generated, `${assetPrefix(trigger)}working/master-revised.png`, 'master_working');
       }) as any;
       if (review.needs_revision) review = await step.do('critique-revised-master', { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' }, timeout: '10 minutes' }, async () => critique(this.env, await loadGenerated(this.env, masterWorking), direction.production_spec)) as any;
@@ -203,7 +227,7 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
       for (let index = 1; index < count; index += 1) {
         const variant = await step.do(`generate-variant-${index}`, { retries: { limit: 6, delay: '20 seconds', backoff: 'exponential' }, timeout: '20 minutes' }, async () => {
           const anchorReference = anchor ? await loadGenerated(this.env, anchor) : null;
-          const generated = await generate(this.env, `${finalPrompt(direction.production_spec, direction.production_spec.variants[index], Boolean(anchor))}\nVerified visual evidence is available for style only; no logo reproduction.`, aspects[index % aspects.length], quality, [anchorReference, ...evidence].filter(Boolean) as Generated[]);
+          const generated = await generate(this.env, finalPrompt(direction.production_spec, direction.production_spec.variants[index], Boolean(anchor)), aspects[index % aspects.length], quality, [anchorReference, ...generationReferences].filter(Boolean) as Generated[]);
           const variantReview = await critique(this.env, generated, direction.production_spec);
           if (variantReview.warning || variantReview.needs_revision) throw new Error('visual_variant_quality_not_accepted');
           return store(this.env, trigger, composeExactLogo(generated, logo, aspects[index % aspects.length]), index, aspects[index % aspects.length], 'variant');

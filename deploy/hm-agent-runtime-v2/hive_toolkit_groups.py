@@ -31,6 +31,7 @@ HIVEMIND_NAMES = {
     "hivemind_save_prospect",
     "hivemind_save_memory",
     "hivemind_record_artifact",
+    "hivemind_complete_workrun",
 }
 WEB_NAMES = {"hivemind_web_search"}
 APPS_NAMES = {"hivemind_composio_tools", "hivemind_composio_execute"}

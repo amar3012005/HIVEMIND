@@ -21,6 +21,10 @@ test('PlaybookGet returns the selected playbook body and rejects unknown ids', (
   const playbook = getPlaybook('global:prospect-discovery');
   assert.equal(playbook.id, 'global:prospect-discovery');
   assert.match(playbook.instructions, /sourced list of companies/i);
+  assert.deepEqual(playbook.completion_contract, {
+    tasks: { min_completed: 1, require_all_completed: true },
+    artifacts: { min_count: 1 },
+  });
   assert.equal(getPlaybook('global:does-not-exist'), null);
 });
 

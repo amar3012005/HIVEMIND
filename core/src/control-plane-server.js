@@ -113,6 +113,7 @@ import {
   handleInternalSaveMemoryRoute,
   handleInternalCompanyContextRoute,
   handleInternalCompanyRecordsRoute,
+  handleInternalCompleteWorkRunRoute,
   handleInternalWebSearchRoute,
   handleInternalRecordArtifactRoute,
   handleInternalSaveProspectRoute,
@@ -13015,6 +13016,9 @@ Write the persona now.`;
     }
     if (pathname === '/internal/hivemind/artifacts' && req.method === 'POST') {
       return handleInternalRecordArtifactRoute({ req, res, jsonResponse, parseBody, prisma });
+    }
+    if (pathname === '/internal/hivemind/workruns/complete' && req.method === 'POST') {
+      return handleInternalCompleteWorkRunRoute({ req, res, jsonResponse, parseBody, prisma });
     }
     if (pathname === '/internal/hivemind/composio/execute' && req.method === 'POST') {
       return handleInternalComposioExecuteRoute({

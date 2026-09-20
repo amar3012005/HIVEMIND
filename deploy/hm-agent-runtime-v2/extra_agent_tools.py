@@ -410,6 +410,35 @@ class ArtifactsTool(_CompanyRecordsTool):
     record_kind: str = "artifacts"
 
 
+class CompleteWorkRunTool(_HiveMindToolBase):
+    """Ask HIVE to validate and complete this WorkRun's selected playbook."""
+
+    name: str = "hivemind_complete_workrun"
+    is_read_only: bool = False
+
+    description: str = """Complete the current WorkRun after all selected-playbook
+tasks and required artifacts are genuinely finished. HIVE validates the durable
+completion contract and returns exact unmet predicates when more work is needed.
+Never call this merely because you have written a final response."""
+
+    class Params(BaseModel):
+        summary: str = Field(description="Brief factual summary of what was produced and verified.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, summary: str) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/workruns/complete",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={"agentscope_session_id": self._session_id, "summary": summary},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        return _ok(data)
+
+
 class SaveProspectTool(_HiveMindToolBase):
     """Add a qualified prospect to the organization's shared lead book."""
 
@@ -719,6 +748,7 @@ _TOOL_CLASSES = (
     ObjectivesTool,
     WorkTool,
     ArtifactsTool,
+    CompleteWorkRunTool,
     RecallTool,
     ListProspectsTool,
     SaveProspectTool,

@@ -700,6 +700,7 @@ export async function handleInternalPlaybookGetRoute({
   let roomPlaybook = null;
   let localPlaybook = null;
   let workRunId = null;
+  let workRunScope = {};
   if (sessionId) {
     const rows = await prisma.$queryRawUnsafe(
       `SELECT w.id, r.room_playbook, w.scope
@@ -716,6 +717,7 @@ export async function handleInternalPlaybookGetRoute({
     roomPlaybook = rows?.[0]?.room_playbook || null;
     localPlaybook = rows?.[0]?.scope?.local_playbooks || null;
     workRunId = rows?.[0]?.id || null;
+    workRunScope = rows?.[0]?.scope && typeof rows[0].scope === 'object' ? rows[0].scope : {};
   }
   const { getPlaybook, organizationPlaybooks, localPlaybooks } = await import('../employees/playbook-catalog.js');
   const playbook = getPlaybook(id, {
@@ -727,18 +729,51 @@ export async function handleInternalPlaybookGetRoute({
     // PlaybookGet is the selection boundary. Persist a validated catalog id
     // and version here, after resolving it under the bound session, instead
     // of trusting a model-supplied value at WorkRun creation time.
+    const { completion_contract: _previousContract, ...baseScope } = workRunScope;
+    const selectedScope = playbook.completion_contract
+      ? { ...baseScope, completion_contract: playbook.completion_contract }
+      : baseScope;
     await prisma.$queryRawUnsafe(
       `UPDATE "hivemind"."work_runs"
-          SET playbook_id = $2, playbook_version = $3, updated_at = now()
-        WHERE id = $1::uuid AND user_id = $4::uuid AND org_id = $5::uuid`,
+          SET playbook_id = $2, playbook_version = $3, scope = $4::jsonb, updated_at = now()
+        WHERE id = $1::uuid AND user_id = $5::uuid AND org_id = $6::uuid`,
       workRunId,
       playbook.id,
       playbook.version,
+      JSON.stringify(selectedScope),
       principal.userId,
       principal.orgId,
     );
   }
   return jsonResponse(res, { status: 'completed', playbook });
+}
+
+/** Complete an AgentScope WorkRun only when its selected playbook evidence passes. */
+export async function handleInternalCompleteWorkRunRoute({ req, res, jsonResponse, parseBody, prisma }) {
+  if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+  const principal = await resolvePrincipal(req, prisma);
+  const invalid = principalError(jsonResponse, res, principal);
+  if (invalid) return invalid;
+  const body = await parseBody(req).catch(() => ({}));
+  const sessionId = String(body?.agentscope_session_id || '').trim();
+  if (!sessionId) return jsonResponse(res, { error: 'agentscope_session_id is required' }, 400);
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id FROM "hivemind"."work_runs"
+      WHERE agentscope_session_id = $1 AND user_id = $2::uuid AND org_id = $3::uuid
+      LIMIT 1`,
+    sessionId, principal.userId, principal.orgId,
+  );
+  const workRunId = rows?.[0]?.id;
+  if (!workRunId) return jsonResponse(res, { error: 'bound WorkRun not found' }, 404);
+  const { completeWorkRun } = await import('../employees/work-runs.js');
+  const outcome = await completeWorkRun(prisma, workRunId, {
+    result: { summary: String(body?.summary || '').trim().slice(0, 2000) },
+  });
+  if (!outcome.ok && outcome.reason === 'completion_contract_unmet') {
+    return jsonResponse(res, { status: 'incomplete', ...outcome }, 200);
+  }
+  if (!outcome.ok) return jsonResponse(res, { error: outcome.reason || 'unable to complete WorkRun' }, 409);
+  return jsonResponse(res, { status: 'completed', workrun_id: workRunId, workrun: outcome.run });
 }
 
 export async function handleInternalComposioToolsRoute({

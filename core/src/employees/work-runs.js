@@ -26,6 +26,7 @@
 
 import { internalFetch } from '../internal/internal-fetch.js';
 import { localPlaybooks } from './playbook-catalog.js';
+import { validateWorkRunCompletion } from './workrun-completion.js';
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -136,6 +137,7 @@ export const WORK_RUN_EVENT = Object.freeze({
   TEAM_MEMBER_STARTED: 'team.member.started',
   PLAN: 'plan.updated',
   COMPLETED: 'workrun.completed',
+  COMPLETION_BLOCKED: 'workrun.completion_blocked',
   FAILED: 'workrun.failed',
 });
 
@@ -673,6 +675,27 @@ export async function applyRuntimeEvent(prisma, workRunId, agentScopeEvent) {
  * from a terminal event or from an explicit completion call.
  */
 export async function completeWorkRun(prisma, workRunId, { result = {}, error = null } = {}) {
+  if (!error) {
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT scope, events, result_artifact_ids FROM "hivemind"."work_runs" WHERE id = $1::uuid',
+      workRunId,
+    );
+    const row = rows?.[0];
+    if (!row) return { ok: false, reason: 'not_found' };
+    const verdict = validateWorkRunCompletion({
+      scope: row.scope,
+      events: row.events,
+      resultArtifactIds: row.result_artifact_ids,
+    });
+    if (!verdict.passed) {
+      await appendWorkRunEvent(prisma, workRunId, {
+        t: WORK_RUN_EVENT.COMPLETION_BLOCKED,
+        verdict: { unmet: verdict.unmet },
+        ts: Date.now(),
+      });
+      return { ok: false, reason: 'completion_contract_unmet', verdict };
+    }
+  }
   const to = error ? WORK_RUN_STATUS.FAILED : WORK_RUN_STATUS.COMPLETED;
   const outcome = await transitionWorkRun(prisma, workRunId, to, {
     result,

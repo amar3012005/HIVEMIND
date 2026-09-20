@@ -8,6 +8,7 @@ import pytest
 from hivemind_employees.hyper.campaign_contract import (
     CAMPAIGN_CONTRACT_VERSION,
     assemble_campaign_bundle,
+    campaign_bundle_errors,
     campaign__govern_delivery,
     campaign__submit_plan,
     classify_campaign_errors,
@@ -164,6 +165,56 @@ def test_campaign_compiler_normalizes_offsets_to_the_promised_horizon():
 
     assert [action["scheduled_offset_minutes"] for action in bundle["actions"]] == [0, 9360, 18720]
     assert [row["scheduled_offset_minutes"] for row in bundle["timeline"]] == [0, 9360, 18720]
+
+
+def test_campaign_compiler_normalizes_cited_web_evidence_provenance_and_status():
+    bundle = assemble_campaign_bundle(
+        {
+            "evidence": [{
+                "id": "website-fact",
+                "claim": "The company describes the product as a memory engine.",
+                "source": "Company website",
+                "source_type": "derived",
+                "status": "supported",
+                "url": "https://example.com/product",
+            }],
+            "actions": [],
+        },
+        channels=["instagram"],
+        requirements=["goal", "channel:instagram"],
+        campaign_brief={"brief": {"duration_days": 14}},
+    )
+
+    assert bundle["evidence"][0]["status"] == "verified"
+    assert bundle["evidence"][0]["source_type"] == "web"
+
+
+def test_campaign_compiler_keeps_uncited_derived_evidence_unverified_by_governance():
+    bundle = assemble_campaign_bundle(
+        {
+            "evidence": [{
+                "id": "inference",
+                "claim": "The audience will convert.",
+                "source": "Agent inference",
+                "source_type": "derived",
+                "status": "verified",
+                "url": "",
+            }],
+            "actions": [],
+        },
+        channels=["instagram"],
+        requirements=["goal", "channel:instagram"],
+        campaign_brief={"brief": {"duration_days": 14}},
+    )
+
+    assert bundle["evidence"][0]["source_type"] == "derived"
+    assert "evidence item 1 cannot be verified from a derived source" in campaign_bundle_errors(
+        bundle,
+        ["instagram"],
+        ["goal", "channel:instagram"],
+        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        campaign_brief={"brief": {"duration_days": 14}},
+    )
 
 
 def test_campaign_compiler_completes_missing_creative_hypothesis_links_without_resynthesis():

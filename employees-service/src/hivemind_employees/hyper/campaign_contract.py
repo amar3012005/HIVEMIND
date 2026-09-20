@@ -21,6 +21,18 @@ _EVIDENCE_SOURCE_ALIASES = {
     "connected_provider": "provider",
     "inference": "derived",
 }
+_EVIDENCE_STATUS_ALIASES = {
+    "confirmed": "verified",
+    "grounded": "verified",
+    "fact": "verified",
+    "supported": "verified",
+    "unverified": "assumption",
+    "proposed": "assumption",
+    "inferred": "assumption",
+    "unknown": "missing",
+    "unavailable": "missing",
+    "gap": "missing",
+}
 _NO_CLAIM_OUTCOME_RE = re.compile(
     r"\b(?:case\s+stud(?:y|ies)|(?:we|our\s+(?:team|platform|clients?|customers?))\s+"
     r"(?:help(?:ed|s|ing)?|deliver(?:ed|s|ing)?|accelerat\w*|driv(?:e|es|en|ing)|improv\w*|"
@@ -192,9 +204,18 @@ def assemble_campaign_bundle(
     evidence = [row for row in (plan.get("evidence") or []) if isinstance(row, dict)]
     for index, item in enumerate(evidence):
         item["id"] = str(item.get("id") or f"evidence_{index + 1}")
-        item.setdefault("status", "assumption")
+        status = str(item.get("status") or "assumption").strip().lower().replace("-", "_").replace(" ", "_")
+        item["status"] = _EVIDENCE_STATUS_ALIASES.get(status, status)
         source_type = str(item.get("source_type") or "derived").strip().lower().replace("-", "_").replace(" ", "_")
         source_type = _EVIDENCE_SOURCE_ALIASES.get(source_type, source_type)
+        # A model will occasionally label a cited search result as "derived"
+        # even though the provenance is the linked web page. Source type records
+        # where the evidence came from, not whether its claim is accepted. Keep
+        # the separate status/claim checks authoritative while preserving the
+        # actual web provenance so a valid cited fact can pass deterministic
+        # governance without an unnecessary LLM repair round.
+        if source_type == "derived" and re.match(r"^https?://", str(item.get("url") or "").strip(), re.I):
+            source_type = "web"
         item["source_type"] = source_type if source_type in _EVIDENCE_SOURCE_TYPES else "derived"
         item.setdefault("confidence", "medium" if item.get("status") == "verified" else "low")
         item.setdefault("url", "")

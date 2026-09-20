@@ -2293,3 +2293,26 @@ slides that find no unique anchor get a page instead of `null`.
   assets. A browser reload restored the same in-conversation Visual Studio card
   with `3 images ready`, `100% QUALITY`, and all three assets marked
   `Rendered + reviewed`.
+
+## 2026-09-20 UTC — Muse quality-provider canary
+
+- Released HIVE commit `9646d629cd8639102050ad2987d7365cfc020d27` to Core
+  only. `hm-core` is healthy on `hivemind/core-api:sha-9646d629`; its exact
+  rollback image is `hivemind/core-api:sha-54b429f8`. Harness was not rebuilt
+  or recreated.
+- Quality visual jobs now use `meta/muse-image` through the existing
+  OpenRouter provider routed by Cloudflare AI Gateway. The Worker does not
+  receive an OpenRouter credential. Fast jobs remain on Workers AI Flux.
+- The provider contract is model-aware: Muse receives only fields it supports,
+  accepts 4:5 output, returns PNG/JPEG/WebP safely, and accepts bounded base64
+  reference images for the approved-master-to-variant edit path.
+- Cloudflare Worker `hivemind-visual-generation` is live as
+  `c6ace313-59d8-475c-aa31-2ed6113534a9`; rollback version is
+  `745c8234-7f16-4c65-8106-fc0cc0ef14f3`.
+- Verification: the Core provider canary returned a `meta/muse-image` WebP
+  through OpenRouter and Cloudflare. Durable one-shot job
+  `83483ce4-544a-4529-b817-78d1489a015b` completed on Muse. Durable two-shot
+  job `4d8274b6-55a8-436f-bd63-0350441377b5` completed with two 4:5 WebP assets,
+  both recorded as `openrouter/meta/muse-image`; the second was generated from
+  the first approved master as its reference. Core focused tests passed 9/9;
+  Worker tests, TypeScript checking, and dry-run deploy passed.

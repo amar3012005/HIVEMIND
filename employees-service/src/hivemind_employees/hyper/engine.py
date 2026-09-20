@@ -8331,7 +8331,11 @@ class Director:
                 await self.emit({"t": "growth_stage", "stage": "plan", "status": "complete",
                                  "title": "Growth stage selected", "detail": "One bounded stage and one specialist work order are ready to persist."})
         else:
-            if self.artifact_intent:
+            if (self.artifact_intent or {}).get("kind") == "generated_image":
+                # Rendering consumes the completed research and specialist work.
+                # An image intent does not replace the Director's synthesis.
+                final_text = await self._synthesize(forced_debate, transcript_json)
+            elif self.artifact_intent:
                 # The visual producer is the final synthesizer for ordinary Room
                 # turns; do not pay for a prose report that would be rendered again.
                 final_text = ""

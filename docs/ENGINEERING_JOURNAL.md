@@ -2223,3 +2223,26 @@ slides that find no unique anchor get a page instead of `null`.
   live with DB, Qdrant, and Docling dependencies healthy; the migration tables
   and public unauthenticated Control Plane guard (`401`) were verified; live
   frontend chunks contained the announcement API and Admin UI markers.
+
+## 2026-09-20 UTC — Announcement artifact reader and release reliability
+
+- Released HIVE commit `fa7748817e36a4e18543fe4160e9460152072479` and
+  Da-vinci commit `982f4c9a8810f24daaff8497eb11587e01df0b0a`.
+  Cloudflare Worker version `a489e0a1-6f0d-4e86-88d0-ee2474daed27` serves the
+  reader build.
+- `reader` announcements can now reference a tenant-scoped onboarding web
+  artifact by UUID and render the exact persisted crawl in the shared popup
+  shell. The operator can keep a source URL, facts, Humation agents, and CTA
+  alongside that evidence; the preview URL itself remains organization scoped.
+- The canonical runner now force-refreshes only its local
+  `github/singulance-main` tracking ref before proving ancestry. This repaired
+  a safe pre-build failure caused by a divergent stale tracking ref; the
+  canonical SHA and ancestry gate remain mandatory.
+- The canonical trio release completed successfully with manifest
+  `/root/releases/manifests/fa774881/20260920T194409Z/RELEASE_MANIFEST.json`.
+  `hm-core`, `hm-control`, and `hm-employees` are healthy on their immutable
+  `sha-fa774881` images. Rollback images are Core `sha-fcd4bcdc`, Control
+  Plane `sha-ab8580ba`, and Employees `sha-ab8580ba`; Harness was untouched.
+- Verification: focused lifecycle/announcement tests passed **22/22**;
+  frontend type-check and production build passed; live Cloudflare chunks
+  matched the artifact-reader chunks byte-for-byte.

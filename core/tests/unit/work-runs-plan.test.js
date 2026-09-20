@@ -85,6 +85,18 @@ describe('WorkRun Task tools → plan events (Phase 1)', () => {
     assert.equal(appended[0].tool, 'hivemind_recall');
   });
 
+  it('keeps a bounded tool-result preview for reconnect-safe disclosure', () => {
+    const ev = normalizeAgentScopeEvent({
+      type: 'TOOL_RESULT_END',
+      tool_call_name: 'hivemind_recall',
+      tool_call_id: 'call-1',
+      output: { memories: [{ id: 'm-1', content: 'Known company fact' }] },
+    });
+    assert.equal(ev.t, WORK_RUN_EVENT.TOOL_COMPLETED);
+    assert.match(ev.result, /Known company fact/);
+    assert.equal(ev.state, 'success');
+  });
+
   it('projects AgentScope state_updated tasks without duplicating task ownership', () => {
     const ev = normalizeAgentScopeEvent({
       type: 'CUSTOM',

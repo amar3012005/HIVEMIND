@@ -143,6 +143,22 @@ function isNativeTaskTool(name) {
   return /^Task(Create|Update|List|Get)$/i.test(String(name || ''));
 }
 
+// The transcript remains the authoritative full event history. The WorkRun
+// progress log keeps only an inspectable, bounded result preview so reconnects
+// can reopen a tool row without turning a long tool response into unbounded
+// row state. This is presentation data, never completion evidence.
+function toolResultPreview(event) {
+  const value = event?.output ?? event?.result ?? event?.content ?? event?.value ?? null;
+  if (value == null) return null;
+  let text;
+  try {
+    text = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  return text.slice(0, 12_000);
+}
+
 /** User-visible failure. Never persist a Gateway/OpenAI payload. */
 export function publicWorkRunError(err) {
   const raw = typeof err === 'string'
@@ -214,6 +230,7 @@ export function normalizeAgentScopeEvent(event) {
         call_id: event.tool_call_id || event.id || null,
         family: isNativeTaskTool(tool) ? 'task' : null,
         state: event.state || 'success',
+        result: toolResultPreview(event),
         ts,
       };
     }

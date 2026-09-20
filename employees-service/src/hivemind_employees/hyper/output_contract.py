@@ -26,7 +26,11 @@ EXPLICIT_IMAGE_GENERATION = re.compile(
     r"(?:\b(?:generate|create|make|produce|render|design)\b.{0,100}"
     r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative)\b|"
     r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative)\b.{0,100}"
-    r"\b(?:generate|create|make|produce|render|design)\b)",
+    r"\b(?:generate|create|make|produce|render|design)\b|"
+    r"\b(?:i\s+(?:want|need)|we\s+(?:want|need)|give\s+me)\b.{0,60}"
+    r"\b(?:an?\s+)?(?:image|visual|graphic|artwork|creative)\b|"
+    r"\b(?:final\s+(?:image|visual|graphic|artwork)|visual\s+artifact|"
+    r"(?:image|visual|graphic|creative)\s+(?:set|series))\b)",
     re.I | re.S,
 )
 

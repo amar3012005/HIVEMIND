@@ -47,6 +47,22 @@ def test_explicit_generated_image_uses_durable_visual_contract():
     assert c["artifact_kind"] == "generated_image"
 
 
+def test_direct_visual_language_uses_durable_visual_contract_in_any_room():
+    for message in (
+        "I need a visual for this launch",
+        "Give me a final visual",
+        "Create the campaign plan and a visual artifact",
+        "Produce an image set after the research is complete",
+    ):
+        c = resolve_output_contract(
+            user_message=message,
+            room_kind="general",
+            room_mode="work",
+        )
+        assert c["artifact_required"] is True
+        assert c["artifact_kind"] == "generated_image"
+
+
 def test_explicit_deck_is_artifact():
     c = resolve_output_contract(user_message="Make a pitch deck for EU buyers", room_kind="branding")
     assert c["intended_output"] == "artifact"

@@ -29,6 +29,21 @@ function fakePrisma(company) {
   };
 }
 
+test('Day 0 never claims delivery while the website capture is pending, failed, or missing', async () => {
+  for (const capture of [
+    { screenshot_pending: true },
+    { screenshot_pending: false, screenshot_error: 'website_capture_failed' },
+    { screenshot_pending: false, screenshot: null },
+  ]) {
+    const prisma = fakePrisma({ company: 'Canary Co', website: 'https://canary.example', ...capture });
+    const result = await startDayZeroOnboardingReport({ prisma, orgId: ORG_ID, hqRoomId: ROOM_ID,
+      sendEmail: async () => { throw new Error('must not send'); } });
+    assert.equal(result.accepted, false);
+    assert.equal(result.status, 'waiting_for_preview');
+    assert.equal(prisma.writes.length, 0);
+  }
+});
+
 test('Day 0 reissues an older renderer once, retains its receipt, and sends the current artifact', async () => {
   const prisma = fakePrisma({
     company: 'Canary Co',

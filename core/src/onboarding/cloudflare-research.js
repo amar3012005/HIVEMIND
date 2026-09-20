@@ -43,7 +43,11 @@ async function browserRenderingRequest(path, body, { timeoutMs = 30_000 } = {}) 
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw new Error(`browser_rendering_${path}_${response.status}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const detail = (payload.errors || []).map((error) => error.detail || error.message || '').join('; ').slice(0, 500);
+    throw new Error(`browser_rendering_${path}_${response.status}${detail ? `: ${detail}` : ''}`);
+  }
   return response;
 }
 
@@ -224,10 +228,10 @@ const CAPTURE_READY_SCRIPT = `(() => {
     return ['fixed', 'sticky'].includes(style.position) && coverage >= 0.28 && /(cookie|consent|privacy|accept all)/.test(text);
   });
   (async () => {
-    await document.fonts?.ready?.catch?.(() => {});
+    await Promise.race([document.fonts?.ready?.catch?.(() => {}), wait(3000)]);
     await Promise.all(visibleImages().map(async (image) => {
       if (!image.complete) await Promise.race([new Promise((resolve) => { image.addEventListener('load', resolve, { once: true }); image.addEventListener('error', resolve, { once: true }); }), wait(5000)]);
-      await image.decode?.().catch?.(() => {});
+      await Promise.race([image.decode?.().catch?.(() => {}), wait(3000)]);
     }));
     await nextFrame();
     await nextFrame();
@@ -259,12 +263,14 @@ export async function cfCaptureScreenshot(websiteUrl, {
         addScriptTag: [{ id: 'hivemind-capture-readiness', content: CAPTURE_READY_SCRIPT }],
         screenshotOptions: { fullPage: false, type: 'png', optimizeForSpeed: false },
         viewport: { width: 1440, height: 900, deviceScaleFactor: 1, isMobile: false },
-        gotoOptions: { waitUntil: ['domcontentloaded', 'networkidle2'], timeout: 60_000 },
+        // Analytics, video and live connections can prevent networkidle2 forever.
+        // Wait for the DOM, then explicitly settle the visible page assets.
+        gotoOptions: { waitUntil: 'domcontentloaded', timeout: 20_000 },
         waitForSelector: { selector: 'html[data-hivemind-capture-ready="true"]', visible: true, timeout: 20_000 },
         waitForTimeout: 900 + attempt * 600,
-        actionTimeout: 120_000,
+        actionTimeout: 30_000,
         bestAttempt: false,
-      }, { timeoutMs: 120_000 });
+      }, { timeoutMs: 50_000 });
       const buffer = await response.arrayBuffer();
       const bytes = new Uint8Array(buffer);
       if (!isAcceptableHomepageScreenshot(bytes, response.headers.get('content-type'))) {

@@ -58,6 +58,12 @@ export async function startDayZeroOnboardingReport({
   const reissue = Boolean(allowVersionedReissue && prior.status === 'sent' && prior.version !== DAY_ZERO_REPORT_VERSION);
   if (prior.status === 'sent' && !reissue) return { ok: true, accepted: false, status: 'sent', version: prior.version || null };
   if (isActiveSendingLease(prior)) return { ok: true, accepted: false, status: 'sending', version: prior.version || null };
+  // Every entry point (including dashboard/worker retries) must wait for the
+  // capture state persisted by onboarding before claiming a report delivery.
+  if (company.screenshot_pending === true || company.screenshot_error ||
+      (company.screenshot_pending === false && !company.screenshot)) {
+    return { ok: true, accepted: false, status: 'waiting_for_preview', reason: 'website_preview_not_ready' };
+  }
 
   const claimedAt = new Date().toISOString();
   const claimState = {

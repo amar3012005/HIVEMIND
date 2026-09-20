@@ -31,7 +31,7 @@ test('Cloudflare capture waits for live render readiness and retries rejected fr
   assert.match(result, /^data:image\/png;base64,/);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].path, 'screenshot');
-  assert.deepEqual(calls[0].body.gotoOptions.waitUntil, ['domcontentloaded', 'networkidle2']);
+  assert.equal(calls[0].body.gotoOptions.waitUntil, 'domcontentloaded');
   assert.deepEqual(calls[0].body.viewport, { width: 1440, height: 900, deviceScaleFactor: 1, isMobile: false });
   assert.match(calls[0].body.waitForSelector.selector, /data-hivemind-capture-ready/);
   assert.match(calls[0].body.addScriptTag[0].content, /document\.fonts/);

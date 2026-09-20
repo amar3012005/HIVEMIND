@@ -11936,7 +11936,25 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       if (!await requirePrivilegedAgentAccess(req, res, current)) return;
-      const job = _hyperOnboardJobs.get(current.session.orgId);
+      let job = _hyperOnboardJobs.get(current.session.orgId);
+      if (!job) {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, agent_connectors->'_company' AS company FROM hivemind.hyper_rooms
+           WHERE org_id=$1::uuid AND archived_at IS NULL AND agent_connectors ? '_company'
+           ORDER BY created_at DESC LIMIT 1`, current.session.orgId,
+        );
+        if (rows?.[0]?.company) {
+          const result = { ...rows[0].company, room_id: rows[0].id };
+          // No capture worker survives a process restart. Expose a retryable
+          // failure instead of restoring a permanent spinner.
+          if (result.screenshot_pending) {
+            result.screenshot_pending = false;
+            result.screenshot_error = 'website_capture_interrupted';
+          }
+          job = { done: true, result, lines: [], error: null };
+          _hyperOnboardJobs.set(current.session.orgId, job);
+        }
+      }
       if (!job) return jsonResponse(res, { running: false, lines: [], done: false });
       // A completed job whose HQ room was since DELETED is stale — serving it
       // trapped the FE in a done-screen loop (Enter → /company 404 → fallback
@@ -11966,7 +11984,18 @@ Write the persona now.`;
       if (!current) return;
       if (!await requirePrivilegedAgentAccess(req, res, current)) return;
       const orgId = current.session.orgId;
-      const job = _hyperOnboardJobs.get(orgId);
+      let job = _hyperOnboardJobs.get(orgId);
+      if (!job) {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, agent_connectors->'_company' AS company FROM hivemind.hyper_rooms
+           WHERE org_id=$1::uuid AND archived_at IS NULL AND agent_connectors ? '_company'
+           ORDER BY created_at DESC LIMIT 1`, orgId,
+        );
+        if (rows?.[0]?.company) {
+          job = { done: true, result: { ...rows[0].company, room_id: rows[0].id, screenshot_pending: false }, lines: [] };
+          _hyperOnboardJobs.set(orgId, job);
+        }
+      }
       const websiteUrl = job?.result?.website;
       if (!job?.done || !job.result || !websiteUrl) return jsonResponse(res, { error: 'completed onboarding not found' }, 404);
       if (job.result.screenshot_pending) return jsonResponse(res, { ok: true, already_running: true }, 202);
@@ -11980,10 +12009,16 @@ Write the persona now.`;
         job.lines.push({ ts: Date.now(), text: visual ? 'Website preview ready' : 'Website capture failed — retry when the homepage is available' });
         try {
           await prisma.$executeRawUnsafe(
-            'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
-            JSON.stringify({ _company: job.result }), job.result.room_id,
+            `UPDATE hivemind.hyper_rooms SET agent_connectors=jsonb_set(agent_connectors, '{_company}',
+              (agent_connectors->'_company') || $1::jsonb) WHERE id=$2::uuid AND org_id=$3::uuid`,
+            JSON.stringify({ screenshot: job.result.screenshot, website_visual_source: job.result.website_visual_source,
+              screenshot_pending: false, screenshot_error: job.result.screenshot_error }), job.result.room_id, orgId,
           );
-        } catch (error) { console.warn('[hyper-onboarding] website preview retry persist failed:', error.message); }
+        } catch (error) { console.warn('[hyper-onboarding] website preview retry persist failed:', error.message); throw error; }
+        if (visual) {
+          const started = await startDayZeroLifecycle({ prisma, orgId, hqRoomId: job.result.room_id, userId: current.session.userId });
+          if (started.accepted) await started.completion;
+        }
       })().catch((error) => {
         job.result.screenshot_pending = false;
         job.result.screenshot_error = 'website_capture_failed';
@@ -12136,6 +12171,10 @@ Write the persona now.`;
           // links that the company actually exposes. Never invent conventional
           // /about, /product, or /pricing paths.
           const homepageUrl = `https://${host}/`;
+          // Capture starts with research so website rendering does not add a
+          // second serial phase after the company and team have been created.
+          const homepageVisualPromise = captureWebsiteScreenshot(homepageUrl)
+            .catch((error) => { console.warn('[hyper-onboarding] capture failed:', error.message); return null; });
           const fetchPage = async (pageUrl) => {
             say(`Fetching: ${pageUrl}...`);
             const ac = new AbortController();
@@ -12753,11 +12792,10 @@ Write the persona now.`;
           // Day 0 belongs to the durable onboarding completion, not to a
           // later dashboard mount. The claim makes re-onboarding/retries safe;
           // the tenant-scoped Cloudflare Day-0 flag controls this entry point.
-          void startDayZeroLifecycle({ prisma, orgId, hqRoomId: room.id, userId })
-            .then((started) => started.accepted ? started.completion : null)
-            .catch((error) => console.warn('[hyper-onboarding] day-0 lifecycle failed:', error.message));
           void (async () => {
-            const visual = await captureValidatedHomepageVisual({ websiteUrl: homepage.url || homepageUrl, orgId });
+            const rendered = await homepageVisualPromise;
+            const storedScreenshot = await storeRenderedWebsiteVisual({ screenshot: rendered, orgId });
+            const visual = storedScreenshot ? { screenshot: storedScreenshot, source: 'cloudflare-browser-rendering' } : null;
             resultPayload.screenshot = visual?.screenshot || null;
             resultPayload.website_visual_source = visual?.source || null;
             resultPayload.screenshot_pending = false;
@@ -12767,13 +12805,17 @@ Write the persona now.`;
             else say('Website capture failed — retry when the homepage is available');
             try {
               await prisma.$executeRawUnsafe(
-                'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
-                JSON.stringify({ _company: resultPayload }), room.id,
+                `UPDATE hivemind.hyper_rooms SET agent_connectors=jsonb_set(agent_connectors, '{_company}',
+                  (agent_connectors->'_company') || $1::jsonb) WHERE id=$2::uuid AND org_id=$3::uuid`,
+                JSON.stringify({ screenshot: resultPayload.screenshot, website_visual_source: resultPayload.website_visual_source,
+                  screenshot_pending: false, screenshot_error: resultPayload.screenshot_error }), room.id, orgId,
               );
-            } catch (error) { console.warn('[hyper-onboarding] website preview persist failed:', error.message); }
-            // Day 0 was already claimed from the durable onboarding completion.
-            // Screenshot enrichment must never become a lifecycle dependency.
-          })();
+            } catch (error) { console.warn('[hyper-onboarding] website preview persist failed:', error.message); throw error; }
+            if (visual) {
+              const started = await startDayZeroLifecycle({ prisma, orgId, hqRoomId: room.id, userId });
+              if (started.accepted) await started.completion;
+            }
+          })().catch((error) => console.warn('[hyper-onboarding] preview completion failed:', error.message));
           console.info('[hyper-onboarding] timing', JSON.stringify({
             org_id: orgId,
             company: companyName,

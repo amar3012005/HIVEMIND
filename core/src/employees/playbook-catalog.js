@@ -8,24 +8,28 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
     name: 'General',
     description: 'Inspect this catalog, pick a more specific playbook, then execute it.',
     scope: 'global',
+    version: '1.0.0',
   },
   {
     id: 'global:prospect-discovery',
     name: 'Prospect Discovery',
     description: 'Discover, verify and qualify ICP-matching companies.',
     scope: 'global',
+    version: '1.0.0',
   },
   {
     id: 'global:market-research',
     name: 'Market Research',
     description: 'Map a market with sourced evidence and a written brief.',
     scope: 'global',
+    version: '1.0.0',
   },
   {
     id: 'global:competitive-analysis',
     name: 'Competitive Analysis',
     description: 'Compare named competitors on positioning, product, and GTM.',
     scope: 'global',
+    version: '1.0.0',
   },
 ]);
 
@@ -65,6 +69,7 @@ function scopedPlaybooks(value, scope) {
           : 'Organization-specific operating guidance.'
       )).trim(),
       scope,
+      version: String(object.version || '1.0.0').trim().slice(0, 80) || '1.0.0',
       instructions,
     };
   }).filter(Boolean);
@@ -112,7 +117,7 @@ const BODIES = Object.freeze({
 
 export function listPlaybooks({ orgPlaybooks = [], localPlaybooks: local = [] } = {}) {
   return [...GLOBAL_PLAYBOOKS, ...orgPlaybooks, ...local]
-    .map(({ id, name, description, scope }) => ({ id, name, description, scope }));
+    .map(({ id, name, description, scope, version }) => ({ id, name, description, scope, version }));
 }
 
 export function getPlaybook(id, { orgPlaybooks = [], localPlaybooks: local = [] } = {}) {

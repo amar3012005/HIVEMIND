@@ -106,11 +106,12 @@ export function canTransition(from, to) {
 export function runtimeScopeProjection(scope) {
   if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return {};
   const { local_playbooks: local, ...compactScope } = scope;
-  const localMetadata = localPlaybooks(local).map(({ id, name, description, scope: playbookScope }) => ({
+  const localMetadata = localPlaybooks(local).map(({ id, name, description, scope: playbookScope, version }) => ({
     id,
     name,
     description,
     scope: playbookScope,
+    version,
   }));
   return localMetadata.length ? { ...compactScope, local_playbooks: localMetadata } : compactScope;
 }

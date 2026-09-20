@@ -29,7 +29,9 @@ function routeHarness(body) {
         userOrganization: { findFirst: async () => ({ orgId: ORG_ID }) },
         $queryRawUnsafe: async (sql, ...params) => {
           queries.push({ sql, params });
+          if (sql.includes('UPDATE "hivemind"."work_runs"')) return [];
           return [{
+            id: '33333333-3333-4333-8333-333333333333',
             room_playbook: {
               id: 'org-sales',
               name: 'Organization sales',
@@ -59,6 +61,7 @@ test('the session-bound PlaybookList returns global, org, and local metadata onl
   assert.ok(harness.response().body.playbooks.some((entry) => entry.id === 'org:org-sales'));
   assert.ok(harness.response().body.playbooks.some((entry) => entry.id === 'local:launch-overlay'));
   assert.ok(harness.response().body.playbooks.every((entry) => !Object.hasOwn(entry, 'instructions')));
+  assert.ok(harness.response().body.playbooks.every((entry) => entry.version === '1.0.0'));
   assert.deepEqual(harness.queries[0].params, [SESSION_ID, USER_ID, ORG_ID]);
 });
 
@@ -72,6 +75,15 @@ test('the session-bound PlaybookGet loads only the selected local body', async (
     name: 'Launch overlay',
     description: 'WorkRun-local operating guidance.',
     scope: 'local',
+    version: '1.0.0',
     instructions: 'Use current launch constraints.',
   });
+  assert.match(harness.queries[1].sql, /SET playbook_id = \$2, playbook_version = \$3/);
+  assert.deepEqual(harness.queries[1].params, [
+    '33333333-3333-4333-8333-333333333333',
+    'local:launch-overlay',
+    '1.0.0',
+    USER_ID,
+    ORG_ID,
+  ]);
 });

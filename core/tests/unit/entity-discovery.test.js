@@ -25,6 +25,56 @@ test('entity finder caps output and exposes only safe discovery fields', () => {
   assert.deepEqual(Object.keys(match).sort(), ['aliases', 'canonical_name', 'entity_id', 'entity_type', 'last_seen_at', 'match', 'mention_count']);
 });
 
+test('entity finder tolerates bounded spelling mistakes', () => {
+  const matches = rankEntityMatches(ENTITIES, 'Bergr', 12);
+  assert.equal(matches[0].canonical_name, 'Uwe Berger');
+  assert.equal(matches[0].match, 'fuzzy');
+});
+
+test('entity finder merges canonical, legacy and tag identities by normalized name', async () => {
+  const prisma = {
+    entity: { findMany: async () => [{
+      id: 'legacy-solvispia', canonicalName: 'SolvisPia', entityType: 'product',
+      aliases: ['Pia'], mentionCount: 2, lastSeenAt: '2026-09-10T00:00:00Z',
+    }] },
+    canonicalEntity: { findMany: async () => [{
+      id: 'canonical-solvispia', canonicalName: 'SolvisPia', entityKind: 'product',
+      aliases: ['Solvis Pia'], updatedAt: '2026-09-12T00:00:00Z',
+    }] },
+    memoryEntityLink: { findMany: async () => [{ entityId: 'canonical-solvispia', memoryId: 'memory-1' }] },
+    memory: { findMany: async () => [] },
+  };
+  const memoryStore = {
+    listMemories: async () => ({ memories: [{
+      id: 'memory-1', scope: 'organization', created_at: '2026-09-12T00:00:00Z', tags: ['entity:solvispia'],
+    }] }),
+  };
+  const result = await findEntities({
+    prisma, memoryStore, orgId: 'org', userId: 'user', query: 'SolvisPia', accessContext: { orgRole: 'owner' },
+  });
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].entity_id, 'canonical-solvispia');
+  assert.deepEqual(result.matches[0].aliases.sort(), ['Pia', 'Solvis Pia']);
+});
+
+test('entity finder includes active workspace members as person identities', async () => {
+  const prisma = {
+    entity: { findMany: async () => [] },
+    canonicalEntity: { findMany: async () => [] },
+    memoryEntityLink: { findMany: async () => [] },
+    memory: { findMany: async () => [] },
+    userOrganization: { findMany: async () => [{
+      userId: 'amar-id', role: 'owner', joinedAt: '2026-09-01T00:00:00Z',
+      user: { displayName: 'Amar', email: 'amar@example.com', updatedAt: '2026-09-12T00:00:00Z' },
+    }] },
+  };
+  const memoryStore = { listMemories: async () => ({ memories: [] }) };
+  const result = await findEntities({ prisma, memoryStore, orgId: 'org', userId: 'amar-id', query: 'AMAR' });
+  assert.equal(result.matches[0].entity_id, 'member:amar-id');
+  assert.equal(result.matches[0].canonical_name, 'Amar');
+  assert.equal(result.matches[0].entity_type, 'person');
+});
+
 test('agent-backed memories expose only authorized entity tags and revalidate issued tag ids', async () => {
   const prisma = {
     entity: { findMany: async () => [] },

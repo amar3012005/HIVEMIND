@@ -20,7 +20,6 @@ import { loadTypedGraphEvidence, buildEvidencePacket } from '../memory/recall-ro
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { normalizeEntity } from '../memory/entity-normalize.js';
 import { findEntities, resolveAuthorizedEntityIds } from '../memory/entity-discovery.js';
-import { entityDiscoveryCanaryFor } from '../employees/cloudflare-hyper-planner-client.js';
 import {
   CANONICAL_MEMORY_TYPES,
   normalizeMemoryType,
@@ -493,11 +492,6 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_find_entities(args, ctx) {
-    const principalUser = ctx.prisma?.user
-      ? await ctx.prisma.user.findUnique({ where: { id: ctx.userId }, select: { email: true } }).catch(() => null)
-      : null;
-    const enabled = await entityDiscoveryCanaryFor({ orgId: ctx.orgId, userId: ctx.userId, email: principalUser?.email });
-    if (!enabled) return { error: 'feature_unavailable' };
     const result = await findEntities({
       prisma: ctx.prisma,
       memoryStore: ctx.persistentMemoryStore,
@@ -506,7 +500,7 @@ const TOOL_HANDLERS = {
       query: args.query,
       entityTypes: args.entity_types || [],
       scope: args.scope || null,
-      limit: args.limit || 12,
+      limit: args.limit || 25,
       accessContext: ctx.accessContext || {},
       projectId: ctx.projectId || null,
     });

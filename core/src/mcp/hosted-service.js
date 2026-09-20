@@ -607,7 +607,7 @@ Returns { id, name, slug, description, status, created_at }; pass the returned i
           query: { type: 'string', description: 'Partial or ambiguous entity name.' },
           entity_types: { type: 'array', items: { type: 'string' }, description: 'Optional entity type filters.' },
           scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Optional authorized scope boundary. Omit for the complete tenant-authorized entity inventory.' },
-          limit: { type: 'integer', minimum: 1, maximum: 25, default: 12 },
+          limit: { type: 'integer', minimum: 1, maximum: 25, default: 25 },
         },
         required: ['query'],
       },
@@ -2835,7 +2835,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
               ? { entity_type: args.entity_types.join(',') }
               : {}),
             ...(typeof args.scope === 'string' && args.scope.trim() ? { scope: args.scope.trim() } : {}),
-            limit: Math.max(1, Math.min(Number(args.limit) || 12, 25)),
+            limit: Math.max(1, Math.min(Number(args.limit) || 25, 25)),
           },
         });
         return formatToolContent(result);

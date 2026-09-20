@@ -10982,10 +10982,6 @@ exit \$RC
         const query = String(url.searchParams.get('query') || '').trim();
         if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
         try {
-          const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
-          const { entityDiscoveryCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
-          const enabled = await entityDiscoveryCanaryFor({ orgId, userId, email: principalUser?.email });
-          if (!enabled) return jsonResponse(res, { error: 'feature_unavailable' }, 404);
           const entityTypes = url.searchParams.getAll('entity_type')
             .flatMap((value) => String(value || '').split(','))
             .map((value) => value.trim())
@@ -10997,7 +10993,7 @@ exit \$RC
             userId,
             query,
             entityTypes,
-            limit: Number(url.searchParams.get('limit')) || 12,
+            limit: Number(url.searchParams.get('limit')) || 25,
             accessContext: await buildAccessContext(userId, orgId).catch(() => null),
             projectId: url.searchParams.get('project_id') || null,
             scope: url.searchParams.get('scope') || null,
@@ -13283,22 +13279,17 @@ exit \$RC
         // baseline Brain features remain available and every canary is off.
         case '/api/brain/capabilities':
           if (req.method === 'GET') {
-            const [admission, entityDiscovery] = await Promise.all([
+            const admission = await (
               cloudflareChatSessionClient
                 .admissionFor({ orgId, userId })
-                .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false })),
-              (async () => {
-                const principalUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
-                const { entityDiscoveryCanaryFor } = await import('./employees/cloudflare-hyper-planner-client.js');
-                return entityDiscoveryCanaryFor({ orgId, userId, email: principalUser?.email });
-              })(),
-            ]);
+                .catch(() => ({ meetingLifecycleMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false }))
+            );
             return jsonResponse(res, {
               capabilities: {
                 connectors: { enabled: true }, memories: { enabled: true },
                 meeting_notes: { enabled: true, consent_v2: admission.meetingLifecycleMode === 'consent' },
                 graph: { enabled: true }, knowledge: { enabled: true }, mcp: { enabled: true },
-                entity_discovery: { enabled: entityDiscovery === true },
+                entity_discovery: { enabled: true },
                 chat: { enabled: true, unified_dag: admission.unifiedDag === true,
                   orchestrator_v2_mode: admission.orchestratorV2Mode || 'off',
                   compound_orchestrator: admission.compoundOrchestrator === true },

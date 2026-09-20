@@ -12,7 +12,7 @@ export const TOOL_SCHEMAS = [
           query: { type: 'string', description: 'Partial or ambiguous person, organization, project, or document entity name.' },
           entity_types: { type: 'array', items: { type: 'string' }, maxItems: 8, description: 'Optional canonical entity-type filters.' },
           scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Optional authorized scope boundary. Omit for all entities visible in the organization; never invent a scope.' },
-          limit: { type: 'integer', minimum: 1, maximum: 25, default: 12 },
+          limit: { type: 'integer', minimum: 1, maximum: 25, default: 25 },
         },
         required: ['query'],
       },

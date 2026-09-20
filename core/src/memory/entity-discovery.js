@@ -10,6 +10,33 @@ const normalize = (value) => String(value || '').normalize('NFKC').trim().toLoca
 const words = (value) => normalize(value).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 const entitySlug = (value) => normalize(value).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
 
+function editDistance(left, right) {
+  const a = normalize(left);
+  const b = normalize(right);
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+function fuzzyWordMatch(queryWord, candidateWord) {
+  if (queryWord.length < 4 || candidateWord.length < 4) return false;
+  const allowance = Math.max(queryWord.length, candidateWord.length) >= 8 ? 2 : 1;
+  return editDistance(queryWord, candidateWord) <= allowance;
+}
+
 // Entity discovery is an authorized inventory browser.  An omitted scope is
 // deliberately the whole authorized organization; an explicit scope narrows
 // that inventory before matching and ranking.  Do not silently turn an
@@ -74,6 +101,8 @@ function matchKind(entity, query) {
   if (queryWords.some((queryWord) => canonicalWords.some((word) => word.startsWith(queryWord)))) return 'canonical_prefix';
   if (queryWords.some((queryWord) => aliasWords.some((word) => word.startsWith(queryWord)))) return 'alias_prefix';
   if (q.length >= 4 && (canonical.includes(q) || aliases.some((alias) => alias.includes(q)))) return 'substring';
+  const candidates = [...canonicalWords, ...aliasWords];
+  if (queryWords.some((queryWord) => candidates.some((word) => fuzzyWordMatch(queryWord, word)))) return 'fuzzy';
   return null;
 }
 
@@ -83,9 +112,10 @@ const MATCH_ORDER = Object.freeze({
   canonical_prefix: 2,
   alias_prefix: 3,
   substring: 4,
+  fuzzy: 5,
 });
 
-export function rankEntityMatches(entities, query, limit = 12) {
+export function rankEntityMatches(entities, query, limit = MAX_LIMIT) {
   return (entities || [])
     .map((entity) => ({ entity, match: matchKind(entity, query) }))
     .filter((row) => row.match)
@@ -181,11 +211,24 @@ function visibleMemoryWhere({ orgId, userId, accessContext = {}, projectId = nul
 function dedupeRows(rows = []) {
   const winners = new Map();
   for (const row of rows) {
-    const key = `${normalize(row.entityType)}\u0000${normalize(row.canonicalName)}`;
+    // All registries describe the same user-facing identity. Entity kind is
+    // metadata, not part of identity: a tag-backed `entity:solvispia` and a
+    // canonical `product / SolvisPia` must collapse into one chooser result.
+    const key = entitySlug(row.canonicalName);
     const previous = winners.get(key);
-    // Canonical links are written by the current ingestion path, so prefer
-    // them on an otherwise identical entity identity.
-    if (!previous || (row._canonical && !previous._canonical)) winners.set(key, row);
+    if (!previous) {
+      winners.set(key, { ...row });
+      continue;
+    }
+    const preferred = row._canonical && !previous._canonical ? row : previous;
+    const secondary = preferred === row ? previous : row;
+    winners.set(key, {
+      ...secondary,
+      ...preferred,
+      aliases: [...new Set([...(previous.aliases || []), ...(row.aliases || [])])],
+      mentionCount: Math.max(Number(previous.mentionCount || 0), Number(row.mentionCount || 0)),
+      lastSeenAt: [previous.lastSeenAt, row.lastSeenAt].filter(Boolean).sort().at(-1) || null,
+    });
   }
   return [...winners.values()];
 }
@@ -297,15 +340,53 @@ async function authorizedTagRows({ memoryStore, orgId, userId, accessContext, pr
   return [...stats.values()];
 }
 
+async function authorizedMemberRows({ prisma, orgId, memberIds = [], entityTypes = [], scopeFilter = null }) {
+  if (!prisma?.userOrganization) return [];
+  if (scopeFilter && scopeFilter !== 'organization' && scopeFilter !== 'team' && scopeFilter !== 'project') return [];
+  const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
+  if (types.length && !types.includes('person') && !types.includes('user')) return [];
+  const ids = [...new Set((memberIds || []).map(String).filter(Boolean))];
+  const memberships = await prisma.userOrganization.findMany({
+    where: {
+      orgId,
+      isActive: true,
+      ...(ids.length ? { userId: { in: ids } } : {}),
+    },
+    select: {
+      userId: true,
+      role: true,
+      joinedAt: true,
+      user: { select: { displayName: true, email: true, updatedAt: true } },
+    },
+    take: ids.length ? ids.length : MAX_CANDIDATES,
+  });
+  return memberships
+    .filter((membership) => membership.user?.displayName || membership.user?.email)
+    .map((membership) => {
+      const email = String(membership.user?.email || '').trim();
+      const emailName = email.split('@')[0] || '';
+      return {
+        id: `member:${membership.userId}`,
+        canonicalName: membership.user?.displayName || emailName,
+        entityType: 'person',
+        aliases: [...new Set([emailName, email].filter(Boolean))],
+        mentionCount: 0,
+        lastSeenAt: membership.user?.updatedAt || membership.joinedAt || null,
+        _member: true,
+      };
+    });
+}
+
 async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds, entityTypes }) {
   if (!prisma) return { rows: [], degraded: 'entity_index_unavailable' };
   try {
     const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
     const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
     const tagSlugs = ids.filter((id) => id.startsWith('tag:')).map((id) => entitySlug(id.slice(4))).filter(Boolean);
-    const registryIds = ids.filter((id) => !id.startsWith('tag:'));
-    const onlyTagIds = ids.length > 0 && registryIds.length === 0;
-    const legacy = prisma.entity && !onlyTagIds
+    const memberIds = ids.filter((id) => id.startsWith('member:')).map((id) => id.slice('member:'.length)).filter(Boolean);
+    const registryIds = ids.filter((id) => !id.startsWith('tag:') && !id.startsWith('member:'));
+    const onlyNonRegistryIds = ids.length > 0 && registryIds.length === 0;
+    const legacy = prisma.entity && !onlyNonRegistryIds
       ? prisma.entity.findMany({
           where: {
             orgId,
@@ -319,9 +400,9 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
           take: registryIds.length ? registryIds.length : MAX_CANDIDATES,
         })
       : Promise.resolve([]);
-    const [legacyRows, canonicalRows, tagRows] = await Promise.all([
+    const [legacyRows, canonicalRows, tagRows, memberRows] = await Promise.all([
       legacy,
-      onlyTagIds
+      onlyNonRegistryIds
         ? Promise.resolve([])
         : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds: registryIds, entityTypes: types }),
       // Discovery without an ID may enumerate tag-backed entities. Resolution
@@ -331,14 +412,17 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
       (tagSlugs.length || ids.length === 0)
         ? authorizedTagRows({ memoryStore, orgId, userId, accessContext, projectId, scopeFilter, tagSlugs, entityTypes: types })
         : Promise.resolve([]),
+      (memberIds.length || ids.length === 0)
+        ? authorizedMemberRows({ prisma, orgId, memberIds, entityTypes: types, scopeFilter })
+        : Promise.resolve([]),
     ]);
-    return { rows: dedupeRows([...legacyRows, ...canonicalRows, ...(tagRows || [])]), degraded: null };
+    return { rows: dedupeRows([...legacyRows, ...canonicalRows, ...(tagRows || []), ...(memberRows || [])]), degraded: null };
   } catch {
     return { rows: [], degraded: 'entity_index_unavailable' };
   }
 }
 
-export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = 12, accessContext = {}, projectId = null, scope = null } = {}) {
+export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = MAX_LIMIT, accessContext = {}, projectId = null, scope = null } = {}) {
   if (!String(query || '').trim()) return { matches: [], degraded: null };
   const { scopeFilter, error } = normalizeEntityScope(scope);
   if (error) return { matches: [], degraded: null, error };

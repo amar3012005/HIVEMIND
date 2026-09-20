@@ -197,7 +197,20 @@ function workflowId(discovery) {
   return discovery?.workflowSessionId || discovery?.searchResponse?.data?.session?.id || discovery?.session?.id || null;
 }
 
-async function defaultConnectedExecutor(args, state, ctx, composio) {
+function narrowConnectedSearch(compact, slug) {
+  return {
+    ...compact,
+    results: (compact.results || []).map(row => ({
+      ...row,
+      primary_tool_slugs: (row.primary_tool_slugs || []).filter(value => value === slug),
+      related_tool_slugs: (row.related_tool_slugs || []).filter(value => value === slug),
+    })).filter(row => row.primary_tool_slugs.length || row.related_tool_slugs.length),
+    decision_selection: { stage: 'composio_selection', selected_tool_slug: slug, authoritative: true },
+    next_steps_guidance: `Use only ${slug} for this request. Do not execute any other discovered action.`,
+  };
+}
+
+async function defaultConnectedExecutor(args, state, ctx, composio, decisionStage = decideRuntimeStage, onDecision = () => {}) {
   const action = String(args.action || '');
   if (action === 'search') {
     const queries = Array.isArray(args.queries) ? args.queries.slice(0, 8) : [];
@@ -246,7 +259,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
         search_strategy: args.search_strategy || 'auto',
       },
     });
-    const compact = compactConnectedSearch(discovery.searchResponse || {
+    let compact = compactConnectedSearch(discovery.searchResponse || {
       data: {
         results: useCases.map(use_case => ({
           use_case,
@@ -259,11 +272,47 @@ async function defaultConnectedExecutor(args, state, ctx, composio) {
         session: workflowId(discovery) ? { id: workflowId(discovery) } : null,
       },
     });
+    let primarySlugs = [...new Set(discovery.primaryToolSlugs || [])];
+    let selectedSlugs = [...new Set([...(discovery.primaryToolSlugs || []), ...(discovery.relatedToolSlugs || [])])];
+    // Even one returned provider action still competes with ask/fallback and
+    // must be validated against the original request. Jev owns that bounded
+    // post-search choice; the existing selector remains the same-turn fallback.
+    if (Array.isArray(discovery.tools) && discovery.tools.length > 0) {
+      let decision;
+      try {
+        decision = await decisionStage({
+          runtime: 'legacy', stage: 'composio_selection', turn_id: state.runId,
+          user_query: ctx.requestMessage, actor_id: ctx.userId, context: state.context,
+          discovery: {
+            sessionId: discovery.sessionId,
+            workflowSessionId: discovery.workflowSessionId,
+            tools: discovery.tools,
+            toolkitConnectionStatuses: discovery.toolkitConnectionStatuses || {},
+          },
+          progress: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
+        }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
+      } catch (error) {
+        decision = { status: 'defer', selected: null, authoritative: false,
+          receipt: { source: 'fallback', reason: compactText(error?.message || error || 'decision_gateway_unavailable', 240) } };
+      }
+      onDecision({ stage: 'composio_selection', status: decision.status, selected: decision.selected || null,
+        source: decision.receipt?.source || 'fallback', authoritative: decision.authoritative === true,
+        probability: decision.receipt?.probability ?? null, margin: decision.receipt?.margin ?? null,
+        request_id: decision.receipt?.requestId || null, run_id: state.runId });
+      if (decision.status === 'selected' && decision.authoritative === true && String(decision.selected || '').startsWith('use:')) {
+        const selected = String(decision.selected).slice(4);
+        if (selectedSlugs.includes(selected)) {
+          primarySlugs = [selected];
+          selectedSlugs = [selected];
+          compact = narrowConnectedSearch(compact, selected);
+        }
+      }
+    }
     return {
       successful: true, data: compact,
       state: {
-        primarySlugs: [...new Set(discovery.primaryToolSlugs || [])],
-        selectedSlugs: [...new Set([...(discovery.primaryToolSlugs || []), ...(discovery.relatedToolSlugs || [])])],
+        primarySlugs,
+        selectedSlugs,
         sessionId: discovery.sessionId || state.sessionId,
         workflowSessionId: workflowId(discovery) || state.workflowSessionId,
         connectionScope,
@@ -372,6 +421,12 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const runMeta = metaExecutor || defaultMetaExecutor;
   const runConnected = connectedExecutor || defaultConnectedExecutor;
   const ledger = new GovernedAgentEventLedger({ prisma });
+  const emitDecision = event => {
+    onEvent({ type: 'decision', ...event });
+    if (event.source === 'jev' || event.source === 'deterministic') {
+      console.info(`[JevDecision] ${JSON.stringify({ runtime: 'legacy', ...event })}`);
+    }
+  };
 
   const ensureRun = async runId => {
     if (!prisma?.agentRun?.create || !runId) return;
@@ -460,8 +515,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       tools = decision.status === 'selected' && decision.authoritative
         ? decisionToolSurface(decision.selected, useTools)
         : unifiedMetaTools({ useTools });
-      onEvent({ type: 'decision', stage: 'capability', status: decision.status, selected: decision.selected || null,
-        source: decision.receipt?.source || 'fallback', authoritative: decision.authoritative === true, run_id: state.runId });
+      emitDecision({ stage: 'capability', status: decision.status, selected: decision.selected || null,
+        source: decision.receipt?.source || 'fallback', authoritative: decision.authoritative === true,
+        probability: decision.receipt?.probability ?? null, margin: decision.receipt?.margin ?? null,
+        request_id: decision.receipt?.requestId || null, run_id: state.runId });
     }
     const turn = await callModel({
       messages: modelMessages, tools, model: ctx.model,
@@ -520,7 +577,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     }
     let receipt = call.name === 'hivemind_meta'
       ? await runMeta(call.args, ctx, state)
-      : await runConnected(call.args, state, ctx, composio);
+      : await runConnected(call.args, state, ctx, composio, decisionStage, emitDecision);
     const statePatch = receipt?.state || {};
     if (receipt?.approval) {
       const row = await createApproval(prisma, ctx, state, receipt.approval);

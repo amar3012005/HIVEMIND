@@ -109,20 +109,26 @@ async function websiteFallbackReference(env: Env, context: ContextReceipt): Prom
   return { bytes, contentType: imageContentType(bytes, response.headers.get('content-type') || ''), model: 'browser-rendered-homepage', prompt: '' };
 }
 async function critique(env: Env, image: Generated, spec: any) {
-  const model = env.VISUAL_CRITIC_MODEL || '@cf/meta/llama-3.2-11b-vision-instruct';
+  const model = env.VISUAL_CRITIC_MODEL || '@cf/qwen/qwen3.8-27b';
   let binary = ''; for (let offset = 0; offset < image.bytes.length; offset += 0x8000) binary += String.fromCharCode(...image.bytes.subarray(offset, offset + 0x8000));
   const dataUri = `data:${image.contentType};base64,${btoa(binary)}`;
   try {
     const result = await (env.AI as any).run(model, {
       messages: [
         { role: 'system', content: 'Return strict JSON only.' },
-        { role: 'user', content: `Act as a strict senior visual-design critic. Inspect every visible pixel before deciding. This asset must be rejected if it contains any readable or pseudo-readable word, letter, number, caption, UI label, watermark, brand name, logo, signature, or glyph. Exact official marks are applied only after this check, outside the generated pixels. When uncertain, treat it as present. Return JSON only: {score,needs_revision,contains_visible_text_or_mark,revision_instruction,findings}. Contract: ${JSON.stringify(spec).slice(0, 12_000)}` },
+        { role: 'user', content: [
+          { type: 'text', text: `Act as a senior visual-design critic. Inspect the supplied image for relevance, composition, completeness and unrequested text/marks. Reject readable or pseudo-readable words, numbers, UI labels, watermarks or existing brand marks. ${spec.skill_id === 'identity' ? 'A newly requested abstract logo symbol is allowed; existing brand marks and lettering are not.' : 'Logos and lettering are not allowed in this generated background.'} Exact official marks are applied after this check. Score 0-100. Return JSON only: {score,needs_revision,contains_visible_text_or_mark,revision_instruction,findings}. Contract: ${JSON.stringify(spec).slice(0, 12_000)}` },
+          { type: 'image_url', image_url: { url: dataUri } },
+        ] },
       ],
-      image: dataUri,
-      max_tokens: 900,
+      max_completion_tokens: 2000,
+      reasoning_effort: 'low',
+      response_format: { type: 'json_object' },
       temperature: 0,
     }, env.AI_GATEWAY_ID ? { gateway: { id: env.AI_GATEWAY_ID } } : undefined);
-    const parsed = parseJson(result); const textOrMark = parsed.contains_visible_text_or_mark === true;
+    const parsed = parseJson(result);
+    if (typeof parsed.score !== 'number' || !Number.isFinite(parsed.score) || typeof parsed.needs_revision !== 'boolean' || typeof parsed.contains_visible_text_or_mark !== 'boolean') throw new Error('visual_critic_invalid_receipt');
+    const textOrMark = parsed.contains_visible_text_or_mark === true;
     return { model, score: Math.max(0, Math.min(100, Number(parsed.score) || 0)), needs_revision: parsed.needs_revision === true || textOrMark || Number(parsed.score) < 75, contains_visible_text_or_mark: textOrMark, revision_instruction: String(parsed.revision_instruction || '').slice(0, 1200), findings: parsed.findings || [] };
   } catch (error) { return { model, score: null, needs_revision: false, revision_instruction: '', findings: [], warning: error instanceof Error ? error.message : 'critic_unavailable' }; }
 }

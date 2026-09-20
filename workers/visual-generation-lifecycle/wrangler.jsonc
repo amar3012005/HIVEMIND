@@ -7,7 +7,7 @@
   "vars": {
     "HIVEMIND_VISUAL_API_URL": "https://core.singulancelabs.com",
     "VISUAL_ART_DIRECTOR_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    "VISUAL_CRITIC_MODEL": "@cf/meta/llama-3.2-11b-vision-instruct",
+    "VISUAL_CRITIC_MODEL": "@cf/qwen/qwen3.8-27b",
     "VISUAL_FAST_MODEL": "@cf/black-forest-labs/flux-2-klein-4b",
     "VISUAL_QUALITY_MODEL": "@cf/black-forest-labs/flux-2-klein-9b"
   },

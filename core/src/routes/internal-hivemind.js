@@ -345,9 +345,31 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
     return jsonResponse(res, { error: 'path and title are required' }, 400);
   }
   const contentType = String(body?.content_type || 'application/octet-stream').slice(0, 100);
-  const workRunId = UUID_RE.test(String(body?.workrun_id || '')) ? String(body.workrun_id) : null;
+  let workRunId = UUID_RE.test(String(body?.workrun_id || '')) ? String(body.workrun_id) : null;
+  const agentScopeSessionId = String(body?.agentscope_session_id || '').trim().slice(0, 120);
 
   try {
+    // The AgentScope tool factory receives the server-minted session id but
+    // deliberately never exposes a WorkRun id to the model. Resolve that
+    // session back to a run under the already-authenticated principal. This
+    // keeps artifact ownership and preview hydration durable without creating
+    // a second client-side or runtime-local source of truth.
+    if (!workRunId && agentScopeSessionId) {
+      const runs = await prisma.$queryRawUnsafe(
+        `SELECT id FROM "hivemind"."work_runs"
+          WHERE agentscope_session_id = $1
+            AND user_id = $2::uuid
+            AND org_id = $3::uuid
+          ORDER BY updated_at DESC
+          LIMIT 1`,
+        agentScopeSessionId,
+        principal.userId,
+        principal.orgId,
+      );
+      const matchedId = runs?.[0]?.id;
+      workRunId = UUID_RE.test(String(matchedId || '')) ? String(matchedId) : null;
+    }
+
     // The checksum is over the identity of the artifact (its path + title), not
     // its bytes: the runtime holds the bytes in a sandbox hm-core cannot read,
     // and a pointer row is what makes the artifact citable. Dedup on this key

@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from hm_bridge import EventForwarder, WorkRunBinding, build_execution_identity
+from extra_agent_tools import RecordArtifactTool
 
 
 class _Response:
@@ -75,6 +77,21 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         await forwarder._forward(client, event)
         self.assertEqual(resumed, [event])
         self.assertEqual(client.posts, [])
+
+    async def test_artifact_tool_forwards_server_minted_session_identity(self):
+        captured = {}
+
+        async def call_hm_core(path, **kwargs):
+            captured["path"] = path
+            captured.update(kwargs)
+            return {"artifact_id": "artifact-1"}
+
+        tool = RecordArtifactTool("user-1", "org-1", "agentscope-session-1")
+        with patch("extra_agent_tools._call_hm_core", call_hm_core):
+            await tool.call("deliverables/report.md", "Report")
+
+        self.assertEqual(captured["path"], "/internal/hivemind/artifacts")
+        self.assertEqual(captured["body"]["agentscope_session_id"], "agentscope-session-1")
 
 
 if __name__ == "__main__":

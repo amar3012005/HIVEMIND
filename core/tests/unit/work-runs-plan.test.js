@@ -84,4 +84,33 @@ describe('WorkRun Task tools → plan events (Phase 1)', () => {
     assert.equal(appended[0].t, WORK_RUN_EVENT.TOOL_COMPLETED);
     assert.equal(appended[0].tool, 'hivemind_recall');
   });
+
+  it('projects AgentScope state_updated tasks without duplicating task ownership', () => {
+    const ev = normalizeAgentScopeEvent({
+      type: 'CUSTOM',
+      name: 'state_updated',
+      value: {
+        tasks_context: {
+          tasks: [{
+            id: 'task_1',
+            subject: 'Verify sources',
+            description: 'Use first-party evidence.',
+            state: 'in_progress',
+            blocked_by: ['task_0'],
+            owner: 'lead',
+            private_field: 'not projected',
+          }],
+        },
+      },
+    });
+    assert.equal(ev.t, WORK_RUN_EVENT.PLAN);
+    assert.deepEqual(ev.tasks, [{
+      id: 'task_1',
+      subject: 'Verify sources',
+      description: 'Use first-party evidence.',
+      state: 'in_progress',
+      blocked_by: ['task_0'],
+      owner: 'lead',
+    }]);
+  });
 });

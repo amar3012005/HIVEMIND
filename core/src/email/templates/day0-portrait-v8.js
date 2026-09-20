@@ -1,110 +1,55 @@
-// Day-0 v8 portrait report — editorial "operating intelligence" design.
-// SINGULANCE branding for every tenant; company identity is data only.
-// Uses the v2 report shell (Space Grotesk + IBM Plex Mono) and embeds the
-// real website screenshot captured during onboarding.
-import { CARTESIA, escapeHtml, reportPage, reportShell, REPORT_DISPLAY, REPORT_MONO } from './cartesia-lifecycle.js';
+// Day-0 editorial portrait report. The email remains owned by
+// day0-company-onboarding.js; this renderer changes only the PDF attachment.
+// It follows the flowing Day-1 research-report grammar so the complete
+// onboarding record reads as one report rather than a slide deck.
+import { CARTESIA, escapeHtml, brandLockup, REPORT_MONO } from './cartesia-lifecycle.js';
 
 function hostname(value) {
   try { return new URL(value).hostname.replace(/^www\./, ''); } catch { return String(value || '').slice(0, 80); }
 }
 
-function shotBar(url) {
-  return `<div class="rshot-bar"><span class="rshot-dot" style="background:#ff6b5f"></span><span class="rshot-dot" style="background:#f4bc4f"></span><span class="rshot-dot" style="background:#52c66d"></span><span class="rshot-url">${escapeHtml(url || 'company website')}</span></div>`;
+function section(title, chapter, content) {
+  return `<section class="report-section"><div class="section-head"><div class="eyebrow">${escapeHtml(title)} · ${escapeHtml(chapter)}</div></div>${content}</section>`;
 }
 
-function stats(report) {
-  return `<div class="rstats"><div class="rstat"><b>${report.sourceCount}</b><span>Sources read</span></div><div class="rstat"><b>${report.taskCount}</b><span>First moves</span></div><div class="rstat"><b>${report.teamCount}</b><span>HyperAgents</span></div></div>`;
+function rows(items, { numbered = false } = {}) {
+  return `<div class="rows">${items.filter(Boolean).map((item, index) => `<div class="row${numbered ? ' numbered' : ''}">${numbered ? `<div class="row-number">${String(index + 1).padStart(2, '0')}</div>` : ''}<div class="row-body">${item}</div></div>`).join('')}</div>`;
 }
 
-function factList(items) {
-  return items.filter(Boolean).map((item) => `<div class="rfact">${escapeHtml(item)}</div>`).join('');
+function textRow(label, value, extra = '') {
+  if (!value) return '';
+  return `<div class="row-label">${escapeHtml(label)}</div><div class="row-title">${escapeHtml(value)}</div>${extra}`;
 }
 
-function cards(items, renderer) {
-  return `<div class="rgrid2">${items.map((item, index) => `<div class="rcard">${renderer(item, index)}</div>`).join('')}</div>`;
+function characterStrip(team = []) {
+  if (!team.length) return '';
+  return `<div class="character-strip">${team.slice(0, 8).map((member) => `<div class="character"><div class="character-avatar" style="background:${member.background};border-color:${member.color}">${member.avatarSvg}</div><div class="character-name">${escapeHtml(member.name)}</div><div class="character-role" style="color:${member.color}">${escapeHtml(member.role)}</div></div>`).join('')}</div>`;
 }
 
-function itemsList(entries) {
-  return entries.map((entry, index) => `<div class="ritem"><div class="rnum">${String(index + 1).padStart(2, '0')}</div><div><div class="rcard-kicker">${escapeHtml((entry.kicker || 'ITEM').toUpperCase())}</div><div class="rcard-title">${escapeHtml(entry.title)}</div>${entry.copy ? `<div class="rcard-copy">${escapeHtml(entry.copy)}</div>` : ''}${entry.url ? `<div class="rcard-copy" style="color:${CARTESIA.blue}">${escapeHtml(hostname(entry.url))}</div>` : ''}</div></div>`).join('');
-}
+export function renderDayZeroPortraitV8(report, { screenshotDataUri = '' } = {}) {
+  const screenshot = screenshotDataUri
+    ? `<div class="browser"><div class="browser-bar"><i class="red"></i><i class="amber"></i><i class="green"></i><span>${escapeHtml(report.websiteHost || report.website || 'company website')}</span></div><img src="${screenshotDataUri}" alt="${escapeHtml(report.companyName)} homepage"></div>`
+    : `<div class="browser browser-empty"><div class="browser-bar"><i class="red"></i><i class="amber"></i><i class="green"></i><span>${escapeHtml(report.websiteHost || report.website || 'company website')}</span></div><div>Website preview was unavailable when this report was generated.</div></div>`;
+  const companyRows = report.profileRows.map(([label, value]) => textRow(label, value));
+  const facts = report.facts.map((fact) => `<div class="fact">${escapeHtml(fact)}</div>`);
+  const research = report.researchItems.length
+    ? report.researchItems.map((item) => textRow('ONBOARDING RESEARCH', item.title || hostname(item.url), `${item.summary ? `<p>${escapeHtml(item.summary)}</p>` : ''}${item.url ? `<a href="${escapeHtml(item.url)}">${escapeHtml(hostname(item.url))}</a>` : ''}`))
+    : report.sourceUrls.map((url) => textRow('FIRST-PARTY SOURCE', hostname(url), `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`));
+  const moves = report.firstMoves.map((move) => textRow(move.room || 'FIRST MOVE', move.title, `<p>${escapeHtml(move.deliverable || move.detail || '')}</p>`));
+  const documents = report.documents.map((name) => textRow('MEMORY DOCUMENT', name));
+  const sources = report.sourceUrls.map((url) => textRow('SOURCE', hostname(url), `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`));
+  const confirmations = report.confirmations.map((item) => `<div class="confirmation">${escapeHtml(item)}</div>`);
 
-export function renderDayZeroPortraitV8(report, { screenshotDataUri = '', orgId = '' } = {}) {
-  const coverShot = screenshotDataUri
-    ? `<div class="rshot">${shotBar(report.websiteHost)}<img src="${screenshotDataUri}" alt="${escapeHtml(report.websiteHost || report.companyName)} homepage"></div>`
-    : `<div class="rshot">${shotBar(report.websiteHost)}<div style="padding:14mm;text-align:center;font:600 8px/12px ${REPORT_MONO};color:${CARTESIA.muted}">Website preview captured during onboarding</div></div>`;
-
-  const research = (report.researchItems.length ? report.researchItems : report.sourceUrls.slice(0, 6).map((url) => ({ title: hostname(url), summary: url, url })));
-  const moves = report.firstMoves.map((move) => ({ kicker: move.room || 'FIRST MOVE', title: move.title, copy: move.deliverable || move.detail }));
-  const documents = report.documents.map((doc) => ({ kicker: 'MEMORY DOCUMENT', title: doc }));
-  const profile = report.profileRows.map(([label, value]) => ({ kicker: label, title: '', copy: value }));
-
-  const pages = [
-    // ── Cover: gradient band, display title, mission lede, real screenshot, stats
-    reportPage({
-      pageNumber: 1, totalPages: 6, footerWord: 'THE RISE OF AWAKENING',
-      body: `<div class="rcover-band"></div>
-        <div class="reyebrow">DAY 0 · THE RISE OF AWAKENING</div>
-        <h1 class="rh1">${escapeHtml(report.companyName)}<br>has awakened.</h1>
-        <p class="rlede">HIVEMIND read ${report.sourceCount} sources across ${escapeHtml(report.websiteHost || 'your website')}, shaped the first operating model of <strong>${escapeHtml(report.companyName)}</strong>, and prepared the people and first moves now waiting inside your workspace.</p>
-        <div style="margin-top:6mm">${coverShot}</div>
-        <div style="margin-top:6mm">${stats(report)}</div>
-        <div style="margin-top:6mm" class="rquote"><q>Welcome to the world of SINGULANCE. Congratulations on being among the first to onboard your company with us. Here's to the future — and a new way of running your company.</q><div class="rquote-by">AMAR SAI GADDE · FOUNDER &amp; CEO</div></div>`,
-    }),
-    // ── Company record
-    reportPage({
-      pageNumber: 2, totalPages: 6, footerWord: 'COMPANY RECORD',
-      body: `<div class="reyebrow">COMPANY RECORD · 02</div>
-        <h2 class="rh2">The first shape of ${escapeHtml(report.companyName)}.</h2>
-        <p class="rlede">${escapeHtml(report.whatItDoes || report.positioning || report.tagline || 'Your company record is ready for review.')}</p>
-        <div class="rrule"></div>
-        ${profile.length ? itemsList(profile.map((row) => ({ kicker: row.kicker, title: '', copy: row.copy }))) : ''}
-        ${report.facts.length ? `<div class="rrule"></div><div class="reyebrow" style="color:${CARTESIA.muted}">VERIFIED SIGNALS</div>${factList(report.facts.slice(0, 5))}` : ''}`,
-    }),
-    // ── Market & audience
-    reportPage({
-      pageNumber: 3, totalPages: 6, footerWord: 'WHO YOU SERVE',
-      body: `<div class="reyebrow">MARKET &amp; AUDIENCE · 03</div>
-        <h2 class="rh2">A company with a clear customer.</h2>
-        <p class="rlede">${escapeHtml(report.icp || 'HIVEMIND prepared an initial audience hypothesis for you to validate.')}</p>
-        <div class="rrule"></div>
-        ${report.location ? factList([`Company location: ${report.location}`, report.offer ? `Offer: ${report.offer}` : '', report.tagline ? `Tagline: ${report.tagline}` : '']) : ''}
-        <div class="rrule"></div>
-        <div class="reyebrow" style="color:${CARTESIA.muted}">MARKET RESEARCH</div>
-        ${itemsList(research.slice(0, 6).map((item) => ({ kicker: 'MARKET RESEARCH', title: item.title || hostname(item.url), copy: item.summary, url: item.url })))}`,
-    }),
-    // ── Mission & positioning
-    reportPage({
-      pageNumber: 4, totalPages: 6, footerWord: 'WHY YOU EXIST',
-      body: `<div class="reyebrow">MISSION &amp; POSITIONING · 04</div>
-        <h2 class="rh2">Your reason to exist, made operational.</h2>
-        <div class="rrule"></div>
-        <div class="rquote"><q>${escapeHtml(report.mission || report.positioning || 'Your mission is ready for your judgement.')}</q><div class="rquote-by">${escapeHtml(report.companyName.toUpperCase())} · MISSION</div></div>
-        <div style="margin-top:5mm" class="rrule"></div>
-        <div class="reyebrow" style="color:${CARTESIA.muted}">POSITIONING</div>
-        <p class="rlede">${escapeHtml(report.positioning || report.whatItDoes || '—')}</p>
-        ${report.contacts.length ? `<div class="rrule"></div><div class="reyebrow" style="color:${CARTESIA.muted}">OFFICIAL CONTACT POINTS</div><div style="margin-top:2mm">${report.contacts.slice(0, 6).map((c) => `<span class="rchip">${escapeHtml(c)}</span> `).join('')}</div>` : ''}`,
-    }),
-    // ── The team
-    reportPage({
-      pageNumber: 5, totalPages: 6, footerWord: 'AGENTS THAT ACT',
-      body: `<div class="reyebrow">HIVEMIND · HYPERAGENTS · 05</div>
-        <h2 class="rh2">We recruited ${report.teamCount} AI HyperAgent${report.teamCount === 1 ? '' : 's'} to run ${escapeHtml(report.companyName)}.</h2>
-        <p class="rlede">Each operates with a distinct role and clear operating responsibility — grounded in the company record filed during onboarding.</p>
-        <div class="rrule"></div>
-        <div style="display:grid;gap:3mm">${report.team.map((member) => `<div class="ragent"><div class="ragent-avatar" style="background:${member.background};border-color:${member.color}">${member.avatarSvg}</div><div><div class="ragent-name">${escapeHtml(member.name)}</div><div class="ragent-role" style="color:${member.color}">${escapeHtml(member.role.toUpperCase())}</div></div><div class="ragent-copy">${escapeHtml(member.oneLiner)}</div></div>`).join('')}</div>`,
-    }),
-    // ── First moves + memory
-    reportPage({
-      pageNumber: 6, totalPages: 6, footerWord: 'FIRST MOVES',
-      body: `<div class="reyebrow">FIRST COMPANY MOVES · 06</div>
-        <h2 class="rh2">Work waiting to become real.</h2>
-        <p class="rlede">HIVEMIND converted the company model into concrete first moves. Review, refine, and send the right one into a room.</p>
-        <div class="rrule"></div>
-        ${itemsList(moves.slice(0, 6))}
-        ${documents.length ? `<div class="rrule"></div><div class="reyebrow" style="color:${CARTESIA.muted}">MEMORY FILED FOR RECALL</div>${itemsList(documents.slice(0, 4))}` : ''}
-        ${report.sourceUrls.length ? `<div class="rrule"></div><div class="reyebrow" style="color:${CARTESIA.muted}">SOURCES READ (${report.sourceCount})</div><div style="margin-top:2mm">${report.sourceUrls.slice(0, 8).map((url) => `<span class="rchip">${escapeHtml(hostname(url))}</span> `).join('')}</div>` : ''}`,
-    }),
-  ];
-
-  return reportShell({ title: `Day 0 - ${report.companyName}`, pages, reportLabel: 'DAY 0 · AWAKENING REPORT' });
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Day 0 - ${escapeHtml(report.companyName)}</title><style>
+  @page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:${CARTESIA.paper};color:${CARTESIA.ink};font-family:Arial,"Noto Sans","Segoe UI Symbol",sans-serif;overflow-wrap:anywhere}.page{padding:12mm 15mm 14mm;background:linear-gradient(180deg,#f4f8ff 0,#fff 34mm,#fff 100%)}.head{display:flex;align-items:center;justify-content:space-between;padding-bottom:5mm;border-bottom:1px solid ${CARTESIA.line}}.brand-lockup{display:flex;align-items:center;gap:3mm}.brand-lockup svg{width:10mm;height:10mm}.brand-word{font-size:18px;font-weight:800;letter-spacing:-.6px}.brand-sub{margin-top:2px;font:700 6px/9px ${REPORT_MONO};letter-spacing:1.3px;color:#999}.brand-sub span{color:${CARTESIA.blue}}.folio{font:700 7px/10px ${REPORT_MONO};letter-spacing:1.5px;color:${CARTESIA.blue}}.intro{padding:8mm 0 7mm;border-bottom:1px solid ${CARTESIA.line}}.eyebrow,.row-label{font:700 7px/11px ${REPORT_MONO};letter-spacing:1.6px;color:${CARTESIA.blue};text-transform:uppercase}h1{margin:3mm 0 0;max-width:170mm;font-size:31px;line-height:1.04;letter-spacing:-1.2px}h2{margin:2mm 0 0;font-size:23px;line-height:1.12;letter-spacing:-.6px}.lede{max-width:170mm;margin:4mm 0 0;color:${CARTESIA.body};font-size:11px;line-height:17px}.stats{display:grid;grid-template-columns:repeat(4,1fr);margin-top:5mm;border:1px solid ${CARTESIA.line};break-inside:avoid}.stat{padding:4mm}.stat+.stat{border-left:1px solid ${CARTESIA.line}}.stat b{display:block;font-size:23px}.stat span{font:700 6px/9px ${REPORT_MONO};letter-spacing:1px;color:#888}.browser{margin-top:6mm;background:#fff;border:1px solid ${CARTESIA.line};box-shadow:0 5mm 12mm rgba(10,10,10,.08);break-inside:avoid}.browser-bar{height:9mm;padding:3mm 4mm;border-bottom:1px solid ${CARTESIA.line};display:flex;align-items:center;gap:1.5mm}.browser-bar i{width:4px;height:4px;border-radius:50%}.browser-bar .red{background:#ff6b5f}.browser-bar .amber{background:#f4bc4f}.browser-bar .green{background:#52c66d}.browser-bar span{margin-left:2mm;font:700 5px/8px ${REPORT_MONO};letter-spacing:1px;color:#999}.browser img{display:block;width:100%;max-height:86mm;object-fit:cover;object-position:top}.browser-empty>div:last-child{padding:18mm;text-align:center;color:${CARTESIA.muted};font:700 7px/11px ${REPORT_MONO}}.character-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:5mm;margin-top:6mm;break-inside:avoid}.character{text-align:center}.character-avatar{width:15mm;height:15mm;margin:0 auto 1.5mm;border-radius:50%;overflow:hidden;border:1px solid}.character-avatar svg{display:block;width:100%;height:100%}.character-name{font-size:8px;line-height:10px;font-weight:800}.character-role{margin-top:1px;font-size:6px;line-height:8px}.report-section{padding-top:7mm}.section-head{padding-bottom:3mm;border-bottom:1px solid ${CARTESIA.line};break-after:avoid}.rows{display:grid}.row{padding:4mm 0;border-bottom:1px solid ${CARTESIA.line};break-inside:avoid}.row.numbered{display:grid;grid-template-columns:12mm 1fr;gap:3mm}.row-number{font:700 9px/13px ${REPORT_MONO};color:${CARTESIA.blue}}.row-title{margin-top:1mm;font-size:13px;line-height:18px;font-weight:800}.row p{margin:1.5mm 0 0;color:${CARTESIA.body};font-size:9px;line-height:14px}.row a{display:block;margin-top:1.5mm;color:${CARTESIA.blue};font-size:8px;line-height:11px;text-decoration:none;word-break:break-all}.facts{display:grid;grid-template-columns:1fr 1fr;gap:3mm;margin-top:4mm}.fact,.confirmation{padding:4mm;border:1px solid ${CARTESIA.line};background:#fff;font-size:9px;line-height:14px;break-inside:avoid}.mission{margin-top:4mm;padding:6mm;background:#101010;color:#fff;break-inside:avoid}.mission q{font-size:15px;line-height:21px;font-weight:700}.mission div{margin-top:3mm;font:700 6px/9px ${REPORT_MONO};letter-spacing:1.1px;color:#83b6ed}.confirmations{display:grid;gap:2mm;margin-top:4mm}.confirmation{border-left:2px solid ${CARTESIA.blue};background:#f4f8ff}.contacts{margin-top:4mm}.chip{display:inline-block;margin:0 2mm 2mm 0;padding:2mm 3mm;border:1px solid ${CARTESIA.line};font-size:8px}.cta{margin-top:8mm;padding:6mm;background:${CARTESIA.blue};color:#fff;break-inside:avoid}.cta h2{margin:0}.cta p{margin:2mm 0 0;font-size:10px;line-height:15px}.cta a{display:inline-block;margin-top:4mm;color:#fff;font:700 8px/11px ${REPORT_MONO};letter-spacing:1px;text-decoration:none}.foot{margin-top:8mm;padding-top:3mm;border-top:1px solid ${CARTESIA.line};display:flex;justify-content:space-between;font:700 6px/9px ${REPORT_MONO};letter-spacing:1.1px;color:#999;break-inside:avoid}.foot a{color:${CARTESIA.blue};text-decoration:none}
+  </style></head><body><main class="page"><header class="head">${brandLockup({ compact: true })}<div class="folio">DAY-0 / AWAKENING</div></header><section class="intro"><div class="eyebrow">HIVEMIND · COMPANY AWAKENING COMPLETE</div><h1>${escapeHtml(report.companyName)} has awakened.</h1><p class="lede">Prepared from the complete onboarding record. This report preserves the company context, research, sources, people, memory, and first moves now available inside HIVEMIND.</p><div class="stats"><div class="stat"><b>${report.sourceCount}</b><span>SOURCES READ</span></div><div class="stat"><b>${report.documentCount}</b><span>MEMORY FILES</span></div><div class="stat"><b>${report.taskCount}</b><span>FIRST MOVES</span></div><div class="stat"><b>${report.teamCount}</b><span>HYPERAGENTS</span></div></div>${screenshot}</section>
+  ${section('COMPANY RECORD','01', `<h2>The first working model of ${escapeHtml(report.companyName)}.</h2><p class="lede">${escapeHtml(report.whatItDoes || report.positioning || report.tagline || 'Your company context is ready for review.')}</p>${rows(companyRows)}${facts.length ? `<div class="facts">${facts.join('')}</div>` : ''}`)}
+  ${section('MARKET & AUDIENCE','02', `<h2>Who you serve and where you compete.</h2><p class="lede">${escapeHtml(report.icp || 'HIVEMIND prepared an initial audience hypothesis for founder validation.')}</p>${rows(research, { numbered: true })}`)}
+  ${section('MISSION & POSITIONING','03', `<h2>Your reason to exist, made operational.</h2><div class="mission"><q>${escapeHtml(report.mission || report.positioning || 'Your mission is ready for founder review.')}</q><div>${escapeHtml(report.companyName.toUpperCase())} · MISSION</div></div>${rows([textRow('POSITIONING', report.positioning || report.whatItDoes), textRow('OFFER', report.offer), textRow('TAGLINE', report.tagline)])}${report.contacts.length ? `<div class="contacts">${report.contacts.map((value) => `<span class="chip">${escapeHtml(value)}</span>`).join('')}</div>` : ''}`)}
+  ${section('HIVEMIND · HYPERAGENTS','04', `<h2>${report.teamCount} digital employees now know your company.</h2><p class="lede">Each HyperAgent has a distinct operating responsibility grounded in the company record created during onboarding.</p>${characterStrip(report.team)}${rows(report.team.map((member) => textRow(member.role, member.name, `<p>${escapeHtml(member.oneLiner)}</p>`)))}`)}
+  ${section('FIRST COMPANY MOVES','05', `<h2>Work waiting to become real.</h2><p class="lede">These are the initial tasks HIVEMIND prepared from the onboarding record.</p>${rows(moves, { numbered: true })}`)}
+  ${section('COMPANY MEMORY','06', `<h2>What HIVEMIND filed for recall.</h2><p class="lede">These retained documents can ground future rooms, decisions, and agent actions.</p>${rows(documents, { numbered: true })}`)}
+  ${section('SOURCE & EVIDENCE LEDGER','07', `<h2>Every company claim starts with a retained source.</h2>${rows(sources, { numbered: true })}`)}
+  ${report.confirmations.length ? section('HUMAN CONFIRMATION','08', `<h2>The model knows where it still needs you.</h2><div class="confirmations">${confirmations.join('')}</div>`) : ''}
+  <section class="cta"><div class="eyebrow" style="color:#d7eaff">YOUR COMPANY IS READY</div><h2>Continue inside HIVEMIND.</h2><p>Review the company model, inspect the retained evidence, meet your HyperAgents, and begin the first move.</p><a href="${escapeHtml(report.reportUrl)}">OPEN YOUR COMPANY →</a></section><footer class="foot"><span>SINGULANCE · YOUR COMPANY, IN MOTION</span><a href="${escapeHtml(report.reportUrl)}">OPEN YOUR COMPANY →</a></footer></main></body></html>`;
 }

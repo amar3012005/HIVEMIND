@@ -164,6 +164,7 @@ import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
+import { announcementForAdmin, announcementMetrics, nextWorkspaceAnnouncement, normalizeAnnouncementInput, recordWorkspaceAnnouncementDelivery } from './workspace/announcements.js';
 import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
 import { resolveInvitationBaseUrl, resolvePublicAppUrl, resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import {
@@ -3955,6 +3956,49 @@ const server = http.createServer(async (req, res) => {
       return acc;
     }, { b2b: 0, b2c: 0, active: 0, sleeping: 0 });
     return jsonResponse(res, { total, returned: users.length, summary, users });
+  }
+
+  if (pathname === '/admin/api/platform/announcements' && (req.method === 'GET' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      if (req.method === 'GET') {
+        const rows = await prisma.workspaceAnnouncement.findMany({ orderBy: [{ updatedAt: 'desc' }], take: 100 });
+        const announcements = await Promise.all(rows.map(async (row) => announcementForAdmin(row, await announcementMetrics(prisma, row.id))));
+        return jsonResponse(res, { announcements });
+      }
+      const input = normalizeAnnouncementInput(await parseBody(req).catch(() => ({})), { operator: operator.operator });
+      const published = input.status === 'published' || (input.status === 'scheduled' && input.startsAt && input.startsAt <= new Date());
+      const announcement = await prisma.workspaceAnnouncement.create({ data: { ...input, status: published ? 'published' : input.status, ...(published ? { publishedBy: operator.operator, publishedAt: new Date() } : {}) } });
+      await audit({ eventType: 'platform.announcement_created', eventCategory: 'platform', action: 'create', resourceType: 'workspace_announcement', resourceId: announcement.id, metadata: { key: announcement.key, version: announcement.version, status: announcement.status, operator: operator.operator }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { announcement: announcementForAdmin(announcement) }, 201);
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+  }
+
+  const platformAnnouncementMatch = pathname.match(/^\/admin\/api\/platform\/announcements\/([0-9a-f-]{36})(?:\/(publish|pause|archive|duplicate))?$/i);
+  if (platformAnnouncementMatch && (req.method === 'PATCH' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const [, id, action] = platformAnnouncementMatch;
+    try {
+      const existing = await prisma.workspaceAnnouncement.findUnique({ where: { id } });
+      if (!existing) return jsonResponse(res, { error: 'Announcement not found' }, 404);
+      let announcement;
+      if (action === 'duplicate') {
+        const latest = await prisma.workspaceAnnouncement.aggregate({ where: { key: existing.key }, _max: { version: true } });
+        const input = normalizeAnnouncementInput({ key: existing.key, status: 'draft' }, { existing, operator: operator.operator });
+        announcement = await prisma.workspaceAnnouncement.create({ data: { ...input, version: Number(latest._max.version || 0) + 1, status: 'draft', publishedAt: null, publishedBy: null } });
+      } else {
+        const body = await parseBody(req).catch(() => ({}));
+        const input = normalizeAnnouncementInput(action ? { ...body, status: action === 'publish' ? 'published' : action === 'pause' ? 'paused' : 'archived' } : body, { existing });
+        const publishing = input.status === 'published' && existing.status !== 'published';
+        announcement = await prisma.workspaceAnnouncement.update({ where: { id }, data: { ...input, ...(publishing ? { publishedBy: operator.operator, publishedAt: new Date() } : {}) } });
+      }
+      await audit({ eventType: `platform.announcement_${action || 'updated'}`, eventCategory: 'platform', action: action || 'update', resourceType: 'workspace_announcement', resourceId: announcement.id, metadata: { key: announcement.key, version: announcement.version, status: announcement.status, operator: operator.operator }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { announcement: announcementForAdmin(announcement, await announcementMetrics(prisma, announcement.id)) });
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
   }
 
   const platformUserLifecycleMatch = pathname.match(/^\/admin\/api\/platform\/users\/([0-9a-f-]{36})\/lifecycle$/i);
@@ -8582,6 +8626,31 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return jsonResponse(res, { error: 'Notifications unavailable' }, 503);
     }
+  }
+
+  if (pathname === '/v1/workspace/announcements/next' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      return jsonResponse(res, { announcement: await nextWorkspaceAnnouncement({ prisma, orgId: current.session.orgId, userId: current.session.userId }) });
+    } catch (error) { return jsonResponse(res, { error: 'Announcements unavailable' }, 503); }
+  }
+
+  const workspaceAnnouncementEventMatch = pathname.match(/^\/v1\/workspace\/announcements\/([0-9a-f-]{36})\/event$/i);
+  if (workspaceAnnouncementEventMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      await recordWorkspaceAnnouncementDelivery({ prisma, announcementId: workspaceAnnouncementEventMatch[1], orgId: current.session.orgId, userId: current.session.userId, event: body?.event });
+      return jsonResponse(res, { ok: true });
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
   }
 
   const notificationReadMatch = pathname.match(/^\/v1\/workspace\/notifications\/([0-9a-f-]{36})\/read$/);

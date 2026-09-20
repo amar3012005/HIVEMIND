@@ -15,6 +15,15 @@ import {
   selectDayOneResearchTask,
 } from '../../src/lifecycle/day1-first-move.js';
 import { lifecycleEmailShell } from '../../src/email/templates/cartesia-lifecycle.js';
+import { nextLocalLifecycleMorning } from '../../src/lifecycle/local-morning.js';
+
+test('lifecycle morning is the following calendar day at 09:00 in the workspace timezone', () => {
+  assert.equal(nextLocalLifecycleMorning('2026-09-20T12:39:40.143Z', { timeZone: 'Europe/Berlin' }).toISOString(), '2026-09-21T07:00:00.000Z');
+});
+
+test('lifecycle morning remains 09:00 local across the DST transition', () => {
+  assert.equal(nextLocalLifecycleMorning('2026-10-24T12:00:00.000Z', { timeZone: 'Europe/Berlin' }).toISOString(), '2026-10-25T08:00:00.000Z');
+});
 
 test('shared lifecycle email shell owns the responsive rich-content contract', () => {
   const html = lifecycleEmailShell({ title: 'Shared', preheader: 'Shared', body: '<tr><td class="section rich-content">Content</td></tr>' });
@@ -92,6 +101,31 @@ test('Day 1 scheduling is skipped while the backend master gate is off', async (
     assert.deepEqual(result, { ok: false, skipped: true, reason: 'feature_disabled' });
   } finally {
     if (previous === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previous;
+  }
+});
+
+test('Day 1 durable admission targets the following 09:00 workspace morning', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  const previousUrl = process.env.HIVEMIND_D1_WORKFLOW_URL;
+  const previousSecret = process.env.HIVEMIND_D1_WORKFLOW_SECRET;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+  process.env.HIVEMIND_D1_WORKFLOW_URL = 'https://workflow.example.test';
+  process.env.HIVEMIND_D1_WORKFLOW_SECRET = 'test-secret';
+  try {
+    const result = await scheduleDayOneWorkflow({
+      orgId: 'org', hqRoomId: 'hq', onboardedAt: '2026-09-20T12:39:40.143Z', timeZone: 'Europe/Berlin',
+      fetchImpl: async (_url, request) => {
+        const body = JSON.parse(request.body);
+        assert.equal(body.target_at, '2026-09-21T07:00:00.000Z');
+        return new Response(JSON.stringify({ admitted: true }), { status: 202 });
+      },
+    });
+    assert.equal(result.target_at, '2026-09-21T07:00:00.000Z');
+    assert.equal(result.ok, true);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+    if (previousUrl === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_URL; else process.env.HIVEMIND_D1_WORKFLOW_URL = previousUrl;
+    if (previousSecret === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_SECRET; else process.env.HIVEMIND_D1_WORKFLOW_SECRET = previousSecret;
   }
 });
 

@@ -63,7 +63,7 @@ export async function startDayZeroLifecycle({
   const completion = started.completion.then(async (result) => {
     const owner = await prisma.user.findUnique({
       where: { id: started.ownerId },
-      select: { email: true },
+      select: { email: true, timezone: true },
     }).catch(() => null);
     if (owner?.email) {
       await advanceActivation({
@@ -79,6 +79,7 @@ export async function startDayZeroLifecycle({
       orgId: started.orgId,
       hqRoomId: started.hqRoomId,
       onboardedAt: started.company.onboarded_at,
+      timeZone: owner?.timezone,
     });
     if (dayOne.ok) {
       await persistDayOneSchedule({

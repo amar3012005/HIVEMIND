@@ -71,9 +71,9 @@ function harnessCreditLimitResponse(summary) {
   const plan = summary?.plan || 'free';
   const nextPlan = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise_onboarding: 'enterprise', enterprise: null }[plan] ?? 'pro';
   return {
-    error: 'plan_limit_exceeded',
-    code: 'plan_limit_exceeded',
-    message: 'Monthly credits exhausted',
+    error: 'credits_exhausted',
+    code: 'credits_exhausted',
+    message: summary?.referral_trial ? 'Invitation credits exhausted. Talk to the founder to continue.' : 'Monthly credits exhausted',
     resource: 'credits',
     plan,
     limit: summary?.included ?? null,
@@ -81,6 +81,8 @@ function harnessCreditLimitResponse(summary) {
     remaining: summary?.remaining ?? 0,
     suggested_plan: nextPlan,
     upgrade_url: '/hivemind/app/billing',
+    referral_trial: summary?.referral_trial === true,
+    commercial_action: summary?.referral_trial === true ? 'talk_to_founder' : null,
   };
 }
 
@@ -220,7 +222,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       idempotencyKey,
       metadata: { session_id: sessionId, turn_id: String(turnId), call_id: callId, ...(tool ? { tool } : {}) },
     });
-    if (!charged.admitted) { jsonResponse(res, { error: 'Credits exhausted', code: 'credits_exhausted' }, 402); return true; }
+    if (!charged.admitted) {
+      const check = charged.check || {};
+      jsonResponse(res, {
+        error: 'credits_exhausted', code: 'credits_exhausted', message: check.reason || 'Credits exhausted', resource: 'credits',
+        plan: check.plan || 'free', limit: check.limit ?? null, current: check.current ?? null, remaining: check.remaining ?? 0,
+        referral_trial: check.referralTrial === true, commercial_action: check.referralTrial === true ? 'talk_to_founder' : null,
+        upgrade_url: '/hivemind/app/billing',
+      }, 402); return true;
+    }
     jsonResponse(res, { admitted: true, duplicate: Boolean(charged.duplicate), service }, 200);
     return true;
   }

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { PlaywrightServiceRuntime } from '../web/playwright-service-runtime.js';
 import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 import { createWorkspaceNotification } from '../workspace/notifications.js';
+import { nextLocalLifecycleMorning, safeLifecycleTimezone } from '../lifecycle/local-morning.js';
 
 export const VISUAL_PIPELINE_VERSION = 1;
 export const VISUAL_STAGES = Object.freeze(['admit', 'discover', 'capture', 'store', 'extract', 'verify', 'publish', 'render', 'notify']);
@@ -116,12 +117,13 @@ function companyWebsite(company) {
 /** The Worker cron asks for candidates; eligibility is entirely PostgreSQL-backed. */
 export async function listEligibleDayTwoBrandDna({ prisma, limit = 25 } = {}) {
   if (!isDayTwoBrandDnaEnabled()) throw Object.assign(new Error('day2_feature_disabled'), { retryable: false });
-  const rows = await prisma.$queryRawUnsafe(`SELECT id, org_id, user_id, "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms" WHERE "agent_connectors" ? '_company' AND archived_at IS NULL AND "agent_connectors" #>> '{_company,day1_first_move,status}' = 'sent' AND COALESCE("agent_connectors" #>> '{_company,day2_brand_dna,status}', '') NOT IN ('queued','running','completed','sent') ORDER BY created_at ASC LIMIT $1`, Math.max(1, Math.min(100, Number(limit) || 25))).catch(() => []);
+  const rows = await prisma.$queryRawUnsafe(`SELECT h.id, h.org_id, h.user_id, h."agent_connectors"->'_company' AS company, u.timezone AS owner_timezone FROM "hivemind"."hyper_rooms" h LEFT JOIN "hivemind".users u ON u.id=h.user_id WHERE h."agent_connectors" ? '_company' AND h.archived_at IS NULL AND h."agent_connectors" #>> '{_company,day1_first_move,status}' = 'sent' AND COALESCE(h."agent_connectors" #>> '{_company,day2_brand_dna,status}', '') NOT IN ('queued','running','completed','sent') ORDER BY h.created_at ASC LIMIT $1`, Math.max(1, Math.min(100, Number(limit) || 25))).catch(() => []);
   const now = Date.now();
   return rows.map((row) => {
     const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
-    const target = Date.parse(company?.onboarded_at || ''); const website = companyWebsite(company);
-    return website && (!Number.isFinite(target) || target + 48 * 60 * 60 * 1000 <= now) ? { org_id: String(row.org_id), user_id: String(row.user_id), room_id: String(row.id), url: website } : null;
+    const delivered = Date.parse(company?.day1_first_move?.sent_at || ''); const website = companyWebsite(company);
+    const target = nextLocalLifecycleMorning(Number.isFinite(delivered) ? new Date(delivered) : new Date(), { timeZone: safeLifecycleTimezone(row.owner_timezone || company?.owner_timezone) });
+    return website && target.getTime() <= now ? { org_id: String(row.org_id), user_id: String(row.user_id), room_id: String(row.id), url: website } : null;
   }).filter(Boolean);
 }
 /** Claims one Day-2 episode before scheduling, so cron replays never duplicate it. */

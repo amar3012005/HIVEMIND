@@ -21,18 +21,24 @@ function creditWindow(plan, now = new Date()) {
 
 function referralTrialCheck(plan) {
   const entitlement = plan?.entitlement;
-  if (entitlement?.source !== 'partner_referral') return null;
+  if (!['partner_referral', 'enterprise_invitation'].includes(entitlement?.source)) return null;
   if (!['manual_review', 'expired', 'suspended', 'revoked'].includes(entitlement.status)) return null;
   return {
     allowed: false,
     status: 402,
-    reason: 'Your referral trial has ended. Talk to the founder to continue.',
+    reason: 'Your invitation access has ended. Talk to the founder to continue.',
     plan: 'enterprise',
     limit: plan?.limits?.monthlyCredits ?? null,
     current: null,
     remaining: 0,
     referralTrial: true,
   };
+}
+
+function founderGate(plan) {
+  const entitlement = plan?.entitlement;
+  return ['partner_referral', 'enterprise_invitation'].includes(entitlement?.source)
+    || entitlement?.commercialTerms?.kind === 'enterprise_onboarding';
 }
 
 export class CreditService {
@@ -119,7 +125,7 @@ export class CreditService {
     const unlimited = included < 0;
     const remaining = unlimited ? -1 : Math.max(0, included - used - reserved);
     return {
-      plan: plan?.id || 'free', included, used, reserved, remaining, unlimited,
+      plan: plan?.id || 'free', included, used, reserved, remaining, unlimited, referral_trial: founderGate(plan),
       percent_used: unlimited || included === 0 ? 0 : Math.min(100, Math.round(((used + reserved) / included) * 100)),
       percent_remaining: unlimited || included === 0 ? 100 : Math.max(0, 100 - Math.min(100, Math.round(((used + reserved) / included) * 100))),
       period: key, period_start: start.toISOString(), period_end: end.toISOString(), reset_at: lifetime ? null : end.toISOString(),
@@ -162,7 +168,7 @@ export class CreditService {
         if (existing[0].state === 'released') {
           const summary = await this.getSummary(orgId, null, tx, plan);
           if (!summary.unlimited && quantity > summary.remaining) {
-            return { admitted: false, check: { allowed: false, status: 402, reason: summary.credit_pool === 'grant_lifetime' ? 'Referral trial credits exhausted' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.credit_pool === 'grant_lifetime' } };
+            return { admitted: false, check: { allowed: false, status: 402, reason: summary.referral_trial ? 'Invitation credits exhausted. Talk to the founder to continue.' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.referral_trial } };
           }
           const revived = await tx.$queryRawUnsafe(
             `UPDATE hivemind.usage_events SET state='reserved',released_at=NULL
@@ -175,7 +181,7 @@ export class CreditService {
       }
       const summary = await this.getSummary(orgId, null, tx, plan);
       if (!summary.unlimited && quantity > summary.remaining) {
-        return { admitted: false, check: { allowed: false, status: 402, reason: summary.credit_pool === 'grant_lifetime' ? 'Referral trial credits exhausted' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.credit_pool === 'grant_lifetime' } };
+        return { admitted: false, check: { allowed: false, status: 402, reason: summary.referral_trial ? 'Invitation credits exhausted. Talk to the founder to continue.' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.referral_trial } };
       }
       const rows = await tx.$queryRawUnsafe(
         `INSERT INTO hivemind.usage_events (org_id,initiating_user_id,source,metric,quantity,state,idempotency_key,metadata)
@@ -211,7 +217,7 @@ export class CreditService {
       if (event.state !== 'reserved' || event.metadata?.service !== service) throw new Error('credit reservation is not adjustable');
       const summary = await this.getSummary(orgId, null, tx, plan);
       const available = summary.unlimited ? Number.MAX_SAFE_INTEGER : summary.remaining + Number(event.quantity || 0);
-      if (quantity > available) return { adjusted: false, admitted: false, check: { allowed: false, status: 402, reason: summary.credit_pool === 'grant_lifetime' ? 'Referral trial credits exhausted' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.credit_pool === 'grant_lifetime' } };
+      if (quantity > available) return { adjusted: false, admitted: false, check: { allowed: false, status: 402, reason: summary.referral_trial ? 'Invitation credits exhausted. Talk to the founder to continue.' : 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining, referralTrial: summary.referral_trial } };
       await tx.$executeRawUnsafe(
         `UPDATE hivemind.usage_events SET quantity=$3::bigint,metadata=metadata || $4::jsonb WHERE org_id=$1::uuid AND idempotency_key=$2 AND state='reserved'`,
         orgId, idempotencyKey, quantity, JSON.stringify({ units: Math.max(0, Math.ceil(Number(units) || 0)) }),

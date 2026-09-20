@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { CARTESIA, escapeHtml, lifecycleEmailShell, lifecycleRichContentStyles, lifecycleSubject, brandLockup } from '../email/templates/cartesia-lifecycle.js';
+import { nextLocalLifecycleMorning, safeLifecycleTimezone } from './local-morning.js';
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
 import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../email/humation-avatar.js';
@@ -355,10 +356,10 @@ async function workflowFetch(pathname, body, { fetchImpl = globalThis.fetch, att
   return { ok: false, reason: error?.message || 'workflow_request_failed' };
 }
 
-export async function scheduleDayOneWorkflow({ orgId, hqRoomId, onboardedAt, fetchImpl } = {}) {
+export async function scheduleDayOneWorkflow({ orgId, hqRoomId, onboardedAt, timeZone, fetchImpl } = {}) {
   if (!isDayOneWorkflowEnabled()) return { ok: false, skipped: true, reason: 'feature_disabled' };
   const onboarded = Date.parse(onboardedAt || '');
-  const targetAt = new Date(Math.max(Date.now(), Number.isFinite(onboarded) ? onboarded + 24 * 60 * 60 * 1000 : Date.now() + 24 * 60 * 60 * 1000)).toISOString();
+  const targetAt = nextLocalLifecycleMorning(Number.isFinite(onboarded) ? new Date(onboarded) : new Date(), { timeZone: safeLifecycleTimezone(timeZone) }).toISOString();
   return { target_at: targetAt, ...await workflowFetch('/start', { org_id: orgId, hq_room_id: hqRoomId, target_at: targetAt }, { fetchImpl }) };
 }
 
@@ -366,23 +367,36 @@ export async function scheduleDayOneWorkflow({ orgId, hqRoomId, onboardedAt, fet
 export async function listEligibleDayOneCompanies({ prisma, limit = 500 } = {}) {
   requireDayOneWorkflowEnabled();
   const rows = await prisma.$queryRawUnsafe(
-    `SELECT id, org_id, "agent_connectors"->'_company' AS company
-       FROM "hivemind"."hyper_rooms"
-      WHERE "agent_connectors" ? '_company' AND archived_at IS NULL
-        AND "agent_connectors" #>> '{_company,day0_report_email,status}' = 'sent'
-        AND COALESCE("agent_connectors" #>> '{_company,day1_first_move,status}', '') NOT IN ('running','completed','sending','sent')
-      ORDER BY created_at ASC LIMIT $1`,
+    `SELECT h.id, h.org_id, h."agent_connectors"->'_company' AS company, u.timezone AS owner_timezone
+       FROM "hivemind"."hyper_rooms" h
+       LEFT JOIN "hivemind".users u ON u.id = h.user_id
+      WHERE h."agent_connectors" ? '_company' AND h.archived_at IS NULL
+        AND h."agent_connectors" #>> '{_company,day0_report_email,status}' = 'sent'
+        AND COALESCE(h."agent_connectors" #>> '{_company,day1_first_move,status}', '') NOT IN ('running','completed','sending','sent')
+      ORDER BY h.created_at ASC LIMIT $1`,
     Math.max(1, Math.min(500, Number(limit) || 500)),
   ).catch(() => []);
-  return (rows || []).map((row) => {
+  return Promise.all((rows || []).map(async (row) => {
     const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
     const onboarded = Date.parse(company?.onboarded_at || '');
+    const targetAt = nextLocalLifecycleMorning(Number.isFinite(onboarded) ? new Date(onboarded) : new Date(), { timeZone: safeLifecycleTimezone(row.owner_timezone || company?.owner_timezone) }).toISOString();
+    const scheduled = company?.day1_first_move;
+    // Old releases stored an elapsed-hours target. Reconciliation safely
+    // corrects only pre-execution receipts; a queued old message subsequently
+    // observes `sent` and cannot duplicate the new morning episode.
+    if (scheduled?.status === 'scheduled' && scheduled.target_at !== targetAt) {
+      company.day1_first_move = { ...scheduled, target_at: targetAt, schedule_policy: 'next_local_morning_v1', rescheduled_at: new Date().toISOString() };
+      await prisma.$executeRawUnsafe(
+        `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company}', $1::jsonb, true) WHERE id=$2::uuid AND org_id=$3::uuid AND "agent_connectors" #>> '{_company,day1_first_move,status}' = 'scheduled'`,
+        JSON.stringify(company), row.id, row.org_id,
+      ).catch(() => {});
+    }
     return {
       org_id: String(row.org_id),
       hq_room_id: String(row.id),
-      target_at: new Date(Number.isFinite(onboarded) ? onboarded + 24 * 60 * 60 * 1000 : Date.now()).toISOString(),
+      target_at: targetAt,
     };
-  });
+  }));
 }
 
 export async function notifyDayOneWorkflowCompletion({ prisma, turnId, status = 'complete', fetchImpl } = {}) {

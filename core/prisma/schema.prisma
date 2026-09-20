@@ -304,6 +304,55 @@ model WorkspaceNotification {
   @@map("workspace_notifications")
 }
 
+/// Platform-authored, versioned in-app content. Content remains a typed JSON
+/// contract so an administrator can publish safely without shipping JSX/HTML.
+model WorkspaceAnnouncement {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key                  String   @db.VarChar(120)
+  version              Int      @default(1)
+  status               String   @default("draft") @db.VarChar(24)
+  placement            String   @default("toast") @db.VarChar(24)
+  priority             Int      @default(0)
+  title                String   @db.VarChar(180)
+  body                 String?
+  content              Json     @default("{}")
+  audience             Json     @default("{\"kind\":\"all\"}")
+  requiresNotification Boolean  @default(true) @map("requires_notification")
+  startsAt             DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt               DateTime? @map("ends_at") @db.Timestamptz(6)
+  createdBy            String?  @map("created_by") @db.VarChar(120)
+  publishedBy          String?  @map("published_by") @db.VarChar(120)
+  publishedAt          DateTime? @map("published_at") @db.Timestamptz(6)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deliveries           WorkspaceAnnouncementDelivery[]
+
+  @@unique([key, version])
+  @@index([status, startsAt, endsAt, priority])
+  @@map("workspace_announcements")
+}
+
+/// Per-user durable popup state. A dismissed version never returns after a
+/// refresh or device change; a future version can intentionally be delivered.
+model WorkspaceAnnouncementDelivery {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  announcementId String    @map("announcement_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  notificationId String?   @map("notification_id") @db.Uuid
+  firstSeenAt    DateTime? @map("first_seen_at") @db.Timestamptz(6)
+  dismissedAt    DateTime? @map("dismissed_at") @db.Timestamptz(6)
+  actionedAt     DateTime? @map("actioned_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  announcement   WorkspaceAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, orgId, userId])
+  @@index([orgId, userId, dismissedAt])
+  @@index([announcementId])
+  @@map("workspace_announcement_deliveries")
+}
+
 /// Durable, privacy-minimal reminder state. Cloudflare Workflows holds only
 /// this record id/generation; PostgreSQL remains the authoritative lifecycle.
 model ActivationLifecycle {

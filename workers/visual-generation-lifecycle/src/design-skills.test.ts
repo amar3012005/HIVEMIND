@@ -23,4 +23,13 @@ describe('production design contracts', () => {
     expect(result).toContain('Exploded assembly');
     expect(result).toContain('Image 0 is the approved key visual');
   });
+  it('keeps governance notes and deterministic branding out of the image-model prompt', () => {
+    const spec = { skill_id: 'social', communication_objective: 'Introduce shared memory', audience: 'Operators', subject: 'A connected archive', scene: 'Abstract editorial scene', composition: 'Strong central hierarchy', camera: 'Isometric', lighting: 'Soft', materials: 'Paper and glass', palette: 'Verified site palette', emotional_tone: 'Confident', brand_rules: ['Use official SINGULANCE logo', 'Restrained blue line art'], required_elements: ['SINGULANCE logo', 'Connected archive'], forbidden_elements: ['Data-leakage implications'], unsupported_claims: ['No compliance claims'] };
+    const result = modelPrompt(spec, { purpose: 'Introduce persistent memory', variation: 'A luminous archive connected by restrained lines' }, false);
+    expect(result).toContain('Connected archive');
+    expect(result).toContain('Restrained blue line art');
+    expect(result).not.toContain('Data-leakage');
+    expect(result).not.toContain('No compliance claims');
+    expect(result).not.toContain('Use official SINGULANCE logo');
+  });
 });

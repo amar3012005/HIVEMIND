@@ -30,6 +30,15 @@ export function validateShotPlan(value: any, count: number) {
 
 export function modelPrompt(spec: any, shot: any, hasAnchor: boolean) {
   const skill = designSkill(spec.skill_id);
+  const generatedPixelRule = spec.skill_id === 'identity'
+    ? 'Only create a new abstract symbol when the approved brief explicitly requests a new identity. Do not imitate or redraw an existing official mark; lettering is composed separately.'
+    : 'Create only the background artwork. Keep it free of words, letters, numbers, logos and watermarks; exact approved copy and existing brand marks are composed separately.';
+  const visualRequirements = (Array.isArray(spec.required_elements) ? spec.required_elements : [])
+    .filter((value: unknown) => typeof value === 'string' && !/logo|word|letter|copy|caption|typography|brand mark/i.test(value))
+    .slice(0, 8);
+  const visualBrandRules = (Array.isArray(spec.brand_rules) ? spec.brand_rules : [])
+    .filter((value: unknown) => typeof value === 'string' && !/logo|word|letter|copy|caption|typography|brand mark/i.test(value))
+    .slice(0, 8);
   // FLUX consumes descriptive natural language with actual image inputs. The
   // compiler owns technical instructions; users supply only the intended use.
   return [
@@ -39,10 +48,10 @@ export function modelPrompt(spec: any, shot: any, hasAnchor: boolean) {
     `Scene and subject: ${spec.subject}. ${spec.scene}.`,
     `Art direction: ${spec.composition}. ${spec.camera}. ${spec.lighting}. ${spec.materials}.`,
     `Visual system: ${spec.palette}. ${spec.emotional_tone}.`,
-    `Brand rules: ${(spec.brand_rules || []).join('; ')}.`,
-    `Required: ${(spec.required_elements || []).join('; ')}. Exclude: ${[...(spec.forbidden_elements || []), ...(spec.unsupported_claims || [])].join('; ')}.`,
+    visualBrandRules.length ? `Verified visual rules: ${visualBrandRules.join('; ')}.` : '',
+    visualRequirements.length ? `Required visual subjects: ${visualRequirements.join('; ')}.` : '',
     'Use website screenshots for palette and visual language only. Preserve verified product identity when supplied. Do not reproduce screenshot text or layout.',
-    spec.skill_id === 'identity' ? 'Only create a new symbol if the approved brief explicitly requests a new identity. Never redraw an existing official logo.' : 'Keep the scene free of words, letters, numbers, logos and watermarks. Exact approved copy and existing brand marks are composed separately.',
+    generatedPixelRule,
     hasAnchor ? 'Image 0 is the approved key visual. Match its lighting, palette and materials; express this shot’s distinct message and composition.' : '',
   ].filter(Boolean).join('\n');
 }

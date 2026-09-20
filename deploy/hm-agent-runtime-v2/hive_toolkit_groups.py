@@ -21,6 +21,11 @@ from agentscope.tool._base import ToolBase
 
 HIVEMIND_NAMES = {
     "hivemind_company_context",
+    "hivemind_people",
+    "hivemind_projects",
+    "hivemind_objectives",
+    "hivemind_work",
+    "hivemind_artifacts",
     "hivemind_recall",
     "hivemind_list_prospects",
     "hivemind_save_prospect",
@@ -73,7 +78,7 @@ def extra_groups_for(tools: list[ToolBase]) -> tuple[list[ToolBase], list[ToolGr
         groups.append(
             ToolGroup(
                 name="hivemind",
-                description="Company memory, prospects, artifacts, and ICP.",
+                description="Company profile, people, projects, objectives, work, memory, prospects, and artifacts.",
                 instructions="Call hivemind_company_context first on identity or ICP questions.",
                 tools=buckets["hivemind"],
             ),

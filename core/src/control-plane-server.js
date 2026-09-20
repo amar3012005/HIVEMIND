@@ -112,6 +112,7 @@ import {
   handleInternalRecallRoute,
   handleInternalSaveMemoryRoute,
   handleInternalCompanyContextRoute,
+  handleInternalCompanyRecordsRoute,
   handleInternalWebSearchRoute,
   handleInternalRecordArtifactRoute,
   handleInternalSaveProspectRoute,
@@ -13002,6 +13003,12 @@ Write the persona now.`;
     }
     if (pathname === '/internal/hivemind/company-context' && req.method === 'GET') {
       return handleInternalCompanyContextRoute({ req, res, jsonResponse, prisma });
+    }
+    const companyRecordsMatch = pathname.match(/^\/internal\/hivemind\/context\/(people|projects|objectives|work|artifacts)$/);
+    if (companyRecordsMatch && req.method === 'GET') {
+      return handleInternalCompanyRecordsRoute({
+        req, res, jsonResponse, prisma, kind: companyRecordsMatch[1],
+      });
     }
     if (pathname === '/internal/hivemind/web-search' && req.method === 'POST') {
       return handleInternalWebSearchRoute({ req, res, jsonResponse, parseBody, prisma });

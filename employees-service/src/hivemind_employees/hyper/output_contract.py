@@ -24,13 +24,13 @@ EXPLICIT_VISUAL = re.compile(
 
 EXPLICIT_IMAGE_GENERATION = re.compile(
     r"(?:\b(?:generate|create|make|produce|render|design)\b.{0,100}"
-    r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative)\b|"
+    r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative|logo|logos|brand\s+marks?|emblems?)\b|"
     r"\b(?:image|images|visual|visuals|graphic|graphics|artwork|creative)\b.{0,100}"
     r"\b(?:generate|create|make|produce|render|design)\b|"
     r"\b(?:i\s+(?:want|need)|we\s+(?:want|need)|give\s+me)\b.{0,60}"
-    r"\b(?:an?\s+)?(?:image|visual|graphic|artwork|creative)\b|"
+    r"\b(?:an?\s+)?(?:image|visual|graphic|artwork|creative|logo|brand\s+mark|emblem)\b|"
     r"\b(?:final\s+(?:image|visual|graphic|artwork)|visual\s+artifact|"
-    r"(?:image|visual|graphic|creative)\s+(?:set|series))\b)",
+    r"(?:image|visual|graphic|creative|logo)\s+(?:set|series))\b)",
     re.I | re.S,
 )
 

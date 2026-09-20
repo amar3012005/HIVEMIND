@@ -63,6 +63,17 @@ def test_direct_visual_language_uses_durable_visual_contract_in_any_room():
         assert c["artifact_kind"] == "generated_image"
 
 
+def test_direct_logo_request_uses_generated_image_contract_inside_campaign_room():
+    c = resolve_output_contract(
+        user_message="create me a new logo for solvis",
+        room_kind="campaign",
+        room_mode="work",
+    )
+    assert c["intended_output"] == "artifact"
+    assert c["artifact_required"] is True
+    assert c["artifact_kind"] == "generated_image"
+
+
 def test_explicit_deck_is_artifact():
     c = resolve_output_contract(user_message="Make a pitch deck for EU buyers", room_kind="branding")
     assert c["intended_output"] == "artifact"

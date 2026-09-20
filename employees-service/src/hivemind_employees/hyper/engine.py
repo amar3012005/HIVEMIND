@@ -5669,8 +5669,10 @@ class Director:
                     "or external Docs/Sheets/Notion writes. Preserve the requested medium exactly: use kind=presentation "
                     "for a deck, pitch deck, slides, briefing presentation, or slide-by-slide request; use kind=dashboard "
                     "only when the user asks for monitoring, a dashboard, console, or recurring metric exploration; "
-                    "use kind=generated_image with medium=image_generation for a final raster image or coordinated "
-                    "image set; otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
+                    "use kind=generated_image with medium=image_generation for a final raster image, logo, brand mark, "
+                    "or coordinated image set; otherwise use kind=interactive_document. A direct logo or brand-mark request "
+                    "is the active deliverable even inside a campaign Room; use the Room goal only as context and do not "
+                    "replace it with a campaign report. Never turn a presentation into a scrolling report or "
                     "dashboard. Describe purpose and audience without choosing a theme "
                     "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
                     " A requested wireframe, prototype, journey map, flow visualization, system diagram, or other "
@@ -5800,7 +5802,7 @@ class Director:
         explicit_family = None
         if re.search(r"\b(?:pitch\s+deck|slide\s*deck|slides?|presentation)\b", message, re.I):
             explicit_family = "presentation"
-        elif re.search(r"\b(?:poster|banner|social\s+(?:graphic|image)|generate\s+(?:an?\s+)?image)\b", message, re.I):
+        elif re.search(r"\b(?:poster|banner|logos?|brand\s+marks?|emblems?|social\s+(?:graphic|image)|generate\s+(?:an?\s+)?image)\b", message, re.I):
             explicit_family = "image"
         elif re.search(r"\b(?:spreadsheet|workbook|\.csv\b|csv\s+(?:file|table)|xlsx)\b", message, re.I):
             explicit_family = "spreadsheet"

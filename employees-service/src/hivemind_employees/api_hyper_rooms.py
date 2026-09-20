@@ -602,7 +602,7 @@ def _room_visual_job_payload(req: "RoomTurnRequest", room_kind: str) -> Dict[str
             "quality": "quality",
         },
         "model_policy": "auto",
-        "source": {"kind": "room_director", "room_id": req.room_id},
+        "source": {"kind": "room_director", "room_id": req.room_id, "turn_id": req.turn_id},
         "idempotency_key": f"room-visual:{req.turn_id}",
     }
 
@@ -644,7 +644,9 @@ def _campaign_post_visual_payload(
     payload["output"] = {
         "mode": "set", "count": count, "aspect_ratios": ["4:5"], "quality": "quality",
     }
-    payload["source"] = {"kind": "room_director_campaign_report", "room_id": req.room_id}
+    payload["source"] = {
+        "kind": "room_director_campaign_report", "room_id": req.room_id, "turn_id": req.turn_id,
+    }
     payload["idempotency_key"] = f"room-visual-report:{req.turn_id}"
     return payload
 
@@ -699,7 +701,9 @@ def _director_final_visual_payload(
         f"APPROVED FINAL SYNTHESIS:\n{str(final_text or '')[:16000]}\n\n"
         f"COMPLETED ROOM CONTEXT:\n{json.dumps(completed_context, ensure_ascii=False)[:14000]}"
     )
-    payload["source"] = {"kind": "room_director_final_synthesis", "room_id": req.room_id}
+    payload["source"] = {
+        "kind": "room_director_final_synthesis", "room_id": req.room_id, "turn_id": req.turn_id,
+    }
     payload["idempotency_key"] = f"room-visual-final:{req.turn_id}"
     return payload
 

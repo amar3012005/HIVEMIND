@@ -28,6 +28,7 @@ def test_room_visual_payload_preserves_instruction_ratio_and_idempotency():
         "mode": "single", "count": 1, "aspect_ratios": ["16:9"], "quality": "quality",
     }
     assert payload["source"]["room_id"] == "aa0e4263-cd83-45ec-9bcb-aae37e9a350b"
+    assert payload["source"]["turn_id"] == "turn-visual-canary"
     assert payload["idempotency_key"] == "room-visual:turn-visual-canary"
 
 
@@ -56,6 +57,7 @@ def test_linkedin_post_report_queues_one_coordinated_visual_per_post():
     assert "one for each approved post" in payload["instruction"]
     assert "hot water infographic" in payload["instruction"]
     assert payload["source"]["kind"] == "room_director_campaign_report"
+    assert payload["source"]["turn_id"] == "turn-visual-canary"
     assert payload["idempotency_key"] == "room-visual-report:turn-visual-canary"
 
 
@@ -82,6 +84,7 @@ def test_director_selected_image_uses_completed_room_result_as_final_brief():
     )
     assert payload is not None
     assert payload["source"]["kind"] == "room_director_final_synthesis"
+    assert payload["source"]["turn_id"] == "turn-visual-canary"
     assert payload["idempotency_key"] == "room-visual-final:turn-visual-canary"
     assert "APPROVED FINAL SYNTHESIS" in payload["instruction"]
     assert "Verified buyer concern" in payload["instruction"]

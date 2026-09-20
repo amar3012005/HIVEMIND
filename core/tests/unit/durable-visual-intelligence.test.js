@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { VISUAL_STAGES, DurableVisualIntelligenceLifecycle, normalizeBrandDnaExtraction, startVisualIntelligenceWorkflow, validateVisualAdmission } from '../../src/visual-intelligence/durable-visual-intelligence.js';
+import { VISUAL_STAGES, DurableVisualIntelligenceLifecycle, listEligibleDayTwoBrandDna, normalizeBrandDnaExtraction, startVisualIntelligenceWorkflow, validateVisualAdmission } from '../../src/visual-intelligence/durable-visual-intelligence.js';
 
 const ids = { org_id: '47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f', user_id: '3b56a01a-7caf-4348-964a-566f52d8c437', job_id: '74fb72fc-08da-41cc-8c56-598eae67bfee' };
 
@@ -37,6 +37,28 @@ test('Day 2 delivery admission requires lifecycle context but never creates a Ro
   const delivered = await startVisualIntelligenceWorkflow({ orgId: ids.org_id, userId: ids.user_id, roomId: ids.job_id, urls: ['https://example.com'], lifecycleDay: 2, fetchImpl: async (_url, options) => new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'content-type': 'application/json' } }) });
   assert.equal(delivered.ok, true);
   process.env.VISUAL_INTELLIGENCE_WORKFLOW_ENABLED = previous.enabled; process.env.HIVEMIND_VISUAL_WORKFLOW_URL = previous.url; process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET = previous.secret;
+});
+
+test('Day 2 waits for the next 09:00 local morning after Day 1 is sent', async () => {
+  const previousEnabled = process.env.HIVEMIND_D2_BRAND_DNA_WORKFLOW_ENABLED;
+  const previousNow = Date.now;
+  process.env.HIVEMIND_D2_BRAND_DNA_WORKFLOW_ENABLED = 'true';
+  const prisma = {
+    $queryRawUnsafe: async () => [{
+      id: ids.job_id, org_id: ids.org_id, user_id: ids.user_id, owner_timezone: 'Europe/Berlin',
+      company: { website: 'https://example.com', day1_first_move: { status: 'sent', sent_at: '2026-09-20T10:00:00.000Z' } },
+    }],
+  };
+  try {
+    Date.now = () => Date.parse('2026-09-21T06:59:00.000Z');
+    assert.deepEqual(await listEligibleDayTwoBrandDna({ prisma }), []);
+    Date.now = () => Date.parse('2026-09-21T07:00:00.000Z');
+    assert.deepEqual(await listEligibleDayTwoBrandDna({ prisma }), [{ org_id: ids.org_id, user_id: ids.user_id, room_id: ids.job_id, url: 'https://example.com/' }]);
+  } finally {
+    Date.now = previousNow;
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D2_BRAND_DNA_WORKFLOW_ENABLED;
+    else process.env.HIVEMIND_D2_BRAND_DNA_WORKFLOW_ENABLED = previousEnabled;
+  }
 });
 
 test('visual admission rejects an optional Room outside the caller tenant', async () => {

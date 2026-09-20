@@ -96,6 +96,55 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
+test('Jev narrows legacy Composio discovery and blocks an unselected write in the same turn', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let turn = 0;
+  const modelStep = async () => {
+    turn += 1;
+    if (turn === 1) return { message: call('hivemind_connected_task', {
+      action: 'search', toolkits: ['gmail'],
+      queries: [{ use_case: 'Find the newest Gmail message from Rama and return date and subject without changing it' }],
+    }, 'j1') };
+    if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', tool_slugs: ['GMAIL_ADD_LABEL_TO_EMAIL'] }, 'j2') };
+    if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'GMAIL_FETCH_EMAILS', arguments: { query: 'from:Rama', max_results: 1 } }, 'j3') };
+    return { message: { role: 'assistant', content: 'The newest message is **Hello** from **September 20, 2026**.' } };
+  };
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async discoverSessionTools() {
+      const tools = [
+        { type: 'function', function: { name: 'composio_gmail_fetch_emails', description: 'Read Gmail messages.', parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail', read_only: true } },
+        { type: 'function', function: { name: 'composio_gmail_add_label_to_email', description: 'Add a label to a message.', parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_ADD_LABEL_TO_EMAIL', toolkit: 'gmail', read_only: false } },
+      ];
+      return {
+        sessionId: 'jev-session', tools,
+        primaryToolSlugs: ['GMAIL_FETCH_EMAILS', 'GMAIL_ADD_LABEL_TO_EMAIL'], relatedToolSlugs: [],
+        toolkitConnectionStatuses: { gmail: { status: 'ACTIVE' } },
+      };
+    },
+    async getSessionToolSchemas(_session, slugs) {
+      assert.deepEqual(slugs, ['GMAIL_FETCH_EMAILS']);
+      return { GMAIL_FETCH_EMAILS: { read_only: true, input_schema: { type: 'object', required: ['query', 'max_results'], properties: { query: { type: 'string' }, max_results: { type: 'integer' } } } } };
+    },
+    async executeToolsParallel() { return [{ successful: true, data: { messages: [{ subject: 'Hello', received_at: '2026-09-20' }] } }]; },
+  };
+  const decisionStage = async input => input.stage === 'composio_selection'
+    ? { status: 'selected', selected: 'use:GMAIL_FETCH_EMAILS', authoritative: true, receipt: { source: 'jev' } }
+    : { status: 'selected', selected: 'composio_search', authoritative: true, receipt: { source: 'jev' } };
+  const result = await runUnifiedMetaAgent({
+    message: 'Find my last email from Rama. Do not modify it.', useTools: true, prisma,
+    ctx: ctx(prisma, 'jev-read'), checkpointer: new MemorySaver(), modelStep, composio, decisionStage,
+    onEvent: event => events.push(event),
+  });
+  assert.equal(result.status, 'completed');
+  assert.match(result.response, /Hello/);
+  assert.ok(result.steps.some(step => step.slug === 'hivemind_connected_task' && step.status === 'error'));
+  assert.ok(events.some(event => event.type === 'decision' && event.stage === 'composio_selection'
+    && event.selected === 'use:GMAIL_FETCH_EMAILS' && event.source === 'jev'));
+  assert.deepEqual(result.run.scratch.selected_tool_slugs, ['GMAIL_FETCH_EMAILS']);
+});
+
 test('execute progressively hydrates its authorized schema and refuses empty provider defaults', async () => {
   const prisma = fakePrisma();
   const calls = [];

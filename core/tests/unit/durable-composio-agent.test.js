@@ -293,6 +293,50 @@ test('latest emails is a read: no reply, no label mutate, no hivemind dump', asy
   assert.match(result.summary, /synth:/);
 });
 
+test('latest email request rejects contact tools and executes the mailbox tool with the requested limit', async () => {
+  resetDurableAgentMemory();
+  const executed = [];
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+    async getToolRouterSession() { return { id: 'trs_mail_not_contacts' }; },
+    async discoverSessionTools() {
+      return {
+        sessionId: 'trs_mail_not_contacts',
+        primaryToolSlugs: ['GMAIL_SEARCH_PEOPLE', 'GMAIL_GET_CONTACTS'],
+        relatedToolSlugs: ['GMAIL_FETCH_EMAILS'],
+        toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
+        tools: [
+          { _composio: { slug: 'GMAIL_SEARCH_PEOPLE', toolkit: 'gmail' } },
+          { _composio: { slug: 'GMAIL_GET_CONTACTS', toolkit: 'gmail' } },
+          { _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
+        ],
+      };
+    },
+    async generateToolInputs() { return {}; },
+    async executeToolsParallel(_org, tools) {
+      executed.push(...tools);
+      return tools.map((tool) => tool.slug === 'GMAIL_FETCH_EMAILS'
+        ? { successful: true, data: { messages: [{ subject: 'Newest message' }] } }
+        : { successful: false, error: 'wrong tool' });
+    },
+  };
+  const result = await runDurableComposioAgent({
+    message: 'what are my last 5 emails',
+    ctx: {
+      orgId: 'o1', userId: 'u1', threadId: 't-mail-not-contacts',
+      chooseNextAction: async (observation) => observation.searched
+        ? { action: 'execute', slug: 'GMAIL_SEARCH_PEOPLE', arguments: {}, reason: 'bad model choice' }
+        : { action: 'search', query: observation.goal },
+      synthesizeDurableAnswer: async ({ table }) => table,
+    },
+    composio,
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(executed.map((row) => row.slug), ['GMAIL_FETCH_EMAILS']);
+  assert.equal(executed[0].arguments.max_results, 5);
+  assert.match(result.summary, /Newest message/);
+});
+
 test('read-only LinkedIn questions do not execute create-post', async () => {
   resetDurableAgentMemory();
   const executed = [];

@@ -84,6 +84,27 @@ export function isRecipientLookupSlug(slug) {
   return /GET_CONTACT|SEARCH_PEOPLE|FETCH_EMAILS/i.test(String(slug || ''));
 }
 
+export function isContactDirectorySlug(slug) {
+  return /SEARCH_PEOPLE|GET_CONTACT/i.test(String(slug || ''));
+}
+
+export function isMailboxMessageSlug(slug) {
+  return /FETCH_EMAILS|SEARCH_EMAILS|LIST_EMAILS|LIST_MESSAGES|LIST_THREADS|FETCH_MESSAGE/i.test(String(slug || ''));
+}
+
+export function isMailboxMessageRequest(message) {
+  const text = String(message || '').toLowerCase();
+  return /\b(?:email|emails|e-mail|e-mails|mail|mails|inbox|message|messages|thread|threads)\b/.test(text)
+    && /\b(?:last|latest|recent|newest|new|unread|show|list|what|which|find|get|read)\b/.test(text);
+}
+
+export function requestedResultLimit(message, fallback = null) {
+  const text = String(message || '');
+  const match = text.match(/\b(?:last|latest|recent|newest|show|list|get|read)?\s*(\d{1,2})\s+(?:email|emails|e-mail|e-mails|mail|mails|message|messages|thread|threads)\b/i);
+  if (!match) return fallback;
+  return Math.max(1, Math.min(50, Number(match[1])));
+}
+
 export function isMailboxInventorySlug(slug) {
   return /LIST_DRAFTS|GET_DRAFT|UPDATE_DRAFT|LIST_LABELS|LIST_SEND_AS|GET_PROFILE|GET_CURRENT_TIME|LIST_SEND_AS/i.test(String(slug || ''));
 }
@@ -902,6 +923,15 @@ export function rankDurableReadSlug(slug) {
   return 3;
 }
 
+export function rankMailboxReadSlug(slug) {
+  const value = String(slug || '');
+  if (/FETCH_EMAILS|SEARCH_EMAILS|LIST_EMAILS|LIST_MESSAGES/i.test(value)) return 0;
+  if (/LIST_THREADS/i.test(value)) return 1;
+  if (/FETCH_MESSAGE/i.test(value)) return 4;
+  if (isContactDirectorySlug(value)) return 90;
+  return 20 + rankDurableReadSlug(value);
+}
+
 export function compactDurableObservation(run, {
   message,
   connected = [],
@@ -980,13 +1010,17 @@ export function fallbackNextDurableAction(obs) {
     return Boolean(row && (row.status === 'error' || row.status === 'skipped')
       && /missing required|needs more context|invalid request|1 out of 1 tools failed/i.test(String(row.summary || '')));
   };
+  const mailboxRequest = Boolean(obs.read_only && isMailboxMessageRequest(obs.goal));
   const pendingReads = slugs
     .filter((slug) => !isWriteSlug(slug) && !isMailboxInventorySlug(slug) && !isNativeHivemindSlug(slug))
     .filter((slug) => !tokens(slug).some((x) => BLOCKED_WRITE_TOKENS.has(x)))
     .filter((slug) => !/ATTACHMENT|HISTORY|CODESPACE|SECRET/i.test(slug))
     .filter((slug) => !done(slug) && !failedMissing(slug))
     .filter((slug) => toolkitHasActiveConnection(toolkitFromSlug(slug), connected, statuses))
-    .sort((left, right) => rankDurableReadSlug(left) - rankDurableReadSlug(right));
+    .filter((slug) => !mailboxRequest || !isContactDirectorySlug(slug))
+    .sort((left, right) => mailboxRequest
+      ? rankMailboxReadSlug(left) - rankMailboxReadSlug(right)
+      : rankDurableReadSlug(left) - rankDurableReadSlug(right));
 
   const disconnected = [...new Set([
     ...(candidates || []),
@@ -1010,6 +1044,7 @@ export function fallbackNextDurableAction(obs) {
     && row.slug
     && !isNativeHivemindSlug(row.slug)
     && !/^COMPOSIO_SEARCH/i.test(row.slug)
+    && (!mailboxRequest || isMailboxMessageSlug(row.slug))
   ));
   if (obs.read_only && successfulAppReads.length >= 1) {
     return { action: 'done', reason: 'answer from the read that already succeeded' };
@@ -1031,6 +1066,14 @@ export function fallbackNextDurableAction(obs) {
         reason: 'search list tools after get-by-id miss',
       };
     }
+  }
+
+  if (mailboxRequest && !pendingReads.some(isMailboxMessageSlug) && !obs.known?.list_search) {
+    return {
+      action: 'search',
+      query: `list the authenticated user's latest email messages for: ${String(obs.goal || '').slice(0, 260)}`,
+      reason: 'discover a mailbox message read capability, not contacts',
+    };
   }
 
   const follow = slugs.find((slug) => isFollowUpReadSlug(slug) && !done(slug) && !isWriteSlug(slug) && !failedMissing(slug));
@@ -1073,6 +1116,7 @@ export function fallbackNextDurableAction(obs) {
 export function governNextAction(next, obs) {
   const parsed = parseNextAction(next) || fallbackNextDurableAction(obs);
   const slugs = catalogSlugsFromObservation(obs);
+  const mailboxRequest = Boolean(obs?.read_only && isMailboxMessageRequest(obs.goal));
   if (parsed.action === 'search' && obs.searched && !parsed.query) {
     const again = fallbackNextDurableAction(obs);
     return again.action === 'search' && !again.query ? { action: 'done', reason: 'already searched' } : again;
@@ -1081,6 +1125,13 @@ export function governNextAction(next, obs) {
     if (!slugs.includes(parsed.slug) && !isNativeHivemindSlug(parsed.slug)) {
       return fallbackNextDurableAction(obs);
     }
+  }
+  if (mailboxRequest && parsed.action === 'execute' && isContactDirectorySlug(parsed.slug)) {
+    return fallbackNextDurableAction(obs);
+  }
+  if (mailboxRequest && parsed.action === 'done') {
+    const hasMailboxReceipt = (obs.receipts || []).some((row) => row.status === 'completed' && isMailboxMessageSlug(row.slug));
+    if (!hasMailboxReceipt) return fallbackNextDurableAction(obs);
   }
   if (parsed.action === 'execute' && parsed.slug && isWriteSlug(parsed.slug)) {
     return obs.read_only
@@ -1733,6 +1784,8 @@ export async function runDurableComposioAgent({
       }
     }
     if (!Object.keys(args).length) args = argumentsForReadSlug(call.slug, { person });
+    const requestedLimit = requestedResultLimit(message);
+    if (requestedLimit && isMailboxMessageSlug(call.slug)) args.max_results = requestedLimit;
     beginTool(emit, run, call.slug, args);
     let result = { successful: false, data: null, error: 'execute unavailable' };
     try {

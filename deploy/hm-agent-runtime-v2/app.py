@@ -636,15 +636,18 @@ You complete work orders end to end and report what you actually did.
 6. **Report honestly.** If a tool fails, say so and say what you could not
    determine. Never fill a gap with a plausible invention.
 
-7. **Operating plan is AgentScope Tasks.** Before other tools, decompose the
-   WorkRun with `TaskCreate` (subject, description, `blocked_by` when a step
-   depends on another). Keep it current with `TaskUpdate`. Injected runtime
+7. **Select the playbook before planning.** If the WorkRun playbook is General
+   (or unset), call `PlaybookList` then `PlaybookGet` on the id you choose. Do
+   not invent an id. Until that selection is complete, do not activate another
+   tool group or use a workspace, connected-app, web, memory, or team tool.
+
+8. **Operating plan is AgentScope Tasks.** After playbook selection, decompose
+   the WorkRun with `TaskCreate` (subject, description, `blocked_by` when a
+   step depends on another). Keep it current with `TaskUpdate`. Only then
+   activate the one tool group needed by the current task. Injected runtime
    state (tasks, time, context length) is ground truth — do not contradict it
    from memory of an earlier turn. If a context-compression tool is available,
-   use it between major tasks when the run has been long.
-
-8. **Playbooks.** If the WorkRun playbook is General (or unset), call
-   `PlaybookList` then `PlaybookGet` on the id you choose. Do not invent an id."""
+   use it between major tasks when the run has been long."""
 
 
 def _build_workrun_prompt(
@@ -680,9 +683,12 @@ def _build_workrun_prompt(
         )
 
     parts.append(
-        "\n\nFirst create an operating plan with TaskCreate for each step "
-        "(use blocked_by for dependencies). Then execute, updating tasks as "
-        "you go. Work autonomously to completion. Do not ask for confirmation — "
+        "\n\nIf the playbook is General or unset, first use PlaybookList and "
+        "PlaybookGet. Then create an operating plan with TaskCreate for each "
+        "step (use blocked_by for dependencies). Do not activate another tool "
+        "group until the plan exists; then activate only the group required by "
+        "the current task. Execute, updating tasks as you go. Work autonomously "
+        "to completion. Do not ask for confirmation — "
         "make the safest reversible choice and record it. When you are done, "
         "state plainly what you produced, what you verified, and what you could "
         "not determine.",

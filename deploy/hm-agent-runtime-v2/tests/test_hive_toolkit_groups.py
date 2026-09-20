@@ -1,8 +1,16 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
-from hive_toolkit_groups import extra_groups_for, partition_hive_tools
+from agentscope.tool import TaskCreate, Toolkit
+from agentscope.workspace import LocalWorkspace
+from hive_toolkit_groups import (
+    TEAM_TOOL_NAMES,
+    extra_groups_for,
+    partition_hive_tools,
+    separate_native_tool_groups,
+)
 
 
 class HiveToolkitGroupsTests(unittest.TestCase):
@@ -31,6 +39,56 @@ class HiveToolkitGroupsTests(unittest.TestCase):
         basic, groups = extra_groups_for(tools)
         self.assertEqual([tool.name for tool in basic], ["PlaybookList", "PlaybookGet"])
         self.assertEqual([group.name for group in groups], ["hivemind", "web_research", "connected_apps"])
+
+    def test_unknown_extra_is_an_explicit_runtime_extension_group(self):
+        basic, groups = extra_groups_for([SimpleNamespace(name="custom_runtime_tool")])
+        self.assertEqual(basic, [])
+        self.assertEqual([group.name for group in groups], ["runtime_extensions"])
+
+    def test_native_workspace_and_team_tools_are_not_left_in_basic(self):
+        basic = SimpleNamespace(
+            name="basic",
+            tools=[
+                SimpleNamespace(name="Bash"),
+                SimpleNamespace(name="Read"),
+                SimpleNamespace(name="TaskCreate"),
+                SimpleNamespace(name="TeamCreate"),
+            ],
+            skills_or_loaders=["skill-loader"],
+            mcps=["mcp-client"],
+        )
+        toolkit = SimpleNamespace(tool_groups=[basic])
+        separate_native_tool_groups(toolkit, {"Bash", "Read"})
+        groups = {group.name: group for group in toolkit.tool_groups}
+        self.assertEqual([tool.name for tool in groups["basic"].tools], ["TaskCreate"])
+        self.assertEqual([tool.name for tool in groups["workspace"].tools], ["Bash", "Read"])
+        self.assertEqual([tool.name for tool in groups["team_tools"].tools], ["TeamCreate"])
+        self.assertEqual(len(groups["workspace"].skills_or_loaders), 1)
+        self.assertEqual(groups["workspace"].mcps, ["mcp-client"])
+        self.assertIn("TeamCreate", TEAM_TOOL_NAMES)
+
+    def test_real_agentscope_toolkit_hides_workspace_schema_until_reset(self):
+        async def verify():
+            workspace = LocalWorkspace(workdir="/tmp/hm-toolkit-group-test")
+            workspace_tools = await workspace.list_tools()
+            toolkit = Toolkit(tools=workspace_tools + [TaskCreate()])
+            separate_native_tool_groups(
+                toolkit,
+                {tool.name for tool in workspace_tools},
+            )
+            basic = {
+                schema["function"]["name"]
+                for schema in await toolkit.get_tool_schemas()
+            }
+            active_workspace = {
+                schema["function"]["name"]
+                for schema in await toolkit.get_tool_schemas(["workspace"])
+            }
+            self.assertIn("TaskCreate", basic)
+            self.assertNotIn("Bash", basic)
+            self.assertIn("Bash", active_workspace)
+
+        asyncio.run(verify())
 
     def test_runtime_does_not_pre_activate_a_group_before_reset_tools(self):
         app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text()

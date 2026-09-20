@@ -117,6 +117,36 @@ test('native Harness recall reports bounded unavailability without asserting emp
   assert.match(res.body.message, /No absence conclusion/);
 });
 
+test('native Harness web fallback starts and polls only tenant-scoped Core search jobs', async () => {
+  const calls = [];
+  for (const request of [
+    { method: 'POST', pathname: '/internal/v1/harness-chat/core/api/web/search/jobs', body: { query: 'Singulance', limit: 5 } },
+    { method: 'GET', pathname: '/internal/v1/harness-chat/core/api/web/jobs/123e4567-e89b-12d3-a456-426614174000' },
+  ]) {
+    const res = {};
+    await handleHarnessChatBootstrapRoute({
+      req: { method: request.method, headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: request.pathname,
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => request.body || {},
+      jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+      redisConfig: { coreApiBaseUrl: 'http://core.test' },
+      env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ status: 'succeeded', results: [] }));
+      },
+    });
+    assert.equal(res.status, 200);
+  }
+  assert.equal(calls[0].url, 'http://core.test/api/web/search/jobs');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { query: 'Singulance', limit: 5 });
+  assert.equal(calls[1].url, 'http://core.test/api/web/jobs/123e4567-e89b-12d3-a456-426614174000');
+  assert.equal(calls[1].init.method, 'GET');
+  assert.equal(calls[1].init.headers['x-hm-user-id'], userId);
+  assert.equal(calls[1].init.headers['x-hm-org-id'], orgId);
+});
+
 test('scoped proxy forwards a save-status replay lookup without allowing other memory subroutes', async () => {
   const res = {};
   const calls = [];

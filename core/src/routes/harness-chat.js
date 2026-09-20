@@ -33,6 +33,7 @@ const CORE_ROUTES = new Map([
   ['/api/profiles', new Set(['GET'])],
   ['/api/profiles/context', new Set(['GET'])],
   ['/api/recall', new Set(['POST'])],
+  ['/api/web/search/jobs', new Set(['POST'])],
   // The native DeepSeek Harness runtime intentionally exposes the compact
   // `/api/entities` contract. Core's canonical HTTP route is
   // `/api/entity-search`; keep the translation at this authenticated proxy
@@ -267,7 +268,8 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     jsonResponse(res, result || { error: 'Organization membership required' }, result ? 200 : 403);
     return true;
   }
-  if (!CORE_ROUTES.get(corePath)?.has(req.method)) {
+  const webJobStatus = corePath.match(/^\/api\/web\/jobs\/([0-9a-f-]+)$/i);
+  if (!CORE_ROUTES.get(corePath)?.has(req.method) && !(webJobStatus && req.method === 'GET')) {
     jsonResponse(res, { error: 'Harness core operation not allowed' }, 404); return true;
   }
   let body;

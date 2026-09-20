@@ -12856,7 +12856,7 @@ Write the persona now.`;
           });
           const binding = await bind.json().catch(() => ({}));
           if (!bind.ok) return jsonResponse(res, { error: binding.detail || 'runtime binding missing' }, 404);
-          const text = String(body?.text || body?.goal || '').trim();
+          const text = String(body?.text || body?.content || body?.goal || '').trim();
           const isHitlResult = body?.input
             && typeof body.input === 'object'
             && ['USER_CONFIRM_RESULT', 'EXTERNAL_EXECUTION_RESULT'].includes(String(body.input.type || '').toUpperCase());

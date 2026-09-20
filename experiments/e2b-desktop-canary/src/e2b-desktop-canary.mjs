@@ -19,7 +19,7 @@ function sha256(value) {
 }
 
 function requireDesktopApi(desktop) {
-  for (const method of ['launch', 'open', 'wait', 'write', 'screenshot', 'kill']) {
+  for (const method of ['launch', 'wait', 'leftClick', 'write', 'press', 'screenshot', 'kill']) {
     if (typeof desktop?.[method] !== 'function') throw new TypeError(`E2B Desktop is missing ${method}()`)
   }
   if (typeof desktop?.files?.write !== 'function') throw new TypeError('E2B Desktop is missing files.write()')
@@ -47,11 +47,20 @@ export async function runDesktopCanary({
   try {
     desktop = await Sandbox.create()
     requireDesktopApi(desktop)
-    await desktop.launch('google-chrome')
     await desktop.files.write(FIXTURE_PATH, fixtureHtml)
-    await desktop.open(FIXTURE_PATH)
-    await desktop.wait(1_000)
+    await desktop.launch('google-chrome')
+    // Do not use desktop.open(): it follows the desktop's default file
+    // association, which may be a file manager rather than Chrome.
+    await desktop.wait(10_000)
+    await desktop.press(['ctrl', 'l'])
+    await desktop.write(`file://${FIXTURE_PATH}`)
+    await desktop.press('enter')
+    await desktop.wait(2_000)
+    // The fixture has a stable 1024x768 layout. Focus its input before typing,
+    // using E2B's documented mouse primitive.
+    await desktop.leftClick(220, 308)
     await desktop.write('Agent draft: awaiting human review')
+    await desktop.wait(500)
 
     await desktop.stream.start({ requireAuth: true })
     const authKey = await desktop.stream.getAuthKey()
@@ -80,7 +89,9 @@ export async function runDesktopCanary({
       status: keepAlive ? 'awaiting_human_takeover' : 'completed',
     }
     await writeFile(path.join(outputDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`)
-    return { receipt, streamUrl: printStreamUrl ? streamUrl : undefined, desktop }
+    // The caller may open this URL locally for an operator, but it must never
+    // be persisted. The receipt and normal console output remain secret-free.
+    return { receipt, streamUrl, desktop }
   } finally {
     if (desktop && !keepAlive) await desktop.kill()
   }

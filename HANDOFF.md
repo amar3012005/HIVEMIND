@@ -1,43 +1,73 @@
-# HIVE native Harness chat handoff
+# WorkRun AgentScope progression handoff
 
-## Authority and scope
+## Source and branch
 
-- Branch: `codex/hive-chat-origin-compose` from locked local setup `3023a035d`.
-- Baseline: `origin/singulance-local` `0035027205b84e60e58fefa5ca0f1aa95cea2adc`.
-- Harness: `amar3012005/deepseek-harness-hivemind` `hivemind-chat` `980a9d66e373d9c3a1a29f249968c44991280d18`.
-- Da-vinci gitlink: `c0032dd4de663476f8f55d061a847dbf9bfeb8ed`.
-- `singulance-main` and production were not changed.
+- Base recovery branch: `codex/workrun-source-parity` at `d7aa00529`.
+- Active branch: `codex/workrun-artifact-link`.
+- Current pushed head: `d3dd7b400`.
+- This is local-only work. No shared container, preview, or production service
+  was replaced.
 
-## Canonical architecture
+## Completed, verified phases
 
-Use `./scripts/harness-chat-env` only. One Compose file:
+1. `6caef15e2 fix(workruns): link artifacts by AgentScope session`
+   - `hivemind_record_artifact` forwards the server-minted AgentScope session
+     identity and hm-core resolves it under the authenticated user/org before
+     linking the durable artifact pointer to the WorkRun.
+2. `7ecd5d35f feat(workruns): progressively activate native capabilities`
+   - AgentScope Tasks, PlaybookList/Get, and cancellation remain basic.
+   - Workspace tools, workspace skills/MCPs, team controls, and non-basic HIVE
+     extensions are named AgentScope ToolGroups, activated only by
+     `reset_tools`.
+   - Tool-result events recover their tool name from the matching call id.
+3. `d3dd7b400 feat(workruns): allow direct answers before company planning`
+   - The single native AgentScope run now answers self-contained requests with
+     no tools; company work follows playbook selection, native Tasks, then one
+     needed ToolGroup.
 
-`infra/docker-compose.hivemind-chat.yml`
+## Verification output
 
-Project `hivemind-chat-local`, network `hivemind-network`. Browser stays on
-`https://next.preview.singulancelabs.com`. Cloudflare Worker keeps Da-vinci
-static assets. One named tunnel delivers traffic to Caddy `origin-gateway`.
-Internal calls use Compose DNS: `core`, `control-plane`, `harness-runner`.
+Run from `/Users/amar/HIVE-MIND-workrun-artifact-link`:
 
-## Agent 1 work
+```text
+docker run --rm --volume "$PWD/deploy/hm-agent-runtime-v2:/work:ro" --workdir /work --entrypoint python hm-agent-runtime-v2:local -m unittest discover -s tests -p 'test_*.py' -v
+Ran 14 tests in 0.018s
+OK
 
-- Replaced the three-file transitional composition with one complete model.
-- Added Caddy origin gateway and in-project cloudflared with committed ingress.
-- Mapped existing postgres/qdrant/docling volumes; added redis volume.
-- Doctor rejects duplicate projects, foreign/compat containers, floating
-  Harness SHAs, and package bind mounts.
-- `up` rebuilds only the runner; `up-all` is first boot.
+(cd core && npm test -- tests/unit/work-runs-plan.test.js tests/unit/workrun-artifact-link.test.js tests/unit/workrun-playbook-catalog.test.js)
+# tests 8
+# pass 8
+# fail 0
+```
 
-## Runtime after Agent 1 cutover
+The Docker test includes a real AgentScope 2.0.8 Toolkit assertion: `TaskCreate`
+is initially available and `Bash` appears only after activating `workspace`.
 
-Local Compose project `hivemind-chat-local` is up: core, control-plane,
-harness-runner, origin-gateway, employees, postgres, redis, qdrant, nango,
-playwright, docling, cloudflared. Local Caddy `http://127.0.0.1:18080/health`
-and Host-header routes for preview-api/preview return 200.
+## Current next phase
 
-Public `next.preview.singulancelabs.com` still returns 200 from the Cloudflare
-Worker. `preview-api` and `preview.singulancelabs.com` currently return 530
-because those hostnames were on the old token tunnel we removed. Point those
-hostnames at named tunnel `c5dbf395-9e2b-40aa-b033-bcf85bde0240`, then recheck.
+Implement layered catalog resolution for AgentScope `PlaybookList`/`PlaybookGet`:
 
-Do not delete volumes. Do not edit `singulance-main`.
+1. Preserve `global:*` catalog entries.
+2. Resolve the current WorkRun from the authenticated AgentScope session id.
+3. Add employee-global learned playbook and room-local playbook data as scoped
+   catalog entries, without trusting a caller-supplied org, room, or employee.
+4. Keep catalog metadata compact; return detailed instructions only on
+   `PlaybookGet`.
+5. Add unit coverage for global-only fallback, scoped local entries, and
+   cross-user/session rejection.
+
+## Decisions
+
+- Do not create a second execution loop or keyword router. The AgentScope model
+  decides direct answer versus company work from the bounded system contract.
+- Keep the existing Da-vinci HM Rooms UI untouched until the runtime contract is
+  stable; the current UI already consumes stable event identities.
+- Do not rebuild the shared `hm-agent-runtime-local` container from this
+  worktree. Exact dependency/runtime tests run from an isolated container using
+  `hm-agent-runtime-v2:local`.
+
+## Exact next action
+
+Extend the internal playbook endpoints so an authenticated AgentScope session
+receives only the global, employee-global, and room-local catalog entries bound
+to its own WorkRun.

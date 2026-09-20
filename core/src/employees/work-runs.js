@@ -25,6 +25,7 @@
  */
 
 import { internalFetch } from '../internal/internal-fetch.js';
+import { localPlaybooks } from './playbook-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -94,6 +95,24 @@ export function isTerminal(status) {
 export function canTransition(from, to) {
   if (from === to) return true; // idempotent re-assert
   return (TRANSITIONS[from] || []).includes(to);
+}
+
+/**
+ * L0 context sent to a new AgentScope session. The durable WorkRun scope may
+ * contain a local playbook body, but that body is L2/L3 material and must be
+ * retrieved through the session-bound PlaybookGet path. Sending it here would
+ * quietly defeat progressive context loading.
+ */
+export function runtimeScopeProjection(scope) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return {};
+  const { local_playbooks: local, ...compactScope } = scope;
+  const localMetadata = localPlaybooks(local).map(({ id, name, description, scope: playbookScope }) => ({
+    id,
+    name,
+    description,
+    scope: playbookScope,
+  }));
+  return localMetadata.length ? { ...compactScope, local_playbooks: localMetadata } : compactScope;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +538,7 @@ export async function dispatchWorkRun({
         hyperagent_slug: hyperagentSlug,
         playbook_id: playbookId,
         playbook_version: playbookVersion,
-        scope: scope || {},
+        scope: runtimeScopeProjection(scope),
         ...(chatModelConfig ? { chat_model_config: chatModelConfig } : {}),
       },
       userId,

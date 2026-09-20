@@ -171,8 +171,11 @@ succeeds or fails.
 - Keep private reasoning private; share only conclusions and evidence.
 
 Note: `TeamSay` is your ONLY channel to {leader_name}. Anything not sent \
-through it is invisible to the team.""",
+        through it is invisible to the team.""",
         permission_context=PermissionContext(mode=PermissionMode.EXPLORE),
+        # AgentScope otherwise inherits the leader's mode and would silently
+        # upgrade this research worker to full access.
+        override_leader_mode=True,
     ),
     SubAgentTemplate(
         type="writer",
@@ -228,8 +231,11 @@ succeeds or fails.
 - State your criteria, your verdict per item, and the evidence for each.
 
 Note: `TeamSay` is your ONLY channel to {leader_name}. Anything not sent \
-through it is invisible to the team.""",
+        through it is invisible to the team.""",
         permission_context=PermissionContext(mode=PermissionMode.EXPLORE),
+        # An analyst must remain a read-only safety boundary even when its
+        # leader can write to a workspace or a connected app.
+        override_leader_mode=True,
     ),
     SubAgentTemplate(
         type="reviewer",
@@ -262,8 +268,10 @@ succeeds or fails.
 - Report each defect with the claim, the problem, and what would fix it.
 
 Note: `TeamSay` is your ONLY channel to {leader_name}. Anything not sent \
-through it is invisible to the team.""",
+        through it is invisible to the team.""",
         permission_context=PermissionContext(mode=PermissionMode.EXPLORE),
+        # A reviewer is a safety boundary, not merely a prompt suggestion.
+        override_leader_mode=True,
     ),
 ]
 
@@ -658,7 +666,15 @@ You complete work orders end to end and report what you actually did.
    Only then activate the one tool group needed by the current task. Injected
    runtime state (tasks, time, context length) is ground truth — do not
    contradict it from memory of an earlier turn. If a context-compression tool
-   is available, use it between major tasks when the run has been long."""
+   is available, use it between major tasks when the run has been long.
+
+10. **Teams are explicit, native delegation.** Activate `team_tools` only for
+    independent planned tasks that genuinely benefit from parallel work. Create
+    one team, then use `AgentCreate` with the smallest suitable worker role.
+    Workers must report a terminal status and evidence using `TeamSay`; task
+    completion is not inferred from timing or a worker stream. Persist required
+    artifacts before `TeamDelete`, because transient workers are deleted with
+    their team. Never use a team for a simple answer or a sequential task."""
 
 
 def _build_workrun_prompt(
@@ -704,7 +720,10 @@ def _build_workrun_prompt(
         "Skill when available; do not load all Skills. Do not activate another "
         "tool group until the plan and relevant Skill are ready; then activate "
         "only the group required by the current task. Execute, updating tasks as "
-        "you go. When selected-playbook work is actually complete, call "
+        "you go. Use team_tools only for independent planned tasks that need "
+        "parallel delegation; require each worker to TeamSay a terminal result "
+        "with evidence, and persist required artifacts before TeamDelete. When "
+        "selected-playbook work is actually complete, call "
         "hivemind_complete_workrun so HIVE can validate its evidence contract. "
         "Work autonomously to completion. Do not ask for confirmation — "
         "make the safest reversible choice and record it. When you are done, "

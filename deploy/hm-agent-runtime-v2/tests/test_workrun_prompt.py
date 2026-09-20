@@ -1,6 +1,8 @@
 import unittest
 
-from app import _build_agent_system_prompt, _build_workrun_prompt
+from agentscope.app._tool._agent_create import AgentCreate
+
+from app import _SUBAGENT_TEMPLATES, _build_agent_system_prompt, _build_workrun_prompt
 
 
 class WorkRunPromptTests(unittest.TestCase):
@@ -32,6 +34,30 @@ class WorkRunPromptTests(unittest.TestCase):
         self.assertLess(company_work.index("PlaybookList"), company_work.index("TaskCreate"))
         self.assertLess(company_work.index("TaskCreate"), company_work.index("SkillViewer"))
         self.assertLess(company_work.index("SkillViewer"), company_work.index("activate another tool group"))
+
+    def test_read_only_team_roles_cannot_inherit_full_leader_access(self):
+        templates = {template.type: template for template in _SUBAGENT_TEMPLATES}
+        for role in ("researcher", "analyst", "reviewer"):
+            with self.subTest(role=role):
+                self.assertTrue(templates[role].override_leader_mode)
+                self.assertEqual(templates[role].permission_context.mode.value, "explore")
+        prompt = _build_agent_system_prompt(None)
+        self.assertIn("Teams are explicit, native delegation", prompt)
+        self.assertIn("Persist required\n    artifacts before `TeamDelete`", prompt)
+
+    def test_native_agent_create_exposes_the_registered_role_choices(self):
+        templates = {template.type: template for template in _SUBAGENT_TEMPLATES}
+        tool = AgentCreate(
+            storage=None,
+            message_bus=None,
+            workspace_manager=None,
+            user_id="user-1",
+            agent_id="agent-1",
+            session_id="session-1",
+            sub_agent_templates=templates,
+        )
+        choices = tool.input_schema["properties"]["subagent_type"]["enum"]
+        self.assertTrue({"default", "researcher", "writer", "analyst", "reviewer"}.issubset(choices))
 
 
 if __name__ == "__main__":

@@ -715,6 +715,32 @@ def _visual_delivery_ready(
     return True
 
 
+def _campaign_action_visual_delivery(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Describe a governed campaign as one coherent per-action visual set."""
+    result = result if isinstance(result, dict) else {}
+    bundle = result.get("campaign_bundle") if isinstance(result.get("campaign_bundle"), dict) else None
+    artifact_intent = result.get("artifact_intent") if isinstance(result.get("artifact_intent"), dict) else {}
+    output_contract = result.get("output_contract") if isinstance(result.get("output_contract"), dict) else {}
+    selected_image = bool(
+        str(artifact_intent.get("kind") or "").strip().lower() == "generated_image"
+        or str(output_contract.get("artifact_kind") or "").strip().lower() == "generated_image"
+        or str(result.get("output_family") or "").strip().lower() == "image"
+    )
+    if not bundle or not selected_image:
+        return None
+    actions = [row for row in (bundle.get("actions") or []) if isinstance(row, dict)]
+    action_ids = [str(row.get("id") or "").strip() for row in actions if str(row.get("id") or "").strip()]
+    if not action_ids:
+        return None
+    return {
+        "contract": "campaign-visual-delivery.v1",
+        "delivery": "campaign_action_set",
+        "count": len(action_ids),
+        "coherence": "shared_campaign_system",
+        "actions": action_ids,
+    }
+
+
 async def _queue_room_visual_generation(
     req: "RoomTurnRequest", room_kind: str, payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -4900,8 +4926,15 @@ async def _orchestrate_single_agent(
     # last: research, specialist work, synthesis, and governance above must all
     # finish first. The durable workflow receives the approved final result,
     # not merely the user's opening prompt.
+    _campaign_visual_delivery = _campaign_action_visual_delivery(result)
     _final_visual_payload = _director_final_visual_payload(req, _room_kind, final_text, result)
-    if _final_visual_payload and _visual_delivery_ready(status, _gv, final_text):
+    if _campaign_visual_delivery and _visual_delivery_ready(status, _gv, final_text):
+        await _emit({
+            "t": "campaign_room_visual_handoff",
+            "bundle": result.get("campaign_bundle"),
+            "delivery": _campaign_visual_delivery,
+        })
+    elif _final_visual_payload and _visual_delivery_ready(status, _gv, final_text):
         try:
             _final_visual_job = await _queue_room_visual_generation(
                 req, _room_kind, _final_visual_payload,

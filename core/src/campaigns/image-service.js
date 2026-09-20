@@ -123,6 +123,31 @@ async function storeBytes({ orgId, campaignId, assetId, bytes, contentType }) {
   return relative;
 }
 
+async function campaignKeyVisualReference(prisma, queued) {
+  const position = Number(queued?.action?.position);
+  const planVersionId = queued?.action?.planVersionId;
+  if (!Number.isInteger(position) || position <= 0 || !planVersionId) return null;
+  const candidates = await prisma.campaignAsset.findMany({
+    where: {
+      campaignId: queued.campaignId, status: 'READY', deletedAt: null, storageKey: { not: null },
+      action: { planVersionId },
+    },
+    include: { action: { select: { position: true } } },
+  });
+  const keyVisual = candidates
+    .filter((asset) => Number(asset?.action?.position) < position)
+    .sort((left, right) => Number(left.action.position) - Number(right.action.position))[0];
+  if (!keyVisual?.storageKey || !IMAGE_TYPES.has(keyVisual.contentType)) return null;
+  const referencePath = path.resolve(STORAGE_ROOT, keyVisual.storageKey);
+  if (!referencePath.startsWith(`${STORAGE_ROOT}${path.sep}`)) return null;
+  const bytes = await fs.readFile(referencePath);
+  if (!bytes.length || bytes.length > MAX_UPLOAD_BYTES) return null;
+  return {
+    assetId: keyVisual.id,
+    dataUrl: `data:${keyVisual.contentType};base64,${bytes.toString('base64')}`,
+  };
+}
+
 async function selectReadyAsset(prisma, { campaign, action, asset }) {
   const selectedPayload = { ...action.payload, asset_id: asset.id, asset_hash: asset.contentHash, asset_alt_text: asset.metadata?.alt_text || '' };
   const siblings = await prisma.campaignAsset.findMany({ where: { campaignId: campaign.id, actionId: action.id, deletedAt: null }, select: { id: true, metadata: true } });
@@ -196,12 +221,18 @@ export async function processQueuedCampaignAssets({ prisma, limit = 1, provider 
     try {
       const generatedToday = await prisma.campaignAsset.count({ where: { campaign: { orgId: queued.campaign.orgId }, provider: 'openrouter', createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }, status: { in: ACTIVE_GENERATION_STATUSES } } });
       if (generatedToday > DAILY_GENERATION_LIMIT) throw campaignError(`The organization image limit of ${DAILY_GENERATION_LIMIT} generations per 24 hours has been reached`, 429, 'campaign_image_daily_limit');
-      const generated = await provider({ prompt: queued.prompt, aspectRatio: queued.metadata?.aspect_ratio || '16:9', model: queued.model || DEFAULT_CAMPAIGN_IMAGE_MODEL });
+      const reference = await campaignKeyVisualReference(prisma, queued).catch(() => null);
+      const generated = await provider({
+        prompt: queued.prompt,
+        aspectRatio: queued.metadata?.aspect_ratio || '16:9',
+        model: queued.model || DEFAULT_CAMPAIGN_IMAGE_MODEL,
+        inputReferences: reference ? [reference.dataUrl] : [],
+      });
       if (!generated.bytes.length || generated.bytes.length > MAX_UPLOAD_BYTES) throw campaignError('Generated image exceeds the 5 MB campaign limit', 400, 'campaign_asset_too_large');
       const contentHash = crypto.createHash('sha256').update(generated.bytes).digest('hex');
       const storageKey = await storeBytes({ orgId: queued.campaign.orgId, campaignId: queued.campaignId, assetId: queued.id, bytes: generated.bytes, contentType: generated.contentType });
       const size = dimensions(generated.bytes, generated.contentType);
-      const asset = await prisma.campaignAsset.update({ where: { id: queued.id }, data: { status: 'READY', storageKey, contentHash, contentType: generated.contentType, sizeBytes: generated.bytes.length, width: size.width, height: size.height, provider: generated.provider, model: generated.model, metadata: { ...(queued.metadata || {}), usage: generated.usage || {} } } });
+      const asset = await prisma.campaignAsset.update({ where: { id: queued.id }, data: { status: 'READY', storageKey, contentHash, contentType: generated.contentType, sizeBytes: generated.bytes.length, width: size.width, height: size.height, provider: generated.provider, model: generated.model, metadata: { ...(queued.metadata || {}), usage: generated.usage || {}, ...(reference ? { coherence_reference_asset_id: reference.assetId } : {}) } } });
       const action = await prisma.campaignAction.findUnique({ where: { id: queued.actionId } });
       if (action && !action.payload?.asset_id) await selectReadyAsset(prisma, { campaign: queued.campaign, action, asset });
       await prisma.campaignEvent.create({ data: { campaignId: queued.campaignId, orgId: queued.campaign.orgId, eventType: 'campaign_asset_ready', data: { action_id: queued.actionId, asset_id: queued.id, content_hash: contentHash, provider: asset.provider, model: asset.model } } });

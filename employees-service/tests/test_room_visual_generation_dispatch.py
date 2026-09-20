@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from hivemind_employees.api_hyper_rooms import (
+    _campaign_action_visual_delivery,
     _campaign_post_visual_payload,
     _director_final_visual_payload,
     _room_visual_job_payload,
@@ -94,3 +95,31 @@ def test_visual_delivery_waits_for_completed_grounded_room_result():
     assert _visual_delivery_ready("blocked", approved, synthesis) is False
     assert _visual_delivery_ready("complete", {"met": False, "grounded_ok": True}, synthesis) is False
     assert _visual_delivery_ready("complete", {"met": True, "grounded_ok": False}, synthesis) is False
+
+
+def test_campaign_director_image_selection_derives_multishot_count_from_actions():
+    result = {
+        "artifact_intent": {"kind": "generated_image"},
+        "campaign_bundle": {
+            "actions": [
+                {"id": "act1", "creative_brief": {"required": True}},
+                {"id": "act2", "creative_brief": {"required": True}},
+                {"id": "act3", "creative_brief": {"required": True}},
+                {"id": "act4", "creative_brief": {"required": True}},
+            ],
+        },
+    }
+    assert _campaign_action_visual_delivery(result) == {
+        "contract": "campaign-visual-delivery.v1",
+        "delivery": "campaign_action_set",
+        "count": 4,
+        "coherence": "shared_campaign_system",
+        "actions": ["act1", "act2", "act3", "act4"],
+    }
+
+
+def test_campaign_without_selected_visual_does_not_materialize_image_set():
+    assert _campaign_action_visual_delivery({
+        "campaign_bundle": {"actions": [{"id": "act1"}]},
+        "artifact_intent": None,
+    }) is None

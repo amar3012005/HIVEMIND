@@ -5,7 +5,7 @@ import { applyCampaignActionEdit, campaignActionRanges, campaignAgentWhere, cano
 import { assertTransition, campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from '../../src/campaigns/state.js';
 import { getCampaignCapabilities } from '../../src/campaigns/capabilities.js';
 import { buildCampaignDisplayMessage, buildCampaignKickoff, buildCampaignRoomDispatch, normalizeCampaignRoomEvent } from '../../src/campaigns/contracts.js';
-import { handleCampaignDispatchError, handleCampaignRoomEvent } from '../../src/campaigns/pipeline.js';
+import { handleCampaignDispatchError, handleCampaignRoomEvent, materializeRoomCampaignVisualRun } from '../../src/campaigns/pipeline.js';
 
 const baseInput = {
   idempotency_key: 'create-1', objective: 'LEAD_GENERATION',
@@ -441,6 +441,32 @@ test('first Campaign Room event advances the durable run and records progress', 
   assert.equal(result.status, 'RUNNING');
   assert.equal(run.status, 'RUNNING');
   assert.equal(events[0].eventType, 'campaign_generation_started');
+});
+
+test('ordinary room visual handoff materializes one canonical campaign run from all accepted actions', async () => {
+  const writes = [];
+  const run = { id: 'run-a', campaignId: 'campaign-a', turnId: 'turn-a', campaign: { id: 'campaign-a', orgId: 'org-a' } };
+  let lookupCount = 0;
+  const prisma = {
+    campaignRun: {
+      async findUnique() { lookupCount += 1; return lookupCount === 1 ? null : run; },
+      create({ data }) { writes.push(['run', data]); return Promise.resolve(data); },
+    },
+    hyperTurn: { async findUnique() { return { id: 'turn-a', userMessage: 'Build campaign visuals', room: { id: 'room-a', orgId: 'org-a', userId: 'user-a', name: 'Growth room' } }; } },
+    campaign: { create({ data }) { writes.push(['campaign', data]); return Promise.resolve(data); } },
+    campaignChannel: { createMany({ data }) { writes.push(['channels', data]); return Promise.resolve({ count: data.length }); } },
+    campaignEvent: { create({ data }) { writes.push(['event', data]); return Promise.resolve(data); } },
+    async $transaction(operations) { return Promise.all(operations); },
+  };
+  const actions = ['act1', 'act2', 'act3', 'act4'].map((id) => ({ id, channel: 'linkedin', creative_brief: { required: true } }));
+  const result = await materializeRoomCampaignVisualRun({
+    prisma, turnId: 'turn-a', bundle: { objective: 'Launch', actions, campaign_horizon: { duration_days: 14, intensity: 'focused' } },
+    delivery: { contract: 'campaign-visual-delivery.v1', delivery: 'campaign_action_set', count: 4, actions: actions.map((action) => action.id) },
+  });
+  assert.equal(result.campaignId, 'campaign-a');
+  assert.equal(writes.find(([kind]) => kind === 'campaign')[1].creationKey, 'room-visual:turn-a');
+  assert.deepEqual(writes.find(([kind]) => kind === 'campaign')[1].requestedChannels, ['linkedin']);
+  assert.equal(writes.find(([kind]) => kind === 'event')[1].data.visual_count, 4);
 });
 
 test('campaign governance gaps terminate cleanly with exact unmet deliverables', async () => {

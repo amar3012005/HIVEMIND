@@ -15079,7 +15079,10 @@ Write the persona now.`;
           }
         }
         const { handleCampaignRoomEvent } = await import('./campaigns/pipeline.js');
-        await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
+        const campaignRoomResult = await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
+        if (campaignRoomResult?.roomProjection) {
+          await appendTurnEvent(prisma, body.turn_id, campaignRoomResult.roomProjection);
+        }
         if (body.event.t === 'seal') {
           // Default-off shadow bridge. The current Room remains authoritative;
           // only turns carrying a typed generalized prospecting contract create

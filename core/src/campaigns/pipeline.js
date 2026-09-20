@@ -1,9 +1,59 @@
+import crypto from 'node:crypto';
 import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle, persistCampaignRepairingBundle, regenerateCampaign } from './service.js';
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
 import { notifyRuntimeCampaignProjection, scheduleRuntimeCampaignEvent } from './runtime-bridge.js';
 
 const FINAL_RUN_STATES = new Set(['COMPLETED', 'NEEDS_INPUT', 'FAILED', 'CANCELLED']);
+
+export async function materializeRoomCampaignVisualRun({ prisma, turnId, bundle, delivery }) {
+  if (delivery?.contract !== 'campaign-visual-delivery.v1' || delivery?.delivery !== 'campaign_action_set') return null;
+  const actions = Array.isArray(bundle?.actions) ? bundle.actions : [];
+  const actionIds = actions.map((action) => String(action?.id || '').trim()).filter(Boolean);
+  if (!actions.length || Number(delivery.count) !== actions.length || actionIds.length !== actions.length) return null;
+  if (JSON.stringify(actionIds) !== JSON.stringify(delivery.actions || [])) return null;
+  if (actions.some((action) => action?.creative_brief?.required !== true)) return null;
+
+  const existing = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
+  if (existing) return existing;
+  const turn = await prisma.hyperTurn.findUnique({
+    where: { id: turnId },
+    include: { room: { select: { id: true, orgId: true, userId: true, name: true } } },
+  });
+  if (!turn?.room) return null;
+  const channels = [...new Set(actions.map((action) => String(action.channel || '').trim()).filter(Boolean))];
+  if (!channels.length) return null;
+  const campaignId = crypto.randomUUID();
+  const horizon = bundle.campaign_horizon && typeof bundle.campaign_horizon === 'object' ? bundle.campaign_horizon : {};
+  const creationKey = `room-visual:${turnId}`;
+  const name = `${String(turn.room.name || 'Room').slice(0, 220)} campaign`;
+  const goal = String(bundle.objective || turn.userMessage || 'Campaign visual set').slice(0, 4000);
+  try {
+    await prisma.$transaction([
+      prisma.campaign.create({ data: {
+        id: campaignId, orgId: turn.room.orgId, ownerUserId: turn.room.userId,
+        creationKey, name, objective: 'CUSTOM', goal,
+        brief: { duration_days: Number(horizon.duration_days) || 14, cadence: { preset: String(horizon.intensity || 'focused') }, visual_delivery: delivery },
+        requirements: ['campaign_action_set', `visual_count:${actions.length}`], requestedChannels: channels,
+        audiencePolicy: bundle.audience || {}, schedulePolicy: {}, autonomyMode: 'APPROVE_PLAN_ONCE',
+        sourceType: 'campaign_room_visual', sourceId: turnId, roomId: turn.room.id, status: 'GENERATING',
+      } }),
+      prisma.campaignRun.create({ data: {
+        campaignId, roomId: turn.room.id, turnId, status: 'RUNNING',
+        briefSnapshot: { source: 'campaign_room_visual', visual_delivery: delivery }, startedAt: new Date(),
+      } }),
+      prisma.campaignChannel.createMany({ data: channels.map((channel) => ({ campaignId, channel, status: 'PLANNING' })) }),
+      prisma.campaignEvent.create({ data: {
+        campaignId, orgId: turn.room.orgId, eventType: 'campaign_created_from_room_visual',
+        actorType: 'user', actorId: turn.room.userId,
+        data: { room_id: turn.room.id, turn_id: turnId, visual_count: actions.length, action_ids: actionIds },
+      } }),
+    ]);
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
+  }
+  return prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
+}
 
 function campaignReadyDisplay(campaign, bundle) {
   return {
@@ -95,7 +145,27 @@ async function markGenerationFailed(prisma, run, event) {
 export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
   const normalized = normalizeCampaignRoomEvent(event);
   if (!normalized) return null;
-  const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
+  let run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
+  if (!run && normalized.t === 'campaign_room_visual_handoff') {
+    run = await materializeRoomCampaignVisualRun({
+      prisma, turnId, bundle: normalized.bundle, delivery: normalized.delivery,
+    });
+    if (!run) return null;
+    const result = await persistCampaignBundle({ prisma, turnId, bundle: normalized.bundle });
+    if (!result?.ok) return result;
+    await notifyRuntimeCampaignProjection({
+      prisma, campaignId: run.campaignId, type: 'campaign.assets_rendering',
+      data: { plan_version_id: result.planVersionId, action_count: result.visualActionCount || 0 },
+    }).catch(() => {});
+    return {
+      ...result,
+      roomProjection: {
+        t: 'campaign_visual_handoff', campaign_id: run.campaignId,
+        status: result.status, visual_count: result.visualActionCount || 0,
+        delivery: normalized.delivery,
+      },
+    };
+  }
   if (!run) return null;
 
   if (!FINAL_RUN_STATES.has(run.status) && normalized.t !== 'seal') await markGenerationStarted(prisma, run);

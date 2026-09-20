@@ -6739,7 +6739,7 @@ class Director:
             "audience:{rationale:string,segments:array,safety_notes:array},"
             "content_pillars:string[],kpis:[{name:string,target:string,source:string,target_type:baseline|proposed|verified,evidence_ids:string[]}],"
             "actions:[{id:string,channel:string,title:string,format:string,final_copy:string,payload:object,scheduled_offset_minutes:integer,rationale:string,"
-            "creative_brief:{required:boolean,concept:string,alt_text:string},"
+            "creative_brief:{required:boolean,concept:string,objective:string,subject:string,composition:string,brand_style:string,audience:string,aspect_ratio:string,text_policy:string,alt_text:string,generation_prompt:string,rationale:string,lighting:string,camera:string,color_direction:string,emotional_tone:string,required_elements:string[],forbidden_elements:string[],unsupported_claims:string[],visual_references:string[]},"
             "claim_status:verified|no_claim,evidence_ids:string[],hypothesis_id:string,dependencies:string[],"
             "success_measure:string,rollback_or_exit:string}],"
             "measurement:{primary_kpi:string,attribution_limit:string,review_cadence:string},debate_conflicts_present:boolean,"
@@ -6760,12 +6760,20 @@ class Director:
             "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
+            + (
+                "The Director selected generated-image delivery for this campaign. Every campaign action is one member "
+                "of a coordinated visual set: set creative_brief.required=true on every action and provide every "
+                "production field in creative_brief, including a self-contained generation_prompt. Keep one shared "
+                "visual system across the set while giving each action a distinct subject and composition. Generated "
+                "pixels must contain no words, letters, numbers, captions, logos, watermarks, UI labels, or pseudo-text. "
+                if (self.artifact_intent or {}).get("kind") == "generated_image" else ""
+            ) +
             f"For this {duration_days}-day campaign, scheduled_offset_minutes starts at 0 and the final action must be "
             f"between {last_action_minimum} and {last_action_maximum} inclusive so the sequence spans the promised horizon. "
             "Targets without verified historical evidence must be labeled proposed, never described as expected results. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
-        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
+        user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
                 f"GATHERED BOARD:\n{board}\n\nDEBATE:\n{transcript_json[:3000] if forced_debate else '(not forced)'}")
         msg = await self._groq(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],

@@ -19,7 +19,7 @@ export function normalizeImageAspectRatio(value) {
   return 'auto';
 }
 
-export async function generateCampaignImage({ prompt, aspectRatio = '16:9', model = DEFAULT_CAMPAIGN_IMAGE_MODEL, signal } = {}) {
+export async function generateCampaignImage({ prompt, aspectRatio = '16:9', model = DEFAULT_CAMPAIGN_IMAGE_MODEL, inputReferences = [], signal } = {}) {
   const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
   if (!apiKey) throw new CampaignImageProviderError('Image generation is not configured', { status: 503, code: 'campaign_image_provider_unavailable' });
   const response = await fetch(OPENROUTER_IMAGE_URL, {
@@ -30,7 +30,12 @@ export async function generateCampaignImage({ prompt, aspectRatio = '16:9', mode
       'HTTP-Referer': 'https://singulancelabs.com',
       'X-Title': 'Singulance Campaign OS',
     },
-    body: JSON.stringify({ model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio), quality: 'medium', output_format: 'png' }),
+    body: JSON.stringify({
+      model, prompt, n: 1, aspect_ratio: normalizeImageAspectRatio(aspectRatio), quality: 'medium', output_format: 'png',
+      ...(Array.isArray(inputReferences) && inputReferences.length ? {
+        input_references: inputReferences.slice(0, 4).map((url) => ({ type: 'image_url', image_url: { url } })),
+      } : {}),
+    }),
     signal: signal || AbortSignal.timeout(180_000),
   });
   const data = await response.json().catch(() => ({}));

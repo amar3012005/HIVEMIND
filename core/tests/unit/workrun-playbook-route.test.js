@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  handleInternalCompanyRecordsRoute,
   handleInternalPlaybookGetRoute,
   handleInternalPlaybookListRoute,
 } from '../../src/routes/internal-hivemind.js';
@@ -51,6 +52,48 @@ function routeHarness(body) {
     response: () => response,
   };
 }
+
+test('focused company record reads are organization-scoped and do not expose artifact bytes', async () => {
+  let response;
+  const calls = [];
+  const options = {
+    req: { headers: { 'x-hm-user-id': USER_ID, 'x-hm-org-id': ORG_ID } },
+    res: {},
+    jsonResponse: (_res, body, status = 200) => {
+      response = { body, status };
+      return response;
+    },
+    prisma: {
+      userOrganization: {
+        findFirst: async () => ({ orgId: ORG_ID }),
+        findMany: async (query) => {
+          calls.push({ kind: 'people', query });
+          return [{ userId: USER_ID, role: 'owner', roles: ['owner'], user: { displayName: 'Amar' } }];
+        },
+      },
+      project: { findMany: async (query) => { calls.push({ kind: 'projects', query }); return [{ id: 'project-1' }]; } },
+      growthGoal: { findMany: async (query) => { calls.push({ kind: 'objectives', query }); return [{ id: 'goal-1' }]; } },
+      hyperWorkOrder: { findMany: async (query) => { calls.push({ kind: 'work', query }); return [{ id: 'work-1' }]; } },
+      sourceArtifact: { findMany: async (query) => { calls.push({ kind: 'artifacts', query }); return [{ id: 'artifact-1', payload: 'must not escape' }]; } },
+    },
+  };
+
+  for (const kind of ['people', 'projects', 'objectives', 'work', 'artifacts']) {
+    await handleInternalCompanyRecordsRoute({ ...options, kind });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.kind, kind);
+    assert.equal(response.body.status, 'completed');
+  }
+  assert.deepEqual(response.body.items, [{ id: 'artifact-1', payload: 'must not escape' }]);
+  assert.equal(calls.length, 5);
+  for (const call of calls) {
+    assert.deepEqual(call.query.where.orgId, ORG_ID);
+    assert.equal(call.query.take, 25);
+  }
+  const artifactCall = calls.find((call) => call.kind === 'artifacts');
+  assert.equal(Object.hasOwn(artifactCall.query.select, 'payload'), false);
+  assert.equal(Object.hasOwn(artifactCall.query.select, 'storageLocation'), false);
+});
 
 test('the session-bound PlaybookList returns global, org, and local metadata only', async () => {
   const harness = routeHarness({ agentscope_session_id: SESSION_ID });

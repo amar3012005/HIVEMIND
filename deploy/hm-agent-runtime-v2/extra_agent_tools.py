@@ -357,6 +357,59 @@ do not leave it blank in your reply."""
         return _ok(data)
 
 
+class _CompanyRecordsTool(_HiveMindToolBase):
+    """Base class for one bounded, tenancy-gated company record collection."""
+
+    record_kind: str
+
+    class Params(BaseModel):
+        note: Optional[str] = Field(default=None, description="Optional. Do not set.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, note: Optional[str] = None) -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                f"/internal/hivemind/context/{self.record_kind}",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                method="GET",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), kind=self.record_kind)
+        return _ok(data)
+
+
+class PeopleTool(_CompanyRecordsTool):
+    """Read the organization's active people and their roles."""
+    name: str = "hivemind_people"
+    record_kind: str = "people"
+
+
+class ProjectsTool(_CompanyRecordsTool):
+    """Read active projects in the organization."""
+    name: str = "hivemind_projects"
+    record_kind: str = "projects"
+
+
+class ObjectivesTool(_CompanyRecordsTool):
+    """Read the organization's durable growth objectives."""
+    name: str = "hivemind_objectives"
+    record_kind: str = "objectives"
+
+
+class WorkTool(_CompanyRecordsTool):
+    """Read recent durable work orders; this does not create or change work."""
+    name: str = "hivemind_work"
+    record_kind: str = "work"
+
+
+class ArtifactsTool(_CompanyRecordsTool):
+    """Read registered evidence and output artifacts without loading their bytes."""
+    name: str = "hivemind_artifacts"
+    record_kind: str = "artifacts"
+
+
 class SaveProspectTool(_HiveMindToolBase):
     """Add a qualified prospect to the organization's shared lead book."""
 
@@ -661,6 +714,11 @@ something would work."""
 # a capability is adding a class above and a line here.
 _TOOL_CLASSES = (
     CompanyContextTool,
+    PeopleTool,
+    ProjectsTool,
+    ObjectivesTool,
+    WorkTool,
+    ArtifactsTool,
     RecallTool,
     ListProspectsTool,
     SaveProspectTool,

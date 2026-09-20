@@ -289,6 +289,75 @@ export async function handleInternalCompanyContextRoute({ req, res, jsonResponse
 }
 
 /**
+ * GET /internal/hivemind/context/:kind — focused, bounded company records.
+ *
+ * These are deliberately separate from the broad company profile and semantic
+ * recall.  A WorkRun can load the one durable record class it needs without
+ * injecting a whole organization into the model context.  `kind` is supplied
+ * only by the server route table (never by model input), and every query is
+ * scoped to the principal's resolved organization.
+ */
+export async function handleInternalCompanyRecordsRoute({ req, res, jsonResponse, prisma, kind }) {
+  if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+  const principal = await resolvePrincipal(req, prisma);
+  const invalid = principalError(jsonResponse, res, principal);
+  if (invalid) return invalid;
+
+  const readers = {
+    people: async () => prisma.userOrganization.findMany({
+      where: { orgId: principal.orgId, isActive: true },
+      orderBy: { joinedAt: 'asc' },
+      take: 25,
+      select: { userId: true, role: true, roles: true, user: { select: { displayName: true } } },
+    }).then((rows) => rows.map((row) => ({
+      id: row.userId,
+      name: row.user?.displayName || null,
+      role: row.role || null,
+      roles: Array.isArray(row.roles) ? row.roles : [],
+    }))),
+    projects: async () => prisma.project.findMany({
+      where: { orgId: principal.orgId, archivedAt: null },
+      orderBy: { updatedAt: 'desc' },
+      take: 25,
+      select: { id: true, name: true, slug: true, description: true, status: true, policy: true, updatedAt: true },
+    }),
+    objectives: async () => prisma.growthGoal.findMany({
+      where: { orgId: principal.orgId },
+      orderBy: { updatedAt: 'desc' },
+      take: 25,
+      select: { id: true, title: true, objective: true, status: true, autonomyMode: true, updatedAt: true },
+    }),
+    work: async () => prisma.hyperWorkOrder.findMany({
+      where: { orgId: principal.orgId },
+      orderBy: { updatedAt: 'desc' },
+      take: 25,
+      select: {
+        id: true, planStepId: true, kind: true, status: true, title: true,
+        objective: true, ownerSlug: true, ownerLane: true, updatedAt: true,
+      },
+    }),
+    artifacts: async () => prisma.sourceArtifact.findMany({
+      where: { orgId: principal.orgId },
+      orderBy: { createdAt: 'desc' },
+      take: 25,
+      select: {
+        id: true, artifactType: true, sourcePlatform: true, sourceId: true,
+        sourceUrl: true, contentType: true, sizeBytes: true, version: true,
+        createdAt: true, metadata: true,
+      },
+    }),
+  };
+  const read = readers[kind];
+  if (!read) return jsonResponse(res, { error: 'unknown company record kind' }, 404);
+
+  try {
+    return jsonResponse(res, { status: 'completed', kind, items: await read() });
+  } catch (err) {
+    return jsonResponse(res, { error: err.message }, 500);
+  }
+}
+
+/**
  * POST /internal/hivemind/web-search — live external search.
  *
  * Delegates to the same `runWebSearchJob` the product's own search uses, so the

@@ -19,12 +19,17 @@ class HiveToolkitGroupsTests(unittest.TestCase):
             SimpleNamespace(name="PlaybookList"),
             SimpleNamespace(name="PlaybookGet"),
             SimpleNamespace(name="hivemind_company_context"),
+            SimpleNamespace(name="hivemind_people"),
+            SimpleNamespace(name="hivemind_projects"),
             SimpleNamespace(name="hivemind_web_search"),
             SimpleNamespace(name="hivemind_composio_execute"),
         ]
         groups = partition_hive_tools(tools)
         self.assertEqual([tool.name for tool in groups["basic"]], ["PlaybookList", "PlaybookGet"])
-        self.assertEqual([tool.name for tool in groups["hivemind"]], ["hivemind_company_context"])
+        self.assertEqual(
+            [tool.name for tool in groups["hivemind"]],
+            ["hivemind_company_context", "hivemind_people", "hivemind_projects"],
+        )
         self.assertEqual([tool.name for tool in groups["web_research"]], ["hivemind_web_search"])
         self.assertEqual([tool.name for tool in groups["connected_apps"]], ["hivemind_composio_execute"])
 

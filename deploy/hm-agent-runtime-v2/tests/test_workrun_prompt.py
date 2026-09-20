@@ -26,6 +26,7 @@ class WorkRunPromptTests(unittest.TestCase):
         )
         self.assertIn("For a self-contained direct answer", prompt)
         self.assertIn("company-grounded answer", prompt)
+        self.assertIn("hivemind_complete_workrun", prompt)
         self.assertIn("without a playbook or TaskCreate", prompt)
         company_work = prompt[prompt.index("For \"company work\""):] if "For \"company work\"" in prompt else prompt[prompt.index("For company work"):]
         self.assertLess(company_work.index("PlaybookList"), company_work.index("TaskCreate"))

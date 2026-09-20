@@ -9,6 +9,7 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
     description: 'Inspect this catalog, pick a more specific playbook, then execute it.',
     scope: 'global',
     version: '1.0.0',
+    completionContract: { tasks: { min_completed: 1, require_all_completed: true } },
   },
   {
     id: 'global:prospect-discovery',
@@ -16,6 +17,7 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
     description: 'Discover, verify and qualify ICP-matching companies.',
     scope: 'global',
     version: '1.0.0',
+    completionContract: { tasks: { min_completed: 1, require_all_completed: true }, artifacts: { min_count: 1 } },
   },
   {
     id: 'global:market-research',
@@ -23,6 +25,7 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
     description: 'Map a market with sourced evidence and a written brief.',
     scope: 'global',
     version: '1.0.0',
+    completionContract: { tasks: { min_completed: 1, require_all_completed: true }, artifacts: { min_count: 1 } },
   },
   {
     id: 'global:competitive-analysis',
@@ -30,6 +33,7 @@ export const GLOBAL_PLAYBOOKS = Object.freeze([
     description: 'Compare named competitors on positioning, product, and GTM.',
     scope: 'global',
     version: '1.0.0',
+    completionContract: { tasks: { min_completed: 1, require_all_completed: true }, artifacts: { min_count: 1 } },
   },
 ]);
 
@@ -70,6 +74,9 @@ function scopedPlaybooks(value, scope) {
       )).trim(),
       scope,
       version: String(object.version || '1.0.0').trim().slice(0, 80) || '1.0.0',
+      completionContract: object.completion_contract && typeof object.completion_contract === 'object'
+        ? object.completion_contract
+        : null,
       instructions,
     };
   }).filter(Boolean);
@@ -123,5 +130,10 @@ export function listPlaybooks({ orgPlaybooks = [], localPlaybooks: local = [] } 
 export function getPlaybook(id, { orgPlaybooks = [], localPlaybooks: local = [] } = {}) {
   const meta = [...GLOBAL_PLAYBOOKS, ...orgPlaybooks, ...local].find((p) => p.id === id);
   if (!meta) return null;
-  return { ...meta, instructions: meta.instructions || BODIES[id] || '' };
+  const { completionContract, ...publicMeta } = meta;
+  return {
+    ...publicMeta,
+    instructions: meta.instructions || BODIES[id] || '',
+    ...(completionContract ? { completion_contract: completionContract } : {}),
+  };
 }

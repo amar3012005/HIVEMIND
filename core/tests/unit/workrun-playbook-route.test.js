@@ -126,7 +126,27 @@ test('the session-bound PlaybookGet loads only the selected local body', async (
     '33333333-3333-4333-8333-333333333333',
     'local:launch-overlay',
     '1.0.0',
+    JSON.stringify({
+      local_playbooks: {
+        id: 'launch-overlay',
+        name: 'Launch overlay',
+        instructions: 'Use current launch constraints.',
+      },
+    }),
     USER_ID,
     ORG_ID,
   ]);
+});
+
+test('the selected global playbook stores its resolved completion contract on the WorkRun', async () => {
+  const harness = routeHarness({ id: 'global:market-research', agentscope_session_id: SESSION_ID });
+  await handleInternalPlaybookGetRoute(harness.options);
+
+  assert.equal(harness.response().status, 200);
+  assert.deepEqual(harness.response().body.playbook.completion_contract, {
+    tasks: { min_completed: 1, require_all_completed: true },
+    artifacts: { min_count: 1 },
+  });
+  assert.deepEqual(JSON.parse(harness.queries[1].params[3]).completion_contract,
+    harness.response().body.playbook.completion_contract);
 });

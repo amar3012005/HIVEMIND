@@ -704,7 +704,9 @@ def _build_workrun_prompt(
         "Skill when available; do not load all Skills. Do not activate another "
         "tool group until the plan and relevant Skill are ready; then activate "
         "only the group required by the current task. Execute, updating tasks as "
-        "you go. Work autonomously to completion. Do not ask for confirmation — "
+        "you go. When selected-playbook work is actually complete, call "
+        "hivemind_complete_workrun so HIVE can validate its evidence contract. "
+        "Work autonomously to completion. Do not ask for confirmation — "
         "make the safest reversible choice and record it. When you are done, "
         "state plainly what you produced, what you verified, and what you could "
         "not determine.",

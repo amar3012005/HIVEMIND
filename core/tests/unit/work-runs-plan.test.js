@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyRuntimeEvent,
+  completeWorkRun,
   normalizeAgentScopeEvent,
   WORK_RUN_EVENT,
 } from '../../src/employees/work-runs.js';
@@ -95,6 +96,31 @@ describe('WorkRun Task tools → plan events (Phase 1)', () => {
     assert.equal(ev.t, WORK_RUN_EVENT.TOOL_COMPLETED);
     assert.match(ev.result, /Known company fact/);
     assert.equal(ev.state, 'success');
+  });
+
+  it('does not terminally complete a selected playbook without its durable evidence', async () => {
+    const appended = [];
+    const prisma = {
+      $queryRawUnsafe: async (sql, ...params) => {
+        if (sql.startsWith('SELECT scope, events, result_artifact_ids')) {
+          return [{
+            scope: { completion_contract: { artifacts: { min_count: 1 } } },
+            events: [],
+            result_artifact_ids: [],
+          }];
+        }
+        if (sql.startsWith('UPDATE "hivemind"."work_runs"')) {
+          appended.push(JSON.parse(params[2])[0]);
+          return [{ id: '11111111-1111-4111-8111-111111111111', status: 'running' }];
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      },
+    };
+    const outcome = await completeWorkRun(prisma, '11111111-1111-4111-8111-111111111111');
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, 'completion_contract_unmet');
+    assert.deepEqual(outcome.verdict.unmet, [{ predicate: 'artifacts.min_count', expected: 1, actual: 0 }]);
+    assert.equal(appended[0].t, WORK_RUN_EVENT.COMPLETION_BLOCKED);
   });
 
   it('projects AgentScope state_updated tasks without duplicating task ownership', () => {

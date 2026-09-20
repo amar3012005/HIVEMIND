@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from hivemind_employees.api_hyper_rooms import (
     _director_progress_note,
+    _deferred_image_synthesis,
     _campaign_action_visual_delivery,
     _campaign_post_visual_payload,
     _director_final_visual_payload,
@@ -52,6 +53,18 @@ def test_room_visual_payload_understands_the_reported_instagram_request():
     assert payload["output"]["mode"] == "set"
     assert payload["output"]["count"] == 3
     assert payload["source"]["turn_id"] == "turn-visual-canary"
+
+
+def test_empty_director_image_synthesis_becomes_a_governed_multishot_brief():
+    brief = _deferred_image_synthesis(
+        _request("Generate 3 coordinated Instagram images for SINGULANCE"),
+        "design",
+        company_name="SINGULANCE",
+    )
+    assert "3 distinct visuals" in brief
+    assert "4:5" in brief
+    assert "SINGULANCE" in brief
+    assert "avoid text and logos" in brief
 
 
 def test_director_progress_messages_rotate_without_exposing_prompts():

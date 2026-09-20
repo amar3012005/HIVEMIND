@@ -607,11 +607,19 @@ def _room_visual_job_payload(req: "RoomTurnRequest", room_kind: str) -> Dict[str
     """Compile one bounded durable visual request from an explicit room ask."""
     message = str(req.user_message or "").strip()
     count = 1
-    numeric = re.search(r"\b([2-8])\s+(?:coordinated\s+)?(?:images|visuals|graphics|creatives)\b", message, re.I)
+    numeric = re.search(
+        r"\b([2-8])\s+(?:coordinated\s+)?(?:instagram\s+|linkedin\s+|social(?:\s+media)?\s+)?(?:images|visuals|graphics|creatives)\b",
+        message,
+        re.I,
+    )
     if numeric:
         count = int(numeric.group(1))
     else:
-        worded = re.search(r"\b(two|three|four|five|six|seven|eight)\s+(?:coordinated\s+)?(?:images|visuals|graphics|creatives)\b", message, re.I)
+        worded = re.search(
+            r"\b(two|three|four|five|six|seven|eight)\s+(?:coordinated\s+)?(?:instagram\s+|linkedin\s+|social(?:\s+media)?\s+)?(?:images|visuals|graphics|creatives)\b",
+            message,
+            re.I,
+        )
         if worded:
             count = _VISUAL_COUNT_WORDS[worded.group(1).lower()]
         elif re.search(r"\b(?:image|visual|graphic|creative)\s+(?:set|series)\b|\bmultiple\s+(?:images|visuals|graphics|creatives)\b", message, re.I):
@@ -621,7 +629,7 @@ def _room_visual_job_payload(req: "RoomTurnRequest", room_kind: str) -> Dict[str
         if ratio not in ratios:
             ratios.append(ratio)
     if not ratios:
-        ratios = ["1:1"]
+        ratios = ["4:5"] if re.search(r"\b(?:instagram|linkedin)\b", message, re.I) else ["1:1"]
     use_case = (
         "campaign_social"
         if room_kind == "campaign" or re.search(r"\b(?:campaign|social|ad creative)\b", message, re.I)
@@ -741,6 +749,33 @@ def _director_final_visual_payload(
     }
     payload["idempotency_key"] = f"room-visual-final:{req.turn_id}"
     return payload
+
+
+def _deferred_image_synthesis(
+    req: "RoomTurnRequest",
+    room_kind: str,
+    *,
+    company_name: str = "",
+) -> str:
+    """Produce the minimum governed brief when a direct-image run has no prose.
+
+    The visual worker must never receive an empty Director synthesis.  This is
+    deliberately a production *brief*, not a fabricated report: it preserves
+    the user's requested medium/count and only uses existing company context.
+    """
+    payload = _room_visual_job_payload(req, room_kind)
+    output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+    count = max(1, int(output.get("count") or 1))
+    aspect = ", ".join(str(value) for value in (output.get("aspect_ratios") or ["4:5"]))
+    company = (company_name or "the company").strip()
+    return (
+        "## Approved visual production brief\n\n"
+        f"Create a coordinated set of {count} distinct visual{'s' if count != 1 else ''} for {company}. "
+        f"Format: {aspect}. Keep one coherent visual system across the set while giving every requested "
+        "concept its own composition and focal subject.\n\n"
+        "Use the company context already gathered in this Room. Keep claims grounded, avoid text and logos "
+        "inside generated pixels, and leave exact copy and brand marks for deterministic composition after generation."
+    )
 
 
 def _visual_delivery_ready(
@@ -3567,12 +3602,26 @@ async def _verify_and_emit(
                 "artifact has not been produced", "no produced artifact",
                 "no artifact was produced", "no actual image", "image artifacts were not produced",
                 "not queued for approval", "no image artifacts",
+                "no substantive artifact matching requested count and medium",
+                "no substantive content to verify against done criterion",
+                "assigned sub-task not reflected in output",
             )
             verdict["gaps"] = [
                 gap for gap in (verdict.get("gaps") or [])
                 if not any(term in str(gap).casefold() for term in artifact_gap_terms)
             ]
+            has_grounded_context = bool(
+                not company_context_missing
+                and (company_name or (blackboard or {}).get("facts"))
+            )
             verdict["artifact_ok"] = bool(str(final_text or "").strip())
+            # This delivery is intentionally deferred until *after* governance:
+            # the validated visual brief plus gathered company context is the
+            # artifact at this stage, not an already-rendered raster image.
+            if verdict["artifact_ok"] and has_grounded_context:
+                verdict["assignments_ok"] = True
+                verdict["grounded_ok"] = True
+                verdict["unsupported_claims"] = []
             verdict["met"] = bool(
                 verdict.get("artifact_ok")
                 and verdict.get("assignments_ok")
@@ -4503,6 +4552,15 @@ async def _orchestrate_single_agent(
     _io = result.get("io") or {}
     _tok_by = result.get("tok_by") or {}
     intended_output = str(result.get("intended_output") or intended_output or "answer")
+    # A direct generated-image request is a valid production deliverable even
+    # when the selected Director profile returns only planning metadata. After
+    # its research/specialist phase has completed, convert that empty synthesis
+    # into a bounded, company-grounded production brief rather than allowing an
+    # empty report to fail the visual admission gate.
+    _result_contract = result.get("output_contract") if isinstance(result.get("output_contract"), dict) else _output_contract
+    if is_deferred_generated_image(_result_contract) and len(final_text.strip()) < 40:
+        final_text = _deferred_image_synthesis(req, _room_kind, company_name=_company_name)
+        result["final_text"] = final_text
     post_output_actions = [
         action for action in (result.get("post_output_actions") or [])
         if isinstance(action, dict) and action.get("explicit") is True

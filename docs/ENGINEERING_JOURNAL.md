@@ -2192,3 +2192,34 @@ slides that find no unique anchor get a page instead of `null`.
   creation; test/curl/commit/integration steps; and the governed production
   deployment and rollback commands. This is documentation-only and has not
   been deployed.
+
+## 2026-09-20 UTC — Durable lifecycle announcements and popup control
+
+- Released HIVE parent commit `ab8580ba7240c9946edd4211e67569cd6c172f0b`
+  and Da-vinci commit `f9d5091c4b78f4c7b6fd479efe86e7d76a6f51e2`.
+  The Cloudflare frontend Worker is live as version
+  `13e5a047-9ea7-4274-b1f1-28acab009ab4`.
+- The canonical scoped release rebuilt only the contract-coupled Core,
+  Control Plane, and Employees services. They are healthy on immutable
+  `hivemind/core-api:sha-ab8580ba`,
+  `hivemind/control-plane:sha-ab8580ba`, and
+  `hivemind/employees:sha-ab8580ba`. Harness, Voice, databases, and unrelated
+  services were not recreated. Core rollback identity is
+  `hivemind/core-api:sha-a813ea09`.
+- Applied additive Prisma migration `20260920100000_workspace_announcements`.
+  It creates server-owned announcement definitions and per-user delivery
+  receipts without changing existing lifecycle notifications.
+- Day 1 now schedules for the next 09:00 local workspace morning, including
+  DST-safe conversion. Day 2 waits for a sealed Day 1 report and then follows
+  the same local-morning rule. Live reconciliation confirmed an existing
+  scheduled receipt with policy `next_local_morning_v1`.
+- Platform Admin can draft, schedule, publish, pause, archive, and version
+  global or targeted announcements with facts, Humation agents, approved CTA
+  destinations, inbox-first delivery, and delivery/action/dismissal metrics.
+  Popup dismissal or CTA action is persisted and never repeats after refresh;
+  the inbox notification remains the durable record.
+- Verification: Prisma generated successfully; 34 focused Core tests passed;
+  frontend type-check and Cloudflare production build passed; Core health was
+  live with DB, Qdrant, and Docling dependencies healthy; the migration tables
+  and public unauthenticated Control Plane guard (`401`) were verified; live
+  frontend chunks contained the announcement API and Admin UI markers.

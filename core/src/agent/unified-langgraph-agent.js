@@ -15,6 +15,7 @@ import {
   parseUnifiedToolCall,
   unifiedMetaTools,
 } from './unified-meta-tool-contract.js';
+import { decideRuntimeStage, decisionGatewayToolNames } from './decision-gateway-service.js';
 
 export const UNIFIED_META_HARNESS_VERSION = 'langgraph-meta-loop-v2';
 const MAX_STEPS = 12;
@@ -64,7 +65,7 @@ function localized(locale, key, toolkit = '') {
 function systemPrompt({ useTools, locale }) {
   return `${ORGANIZATIONAL_BRAIN_PERSONA}
 
-You have ${useTools ? 'two' : 'one'} stable progressive gateway tools: hivemind_meta${useTools ? ' and hivemind_connected_task' : ''}. Use recent conversation and the compact authenticated profile when sufficient. Use hivemind_meta only when organization memory, documents, history, a profile, or a durable save is needed. For external apps, search once with complete atomic use cases, follow the returned connection state and selected slugs, load only selected schemas, then execute through the same gateway.
+You receive only the progressive gateway capability needed for the current step. Use recent conversation and the compact authenticated profile when sufficient. When available, use hivemind_meta only when organization memory, documents, history, a profile, or a durable save is needed. When available, use hivemind_connected_task for external apps: search once with complete atomic use cases, follow the returned connection state and selected slugs, load only selected schemas, then execute through the same gateway.
 
 Continue after every tool receipt as the same agent. If evidence is incomplete, make the next useful gateway call. Ask the user only for a real business choice that cannot be discovered. Never ask for provider IDs. Never claim that an approval draft was executed. Answer in ${locale || 'the user language'} with concise, well-structured Markdown. Use tables when the user requests multiple records and preserve evidence citations.`;
 }
@@ -360,7 +361,13 @@ function outputShape(state, response, status = 'completed') {
   };
 }
 
-export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useTools = false, onEvent = () => {}, composio, prisma, modelStep, metaExecutor, connectedExecutor }) {
+function decisionToolSurface(selection, useTools) {
+  const current = unifiedMetaTools({ useTools });
+  const names = decisionGatewayToolNames(selection, { connected: useTools });
+  return names === null ? current : current.filter(tool => names.includes(tool.function.name));
+}
+
+export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useTools = false, onEvent = () => {}, composio, prisma, modelStep, metaExecutor, connectedExecutor, decisionStage = decideRuntimeStage }) {
   const callModel = modelStep || defaultModelStep;
   const runMeta = metaExecutor || defaultMetaExecutor;
   const runConnected = connectedExecutor || defaultConnectedExecutor;
@@ -434,8 +441,29 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       { role: 'user', content: message },
       { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))).slice(0, 24000)}` },
     ] : state.messages;
+    let tools = [];
+    if (!providerEvidenceReady) {
+      let decision;
+      try {
+        decision = await decisionStage({
+          runtime: 'legacy', stage: 'capability', turn_id: state.runId, user_query: message,
+          context: state.context,
+          observation: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
+          app_mentions: state.requestedToolkits,
+          operational_app_intent: state.requestedToolkits.length > 0,
+        }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
+      } catch (error) {
+        decision = { status: 'defer', selected: null, authoritative: false,
+          receipt: { source: 'fallback', reason: compactText(error?.message || error || 'decision_gateway_unavailable', 240) } };
+      }
+      tools = decision.status === 'selected' && decision.authoritative
+        ? decisionToolSurface(decision.selected, useTools)
+        : unifiedMetaTools({ useTools });
+      onEvent({ type: 'decision', stage: 'capability', status: decision.status, selected: decision.selected || null,
+        source: decision.receipt?.source || 'fallback', authoritative: decision.authoritative === true, run_id: state.runId });
+    }
     const turn = await callModel({
-      messages: modelMessages, tools: providerEvidenceReady ? [] : unifiedMetaTools({ useTools }), model: ctx.model,
+      messages: modelMessages, tools, model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
     });
     const assistant = turn.message || turn;
@@ -643,14 +671,14 @@ function interruptedResult(output, graphThreadId, useTools) {
   };
 }
 
-export async function runUnifiedMetaAgent({ message, useTools = false, ctx = {}, onEvent, prisma = null, composio = null, choice = null, graph = null, checkpointer = null, modelStep = null, metaExecutor = null, connectedExecutor = null } = {}) {
+export async function runUnifiedMetaAgent({ message, useTools = false, ctx = {}, onEvent, prisma = null, composio = null, choice = null, graph = null, checkpointer = null, modelStep = null, metaExecutor = null, connectedExecutor = null, decisionStage = decideRuntimeStage } = {}) {
   const db = prisma || ctx.prisma;
   if (!db) throw new Error('unified_prisma_required');
   const connector = composio || await import('../connectors/composio/composio-service.js');
   const graphThreadId = threadId(ctx);
   const runId = ctx.unifiedRunId || choice?.run_id || crypto.randomUUID();
   const runtimeCtx = { ...ctx, prisma: db, requestMessage: message, unifiedRunId: runId, unifiedGraphThreadId: graphThreadId };
-  const runtime = graph || createUnifiedMetaAgentGraph({ checkpointer: checkpointer || await productionCheckpointer(), ctx: runtimeCtx, message, useTools, onEvent, composio: connector, prisma: db, modelStep, metaExecutor, connectedExecutor });
+  const runtime = graph || createUnifiedMetaAgentGraph({ checkpointer: checkpointer || await productionCheckpointer(), ctx: runtimeCtx, message, useTools, onEvent, composio: connector, prisma: db, modelStep, metaExecutor, connectedExecutor, decisionStage });
   const config = { configurable: { thread_id: graphThreadId }, recursionLimit: 64, tags: [UNIFIED_META_HARNESS_VERSION], metadata: { use_tools: useTools, locale: ctx.language || 'en' } };
   const output = choice ? await runtime.invoke(new Command({ resume: choice }), config) : await runtime.invoke({ runId }, config);
   return output?.__interrupt__?.length ? interruptedResult(output, graphThreadId, useTools) : output.result;

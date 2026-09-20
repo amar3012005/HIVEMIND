@@ -12,10 +12,14 @@ export function buildCampaignDisplayMessage(campaign, feedback = '') {
   const objective = String(campaign.objective || 'campaign').toLowerCase().replaceAll('_', ' ');
   const duration = Number(campaign.brief?.duration_days || 14);
   const intensity = String(campaign.brief?.cadence?.preset || 'focused').replaceAll('_', ' ');
+  const actionCount = Number(campaign.brief?.action_count || 0);
+  const visualsRequired = campaign.brief?.visual_delivery?.required === true;
   return [
     `Create a ${objective} campaign for this goal: ${campaign.goal}`,
     channels ? `Prepare the campaign for ${channels}.` : null,
     `Build a ${duration}-day ${intensity} campaign. Decide the strongest strategy and produce the complete scheduled sequence, not a single sample action.`,
+    actionCount ? `Produce exactly ${actionCount} campaign actions.` : null,
+    visualsRequired ? 'Create one complete, coherent generated visual for every campaign action after the strategy and copy are accepted.' : null,
     'Research our company and existing audience, debate the strategy, and produce a polished launch-ready operating plan. Do not publish anything yet.',
     feedback ? `Requested improvement: ${String(feedback).slice(0, 4000)}` : null,
   ].filter(Boolean).join('\n\n');
@@ -26,6 +30,7 @@ export function buildCampaignExecutionContext(campaign, feedback = '', channelCa
   const cadenceContract = Object.entries(cadence).map(([channel, range]) => (
     `${channel}: ${Number(range?.minimum || 0)}-${Number(range?.maximum || 0)} standalone posts`
   )).join('; ');
+  const visualDelivery = campaign.brief?.visual_delivery || {};
   return [
     `CAMPAIGN_ID: ${campaign.id}`,
     `GOAL: ${campaign.goal}`,
@@ -33,6 +38,7 @@ export function buildCampaignExecutionContext(campaign, feedback = '', channelCa
     `CHANNELS: ${campaign.requestedChannels.join(', ')}`,
     `BRIEF_JSON: ${JSON.stringify(campaign.brief || {})}`,
     cadenceContract ? `CADENCE_CONTRACT: ${cadenceContract}. The returned action count for every channel must stay inside its exact range.` : null,
+    visualDelivery.required ? `VISUAL_DELIVERY_CONTRACT: every action requires a complete creative brief and a generated image; expected visual count is ${Number(visualDelivery.count || campaign.brief?.action_count || 0) || 'the final action count'}. Use one shared campaign visual system with a distinct subject and composition per action.` : null,
     `CAMPAIGN_REQUIREMENTS_JSON: ${JSON.stringify(campaign.requirements || [])}`,
     `AUDIENCE_POLICY_JSON: ${JSON.stringify(campaign.audiencePolicy || {})}`,
     `CHANNEL_CAPABILITIES_JSON: ${JSON.stringify(Array.isArray(channelCapabilities) ? channelCapabilities : [])}`,

@@ -5237,6 +5237,35 @@ class Director:
         profile_id = str(self.execution_profile.get("profile_id") or "")
         governed_profiles = {"research.decision.v1", "fundraising.artifact.v1", "legal_finance.review.v1"}
         contract = getattr(self, "output_contract", None) or {}
+        is_canonical_campaign = bool(
+            getattr(self, "room_kind", "") == "campaign"
+            and isinstance(getattr(self, "campaign_brief", None), dict)
+            and self.campaign_brief.get("campaign_id")
+        )
+        if is_canonical_campaign:
+            amended = dict(plan)
+            queries = [str(q).strip() for q in (amended.get("recall_queries") or []) if str(q).strip()]
+            if not queries:
+                goal = str(self.campaign_brief.get("goal") or self.user_message or "campaign")
+                amended["recall_queries"] = [goal[:400]]
+            has_external_read = bool(
+                str(amended.get("web_query") or "").strip()
+                or amended.get("connector_calls")
+                or amended.get("seo_audit_url")
+            )
+            if not has_external_read and self._web_budget > 0 and not re.search(
+                r"\b(?:do not|don't|without|no)\s+(?:use\s+)?(?:the\s+)?web(?:\s+search)?\b",
+                self.user_message or "", re.IGNORECASE,
+            ):
+                amended["web_query"] = str(self.campaign_brief.get("goal") or self.user_message or "")[:1200]
+            amended["turn_mode"] = "task"
+            amended["research_floor"] = "campaign.contract.v1"
+            amended["research_claims"] = [
+                "Verified company, offer, and brand facts",
+                "Current audience and market evidence relevant to the selected channels",
+                "Every public claim separated from assumptions and creative hypotheses",
+            ]
+            return amended
         if profile_id not in governed_profiles:
             if not contract.get("evidence_required"):
                 return plan
@@ -5480,8 +5509,10 @@ class Director:
                     "channels": {"type": "array", "items": {"type": "string", "enum": ["x_organic", "linkedin", "instagram", "facebook", "tiktok", "youtube", "pinterest", "reddit", "threads", "bluesky", "google_business", "gmail", "tara", "x_ads", "google_ads", "meta", "linkedin_ads", "youtube_ads", "tiktok_ads", "microsoft_ads", "apple_ads", "amazon_ads", "reddit_ads", "pinterest_ads", "snapchat_ads"]}},
                     "duration_days": {"type": "integer", "minimum": 1, "maximum": 365},
                     "intensity": {"type": "string", "enum": ["LIGHT", "FOCUSED", "HIGH"]},
+                    "action_count": {"type": ["integer", "null"], "minimum": 1, "maximum": 24},
+                    "visuals_required": {"type": "boolean"},
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
-                }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
+                }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "action_count", "visuals_required", "autonomy_mode"], "additionalProperties": False},
             },
             "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "execution_engine", "collaboration_intensity", "response_depth", "output_family", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
             "additionalProperties": False,
@@ -5562,13 +5593,15 @@ class Director:
             "when call briefs or calls are explicitly requested. Use null for non-operational "
             "questions. This contract is checked deterministically; a sample email or shorter prospect list cannot finish "
             "a larger request.\n"
-            "- campaign_request: when this is NOT already a Campaign Room and the user explicitly asks to CREATE, "
+            "- campaign_request: when this is not a CANONICAL Campaign Room carrying campaign_brief.campaign_id and the user explicitly asks to CREATE, "
             "RUN, START, or SET UP an operational campaign, return its complete brief here. This delegates to a "
             "dedicated Campaign Room, so every gather field must be empty/null and needs_debate=false. Map X to "
             "x_organic, paid X to x_ads, email/Gmail to gmail, calls/TARA to tara, and map explicit paid or organic platforms to their matching channel ID. Use channels=[] when the user did not specify "
-            "a channel; Core will select only channels that are connected and executable. Defaults: 14 days, "
-            "FOCUSED, APPROVE_PLAN_ONCE. Use null for discussions, analysis, status questions, or when this is "
-            "already a Campaign Room. Starting a campaign NEVER means publishing it.\n"
+            "a channel; Core will select only channels that are connected and executable. Preserve an explicit number "
+            "of posts/images/actions as action_count; otherwise use null. Set visuals_required=true when the user asks "
+            "for images, visuals, graphics, artwork, or other generated campaign creative. Defaults: 14 days, FOCUSED, "
+            "APPROVE_PLAN_ONCE. Use null for discussions, analysis, status questions, or when campaign_brief.campaign_id "
+            "shows this is already a canonical Campaign Room. Starting a campaign NEVER means publishing it.\n"
             "- seo_audit_url: ONLY in an SEO Room when live page evidence is needed. For a direct question about "
             "a page's current tag, redirect, heading, rendered content, or status, provide its URL; the runtime "
             "will inspect one page. For focused analysis it inspects a small sample. For an operating audit or "
@@ -6553,7 +6586,14 @@ class Director:
             ))
             channels = inferred or ["x_organic"]
             log.info("[hyper-engine] campaign brief carried no channels — inferred %s", channels)
-        return channels, ["goal"] + [f"channel:{channel}" for channel in channels]
+        requirements = ["goal"] + [f"channel:{channel}" for channel in channels]
+        brief_payload = self.campaign_brief.get("brief") if isinstance(self.campaign_brief.get("brief"), dict) else self.campaign_brief
+        if brief_payload.get("action_count") is not None:
+            requirements.append("delivery:action_count")
+        visual_delivery = brief_payload.get("visual_delivery") if isinstance(brief_payload.get("visual_delivery"), dict) else {}
+        if visual_delivery.get("required") is True:
+            requirements.append("delivery:visuals")
+        return channels, requirements
 
     @staticmethod
     def _campaign_bundle_errors(bundle: Any, channels: List[str], requirements: List[str]) -> List[str]:
@@ -6768,7 +6808,8 @@ class Director:
                 "production field in creative_brief, including a self-contained generation_prompt. Keep one shared "
                 "visual system across the set while giving each action a distinct subject and composition. Generated "
                 "pixels must contain no words, letters, numbers, captions, logos, watermarks, UI labels, or pseudo-text. "
-                if (self.artifact_intent or {}).get("kind") == "generated_image" else ""
+                if ((self.artifact_intent or {}).get("kind") == "generated_image"
+                    or (brief_payload.get("visual_delivery") or {}).get("required") is True) else ""
             ) +
             f"For this {duration_days}-day campaign, scheduled_offset_minutes starts at 0 and the final action must be "
             f"between {last_action_minimum} and {last_action_maximum} inclusive so the sequence spans the promised horizon. "
@@ -8138,16 +8179,19 @@ class Director:
             await self.emit({"t": "campaign_stage", "stage": "brief", "status": "complete",
                              "title": "Campaign brief understood", "detail": "Objective, channels, horizon, pace, and operating constraints are set."})
         campaign_request = plan.get("campaign_request")
-        # Human Work Room turns now select their specialist engine deterministically,
-        # BEFORE this Director ever runs (api_hyper_rooms._select_execution_profile).
-        # A campaign.contract.v1-profiled turn already has self.room_kind == "campaign"
-        # and is dispatched through _build_campaign_director, the correct existing path —
-        # this generic escape hatch existed for turns whose room_kind was frozen at
-        # "general" with no other way to reach Campaign. For room_mode == "work" that
-        # reason no longer applies: only profile_id == campaign.contract.v1 may invoke
-        # the Campaign compiler, never a planner freelancing a campaign_request object
-        # after already doing generic work under a different profile.
-        if isinstance(campaign_request, dict) and self.room_kind != "campaign" and self.room_mode != "work":
+        # A Work Room that semantically selects the Campaign profile is still the
+        # originating HyperAgent conversation, not the canonical Campaign Room.
+        # Delegate it before gather/debate so Core creates the durable Campaign,
+        # Campaign Run and typed brief. A canonical dispatch always carries a
+        # campaign_id in campaign_brief and must compile in place instead.
+        is_campaign_profile = str(self.execution_profile.get("profile_id") or "") == "campaign.contract.v1"
+        is_canonical_campaign = bool(self.campaign_brief.get("campaign_id"))
+        should_create_campaign = (
+            isinstance(campaign_request, dict)
+            and not is_canonical_campaign
+            and (self.room_kind != "campaign" or is_campaign_profile)
+        )
+        if should_create_campaign:
             await self.emit({"t": "typing", "agent": _lead,
                              "note": "Creating the dedicated Campaign Room…"})
             response = await campaign_create_emulated(

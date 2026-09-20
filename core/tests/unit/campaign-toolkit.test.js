@@ -68,7 +68,7 @@ test('progressive Director routes campaign requests to the campaign toolkit', ()
   assert.ok(HIGH_TOOLS.some((tool) => tool.function.name === 'use_campaign'));
   const { decision } = adaptToDecision('use_campaign', {
     intent: 'write', request: 'Run a two-week X awareness campaign', response_language: 'en',
-  }, 'Run a two-week X awareness campaign', 'en');
+  }, 'Run a two-week X awareness campaign', 'en', { useTools: true });
   assert.equal(decision.operation, 'connector_write');
   assert.equal(decision.connector_provider, CAMPAIGN_TOOL_GROUP);
   assert.deepEqual(decision.tool_groups, [CAMPAIGN_TOOL_GROUP]);

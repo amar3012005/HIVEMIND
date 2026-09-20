@@ -31,6 +31,7 @@ async def test_non_campaign_room_can_delegate_to_campaign_tool(monkeypatch):
                 "goal": "Build awareness for HIVEMIND", "name": "HIVEMIND awareness",
                 "objective": "AWARENESS", "channels": ["x_organic"],
                 "duration_days": 14, "intensity": "FOCUSED",
+                "action_count": None, "visuals_required": False,
                 "autonomy_mode": "APPROVE_PLAN_ONCE",
             },
         }
@@ -85,6 +86,7 @@ async def test_campaign_tool_failure_is_a_terminal_honest_handoff(monkeypatch):
             "places_query": None, "needs_debate": False, "method_skills": [],
             "campaign_request": {"goal": "Run a campaign", "name": None, "objective": "CUSTOM",
                                  "channels": [], "duration_days": 14, "intensity": "FOCUSED",
+                                 "action_count": None, "visuals_required": False,
                                  "autonomy_mode": "APPROVE_PLAN_ONCE"},
         }
 
@@ -103,3 +105,52 @@ async def test_campaign_tool_failure_is_a_terminal_honest_handoff(monkeypatch):
     assert result["campaign_handoff_error"] == "No campaign channel is ready"
     assert any(event.get("t") == "campaign_handoff_failed" for event in events)
     assert not any(event.get("t") == "campaign_handoff" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_hyperagent_work_room_campaign_profile_creates_canonical_campaign(monkeypatch):
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    director = Director(
+        user_message="Build a law-firm Instagram campaign with 3 post images",
+        user_id="user-1", org_id="org-1", project_id=None,
+        participants=[{"slug": "lead", "name": "Lead"}], room_template="debate",
+        room_goal="Growth", enabled_connectors=[], emit=emit,
+        room_kind="campaign", room_mode="work", room_id="source-room", turn_id="source-turn",
+        execution_profile={"profile_id": "campaign.contract.v1", "visual_artifact_required": True},
+    )
+
+    async def no_tools():
+        return None
+
+    async def plan():
+        return {
+            "turn_mode": "task", "recall_queries": [], "connector_calls": [], "web_query": None,
+            "places_query": None, "needs_debate": False, "method_skills": [],
+            "campaign_request": {
+                "goal": "Reach German law firms", "name": "Law firm launch", "objective": "LEAD_GENERATION",
+                "channels": ["instagram"], "duration_days": 14, "intensity": "FOCUSED",
+                "action_count": 3, "visuals_required": True, "autonomy_mode": "APPROVE_PLAN_ONCE",
+            },
+        }
+
+    async def create(brief, **_kwargs):
+        assert brief["channels"] == ["instagram"]
+        assert brief["action_count"] == 3
+        assert brief["visuals_required"] is True
+        return {"campaign": {"id": "campaign-1", "roomId": "campaign-room-1", "status": "GENERATING", "name": "Law firm launch"}}
+
+    async def no_usage(**_kwargs):
+        return None
+
+    monkeypatch.setattr(director, "_init_connector_tools", no_tools)
+    monkeypatch.setattr(director, "_plan_gather", plan)
+    monkeypatch.setattr(engine, "campaign_create_emulated", create)
+    monkeypatch.setattr(engine, "report_llm_usage", no_usage)
+
+    result = await director.run()
+    assert result["campaign_handoff"]["room_id"] == "campaign-room-1"
+    assert any(event.get("t") == "campaign_handoff" for event in events)

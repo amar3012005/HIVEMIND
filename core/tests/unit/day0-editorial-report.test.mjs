@@ -43,3 +43,24 @@ test('Day 0 PDF uses the flowing Day 1 editorial grammar without changing the em
   assert.doesNotMatch(email.html, /COMPANY AWAKENING COMPLETE/);
   assert.doesNotMatch(email.html, /SOURCE &amp; EVIDENCE LEDGER/);
 });
+
+test('Day 0 attachment retains onboarding material beyond the old dashboard-card caps', () => {
+  const expanded = {
+    ...company,
+    research: Array.from({ length: 12 }, (_, index) => ({
+      title: `Research item ${index + 1}`,
+      summary: `Evidence summary ${index + 1}`,
+      url: `https://canary.example/research/${index + 1}`,
+    })),
+    documents: Array.from({ length: 16 }, (_, index) => `Onboarding document ${index + 1}`),
+    tasks: Array.from({ length: 12 }, (_, index) => ({ title: `First move ${index + 1}`, room_name: 'Research' })),
+  };
+  const report = buildDayZeroOnboardingReport(expanded, { appUrl: 'https://next.example.test/company' });
+  const html = renderDayZeroPortraitV8(report);
+  assert.equal(report.researchItems.length, 12);
+  assert.equal(report.documents.length, 16);
+  assert.equal(report.firstMoves.length, 12);
+  assert.match(html, /Research item 12/);
+  assert.match(html, /Onboarding document 16/);
+  assert.match(html, /First move 12/);
+});

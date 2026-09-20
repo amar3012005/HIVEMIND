@@ -50,31 +50,33 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
   const research = Array.isArray(company.research) ? company.research : [];
   const tasks = Array.isArray(company.tasks) ? company.tasks : [];
   const team = Array.isArray(company.team) ? company.team : [];
-  const documents = unique(Array.isArray(company.documents) ? company.documents : [], 12);
+  // The attachment is the durable onboarding record, so retain the complete
+  // bounded onboarding set here. Email sections keep their own compact slices.
+  const documents = unique(Array.isArray(company.documents) ? company.documents : [], 60);
   const sourcePages = Array.isArray(company.source_pages) ? company.source_pages : [];
   const socialProfiles = Array.isArray(profile.social_profiles) ? profile.social_profiles : [];
   const contactDetails = profile.contact_details && typeof profile.contact_details === 'object' ? profile.contact_details : {};
-  const sourceUrls = unique([website, ...sourcePages.map((item) => item?.url), ...research.map((item) => item?.url || item?.source_url || item?.link)].filter(Boolean), 40);
-  const facts = unique([profile.what_it_does, profile.tagline, profile.positioning, profile.offer, profile.icp, company.mission], 8);
+  const sourceUrls = unique([website, ...sourcePages.map((item) => item?.url), ...research.map((item) => item?.url || item?.source_url || item?.link)].filter(Boolean), 100);
+  const facts = unique([profile.what_it_does, profile.tagline, profile.positioning, profile.offer, profile.icp, company.mission], 24);
   const confirmations = unique([
     ...(Array.isArray(profile.unknowns) ? profile.unknowns : []),
     ...(Array.isArray(profile.open_questions) ? profile.open_questions : []),
     ...(Array.isArray(profile.evidence_gaps) ? profile.evidence_gaps : []),
-  ], 6);
-  const firstMoves = tasks.slice(0, 8).map((task) => ({
+  ], 40);
+  const firstMoves = tasks.slice(0, 60).map((task) => ({
     title: clean(task?.title, 120),
     detail: clean(task?.detail || task?.description, 210),
     deliverable: clean(task?.deliverable || task?.output, 160),
     room: clean(task?.room_name || task?.room_tag || task?.tag, 48),
     status: clean(task?.status, 24),
   })).filter((task) => task.title);
-  const researchItems = research.slice(0, 8).map((item) => ({
+  const researchItems = research.slice(0, 60).map((item) => ({
     title: clean(item?.title || item?.name || hostname(item?.url || item?.source_url || item?.link), 120),
     summary: clean(item?.summary || item?.snippet || item?.description, 210),
     url: safeUrl(item?.url || item?.source_url || item?.link),
   })).filter((item) => item.title || item.url);
   const reportUrl = safeUrl(appUrl) || 'https://next.singulancelabs.com/hivemind/app/employees/mycompany';
-  const members = team.slice(0, 8).map((member) => {
+  const members = team.slice(0, 24).map((member) => {
     const roleTitle = clean(member?.jobTitle || member?.title || member?.roleArchetype || member?.role || 'Company Specialist', 96);
     const lane = resolveHumationLane(member?.lane || member?.archetype || roleTitle);
     const normalized = {
@@ -125,7 +127,7 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
       ...(Array.isArray(contactDetails.emails) ? contactDetails.emails : []),
       ...(Array.isArray(contactDetails.phones) ? contactDetails.phones : []),
       ...socialProfiles.map((item) => item?.url),
-    ], 10),
+    ], 40),
     facts,
     confirmations,
     firstMoves,

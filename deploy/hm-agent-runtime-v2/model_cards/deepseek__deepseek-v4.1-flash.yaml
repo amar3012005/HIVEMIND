@@ -1,0 +1,31 @@
+name: deepseek/deepseek-v4.1-flash
+label: DeepSeek V4.1 Flash
+status: active
+
+# Verified live against the gateway's OpenRouter route:
+#   model id served  : deepseek/deepseek-v4.1-flash
+#   OpenRouter name  : "DeepSeek: DeepSeek V4.1 Flash"
+#   context_length   : 1048576
+#   max_completion   : 384000
+#   modality         : text+image -> text   (VISION-CAPABLE)
+#   latency observed : ~1.1s for a 10-token reply
+
+input_types:
+  - text/plain
+  - image/jpeg
+  - image/png
+  - image/gif
+  - image/webp
+  - application/pdf
+
+output_types:
+  - text/plain
+
+context_size: 1048576
+output_size: 384000
+
+parameter_overrides:
+  max_tokens:
+    maximum: 384000
+  voice:
+    hidden: true

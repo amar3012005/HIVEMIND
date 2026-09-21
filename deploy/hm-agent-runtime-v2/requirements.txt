@@ -1,0 +1,31 @@
+# Phase 1 dependency set — deliberately NOT `[full]`.
+#
+# `agentscope[full]` pulls every sandbox backend (E2B, Daytona, K8s, OpenSandbox,
+# Bubblewrap), every vector store (Qdrant, Milvus, MongoDB, Elasticsearch),
+# realtime audio, the TUI, and all chat channels. That is hundreds of MB and a
+# long build for features Phase 1 does not use.
+#
+# Selected extras:
+#   service        - fastapi, uvicorn, apscheduler, ag-ui-protocol (the HTTP layer)
+#   storage-redis  - the `redis` client
+#   tools          - bundles the `rg` binary used by the builtin Grep tool on LocalWorkspace
+#   workspace-e2b  - the E2B sandbox manager. A WorkRun gets one E2B workspace
+#                    (`workrun:<uuid>`, isolation=per_session), so the manager
+#                    must be importable or `build_workspace_manager()` raises
+#                    ImportError at container start when
+#                    AGENTSCOPE_WORKSPACE_BACKEND=e2b.
+#
+# NOT selected, and why:
+#   workspace-docker/-k8s/-daytona/-opensandbox
+#                  - only the backend named by AGENTSCOPE_WORKSPACE_BACKEND is
+#                    imported, so shipping every manager is dead weight. Add the
+#                    one you switch to.
+#   rag / vdb-*    - knowledge bases are disabled in Phase 1; add `rag,vdb-qdrant`
+#                    together with `knowledge_base_manager=` in app.py.
+#   channel        - no DingTalk/Discord/Feishu bot in Phase 1.
+#   storage-sql    - Phase 1 keeps AgentScope state in its own Redis. Add
+#                    `storage-sql` + `asyncpg` before switching to Postgres.
+#
+# Model providers need no extra: `openai`, `anthropic`, and `dashscope` are base
+# dependencies, so OpenAI/Anthropic credentials work out of the box.
+agentscope[service,storage-redis,tools,workspace-e2b]==2.0.8

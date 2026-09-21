@@ -1,0 +1,138 @@
+# hm-agent-runtime-v2 — Phase 1 stack
+#
+# TWO processes, in two separate roles:
+#   1. redis           — AgentScope's own storage + message bus
+#   2. agent-service   — ONE Agent Service process
+#
+# The Redis here is deliberately SEPARATE from hm-core's redis/postgres. The
+# runtime's session/schedule/team state is its own; hm-core owns org identity.
+# Keeping them apart is what lets either side be reset or scaled independently.
+#
+# Run from the repository root:
+#   docker compose -f deploy/hm-agent-runtime-v2/docker-compose.yml up -d --build
+
+name: hm-agent-runtime-v2
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: hm-agent-runtime-redis
+    # Inspection only; not reachable off this host.
+    ports:
+      - "127.0.0.1:6390:6379"
+    command:
+      - redis-server
+      # Persist, because AgentScope state (sessions, schedules, teams) lives here.
+      # Without this a container restart silently loses every session.
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  agent-service:
+    build:
+      context: ../..                          # repo root
+      dockerfile: deploy/hm-agent-runtime-v2/Dockerfile
+      args:
+        # Pass the host docker group GID so the non-root app user can use a
+        # mounted docker socket (see the Dockerfile ARG).
+        DOCKER_GID: ${DOCKER_GID:-0}
+    image: hm-agent-runtime-v2:phase1
+    container_name: hm-agent-runtime-v2
+    # Loopback only. The X-User-ID header is NOT authentication yet, so this
+    # service must not be reachable from the network. Change to a real bind
+    # (or put it behind the gateway) only after Phase 5 wires hm-core auth.
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      # Single source of truth for the gateway + provider credentials, shared
+      # with the rest of the stack. Optional: absent locally is fine, the
+      # service still boots on the environment below.
+      - path: .env
+        required: false
+    environment:
+      # --- AgentScope state (its own Redis, not hm-core's) ---
+      AGENTSCOPE_REDIS_HOST: redis
+      AGENTSCOPE_REDIS_PORT: "6379"
+      AGENTSCOPE_REDIS_DB: "0"
+      # --- workspace root (named volume below) ---
+      AGENTSCOPE_WORKSPACES: /data/workspaces
+      # --- Phase 1: this single process owns timers + channel connections ---
+      AGENTSCOPE_ENABLE_SCHEDULER: "1"
+      AGENTSCOPE_ENABLE_CHANNEL_WORKER: "1"
+      # --- public hubs off until wanted ---
+      AGENTSCOPE_ENABLE_HUBS: "0"
+      # --- download-token signing; override via .env in any shared environment ---
+      AGENTSCOPE_DOWNLOAD_SECRET: ${AGENTSCOPE_DOWNLOAD_SECRET:-dev-only-insecure-download-secret}
+      # --- Cloudflare AI Gateway (SAME gateway as hm-core) ---
+      # These must match the running hivemind-core container. Model calls go
+      # through the gateway's OpenRouter BYOK route, so no provider key is
+      # needed here — the alias selects the stored credential gateway-side.
+      # Set CLOUDFLARE_AI_GATEWAY_ENABLED=false to fall back to direct routing.
+      CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
+      # Set to 1 to log the request payload + upstream error body whenever the
+      # gateway answers 4xx/5xx. Without it a rejected request surfaces only as
+      # AgentScope's generic "rejected as invalid", which names no field.
+      AGENTSCOPE_GATEWAY_DEBUG: ${AGENTSCOPE_GATEWAY_DEBUG:-0}
+      # DEBUG also enables verbose reply-failure diagnostics: AgentScope reports
+      # a failed run to the client as a generic localized message and logs no
+      # traceback, so a misconfiguration is otherwise undiagnosable.
+      AGENTSCOPE_LOG_LEVEL: ${AGENTSCOPE_LOG_LEVEL:-INFO}
+      # --- direct-routing fallback (only used when the gateway is disabled) ---
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # --- future sandbox backends (unused in Phase 1) ---
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      # --- hm-core identity (replaces the X-User-ID placeholder) ---
+      # Shared secret for the service-to-service path. hm-core's control plane
+      # calls this service with X-API-Key: <this> + X-HM-User-Id / X-HM-Org-Id,
+      # exactly as core/src/internal/internal-fetch.js emits them.
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-}
+      # Base URL of hm-core's Core API, used to verify user bearer tokens.
+      HM_CORE_URL: ${HM_CORE_URL:-}
+      HM_CORE_VERIFY_PATH: ${HM_CORE_VERIFY_PATH:-/api/auth/verify}
+      # LOCAL DEV ONLY. Accepts the unauthenticated X-User-ID header. Never
+      # enable this on a reachable host.
+      AGENTSCOPE_ALLOW_DEV_AUTH: ${AGENTSCOPE_ALLOW_DEV_AUTH:-0}
+      # --- hm-core bridge: WorkRun -> session mapping + event forwarding ---
+      HM_FORWARD_ENABLED: ${HM_FORWARD_ENABLED:-0}
+      HM_CORE_EVENT_PATH: ${HM_CORE_EVENT_PATH:-/internal/hyper/turn-event}
+      # --- sandbox backend selection (see workspace_backend.py) ---
+      AGENTSCOPE_WORKSPACE_BACKEND: ${AGENTSCOPE_WORKSPACE_BACKEND:-local}
+      AGENTSCOPE_WORKSPACE_ISOLATION: ${AGENTSCOPE_WORKSPACE_ISOLATION:-per_agent}
+      AGENTSCOPE_WORKSPACE_TTL: ${AGENTSCOPE_WORKSPACE_TTL:-3600}
+      AGENTSCOPE_SANDBOX_IMAGE: ${AGENTSCOPE_SANDBOX_IMAGE:-python:3.12-slim}
+      AGENTSCOPE_SANDBOX_NODE_VERSION: ${AGENTSCOPE_SANDBOX_NODE_VERSION:-20}
+    volumes:
+      # Named volume, not a bind mount: keeps agent working files off the host
+      # filesystem and survives `docker compose down`.
+      - workspaces:/data/workspaces
+      # Docker socket for future sandbox/MCP work. Comment out if you do not
+      # want the runtime to be able to drive the host's containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Lets the container reach a service on the host (e.g. a local hm-core or a
+    # mock sink) via host.docker.internal. Harmless when unused.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  workspaces:

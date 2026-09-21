@@ -131,6 +131,7 @@ export const WORK_RUN_EVENT = Object.freeze({
   STATUS: 'agent.status',
   TOOL_STARTED: 'tool.started',
   TOOL_COMPLETED: 'tool.completed',
+  EXTERNAL_ACTION_PENDING: 'external_action.pending',
   WORKSPACE_STARTED: 'workspace.started',
   ARTIFACT_CREATED: 'artifact.created',
   APPROVAL_REQUESTED: 'approval.requested',
@@ -143,6 +144,38 @@ export const WORK_RUN_EVENT = Object.freeze({
 
 function isNativeTaskTool(name) {
   return /^Task(Create|Update|List|Get)$/i.test(String(name || ''));
+}
+
+function approvalFromToolResult(event) {
+  const seen = new Set();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object') {
+      if (typeof value !== 'string') return null;
+      try { return visit(JSON.parse(value)); } catch { return null; }
+    }
+    if (seen.has(value)) return null;
+    seen.add(value);
+    if (value.status === 'approval_required' && value.approval?.id) {
+      return {
+        id: value.approval.id,
+        summary: value.approval.summary || value.message || null,
+        expires_at: value.approval.expiresAt || null,
+      };
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    for (const key of ['output', 'result', 'data', 'content', 'value']) {
+      const found = visit(value[key]);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(event);
 }
 
 // The transcript remains the authoritative full event history. The WorkRun
@@ -226,6 +259,7 @@ export function normalizeAgentScopeEvent(event) {
 
     case 'TOOL_RESULT_END': {
       const tool = event.tool_call_name || event.tool_name || event.name || null;
+      const approval = approvalFromToolResult(event);
       return {
         t: isNativeTaskTool(tool) ? WORK_RUN_EVENT.PLAN : WORK_RUN_EVENT.TOOL_COMPLETED,
         tool,
@@ -233,6 +267,7 @@ export function normalizeAgentScopeEvent(event) {
         family: isNativeTaskTool(tool) ? 'task' : null,
         state: event.state || 'success',
         result: toolResultPreview(event),
+        approval,
         ts,
       };
     }
@@ -639,6 +674,22 @@ export async function applyRuntimeEvent(prisma, workRunId, agentScopeEvent) {
   }
 
   await appendWorkRunEvent(prisma, workRunId, normalized);
+
+  // Connected writes return a normal tool result with `approval_required`.
+  // That is HIVE's durable authority receipt, not an AgentScope permission
+  // prompt. Keep the active run usable (the agent can continue with other
+  // tasks) and append a separate product event for the approval surface.
+  if (normalized.t === WORK_RUN_EVENT.TOOL_COMPLETED && normalized.approval?.id) {
+    await appendWorkRunEvent(prisma, workRunId, {
+      t: WORK_RUN_EVENT.EXTERNAL_ACTION_PENDING,
+      approval_id: normalized.approval.id,
+      tool: normalized.tool,
+      call_id: normalized.call_id,
+      summary: normalized.approval.summary,
+      expires_at: normalized.approval.expires_at,
+      ts: normalized.ts,
+    });
+  }
 
   // An event may imply a status change. Only the ones that do are acted on —
   // a tool completing does not move the run, a reply ending does.

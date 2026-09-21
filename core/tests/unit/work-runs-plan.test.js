@@ -98,6 +98,43 @@ describe('WorkRun Task tools → plan events (Phase 1)', () => {
     assert.equal(ev.state, 'success');
   });
 
+  it('projects HIVE external approvals from a tool result without creating an AgentScope confirmation prompt', async () => {
+    const appended = [];
+    const prisma = {
+      $queryRawUnsafe: async (sql, ...params) => {
+        if (sql.startsWith('SELECT id, status, events')) {
+          return [{ id: '11111111-1111-4111-8111-111111111111', status: 'running', events: [] }];
+        }
+        if (sql.startsWith('UPDATE "hivemind"."work_runs"')) {
+          appended.push(JSON.parse(params[2])[0]);
+          return [{ id: '11111111-1111-4111-8111-111111111111', status: 'running' }];
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      },
+    };
+    const result = await applyRuntimeEvent(prisma, '11111111-1111-4111-8111-111111111111', {
+      type: 'TOOL_RESULT_END',
+      tool_call_name: 'hivemind_composio_execute',
+      tool_call_id: 'call-1',
+      output: {
+        status: 'approval_required',
+        approval: { id: 'draft-1', summary: 'gmail/GMAIL_SEND_EMAIL', expiresAt: '2026-10-01T00:00:00.000Z' },
+      },
+    });
+    assert.deepEqual(result, { applied: true });
+    assert.equal(appended[0].t, WORK_RUN_EVENT.TOOL_COMPLETED);
+    assert.equal(appended[0].approval.id, 'draft-1');
+    assert.deepEqual(appended[1], {
+      t: WORK_RUN_EVENT.EXTERNAL_ACTION_PENDING,
+      approval_id: 'draft-1',
+      tool: 'hivemind_composio_execute',
+      call_id: 'call-1',
+      summary: 'gmail/GMAIL_SEND_EMAIL',
+      expires_at: '2026-10-01T00:00:00.000Z',
+      ts: appended[0].ts,
+    });
+  });
+
   it('does not terminally complete a selected playbook without its durable evidence', async () => {
     const appended = [];
     const prisma = {

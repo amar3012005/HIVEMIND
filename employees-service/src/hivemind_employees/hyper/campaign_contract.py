@@ -204,6 +204,15 @@ def assemble_campaign_bundle(
     evidence = [row for row in (plan.get("evidence") or []) if isinstance(row, dict)]
     for index, item in enumerate(evidence):
         item["id"] = str(item.get("id") or f"evidence_{index + 1}")
+        source = str(item.get("source") or "").strip()
+        url = str(item.get("url") or "").strip()
+        # Models commonly place a first-party citation directly in `source`
+        # and omit the redundant `url` field. Preserve that cited provenance
+        # before source-type normalization; this is not evidence promotion,
+        # because an uncited derived item remains derived and fail-closed.
+        if not url and re.match(r"^https?://", source, re.I):
+            url = source
+        item["url"] = url
         status = str(item.get("status") or "assumption").strip().lower().replace("-", "_").replace(" ", "_")
         item["status"] = _EVIDENCE_STATUS_ALIASES.get(status, status)
         source_type = str(item.get("source_type") or "derived").strip().lower().replace("-", "_").replace(" ", "_")
@@ -214,11 +223,10 @@ def assemble_campaign_bundle(
         # the separate status/claim checks authoritative while preserving the
         # actual web provenance so a valid cited fact can pass deterministic
         # governance without an unnecessary LLM repair round.
-        if source_type == "derived" and re.match(r"^https?://", str(item.get("url") or "").strip(), re.I):
+        if source_type == "derived" and re.match(r"^https?://", url, re.I):
             source_type = "web"
         item["source_type"] = source_type if source_type in _EVIDENCE_SOURCE_TYPES else "derived"
         item.setdefault("confidence", "medium" if item.get("status") == "verified" else "low")
-        item.setdefault("url", "")
     plan["evidence"] = evidence
     verified_evidence_ids = {
         str(item.get("id") or "")

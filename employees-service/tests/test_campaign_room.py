@@ -189,6 +189,28 @@ def test_campaign_compiler_normalizes_cited_web_evidence_provenance_and_status()
     assert bundle["evidence"][0]["source_type"] == "web"
 
 
+def test_campaign_compiler_recognizes_url_supplied_in_source_field():
+    bundle = assemble_campaign_bundle(
+        {
+            "evidence": [{
+                "id": "homepage-fact",
+                "claim": "The company describes a GDPR-native AI operating layer.",
+                "source": "https://example.com/",
+                "source_type": "derived",
+                "status": "supported",
+            }],
+            "actions": [],
+        },
+        channels=["instagram"],
+        requirements=["goal", "channel:instagram"],
+        campaign_brief={"brief": {"duration_days": 14}},
+    )
+
+    assert bundle["evidence"][0]["url"] == "https://example.com/"
+    assert bundle["evidence"][0]["status"] == "verified"
+    assert bundle["evidence"][0]["source_type"] == "web"
+
+
 def test_campaign_compiler_keeps_uncited_derived_evidence_unverified_by_governance():
     bundle = assemble_campaign_bundle(
         {

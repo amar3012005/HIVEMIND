@@ -123,6 +123,7 @@ import {
   handleInternalPlaybookGetRoute,
   handleInternalResourceAccessRoute,
 } from './routes/internal-hivemind.js';
+import { handleRoutineRoutes } from './routes/routines.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
@@ -13001,6 +13002,20 @@ Write the persona now.`;
     }
   }
   // ─── End WorkRuns ─────────────────────────────────────────
+
+  // ─── AgentScope-native governed Routines ──────────────────
+  // AgentScope owns the single scheduler/timer; HIVE owns routine identity,
+  // policy, idempotency and the WorkRun created by each fire.
+  const routineHandled = await handleRoutineRoutes({
+    req, res, url, prisma, requireSession, parseBody, jsonResponse,
+    internalAuth: (() => {
+      const apiKey = req.headers['x-api-key']
+        || req.headers['authorization']?.replace(/^Bearer\s+/i, '')
+        || '';
+      return hasInternalApiKey(apiKey);
+    })(),
+  });
+  if (routineHandled) return;
 
   // ─── Internal HIVE-MIND capability endpoints ──────────────
   // The hm-core side of the `extra_agent_tools` contract. The agent runtime is

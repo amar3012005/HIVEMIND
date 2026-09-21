@@ -35,7 +35,9 @@ export function normalizeRoutineInput(input = {}) {
     throw new TypeError('routine must be an object');
   }
   const scheduleType = requiredString(input.schedule_type, 'schedule_type');
+  if (scheduleType !== 'cron') throw new TypeError('schedule_type must be cron for AgentScope native schedules');
   const scheduleExpression = requiredString(input.schedule_expression, 'schedule_expression');
+  const goal = requiredString(input.goal, 'goal');
   const playbookId = requiredString(input.playbook_id, 'playbook_id');
   const playbookVersion = Number(input.playbook_version);
   if (!Number.isInteger(playbookVersion) || playbookVersion < 1) {
@@ -47,11 +49,12 @@ export function normalizeRoutineInput(input = {}) {
   }
   return Object.freeze({
     room_id: requiredString(input.room_id, 'room_id'),
-    agent_runtime_id: requiredString(input.agent_runtime_id, 'agent_runtime_id'),
+    agent_runtime_id: requiredString(input.agent_runtime_id || input.agent_id, 'agent_id'),
     playbook_id: playbookId,
     playbook_version: playbookVersion,
     schedule_type: scheduleType,
     schedule_expression: scheduleExpression,
+    goal,
     authority_policy: input.authority_policy && typeof input.authority_policy === 'object'
       ? input.authority_policy
       : {},
@@ -76,6 +79,7 @@ export function nativeScheduleProjection({ routine, routineId, agentId, chatMode
       routine_id: routineId,
       playbook_id: normalized.playbook_id,
       playbook_version: normalized.playbook_version,
+      goal: normalized.goal,
     }),
     cron_expression: normalized.schedule_expression,
     timezone: routine.timezone || 'UTC',
@@ -104,6 +108,6 @@ export function routineWorkRunScope({ routine, routineId, fireKey, scheduledAt }
     playbook_id: normalized.playbook_id,
     playbook_version: normalized.playbook_version,
     authority_policy: normalized.authority_policy,
+    goal: normalized.goal,
   };
 }
-

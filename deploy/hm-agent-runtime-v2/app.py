@@ -47,6 +47,7 @@ from agentscope.agent import Agent
 from agentscope.app import SubAgentTemplate, create_app
 import hive_access_policy
 import hive_toolkit_groups
+import hive_scheduler
 import model_capabilities
 from agentscope.app.hub import ClawSkillHub, GitHubMCPHub
 from agentscope.app.message_bus import RedisMessageBus
@@ -61,6 +62,12 @@ import hm_auth
 import hm_bridge
 import extra_agent_tools
 from gateway_credential import CloudflareGatewayOpenAICredential
+
+# AgentScope remains the sole scheduler owner. HIVE only replaces the trigger
+# action for explicitly marked routine records so each native fire can enter
+# the governed WorkRun path before any model execution begins.
+import agentscope.app._app as _agentscope_app
+_agentscope_app.SchedulerManager = hive_scheduler.HiveRoutineSchedulerManager
 
 # --------------------------------------------------------------------------
 # Configuration (env-driven so the same image runs anywhere)

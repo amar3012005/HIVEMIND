@@ -8,12 +8,14 @@ import {
   routineFireKey,
   routineWorkRunScope,
 } from '../../src/employees/routines.js';
+import { claimRoutineFire, createRoutine, setRoutineStatus } from '../../src/employees/routine-repository.js';
 
 const routine = {
   room_id: 'room-1',
   agent_runtime_id: 'agent-1',
   playbook_id: 'global:brief',
   playbook_version: 2,
+  goal: 'Prepare the operating brief',
   schedule_type: 'cron',
   schedule_expression: '0 * * * *',
   timezone: 'Europe/Berlin',
@@ -45,6 +47,7 @@ test('native projection carries only a compact HIVE routine envelope', () => {
     routine_id: 'routine-1',
     playbook_id: 'global:brief',
     playbook_version: 2,
+    goal: 'Prepare the operating brief',
   });
 });
 
@@ -58,6 +61,32 @@ test('routine fire key and WorkRun scope are deterministic and replay-safe', () 
     scheduled_at: when,
     playbook_id: 'global:brief',
     playbook_version: 2,
+    goal: 'Prepare the operating brief',
     authority_policy: { external_writes: 'approval' },
   });
+});
+
+test('routine repository uses parameterized inserts and idempotent fire claims', async () => {
+  const calls = [];
+  const prisma = {
+    async $queryRawUnsafe(...args) {
+      calls.push(args);
+      if (String(args[0]).includes('INSERT INTO "hivemind"."agentscope_routine_fires"')) {
+        return calls.length === 2 ? [{ id: 'fire-1' }] : [];
+      }
+      return [{ id: 'routine-1', status: 'active' }];
+    },
+  };
+  const created = await createRoutine(prisma, {
+    orgId: '00000000-0000-4000-8000-000000000001',
+    userId: '00000000-0000-4000-8000-000000000002',
+    input: routine,
+    agentId: 'agentscope-agent-1',
+    chatModelConfig: { model: 'deepseek/deepseek-v4-flash' },
+  });
+  assert.equal(created.id, 'routine-1');
+  assert.equal((await claimRoutineFire(prisma, { routineId: 'routine-1', fireKey: 'fire-key' })).id, 'fire-1');
+  assert.equal(await claimRoutineFire(prisma, { routineId: 'routine-1', fireKey: 'fire-key' }), null);
+  await setRoutineStatus(prisma, { orgId: 'org-1', routineId: 'routine-1', status: ROUTINE_STATUS.PAUSED });
+  assert.equal(calls.length, 4);
 });

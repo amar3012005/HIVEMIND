@@ -133,19 +133,22 @@ test('a save without a stated destination interrupts once for scope and resumes 
     ...ctx(prisma, 'save-scope'),
     _tracedDispatch: async (_name, args) => {
       writes += 1;
-      if (writes === 1) return {
-        saved: false, needs_project_choice: true,
-        message: 'Choose a destination.',
-        scope_options: [{ scope: 'personal', label: 'Personal' }, { scope: 'organization', label: 'Organization' }],
-        draft: { title: args.title, content: args.content, tags: args.tags, memory_type: 'fact' },
-      };
+      if (writes === 1) {
+        assert.equal(args.scope, undefined);
+        return {
+          saved: false, needs_project_choice: true,
+          message: 'Choose a destination.',
+          scope_options: [{ scope: 'personal', label: 'Personal' }, { scope: 'organization', label: 'Organization' }],
+          draft: { title: args.title, content: args.content, tags: args.tags, memory_type: 'fact' },
+        };
+      }
       assert.equal(args.scope, 'personal');
       return { saved: true, id: 'memory-scoped' };
     },
   };
   const modelStep = async () => {
     turn += 1;
-    if (turn === 1) return { message: call('hivemind_meta', { operation: 'save', save: { title: 'Rama', content: 'Rama is important to Amar.', tags: ['rama', 'relationship'] } }, 'scope-save') };
+    if (turn === 1) return { message: call('hivemind_meta', { operation: 'save', save: { title: 'Rama', content: 'Rama is important to Amar.', tags: ['rama', 'relationship'], scope: 'personal' } }, 'scope-save') };
     return { message: { role: 'assistant', content: 'Saved in your personal memory.' } };
   };
   const initial = await runUnifiedMetaAgent({

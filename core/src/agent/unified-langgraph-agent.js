@@ -68,6 +68,14 @@ function explicitDurableSaveRequest(message) {
   return /\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,120}\b(?:memory|hive[-\s]?mind)\b/.test(text);
 }
 
+function explicitlyRequestedMemoryScope(message) {
+  const text = String(message || '').toLowerCase();
+  if (/\b(?:personal|private)\s+(?:memory|hive[-\s]?mind)\b/.test(text)) return 'personal';
+  if (/\b(?:organization|organisation|company|org(?:-wide)?)\s+(?:memory|hive[-\s]?mind)\b/.test(text)) return 'organization';
+  if (/\bteam\s+(?:memory|hive[-\s]?mind)\b/.test(text)) return 'team';
+  return null;
+}
+
 function decisionSummaryRequest(message) {
   const text = String(message || '').toLowerCase();
   return /\bdecisions?\b/.test(text)
@@ -259,7 +267,11 @@ async function defaultMetaExecutor(args, ctx) {
     tags: Array.isArray(save.tags) && save.tags.length >= 2 ? save.tags : ['hivemind', 'user-confirmed'],
     source_type: save.source_type || 'text',
     ...(save.project ? { project: save.project } : {}),
-    ...(save.scope ? { scope: save.scope } : {}),
+    // A model must not turn a vague "save this" into an unstated personal
+    // or organization write. Scope is user authority, so accept only a
+    // destination the user actually named; otherwise let the write handler
+    // produce its one durable scope-choice checkpoint.
+    ...(explicitlyRequestedMemoryScope(ctx.requestMessage) ? { scope: explicitlyRequestedMemoryScope(ctx.requestMessage) } : {}),
     _memory_admission: 'user_assertion', _require_explicit_scope: true,
   };
   return executeGovernedCoreWrite('hivemind_save_memory', toolArgs, ctx);

@@ -197,6 +197,10 @@ HYPER_AGENTIC_MAX_ITERS = int(os.environ.get("HYPER_AGENTIC_MAX_ITERS", "18"))
 # turn — a hard ceiling so a runaway plan can't fan out unbounded real
 # sub-agent loops (each one is its own LLM+tool cost).
 HYPER_AGENTIC_MAX_DELEGATIONS = int(os.environ.get("HYPER_AGENTIC_MAX_DELEGATIONS", "4"))
+# Keep the native PlanNotebook bounded. Its sequential state machine already
+# prevents more than one subtask from being in progress; this limit prevents a
+# single model turn from creating an unrenderable operating plan.
+HYPER_AGENTIC_MAX_TASKS = int(os.environ.get("HYPER_AGENTIC_MAX_TASKS", "8"))
 
 ROLE_LANES = ("Strategist", "Builder", "Skeptic", "Researcher", "Communicator")
 
@@ -1023,6 +1027,7 @@ async def _build_lead_task_agent(
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
     room_kind: str = "",
+    on_plan_change: Optional[Callable[[Any], Awaitable[None]]] = None,
 ) -> ReActAgent:
     """Build the lead's real ReAct agent for the AGENTIC TASK ENGINE
     (dual-engine, 2026-08-13, flag-gated HYPER_AGENTIC_ENGINE) — a genuinely
@@ -1077,9 +1082,12 @@ async def _build_lead_task_agent(
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
+    plan_notebook = PlanNotebook(max_subtasks=HYPER_AGENTIC_MAX_TASKS)
+    if on_plan_change is not None:
+        plan_notebook.register_plan_change_hook(on_plan_change)
     agent = build_react_agent(
         merged, api_key, user_id=user_id, org_id=org_id, project_id=project_id,
-        plan_notebook=PlanNotebook(),
+        plan_notebook=plan_notebook,
     )
 
     async def _build_sub_agent(target_row: Dict[str, Any]) -> ReActAgent:
@@ -3848,6 +3856,7 @@ async def _run_agentic_task_agent(
     user_id: str, org_id: str, project_id: Optional[str],
     turn_id: str, user_message: str, board_context: str,
     room_kind: str = "",
+    callback_url: str = "",
 ) -> Optional[str]:
     """Invoke the AGENTIC TASK ENGINE (dual-engine, flag-gated
     HYPER_AGENTIC_ENGINE) — the lead's real ReAct agent with a native
@@ -3865,9 +3874,34 @@ async def _run_agentic_task_agent(
             set_approval_rules(await get_org_approval_rules(org_id))
         except Exception:  # noqa: BLE001 — a failed rule load must fail open to the normal ask/deny policy
             set_approval_rules(None)
+        async def _publish_plan(plan: Any) -> None:
+            """Project native PlanNotebook state without making the UI owner.
+
+            The notebook remains AgentScope's execution state.  This is a
+            bounded, append-only Room event so the transcript can render plan
+            changes in their original order and recover them from the turn log.
+            """
+            subtasks = []
+            for index, subtask in enumerate(getattr(plan, "subtasks", []) or []):
+                subtasks.append({
+                    "id": str(index),
+                    "title": str(getattr(subtask, "name", "") or "Untitled task"),
+                    "description": str(getattr(subtask, "description", "") or "")[:1000],
+                    "expected_outcome": str(getattr(subtask, "expected_outcome", "") or "")[:1000],
+                    "status": str(getattr(subtask, "state", "todo") or "todo"),
+                })
+            await _emit_event(callback_url, turn_id, {
+                "t": "task_plan",
+                "source": "agentscope_plan_notebook",
+                "name": str(getattr(plan, "name", "") or "Operating plan"),
+                "description": str(getattr(plan, "description", "") or "")[:2000],
+                "expected_outcome": str(getattr(plan, "expected_outcome", "") or "")[:2000],
+                "subtasks": subtasks,
+            })
+
         agent = await _build_lead_task_agent(
             room_id, lead, participants, user_id=user_id, org_id=org_id, project_id=project_id,
-            room_kind=room_kind,
+            room_kind=room_kind, on_plan_change=_publish_plan,
         )
         prompt = (
             f"TASK: {user_message}\n\n"
@@ -4153,7 +4187,7 @@ async def _orchestrate_single_agent(
     async def _agentic_task_via_agent(user_message: str, board_context: str) -> Optional[str]:
         return await _run_agentic_task_agent(
             req.room_id, lead, participants, req.user_id, req.org_id, req.project_id, req.turn_id,
-            user_message, board_context, room_kind=_room_kind,
+            user_message, board_context, room_kind=_room_kind, callback_url=req.callback_url,
         )
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/

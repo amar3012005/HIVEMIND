@@ -308,8 +308,12 @@ export async function handleAgentScopeCapabilityRoute({
        SET result_artifact_ids = CASE WHEN result_artifact_ids ? $2 THEN result_artifact_ids ELSE result_artifact_ids || jsonb_build_array($2::text) END,
            updated_at = now() WHERE id = $1::uuid`, run.id, artifact.id,
     );
-    await appendWorkRunEvent(prisma, run.id, { t: 'artifact.created', artifact_id: artifact.id, path, title, version: artifact.version, ts: Date.now() });
-    return jsonResponse(res, { status: 'completed', artifact: { id: artifact.id, title, path, content_type: artifact.contentType, size_bytes: Number(artifact.sizeBytes), checksum: artifact.checksum, version: artifact.version } });
+    // The immutable SourceArtifact may be reused for a byte-identical object
+    // already present at another path. The WorkRun event is the logical
+    // path-version receipt, so it must expose this path's computed version
+    // rather than the reusable content object's original version.
+    await appendWorkRunEvent(prisma, run.id, { t: 'artifact.created', artifact_id: artifact.id, path, title, version, ts: Date.now() });
+    return jsonResponse(res, { status: 'completed', artifact: { id: artifact.id, title, path, content_type: artifact.contentType, size_bytes: Number(artifact.sizeBytes), checksum: artifact.checksum, version } });
   }
   if (pathname === '/internal/hivemind/workruns/complete') {
     const run = await scopedWorkRun(prisma, String(body?.agentscope_session_id || '').trim(), p);

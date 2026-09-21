@@ -111,6 +111,26 @@ test('artifact registration assigns the next immutable version for changed bytes
   assert.equal(stored.metadata.previous_artifact_id, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
 });
 
+test('artifact registration retains the logical path version when immutable bytes are deduplicated', async () => {
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql) => sql.includes('SELECT id, room_id, turn_id, status')
+      ? [{ id: '33333333-3333-3333-3333-333333333333', room_id: '44444444-4444-4444-4444-444444444444', turn_id: '55555555-5555-5555-5555-555555555555', status: 'running' }]
+      : [{ id: '33333333-3333-3333-3333-333333333333', status: 'running' }],
+    sourceArtifact: {
+      findFirst: async () => ({ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', checksum: 'different-checksum', version: 5 }),
+      // The same bytes already have an immutable receipt from another path.
+      upsert: async ({ create }) => ({ id: 'cccccccc-cccc-cccc-cccc-cccccccccccc', checksum: create.checksum, contentType: create.contentType, sizeBytes: create.sizeBytes, version: 1, createdAt: new Date() }),
+    },
+  };
+  const result = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ agentscope_session_id: 'session-1', path: 'reports/brief.md', title: 'Research brief', content_base64: Buffer.from('reused bytes').toString('base64') }),
+    jsonResponse, prisma, pathname: '/internal/hivemind/artifacts',
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.artifact.version, 6);
+});
+
 test('artifact registration refuses an inline fallback when configured storage fails', async () => {
   let persisted = false;
   const prisma = {

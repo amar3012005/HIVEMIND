@@ -1,7 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { appendWorkRunEvent, normalizeAgentScopeEvent } from '../../src/employees/work-runs.js';
+import { appendWorkRunEvent, normalizeAgentScopeEvent, workRunTelemetry } from '../../src/employees/work-runs.js';
+
+test('derives durable first-event telemetry without exposing content', () => {
+  const telemetry = workRunTelemetry([
+    { t: 'workrun.started', ts: 1_000 },
+    { t: 'agent.status', type: 'THINKING_BLOCK_DELTA', ts: 1_120 },
+    { t: 'tool.started', ts: 1_250 },
+    { t: 'assistant.delta', type: 'TEXT_BLOCK_DELTA', ts: 1_400 },
+    { t: 'workrun.completed', ts: 1_900 },
+  ], { submittedAt: 900 });
+
+  assert.deepEqual(telemetry.elapsed, {
+    submit: 0,
+    acknowledgement: 100,
+    first_thinking: 220,
+    first_tool: 350,
+    first_answer: 500,
+    completion: 1_000,
+  });
+  assert.equal(Object.hasOwn(telemetry, 'text'), false);
+});
 
 test('preserves typed AgentScope transcript deltas for durable replay', () => {
   const text = normalizeAgentScopeEvent({

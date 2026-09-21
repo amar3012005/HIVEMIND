@@ -141,6 +141,36 @@ export const WORK_RUN_EVENT = Object.freeze({
   FAILED: 'workrun.failed',
 });
 
+/**
+ * Derive first-event latency from the durable WorkRun log.  This intentionally
+ * uses persisted event timestamps rather than browser marks, so it remains
+ * meaningful after reconnects and can be compared across clients.
+ */
+export function workRunTelemetry(events = [], { submittedAt = null } = {}) {
+  const rows = Array.isArray(events) ? events : [];
+  const first = (predicate) => rows.find((event) => predicate(event) && Number.isFinite(Number(event?.ts))) || null;
+  const submit = Number.isFinite(Number(submittedAt)) ? Number(submittedAt) : null;
+  const acknowledgement = first((event) => event?.t === WORK_RUN_EVENT.STARTED || event?.t === WORK_RUN_EVENT.STATUS);
+  const thought = first((event) => event?.type === 'THINKING_BLOCK_DELTA' || (event?.t === 'assistant.delta' && /thinking/i.test(String(event?.type || ''))));
+  const tool = first((event) => event?.t === WORK_RUN_EVENT.TOOL_STARTED);
+  const answer = first((event) => event?.type === 'TEXT_BLOCK_DELTA' || (event?.t === 'assistant.delta' && /text/i.test(String(event?.type || ''))));
+  const completion = first((event) => event?.t === WORK_RUN_EVENT.COMPLETED || (event?.t === WORK_RUN_EVENT.STATUS && event?.status === 'idle') || event?.t === WORK_RUN_EVENT.FAILED);
+  const at = (event) => event ? Number(event.ts) : null;
+  const marks = {
+    submit,
+    acknowledgement: at(acknowledgement),
+    first_thinking: at(thought),
+    first_tool: at(tool),
+    first_answer: at(answer),
+    completion: at(completion),
+  };
+  const elapsed = Object.fromEntries(Object.entries(marks).map(([key, value]) => [
+    key,
+    value == null || submit == null ? null : Math.max(0, value - submit),
+  ]));
+  return { marks, elapsed };
+}
+
 function isNativeTaskTool(name) {
   return /^Task(Create|Update|List|Get)$/i.test(String(name || ''));
 }
@@ -696,7 +726,7 @@ export async function applyRuntimeEvent(prisma, workRunId, agentScopeEvent) {
     if (started?.tool) normalized.tool = started.tool;
   }
 
-  await appendWorkRunEvent(prisma, workRunId, normalized);
+  const appended = await appendWorkRunEvent(prisma, workRunId, normalized);
 
   // An event may imply a status change. Only the ones that do are acted on —
   // a tool completing does not move the run, a reply ending does.
@@ -725,7 +755,7 @@ export async function applyRuntimeEvent(prisma, workRunId, agentScopeEvent) {
     }
   }
 
-  return { applied: true };
+  return appended ? { applied: true } : { applied: false, duplicate: true };
 }
 
 /**

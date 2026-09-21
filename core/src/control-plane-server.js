@@ -12574,11 +12574,12 @@ Write the persona now.`;
       applyRuntimeEvent,
       completeWorkRun,
       transitionWorkRun,
+      workRunTelemetry,
       WORK_RUN_STATUS,
       isTerminal,
     } = await import('./employees/work-runs.js');
 
-    const WORKRUN_ID_RE = /^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/cancel|\/session\/messages|\/session\/stream|\/chat)?$/;
+    const WORKRUN_ID_RE = /^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/telemetry|\/cancel|\/session\/messages|\/session\/stream|\/chat)?$/;
 
     // POST /v1/workruns — create a run and hand it to the runtime.
     if (pathname === '/v1/workruns' && req.method === 'POST') {
@@ -12674,6 +12675,23 @@ Write the persona now.`;
         const events = Array.isArray(rows[0].events) ? rows[0].events : [];
         const sliced = events.filter((e) => Number(e?.seq || 0) > after);
         return jsonResponse(res, { events: sliced, last_seq: events.reduce((m, e) => Math.max(m, Number(e?.seq || 0)), 0) });
+      }
+
+      // GET /v1/workruns/:id/telemetry — durable first-event timings. Unlike
+      // browser performance marks this survives a reconnect and is safe to
+      // inspect after a completed run.
+      if (sub === '/telemetry' && req.method === 'GET') {
+        const current = await requireSession(req, res);
+        if (!current) return;
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT events, created_at FROM "hivemind"."work_runs"
+             WHERE id = $1::uuid AND user_id = $2::uuid`,
+          workRunId,
+          current.session.userId,
+        );
+        if (!rows?.length) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+        const row = rows[0];
+        return jsonResponse(res, { telemetry: workRunTelemetry(row.events, { submittedAt: row.created_at ? new Date(row.created_at).valueOf() : null }) });
       }
 
       if (sub === '/stream' && req.method === 'GET') {

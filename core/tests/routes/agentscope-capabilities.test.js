@@ -157,12 +157,17 @@ test('external action preparation creates a HIVE approval draft and never invoke
     },
     pendingWrite: {
       findFirst: async () => null,
-      create: async ({ data }) => ({ id: '66666666-6666-6666-6666-666666666666', ...data }),
+      create: async ({ data }) => {
+        assert.equal(data.provider, 'composio');
+        assert.equal(data.toolGroup, 'composio');
+        assert.deepEqual(data.toolArgs, { to: 'ada@example.com', body: 'Hello' });
+        return { id: '66666666-6666-6666-6666-666666666666', ...data };
+      },
     },
   };
   const result = await handleAgentScopeCapabilityRoute({
     req: baseReq, res: {}, jsonResponse, prisma,
-    parseBody: async () => ({ agentscope_session_id: 'session-1', provider: 'gmail', tool_name: 'GMAIL_SEND_EMAIL', arguments: { to: 'ada@example.com', body: 'Hello' }, summary: 'Send the reviewed email to Ada.' }),
+    parseBody: async () => ({ agentscope_session_id: 'session-1', provider: 'composio', tool_name: 'GMAIL_SEND_EMAIL', arguments: { to: 'ada@example.com', body: 'Hello' }, summary: 'Send the reviewed email to Ada.' }),
     pathname: '/internal/hivemind/actions/prepare',
   });
   assert.equal(result.statusCode, 202);

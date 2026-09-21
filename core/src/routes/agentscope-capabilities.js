@@ -212,8 +212,8 @@ export async function handleAgentScopeCapabilityRoute({
     const toolName = String(body?.tool_name || '').trim();
     const args = body?.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : null;
     const summary = String(body?.summary || '').trim().replace(/\s+/g, ' ').slice(0, 1200);
-    if (!/^[a-z0-9_-]{2,50}$/.test(provider) || !/^[A-Za-z0-9_.:-]{2,160}$/.test(toolName) || !args || !summary) {
-      return jsonResponse(res, { error: 'provider, tool_name, object arguments, and summary are required.' }, 400);
+    if (provider !== 'composio' || !/^[A-Za-z0-9_.:-]{2,160}$/.test(toolName) || !args || !summary) {
+      return jsonResponse(res, { error: 'provider=composio, tool_name, object arguments, and summary are required.' }, 400);
     }
     const proposal = { provider, tool_name: toolName, arguments: args, workrun_id: run.id };
     const argsHash = crypto.createHash('sha256').update(canonicalJson(proposal)).digest('hex');
@@ -221,8 +221,12 @@ export async function handleAgentScopeCapabilityRoute({
     let approval = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: p.orgId, userId: p.userId } });
     if (!approval) {
       approval = await prisma.pendingWrite.create({ data: {
-        userId: p.userId, orgId: p.orgId, provider, toolGroup: 'agentscope_workrun', toolName,
-        toolArgs: { ...args, _agentscope_workrun_id: run.id, _agentscope_session_id: sessionId, _approval_contract: 'draft_only' },
+        // HIVE's existing /api/pending-writes/:id/approve route recognizes
+        // Composio drafts and atomically claims + executes their stored args.
+        // Do not add AgentScope metadata to toolArgs: those bytes are passed to
+        // the provider after approval and must remain its exact schema.
+        userId: p.userId, orgId: p.orgId, provider, toolGroup: 'composio', toolName,
+        toolArgs: args,
         argsHash, traceId: run.id, idempotencyKey, preview: summary,
         expiresAt: new Date(Date.now() + 15 * 60_000), status: 'draft',
       } });

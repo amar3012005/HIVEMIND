@@ -754,8 +754,8 @@ anything; an approved HIVE policy path is required for execution."""
     is_read_only: bool = False
 
     class Params(BaseModel):
-        provider: str = Field(description="Connected provider, for example gmail or slack.")
-        tool_name: str = Field(description="Exact provider action that would run after approval.")
+        provider: str = Field(default="composio", description="Must be 'composio'; HIVE owns the connected provider credential.")
+        tool_name: str = Field(description="Exact Composio write tool slug that would run after approval.")
         arguments: dict = Field(default_factory=dict, description="Proposed provider arguments, never executed by this call.")
         summary: str = Field(description="Short human-review summary of the proposed action.")
 

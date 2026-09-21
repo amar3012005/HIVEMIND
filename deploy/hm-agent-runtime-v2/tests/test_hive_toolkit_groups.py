@@ -3,7 +3,8 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
-from agentscope.tool import TaskCreate, Toolkit
+from agentscope.message import TextBlock
+from agentscope.tool import TaskCreate, TaskUpdate, Toolkit, ToolChunk
 from agentscope.workspace import LocalWorkspace
 from hive_toolkit_groups import (
     TEAM_TOOL_NAMES,
@@ -101,6 +102,14 @@ class HiveToolkitGroupsTests(unittest.TestCase):
         app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
         self.assertNotIn("custom_agent_cls=HiveWorkRunAgent", app_source)
         self.assertNotIn("activated_groups", app_source)
+
+    def test_workrun_prompt_uses_the_native_task_dependency_schema(self):
+        """AgentScope 2.0.8 creates tasks before their ids can be linked."""
+        self.assertNotIn("blocked_by", TaskCreate.input_schema["properties"])
+        self.assertIn("add_blocked_by", TaskUpdate.input_schema["properties"])
+        app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
+        self.assertIn("TaskUpdate.add_blocked_by", app_source)
+        self.assertNotIn("TaskCreate for each step (use blocked_by", app_source)
 
     def test_focused_company_collections_are_available_only_via_hivemind_group(self):
         async def verify():

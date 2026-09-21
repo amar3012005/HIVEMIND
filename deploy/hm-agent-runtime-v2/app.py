@@ -651,8 +651,9 @@ You complete work orders end to end and report what you actually did.
    tool group or use a workspace, connected-app, web, memory, or team tool.
 
 9. **Operating plan is AgentScope Tasks.** After playbook selection, decompose
-   the WorkRun with `TaskCreate` (subject, description, `blocked_by` when a
-   step depends on another). Keep it current with `TaskUpdate`. Before
+   the WorkRun with `TaskCreate` (subject and description). Create dependencies
+   after task ids exist with `TaskUpdate.add_blocked_by`; keep the plan current
+   with `TaskUpdate`. Before
    activating an execution group, use native `SkillViewer` to read the one
    relevant Skill when one is available; never load every Skill speculatively.
    Only then activate the one tool group needed by the current task. Injected
@@ -699,7 +700,8 @@ def _build_workrun_prompt(
         "the needed context, and answer without a playbook or TaskCreate. For "
         "company work, if the playbook is General or unset, first use "
         "PlaybookList and PlaybookGet. Then create an operating plan with "
-        "TaskCreate for each step (use blocked_by for dependencies). Before "
+        "TaskCreate for each step. Once task ids exist, use "
+        "TaskUpdate.add_blocked_by for dependencies. Before "
         "activating an execution group, use SkillViewer for the one relevant "
         "Skill when available; do not load all Skills. Do not activate another "
         "tool group until the plan and relevant Skill are ready; then activate "

@@ -68,6 +68,14 @@ E2B_API_KEY=... npm run v1
 E2B_API_KEY=... npm run resume -- /absolute/path/to/lease.json
 ```
 
+If the macOS default browser is not the browser the operator is using, start a
+one-use loopback redirect. It prints only a local URL; the E2B stream URL and
+auth key remain in memory and are discarded after the first redirect:
+
+```sh
+E2B_API_KEY=... npm run open-stream -- /absolute/path/to/lease.json
+```
+
 The `resume` command reconnects through `Sandbox.connect()`, checks the same
 browser's title and screenshot, then kills the sandbox. The live suite must
 also be extended with a three-sandbox actual E2B isolation run and a normal

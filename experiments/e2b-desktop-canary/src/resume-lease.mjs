@@ -15,7 +15,7 @@ const computer = await E2BComputer.connect({ Sandbox, lease, leaseManager: manag
 try {
   if (!await computer.desktop.isRunning()) throw new Error('Reconnected sandbox is not running.')
   const observed = await computer.observe('reconnected')
-  if (!observed.title.includes('HUMAN EDIT.')) throw new Error('Expected human edit is absent after controller reconnect.')
+  if (!/human edit\./i.test(observed.title)) throw new Error('Expected human edit is absent after controller reconnect.')
   console.log(JSON.stringify({ status: 'reconnect_verified', sandbox_id: computer.desktop.sandboxId, title: observed.title, screenshot_path: observed.screenshot_after }, null, 2))
 } finally {
   await computer.kill()

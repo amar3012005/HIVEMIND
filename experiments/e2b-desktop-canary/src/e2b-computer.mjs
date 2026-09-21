@@ -52,9 +52,10 @@ export class E2BComputer {
   async prepareSafeFixture() {
     requireMethod(this.desktop.files, 'write'); requireMethod(this.desktop, 'launch'); requireMethod(this.desktop, 'wait')
     await this.desktop.files.write(FIXTURE_PATH, fixtureHtml)
-    await this.desktop.launch('google-chrome')
+    // Launch Chrome directly at the fixture. Keyboard navigation from a Chrome
+    // new-tab page is not deterministic across desktop images.
+    await this.desktop.launch('google-chrome', `file://${FIXTURE_PATH}`)
     await this.desktop.wait(10_000)
-    await this.openUrl(`file://${FIXTURE_PATH}`, { record: false })
   }
 
   async openUrl(url, { record = true } = {}) {
@@ -105,9 +106,8 @@ export class E2BComputer {
     const receipt = await this.#startReceipt('browser_recovery', {})
     try {
       await this.desktop.commands.run('pkill -f chrome')
-      await this.desktop.launch('google-chrome')
+      await this.desktop.launch('google-chrome', `file://${FIXTURE_PATH}`)
       await this.desktop.wait(5_000)
-      await this.openUrl(`file://${FIXTURE_PATH}`, { record: false })
       return await this.receipts.record({ ...receipt, status: 'completed', completed_at: this.now(), recovery_attempts: 1, page: await this.observe('browser-recovered') })
     } catch (error) {
       await this.leaseManager.transition(this.leaseId, 'failed'); await this.persistLease()

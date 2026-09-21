@@ -10,7 +10,8 @@
     "test": "node --test test/*.test.mjs",
     "canary": "node src/run-canary.mjs",
     "v1": "node src/run-v1.mjs",
-    "resume": "node src/resume-lease.mjs"
+    "resume": "node src/resume-lease.mjs",
+    "open-stream": "node src/open-stream-proxy.mjs"
   },
   "dependencies": {
     "@e2b/desktop": "2.4.0"

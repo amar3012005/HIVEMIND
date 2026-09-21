@@ -56,12 +56,41 @@ test('tool completion reuses the matching start name', async () => {
 });
 
 test('AgentScope tool input and output deltas retain the call identity for durable inspection', () => {
-  const input = normalizeAgentScopeEvent({ type: 'TOOL_CALL_DELTA', tool_call_id: 'call-1', delta: '{"query":' });
+  const input = normalizeAgentScopeEvent({ id: 'event-input-1', type: 'TOOL_CALL_DELTA', tool_call_id: 'call-1', delta: '{"query":' });
   const output = normalizeAgentScopeEvent({ type: 'TOOL_RESULT_TEXT_DELTA', tool_call_id: 'call-1', delta: 'first result' });
   assert.deepEqual(input.t, 'tool.input.delta');
   assert.deepEqual(output.t, 'tool.output.delta');
   assert.equal(input.call_id, 'call-1');
+  assert.equal(input.source_event_id, 'event-input-1');
   assert.equal(output.call_id, 'call-1');
+});
+
+test('replayed AgentScope event ids do not duplicate the durable WorkRun timeline', async () => {
+  const calls = [];
+  let storedSourceEventId = null;
+  const prisma = {
+    $queryRawUnsafe: async (sql, ...params) => {
+      calls.push({ sql, params });
+      if (sql.startsWith('SELECT id, status, events')) return [{ id: 'run-1', status: 'running', events: [] }];
+      if (sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events')) {
+        const sourceEventId = params[3];
+        if (sourceEventId && sourceEventId === storedSourceEventId) return [];
+        storedSourceEventId = sourceEventId;
+        return [{ id: 'run-1', status: 'running' }];
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+  const rawEvent = { id: 'agentscope-event-1', type: 'REPLY_START' };
+  const first = await applyRuntimeEvent(prisma, 'run-1', rawEvent);
+  const replay = await applyRuntimeEvent(prisma, 'run-1', rawEvent);
+  assert.equal(first.applied, true);
+  assert.equal(replay.applied, false);
+  assert.equal(replay.reason, 'duplicate');
+  const eventWrites = calls.filter((call) => call.sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events'));
+  assert.equal(eventWrites.length, 2);
+  assert.equal(eventWrites[0].params[3], 'agentscope-event-1');
+  assert.match(eventWrites[0].sql, /source_event_id/);
 });
 
 test('native AgentScope team metadata becomes a durable WorkRun lifecycle event', () => {

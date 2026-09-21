@@ -50,6 +50,15 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("complete", kwargs["json"])
         self.assertEqual(forwarder.stats, {"forwarded": 1, "failed": 0})
 
+    async def test_replayed_event_id_is_forwarded_once(self):
+        client = _Client()
+        forwarder = EventForwarder(binding=self.binding, master_key="test-key", base_url="http://hm-core.test")
+        event = {"id": "agentscope-event-1", "type": "REPLY_START"}
+        await forwarder._forward(client, event)
+        await forwarder._forward(client, event)
+        self.assertEqual(len(client.posts), 1)
+        self.assertEqual(forwarder.stats, {"forwarded": 1, "failed": 0})
+
     async def test_unrelated_custom_events_are_not_forwarded(self):
         client = _Client()
         forwarder = EventForwarder(binding=self.binding, master_key="test-key", base_url="http://hm-core.test")

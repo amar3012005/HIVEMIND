@@ -18,15 +18,15 @@ This module is the only place that knows both. It does two things:
    hm-core call can find the session it refers to. hm-core stores the session id
    on its side too; this table is the reverse index.
 
-2. **Forwarding.** Tails a session's SSE stream and POSTs each event to hm-core's
-   inbound sink, mirroring `POST /internal/hyper/turn-event`
-   (`core/src/routes/hyper-rooms.js`). hm-core validates the execution identity
-   and fans the event out to its own SSE subscribers.
+2. **Forwarding.** Tails a session's SSE stream and POSTs each event to the
+   WorkRun inbound sink. hm-core validates the run identity, keeps a durable
+   normalized event log, and Rooms reattaches to the native session stream for
+   the ordered, rich transcript.
 
 Why a tailer and not a webhook: AgentScope publishes events to its message bus
 and exposes them only over SSE. The stream replays buffered history to a late
-joiner, so a forwarder that starts after the run began still sees every event —
-which is what makes this safe to start lazily.
+joiner, so a forwarder that starts after the run began still sees every event;
+event ids make that replay idempotent at both the bridge and Core boundaries.
 
 Configuration:
 
@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
@@ -56,6 +57,7 @@ HM_CORE_EVENT_PATH = os.getenv(
     "/internal/hyper/turn-event",
 ).strip()
 FORWARD_ENABLED = os.getenv("HM_FORWARD_ENABLED", "0") == "1"
+MAX_REPLAY_EVENT_IDS = 4096
 
 # The execution-identity contract hm-core validates on the inbound sink. A
 # mismatch is a 409 there, so it must be built exactly as hm-core expects.
@@ -211,6 +213,12 @@ class EventForwarder:
         self._forwarded = 0
         self._failed = 0
         self._on_confirmation = on_confirmation
+        # AgentScope reconnects replay its buffered stream. Keep a bounded
+        # local identity window to avoid needless Core posts during a live
+        # forwarder's reconnect; Core applies the durable second line of
+        # defence with the same event id.
+        self._seen_event_ids: set[str] = set()
+        self._seen_event_order: deque[str] = deque()
 
     @property
     def stats(self) -> dict[str, int]:
@@ -281,36 +289,36 @@ class EventForwarder:
         if event.get("type") == "CUSTOM" and event.get("name") not in {"state_updated", "artifact.created"}:
             return
 
+        event_id = str(event.get("id") or "").strip()
+        if event_id and event_id in self._seen_event_ids:
+            return
+
         # WorkRuns execute inside their own AgentScope workspace/container.
         # Tool-permission prompts in that sandbox are runtime mechanics, not
         # HIVE authority grants. Resume them internally and keep them out of
         # the product event stream; external actions remain governed by hm-core.
         if event.get("type") == "REQUIRE_USER_CONFIRM" and self._on_confirmation is not None:
             await self._on_confirmation(event)
+            self._remember_event_id(event_id)
             return
 
-        # Two sinks, deliberately:
-        #
-        #   1. /internal/workruns/{id}/event — the WorkRun progress log. hm-core
-        #      normalizes the AgentScope event into its own small vocabulary, so
-        #      neither side learns the other's event names. This is the durable
-        #      seam: it survives a browser close and is what a reconnecting UI
-        #      re-attaches to.
-        #
-        #   2. /internal/hyper/turn-event — the existing room feed. The room UI
-        #      already renders this vocabulary, so a WorkRun is visible in the
-        #      room it belongs to without the UI needing a second renderer.
-        #
-        # Both are real surfaces, not a fallback: the WorkRun log is the run's
-        # own record, the turn feed is the room's. Dropping either would lose
-        # information the other does not carry.
-        await self._forward_workrun(client, event)
-        # WorkRuns are not HyperAgent CSI turns. Forwarding every AgentScope
-        # delta to /internal/hyper/turn-event 409s (roomMode !== work / identity)
-        # and then crashes the CP on undefined body.turn_id. The WorkRun sink
-        # is the durable log; skip the room feed.
+        # The WorkRun sink is deliberately the single durable projection seam.
+        # It translates AgentScope events into HIVE's compact lifecycle log;
+        # Rooms reads native session SSE and persisted session messages for the
+        # richer ordered transcript. Sending every delta through a legacy room
+        # turn feed would create a competing transcript and duplicate UI rows.
+        if await self._forward_workrun(client, event):
+            self._remember_event_id(event_id)
 
-    async def _forward_workrun(self, client: httpx.AsyncClient, event: dict[str, Any]) -> None:
+    def _remember_event_id(self, event_id: str) -> None:
+        if not event_id or event_id in self._seen_event_ids:
+            return
+        self._seen_event_ids.add(event_id)
+        self._seen_event_order.append(event_id)
+        if len(self._seen_event_order) > MAX_REPLAY_EVENT_IDS:
+            self._seen_event_ids.discard(self._seen_event_order.popleft())
+
+    async def _forward_workrun(self, client: httpx.AsyncClient, event: dict[str, Any]) -> bool:
         """Post one event to the WorkRun sink.
 
         hm-core normalizes it; this side sends the raw AgentScope event and does
@@ -356,11 +364,14 @@ class EventForwarder:
                     resp.status_code,
                     event.get("type"),
                 )
+                return False
             else:
                 self._forwarded += 1
+                return True
         except httpx.HTTPError as exc:
             self._failed += 1
             _log.warning("forwarder %s: workrun post failed: %s", self._binding.workrun_id, exc)
+            return False
 
     async def _forward_turn(self, client: httpx.AsyncClient, event: dict[str, Any]) -> None:
         """Post one event to the existing room turn feed.

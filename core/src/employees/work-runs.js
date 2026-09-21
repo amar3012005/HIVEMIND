@@ -107,32 +107,39 @@ export function normalizeAgentScopeEvent(event) {
   const ts = Date.now();
   const tool = event.tool_call_name || event.tool_name || event.name || null;
   const callId = event.tool_call_id || event.id || null;
+  // AgentScope assigns an id to each event it puts on its replayable session
+  // stream. Preserve that identity at the Core boundary: reconnecting a
+  // forwarder must update neither the ordered WorkRun log nor a Rooms block a
+  // second time. A tool-call id is deliberately not a substitute here because
+  // one tool call has several distinct start/delta/result events.
+  const sourceEventId = typeof event.id === 'string' && event.id ? event.id : null;
+  const emit = (value) => (sourceEventId ? { ...value, source_event_id: sourceEventId } : value);
 
-  if (type === 'REPLY_START') return { t: 'agent.status', status: 'thinking', ts };
+  if (type === 'REPLY_START') return emit({ t: 'agent.status', status: 'thinking', ts });
   if (type === 'REPLY_END') {
     const reason = event.finished_reason || event.reason || 'completed';
     return reason === 'completed'
-      ? { t: 'agent.status', status: 'idle', reason, ts }
-      : { t: 'workrun.failed', reason, error: 'The agent stopped before finishing. Work is saved.', ts };
+      ? emit({ t: 'agent.status', status: 'idle', reason, ts })
+      : emit({ t: 'workrun.failed', reason, error: 'The agent stopped before finishing. Work is saved.', ts });
   }
   if (type === 'TOOL_CALL_START') {
     return nativeTask(tool)
-      ? { t: 'plan.updated', family: 'task', tool, call_id: callId, ts }
-      : { t: 'tool.started', tool, call_id: callId, ts };
+      ? emit({ t: 'plan.updated', family: 'task', tool, call_id: callId, ts })
+      : emit({ t: 'tool.started', tool, call_id: callId, ts });
   }
   // AgentScope carries tool arguments incrementally. Retain the chunks in
   // HIVE's durable event log so a reconnecting Rooms client can show the same
   // inspectable call input as the live session stream.
   if (type === 'TOOL_CALL_DELTA') {
-    return { t: 'tool.input.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts };
+    return emit({ t: 'tool.input.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts });
   }
   if (type === 'TOOL_RESULT_TEXT_DELTA') {
-    return { t: 'tool.output.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts };
+    return emit({ t: 'tool.output.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts });
   }
   if (type === 'TOOL_RESULT_END') {
     const team = asObject(event.metadata?.hivemind_team, null);
     if (team?.team_id && team?.action) {
-      return {
+      return emit({
         t: 'team.updated',
         team_id: team.team_id,
         action: team.action,
@@ -144,32 +151,33 @@ export function normalizeAgentScopeEvent(event) {
         member_origin: team.member_origin || null,
         recipient: team.recipient || null,
         ts,
-      };
+      });
     }
     return nativeTask(tool)
-      ? { t: 'plan.updated', family: 'task', tool, call_id: callId, ts }
-      : { t: 'tool.completed', tool, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), metadata: event.metadata || {}, ts };
+      ? emit({ t: 'plan.updated', family: 'task', tool, call_id: callId, ts })
+      : emit({ t: 'tool.completed', tool, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), metadata: event.metadata || {}, ts });
   }
   if (type === 'CUSTOM' && event.name === 'state_updated') {
     const tasks = event.value?.tasks_context?.tasks;
     if (!Array.isArray(tasks)) return null;
-    return {
+    return emit({
       t: 'plan.updated', family: 'task',
       tasks: tasks.map((task) => ({
         id: task?.id || null, subject: task?.subject || '', description: task?.description || '',
         state: task?.state || null, blocked_by: Array.isArray(task?.blocked_by) ? task.blocked_by : [],
         owner: task?.owner || null,
       })), ts,
-    };
+    });
   }
   if (type === 'CUSTOM' && event.name === 'artifact.created') {
-    return { t: 'artifact.created', artifact_id: event.value?.artifact_id || null, path: event.value?.path || null, ts };
+    return emit({ t: 'artifact.created', artifact_id: event.value?.artifact_id || null, path: event.value?.path || null, ts });
   }
   return null;
 }
 
 export async function appendWorkRunEvent(prisma, workRunId, event) {
   if (!event) return null;
+  const sourceEventId = typeof event.source_event_id === 'string' && event.source_event_id ? event.source_event_id : null;
   const rows = await prisma.$queryRawUnsafe(
     `UPDATE "hivemind"."work_runs"
        SET events = CASE
@@ -178,8 +186,14 @@ export async function appendWorkRunEvent(prisma, workRunId, event) {
              ELSE COALESCE(events, '[]'::jsonb) || jsonb_set($3::jsonb, '{0,seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
            END,
            heartbeat_at = now(), updated_at = now()
-     WHERE id = $1::uuid RETURNING id, status`,
-    workRunId, MAX_EVENTS, JSON.stringify([event]),
+     WHERE id = $1::uuid
+       AND ($4::text IS NULL OR NOT EXISTS (
+         SELECT 1
+           FROM jsonb_array_elements(COALESCE(events, '[]'::jsonb)) AS prior(event)
+          WHERE prior.event ->> 'source_event_id' = $4::text
+       ))
+     RETURNING id, status`,
+    workRunId, MAX_EVENTS, JSON.stringify([event]), sourceEventId,
   );
   return rows?.[0] || null;
 }
@@ -223,7 +237,8 @@ export async function applyRuntimeEvent(prisma, workRunId, rawEvent) {
       (prior) => prior?.t === 'tool.started' && prior.call_id === event.call_id,
     )?.tool || null;
   }
-  await appendWorkRunEvent(prisma, workRunId, event);
+  const appended = await appendWorkRunEvent(prisma, workRunId, event);
+  if (!appended) return { applied: false, reason: 'duplicate', event };
   if (event.t === 'workrun.failed') {
     await transitionWorkRun(prisma, workRunId, 'failed', { error: event.error });
   }

@@ -10,6 +10,7 @@ import {
   normalizeInitialWorkRunScope,
   recoverWorkRun,
   validateWorkRunCompletion,
+  verifyAgentScopeRuntimeBuild,
 } from '../../src/employees/work-runs.js';
 
 test('initial WorkRun scope is compact and cannot carry HIVE control state into the prompt', () => {
@@ -36,6 +37,27 @@ test('AgentScope Task state is projected without creating another task authority
   assert.deepEqual(normalized.tasks, [{
     id: 'task-1', subject: 'Research', description: 'Find evidence', state: 'in_progress', blocked_by: [], owner: null,
   }]);
+});
+
+test('an opted-in Core refuses a stale AgentScope runtime build before dispatch', async () => {
+  const prior = process.env.HM_AGENT_RUNTIME_BUILD_REF;
+  process.env.HM_AGENT_RUNTIME_BUILD_REF = 'core-source-sha';
+  try {
+    await assert.rejects(
+      verifyAgentScopeRuntimeBuild({
+        userId: 'user-1', orgId: 'org-1',
+        runtimeFetch: async (url, options) => {
+          assert.match(url, /\/runtime\/identity$/);
+          assert.equal(options.method, 'GET');
+          return { ok: true, json: async () => ({ runtime: 'hm-agent-runtime-v2', build_ref: 'older-source-sha' }) };
+        },
+      }),
+      /AgentScope runtime build mismatch: expected core-source-sha, got older-source-sha/,
+    );
+  } finally {
+    if (prior === undefined) delete process.env.HM_AGENT_RUNTIME_BUILD_REF;
+    else process.env.HM_AGENT_RUNTIME_BUILD_REF = prior;
+  }
 });
 
 test('tool completion reuses the matching start name', async () => {

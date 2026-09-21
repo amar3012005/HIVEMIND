@@ -501,6 +501,21 @@ async def _livez() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/runtime/identity", include_in_schema=False)
+async def _runtime_identity(user_id: str = Depends(get_current_user_id)) -> dict:
+    """Return non-secret build provenance to authenticated hm-core callers.
+
+    Liveness intentionally exposes no deployment detail. This endpoint is for
+    the service-to-service dispatch preflight only, so a Core deployment can
+    fail closed rather than silently sending a WorkRun to an older image.
+    """
+    del user_id  # Authentication is the authorization boundary for this read.
+    return {
+        "runtime": "hm-agent-runtime-v2",
+        "build_ref": os.getenv("HM_BUILD_REF", "unknown").strip() or "unknown",
+    }
+
+
 # --------------------------------------------------------------------------
 # hm-core bridge — WorkRun → session mapping + event forwarding.
 # --------------------------------------------------------------------------

@@ -282,6 +282,30 @@ export async function cancelWorkRun(prisma, workRunId) {
 export const agentScopeRuntimeUrl = () =>
   String(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
 
+function expectedAgentScopeRuntimeBuildRef() {
+  return String(process.env.HM_AGENT_RUNTIME_BUILD_REF || '').trim();
+}
+
+/**
+ * Opt-in source-parity guard. A WorkRun must never be silently dispatched to
+ * a different AgentScope image than the release selected. Existing deployments
+ * remain compatible until they set HM_AGENT_RUNTIME_BUILD_REF to an immutable
+ * source revision that their runtime image was built with.
+ */
+export async function verifyAgentScopeRuntimeBuild({ runtimeFetch = internalFetch, userId, orgId } = {}) {
+  const expected = expectedAgentScopeRuntimeBuildRef();
+  if (!expected) return null;
+  const response = await runtimeFetch(`${agentScopeRuntimeUrl()}/runtime/identity`, {
+    service: 'hm-agent-runtime', method: 'GET', userId, orgId, timeoutMs: 5_000,
+  });
+  const identity = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(identity.detail || identity.error || `AgentScope identity returned ${response.status}`);
+  if (identity.build_ref !== expected) {
+    throw new Error(`AgentScope runtime build mismatch: expected ${expected}, got ${identity.build_ref || 'unknown'}`);
+  }
+  return identity;
+}
+
 /** Reattach Core's event forwarder to an existing AgentScope session.
  *
  * Recovery is intentionally unable to dispatch a goal. The runtime verifies
@@ -302,6 +326,7 @@ export async function recoverWorkRun({ prisma, workRunId, userId, orgId, runtime
   if (!run.agentscope_session_id || !agentId || !run.turn_id || !run.room_id) {
     return { ok: false, reason: 'recovery_binding_missing' };
   }
+  await verifyAgentScopeRuntimeBuild({ runtimeFetch, userId, orgId });
   const response = await runtimeFetch(`${agentScopeRuntimeUrl()}/workrun/recover`, {
     service: 'hm-agent-runtime', method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: {
@@ -328,6 +353,7 @@ export async function dispatchWorkRun({
 } = {}) {
   if (!orgId || !userId || !String(goal || '').trim()) throw new Error('orgId, userId, and goal are required');
   const initialScope = normalizeInitialWorkRunScope(scope);
+  await verifyAgentScopeRuntimeBuild({ runtimeFetch, userId, orgId });
   let resolvedRoomId = roomId;
   if (!resolvedRoomId) {
     const rows = await prisma.$queryRawUnsafe(

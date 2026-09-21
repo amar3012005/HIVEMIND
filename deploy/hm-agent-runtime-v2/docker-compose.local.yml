@@ -56,6 +56,9 @@ services:
       dockerfile: deploy/hm-agent-runtime-v2/Dockerfile
       args:
         DOCKER_GID: ${DOCKER_GID:-0}
+        # Local deployments can use the checked-out commit to let Core reject
+        # a stale AgentScope container before it accepts a new WorkRun.
+        HM_BUILD_REF: ${HM_BUILD_REF:-unknown}
     image: hm-agent-runtime-v2:local
     container_name: hm-agent-runtime-local
     # No host port: reachable only inside hivemind-network, by service name.

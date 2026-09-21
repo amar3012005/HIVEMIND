@@ -45,6 +45,9 @@ services:
         # Pass the host docker group GID so the non-root app user can use a
         # mounted docker socket (see the Dockerfile ARG).
         DOCKER_GID: ${DOCKER_GID:-0}
+        # Pass the immutable source revision that this image was built from.
+        # Set HM_BUILD_REF=$(git rev-parse HEAD) before a governed deployment.
+        HM_BUILD_REF: ${HM_BUILD_REF:-unknown}
     image: hm-agent-runtime-v2:phase1
     container_name: hm-agent-runtime-v2
     # Loopback only. The X-User-ID header is NOT authentication yet, so this

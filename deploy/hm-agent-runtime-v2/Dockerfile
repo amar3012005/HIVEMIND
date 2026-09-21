@@ -6,9 +6,13 @@
 
 FROM python:3.12-slim
 
+ARG HM_BUILD_REF=unknown
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    HM_BUILD_REF=${HM_BUILD_REF}
+
+LABEL org.opencontainers.image.revision=${HM_BUILD_REF}
 
 # curl is needed by the compose healthcheck; ca-certificates for outbound TLS
 # (model providers, MCP servers, hubs).

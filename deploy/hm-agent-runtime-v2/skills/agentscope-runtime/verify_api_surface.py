@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -229,6 +230,23 @@ def find_source_root(explicit: str | None) -> tuple[Path | None, bool]:
     for c in candidates:
         if (c / "__init__.py").is_file() and (c / "app").is_dir():
             return c, False
+
+    # A production image normally installs AgentScope into site-packages rather
+    # than carrying a checkout at one of the developer-oriented locations
+    # above.  ``find_spec`` discovers that source tree without importing the
+    # package (and therefore without triggering optional runtime dependencies),
+    # preserving this script's static-validation guarantee.
+    try:
+        spec = importlib.util.find_spec("agentscope")
+        if spec and spec.origin:
+            installed = Path(spec.origin).resolve().parent
+            if (installed / "__init__.py").is_file() and (installed / "app").is_dir():
+                return installed, False
+    except (ImportError, AttributeError, ValueError):
+        # Fall through to the existing metadata-only diagnostic below.  This
+        # keeps a genuinely broken Python environment distinguishable from an
+        # API-surface failure.
+        pass
     return None, False
 
 

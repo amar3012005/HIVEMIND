@@ -4,10 +4,10 @@ import { appendWorkRunEvent, completeWorkRun } from '../employees/work-runs.js';
 
 const UUID = /^[0-9a-f-]{36}$/i;
 const GLOBAL_PLAYBOOKS = Object.freeze([
-  { id: 'global:general', name: 'General', description: 'Use company context only when needed; choose a specific playbook only when it helps.', scope: 'global', version: '1.0.0', instructions: 'Answer directly when possible. For company work, inspect context, select relevant capabilities, then use AgentScope Tasks to plan and execute.' },
-  { id: 'global:prospect-discovery', name: 'Prospect discovery', description: 'Discover, verify, and qualify ICP-matching companies.', scope: 'global', version: '1.0.0', instructions: 'Read company context and existing prospects. Create native Tasks with dependencies. Verify against first-party sources. Save only qualified prospects and register the resulting artifact.' },
-  { id: 'global:market-research', name: 'Market research', description: 'Create a sourced market brief.', scope: 'global', version: '1.0.0', instructions: 'Read company context, create native Tasks, use primary sources, distinguish facts from inference, and register a written artifact.' },
-  { id: 'global:competitive-analysis', name: 'Competitive analysis', description: 'Compare named competitors with evidence.', scope: 'global', version: '1.0.0', instructions: 'Create a native Task plan. Verify competitor claims, cite sources, and register the comparison artifact.' },
+  { id: 'global:general', name: 'General', description: 'Use company context only when needed; choose a specific playbook only when it helps.', scope: 'global', version: '1.0.0', completion: {}, instructions: 'Answer directly when possible. For company work, inspect context, select relevant capabilities, then use AgentScope Tasks to plan and execute.' },
+  { id: 'global:prospect-discovery', name: 'Prospect discovery', description: 'Discover, verify, and qualify ICP-matching companies.', scope: 'global', version: '1.0.0', completion: { requires_task_plan: true }, instructions: 'Read company context and existing prospects. Create native Tasks with dependencies. Verify against first-party sources. Save only qualified prospects and register the resulting artifact.' },
+  { id: 'global:market-research', name: 'Market research', description: 'Create a sourced market brief.', scope: 'global', version: '1.0.0', completion: { requires_task_plan: true, min_artifacts: 1 }, instructions: 'Read company context, create native Tasks, use primary sources, distinguish facts from inference, and register a written artifact.' },
+  { id: 'global:competitive-analysis', name: 'Competitive analysis', description: 'Compare named competitors with evidence.', scope: 'global', version: '1.0.0', completion: { requires_task_plan: true, min_artifacts: 1 }, instructions: 'Create a native Task plan. Verify competitor claims, cite sources, and register the comparison artifact.' },
 ]);
 
 function asEntries(value, scope) {
@@ -108,7 +108,9 @@ export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jso
       const playbook = catalog.find((entry) => entry.id === String(body?.id || ''));
       if (!playbook) return jsonResponse(res, { error: 'unknown playbook' }, 404);
       if (scope.runId) await prisma.$queryRawUnsafe(
-        'UPDATE "hivemind"."work_runs" SET playbook_id = $2, playbook_version = $3, updated_at = now() WHERE id = $1::uuid', scope.runId, playbook.id, playbook.version,
+        `UPDATE "hivemind"."work_runs" SET playbook_id = $2, playbook_version = $3,
+         scope = COALESCE(scope, '{}'::jsonb) || jsonb_build_object('completion_contract', $4::jsonb), updated_at = now() WHERE id = $1::uuid`,
+        scope.runId, playbook.id, playbook.version, JSON.stringify(playbook.completion || {}),
       );
       return jsonResponse(res, { status: 'completed', playbook });
     }
@@ -162,8 +164,8 @@ export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jso
     if (!run) return jsonResponse(res, { error: 'No active WorkRun matches this AgentScope session.' }, 404);
     const summary = String(body?.summary || '').trim();
     if (!summary) return jsonResponse(res, { error: 'summary is required' }, 400);
-    const outcome = await completeWorkRun(prisma, run.id, { result: { summary, completed_by: 'agentscope' } });
-    if (!outcome.ok) return jsonResponse(res, { error: outcome.reason || 'Unable to complete WorkRun.' }, 409);
+    const outcome = await completeWorkRun(prisma, run.id, { result: { summary, completed_by: 'agentscope' }, validate: true });
+    if (!outcome.ok) return jsonResponse(res, { error: outcome.reason || 'Unable to complete WorkRun.', unmet: outcome.unmet || [] }, 409);
     return jsonResponse(res, { status: 'completed', workrun_id: run.id, result: outcome.run?.result || { summary } });
   }
   return jsonResponse(res, { error: 'Unknown AgentScope capability.' }, 404);

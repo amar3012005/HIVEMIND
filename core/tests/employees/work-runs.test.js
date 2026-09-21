@@ -6,6 +6,7 @@ import {
   completeWorkRun,
   dispatchWorkRun,
   normalizeAgentScopeEvent,
+  validateWorkRunCompletion,
 } from '../../src/employees/work-runs.js';
 
 test('AgentScope Task state is projected without creating another task authority', () => {
@@ -51,6 +52,20 @@ test('lifecycle rejects resurrection and completes only once', async () => {
   const completed = await completeWorkRun(prisma, 'run-1', { result: { ok: true } });
   assert.equal(completed.ok, true);
   assert.equal(status, 'completed');
+});
+
+test('completion gate reads AgentScope task snapshots and playbook evidence rules', () => {
+  const blocked = validateWorkRunCompletion({
+    scope: { completion_contract: { requires_task_plan: true, min_artifacts: 1 } }, result_artifact_ids: [],
+    events: [{ t: 'plan.updated', tasks: [{ id: '1', state: 'in_progress' }] }],
+  });
+  assert.equal(blocked.ok, false);
+  assert.deepEqual(blocked.unmet.map(({ predicate }) => predicate), ['all_native_tasks_completed', 'has_min_artifacts']);
+  const complete = validateWorkRunCompletion({
+    scope: { completion_contract: { requires_task_plan: true, min_artifacts: 1 } }, result_artifact_ids: ['artifact-1'],
+    events: [{ t: 'plan.updated', tasks: [{ id: '1', state: 'completed' }] }],
+  });
+  assert.equal(complete.ok, true);
 });
 
 test('dispatch creates the Core envelope before calling the AgentScope runtime', async () => {

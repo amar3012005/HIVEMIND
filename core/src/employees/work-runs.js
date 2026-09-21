@@ -42,6 +42,37 @@ function nativeTask(name) {
   return /^Task(Create|Update|List|Get)$/i.test(String(name || ''));
 }
 
+function asObject(value, fallback = {}) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  try { return JSON.parse(String(value || '')); } catch { return fallback; }
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  try { return Array.isArray(JSON.parse(String(value || ''))) ? JSON.parse(String(value || '')) : []; } catch { return []; }
+}
+
+/**
+ * Validate data selected by HIVE, never execute it. AgentScope's Task state is
+ * the source of truth; this merely refuses a terminal receipt that contradicts
+ * the last native task snapshot or an evidence minimum declared by the chosen
+ * playbook.
+ */
+export function validateWorkRunCompletion(run) {
+  const scope = asObject(run?.scope);
+  const contract = asObject(scope.completion_contract);
+  const unmet = [];
+  const plan = [...asArray(run?.events)].reverse().find((event) => event?.t === 'plan.updated' && Array.isArray(event.tasks));
+  const tasks = Array.isArray(plan?.tasks) ? plan.tasks : [];
+  if (contract.requires_task_plan && !tasks.length) unmet.push({ predicate: 'has_native_task_plan', message: 'The selected playbook requires an AgentScope Task plan.' });
+  const open = tasks.filter((task) => task?.state !== 'completed');
+  if (open.length) unmet.push({ predicate: 'all_native_tasks_completed', task_ids: open.map((task) => task?.id).filter(Boolean), message: 'Native AgentScope tasks are still open.' });
+  const artifactCount = asArray(run?.result_artifact_ids).length;
+  const minArtifacts = Math.max(0, Number(contract.min_artifacts) || 0);
+  if (artifactCount < minArtifacts) unmet.push({ predicate: 'has_min_artifacts', expected: minArtifacts, actual: artifactCount, message: 'The selected playbook requires more registered artifact evidence.' });
+  return { ok: unmet.length === 0, unmet, task_count: tasks.length, artifact_count: artifactCount };
+}
+
 /** Turn AgentScope events into a product vocabulary at one boundary. */
 export function normalizeAgentScopeEvent(event) {
   if (!event || typeof event !== 'object') return null;
@@ -147,7 +178,14 @@ export async function applyRuntimeEvent(prisma, workRunId, rawEvent) {
   return { applied: true, event };
 }
 
-export async function completeWorkRun(prisma, workRunId, { result = {}, error = null } = {}) {
+export async function completeWorkRun(prisma, workRunId, { result = {}, error = null, validate = false } = {}) {
+  if (validate && !error) {
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT scope, events, result_artifact_ids FROM "hivemind"."work_runs" WHERE id = $1::uuid', workRunId,
+    );
+    const verdict = validateWorkRunCompletion(rows?.[0]);
+    if (!verdict.ok) return { ok: false, reason: 'completion_contract_unmet', ...verdict };
+  }
   const to = error ? 'failed' : 'completed';
   const outcome = await transitionWorkRun(prisma, workRunId, to, { result, ...(error ? { error } : {}) });
   if (outcome.ok) await appendWorkRunEvent(prisma, workRunId, {

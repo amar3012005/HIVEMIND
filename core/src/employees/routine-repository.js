@@ -106,6 +106,17 @@ export async function recordRoutineFire(prisma, { routineId, fireKey, workRunId,
     workRunId,
     status,
   );
+  // Keep the compact Routine projection in sync with its durable fire history.
+  // The fire table remains the source of truth; these columns only make the
+  // collection/item API cheap to render without a second aggregate query.
+  await prisma.$queryRawUnsafe(
+    `UPDATE ${TABLE}
+     SET last_fire_key = $2, last_run_id = $3::uuid, last_run_at = now(), updated_at = now()
+     WHERE id = $1::uuid`,
+    routineId,
+    fireKey,
+    workRunId,
+  );
   return rows?.[0] || null;
 }
 

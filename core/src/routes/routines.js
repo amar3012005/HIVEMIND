@@ -43,7 +43,9 @@ function publicRoutine(row) {
     schedule_type: row.schedule_type, schedule_expression: row.schedule_expression,
     timezone: row.timezone, status: row.status, authority_policy: row.authority_policy,
     created_at: row.created_at, updated_at: row.updated_at,
-    last_fired_at: row.last_fired_at, last_work_run_id: row.last_work_run_id,
+    last_fire_key: row.last_fire_key,
+    last_fired_at: row.last_run_at ?? row.last_fired_at ?? null,
+    last_work_run_id: row.last_run_id ?? row.last_work_run_id ?? null,
   };
 }
 

@@ -47,13 +47,13 @@ function publicRoutine(row) {
   };
 }
 
-async function fireRoutine({ prisma, routine, routineId, scheduledAt, userId, orgId, body = {} }) {
+export async function fireRoutine({ prisma, routine, routineId, scheduledAt, userId, orgId, dispatch = dispatchWorkRun }) {
   const fireKey = routineFireKey(routineId, scheduledAt);
   const claimed = await claimRoutineFire(prisma, { routineId, fireKey });
   if (!claimed) return { duplicate: true, fire_key: fireKey };
   try {
     const scope = routineWorkRunScope({ routine, routineId, fireKey, scheduledAt });
-    const result = await dispatchWorkRun({
+    const result = await dispatch({
       prisma, orgId, userId,
       goal: routine.goal,
       employeeId: routine.employee_id || null,
@@ -64,10 +64,10 @@ async function fireRoutine({ prisma, routine, routineId, scheduledAt, userId, or
       scope,
       chatModelConfig: routine.chat_model_config || null,
     });
-    await recordRoutineFire({ routineId, fireKey, workRunId: result.workRun.id, status: 'started' });
+    await recordRoutineFire(prisma, { routineId, fireKey, workRunId: result.workRun.id, status: 'started' });
     return { duplicate: false, fire_key: fireKey, workrun: result.workRun, turn_id: result.turnId };
   } catch (error) {
-    await recordRoutineFire({ routineId, fireKey, workRunId: null, status: 'failed' }).catch(() => {});
+    await recordRoutineFire(prisma, { routineId, fireKey, workRunId: null, status: 'failed' }).catch(() => {});
     throw error;
   }
 }

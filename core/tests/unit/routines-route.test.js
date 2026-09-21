@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleRoutineRoutes } from '../../src/routes/routines.js';
+import { fireRoutine, handleRoutineRoutes } from '../../src/routes/routines.js';
 
 const orgId = '11111111-1111-4111-8111-111111111111';
 const userId = '22222222-2222-4222-8222-222222222222';
@@ -107,4 +107,43 @@ test('routine POST projects a valid schedule through the injected AgentScope ada
   assert.equal(projected.payload.chat_model_config.model, body.chat_model_config.model);
   assert.match(projected.payload.description, /hive_routine_fire/);
   assert.equal(calls.length, 2);
+});
+
+test('routine fire dispatches once and records history; duplicate fire is a no-op', async () => {
+  const routine = {
+    id: routineId, org_id: orgId, user_id: userId,
+    room_id: '44444444-4444-4444-8444-444444444444', agent_id: 'ops-agent',
+    goal: 'daily brief', playbook_id: 'brief', playbook_version: 1,
+    schedule_type: 'cron', schedule_expression: '0 9 * * 1-5', authority_policy: {},
+    status: 'active', chat_model_config: { type: 'gateway', credential_id: 'cred-1', model: 'm', parameters: {} },
+  };
+  let claimCount = 0;
+  let recorded = null;
+  const prisma = {
+    async $queryRawUnsafe(sql) {
+      if (String(sql).includes('INSERT INTO "hivemind"."agentscope_routine_fires"')) {
+        claimCount += 1;
+        return claimCount === 1 ? [{ id: 'fire-1' }] : [];
+      }
+      if (String(sql).includes('UPDATE "hivemind"."agentscope_routine_fires"')) {
+        recorded = true;
+        return [{ id: 'fire-1', status: 'started' }];
+      }
+      return [];
+    },
+  };
+  let dispatched = 0;
+  const dispatch = async (payload) => {
+    dispatched += 1;
+    assert.equal(payload.playbookId, 'brief');
+    return { workRun: { id: 'workrun-1' }, turnId: 'turn-1' };
+  };
+  const scheduledAt = '2026-09-22T09:00:00.000Z';
+  const first = await fireRoutine({ prisma, routine, routineId, scheduledAt, userId, orgId, dispatch });
+  const second = await fireRoutine({ prisma, routine, routineId, scheduledAt, userId, orgId, dispatch });
+  assert.equal(first.duplicate, false);
+  assert.equal(first.workrun.id, 'workrun-1');
+  assert.deepEqual(second, { duplicate: true, fire_key: first.fire_key });
+  assert.equal(dispatched, 1);
+  assert.equal(recorded, true);
 });

@@ -128,6 +128,29 @@ class HiveToolkitGroupsTests(unittest.TestCase):
 
         asyncio.run(verify())
 
+    def test_hivemind_group_tools_all_expose_agentscope_schemas(self):
+        """reset_tools must be able to activate the entire HIVE group.
+
+        AgentScope builds every schema in the selected group, including tools
+        that the model does not call in this turn.  A missing ``description``
+        on one collection tool therefore used to crash immediately after
+        ``reset_tools({\"hivemind\": true})``.
+        """
+        async def verify():
+            tools = await hivemind_tools(
+                "11111111-1111-4111-8111-111111111111",
+                "agent-1",
+                "session-1",
+            )
+            _basic, groups = extra_groups_for(tools)
+            hivemind = next(group for group in groups if group.name == "hivemind")
+            toolkit = Toolkit(tool_groups=groups)
+            schemas = await toolkit.get_tool_schemas(["hivemind"])
+            self.assertEqual(len(schemas), len(hivemind.tools) + 1)  # ResetTools in basic
+            self.assertTrue(all(schema["function"]["description"] for schema in schemas))
+
+        asyncio.run(verify())
+
     def test_native_team_result_carries_storage_derived_member_identity(self):
         class Storage:
             async def get_session(self, *_args):

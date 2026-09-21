@@ -387,30 +387,35 @@ class _CompanyRecordsTool(_HiveMindToolBase):
 class PeopleTool(_CompanyRecordsTool):
     """Read the organization's active people and their roles."""
     name: str = "hivemind_people"
+    description: str = "Read the organization's active people and their roles."
     record_kind: str = "people"
 
 
 class ProjectsTool(_CompanyRecordsTool):
     """Read active projects in the organization."""
     name: str = "hivemind_projects"
+    description: str = "Read active projects in the organization."
     record_kind: str = "projects"
 
 
 class ObjectivesTool(_CompanyRecordsTool):
     """Read the organization's durable growth objectives."""
     name: str = "hivemind_objectives"
+    description: str = "Read the organization's durable growth objectives."
     record_kind: str = "objectives"
 
 
 class WorkTool(_CompanyRecordsTool):
     """Read recent durable work orders; this does not create or change work."""
     name: str = "hivemind_work"
+    description: str = "Read recent durable work orders; this does not create or change work."
     record_kind: str = "work"
 
 
 class ArtifactsTool(_CompanyRecordsTool):
     """Read registered evidence and output artifacts without loading their bytes."""
     name: str = "hivemind_artifacts"
+    description: str = "Read registered evidence and output artifacts without loading their bytes."
     record_kind: str = "artifacts"
 
 

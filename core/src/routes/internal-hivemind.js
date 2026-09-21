@@ -29,6 +29,7 @@
  */
 
 import { internalFetch } from '../internal/internal-fetch.js';
+import { classifyComposioToolAuthority, createComposioDraft } from '../agent/compound-orchestrator.js';
 
 // The runtime's tool calls are on the agent's critical path. A hung backing
 // service must surface as a tool error, not as a stalled run.
@@ -614,6 +615,34 @@ export async function handleInternalComposioExecuteRoute({
   const toolSlug = String(body?.tool || '').trim().slice(0, 200);
   if (!toolSlug) return jsonResponse(res, { error: 'tool is required' }, 400);
   const args = body?.args && typeof body.args === 'object' ? body.args : {};
+
+  // Dynamic Composio tools are classified from the provider slug, never from
+  // the user's prose. Reads may execute immediately; writes enter the same
+  // durable pendingWrite approval path used by the rest of HIVE. Unknown
+  // provider identifiers fail closed rather than becoming an accidental write.
+  const authority = classifyComposioToolAuthority({ _composio: { slug: toolSlug } });
+  if (authority === 'unknown') {
+    return jsonResponse(res, {
+      error: 'Composio tool authority is unknown; refusing to execute',
+      tool: toolSlug,
+      status: 'denied',
+    }, 422);
+  }
+  if (authority === 'write') {
+    const draftId = await createComposioDraft(
+      { prisma, userId: principal.userId, orgId: principal.orgId, _trace: { traceId: req.headers['x-request-id'] || null } },
+      toolSlug,
+      args,
+      toolSlug,
+    );
+    if (!draftId) return jsonResponse(res, { error: 'approval draft creation failed' }, 500);
+    return jsonResponse(res, {
+      status: 'approval_required',
+      approval_required: true,
+      draft_id: draftId,
+      tool: toolSlug,
+    }, 202);
+  }
 
   try {
     const result = await composioService.executeTool(principal.orgId, toolSlug, args);

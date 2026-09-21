@@ -1405,7 +1405,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
  * approval handler re-dispatches and executes the Composio tool. Returns the
  * draft id, or null on failure.
  */
-async function createComposioDraft(ctx, composioSlug, args, toolName) {
+export async function createComposioDraft(ctx, composioSlug, args, toolName) {
   if (!ctx?.prisma) return null;
   try {
     const preview = `${toolName}(${JSON.stringify(args).slice(0, 200)})`;

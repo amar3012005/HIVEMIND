@@ -16,6 +16,7 @@ import {
   buildToolCardSelectionPrompt,
   backfillMissingGroundedContentArgs,
   classifyComposioToolAuthority,
+  createComposioDraft,
   filterComposioToolsByAuthority,
   filterProviderDraftToolsForTerminalOperation,
   exactGroundedDependencyContent,
@@ -198,6 +199,24 @@ test('Composio authority comes from controlled manifest actions, not user-langua
   assert.equal(classifyComposioToolAuthority(read), 'read');
   assert.equal(classifyComposioToolAuthority(labelRead), 'read', 'resource noun label must not turn GET into a write');
   assert.equal(classifyComposioToolAuthority(labelWrite), 'write');
+});
+
+test('Composio writes create a durable approval draft with a replay key', async () => {
+  const calls = [];
+  const prisma = {
+    pendingWrite: {
+      async create({ data }) {
+        calls.push(data);
+        return { id: 'draft-1', ...data };
+      },
+    },
+  };
+  const id = await createComposioDraft({ prisma, userId: 'u-1', orgId: 'o-1', _trace: { traceId: 'trace-1' } }, 'GMAIL_SEND_EMAIL', { to: 'a@example.com' }, 'GMAIL_SEND_EMAIL');
+  assert.equal(id, 'draft-1');
+  assert.equal(calls[0].provider, 'composio');
+  assert.equal(calls[0].status, 'draft');
+  assert.equal(calls[0].toolArgs._composio_slug, 'GMAIL_SEND_EMAIL');
+  assert.match(calls[0].idempotencyKey, /^[a-f0-9]{64}$/);
 });
 
 test('generic read operation exposes Gmail fetch but excludes modifying capabilities in any request language', () => {

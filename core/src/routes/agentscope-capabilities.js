@@ -24,7 +24,14 @@ function asEntries(value, scope) {
     const instructions = typeof item === 'string' ? item : String(value.instructions || value.content || value.text || '').trim();
     if (!instructions) return null;
     const safe = String(value.id || value.slug || value.name || `${scope}-${index + 1}`).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
-    return { id: `${scope}:${safe}`, name: String(value.name || value.title || `${scope} playbook ${index + 1}`), description: String(value.description || `${scope} operating guidance.`), scope, version: String(value.version || '1.0.0'), instructions };
+    // Completion criteria are playbook data.  In particular, an org/local
+    // playbook may explicitly declare a read-only verification stage.  Keep
+    // that contract intact from catalog discovery through PlaybookGet so HIVE
+    // can persist and enforce it; never infer it from the work-order prose.
+    const completion = value.completion && typeof value.completion === 'object' && !Array.isArray(value.completion)
+      ? value.completion
+      : {};
+    return { id: `${scope}:${safe}`, name: String(value.name || value.title || `${scope} playbook ${index + 1}`), description: String(value.description || `${scope} operating guidance.`), scope, version: String(value.version || '1.0.0'), completion, instructions };
   }).filter(Boolean);
 }
 

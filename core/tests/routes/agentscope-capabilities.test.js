@@ -18,6 +18,40 @@ test('playbook catalog is compact until the selected playbook is requested', asy
   assert.equal(queries.length, 0);
 });
 
+test('org and local playbooks preserve an explicit verification completion contract', async () => {
+  const updates = [];
+  const completion = { requires_task_plan: true, verification: { required: true, mode: 'read_only' } };
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql, ...args) => {
+      if (sql.includes('SELECT w.id, w.scope, r.room_playbook')) {
+        return [{
+          id: '33333333-3333-3333-3333-333333333333',
+          room_playbook: [{ id: 'evidence-review', name: 'Evidence review', instructions: 'Inspect persisted evidence.', completion }],
+          scope: { local_playbooks: [{ id: 'quick-review', instructions: 'Review the local artifact.', completion: { verification: { required: true, mode: 'read_only' } } }] },
+        }];
+      }
+      if (sql.includes('UPDATE "hivemind"."work_runs" SET playbook_id')) {
+        updates.push(args);
+        return [];
+      }
+      return [];
+    },
+  };
+  const body = { agentscope_session_id: 'session-1' };
+  const listed = await handleAgentScopeCapabilityRoute({ req: baseReq, res: {}, parseBody: async () => body, jsonResponse, prisma, pathname: '/internal/hivemind/playbooks' });
+  const org = listed.body.playbooks.find((entry) => entry.id === 'org:evidence-review');
+  const local = listed.body.playbooks.find((entry) => entry.id === 'local:quick-review');
+  assert.deepEqual(org.completion, completion);
+  assert.deepEqual(local.completion, { verification: { required: true, mode: 'read_only' } });
+  assert.equal(Object.hasOwn(org, 'instructions'), false);
+
+  const loaded = await handleAgentScopeCapabilityRoute({ req: baseReq, res: {}, parseBody: async () => ({ ...body, id: 'org:evidence-review' }), jsonResponse, prisma, pathname: '/internal/hivemind/playbooks/get' });
+  assert.deepEqual(loaded.body.playbook.completion, completion);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(JSON.parse(updates[0][3]), completion);
+});
+
 test('company context is scoped to the authenticated organization', async () => {
   let captured = null;
   const prisma = {

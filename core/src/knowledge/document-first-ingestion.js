@@ -4486,7 +4486,17 @@ Every item must include a non-empty content field and one or more valid support_
       if (orgIsRemote(orgId)) throw e;
     }
     // V5 Phase 3: async claim structuring for the committed atomic memory (off hot path).
-    if (memoryIds.length) await this._structureClaimsAsync({ memories: [{ id: memoryIds[0], content: atomicContent }], orgId });
+    if (memoryIds.length) {
+      const claims = this._structureClaimsAsync({ memories: [{ id: memoryIds[0], content: atomicContent }], orgId });
+      // Interactive saves already committed the memory above. Do not hold the
+      // durable receipt behind a second model call for optional claim enrichment.
+      // Other canonical callers retain their existing completion semantics.
+      if (envelope.metadata?.defer_entity_linking === true && envelope.metadata?.skip_fact_extraction === true) {
+        claims.catch((err) => this.logger.warn?.(`[interactive-save] deferred claim structuring failed: ${err.message}`));
+      } else {
+        await claims;
+      }
+    }
     return {
       ok: true, mode, source: sourceType, memoryIds,
       promotedCount: memoryIds.length, memoryId: memoryIds[0] || null,

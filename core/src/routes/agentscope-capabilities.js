@@ -1,6 +1,7 @@
 import { internalFetch } from '../internal/internal-fetch.js';
 import crypto from 'node:crypto';
 import { appendWorkRunEvent, completeWorkRun } from '../employees/work-runs.js';
+import { CloudflareKnowledgeIngestClient } from '../knowledge/cloudflare-ingest-client.js';
 import {
   discoverGovernedSessionReads,
   executeGovernedSessionRead,
@@ -105,6 +106,7 @@ async function companyRecords(prisma, kind, p) {
 export async function handleAgentScopeCapabilityRoute({
   req, res, parseBody, jsonResponse, prisma, pathname, fetchInternal = internalFetch,
   composio = { discoverGovernedSessionReads, executeGovernedSessionRead, issueGovernedReadGrant, resolveGovernedReadGrant },
+  artifactStorage = new CloudflareKnowledgeIngestClient({ logger: console }),
 }) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
@@ -258,14 +260,32 @@ export async function handleAgentScopeCapabilityRoute({
     const title = String(body?.title || '').trim();
     if (!path || path.includes('..') || !title) return jsonResponse(res, { error: 'A safe relative path and title are required.' }, 400);
     const checksum = crypto.createHash('sha256').update(bytes).digest('hex');
+    let durableObject = null;
+    if (artifactStorage?.configured?.()) {
+      try {
+        durableObject = await artifactStorage.persistFile({
+          orgId: p.orgId,
+          checksum,
+          filename: `${run.id}-${path.replace(/\//g, '_')}`,
+          fileBuffer: bytes,
+        });
+      } catch (error) {
+        // Do not claim an artifact is durable when its configured object store
+        // rejected the bytes. The workspace copy is only transient.
+        return jsonResponse(res, { error: 'Durable artifact storage failed.', code: error.code || 'ARTIFACT_STORAGE_FAILED' }, 503);
+      }
+    }
     const artifact = await prisma.sourceArtifact.upsert({
       where: { userId_orgId_checksum_sourcePlatform: { userId: p.userId, orgId: p.orgId, checksum, sourcePlatform: 'agentscope_workrun' } },
       create: {
         userId: p.userId, orgId: p.orgId, artifactType: 'generated', sourcePlatform: 'agentscope_workrun',
         sourceId: `${run.id}:${path}`, contentType: String(body?.content_type || 'application/octet-stream').slice(0, 100),
-        sizeBytes: bytes.length, checksum, storageLocation: 'inline:source_artifacts.payload',
-        payload: { contract: 'agentscope-workrun-artifact.v1', content_base64: bytes.toString('base64'), title, path },
-        metadata: { workrun_id: run.id, room_id: run.room_id, turn_id: run.turn_id, path, title },
+        sizeBytes: bytes.length, checksum,
+        storageLocation: durableObject?.objectKey ? `r2:${durableObject.objectKey}` : 'inline:source_artifacts.payload',
+        payload: durableObject?.objectKey
+          ? { contract: 'agentscope-workrun-artifact.v1', object_key: durableObject.objectKey, etag: durableObject.etag || null, title, path }
+          : { contract: 'agentscope-workrun-artifact.v1', content_base64: bytes.toString('base64'), title, path },
+        metadata: { workrun_id: run.id, room_id: run.room_id, turn_id: run.turn_id, path, title, durable_object_key: durableObject?.objectKey || null },
       },
       update: {},
       select: { id: true, checksum: true, contentType: true, sizeBytes: true, createdAt: true },

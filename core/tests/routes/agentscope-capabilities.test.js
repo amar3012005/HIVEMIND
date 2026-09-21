@@ -51,6 +51,56 @@ test('artifact registration stores immutable bytes and appends a durable WorkRun
   assert.ok(calls.some(({ sql }) => sql.includes('SET events')));
 });
 
+test('artifact registration stores WorkRun bytes in the configured object store', async () => {
+  let stored = null;
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql) => sql.includes('SELECT id, room_id, turn_id, status')
+      ? [{ id: '33333333-3333-3333-3333-333333333333', room_id: '44444444-4444-4444-4444-444444444444', turn_id: '55555555-5555-5555-5555-555555555555', status: 'running' }]
+      : [{ id: '33333333-3333-3333-3333-333333333333', status: 'running' }],
+    sourceArtifact: { upsert: async ({ create }) => {
+      stored = create;
+      return { id: '66666666-6666-6666-6666-666666666666', checksum: create.checksum, contentType: create.contentType, sizeBytes: create.sizeBytes, createdAt: new Date() };
+    } },
+  };
+  const artifactStorage = {
+    configured: () => true,
+    persistFile: async ({ orgId, checksum, filename, fileBuffer }) => {
+      assert.equal(orgId, '22222222-2222-2222-2222-222222222222');
+      assert.equal(checksum.length, 64);
+      assert.match(filename, /^33333333-3333-3333-3333-333333333333-/);
+      assert.equal(fileBuffer.toString(), '# Brief');
+      return { objectKey: `org/${orgId}/sha256/${checksum}/brief.md`, etag: 'etag-1' };
+    },
+  };
+  const result = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ agentscope_session_id: 'session-1', path: 'reports/brief.md', title: 'Research brief', content_type: 'text/markdown', content_base64: Buffer.from('# Brief').toString('base64') }),
+    jsonResponse, prisma, artifactStorage, pathname: '/internal/hivemind/artifacts',
+  });
+  assert.equal(result.statusCode, 200);
+  assert.match(stored.storageLocation, /^r2:org\//);
+  assert.equal(stored.payload.content_base64, undefined);
+  assert.match(stored.payload.object_key, /^org\//);
+  assert.equal(stored.metadata.durable_object_key, stored.payload.object_key);
+});
+
+test('artifact registration refuses an inline fallback when configured storage fails', async () => {
+  let persisted = false;
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql) => sql.includes('SELECT id, room_id, turn_id, status') ? [{ id: '33333333-3333-3333-3333-333333333333', status: 'running' }] : [],
+    sourceArtifact: { upsert: async () => { persisted = true; } },
+  };
+  const result = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ agentscope_session_id: 'session-1', path: 'brief.md', title: 'Brief', content_base64: Buffer.from('bytes').toString('base64') }),
+    jsonResponse, prisma, artifactStorage: { configured: () => true, persistFile: async () => { throw Object.assign(new Error('R2 down'), { code: 'R2_UNAVAILABLE' }); } },
+    pathname: '/internal/hivemind/artifacts',
+  });
+  assert.equal(result.statusCode, 503);
+  assert.equal(result.body.code, 'R2_UNAVAILABLE');
+  assert.equal(persisted, false);
+});
+
 test('artifact registration rejects traversal and malformed bytes before persistence', async () => {
   let persisted = false;
   const prisma = {

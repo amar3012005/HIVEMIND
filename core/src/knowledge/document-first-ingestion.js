@@ -4431,6 +4431,7 @@ Every item must include a non-empty content field and one or more valid support_
       },
       // V5: bounded engine processing-flag passthrough (see legacyPayloadToEnvelope).
       skip_fact_extraction: envelope.metadata?.skip_fact_extraction === true || undefined,
+      defer_entity_linking: envelope.metadata?.defer_entity_linking === true || undefined,
       skipPredictCalibrate: envelope.metadata?.skipPredictCalibrate === true || undefined,
       skipProcessing: envelope.metadata?.skipProcessing === true || undefined,
       smartIngest: envelope.metadata?.smartIngest === false ? false : undefined,

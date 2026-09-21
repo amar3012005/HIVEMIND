@@ -299,6 +299,7 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
       // V5: bounded engine processing-flag passthrough (enterprise/bulk callers).
       // Only these four are honored downstream; anything else stays metadata-only.
       ...(payload.skip_fact_extraction === true ? { skip_fact_extraction: true } : {}),
+      ...(payload.defer_entity_linking === true ? { defer_entity_linking: true } : {}),
       ...(payload.skipPredictCalibrate === true ? { skipPredictCalibrate: true } : {}),
       ...(payload.skipProcessing === true ? { skipProcessing: true } : {}),
       ...(payload.smartIngest === false ? { smartIngest: false } : {}),

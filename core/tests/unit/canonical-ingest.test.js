@@ -14,6 +14,17 @@ const base = {
   source: { type: 'api', source_id: 'source-1' },
 };
 
+test('canonical mapping preserves deferred entity linking for interactive saves', () => {
+  const envelope = legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1', content: 'A confirmed decision.',
+    defer_entity_linking: true,
+  }, { mode: 'atomic' });
+  assert.equal(envelope.metadata.defer_entity_linking, true);
+  assert.equal(legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1', content: 'Normal ingestion.',
+  }).metadata.defer_entity_linking, undefined);
+});
+
 test('canonical envelope rejects relationship memory rows', () => {
   const result = validateEnvelope({ ...base, metadata: { memory_type: 'relationship' } });
   assert.equal(result.ok, false);

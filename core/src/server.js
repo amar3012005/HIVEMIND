@@ -21189,6 +21189,9 @@ exit \$RC
 
                 if (saveKey && result.memoryId) {
                   persistentMemoryEngine.linkEntitiesForMemories([memory || { id: result.memoryId }]);
+                  enrichmentQueue?.enqueue(result.memoryId, {
+                    content: p.content, title: p.title, tags: p.tags, orgId,
+                  });
                 }
 
                 // Auto-extract profile facts from ingested content

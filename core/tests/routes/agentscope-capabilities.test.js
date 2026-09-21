@@ -65,3 +65,19 @@ test('artifact registration rejects traversal and malformed bytes before persist
   assert.equal(result.statusCode, 400);
   assert.equal(persisted, false);
 });
+
+test('company-record context endpoints return compact, authenticated metadata only', async () => {
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    project: { findMany: async (query) => [{ id: 'project-1', name: 'Launch', status: 'active', query }] },
+  };
+  const result = await handleAgentScopeCapabilityRoute({
+    req: { ...baseReq, method: 'GET' }, res: {}, parseBody: async () => ({}), jsonResponse, prisma,
+    pathname: '/internal/hivemind/context/projects',
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.kind, 'projects');
+  assert.equal(result.body.records[0].name, 'Launch');
+  assert.equal(result.body.records[0].query.where.orgId, '22222222-2222-2222-2222-222222222222');
+  assert.equal(Object.hasOwn(result.body.records[0].query.select, 'payload'), false);
+});

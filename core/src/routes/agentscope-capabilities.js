@@ -63,6 +63,31 @@ async function scopedWorkRun(prisma, sessionId, p) {
   return rows?.[0] || null;
 }
 
+async function companyRecords(prisma, kind, p) {
+  const take = 24;
+  if (kind === 'people') return prisma.entity.findMany({
+    where: { orgId: p.orgId, entityType: 'person', isActive: true }, orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }], take,
+    select: { id: true, canonicalName: true, description: true, aliases: true, externalIds: true, lastSeenAt: true },
+  });
+  if (kind === 'projects') return prisma.project.findMany({
+    where: { orgId: p.orgId, archivedAt: null }, orderBy: { updatedAt: 'desc' }, take,
+    select: { id: true, name: true, slug: true, description: true, status: true, updatedAt: true },
+  });
+  if (kind === 'objectives') return prisma.growthGoal.findMany({
+    where: { orgId: p.orgId, status: { in: ['ACTIVE', 'PLANNED'] } }, orderBy: { updatedAt: 'desc' }, take,
+    select: { id: true, title: true, objective: true, status: true, autonomyMode: true, updatedAt: true },
+  });
+  if (kind === 'work') return prisma.hyperWorkOrder.findMany({
+    where: { orgId: p.orgId, status: { in: ['queued', 'running', 'waiting'] } }, orderBy: { updatedAt: 'desc' }, take,
+    select: { id: true, title: true, objective: true, status: true, kind: true, dependsOn: true, updatedAt: true },
+  });
+  if (kind === 'artifacts') return prisma.sourceArtifact.findMany({
+    where: { orgId: p.orgId }, orderBy: { createdAt: 'desc' }, take,
+    select: { id: true, artifactType: true, sourcePlatform: true, sourceId: true, contentType: true, sizeBytes: true, checksum: true, metadata: true, createdAt: true },
+  });
+  return null;
+}
+
 export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jsonResponse, prisma, pathname }) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
@@ -95,6 +120,11 @@ export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jso
     const response = await internalFetch(`${String(process.env.HIVEMIND_CORE_API_BASE_URL || process.env.HIVEMIND_API_URL || 'http://localhost:8050').replace(/\/$/, '')}/api/recall`, { service: 'hm-core', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { query, limit: Math.max(1, Math.min(25, Number(body.limit) || 8)), mode: 'quick' }, userId: p.userId, orgId: p.orgId, timeoutMs: 60_000 });
     const payload = await response.json().catch(() => ({}));
     return jsonResponse(res, payload, response.status);
+  }
+  const recordMatch = pathname.match(/^\/internal\/hivemind\/context\/(people|projects|objectives|work|artifacts)$/);
+  if (recordMatch && req.method === 'GET') {
+    const records = await companyRecords(prisma, recordMatch[1], p);
+    return jsonResponse(res, { status: 'completed', kind: recordMatch[1], records });
   }
   if (pathname === '/internal/hivemind/artifacts') {
     const sessionId = String(body?.agentscope_session_id || '').trim();

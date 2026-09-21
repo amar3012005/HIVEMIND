@@ -125,6 +125,15 @@ function substantiveProviderReceipt(receipt, primarySlugs = []) {
   return Object.keys(data).some(key => !['nextPageToken', 'next_page_token', 'resultSizeEstimate', 'total', 'count', 'status', 'successful'].includes(key));
 }
 
+function substantiveMetaReadReceipt(receipt) {
+  if (!receipt || receipt.successful === false || receipt.tool !== 'hivemind_meta') return false;
+  if (!['context', 'profiles', 'recall'].includes(String(receipt.action || ''))) return false;
+  const data = receipt.data;
+  if (data == null) return false;
+  if (typeof data !== 'object') return String(data).trim().length > 0;
+  return Object.keys(data).length > 0;
+}
+
 function invalidFinal(text, receipts) {
   const answer = markdownText(text, 24000);
   if (!answer || /\[object Object\]/.test(answer)
@@ -521,12 +530,21 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
-    const modelMessages = providerEvidenceReady ? [
-      { role: 'system', content: `Synthesize the final answer from verified provider receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.` },
+    // Native HIVE reads are already governed and projected before entering the
+    // graph. For native-only turns we can stream their final synthesis just as
+    // we do connected-app receipts, without streaming an unvalidated planner
+    // response or allowing another tool decision mid-stream.
+    const metaReadEvidenceReady = !useTools && state.receipts.some(substantiveMetaReadReceipt);
+    const finalEvidenceReady = providerEvidenceReady || metaReadEvidenceReady;
+    const finalReceipts = providerEvidenceReady
+      ? state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
+      : state.receipts.filter(substantiveMetaReadReceipt);
+    const modelMessages = finalEvidenceReady ? [
+      { role: 'system', content: `Synthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.` },
       { role: 'user', content: message },
-      { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))).slice(0, 24000)}` },
+      { role: 'system', content: `Verified receipts:\n${jsonText(finalReceipts).slice(0, 24000)}` },
     ] : state.messages;
-    if (providerEvidenceReady && streamFinal) {
+    if (finalEvidenceReady && streamFinal) {
       let emitted = false;
       const streamed = await streamFinal({
         messages: modelMessages, model: ctx.model, apiKey: ctx._apiKey, signal: ctx._signal,
@@ -603,9 +621,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, 'I could not safely complete the connected task because no provider result was produced.', 'error') };
     }
     const response = markdownText(assistant.content, 24000);
-    onEvent({ type: 'answer_started', schema_version: 1, grounded: providerEvidenceReady, run_id: state.runId });
-    onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: providerEvidenceReady, run_id: state.runId });
-    onEvent({ type: 'answer_completed', schema_version: 1, grounded: providerEvidenceReady, run_id: state.runId });
+    onEvent({ type: 'answer_started', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
+    onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: finalEvidenceReady, run_id: state.runId });
+    onEvent({ type: 'answer_completed', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
     return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, response) };
   };
 
@@ -678,7 +696,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       messages: [...state.messages, toolMessage(call, exposed)],
       receipts: [...state.receipts, {
         tool: underlying,
-        action: call.name === 'hivemind_connected_task' ? call.args.action : null,
+        action: call.name === 'hivemind_connected_task' ? call.args.action
+          : (call.name === 'hivemind_meta' ? call.args.operation : null),
         status: receipt?.status || null,
         successful: receipt?.successful !== false,
         data: exposed,

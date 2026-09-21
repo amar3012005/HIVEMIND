@@ -58,6 +58,32 @@ test('one model-tool graph handles native recall and final synthesis with only h
   assert.equal(result.run.scratch.harness_version, UNIFIED_META_HARNESS_VERSION);
 });
 
+test('native HIVE recall streams its final answer from governed read receipts', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'What have I been working on lately?', useTools: false, prisma, ctx: ctx(prisma, 'recall-stream'), checkpointer: new MemorySaver(),
+    onEvent: event => events.push(event), composio: {},
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'recent work', limit: 3 } }, 'mr1') };
+      throw new Error('verified native-read synthesis must stream without a second buffered model call');
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.deepEqual(messages.map(row => row.role), ['system', 'user', 'system']);
+      await onDelta('You have been ');
+      await onDelta('working on durable chat.');
+      return { ok: true, content: 'You have been working on durable chat.', usage: { total_tokens: 9 } };
+    },
+    metaExecutor: async () => ({ successful: true, data: { memories: [{ title: 'Durable chat', content: 'Streaming and LangGraph work.' }] } }),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.response, 'You have been working on durable chat.');
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['You have been ', 'working on durable chat.']);
+  assert.equal(result.usage.at(-1).total_tokens, 9);
+});
+
 test('the same graph progressively searches, loads one selected schema, executes, and renders provider records', async () => {
   const prisma = fakePrisma();
   const events = [];

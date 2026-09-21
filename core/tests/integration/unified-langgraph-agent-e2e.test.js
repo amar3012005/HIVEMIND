@@ -229,6 +229,56 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
+test('a fresh turn never replays a prior connected result from the durable graph checkpoint', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  const runtimeCtx = ctx(prisma, 'fresh-connected-turn');
+  const discoveredUseCases = [];
+  const modelRequests = [];
+  const modelTurns = new Map();
+  const modelStep = async ({ messages }) => {
+    const request = messages.filter(row => row.role === 'user').at(-1)?.content || '';
+    const turn = (modelTurns.get(request) || 0) + 1;
+    modelTurns.set(request, turn);
+    if (turn === 1) {
+      modelRequests.push(request);
+      return { message: call('hivemind_connected_task', {
+        action: 'search', toolkits: ['example'], queries: [{ use_case: request }], session: { generate_id: true },
+      }, `fresh-${modelRequests.length}`) };
+    }
+    if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', tool_slugs: ['EXAMPLE_LIST'] }, `schema-${request}`) };
+    if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'EXAMPLE_LIST', arguments: { query: request } }, `execute-${request}`) };
+    return { message: { role: 'assistant', content: `Fresh result for: ${request}` } };
+  };
+  const composio = {
+    async listConnectedAccounts() { return [{ toolkit: 'example', status: 'ACTIVE' }]; },
+    async discoverSessionTools(_org, input) {
+      discoveredUseCases.push(input.searchPayload.queries[0].use_case);
+      return { sessionId: `session-${discoveredUseCases.length}`, primaryToolSlugs: ['EXAMPLE_LIST'], relatedToolSlugs: [], toolkitConnectionStatuses: { example: 'connected' } };
+    },
+    async getSessionToolSchemas() {
+      return { EXAMPLE_LIST: { read_only: true, input_schema: { type: 'object', additionalProperties: false, required: ['query'], properties: { query: { type: 'string' } } } } };
+    },
+    async executeToolsParallel(_org, input) {
+      return [{ successful: true, data: { records: [{ query: input[0].arguments.query }] } }];
+    },
+  };
+
+  const first = await runUnifiedMetaAgent({
+    message: 'Find the latest important connected records', useTools: true, prisma, ctx: runtimeCtx, checkpointer, modelStep, composio,
+  });
+  const second = await runUnifiedMetaAgent({
+    message: 'Find the latest records from Rama', useTools: true, prisma, ctx: runtimeCtx, checkpointer, modelStep, composio,
+  });
+
+  assert.equal(first.status, 'completed', first.response);
+  assert.match(first.response, /important connected records/);
+  assert.equal(second.status, 'completed');
+  assert.match(second.response, /records from Rama/);
+  assert.deepEqual(modelRequests, ['Find the latest important connected records', 'Find the latest records from Rama']);
+  assert.deepEqual(discoveredUseCases, modelRequests);
+});
+
 test('receipt-grounded final synthesis emits progressive SSE deltas without changing the durable connected workflow', async () => {
   const prisma = fakePrisma();
   const events = [];

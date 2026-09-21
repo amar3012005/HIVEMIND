@@ -593,6 +593,38 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const contextNode = async state => {
     const runId = state.runId || ctx.unifiedRunId || crypto.randomUUID();
     await ensureRun(runId);
+    // A LangGraph thread is durable so an approval can resume its exact
+    // checkpoint. It is not a turn cache. Fresh invocations re-enter here,
+    // therefore discard the prior turn's executable state before admitting
+    // the new request. Conversation and compact receipt context are supplied
+    // explicitly through ctx.conversationHistory; a new message must never
+    // seal or render an earlier result just because it shares a thread id.
+    const freshTurnState = {
+      ...state,
+      runId,
+      context: null,
+      messages: [],
+      receipts: [],
+      steps: [],
+      pendingTool: null,
+      pendingConnection: null,
+      pendingMemoryScope: null,
+      pendingApproval: null,
+      selectedSlugs: [],
+      primarySlugs: [],
+      schemas: {},
+      sessionId: null,
+      workflowSessionId: null,
+      connectionScope: null,
+      requestedToolkits: [],
+      cycles: 0,
+      repairs: 0,
+      callFingerprints: [],
+      result: null,
+      usage: [],
+      status: 'received',
+      eventSequence: 0,
+    };
     let profile = '';
     try { profile = await getSharedProfileStore(prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null); } catch {}
     let requestedToolkits = [];
@@ -620,18 +652,16 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       context: { locale, profile: compactText(profile, 1800), explicit_save: explicitSave },
       requestedToolkits,
       messages,
-      ...(saveDraft ? {
-        pendingTool: {
-          id: `explicit-save-${runId}`,
-          name: 'hivemind_meta',
-          args: { operation: 'save', save: saveDraft },
-        },
-      } : {}),
-      ...(explicitSave && !saveDraft ? {
-        result: outputShape({ ...state, runId, messages }, missingSaveResponse, 'needs_input'),
-      } : {}),
+      pendingTool: saveDraft ? {
+        id: `explicit-save-${runId}`,
+        name: 'hivemind_meta',
+        args: { operation: 'save', save: saveDraft },
+      } : null,
+      result: explicitSave && !saveDraft
+        ? outputShape({ ...freshTurnState, messages }, missingSaveResponse, 'needs_input')
+        : null,
     };
-    return transition({ ...state, runId }, 'running', patch, { reason_code: 'turn_admitted' });
+    return transition(freshTurnState, 'running', patch, { reason_code: 'turn_admitted' });
   };
 
   const modelNode = async state => {

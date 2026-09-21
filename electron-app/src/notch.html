@@ -29,7 +29,8 @@
     transition: opacity 160ms var(--ease);
   }
   #pill .dot { width: 6px; height: 6px; border-radius: 50%; background: #49d17d; box-shadow: 0 0 8px rgba(73,209,125,.8); }
-  #pill .word { font-size: 10px; letter-spacing: 0.16em; font-weight: 600; color: #d4d4d8; text-transform: uppercase; }
+  #pill .word { display: none; }
+  #pill .brand { width: 108px; height: auto; filter: invert(1); opacity: .92; }
   body.open #pill { display: none; }
 
   /* ── Expanded: glass panel hanging off the top edge ──────────────────── */
@@ -49,7 +50,7 @@
   @keyframes drop { from { transform: translateY(-14px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
   header { display: flex; align-items: center; gap: 10px; padding: 2px 2px 0; }
-  header .mark { font-size: 12px; font-weight: 700; letter-spacing: 0.14em; }
+  header .mark { width: 122px; height: auto; filter: invert(1); opacity: .92; }
   header .sub { font-size: 11px; color: var(--muted); }
   header .spacer { flex: 1; }
   #status { font-size: 11px; color: var(--muted); transition: color 160ms; max-width: 300px;
@@ -107,11 +108,11 @@
   ul#jobs li span.n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 
-<div id="pill"><span class="dot"></span><span class="word">SINGULANCE</span></div>
+<div id="pill"><span class="dot"></span><img class="brand" src="../assets/wordmark.png" alt="SINGULANCE" /></div>
 
 <div id="panel">
   <header>
-    <span class="mark">SINGULANCE</span>
+    <img class="mark" src="../assets/wordmark.png" alt="SINGULANCE" />
     <span class="sub">· quick actions</span>
     <span class="spacer"></span>
     <span id="status">Hover to open · click to pin</span>

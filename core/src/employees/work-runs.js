@@ -93,6 +93,13 @@ export function isTerminal(status) {
   return TERMINAL_STATUSES.includes(status);
 }
 
+/** Accept the numeric form emitted by the UI as well as URL/JSON strings. */
+export function normalizePlaybookVersion(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const version = Number(value);
+  return Number.isInteger(version) && version > 0 ? version : null;
+}
+
 export function canTransition(from, to) {
   if (from === to) return true; // idempotent re-assert
   return (TRANSITIONS[from] || []).includes(to);

@@ -4,6 +4,7 @@ import {
   applyRuntimeEvent,
   completeWorkRun,
   normalizeAgentScopeEvent,
+  normalizePlaybookVersion,
   runtimeScopeProjection,
   WORK_RUN_EVENT,
 } from '../../src/employees/work-runs.js';
@@ -20,6 +21,13 @@ test('runtime L0 scope strips full company and playbook bodies', () => {
     org_id: 'org-1', playbook_id: 'global:market-research',
     local_playbooks: [{ id: 'local:local-brief', name: 'Brief', description: 'short', scope: 'local', version: '1.0.0' }],
   });
+});
+
+test('playbook versions preserve the UI numeric form and reject invalid values', () => {
+  assert.equal(normalizePlaybookVersion(3), 3);
+  assert.equal(normalizePlaybookVersion('3'), 3);
+  assert.equal(normalizePlaybookVersion('0'), null);
+  assert.equal(normalizePlaybookVersion('not-a-version'), null);
 });
 
 describe('WorkRun Task tools → plan events (Phase 1)', () => {

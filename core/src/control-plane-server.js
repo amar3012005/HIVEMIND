@@ -12578,6 +12578,7 @@ Write the persona now.`;
       workRunTelemetry,
       WORK_RUN_STATUS,
       isTerminal,
+      normalizePlaybookVersion,
     } = await import('./employees/work-runs.js');
 
     const WORKRUN_ID_RE = /^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/telemetry|\/cancel|\/session\/messages|\/session\/stream|\/chat)?$/;
@@ -12620,7 +12621,7 @@ Write the persona now.`;
           roomId: typeof body.room_id === 'string' ? body.room_id : null,
           hyperagentSlug,
           playbookId,
-          playbookVersion: typeof body.playbook_version === 'string' ? body.playbook_version : null,
+          playbookVersion: normalizePlaybookVersion(body.playbook_version),
           scope: body.scope && typeof body.scope === 'object' ? body.scope : {},
           chatModelConfig: body.chat_model_config && typeof body.chat_model_config === 'object'
             ? body.chat_model_config

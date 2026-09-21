@@ -32,7 +32,7 @@ const CREDIT_OPERATION_PREFIX = '/internal/v1/harness-chat/credit-operations';
 const DECISION_PATH = '/decision';
 const CORE_ROUTES = new Map([
   ['/api/profile', new Set(['GET'])],
-  ['/api/profiles', new Set(['GET'])],
+  ['/api/profiles', new Set(['GET', 'POST'])],
   ['/api/profiles/context', new Set(['GET'])],
   ['/api/recall', new Set(['POST'])],
   ['/api/web/search/jobs', new Set(['POST'])],
@@ -314,6 +314,16 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   }
   let body;
   if (req.method !== 'GET') body = await parseBody(req).catch(() => null);
+  if (corePath === '/api/profiles' && req.method === 'POST') {
+    const allowed = new Set(['name', 'role', 'company', 'language', 'location', 'timezone']);
+    if (!Array.isArray(body) || !body.length || body.length > allowed.size || new Set(body.map(item => item?.key)).size !== body.length
+        || body.some(item => !item || item.category !== 'static' || !allowed.has(item.key) || typeof item.value !== 'string' || !item.value.trim() || item.value.length > 500
+          || Object.keys(item).some(key => !['category', 'key', 'value', 'confidence'].includes(key)))) {
+      jsonResponse(res, { error: 'invalid_profile_update' }, 400); return true;
+    }
+    // Never accept model-supplied user/org IDs or permission-bearing fields.
+    body = body.map(({ key, value }) => ({ category: 'static', key, value: value.trim(), confidence: 1 }));
+  }
   const target = new URL(CORE_ROUTE_TARGETS.get(corePath) || corePath, redisConfig.coreApiBaseUrl);
   const incoming = new URL(req.url || pathname, 'http://harness.internal');
   if (corePath === '/api/entities') {
@@ -389,6 +399,32 @@ export async function handleHarnessChatBootstrapRoute({
   decisionHandler,
 } = {}) {
   if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService, decisionHandler })) return true;
+  const deleteSessionMatch = pathname.match(/^\/v1\/harness-chat\/sessions\/([A-Za-z0-9._:-]{1,180})$/);
+  if (deleteSessionMatch && req.method === 'DELETE') {
+    const current = await requireSession(req, res);
+    if (!current) return true;
+    const { userId, orgId } = current.session || {};
+    if (!UUID_RE.test(userId) || !UUID_RE.test(orgId)) {
+      jsonResponse(res, { error: 'Authenticated tenant scope required' }, 403);
+      return true;
+    }
+    const membership = await prisma?.userOrganization?.findUnique?.({
+      where: { userId_orgId: { userId, orgId } },
+      select: { userId: true },
+    });
+    if (!membership) {
+      jsonResponse(res, { error: 'Organization membership required' }, 403);
+      return true;
+    }
+    const sessionId = deleteSessionMatch[1];
+    const deleted = await prisma?.harnessSession?.deleteMany?.({ where: { id: sessionId, orgId, userId } });
+    if (!deleted || deleted.count !== 1) {
+      jsonResponse(res, { error: 'Session not found' }, 404);
+      return true;
+    }
+    jsonResponse(res, { deleted: true, session_id: sessionId });
+    return true;
+  }
   const dedicatedNewSession = pathname === '/v1/harness-chat/new-session';
   if ((!dedicatedNewSession && pathname !== '/v1/harness-chat/bootstrap') || req.method !== 'POST') return false;
   const current = await requireSession(req, res);

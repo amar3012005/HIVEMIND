@@ -14,6 +14,38 @@ function jsonResponse(res, body, status = 200) {
   res.status = status;
 }
 
+test('permanent session deletion is authenticated and tenant scoped', async () => {
+  const res = responseCapture();
+  const calls = [];
+  const handled = await handleHarnessChatBootstrapRoute({
+    req: { method: 'DELETE' }, res, pathname: '/v1/harness-chat/sessions/session-delete-me',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ userId }) },
+      harnessSession: { deleteMany: async (args) => { calls.push(args); return { count: 1 }; } },
+    },
+    requireSession: async () => ({ session: { orgId, userId } }),
+    parseBody: async () => ({}), jsonResponse,
+  });
+  assert.equal(handled, true);
+  assert.deepEqual(calls, [{ where: { id: 'session-delete-me', orgId, userId } }]);
+  assert.deepEqual(res.json, { deleted: true, session_id: 'session-delete-me' });
+});
+
+test('session deletion never reports success outside the authenticated tenant', async () => {
+  const res = responseCapture();
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'DELETE' }, res, pathname: '/v1/harness-chat/sessions/session-other-user',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ userId }) },
+      harnessSession: { deleteMany: async () => ({ count: 0 }) },
+    },
+    requireSession: async () => ({ session: { orgId, userId } }),
+    parseBody: async () => ({}), jsonResponse,
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(res.json, { error: 'Session not found' });
+});
+
 test('bootstrap requires the existing authenticated control-plane session', async () => {
   const res = responseCapture();
   const handled = await handleHarnessChatBootstrapRoute({

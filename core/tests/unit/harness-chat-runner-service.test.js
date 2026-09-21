@@ -8,6 +8,32 @@ const secret = 'runner-service-secret-that-is-at-least-32-bytes';
 const userId = '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
 const orgId = '67503d34-97e9-49a8-8c52-8ee30cc7603e';
 
+test('Harness profile writes accept only bounded descriptive fields for the signed-in caller', async () => {
+  for (const [body, expected] of [
+    [[{ category: 'static', key: 'name', value: 'ASTER HELIUS' }], 200],
+    [[{ category: 'static', key: 'name', value: 'Other', user_id: 'someone-else' }], 400],
+    [[{ category: 'static', key: 'isAdmin', value: 'true' }], 400],
+    [[], 400],
+  ]) {
+    const res = {}; const calls = [];
+    await handleHarnessChatBootstrapRoute({
+      req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: '/internal/v1/harness-chat/core/api/profiles',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => body, jsonResponse: (r, b, status = 200) => Object.assign(r, { body: b, status }),
+      redisConfig: { coreApiBaseUrl: 'http://core.test' }, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+      fetchImpl: async (url, init) => { calls.push({ url: String(url), init }); return new Response(JSON.stringify({ results: [{ success: true }] })); },
+    });
+    assert.equal(res.status, expected);
+    assert.equal(calls.length, expected === 200 ? 1 : 0);
+    if (calls.length) {
+      assert.equal(calls[0].init.headers['x-hm-user-id'], userId);
+      assert.equal(calls[0].init.headers['x-hm-org-id'], orgId);
+      assert.deepEqual(JSON.parse(calls[0].init.body), [{ category: 'static', key: 'name', value: 'ASTER HELIUS', confidence: 1 }]);
+    }
+  }
+});
+
 function token(overrides = {}) {
   const now = Math.floor(Date.now() / 1000);
   const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');

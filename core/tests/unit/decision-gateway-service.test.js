@@ -5,7 +5,7 @@ import { decideRuntimeStage, decisionGatewayToolNames } from '../../src/agent/de
 function provider(choice = 'option_0', probabilities = { option_0: 0.96, option_1: 0.04 }) {
   return {
     async decideChoice() {
-      const ids = ['direct_answer', 'hivemind_context', 'hivemind_meta', 'hivemind_save', 'composio_search', 'fallback_harness'];
+      const ids = ['direct_answer', 'hivemind_context', 'hivemind_meta', 'hivemind_profile_update', 'hivemind_save', 'composio_search', 'fallback_harness'];
       const selected = Number(choice.split('_')[1]);
       return {
         choice: ids[selected], probability: probabilities[choice],
@@ -24,6 +24,7 @@ test('off mode deterministically defers to the current selector', async () => {
 test('capability mapping returns only the schema family for the next model step', () => {
   assert.deepEqual(decisionGatewayToolNames('direct_answer'), []);
   assert.deepEqual(decisionGatewayToolNames('hivemind_meta'), ['hivemind_meta']);
+  assert.deepEqual(decisionGatewayToolNames('hivemind_profile_update'), ['hivemind_update_profile']);
   assert.deepEqual(decisionGatewayToolNames('hivemind_save'), ['hivemind_save_memory']);
   assert.deepEqual(decisionGatewayToolNames('composio_search'), ['hivemind_connected_task']);
   assert.equal(decisionGatewayToolNames('composio_search', { connected: false }), null);
@@ -42,7 +43,7 @@ test('shadow mode records a confident decision but is not authoritative', async 
 
 test('active mode returns one accepted capability selection', async () => {
   const result = await decideRuntimeStage({ stage: 'capability', user_query: 'Find my last email', app_mentions: ['gmail'], actor_id: 'user-1' }, {
-    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'USER-1' }, provider: provider('option_4', { option_4: 0.98, option_0: 0.02 }),
+    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'USER-1' }, provider: provider('option_5', { option_5: 0.98, option_0: 0.02 }),
   });
   assert.equal(result.status, 'selected');
   assert.equal(result.selected, 'composio_search');

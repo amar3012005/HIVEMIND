@@ -185,9 +185,10 @@ export class DecisionGateway {
 
 export const CAPABILITY_OPTIONS = Object.freeze([
   { id: 'direct_answer', criteria: 'The request can be answered from the current conversation and compact authenticated context without retrieving fresh information or changing state.' },
-  { id: 'hivemind_context', criteria: 'The user asks about their current identity, organization, company profile, role, mission, ICP, location, or maintained preferences.' },
+  { id: 'hivemind_context', criteria: 'Read only: the user asks about their current identity, organization, company profile, role, mission, ICP, location, or maintained preferences. Never select for a requested profile change.' },
   { id: 'hivemind_meta', criteria: 'The request needs HIVE-MIND recall, entity discovery, HyperAgent profiles, or the status of a prior memory save.' },
-  { id: 'hivemind_save', criteria: 'The user explicitly asks to remember a stable fact, preference, decision, correction, or completed outcome.' },
+  { id: 'hivemind_profile_update', criteria: 'The user explicitly asks to change their own maintained profile field: name, role, company, language, location, or timezone. This is not a memory preference.' },
+  { id: 'hivemind_save', criteria: 'The user explicitly asks to remember a stable fact, preference, decision, correction, relationship, or completed outcome as durable memory.' },
   { id: 'composio_search', criteria: 'The request needs information or an action in an external connected application such as email, calendar, files, CRM, messaging, or social media.' },
   { id: 'fallback_harness', criteria: 'None of the other choices is clearly supported; defer to the current chat model and tool-selection behavior.' },
 ]);

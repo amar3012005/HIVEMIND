@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import Ajv from 'ajv';
 import { Annotation, Command, END, START, StateGraph, interrupt } from '@langchain/langgraph';
-import { chatCompletionFetch, resolveChatSynthesisModel } from '../llm/chat-provider.js';
+import { chatCompletionFetch, chatCompletionStream, resolveChatSynthesisModel } from '../llm/chat-provider.js';
 import { createPostgresCheckpointer } from '../hq-runtime/langgraph/postgres-checkpointer.js';
 import { getSharedProfileStore } from '../memory/profile-store.js';
 import { executeGovernedCoreRead, executeGovernedCoreWrite } from './governed-agent-core-tools.js';
@@ -156,6 +156,33 @@ async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
     if (message && (compactText(message.content) || message.tool_calls?.length)) return { message, usage: payload.usage || null };
   }
   throw new Error('unified_model_empty_choice');
+}
+
+/**
+ * Stream only the final, receipt-grounded answer. Planning and tool selection
+ * remain non-streamed because OpenAI-compatible SSE deltas do not durably
+ * expose a complete tool-call contract across all configured providers. At
+ * this point there is no further authority decision to make: the answer is
+ * synthesized from verified, redacted provider receipts only.
+ */
+async function defaultFinalStream({ messages, model, apiKey, signal, onDelta }) {
+  const response = await chatCompletionStream(resolveChatSynthesisModel(model), {
+    method: 'POST', signal,
+    body: JSON.stringify({
+      temperature: 0,
+      max_tokens: 2400,
+      messages,
+    }),
+  }, {
+    fallbackApiKey: apiKey,
+    useCase: 'chat_synthesis',
+    traceId: crypto.randomUUID(),
+    onContent: onDelta,
+  });
+  if (!response.ok || !compactText(response.content, 1)) {
+    throw new Error(`unified_final_stream_${response.status || 'empty'}`);
+  }
+  return response;
 }
 
 function recallArgs(input = {}, ctx = {}) {
@@ -416,8 +443,11 @@ function decisionToolSurface(selection, useTools) {
   return names === null ? current : current.filter(tool => names.includes(tool.function.name));
 }
 
-export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useTools = false, onEvent = () => {}, composio, prisma, modelStep, metaExecutor, connectedExecutor, decisionStage = decideRuntimeStage }) {
+export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useTools = false, onEvent = () => {}, composio, prisma, modelStep, finalStream, metaExecutor, connectedExecutor, decisionStage = decideRuntimeStage }) {
   const callModel = modelStep || defaultModelStep;
+  // Test seams provide a modelStep; keep those deterministic unless they
+  // explicitly inject a finalStream. Production uses the stream by default.
+  const streamFinal = finalStream || (!modelStep && ctx.unifiedStreamFinal !== false ? defaultFinalStream : null);
   const runMeta = metaExecutor || defaultMetaExecutor;
   const runConnected = connectedExecutor || defaultConnectedExecutor;
   const ledger = new GovernedAgentEventLedger({ prisma });
@@ -496,6 +526,33 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       { role: 'user', content: message },
       { role: 'system', content: `Verified provider receipts:\n${jsonText(state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))).slice(0, 24000)}` },
     ] : state.messages;
+    if (providerEvidenceReady && streamFinal) {
+      let emitted = false;
+      const streamed = await streamFinal({
+        messages: modelMessages, model: ctx.model, apiKey: ctx._apiKey, signal: ctx._signal,
+        onDelta: async delta => {
+          const text = String(delta || '');
+          if (!text) return;
+          if (!emitted) {
+            emitted = true;
+            onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
+          }
+          // `delta` is the stable chat SSE contract. `text` remains for older
+          // consumers that already render the unified-v2 event shape.
+          onEvent({ type: 'answer_delta', schema_version: 1, delta: text, text, grounded: true, run_id: state.runId });
+        },
+      });
+      const response = markdownText(streamed.content, 24000);
+      if (!response) throw new Error('unified_final_stream_empty');
+      if (!emitted) onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
+      onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
+      return {
+        messages: [...state.messages, { role: 'assistant', content: response }],
+        pendingTool: null,
+        usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage,
+        result: outputShape({ ...state, usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage }, response),
+      };
+    }
     let tools = [];
     if (!providerEvidenceReady) {
       let decision;
@@ -546,7 +603,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, 'I could not safely complete the connected task because no provider result was produced.', 'error') };
     }
     const response = markdownText(assistant.content, 24000);
-    onEvent({ type: 'answer_delta', text: response });
+    onEvent({ type: 'answer_started', schema_version: 1, grounded: providerEvidenceReady, run_id: state.runId });
+    onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: providerEvidenceReady, run_id: state.runId });
+    onEvent({ type: 'answer_completed', schema_version: 1, grounded: providerEvidenceReady, run_id: state.runId });
     return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, response) };
   };
 
@@ -729,14 +788,14 @@ function interruptedResult(output, graphThreadId, useTools) {
   };
 }
 
-export async function runUnifiedMetaAgent({ message, useTools = false, ctx = {}, onEvent, prisma = null, composio = null, choice = null, graph = null, checkpointer = null, modelStep = null, metaExecutor = null, connectedExecutor = null, decisionStage = decideRuntimeStage } = {}) {
+export async function runUnifiedMetaAgent({ message, useTools = false, ctx = {}, onEvent, prisma = null, composio = null, choice = null, graph = null, checkpointer = null, modelStep = null, finalStream = null, metaExecutor = null, connectedExecutor = null, decisionStage = decideRuntimeStage } = {}) {
   const db = prisma || ctx.prisma;
   if (!db) throw new Error('unified_prisma_required');
   const connector = composio || await import('../connectors/composio/composio-service.js');
   const graphThreadId = threadId(ctx);
   const runId = ctx.unifiedRunId || choice?.run_id || crypto.randomUUID();
   const runtimeCtx = { ...ctx, prisma: db, requestMessage: message, unifiedRunId: runId, unifiedGraphThreadId: graphThreadId };
-  const runtime = graph || createUnifiedMetaAgentGraph({ checkpointer: checkpointer || await productionCheckpointer(), ctx: runtimeCtx, message, useTools, onEvent, composio: connector, prisma: db, modelStep, metaExecutor, connectedExecutor, decisionStage });
+  const runtime = graph || createUnifiedMetaAgentGraph({ checkpointer: checkpointer || await productionCheckpointer(), ctx: runtimeCtx, message, useTools, onEvent, composio: connector, prisma: db, modelStep, finalStream, metaExecutor, connectedExecutor, decisionStage });
   const config = { configurable: { thread_id: graphThreadId }, recursionLimit: 64, tags: [UNIFIED_META_HARNESS_VERSION], metadata: { use_tools: useTools, locale: ctx.language || 'en' } };
   const output = choice ? await runtime.invoke(new Command({ resume: choice }), config) : await runtime.invoke({ runId }, config);
   return output?.__interrupt__?.length ? interruptedResult(output, graphThreadId, useTools) : output.result;

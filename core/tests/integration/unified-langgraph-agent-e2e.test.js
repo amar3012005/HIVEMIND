@@ -96,6 +96,41 @@ test('the same graph progressively searches, loads one selected schema, executes
   assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'GMAIL_FETCH_EMAILS'));
 });
 
+test('receipt-grounded final synthesis emits progressive SSE deltas without changing the durable connected workflow', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Show the latest connected record', useTools: true, prisma, ctx: ctx(prisma, 'stream-final'), checkpointer: new MemorySaver(),
+    onEvent: event => events.push(event),
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_connected_task', { action: 'search', toolkits: ['example'], queries: [{ use_case: 'Read the latest record' }] }, 'sf1') };
+      if (turn === 2) return { message: call('hivemind_connected_task', { action: 'schemas', tool_slugs: ['EXAMPLE_FETCH'] }, 'sf2') };
+      if (turn === 3) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'EXAMPLE_FETCH', arguments: { limit: 1 } }, 'sf3') };
+      throw new Error('the buffered final model call must not run after a verified receipt');
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.deepEqual(messages.map(row => row.role), ['system', 'user', 'system']);
+      await onDelta('The latest ');
+      await onDelta('record is ready.');
+      return { ok: true, content: 'The latest record is ready.', usage: { total_tokens: 12 } };
+    },
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'example', status: 'ACTIVE' }]; },
+      async discoverSessionTools() { return { sessionId: 'stream-session', primaryToolSlugs: ['EXAMPLE_FETCH'], relatedToolSlugs: [], toolkitConnectionStatuses: { example: 'connected' } }; },
+      async getSessionToolSchemas() { return { EXAMPLE_FETCH: { read_only: true, input_schema: { type: 'object', required: ['limit'], properties: { limit: { type: 'integer' } } } } }; },
+      async executeToolsParallel() { return [{ successful: true, data: { records: [{ id: 'record-1', title: 'Latest record' }] } }]; },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.response, 'The latest record is ready.');
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['The latest ', 'record is ready.']);
+  assert.ok(events.some(event => event.type === 'answer_started'));
+  assert.ok(events.some(event => event.type === 'answer_completed'));
+  assert.equal(result.usage.at(-1).total_tokens, 12);
+});
+
 test('Jev narrows legacy Composio discovery and blocks an unselected write in the same turn', async () => {
   const prisma = fakePrisma();
   const events = [];

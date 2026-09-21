@@ -124,6 +124,46 @@ test('an explicit durable-save request repairs a malformed recall and executes t
   assert.match(result.response, /saved the dedicated memory/i);
 });
 
+test('a save without a stated destination interrupts once for scope and resumes the same durable write', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  let writes = 0;
+  let turn = 0;
+  const runtimeCtx = {
+    ...ctx(prisma, 'save-scope'),
+    _tracedDispatch: async (_name, args) => {
+      writes += 1;
+      if (writes === 1) return {
+        saved: false, needs_project_choice: true,
+        message: 'Choose a destination.',
+        scope_options: [{ scope: 'personal', label: 'Personal' }, { scope: 'organization', label: 'Organization' }],
+        draft: { title: args.title, content: args.content, tags: args.tags, memory_type: 'fact' },
+      };
+      assert.equal(args.scope, 'personal');
+      return { saved: true, id: 'memory-scoped' };
+    },
+  };
+  const modelStep = async () => {
+    turn += 1;
+    if (turn === 1) return { message: call('hivemind_meta', { operation: 'save', save: { title: 'Rama', content: 'Rama is important to Amar.', tags: ['rama', 'relationship'] } }, 'scope-save') };
+    return { message: { role: 'assistant', content: 'Saved in your personal memory.' } };
+  };
+  const initial = await runUnifiedMetaAgent({
+    message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
+    checkpointer, modelStep, composio: {},
+  });
+  assert.equal(initial.status, 'needs_input');
+  assert.equal(initial.inputRequests[0].kind, 'memory_scope');
+  assert.equal(writes, 1);
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: false, prisma, ctx: runtimeCtx, checkpointer, modelStep, composio: {},
+    choice: { value: 'personal', run_id: initial.run.id },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(writes, 2);
+  assert.match(resumed.response, /personal memory/i);
+});
+
 test('decision summaries keep non-decision events out of the final synthesis', async () => {
   const prisma = fakePrisma();
   let turn = 0;

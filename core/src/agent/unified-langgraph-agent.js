@@ -28,6 +28,7 @@ const State = Annotation.Root({
   steps: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   pendingTool: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingConnection: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  pendingMemoryScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingApproval: Annotation({ reducer: (_left, right) => right, default: () => null }),
   selectedSlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   primarySlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -481,6 +482,28 @@ function outputShape(state, response, status = 'completed') {
   };
 }
 
+function memoryScopeRequest(receipt, runId) {
+  const data = receipt?.data || receipt || {};
+  const scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
+  const projects = Array.isArray(data.projects) ? data.projects : [];
+  return {
+    kind: 'memory_scope', run_id: runId, blocking: true,
+    prompt: compactText(data.message || 'Choose where this memory belongs before it is saved.', 500),
+    draft: data.draft || null,
+    options: [
+      ...scopeOptions.map(option => ({
+        id: String(option.scope || option.id || ''), value: String(option.scope || option.id || ''),
+        label: String(option.label || option.scope || option.id || ''),
+      })).filter(option => option.id),
+      ...projects.map(project => ({
+        id: `project:${project.id || project.slug || project.name}`,
+        value: `project:${project.id || project.slug || project.name}`,
+        label: String(project.name || project.slug || 'Project'),
+      })),
+    ],
+  };
+}
+
 function decisionToolSurface(selection, useTools) {
   const current = unifiedMetaTools({ useTools });
   const names = decisionGatewayToolNames(selection, { connected: useTools });
@@ -704,6 +727,17 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       };
       return transition(state, 'awaiting_approval', patch, { tool_slug: receipt.tool_slug, reason_code: 'write_approval_required' });
     }
+    if (call.name === 'hivemind_meta' && call.args.operation === 'save' && receipt?.data?.needs_project_choice) {
+      const request = memoryScopeRequest(receipt, state.runId);
+      const patch = {
+        ...statePatch, pendingTool: null, pendingMemoryScope: request,
+        callFingerprints: [...state.callFingerprints, fingerprint],
+        messages: [...state.messages, toolMessage(call, receipt)],
+        receipts: [...state.receipts, { tool: call.name, action: 'save', successful: true, data: receipt.data }],
+        steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'waiting', summary: request.prompt }],
+      };
+      return transition(state, 'awaiting_input', patch, { tool_slug: 'hivemind_save_memory', reason_code: 'memory_scope_required' });
+    }
     if (receipt?.disconnected?.length || receipt?.connection?.redirectUrl) {
       const toolkits = receipt.disconnected?.length ? receipt.disconnected : receipt.connection.toolkits;
       const managed = receipt.connection || await composio.manageSessionConnections(statePatch.sessionId || state.sessionId, toolkits, { reinitiateAll: true });
@@ -792,8 +826,40 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     };
   };
 
+  const memoryScopeNode = async state => {
+    const request = state.pendingMemoryScope;
+    const choice = interrupt(request);
+    const raw = compactText(choice?.scope || choice?.value || choice, 300);
+    const selected = raw.toLowerCase();
+    const draft = request?.draft || {};
+    const saveArgs = {
+      title: draft.title,
+      content: draft.content,
+      tags: Array.isArray(draft.tags) && draft.tags.length >= 2 ? draft.tags : ['hivemind', 'user-confirmed'],
+      memory_type: draft.memory_type || 'fact',
+      _memory_admission: 'user_assertion', _require_explicit_scope: true,
+    };
+    if (['personal', 'organization', 'team'].includes(selected)) saveArgs.scope = selected;
+    else if (selected.startsWith('project:') && raw.slice('project:'.length).trim()) {
+      saveArgs.scope = 'project';
+      saveArgs.project = raw.slice('project:'.length).trim();
+    } else {
+      throw new Error('unified_memory_scope_invalid');
+    }
+    const receipt = await executeGovernedCoreWrite('hivemind_save_memory', saveArgs, ctx);
+    if (receipt?.successful === false || receipt?.data?.saved !== true) {
+      throw new Error(`unified_memory_scope_save_failed:${compactText(receipt?.error || receipt?.data?.error || 'unknown', 160)}`);
+    }
+    return {
+      pendingMemoryScope: null,
+      messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'completed', receipt: publicToolResult(receipt) }) }],
+      receipts: [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: true, data: publicToolResult(receipt) }],
+      steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope' }],
+    };
+  };
+
   const routeModel = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
-  const routeTool = state => state.pendingConnection ? 'connection' : (state.pendingApproval ? 'approval' : 'model');
+  const routeTool = state => state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model'));
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const sealNode = async state => {
     onEvent({ type: 'finish', text: state.result.response });
@@ -805,12 +871,14 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addNode('model', modelNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('tool', toolNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
     .addNode('connection', connectionNode)
+    .addNode('memory_scope', memoryScopeNode)
     .addNode('approval', approvalNode)
     .addNode('seal', sealNode)
     .addEdge(START, 'admit_context').addEdge('admit_context', 'model')
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
-    .addConditionalEdges('tool', routeTool, ['model', 'connection', 'approval'])
+    .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
+    .addEdge('memory_scope', 'model')
     .addEdge('approval', 'model').addEdge('seal', END)
     .compile({ checkpointer });
 }

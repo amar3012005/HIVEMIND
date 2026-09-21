@@ -66,3 +66,45 @@ test('routine POST rejects an incomplete AgentScope model config before persiste
   assert.match(res.body.error, /chat_model_config\.type is required/);
   assert.equal(persisted, false);
 });
+
+test('routine POST projects a valid schedule through the injected AgentScope adapter', async () => {
+  const body = {
+    room_id: '44444444-4444-4444-8444-444444444444', agent_id: 'ops-agent',
+    playbook_id: 'brief', playbook_version: 1, goal: 'daily brief',
+    schedule_type: 'cron', schedule_expression: '0 9 * * 1-5', timezone: 'UTC',
+    chat_model_config: {
+      type: 'cloudflare_gateway_credential', credential_id: 'cred-1',
+      model: 'deepseek/deepseek-v4-flash', parameters: {},
+    },
+  };
+  const created = {
+    id: routineId, org_id: orgId, user_id: userId, room_id: body.room_id,
+    agent_id: body.agent_id, native_schedule_id: null, goal: body.goal,
+    playbook_id: body.playbook_id, playbook_version: 1, schedule_type: 'cron',
+    schedule_expression: body.schedule_expression, timezone: 'UTC', status: 'active',
+    authority_policy: {}, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+  };
+  const calls = [];
+  const prisma = {
+    async $queryRawUnsafe(...args) {
+      calls.push(String(args[0]));
+      if (String(args[0]).startsWith('INSERT INTO')) return [created];
+      if (String(args[0]).startsWith('UPDATE')) return [{ ...created, native_schedule_id: 'native-1' }];
+      return [];
+    },
+  };
+  const res = response();
+  let projected;
+  await handleRoutineRoutes({
+    ...deps(prisma),
+    parseBody: async () => body,
+    scheduleRuntime: async (method, payload) => { projected = { method, payload }; return { id: 'native-1' }; },
+    req: { method: 'POST', headers: {} }, res, url: new URL('http://x/v1/routines'),
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.routine.native_schedule_id, 'native-1');
+  assert.equal(projected.method, 'POST');
+  assert.equal(projected.payload.chat_model_config.model, body.chat_model_config.model);
+  assert.match(projected.payload.description, /hive_routine_fire/);
+  assert.equal(calls.length, 2);
+});

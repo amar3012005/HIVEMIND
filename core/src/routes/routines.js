@@ -73,7 +73,7 @@ async function fireRoutine({ prisma, routine, routineId, scheduledAt, userId, or
 }
 
 /** Governed Routine API. AgentScope owns the timer; HIVE owns identity/policy/WorkRun. */
-export async function handleRoutineRoutes({ req, res, url, prisma, requireSession, parseBody, jsonResponse, internalAuth = false }) {
+export async function handleRoutineRoutes({ req, res, url, prisma, requireSession, parseBody, jsonResponse, internalAuth = false, scheduleRuntime = runtimeSchedule }) {
   const pathname = url.pathname;
   const collection = pathname === '/v1/routines';
   const item = pathname.match(/^\/v1\/routines\/([0-9a-f-]{36})(?:\/(run-now|history))?$/i);
@@ -125,7 +125,7 @@ export async function handleRoutineRoutes({ req, res, url, prisma, requireSessio
       });
       if (!created) throw new Error('routine insert returned no row');
       try {
-        const schedule = await runtimeSchedule('POST', nativeScheduleProjection({
+        const schedule = await scheduleRuntime('POST', nativeScheduleProjection({
           routine: { ...body, ...normalized, timezone: body.timezone },
           routineId: created.id, agentId, chatModelConfig,
         }));
@@ -164,7 +164,7 @@ export async function handleRoutineRoutes({ req, res, url, prisma, requireSessio
       if (!Object.values(ROUTINE_STATUS).includes(status) || !canTransitionRoutine(routine.status, status)) {
         return jsonResponse(res, { error: `cannot transition routine from ${routine.status} to ${status}` }, 409);
       }
-      if (routine.native_schedule_id) await runtimeSchedule('PATCH', { enabled: status === ROUTINE_STATUS.ACTIVE }, routine.native_schedule_id);
+      if (routine.native_schedule_id) await scheduleRuntime('PATCH', { enabled: status === ROUTINE_STATUS.ACTIVE }, routine.native_schedule_id);
       const saved = await setRoutineStatus(prisma, { orgId, routineId, status });
       return jsonResponse(res, { routine: publicRoutine(saved) });
     } catch (error) { return jsonResponse(res, { error: error.message }, 400); }

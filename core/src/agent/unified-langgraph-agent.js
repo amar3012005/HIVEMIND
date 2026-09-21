@@ -76,6 +76,26 @@ function explicitlyRequestedMemoryScope(message) {
   return null;
 }
 
+function explicitSaveDraft(message, history = []) {
+  const request = String(message || '').trim();
+  if (!explicitDurableSaveRequest(request)) return null;
+  const inline = request.match(/\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,100}?\b(?:memory|hive[-\s]?mind)\b\s*[:\-]\s*(.+)$/i)?.[1];
+  const subject = request.match(/\babout\s+([^,.!?;]+)|\bremember\s+([^,.!?;]+)$/i);
+  const namedSubject = compactText(subject?.[1] || subject?.[2] || '', 120);
+  const prior = [...(Array.isArray(history) ? history : [])].reverse()
+    .find(row => row?.role === 'assistant' && compactText(row?.content, 8000));
+  const content = compactText(inline || prior?.content || '', 8000);
+  if (!content) return null;
+  const tag = namedSubject.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+  return {
+    title: namedSubject ? `${namedSubject} memory` : 'Saved memory',
+    content,
+    source_type: 'conversation',
+    tags: ['user-confirmed', tag || 'conversation'],
+    ...(explicitlyRequestedMemoryScope(request) ? { scope: explicitlyRequestedMemoryScope(request) } : {}),
+  };
+}
+
 function decisionSummaryRequest(message) {
   const text = String(message || '').toLowerCase();
   return /\bdecisions?\b/.test(text)
@@ -586,6 +606,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     }
     const locale = ctx.language || 'en';
     const explicitSave = explicitDurableSaveRequest(message);
+    const saveDraft = explicitSave ? explicitSaveDraft(message, ctx.conversationHistory) : null;
     const messages = [
       { role: 'system', content: systemPrompt({ useTools, locale, explicitSave }) },
       ...(requestedToolkits.length ? [{ role: 'system', content: `The request explicitly names authenticated connected-app toolkit(s): ${requestedToolkits.join(', ')}. External app facts cannot be answered by hivemind_meta. Start or continue hivemind_connected_task search, then follow its connection, schema, and execution receipts before answering.` }] : []),
@@ -593,7 +614,23 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       ...safeHistory(ctx.conversationHistory, Math.max(1, Math.min(6, Number(ctx.historyTurns) || 3))),
       { role: 'user', content: message },
     ];
-    const patch = { runId, context: { locale, profile: compactText(profile, 1800), explicit_save: explicitSave }, requestedToolkits, messages };
+    const missingSaveResponse = 'Tell me the specific fact, decision, or note you want saved, and where it belongs (personal, organization, team, or project).';
+    const patch = {
+      runId,
+      context: { locale, profile: compactText(profile, 1800), explicit_save: explicitSave },
+      requestedToolkits,
+      messages,
+      ...(saveDraft ? {
+        pendingTool: {
+          id: `explicit-save-${runId}`,
+          name: 'hivemind_meta',
+          args: { operation: 'save', save: saveDraft },
+        },
+      } : {}),
+      ...(explicitSave && !saveDraft ? {
+        result: outputShape({ ...state, runId, messages }, missingSaveResponse, 'needs_input'),
+      } : {}),
+    };
     return transition({ ...state, runId }, 'running', patch, { reason_code: 'turn_admitted' });
   };
 
@@ -884,6 +921,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   };
 
   const routeModel = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
+  const routeContext = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
   const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model')));
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const sealNode = async state => {
@@ -901,7 +939,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addNode('memory_scope', memoryScopeNode)
     .addNode('approval', approvalNode)
     .addNode('seal', sealNode)
-    .addEdge(START, 'admit_context').addEdge('admit_context', 'model')
+    .addEdge(START, 'admit_context')
+    .addConditionalEdges('admit_context', routeContext, ['model', 'tool', 'seal'])
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
     .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])

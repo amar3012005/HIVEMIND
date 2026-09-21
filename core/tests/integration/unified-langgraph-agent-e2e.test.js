@@ -84,7 +84,7 @@ test('native HIVE recall streams its final answer from governed read receipts', 
   assert.equal(result.usage.at(-1).total_tokens, 9);
 });
 
-test('an explicit durable-save request repairs a malformed recall and executes the governed write', async () => {
+test('an explicit durable-save request uses the prior verified turn without a planner tool decision', async () => {
   const prisma = fakePrisma();
   const calls = [];
   let turn = 0;
@@ -105,17 +105,8 @@ test('an explicit durable-save request repairs a malformed recall and executes t
     checkpointer: new MemorySaver(), composio: {},
     modelStep: async ({ messages }) => {
       turn += 1;
-      if (turn === 1) {
-        assert.match(messages[0].content, /explicitly requested a durable memory write/);
-        return { message: call('hivemind_meta', { operation: 'recall', recall: {} }, 'save-incorrect-recall') };
-      }
-      if (turn === 2) return { message: call('hivemind_meta', {
-        operation: 'save', save: {
-          title: 'Rama',
-          content: 'Rama is Amar\'s partner and accepted the Prague anniversary invitation.',
-          source_type: 'text',
-        },
-      }, 'save-rama') };
+      assert.equal(turn, 1);
+      assert.match(messages[0].content, /explicitly requested a durable memory write/);
       return { message: { role: 'assistant', content: 'I saved the dedicated memory about Rama.' } };
     },
   });
@@ -124,18 +115,15 @@ test('an explicit durable-save request repairs a malformed recall and executes t
   assert.match(result.response, /saved the dedicated memory/i);
 });
 
-test('a malformed explicit save asks for missing facts once instead of retrying the write loop', async () => {
+test('an explicit save without facts asks once before any tool or model call', async () => {
   const prisma = fakePrisma();
   let turns = 0;
   const result = await runUnifiedMetaAgent({
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: ctx(prisma, 'save-missing-payload'),
     checkpointer: new MemorySaver(), composio: {},
-    modelStep: async () => {
-      turns += 1;
-      return { message: call('hivemind_meta', { operation: 'save' }, `missing-save-${turns}`) };
-    },
+    modelStep: async () => { turns += 1; throw new Error('missing save content must not reach the model'); },
   });
-  assert.equal(turns, 1);
+  assert.equal(turns, 0);
   assert.equal(result.status, 'needs_input');
   assert.match(result.response, /specific fact, decision, or note/i);
 });
@@ -147,6 +135,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
   let turn = 0;
   const runtimeCtx = {
     ...ctx(prisma, 'save-scope'),
+    conversationHistory: [{ role: 'assistant', content: 'Rama is important to Amar.' }],
     _tracedDispatch: async (_name, args) => {
       writes += 1;
       if (writes === 1) {
@@ -164,7 +153,6 @@ test('a save without a stated destination interrupts once for scope and resumes 
   };
   const modelStep = async () => {
     turn += 1;
-    if (turn === 1) return { message: call('hivemind_meta', { operation: 'save', save: { title: 'Rama', content: 'Rama is important to Amar.', tags: ['rama', 'relationship'], scope: 'personal' } }, 'scope-save') };
     return { message: { role: 'assistant', content: 'Saved in your personal memory.' } };
   };
   const initial = await runUnifiedMetaAgent({

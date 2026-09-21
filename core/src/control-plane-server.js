@@ -15391,7 +15391,9 @@ Write the persona now.`;
 
     if (
       pathname === '/internal/hivemind/company-context'
+      || pathname === '/internal/hivemind/memories'
       || pathname === '/internal/hivemind/recall'
+      || pathname === '/internal/hivemind/web-search'
       || pathname === '/internal/hivemind/playbooks'
       || pathname === '/internal/hivemind/playbooks/get'
       || pathname === '/internal/hivemind/artifacts'

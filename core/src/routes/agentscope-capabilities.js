@@ -88,7 +88,7 @@ async function companyRecords(prisma, kind, p) {
   return null;
 }
 
-export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jsonResponse, prisma, pathname }) {
+export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jsonResponse, prisma, pathname, fetchInternal = internalFetch }) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
   const body = req.method === 'GET' ? {} : await parseBody(req).catch(() => ({}));
@@ -119,9 +119,29 @@ export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jso
   if (pathname === '/internal/hivemind/recall') {
     const query = String(body?.query || '').trim();
     if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
-    const response = await internalFetch(`${String(process.env.HIVEMIND_CORE_API_BASE_URL || process.env.HIVEMIND_API_URL || 'http://localhost:8050').replace(/\/$/, '')}/api/recall`, { service: 'hm-core', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { query, limit: Math.max(1, Math.min(25, Number(body.limit) || 8)), mode: 'quick' }, userId: p.userId, orgId: p.orgId, timeoutMs: 60_000 });
+    const response = await fetchInternal(`${String(process.env.HIVEMIND_CORE_API_BASE_URL || process.env.HIVEMIND_API_URL || 'http://localhost:8050').replace(/\/$/, '')}/api/recall`, { service: 'hm-core', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { query, limit: Math.max(1, Math.min(25, Number(body.limit) || 8)), mode: 'quick' }, userId: p.userId, orgId: p.orgId, timeoutMs: 60_000 });
     const payload = await response.json().catch(() => ({}));
     return jsonResponse(res, payload, response.status);
+  }
+  if (pathname === '/internal/hivemind/memories') {
+    const title = String(body?.title || '').trim().slice(0, 240);
+    const content = String(body?.content || '').trim().slice(0, 12_000);
+    const tags = Array.isArray(body?.tags) ? body.tags.map((tag) => String(tag).trim()).filter(Boolean).slice(0, 24) : [];
+    if (!title || !content) return jsonResponse(res, { error: 'title and content are required' }, 400);
+    const response = await fetchInternal(`${String(process.env.HIVEMIND_CORE_API_BASE_URL || process.env.HIVEMIND_API_URL || 'http://localhost:8050').replace(/\/$/, '')}/api/ingest/source`, {
+      service: 'hm-core', method: 'POST', headers: { 'Content-Type': 'application/json' }, userId: p.userId, orgId: p.orgId, timeoutMs: 60_000,
+      body: { mode: 'atomic', title, content, source: { type: 'agentscope', source_id: 'agentscope-workrun' }, tags, metadata: { memory_type: 'fact', source_type: 'agentscope-workrun' } },
+    });
+    return jsonResponse(res, await response.json().catch(() => ({})), response.status);
+  }
+  if (pathname === '/internal/hivemind/web-search') {
+    const query = String(body?.query || '').trim().slice(0, 1200);
+    if (query.length < 3) return jsonResponse(res, { error: 'query must be at least 3 characters' }, 400);
+    const response = await fetchInternal(`${String(process.env.HIVEMIND_CORE_API_BASE_URL || process.env.HIVEMIND_API_URL || 'http://localhost:8050').replace(/\/$/, '')}/internal/hyper/web-search`, {
+      service: 'hm-core', method: 'POST', headers: { 'Content-Type': 'application/json' }, userId: p.userId, orgId: p.orgId, timeoutMs: 60_000,
+      body: { org_id: p.orgId, user_id: p.userId, query, limit: Math.max(1, Math.min(10, Number(body?.limit) || 6)) },
+    });
+    return jsonResponse(res, await response.json().catch(() => ({})), response.status);
   }
   const recordMatch = pathname.match(/^\/internal\/hivemind\/context\/(people|projects|objectives|work|artifacts)$/);
   if (recordMatch && req.method === 'GET') {

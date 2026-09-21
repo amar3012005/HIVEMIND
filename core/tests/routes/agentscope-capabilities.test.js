@@ -81,3 +81,27 @@ test('company-record context endpoints return compact, authenticated metadata on
   assert.equal(result.body.records[0].query.where.orgId, '22222222-2222-2222-2222-222222222222');
   assert.equal(Object.hasOwn(result.body.records[0].query.select, 'payload'), false);
 });
+
+test('memory saves and web search use canonical Core paths under the resolved principal', async () => {
+  const calls = [];
+  const prisma = { userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) } };
+  const fetchInternal = async (url, options) => {
+    calls.push({ url, options });
+    return { status: 200, json: async () => ({ ok: true }) };
+  };
+  const save = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ title: 'Decision', content: 'Use the native Task plan.', tags: ['architecture'] }), jsonResponse, prisma, fetchInternal,
+    pathname: '/internal/hivemind/memories',
+  });
+  const search = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ query: 'AgentScope release notes', limit: 4 }), jsonResponse, prisma, fetchInternal,
+    pathname: '/internal/hivemind/web-search',
+  });
+  assert.equal(save.statusCode, 200);
+  assert.equal(search.statusCode, 200);
+  assert.match(calls[0].url, /\/api\/ingest\/source$/);
+  assert.equal(calls[0].options.userId, '11111111-1111-1111-1111-111111111111');
+  assert.equal(calls[0].options.body.source.type, 'agentscope');
+  assert.match(calls[1].url, /\/internal\/hyper\/web-search$/);
+  assert.equal(calls[1].options.body.org_id, '22222222-2222-2222-2222-222222222222');
+});

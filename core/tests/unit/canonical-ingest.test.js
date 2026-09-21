@@ -14,7 +14,7 @@ const base = {
   source: { type: 'api', source_id: 'source-1' },
 };
 
-test('canonical mapping preserves deferred entity linking for interactive saves', () => {
+test('canonical mapping preserves deferred post-commit enrichment for interactive saves', () => {
   const envelope = legacyPayloadToEnvelope({
     user_id: 'user-1', org_id: 'org-1', content: 'A confirmed decision.',
     defer_entity_linking: true,
@@ -23,6 +23,11 @@ test('canonical mapping preserves deferred entity linking for interactive saves'
   assert.equal(legacyPayloadToEnvelope({
     user_id: 'user-1', org_id: 'org-1', content: 'Normal ingestion.',
   }).metadata.defer_entity_linking, undefined);
+  const receiptFirst = legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1', content: 'A governed chat save.',
+    defer_claim_structuring: true,
+  }, { mode: 'atomic' });
+  assert.equal(receiptFirst.metadata.defer_claim_structuring, true);
 });
 
 test('canonical envelope rejects relationship memory rows', () => {

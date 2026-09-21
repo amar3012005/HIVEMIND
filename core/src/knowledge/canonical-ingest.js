@@ -300,6 +300,9 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
       // Only these four are honored downstream; anything else stays metadata-only.
       ...(payload.skip_fact_extraction === true ? { skip_fact_extraction: true } : {}),
       ...(payload.defer_entity_linking === true ? { defer_entity_linking: true } : {}),
+      // Claim structuring is enrichment-only. Interactive saves may return the
+      // durable receipt while this bounded LLM pass completes post-commit.
+      ...(payload.defer_claim_structuring === true ? { defer_claim_structuring: true } : {}),
       ...(payload.skipPredictCalibrate === true ? { skipPredictCalibrate: true } : {}),
       ...(payload.skipProcessing === true ? { skipProcessing: true } : {}),
       ...(payload.smartIngest === false ? { smartIngest: false } : {}),

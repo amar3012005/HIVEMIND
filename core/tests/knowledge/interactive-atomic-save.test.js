@@ -16,7 +16,7 @@ for (const deferred of [true, false]) {
     const result = service.ingestSource({
       mode: 'atomic', userId: 'user-1', orgId: 'org-1', content: 'A synthetic durable test note.',
       source: { type: 'api' },
-      metadata: deferred ? { defer_entity_linking: true, skip_fact_extraction: true } : {},
+      metadata: deferred ? { defer_claim_structuring: true } : {},
     }).then((value) => { returned = true; return value; });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(started, true);

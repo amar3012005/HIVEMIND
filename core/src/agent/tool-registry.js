@@ -1104,6 +1104,10 @@ const TOOL_HANDLERS = {
       scope,
       project_ids: resolvedProjectId ? [resolvedProjectId] : [],
       entities: plannedEntities,
+      // The durable write remains synchronous and governed. Do not make the
+      // user wait for optional post-commit claim enrichment before receiving
+      // its receipt; entity linking keeps its normal queue.
+      defer_claim_structuring: true,
       ...(args.event_time ? { document_date: args.event_time, event_time: args.event_time, valid_from: args.event_time } : {}),
       source_metadata: {
         source_platform: 'talk-to-hive', source_type: 'chat-turn', via: 'react-agent',

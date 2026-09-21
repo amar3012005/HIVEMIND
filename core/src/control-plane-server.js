@@ -14693,8 +14693,8 @@ Write the persona now.`;
         try {
           const upstream = await internalFetch(`${runtimeBase}/workrun/${workRunId}/cancel`, { service: 'hm-agent-runtime', method: 'POST', userId: current.session.userId, orgId: current.session.orgId, timeoutMs: 15_000 });
           if (!upstream.ok) return jsonResponse(res, { error: 'runtime cancellation failed' }, 502);
-          const { transitionWorkRun } = await import('./employees/work-runs.js');
-          const outcome = await transitionWorkRun(prisma, workRunId, 'cancelled');
+          const { cancelWorkRun } = await import('./employees/work-runs.js');
+          const outcome = await cancelWorkRun(prisma, workRunId);
           return outcome.ok ? jsonResponse(res, { workrun: outcome.run }) : jsonResponse(res, { error: outcome.reason }, 409);
         } catch (error) { return jsonResponse(res, { error: error.message }, 502); }
       }

@@ -219,6 +219,24 @@ export async function completeWorkRun(prisma, workRunId, { result = {}, error = 
   return outcome;
 }
 
+/**
+ * Cancel a WorkRun once the runtime has acknowledged cancellation.  The
+ * terminal event is deliberately durable as well as a stream state: a Rooms
+ * client that reconnects after the SSE closes must not infer that the current
+ * reply is still live from an older progress log.
+ */
+export async function cancelWorkRun(prisma, workRunId) {
+  const outcome = await transitionWorkRun(prisma, workRunId, 'cancelled');
+  if (outcome.ok) {
+    await appendWorkRunEvent(prisma, workRunId, {
+      t: 'workrun.cancelled',
+      reason: 'cancelled_by_user',
+      ts: Date.now(),
+    });
+  }
+  return outcome;
+}
+
 export const agentScopeRuntimeUrl = () =>
   String(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
 

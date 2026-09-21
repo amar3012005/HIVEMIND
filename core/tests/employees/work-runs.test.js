@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   applyRuntimeEvent,
   canTransitionWorkRun,
+  cancelWorkRun,
   completeWorkRun,
   dispatchWorkRun,
   normalizeAgentScopeEvent,
@@ -77,6 +78,24 @@ test('lifecycle rejects resurrection and completes only once', async () => {
   const completed = await completeWorkRun(prisma, 'run-1', { result: { ok: true } });
   assert.equal(completed.ok, true);
   assert.equal(status, 'completed');
+});
+
+test('cancellation persists one terminal event after the lifecycle transition', async () => {
+  let status = 'running';
+  const events = [];
+  const prisma = {
+    $queryRawUnsafe: async (sql, ...params) => {
+      if (sql.startsWith('SELECT id, status FROM')) return [{ id: 'run-1', status }];
+      if (sql.startsWith('UPDATE "hivemind"."work_runs" SET status')) { status = 'cancelled'; return [{ id: 'run-1', status }]; }
+      if (sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events')) { events.push(JSON.parse(params[2])[0]); return [{ id: 'run-1', status }]; }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+  const cancelled = await cancelWorkRun(prisma, 'run-1');
+  assert.equal(cancelled.ok, true);
+  assert.equal(status, 'cancelled');
+  assert.equal(events[0].t, 'workrun.cancelled');
+  assert.equal(events[0].reason, 'cancelled_by_user');
 });
 
 test('completion gate reads AgentScope task snapshots and playbook evidence rules', () => {

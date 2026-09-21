@@ -23,6 +23,33 @@ const TRANSITIONS = Object.freeze({
   completed: new Set(), failed: new Set(), cancelled: new Set(),
 });
 const MAX_EVENTS = 500;
+// L0 is intentionally a compact routing envelope. Company facts, complete
+// playbooks, and prior artifacts must arrive through the progressively exposed
+// HIVE tools, never as caller-controlled prompt baggage at WorkRun creation.
+const MAX_INITIAL_SCOPE_BYTES = 12_000;
+const RESERVED_SCOPE_KEYS = new Set(['completion_contract', 'runtime_binding', 'local_playbooks']);
+
+function scopeError(message) {
+  return Object.assign(new Error(message), { code: 'WORKRUN_SCOPE_INVALID' });
+}
+
+export function normalizeInitialWorkRunScope(scope) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
+    if (scope == null) return {};
+    throw scopeError('WorkRun scope must be an object containing compact references.');
+  }
+  const candidate = Object.fromEntries(
+    Object.entries(scope).filter(([key]) => !RESERVED_SCOPE_KEYS.has(key)),
+  );
+  let serialized;
+  try { serialized = JSON.stringify(candidate); }
+  catch { throw scopeError('WorkRun scope must be JSON-serializable.'); }
+  if (!serialized) throw scopeError('WorkRun scope must be JSON-serializable.');
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_INITIAL_SCOPE_BYTES) {
+    throw scopeError(`WorkRun scope exceeds the ${MAX_INITIAL_SCOPE_BYTES}-byte L0 context budget; pass record references and load details progressively.`);
+  }
+  return JSON.parse(serialized);
+}
 
 export function isTerminalWorkRun(status) {
   return TERMINAL.has(String(status || ''));
@@ -285,6 +312,7 @@ export async function dispatchWorkRun({
   runtimeFetch = internalFetch,
 } = {}) {
   if (!orgId || !userId || !String(goal || '').trim()) throw new Error('orgId, userId, and goal are required');
+  const initialScope = normalizeInitialWorkRunScope(scope);
   let resolvedRoomId = roomId;
   if (!resolvedRoomId) {
     const rows = await prisma.$queryRawUnsafe(
@@ -309,7 +337,7 @@ export async function dispatchWorkRun({
   const inserted = await prisma.$queryRawUnsafe(
     `INSERT INTO "hivemind"."work_runs" (org_id, user_id, room_id, turn_id, goal, status, playbook_id, playbook_version, scope)
      VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 'queued', $6, $7, $8::jsonb) RETURNING *`,
-    orgId, userId, resolvedRoomId, turn.id, String(goal), playbookId, playbookVersion, JSON.stringify(scope || {}),
+    orgId, userId, resolvedRoomId, turn.id, String(goal), playbookId, playbookVersion, JSON.stringify(initialScope),
   );
   const workRun = inserted?.[0];
   if (!workRun) throw new Error('WorkRun creation did not return a record');
@@ -321,7 +349,7 @@ export async function dispatchWorkRun({
       body: {
         workrun_id: workRun.id, agent_id: 'workrun-default', turn_id: turn.id, room_id: resolvedRoomId,
         org_id: orgId, goal: String(goal), playbook_id: playbookId, playbook_version: playbookVersion,
-        scope, ...(chatModelConfig ? { chat_model_config: chatModelConfig } : {}),
+        scope: initialScope, ...(chatModelConfig ? { chat_model_config: chatModelConfig } : {}),
       }, userId, orgId, timeoutMs: 30_000,
     });
     const payload = await response.json().catch(() => ({}));

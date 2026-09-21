@@ -14614,7 +14614,7 @@ Write the persona now.`;
         return jsonResponse(res, { workrun: created.workRun, turn_id: created.turnId }, 202);
       } catch (error) {
         console.warn('[workruns] dispatch failed:', error.message);
-        return jsonResponse(res, { error: error.message }, 502);
+        return jsonResponse(res, { error: error.message, ...(error.code ? { code: error.code } : {}) }, error.code === 'WORKRUN_SCOPE_INVALID' ? 400 : 502);
       }
     }
     if (pathname === '/v1/workruns' && req.method === 'GET') {

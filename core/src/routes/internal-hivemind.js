@@ -29,10 +29,13 @@
  */
 
 import { internalFetch } from '../internal/internal-fetch.js';
+import { SourceArtifactBackup } from '../knowledge/source-artifact-backup.js';
 
 // The runtime's tool calls are on the agent's critical path. A hung backing
 // service must surface as a tool error, not as a stalled run.
 const BACKING_TIMEOUT_MS = Number(process.env.HM_INTERNAL_TOOL_TIMEOUT_MS || 60_000);
+const WORKRUN_ARTIFACT_MAX_BYTES = Number(process.env.WORKRUN_ARTIFACT_MAX_BYTES || 8 * 1024 * 1024);
+const WORKRUN_ARTIFACT_INLINE_MAX_BYTES = Number(process.env.WORKRUN_ARTIFACT_INLINE_MAX_BYTES || 256 * 1024);
 
 /**
  * Resolve the caller's principal from the internal-auth headers.
@@ -394,14 +397,15 @@ export async function handleInternalWebSearchRoute({ req, res, jsonResponse, par
 /**
  * POST /internal/hivemind/artifacts — register a produced file.
  *
- * The workspace owns the bytes; hm-core owns the pointer. This records the
- * pointer as a `source_artifacts` row so the artifact is durable and citable.
+ * AgentScope reads bytes through its configured workspace backend; hm-core
+ * writes them to its configured object store and records the immutable receipt.
  *
- * The `path` is workspace-relative and the runtime has already verified the
- * file exists and is non-empty — a claim of an artifact is not an artifact, and
- * this endpoint is the boundary where that claim becomes a row.
+ * The `path` is workspace-relative. The runtime must include the non-empty
+ * bytes it read from that same workspace — a path alone is not an artifact.
  */
-export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse, parseBody, prisma }) {
+export async function handleInternalRecordArtifactRoute({
+  req, res, jsonResponse, parseBody, prisma, artifactStore = null, logger = console,
+}) {
   if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
   const principal = await resolvePrincipal(req, prisma);
   const invalid = principalError(jsonResponse, res, principal);
@@ -414,6 +418,20 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
     return jsonResponse(res, { error: 'path and title are required' }, 400);
   }
   const contentType = String(body?.content_type || 'application/octet-stream').slice(0, 100);
+  const encodedContent = String(body?.content_base64 || '');
+  if (!encodedContent || !/^[A-Za-z0-9+/]*={0,2}$/.test(encodedContent) || encodedContent.length % 4 !== 0) {
+    return jsonResponse(res, { error: 'content_base64 is required and must be valid base64' }, 400);
+  }
+  let content;
+  try {
+    content = Buffer.from(encodedContent, 'base64');
+  } catch {
+    return jsonResponse(res, { error: 'content_base64 is invalid' }, 400);
+  }
+  if (!content.length) return jsonResponse(res, { error: 'artifact content must be non-empty' }, 400);
+  if (content.length > WORKRUN_ARTIFACT_MAX_BYTES) {
+    return jsonResponse(res, { error: `artifact exceeds ${WORKRUN_ARTIFACT_MAX_BYTES}-byte limit` }, 413);
+  }
   let workRunId = UUID_RE.test(String(body?.workrun_id || '')) ? String(body.workrun_id) : null;
   const agentScopeSessionId = String(body?.agentscope_session_id || '').trim().slice(0, 120);
 
@@ -439,31 +457,76 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
       workRunId = UUID_RE.test(String(matchedId || '')) ? String(matchedId) : null;
     }
 
-    // The checksum is over the identity of the artifact (its path + title), not
-    // its bytes: the runtime holds the bytes in a sandbox hm-core cannot read,
-    // and a pointer row is what makes the artifact citable. Dedup on this key
-    // stops a re-run from filing the same deliverable twice.
-    const checksum = await sha256Hex(`${principal.orgId}:${workRunId || ''}:${artifactPath}:${title}`);
+    // Content identity, not an ephemeral sandbox path, is the deduplication
+    // boundary. A retry of the same file reuses the same immutable artifact;
+    // changing bytes creates a new versioned artifact record.
+    const checksum = await sha256Hex(content);
+    const store = artifactStore || new SourceArtifactBackup({ logger, prisma });
+    const allowInlineFallback = process.env.WORKRUN_ARTIFACT_INLINE_FALLBACK === 'true';
+    const storageConfigured = !!artifactStore || !!store?.enabled;
+    if (!storageConfigured && !(allowInlineFallback && content.length <= WORKRUN_ARTIFACT_INLINE_MAX_BYTES)) {
+      return jsonResponse(res, {
+        error: 'durable artifact storage is not configured',
+        remediation: 'configure SOURCE_ARTIFACT_* object-storage variables; local Docker may explicitly enable WORKRUN_ARTIFACT_INLINE_FALLBACK for small fixtures',
+      }, 503);
+    }
     const rows = await prisma.$queryRawUnsafe(
       `INSERT INTO "hivemind"."source_artifacts"
          (user_id, org_id, artifact_type, source_platform, source_id, content_type,
-          checksum, storage_location, payload, metadata)
+          size_bytes, checksum, storage_location, payload, metadata)
        VALUES ($1::uuid, $2::uuid, 'agent_output', 'agent-runtime', $3, $4,
-               $5, $6, $7::jsonb, $8::jsonb)
+               $5, $6, 'pending:object-storage', $7::jsonb, $8::jsonb)
        ON CONFLICT (user_id, org_id, checksum, source_platform)
        DO UPDATE SET metadata = "hivemind"."source_artifacts".metadata || $8::jsonb
-       RETURNING id, created_at`,
+       RETURNING id, created_at, storage_location`,
       principal.userId,
       principal.orgId,
       workRunId,
       contentType,
+      content.length,
       checksum,
-      artifactPath,
       JSON.stringify({ title, path: artifactPath, workrun_id: workRunId }),
-      JSON.stringify({ title, path: artifactPath, workrun_id: workRunId, registered_by: 'agent-runtime' }),
+      JSON.stringify({ title, path: artifactPath, workrun_id: workRunId, registered_by: 'agent-runtime', content_sha256: checksum }),
     );
     const artifact = rows?.[0];
     if (!artifact) return jsonResponse(res, { error: 'artifact insert returned no row' }, 500);
+
+    let storageLocation = artifact.storage_location;
+    if (!String(storageLocation || '').startsWith('r2:') && !String(storageLocation || '').startsWith('s3:')) {
+      const key = `org/${principal.orgId}/workruns/${workRunId || 'unscoped'}/artifacts/${artifact.id}/${checksum}`;
+      const stored = await store.store?.({ key, contentType, bytes: content });
+      if (stored?.stored) {
+        storageLocation = `r2:${stored.key}`;
+        await prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."source_artifacts"
+              SET storage_location = $1, metadata = metadata || $2::jsonb
+            WHERE id = $3::uuid AND org_id = $4::uuid`,
+          storageLocation,
+          JSON.stringify({ durable: true, object_key: stored.key, byte_count: stored.byteCount, content_sha256: stored.sha256 }),
+          artifact.id,
+          principal.orgId,
+        );
+      } else if (allowInlineFallback && content.length <= WORKRUN_ARTIFACT_INLINE_MAX_BYTES) {
+        storageLocation = 'inline:source_artifacts.payload';
+        await prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."source_artifacts"
+              SET storage_location = $1,
+                  payload = payload || $2::jsonb,
+                  metadata = metadata || $3::jsonb
+            WHERE id = $4::uuid AND org_id = $5::uuid`,
+          storageLocation,
+          JSON.stringify({ content_base64: encodedContent }),
+          JSON.stringify({ durable: true, inline_fallback: true, byte_count: content.length, content_sha256: checksum }),
+          artifact.id,
+          principal.orgId,
+        );
+      } else {
+        return jsonResponse(res, {
+          error: 'durable artifact upload failed',
+          reason: stored?.reason || 'object_store_failed',
+        }, 502);
+      }
+    }
 
     // Link the artifact to its WorkRun so the run's result is inspectable.
     if (workRunId) {
@@ -482,6 +545,9 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
       artifact_id: artifact.id,
       title,
       path: artifactPath,
+      storage_location: storageLocation,
+      byte_count: content.length,
+      content_sha256: checksum,
     }, 201);
   } catch (err) {
     return jsonResponse(res, { error: err.message }, 500);

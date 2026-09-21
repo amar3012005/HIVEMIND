@@ -36,12 +36,22 @@ test('artifact registration resolves the authenticated AgentScope session to its
       path: 'deliverables/report.md',
       title: 'Report',
       agentscope_session_id: SESSION_ID,
+      content_base64: Buffer.from('durable report').toString('base64'),
     }),
     jsonResponse: (_res, body, status = 200) => {
       response = { body, status };
       return response;
     },
     prisma,
+    artifactStore: {
+      store: async ({ key, bytes, contentType }) => ({
+        stored: true,
+        key,
+        byteCount: bytes.length,
+        sha256: 'd'.repeat(64),
+        contentType,
+      }),
+    },
   });
 
   assert.equal(response.status, 201);
@@ -50,5 +60,25 @@ test('artifact registration resolves the authenticated AgentScope session to its
   assert.equal(queries[1].params[0], USER_ID);
   assert.equal(queries[1].params[1], ORG_ID);
   assert.equal(queries[1].params[2], WORKRUN_ID);
+  assert.equal(queries[1].params[4], Buffer.byteLength('durable report'));
+  assert.match(queries[1].params[5], /^[a-f0-9]{64}$/);
   assert.equal(queries[1].params[6], JSON.stringify({ title: 'Report', path: 'deliverables/report.md', workrun_id: WORKRUN_ID }));
+  assert.equal(response.body.storage_location, `r2:org/${ORG_ID}/workruns/${WORKRUN_ID}/artifacts/artifact-1/${queries[1].params[5]}`);
+  assert.equal(response.body.byte_count, Buffer.byteLength('durable report'));
+});
+
+test('artifact registration rejects a pointer-only claim before any database write', async () => {
+  let response;
+  await handleInternalRecordArtifactRoute({
+    req: { headers: { 'x-hm-user-id': USER_ID, 'x-hm-org-id': ORG_ID } },
+    res: {},
+    parseBody: async () => ({ path: 'deliverables/report.md', title: 'Report' }),
+    jsonResponse: (_res, body, status = 200) => {
+      response = { body, status };
+      return response;
+    },
+    prisma: { userOrganization: { findFirst: async () => ({ orgId: ORG_ID }) } },
+  });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error, /content_base64/);
 });

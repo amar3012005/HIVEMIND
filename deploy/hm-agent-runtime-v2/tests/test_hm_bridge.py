@@ -89,7 +89,7 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed, [event])
         self.assertEqual(client.posts, [])
 
-    async def test_artifact_tool_forwards_server_minted_session_identity(self):
+    async def test_artifact_tool_reads_the_agentscope_workspace_before_registering(self):
         captured = {}
 
         async def call_hm_core(path, **kwargs):
@@ -97,12 +97,21 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return {"artifact_id": "artifact-1"}
 
+        async def read_workspace_file(session_id, path, *, max_bytes):
+            self.assertEqual(session_id, "agentscope-session-1")
+            self.assertEqual(path, "deliverables/report.md")
+            self.assertGreater(max_bytes, 0)
+            return b"durable report"
+
         tool = RecordArtifactTool("user-1", "org-1", "agentscope-session-1")
-        with patch("extra_agent_tools._call_hm_core", call_hm_core):
+        with patch("extra_agent_tools._call_hm_core", call_hm_core), patch(
+            "extra_agent_tools.read_workspace_file", read_workspace_file,
+        ):
             await tool.call("deliverables/report.md", "Report")
 
         self.assertEqual(captured["path"], "/internal/hivemind/artifacts")
         self.assertEqual(captured["body"]["agentscope_session_id"], "agentscope-session-1")
+        self.assertEqual(captured["body"]["content_base64"], "ZHVyYWJsZSByZXBvcnQ=")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ endpoint, not a new framework.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -62,6 +63,8 @@ from agentscope.permission import (
 )
 from agentscope.tool import ToolBase, ToolChunk
 
+from agent_middlewares import read_workspace_file
+
 _log = logging.getLogger("hm-agent-runtime.tools")
 
 HM_CORE_URL = os.getenv("HM_CORE_URL", "").strip().rstrip("/")
@@ -70,6 +73,7 @@ MASTER_API_KEY = os.getenv("HIVEMIND_MASTER_API_KEY", "").strip()
 # Tool calls are on the agent's critical path. A hung hm-core must surface as a
 # tool error the model can react to, not as a stalled run.
 _TOOL_TIMEOUT = float(os.getenv("HM_TOOL_TIMEOUT", "60"))
+_ARTIFACT_MAX_BYTES = int(os.getenv("HM_ARTIFACT_MAX_BYTES", str(8 * 1024 * 1024)))
 
 
 _TENANCY_RE = re.compile(
@@ -558,15 +562,16 @@ Searching the web for internal facts returns plausible strangers."""
 class RecordArtifactTool(_HiveMindToolBase):
     """Register a produced artifact back into HIVE-MIND.
 
-    The workspace owns the bytes; HIVE-MIND owns the pointer. Registering only
-    after the file is flushed and non-zero is what makes an artifact claim
-    evidence rather than prose.
+    The AgentScope workspace supplies the bytes through its configured backend;
+    HIVE-MIND writes those bytes to durable artifact storage and owns the
+    resulting receipt. Registering only after a non-empty file is read is what
+    makes an artifact claim evidence rather than prose.
     """
 
     name: str = "hivemind_record_artifact"
 
     description: str = """Register a file you produced in the workspace back into \
-HIVE-MIND so it becomes a durable deliverable.
+HIVE-MIND so it is durably stored as a deliverable.
 
 Call this AFTER the file is written and non-empty. Pass the workspace-relative \
 path. Registering a path that does not exist is rejected — a claim of an \
@@ -588,6 +593,11 @@ artifact is not an artifact."""
         content_type: Optional[str] = None,
     ) -> ToolChunk:
         try:
+            payload = await read_workspace_file(
+                str(self._session_id or ""),
+                path,
+                max_bytes=_ARTIFACT_MAX_BYTES,
+            )
             data = await _call_hm_core(
                 "/internal/hivemind/artifacts",
                 user_id=self._user_id,
@@ -597,6 +607,7 @@ artifact is not an artifact."""
                     "title": title,
                     "content_type": content_type,
                     "agentscope_session_id": self._session_id,
+                    "content_base64": base64.b64encode(payload).decode("ascii"),
                 },
             )
         except Exception as exc:  # noqa: BLE001

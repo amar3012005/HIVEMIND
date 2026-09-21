@@ -93,10 +93,19 @@ export function normalizeAgentScopeEvent(event) {
       ? { t: 'plan.updated', family: 'task', tool, call_id: callId, ts }
       : { t: 'tool.started', tool, call_id: callId, ts };
   }
+  // AgentScope carries tool arguments incrementally. Retain the chunks in
+  // HIVE's durable event log so a reconnecting Rooms client can show the same
+  // inspectable call input as the live session stream.
+  if (type === 'TOOL_CALL_DELTA') {
+    return { t: 'tool.input.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts };
+  }
+  if (type === 'TOOL_RESULT_TEXT_DELTA') {
+    return { t: 'tool.output.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts };
+  }
   if (type === 'TOOL_RESULT_END') {
     return nativeTask(tool)
       ? { t: 'plan.updated', family: 'task', tool, call_id: callId, ts }
-      : { t: 'tool.completed', tool, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), ts };
+      : { t: 'tool.completed', tool, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), metadata: event.metadata || {}, ts };
   }
   if (type === 'CUSTOM' && event.name === 'state_updated') {
     const tasks = event.value?.tasks_context?.tasks;

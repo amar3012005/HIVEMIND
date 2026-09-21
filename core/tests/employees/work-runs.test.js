@@ -39,6 +39,15 @@ test('tool completion reuses the matching start name', async () => {
   assert.equal(result.event.tool, 'hivemind_recall');
 });
 
+test('AgentScope tool input and output deltas retain the call identity for durable inspection', () => {
+  const input = normalizeAgentScopeEvent({ type: 'TOOL_CALL_DELTA', tool_call_id: 'call-1', delta: '{"query":' });
+  const output = normalizeAgentScopeEvent({ type: 'TOOL_RESULT_TEXT_DELTA', tool_call_id: 'call-1', delta: 'first result' });
+  assert.deepEqual(input.t, 'tool.input.delta');
+  assert.deepEqual(output.t, 'tool.output.delta');
+  assert.equal(input.call_id, 'call-1');
+  assert.equal(output.call_id, 'call-1');
+});
+
 test('lifecycle rejects resurrection and completes only once', async () => {
   assert.equal(canTransitionWorkRun('completed', 'running'), false);
   let status = 'running';

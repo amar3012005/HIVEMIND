@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from types import SimpleNamespace
 
 from agentscope.app._manager import BackgroundTaskManager, SchedulerManager
@@ -31,12 +32,20 @@ class _Toolkit:
 
 async def _prove_schedule(storage: RedisStorage, bus: RedisMessageBus) -> None:
     """Prove schedule fire persists a session, inbox hint, and one wakeup."""
+    # The canary may intentionally run against the persistent local AgentScope
+    # Redis. Never reuse keys from a previous invocation: schedule-session
+    # indexes are durable by design, so fixed identities make a healthy fire
+    # look like a duplicate.
+    suffix = uuid.uuid4().hex
+    user_id = f"user-canary-{suffix}"
+    agent_id = f"agent-canary-{suffix}"
+    schedule_id = f"schedule-canary-{suffix}"
     workspace = LocalWorkspaceManager("/tmp/lifecycle-canary", isolation=IsolationPolicy.PER_SESSION)
     manager = SchedulerManager(storage, bus, workspace, enabled=False)
     record = ScheduleRecord(
-        id="schedule-canary",
-        user_id="user-canary",
-        agent_id="agent-canary",
+        id=schedule_id,
+        user_id=user_id,
+        agent_id=agent_id,
         data=ScheduleData(
             name="Daily operating brief",
             description="Create the daily operating brief.",
@@ -52,7 +61,7 @@ async def _prove_schedule(storage: RedisStorage, bus: RedisMessageBus) -> None:
     )
 
     await manager._build_trigger(record)()
-    sessions = await storage.list_sessions_by_schedule("user-canary", "schedule-canary")
+    sessions = await storage.list_sessions_by_schedule(user_id, schedule_id)
     assert len(sessions) == 1, sessions
     inbox = await bus.queue_drain(MessageBusKeys.inbox(sessions[0].id))
     wakeups = await bus.queue_drain(MessageBusKeys.wakeup_queue())
@@ -91,6 +100,11 @@ async def _prove_offload(bus: RedisMessageBus) -> None:
     wakeups = await bus.queue_drain(MessageBusKeys.wakeup_queue())
     assert len(inbox) == 1 and "durable offload result" in str(inbox[0][1]), inbox
     assert len(wakeups) == 1 and wakeups[0][1]["session_id"] == "offload-session-canary", wakeups
+    # The middleware publishes a wakeup signal after placing the durable queue
+    # entries. Give that fire-and-forget task a scheduling turn before the
+    # isolated Redis context closes, otherwise a passing canary reports a
+    # misleading "Task exception was never retrieved" during teardown.
+    await asyncio.sleep(0.05)
     print("offload-durable-canary-ok", "response=background", "inbox=1", "wakeups=1")
 
 

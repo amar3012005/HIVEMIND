@@ -21293,13 +21293,21 @@ exit \$RC
               const canonicalMode = admittedCanonicalMode;
               let projection;
               if (canonicalMode !== 'off') {
-                try {
-                  projection = await admitCanonicalProjection({ memoryId: firstSuccessResult.memoryId, orgId, userId, mode: canonicalMode, input: canonicalProjectionInput({
-                    memoryId: firstSuccessResult.memoryId, orgId, payload: ingestPayload, requestBody: body,
-                  }) });
-                } catch (projectionError) {
-                  console.warn('[canonical-knowledge] sync projection degraded:', projectionError.message);
-                  projection = { mode: canonicalMode, status: 'degraded', error: projectionError.message };
+                const projectionTask = admitCanonicalProjection({ memoryId: firstSuccessResult.memoryId, orgId, userId, mode: canonicalMode, input: canonicalProjectionInput({
+                  memoryId: firstSuccessResult.memoryId, orgId, payload: ingestPayload, requestBody: body,
+                }) });
+                if (saveKey) {
+                  projection = { mode: canonicalMode, status: 'queued' };
+                  projectionTask.catch((projectionError) => {
+                    console.warn('[canonical-knowledge] deferred interactive-save projection degraded:', projectionError.message);
+                  });
+                } else {
+                  try {
+                    projection = await projectionTask;
+                  } catch (projectionError) {
+                    console.warn('[canonical-knowledge] sync projection degraded:', projectionError.message);
+                    projection = { mode: canonicalMode, status: 'degraded', error: projectionError.message };
+                  }
                 }
               }
 

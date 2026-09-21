@@ -14,5 +14,6 @@ test('idempotent interactive saves defer entity linking until after persistence'
   assert.match(syncRoute, /persistentMemoryEngine\.linkEntitiesForMemories\(\[memory \|\| \{ id: result\.memoryId \}\]\)/);
   assert.match(syncRoute, /if \(saveKey\) \{\s*indexTask\.catch/);
   assert.match(syncRoute, /if \(saveKey\) \{\s*indexFactMemories\(\)\.catch/);
+  assert.match(syncRoute, /if \(saveKey\) \{\s*projection = \{ mode: canonicalMode, status: 'queued' \}/);
   assert.match(syncRoute, /status: 'completed'/);
 });

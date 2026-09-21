@@ -15,6 +15,8 @@ import time
 import urllib.request
 import uuid
 
+from lifecycle_contract import validate_lifecycle
+
 
 def call(base: str, path: str, body: dict, headers: dict[str, str]) -> dict:
     req = urllib.request.Request(
@@ -142,10 +144,14 @@ def main() -> None:
     identities = [identity for identity in identities if identity]
     if len(identities) != len(set(identities)):
         raise AssertionError("reconnect stream duplicated a durable event identity")
+    lifecycle = validate_lifecycle(replayed)
+    if not lifecycle["ok"]:
+        raise AssertionError(f"reconnect lifecycle contract failed: {lifecycle['errors']}")
     print(
         "reconnect-replay-canary-ok",
         f"first_events={len(first_events)}",
         f"replayed_events={len(replayed)}",
+        f"phases={'/'.join(lifecycle['phases'])}",
         "terminal=REPLY_END",
     )
 

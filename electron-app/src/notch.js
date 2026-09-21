@@ -27,8 +27,8 @@ const path = require('path');
 const fs = require('fs');
 const log = require('electron-log');
 
-const COLLAPSED = { width: 210, height: 34 };
-const EXPANDED = { width: 720, height: 470 };
+const COLLAPSED = { width: 196, height: 30 };
+const EXPANDED = { width: 640, height: 430 };
 
 let notchWindow = null;
 let expanded = false;

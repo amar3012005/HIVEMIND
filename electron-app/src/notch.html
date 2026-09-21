@@ -22,23 +22,24 @@
 
   /* ── Collapsed: a pill that reads as part of the notch ───────────────── */
   #pill {
-    width: 210px; height: 34px; background: #000;
-    border-radius: 0 0 17px 17px;
+    width: 196px; height: 30px; background: #050505;
+    border-radius: 0 0 15px 15px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.32);
     display: flex; align-items: center; justify-content: center; gap: 8px;
     transition: opacity 160ms var(--ease);
   }
-  #pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #pill .dot { width: 6px; height: 6px; border-radius: 50%; background: #49d17d; box-shadow: 0 0 8px rgba(73,209,125,.8); }
   #pill .word { font-size: 10px; letter-spacing: 0.16em; font-weight: 600; color: #d4d4d8; text-transform: uppercase; }
   body.open #pill { display: none; }
 
   /* ── Expanded: glass panel hanging off the top edge ──────────────────── */
   #panel {
-    display: none; width: 720px; height: 470px;
+    display: none; width: 640px; height: 430px;
     background: var(--glass);
     -webkit-backdrop-filter: blur(28px) saturate(160%);
     backdrop-filter: blur(28px) saturate(160%);
     border: 1px solid var(--hair); border-top: none;
-    border-radius: 0 0 26px 26px;
+    border-radius: 0 0 22px 22px;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
     padding: 14px 18px 18px;
     flex-direction: column; gap: 12px;

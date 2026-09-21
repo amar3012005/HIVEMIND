@@ -464,16 +464,9 @@ app.whenReady().then(() => {
   // without waiting for the splash → workspace handoff. Never fatal: a HUD
   // failure must not stop the app from opening.
   //
-  // DEFAULT OFF as of 2.1.1. The panel has never been exercised at runtime — it
-  // could not be launched locally while macOS was deleting the unsigned Electron
-  // binary — and an always-on-top window pinned over the menu bar is the wrong
-  // thing to ship unverified: a bad geometry or a stuck pill is highly visible
-  // and hard for a user to escape. The code stays in the bundle so re-enabling
-  // is a flag flip, not a rebuild of the feature.
-  //
-  //   Enable for a session:  SINGULANCE_NOTCH=1 open -a SINGULANCE
-  //   Enable in dev:         SINGULANCE_NOTCH=1 npm start
-  if (process.env.SINGULANCE_NOTCH === '1') {
+  // The notch is a native macOS surface. Windows keeps the regular Electron
+  // window; SINGULANCE_NOTCH=0 is the explicit opt-out for macOS users.
+  if (process.platform === 'darwin' && process.env.SINGULANCE_NOTCH !== '0') {
     try {
       notch.registerNotchIpc();
       notch.createNotchWindow({ mainWindowGetter: () => mainWindow, url: APP_URL });

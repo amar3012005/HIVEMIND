@@ -136,6 +136,7 @@ import {
 } from './routes/hyper-rooms.js';
 import { handleInternalWorkRunEventRoute } from './routes/workruns.js';
 import { handleAgentScopeCapabilityRoute } from './routes/agentscope-capabilities.js';
+import { readWorkRunArtifact } from './routes/workrun-artifacts.js';
 import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import {
@@ -14572,6 +14573,28 @@ Write the persona now.`;
     // ─── AgentScope WorkRuns ───────────────────────────────────────────────
     // Browser access stays on the Core. The runtime is service-to-service only.
     const workRunMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/session\/messages|\/session\/stream|\/chat|\/cancel|\/recover)?$/);
+    const workRunArtifactMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})\/artifacts\/([0-9a-f-]{36})$/);
+    if (workRunArtifactMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const artifact = await readWorkRunArtifact({
+        prisma,
+        workRunId: workRunArtifactMatch[1],
+        artifactId: workRunArtifactMatch[2],
+        userId: current.session.userId,
+        orgId: current.session.orgId,
+      });
+      if (artifact.status !== 200) return jsonResponse(res, { error: artifact.error, code: artifact.code }, artifact.status);
+      res.writeHead(200, {
+        'Content-Type': artifact.contentType,
+        'Content-Length': artifact.bytes.length,
+        'Content-Disposition': `attachment; filename="${artifact.filename}"`,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(artifact.bytes);
+      return;
+    }
     if (pathname === '/v1/workruns' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;

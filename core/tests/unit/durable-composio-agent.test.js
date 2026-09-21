@@ -190,8 +190,12 @@ test('emails from a named person pass the person into list/fetch', async () => {
         sessionId: 'trs_rama_mail',
         primaryToolSlugs: ['GMAIL_LIST_THREADS', 'GMAIL_REPLY_TO_THREAD'],
         toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
-        tools: [{ _composio: { slug: 'GMAIL_LIST_THREADS' } }],
+        tools: [{ function: { parameters: { type: 'object', properties: { query: { type: 'string' } } } }, _composio: { slug: 'GMAIL_LIST_THREADS' } }],
       };
+    },
+    async generateToolInputs(_slug, input) {
+      assert.match(input, /Original user request: give me list of all emails from rama/);
+      return { query: 'rama' };
     },
     async executeToolsParallel(_org, tools) {
       executed.push(...tools.map((tool) => tool.slug));
@@ -308,13 +312,13 @@ test('latest email request rejects contact tools and executes the mailbox tool w
         relatedToolSlugs: ['GMAIL_FETCH_EMAILS'],
         toolkitConnectionStatuses: { gmail: { has_active_connection: true } },
         tools: [
-          { _composio: { slug: 'GMAIL_SEARCH_PEOPLE', toolkit: 'gmail' } },
-          { _composio: { slug: 'GMAIL_GET_CONTACTS', toolkit: 'gmail' } },
-          { _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
+          { function: { parameters: { type: 'object', properties: { query: { type: 'string' } } } }, _composio: { slug: 'GMAIL_SEARCH_PEOPLE', toolkit: 'gmail' } },
+          { function: { parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_GET_CONTACTS', toolkit: 'gmail' } },
+          { function: { parameters: { type: 'object', properties: { max_results: { type: 'integer' } } } }, _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
         ],
       };
     },
-    async generateToolInputs() { return {}; },
+    async generateToolInputs() { return { max_results: 5 }; },
     async executeToolsParallel(_org, tools) {
       executed.push(...tools);
       return tools.map((tool) => tool.slug === 'GMAIL_FETCH_EMAILS'
@@ -860,7 +864,7 @@ test('legacy durable path lets Jev narrow Composio discovery and preserves read-
     async getToolRouterSession() { return { id: 'trs_jev_legacy' }; },
     async discoverSessionTools() {
       const tools = [
-        { function: { description: 'Fetch matching email messages', parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail', read_only: true } },
+        { function: { description: 'Fetch matching records', parameters: { type: 'object', properties: { query: { type: 'string' }, max_results: { type: 'integer' } } } }, _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail', read_only: true } },
         { function: { description: 'Add a label to a message', parameters: { type: 'object', properties: {} } }, _composio: { slug: 'GMAIL_ADD_LABEL_TO_EMAIL', toolkit: 'gmail', read_only: false } },
       ];
       return {
@@ -881,17 +885,23 @@ test('legacy durable path lets Jev narrow Composio discovery and preserves read-
       orgId: 'o1', userId: 'u1', threadId: 'legacy-jev-read-only',
       decisionStage: async (input) => {
         decisions.push(input);
-        return { status: 'selected', selected: 'use:GMAIL_FETCH_EMAILS', authoritative: true, receipt: { source: 'jev', probability: 0.98, margin: 0.94 } };
+        return input.stage === 'composio_selection'
+          ? { status: 'selected', selected: 'use:GMAIL_FETCH_EMAILS', authoritative: true, receipt: { source: 'jev', probability: 0.98, margin: 0.94 } }
+          : { status: 'selected', selected: 'execute', authoritative: true, receipt: { source: 'jev', probability: 0.98, margin: 0.94 } };
       },
       synthesizeDurableAnswer: async () => 'Griseldis — Returning your MacBook — 2026-09-19T09:00:00Z',
       _tracedDispatch: async () => ({ memories: [] }),
     },
     onEvent: (event) => events.push(event),
-    composio,
+    composio: { ...composio, async generateToolInputs(_slug, input) {
+      assert.match(input, /Original user request: Use Gmail to find the newest message from Griseldis/);
+      return { query: 'Griseldis', max_results: 1 };
+    } },
   });
   assert.equal(result.status, 'completed');
-  assert.equal(decisions.length, 1);
+  assert.equal(decisions.length, 2);
   assert.equal(decisions[0].stage, 'composio_selection');
+  assert.equal(decisions[1].stage, 'composio_argument_review');
   assert.deepEqual(result.run.scratch.primary_tool_slugs, ['GMAIL_FETCH_EMAILS']);
   assert.deepEqual(executed.map((call) => call.slug), ['GMAIL_FETCH_EMAILS']);
   assert.equal(executed[0].arguments.max_results, 1);

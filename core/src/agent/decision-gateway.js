@@ -301,6 +301,42 @@ export async function chooseComposioAction({ gateway, turn, userQuery, context, 
   });
 }
 
+/**
+ * Verify the final schema-bound arguments after discovery and tool selection.
+ * This is toolkit-agnostic: JEV receives no provider credentials and never
+ * constructs or executes provider arguments.
+ */
+export async function chooseComposioArgumentReview({ gateway, turn, userQuery, context, selectedTool, proposedArguments, progress = null, fallback, signal }) {
+  const tool = selectedTool && typeof selectedTool === 'object' ? {
+    slug: clip(selectedTool.slug, 180),
+    toolkit: clip(selectedTool.toolkit, 100),
+    authority: clip(selectedTool.authority, 40),
+    description: clip(selectedTool.description, 700),
+    schema: boundedProjection(selectedTool.schema || {}, { maxChars: 7000, maxDepth: 5, maxItems: 40 }),
+  } : null;
+  if (!tool?.slug) return useFallback({ turn, fallback, reason: 'selected_composio_tool_missing_for_argument_review', stage: 'composio_argument_review', input: { userQuery } });
+  const options = [
+    { id: 'execute', criteria: 'The proposed arguments conform to the selected schema and preserve every material filter, entity, ordering, time range, scope, and result count explicitly requested by the user.' },
+    { id: 'regenerate', criteria: 'The selected tool can satisfy the request, but the proposed arguments omit, contradict, or add a material constraint. Regenerate only the schema argument object from the original request.' },
+    { id: 'ask_user', criteria: 'The selected schema cannot safely express a material user constraint and no supported argument object can be inferred.' },
+  ];
+  return gateway.choose({
+    turn,
+    stage: 'composio_argument_review',
+    userQuery,
+    context,
+    observation: {
+      selected_tool: tool,
+      proposed_arguments: boundedProjection(proposedArguments || {}, { maxChars: 7000, maxDepth: 5, maxItems: 40 }),
+      progress: boundedProjection(progress),
+    },
+    options,
+    instructions: 'Review only whether the proposed schema arguments preserve the original user request. Treat every named entity, identifier, status, date or time range, ordering, population, scope, and requested result count as material when explicit. Do not infer missing restrictions, credentials, or identifiers. Choose execute only when the object retains the requested meaning exactly; otherwise choose regenerate or ask_user. This is a validation decision, not tool execution authority.',
+    fallback,
+    signal,
+  });
+}
+
 export const HIVE_META_OPTIONS = Object.freeze([
   { id: 'entities', criteria: 'Resolve a named person, company, project, document, product, or subject to a canonical HIVE-MIND entity before retrieval.' },
   { id: 'recall', criteria: 'Retrieve stored memories, documents, decisions, evidence, or historical facts from the authenticated HIVE-MIND scope.' },

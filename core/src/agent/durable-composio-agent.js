@@ -553,11 +553,27 @@ export async function polishBriefing({ message, body, person, polishImpl } = {})
   return source;
 }
 
-export function argumentsForReadSlug(slug, { person = '' } = {}) {
-  if (/FETCH_EMAIL|SEARCH_PEOPLE|GET_CONTACT|LIST_MESSAGES|LIST_THREADS|LIST_EMAILS/i.test(slug) && person) {
-    return { query: person, max_results: 8 };
-  }
-  return {};
+function genericReadArgumentInput({ message, slug, schema, proposedArguments, receipts = [], feedback = '' } = {}) {
+  return [
+    'Compile only a JSON argument object for the selected connected-app tool.',
+    `Original user request: ${String(message || '').slice(0, 4000)}`,
+    `Selected tool: ${String(slug || '').slice(0, 180)}`,
+    `Tool schema: ${JSON.stringify(schema || {}).slice(0, 6000)}`,
+    `Existing candidate arguments: ${JSON.stringify(proposedArguments || {}).slice(0, 4000)}`,
+    `Completed bounded receipts: ${JSON.stringify(receipts || []).slice(0, 4000)}`,
+    feedback ? `Validation feedback: ${String(feedback).slice(0, 1200)}` : '',
+    'Preserve every explicit user constraint, including entities, identifiers, time ranges, ordering, scope, statuses, and requested result count. Do not invent restrictions, credentials, IDs, or destinations. Return only fields accepted by the selected schema.',
+  ].filter(Boolean).join('\n\n');
+}
+
+function allowedSchemaArguments(candidate, schema = {}) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return {};
+  const properties = schemaProperties(schema);
+  const allowed = new Set(Object.keys(properties));
+  const reserved = /^(?:user_id|userid|org_id|connected_account_id|entity_id|session_id|metadata|__proto__|constructor|prototype)$/i;
+  return Object.fromEntries(Object.entries(candidate).filter(([key, value]) => (
+    allowed.has(key) && !reserved.test(key) && value !== undefined && value !== null && value !== ''
+  )));
 }
 
 export function draftSubject(message) {
@@ -1790,20 +1806,81 @@ export async function runDurableComposioAgent({
   };
 
   const runOneRead = async (call) => {
-    let args = { ...(call.arguments || {}) };
-    if (typeof composioSvc.generateToolInputs === 'function' && !isRecipientLookupSlug(call.slug)) {
-      const generated = await composioSvc.generateToolInputs(call.slug, evidenceText(call.slug)).catch(() => null);
-      if (generated && typeof generated === 'object' && !Array.isArray(generated)) {
-        const clean = { ...generated };
-        for (const key of Object.keys(clean)) {
-          if (/^(user_id|userid|org_id|connected_account_id|entity_id|session_id|metadata)$/i.test(key)) delete clean[key];
-        }
-        if (Object.keys(clean).length) args = { ...args, ...clean };
+    const schema = run.scratch.tool_schemas?.[call.slug] || {};
+    let args = allowedSchemaArguments(call.arguments, schema);
+    const compileArguments = async (feedback = '', { preserveCandidate = true } = {}) => {
+      if (typeof composioSvc.generateToolInputs !== 'function') return args;
+      const generated = await composioSvc.generateToolInputs(call.slug, genericReadArgumentInput({
+        message,
+        slug: call.slug,
+        schema,
+        proposedArguments: args,
+        receipts: readResults.slice(-6),
+        feedback,
+      }), {
+        systemPrompt: 'Compile one selected connected-app read tool input. Preserve all explicit request constraints. Return only the selected tool schema object; do not execute.',
+      }).catch(() => null);
+      const clean = allowedSchemaArguments(generated, schema);
+      // The compiler is given the candidate as context. Its schema-bound output
+      // is the corrected version, so it must take precedence over a stale or
+      // overly broad model-proposed field.
+      args = preserveCandidate ? { ...args, ...clean } : clean;
+      return args;
+    };
+    await compileArguments();
+    const reviewArguments = async () => {
+      let decision;
+      try {
+        decision = await decisionStage({
+          runtime: 'legacy',
+          stage: 'composio_argument_review',
+          turn_id: run.id,
+          user_query: message,
+          actor_id: ctx?.userId,
+          context: run.scratch.conversation_context || null,
+          selected_tool: {
+            slug: call.slug,
+            toolkit: toolkitFromSlug(call.slug),
+            authority: 'read',
+            description: schema.description || '',
+            schema,
+          },
+          proposed_arguments: args,
+          progress: { completed_receipts: (run.steps || []).slice(-8) },
+        }, {
+          env: ctx?.decisionEnv || process.env,
+          provider: ctx?.decisionProvider || null,
+          signal: ctx?._signal || null,
+        });
+      } catch (error) {
+        decision = { status: 'defer', authoritative: false, receipt: { source: 'fallback', reason: String(error?.message || error).slice(0, 240) } };
       }
+      emitDecision({
+        stage: 'composio_argument_review',
+        status: decision.status,
+        selected: decision.selected || null,
+        source: decision.receipt?.source || 'fallback',
+        authoritative: decision.authoritative === true,
+        probability: decision.receipt?.probability ?? null,
+        margin: decision.receipt?.margin ?? null,
+        request_id: decision.receipt?.requestId || null,
+        run_id: run.id,
+      });
+      return decision;
+    };
+    let contract = await reviewArguments();
+    if (contract.status === 'selected' && contract.authoritative === true && contract.selected === 'regenerate') {
+      await compileArguments('The prior candidate dropped or contradicted a material constraint. Rebuild it from the original user request.', { preserveCandidate: false });
+      contract = await reviewArguments();
     }
-    if (!Object.keys(args).length) args = argumentsForReadSlug(call.slug, { person });
-    const requestedLimit = requestedResultLimit(message);
-    if (requestedLimit && isMailboxMessageSlug(call.slug)) args.max_results = requestedLimit;
+    if (contract.status === 'selected' && contract.authoritative === true && contract.selected !== 'execute') {
+      const reason = contract.selected === 'ask_user'
+        ? 'A required request constraint cannot be represented by the selected tool.'
+        : 'The selected tool arguments do not preserve the requested scope.';
+      finishTool(emit, run, call.slug, { kind: 'read', status: 'skipped', summary: reason, extra: { executor: 'composio' }, args });
+      readResults.push({ slug: call.slug, successful: false, data: null, error: reason });
+      return { successful: false, data: null, error: reason };
+    }
     beginTool(emit, run, call.slug, args);
     let result = { successful: false, data: null, error: 'execute unavailable' };
     try {
@@ -2171,7 +2248,7 @@ export async function runDurableComposioAgent({
       if (toolkit && !toolkitHasActiveConnection(toolkit, connected, run.scratch.toolkit_connection_statuses || {})) {
         return pauseForAppConnect(toolkit);
       }
-      await runOneRead({ slug, arguments: next.arguments || argumentsForReadSlug(slug, { person }) });
+      await runOneRead({ slug, arguments: next.arguments || {} });
       continue;
     }
 

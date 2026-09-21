@@ -57,6 +57,22 @@ test('active mode returns one accepted capability selection', async () => {
   assert.equal(result.authoritative, true);
 });
 
+test('active mode reviews schema-bound connected-app arguments after selection', async () => {
+  const result = await decideRuntimeStage({
+    stage: 'composio_argument_review',
+    user_query: 'Find newest records from Griseldis and return one.',
+    actor_id: 'user-1',
+    selected_tool: { slug: 'ANY_APP_SEARCH_RECORDS', toolkit: 'any-app', authority: 'read', schema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' } } } },
+    proposed_arguments: { query: 'Griseldis', limit: 1 },
+  }, {
+    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },
+    provider: { async decideChoice() { return { choice: 'execute', probability: 0.98, margin: 0.97, probabilities: { execute: 0.98, regenerate: 0.01, ask_user: 0.01 } }; } },
+  });
+  assert.equal(result.status, 'selected');
+  assert.equal(result.selected, 'execute');
+  assert.equal(result.authoritative, true);
+});
+
 test('provider errors and low confidence stay fail-open to the current selector', async () => {
   const unavailable = await decideRuntimeStage({ stage: 'capability', user_query: 'Find my last email', actor_id: 'user-1' }, {
     env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },

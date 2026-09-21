@@ -1,9 +1,12 @@
 import unittest
 
-from app import _build_agent_system_prompt, _build_workrun_prompt
+from app import _DEFAULT_WORKRUN_MODEL, _build_agent_system_prompt, _build_workrun_prompt
 
 
 class WorkRunPromptTests(unittest.TestCase):
+    def test_default_workrun_model_has_a_shipped_gateway_card(self):
+        self.assertEqual(_DEFAULT_WORKRUN_MODEL, "deepseek/deepseek-v4-flash")
+
     def test_system_prompt_keeps_direct_answers_tool_free(self):
         prompt = _build_agent_system_prompt(None)
         self.assertIn("answer directly", prompt)

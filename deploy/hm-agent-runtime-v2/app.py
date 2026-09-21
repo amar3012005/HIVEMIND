@@ -521,7 +521,10 @@ _forwarders: dict[str, EventForwarder] = {}
 # env so the same image runs against a different provider without a code change.
 _DEFAULT_WORKRUN_MODEL = os.getenv(
     "AGENTSCOPE_WORKRUN_MODEL",
-    "deepseek/deepseek-v4-flash-0731",
+    # This is the model id verified by the preview gateway and supplied by
+    # this image's model card. The old -0731 suffix is not a gateway catalogue
+    # id, so a session could start and then fail before its first text delta.
+    "deepseek/deepseek-v4-flash",
 )
 
 # InjectionConfig.inject_runtime_state stays the Agent constructor default

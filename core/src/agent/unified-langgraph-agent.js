@@ -175,7 +175,15 @@ async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
  * synthesized from verified, redacted provider receipts only.
  */
 async function defaultFinalStream({ messages, model, apiKey, signal, onDelta }) {
-  const response = await chatCompletionStream(resolveChatSynthesisModel(model), {
+  // The planner's selected model is deliberately carried in `model`, but it
+  // is not necessarily a good interactive renderer.  In particular, a
+  // reasoning-first planner may stream private reasoning frames and withhold
+  // every visible token until it completes.  Final synthesis has no tool
+  // authority left: use the deployment-owned final model when supplied so
+  // the browser receives the configured visible-token Nitro stream.
+  const finalModel = String(process.env.HIVEMIND_AGENT_FINAL_MODEL || '').trim()
+    || resolveChatSynthesisModel(model);
+  const response = await chatCompletionStream(finalModel, {
     method: 'POST', signal,
     body: JSON.stringify({
       temperature: 0,

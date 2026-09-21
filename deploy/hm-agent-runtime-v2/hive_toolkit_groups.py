@@ -34,7 +34,11 @@ HIVEMIND_NAMES = {
     "hivemind_complete_workrun",
 }
 WEB_NAMES = {"hivemind_web_search"}
-APPS_NAMES = {"hivemind_composio_tools", "hivemind_composio_execute"}
+APPS_NAMES = {
+    "hivemind_composio_tools",
+    "hivemind_composio_execute",
+    "hivemind_prepare_external_action",
+}
 BASIC_NAMES = {"PlaybookList", "PlaybookGet"}
 TEAM_TOOL_NAMES = {
     "TeamCreate",
@@ -98,7 +102,7 @@ def extra_groups_for(tools: list[ToolBase]) -> tuple[list[ToolBase], list[ToolGr
             ToolGroup(
                 name="connected_apps",
                 description="Discover and act through org-connected apps (Composio).",
-                instructions="If need_connect, stop and ask the user to connect. Execute writes once.",
+                instructions="If need_connect, stop and ask the user to connect. Reads use their scoped grants. Prepare an external write only after evidence is complete; HIVE approval, not this tool group, controls execution.",
                 tools=buckets["connected_apps"],
             ),
         )

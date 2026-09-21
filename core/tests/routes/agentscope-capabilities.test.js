@@ -145,3 +145,28 @@ test('connected app capabilities issue scoped read grants and cannot execute wri
   assert.equal(denied.statusCode, 403);
   assert.equal(calls.some((call) => call.kind === 'execute' && call.toolSlug === 'GMAIL_SEND_EMAIL'), false);
 });
+
+test('external action preparation creates a HIVE approval draft and never invokes a provider', async () => {
+  const calls = [];
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql, ...args) => {
+      calls.push({ sql, args });
+      if (sql.includes('SELECT id, room_id, turn_id, status')) return [{ id: '33333333-3333-3333-3333-333333333333', room_id: '44444444-4444-4444-4444-444444444444', turn_id: '55555555-5555-5555-5555-555555555555', status: 'running' }];
+      return [{ id: '33333333-3333-3333-3333-333333333333', status: 'running' }];
+    },
+    pendingWrite: {
+      findFirst: async () => null,
+      create: async ({ data }) => ({ id: '66666666-6666-6666-6666-666666666666', ...data }),
+    },
+  };
+  const result = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, jsonResponse, prisma,
+    parseBody: async () => ({ agentscope_session_id: 'session-1', provider: 'gmail', tool_name: 'GMAIL_SEND_EMAIL', arguments: { to: 'ada@example.com', body: 'Hello' }, summary: 'Send the reviewed email to Ada.' }),
+    pathname: '/internal/hivemind/actions/prepare',
+  });
+  assert.equal(result.statusCode, 202);
+  assert.equal(result.body.status, 'approval_required');
+  assert.equal(result.body.executed, false);
+  assert.equal(calls.some(({ sql }) => sql.includes('SET events')), true);
+});

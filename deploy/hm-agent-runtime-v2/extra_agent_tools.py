@@ -740,6 +740,46 @@ unavailable here and must go through a separate approval-backed workflow."""
         return _ok(data)
 
 
+class PrepareExternalActionTool(_HiveMindToolBase):
+    """Create a durable HIVE approval draft for a proposed external action."""
+
+    name: str = "hivemind_prepare_external_action"
+
+    description: str = """Prepare, but never execute, an external connected-app
+action. HIVE stores an immutable approval draft and records it on the WorkRun.
+Use this only after the relevant Task is complete and the action has enough
+evidence to be reviewed. This tool never sends, publishes, edits, or deletes
+anything; an approved HIVE policy path is required for execution."""
+
+    is_read_only: bool = False
+
+    class Params(BaseModel):
+        provider: str = Field(description="Connected provider, for example gmail or slack.")
+        tool_name: str = Field(description="Exact provider action that would run after approval.")
+        arguments: dict = Field(default_factory=dict, description="Proposed provider arguments, never executed by this call.")
+        summary: str = Field(description="Short human-review summary of the proposed action.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, provider: str, tool_name: str, arguments: Optional[dict] = None, summary: str = "") -> ToolChunk:
+        try:
+            data = await _call_hm_core(
+                "/internal/hivemind/actions/prepare",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={
+                    "agentscope_session_id": self._session_id,
+                    "provider": provider,
+                    "tool_name": tool_name,
+                    "arguments": arguments or {},
+                    "summary": summary,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), provider=provider, tool_name=tool_name)
+        return _ok(data)
+
+
 # ---------------------------------------------------------------------------
 # The factory
 # ---------------------------------------------------------------------------
@@ -765,6 +805,7 @@ _TOOL_CLASSES = (
     PlaybookGetTool,
     ComposioToolsTool,
     ComposioExecuteTool,
+    PrepareExternalActionTool,
 )
 
 

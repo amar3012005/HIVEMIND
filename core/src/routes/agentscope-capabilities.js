@@ -59,6 +59,14 @@ function decodeArtifact(contentBase64) {
   return bytes;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 async function scopedWorkRun(prisma, sessionId, p) {
   if (!sessionId) return null;
   const rows = await prisma.$queryRawUnsafe(
@@ -194,6 +202,41 @@ export async function handleAgentScopeCapabilityRoute({
       const denied = /(?:read_denied|grant_(?:denied|expired|invalid|scope_denied))/.test(String(error.message));
       return jsonResponse(res, { error: error.message }, denied ? 403 : 502);
     }
+  }
+  if (pathname === '/internal/hivemind/actions/prepare') {
+    const sessionId = String(body?.agentscope_session_id || '').trim();
+    const run = await scopedWorkRun(prisma, sessionId, p);
+    if (!run) return jsonResponse(res, { error: 'No active WorkRun matches this AgentScope session.' }, 404);
+    if (run.status !== 'running') return jsonResponse(res, { error: 'External actions can be prepared only for a running WorkRun.' }, 409);
+    const provider = String(body?.provider || '').trim().toLowerCase();
+    const toolName = String(body?.tool_name || '').trim();
+    const args = body?.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : null;
+    const summary = String(body?.summary || '').trim().replace(/\s+/g, ' ').slice(0, 1200);
+    if (!/^[a-z0-9_-]{2,50}$/.test(provider) || !/^[A-Za-z0-9_.:-]{2,160}$/.test(toolName) || !args || !summary) {
+      return jsonResponse(res, { error: 'provider, tool_name, object arguments, and summary are required.' }, 400);
+    }
+    const proposal = { provider, tool_name: toolName, arguments: args, workrun_id: run.id };
+    const argsHash = crypto.createHash('sha256').update(canonicalJson(proposal)).digest('hex');
+    const idempotencyKey = `agentscope-workrun:${argsHash}`;
+    let approval = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: p.orgId, userId: p.userId } });
+    if (!approval) {
+      approval = await prisma.pendingWrite.create({ data: {
+        userId: p.userId, orgId: p.orgId, provider, toolGroup: 'agentscope_workrun', toolName,
+        toolArgs: { ...args, _agentscope_workrun_id: run.id, _agentscope_session_id: sessionId, _approval_contract: 'draft_only' },
+        argsHash, traceId: run.id, idempotencyKey, preview: summary,
+        expiresAt: new Date(Date.now() + 15 * 60_000), status: 'draft',
+      } });
+    }
+    await appendWorkRunEvent(prisma, run.id, {
+      t: 'external_action.pending', tool: toolName,
+      approval: { id: approval.id, status: approval.status, summary: approval.preview || summary, provider, expires_at: approval.expiresAt || null },
+      ts: Date.now(),
+    });
+    return jsonResponse(res, {
+      status: 'approval_required', authority: 'hivemind_pending_write',
+      approval: { id: approval.id, status: approval.status, summary: approval.preview || summary, expires_at: approval.expiresAt || null },
+      executed: false,
+    }, 202);
   }
   const recordMatch = pathname.match(/^\/internal\/hivemind\/context\/(people|projects|objectives|work|artifacts)$/);
   if (recordMatch && req.method === 'GET') {

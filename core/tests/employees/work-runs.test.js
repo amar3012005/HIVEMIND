@@ -87,6 +87,27 @@ test('AgentScope tool input and output deltas retain the call identity for durab
   assert.equal(output.call_id, 'call-1');
 });
 
+test('AgentScope transcript deltas remain typed after durable WorkRun projection', () => {
+  const text = normalizeAgentScopeEvent({
+    id: 'event-text-1', type: 'TEXT_BLOCK_DELTA', block_id: 'answer-1', reply_id: 'reply-1', delta: 'First chunk',
+  });
+  const thinking = normalizeAgentScopeEvent({
+    id: 'event-thinking-1', type: 'THINKING_BLOCK_DELTA', block_id: 'think-1', delta: 'Checking context',
+  });
+  const tool = normalizeAgentScopeEvent({
+    id: 'event-tool-1', type: 'TOOL_CALL_START', tool_call_id: 'call-1', tool_call_name: 'hivemind_recall', input: { query: 'recent work' },
+  });
+  assert.deepEqual(text, {
+    t: 'assistant.delta', type: 'TEXT_BLOCK_DELTA', delta: 'First chunk', block_id: 'answer-1', reply_id: 'reply-1',
+    source_event_id: 'event-text-1', ts: text.ts,
+  });
+  assert.equal(thinking.type, 'THINKING_BLOCK_DELTA');
+  assert.equal(thinking.delta, 'Checking context');
+  assert.equal(tool.type, 'TOOL_CALL_START');
+  assert.equal(tool.tool_call_id, 'call-1');
+  assert.deepEqual(tool.input, { query: 'recent work' });
+});
+
 test('replayed AgentScope event ids do not duplicate the durable WorkRun timeline', async () => {
   const calls = [];
   let storedSourceEventId = null;

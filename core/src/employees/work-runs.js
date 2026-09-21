@@ -114,32 +114,51 @@ export function normalizeAgentScopeEvent(event) {
   // one tool call has several distinct start/delta/result events.
   const sourceEventId = typeof event.id === 'string' && event.id ? event.id : null;
   const emit = (value) => (sourceEventId ? { ...value, source_event_id: sourceEventId } : value);
+  // The browser must be able to reconstruct a live assistant turn from the
+  // durable WorkRun stream alone.  Keep the native event discriminator and
+  // fields required by the transcript reducer alongside HIVE's compact
+  // product projection.  A subscriber that joins after AgentScope emitted a
+  // delta then receives the same ordered block, rather than waiting for a
+  // page refresh to fetch the final session history.
+  const native = (value) => emit({ ...value, type });
 
-  if (type === 'REPLY_START') return emit({ t: 'agent.status', status: 'thinking', ts });
+  if (type === 'REPLY_START') return native({
+    t: 'agent.status', status: 'thinking', reply_id: event.reply_id || event.id || null, ts,
+  });
   if (type === 'REPLY_END') {
     const reason = event.finished_reason || event.reason || 'completed';
     return reason === 'completed'
-      ? emit({ t: 'agent.status', status: 'idle', reason, ts })
-      : emit({ t: 'workrun.failed', reason, error: 'The agent stopped before finishing. Work is saved.', ts });
+      ? native({ t: 'agent.status', status: 'idle', reason, finished_reason: reason, ts })
+      : native({ t: 'workrun.failed', reason, finished_reason: reason, error: 'The agent stopped before finishing. Work is saved.', ts });
+  }
+  if (type === 'TEXT_BLOCK_DELTA' || type === 'TEXT_BLOCK_END'
+    || type === 'THINKING_BLOCK_DELTA' || type === 'THINKING_BLOCK_END') {
+    return native({
+      t: 'assistant.delta',
+      delta: String(event.delta ?? event.text ?? event.content ?? event.output ?? event.thinking ?? ''),
+      block_id: event.block_id || null,
+      reply_id: event.reply_id || null,
+      ts,
+    });
   }
   if (type === 'TOOL_CALL_START') {
     return nativeTask(tool)
-      ? emit({ t: 'plan.updated', family: 'task', tool, call_id: callId, ts })
-      : emit({ t: 'tool.started', tool, call_id: callId, ts });
+      ? native({ t: 'plan.updated', family: 'task', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, input: event.input ?? event.arguments ?? event.args, ts })
+      : native({ t: 'tool.started', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, input: event.input ?? event.arguments ?? event.args, ts });
   }
   // AgentScope carries tool arguments incrementally. Retain the chunks in
   // HIVE's durable event log so a reconnecting Rooms client can show the same
   // inspectable call input as the live session stream.
   if (type === 'TOOL_CALL_DELTA') {
-    return emit({ t: 'tool.input.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts });
+    return native({ t: 'tool.input.delta', tool_call_name: tool, tool_call_id: callId, call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts });
   }
   if (type === 'TOOL_RESULT_TEXT_DELTA') {
-    return emit({ t: 'tool.output.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts });
+    return native({ t: 'tool.output.delta', tool_call_name: tool, tool_call_id: callId, call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts });
   }
   if (type === 'TOOL_RESULT_END') {
     const team = asObject(event.metadata?.hivemind_team, null);
     if (team?.team_id && team?.action) {
-      return emit({
+      return native({
         t: 'team.updated',
         team_id: team.team_id,
         action: team.action,
@@ -154,8 +173,8 @@ export function normalizeAgentScopeEvent(event) {
       });
     }
     return nativeTask(tool)
-      ? emit({ t: 'plan.updated', family: 'task', tool, call_id: callId, ts })
-      : emit({ t: 'tool.completed', tool, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), metadata: event.metadata || {}, ts });
+      ? native({ t: 'plan.updated', family: 'task', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, ts })
+      : native({ t: 'tool.completed', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), output: event.output ?? event.result ?? event.content, metadata: event.metadata || {}, ts });
   }
   if (type === 'CUSTOM' && event.name === 'state_updated') {
     const tasks = event.value?.tasks_context?.tasks;

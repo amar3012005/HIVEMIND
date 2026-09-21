@@ -6,6 +6,7 @@ import {
   completeWorkRun,
   dispatchWorkRun,
   normalizeAgentScopeEvent,
+  recoverWorkRun,
   validateWorkRunCompletion,
 } from '../../src/employees/work-runs.js';
 
@@ -77,6 +78,7 @@ test('dispatch creates the Core envelope before calling the AgentScope runtime',
       if (sql.startsWith('INSERT INTO "hivemind"."work_runs"')) return [{ id: 'run-1', status: 'queued' }];
       if (sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events')) return [{ id: 'run-1', status: 'queued' }];
       if (sql.startsWith('SELECT id, status FROM')) return [{ id: 'run-1', status: calls.filter((entry) => entry.sql.startsWith('UPDATE "hivemind"."work_runs" SET status')).length ? 'starting' : 'queued' }];
+      if (sql.startsWith('UPDATE "hivemind"."work_runs"\n          SET scope')) return [{ id: 'run-1', status: 'starting' }];
       if (sql.startsWith('UPDATE "hivemind"."work_runs" SET status')) return [{ id: 'run-1', status: 'running' }];
       throw new Error(`unexpected query: ${sql}`);
     },
@@ -90,10 +92,38 @@ test('dispatch creates the Core envelope before calling the AgentScope runtime',
     runtimeFetch: async (_url, options) => {
       assert.equal(options.body.turn_id, 'turn-1');
       assert.equal(options.body.workrun_id, 'run-1');
-      return { ok: true, json: async () => ({ session_id: 'session-1', workspace_id: 'workspace-1' }) };
+      return { ok: true, json: async () => ({ session_id: 'session-1', agent_id: 'agent-1', workspace_id: 'workspace-1' }) };
     },
   });
   assert.equal(result.turnId, 'turn-1');
   assert.equal(result.sessionId, 'session-1');
   assert.ok(calls.find((entry) => entry.sql.startsWith('INSERT INTO "hivemind"."work_runs"')));
+  assert.ok(calls.find((entry) => entry.sql.startsWith('UPDATE "hivemind"."work_runs"\n          SET scope')));
+});
+
+test('recovery reattaches an existing session and never resends the WorkRun goal', async () => {
+  const calls = [];
+  const prisma = {
+    $queryRawUnsafe: async (sql, ...params) => {
+      calls.push({ sql, params });
+      if (sql.startsWith('SELECT id, status, agentscope_session_id')) {
+        return [{ id: 'run-1', status: 'running', agentscope_session_id: 'session-1', workspace_id: 'workspace-1', turn_id: 'turn-1', room_id: 'room-1', scope: { runtime_binding: { agent_id: 'agent-1' } } }];
+      }
+      if (sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events')) return [{ id: 'run-1', status: 'running' }];
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+  const result = await recoverWorkRun({
+    prisma, workRunId: 'run-1', userId: 'user-1', orgId: 'org-1',
+    runtimeFetch: async (url, options) => {
+      assert.match(url, /\/workrun\/recover$/);
+      assert.deepEqual(options.body, {
+        workrun_id: 'run-1', agent_id: 'agent-1', session_id: 'session-1', turn_id: 'turn-1',
+        room_id: 'room-1', org_id: 'org-1', workspace_id: 'workspace-1',
+      });
+      return { ok: true, json: async () => ({ recovered: true }) };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.some((call) => JSON.stringify(call.params).includes('Reply exactly')), false);
 });

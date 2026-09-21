@@ -197,6 +197,40 @@ export async function completeWorkRun(prisma, workRunId, { result = {}, error = 
 export const agentScopeRuntimeUrl = () =>
   String(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
 
+/** Reattach Core's event forwarder to an existing AgentScope session.
+ *
+ * Recovery is intentionally unable to dispatch a goal. The runtime verifies
+ * the durable session/agent/workspace tuple and only resumes its subscriber.
+ */
+export async function recoverWorkRun({ prisma, workRunId, userId, orgId, runtimeFetch = internalFetch } = {}) {
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id, status, agentscope_session_id, workspace_id, turn_id, room_id, scope
+       FROM "hivemind"."work_runs"
+      WHERE id = $1::uuid AND user_id = $2::uuid AND org_id = $3::uuid LIMIT 1`,
+    workRunId, userId, orgId,
+  );
+  const run = rows?.[0];
+  if (!run) return { ok: false, reason: 'not_found' };
+  if (isTerminalWorkRun(run.status)) return { ok: false, reason: 'terminal' };
+  const binding = asObject(run.scope).runtime_binding;
+  const agentId = String(binding?.agent_id || '').trim();
+  if (!run.agentscope_session_id || !agentId || !run.turn_id || !run.room_id) {
+    return { ok: false, reason: 'recovery_binding_missing' };
+  }
+  const response = await runtimeFetch(`${agentScopeRuntimeUrl()}/workrun/recover`, {
+    service: 'hm-agent-runtime', method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: {
+      workrun_id: run.id, agent_id: agentId, session_id: run.agentscope_session_id,
+      turn_id: run.turn_id, room_id: run.room_id, org_id: orgId,
+      ...(run.workspace_id ? { workspace_id: run.workspace_id } : {}),
+    }, userId, orgId, timeoutMs: 20_000,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || payload.error || `AgentScope recovery returned ${response.status}`);
+  await appendWorkRunEvent(prisma, run.id, { t: 'workrun.recovered', session_id: run.agentscope_session_id, ts: Date.now() });
+  return { ok: true, run, recovery: payload };
+}
+
 /**
  * Create HIVE's durable envelope, then hand precisely that envelope to the
  * AgentScope service. The service receives no database credentials and never
@@ -249,6 +283,13 @@ export async function dispatchWorkRun({
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || payload.error || `AgentScope runtime returned ${response.status}`);
+    if (payload.agent_id) await prisma.$queryRawUnsafe(
+      `UPDATE "hivemind"."work_runs"
+          SET scope = COALESCE(scope, '{}'::jsonb) || jsonb_build_object('runtime_binding', jsonb_build_object('agent_id', $2::text)),
+              updated_at = now()
+        WHERE id = $1::uuid`,
+      workRun.id, String(payload.agent_id),
+    );
     const started = await transitionWorkRun(prisma, workRun.id, 'running', {
       agentscopeSessionId: payload.session_id || null, workspaceId: payload.workspace_id || null,
     });

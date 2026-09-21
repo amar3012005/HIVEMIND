@@ -14571,7 +14571,7 @@ Write the persona now.`;
 
     // ─── AgentScope WorkRuns ───────────────────────────────────────────────
     // Browser access stays on the Core. The runtime is service-to-service only.
-    const workRunMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/session\/messages|\/session\/stream|\/chat|\/cancel)?$/);
+    const workRunMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/session\/messages|\/session\/stream|\/chat|\/cancel|\/recover)?$/);
     if (pathname === '/v1/workruns' && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -14615,6 +14615,17 @@ Write the persona now.`;
       const run = owned?.[0];
       if (!run) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
       if (!sub && req.method === 'GET') return jsonResponse(res, { workrun: run });
+      if (sub === '/recover' && req.method === 'POST') {
+        try {
+          const { recoverWorkRun } = await import('./employees/work-runs.js');
+          const outcome = await recoverWorkRun({
+            prisma, workRunId, userId: current.session.userId, orgId: current.session.orgId,
+          });
+          return outcome.ok
+            ? jsonResponse(res, { workrun: outcome.run, recovery: outcome.recovery }, 202)
+            : jsonResponse(res, { error: outcome.reason }, outcome.reason === 'not_found' ? 404 : 409);
+        } catch (error) { return jsonResponse(res, { error: error.message }, 502); }
+      }
       if (sub === '/events' && req.method === 'GET') {
         const after = Number(url.searchParams.get('after')) || 0;
         const events = Array.isArray(run.events) ? run.events : [];

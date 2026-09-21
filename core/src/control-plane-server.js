@@ -135,6 +135,7 @@ import {
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
 import { handleInternalWorkRunEventRoute } from './routes/workruns.js';
+import { handleAgentScopeCapabilityRoute } from './routes/agentscope-capabilities.js';
 import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import {
@@ -15386,6 +15387,17 @@ Write the persona now.`;
         console.warn('[workruns] event apply failed:', error.message);
         return jsonResponse(res, { error: 'Unable to record AgentScope progress.' }, 500);
       }
+    }
+
+    if (
+      pathname === '/internal/hivemind/company-context'
+      || pathname === '/internal/hivemind/recall'
+      || pathname === '/internal/hivemind/playbooks'
+      || pathname === '/internal/hivemind/playbooks/get'
+    ) {
+      const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
+      if (!hasInternalApiKey(apiKey)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+      return handleAgentScopeCapabilityRoute({ req, res, parseBody, jsonResponse, prisma, pathname });
     }
 
     // GET /v1/hyper-rooms/:roomId/artifacts — CSI artifact read

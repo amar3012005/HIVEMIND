@@ -1,5 +1,7 @@
 import importlib
+import asyncio
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -70,6 +72,27 @@ class WorkspaceBackendTests(unittest.TestCase):
         runtime_root = Path(__file__).resolve().parents[1]
         requirements = (runtime_root / "requirements.txt").read_text()
         self.assertIn("workspace-docker", requirements)
+
+    def test_per_session_ids_are_distinct_and_workspace_paths_cannot_escape_root(self):
+        backend = self._load_backend(
+            AGENTSCOPE_WORKSPACE_BACKEND="docker",
+            AGENTSCOPE_WORKSPACE_ISOLATION="per_session",
+        )
+
+        async def check_ids(manager):
+            first = await manager.assign_workspace_id(
+                user_id="user-1", agent_id="agent-1", session_id="session-1",
+            )
+            second = await manager.assign_workspace_id(
+                user_id="user-1", agent_id="agent-1", session_id="session-2",
+            )
+            return first, second
+
+        manager = backend.build_workspace_manager(tempfile.mkdtemp(prefix="hm-workspace-") )
+        first, second = asyncio.run(check_ids(manager))
+        self.assertNotEqual(first, second)
+        with self.assertRaisesRegex(ValueError, "escapes the workspace base directory"):
+            manager._workdir_for("../outside")
 
 
 if __name__ == "__main__":

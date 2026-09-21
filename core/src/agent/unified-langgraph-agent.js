@@ -739,6 +739,19 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       };
       return transition(state, 'awaiting_approval', patch, { tool_slug: receipt.tool_slug, reason_code: 'write_approval_required' });
     }
+    if (call.name === 'hivemind_meta' && call.args.operation === 'save'
+      && receipt?.successful === false && receipt?.error === 'hivemind_save_payload_required') {
+      const response = 'Tell me the specific fact, decision, or note you want saved, and where it belongs (personal, organization, team, or project).';
+      const receipts = [...state.receipts, { tool: call.name, action: 'save', successful: false, error: receipt.error, data: null }];
+      return {
+        pendingTool: null,
+        callFingerprints: [...state.callFingerprints, fingerprint],
+        messages: [...state.messages, toolMessage(call, receipt)],
+        receipts,
+        steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'needs_input', summary: response }],
+        result: outputShape({ ...state, receipts }, response, 'needs_input'),
+      };
+    }
     if (call.name === 'hivemind_meta' && call.args.operation === 'save' && receipt?.data?.needs_project_choice) {
       const request = memoryScopeRequest(receipt, state.runId);
       const patch = {
@@ -871,11 +884,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   };
 
   const routeModel = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
-  const routeTool = state => state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model'));
+  const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model')));
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const sealNode = async state => {
     onEvent({ type: 'finish', text: state.result.response });
-    return transition(state, state.result.status === 'completed' ? 'sealed' : 'failed', {}, { reason_code: state.result.status });
+    const terminalState = state.result.status === 'completed' ? 'sealed'
+      : state.result.status === 'needs_input' ? 'awaiting_input' : 'failed';
+    return transition(state, terminalState, {}, { reason_code: state.result.status });
   };
 
   return new StateGraph(State)
@@ -888,7 +903,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addNode('seal', sealNode)
     .addEdge(START, 'admit_context').addEdge('admit_context', 'model')
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
-    .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval'])
+    .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
     .addEdge('memory_scope', 'model')
     .addEdge('approval', 'model').addEdge('seal', END)

@@ -124,6 +124,22 @@ test('an explicit durable-save request repairs a malformed recall and executes t
   assert.match(result.response, /saved the dedicated memory/i);
 });
 
+test('a malformed explicit save asks for missing facts once instead of retrying the write loop', async () => {
+  const prisma = fakePrisma();
+  let turns = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: ctx(prisma, 'save-missing-payload'),
+    checkpointer: new MemorySaver(), composio: {},
+    modelStep: async () => {
+      turns += 1;
+      return { message: call('hivemind_meta', { operation: 'save' }, `missing-save-${turns}`) };
+    },
+  });
+  assert.equal(turns, 1);
+  assert.equal(result.status, 'needs_input');
+  assert.match(result.response, /specific fact, decision, or note/i);
+});
+
 test('a save without a stated destination interrupts once for scope and resumes the same durable write', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

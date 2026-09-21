@@ -25,7 +25,7 @@ test('capability mapping returns only the schema family for the next model step'
   assert.deepEqual(decisionGatewayToolNames('direct_answer'), []);
   assert.deepEqual(decisionGatewayToolNames('hivemind_meta'), ['hivemind_meta']);
   assert.deepEqual(decisionGatewayToolNames('hivemind_profile_update'), ['hivemind_update_profile']);
-  assert.deepEqual(decisionGatewayToolNames('hivemind_save'), ['hivemind_save_memory']);
+  assert.deepEqual(decisionGatewayToolNames('hivemind_save'), ['hivemind_save_memory', 'hivemind_batch_save_memories']);
   assert.deepEqual(decisionGatewayToolNames('composio_search'), ['hivemind_connected_task']);
   assert.equal(decisionGatewayToolNames('composio_search', { connected: false }), null);
   assert.equal(decisionGatewayToolNames('fallback_harness'), null);

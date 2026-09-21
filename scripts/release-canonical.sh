@@ -273,6 +273,39 @@ if [ -n "${REQUESTED[core]:-}" ]; then
   fi
 fi
 
+# A runner recreation must not interrupt an active user turn. The live runner
+# exposes an authenticated, process-local count; require two consecutive idle
+# observations to close the race with a just-admitted turn. The one-time legacy
+# bootstrap flag exists only for upgrading a runner that predates this endpoint.
+if [ -n "${REQUESTED[harness-runner]:-}" ]; then
+  echo "[drain] waiting for active Harness turns"
+  HARNESS_DRAIN_SECRET=$(awk -F= '$1 == "HIVE_HARNESS_RUNNER_SERVICE_SECRET" { print substr($0, length($1) + 2); exit }' "$ENVF")
+  [ -n "$HARNESS_DRAIN_SECRET" ] || { echo "FATAL: Harness drain secret unavailable"; exit 1; }
+  idle_observations=0
+  drain_deadline=$((SECONDS + ${HARNESS_DRAIN_TIMEOUT_SECONDS:-600}))
+  while [ "$SECONDS" -lt "$drain_deadline" ]; do
+    response=$(curl -sS --max-time 5 -w '\n%{http_code}' \
+      -H "Authorization: Bearer $HARNESS_DRAIN_SECRET" \
+      http://127.0.0.1:${HIVE_HARNESS_PORT:-3080}/api/hivemind/runner-drain-status || true)
+    status=${response##*$'\n'}
+    body=${response%$'\n'*}
+    if [ "$status" = 404 ] && [ "${HARNESS_DRAIN_LEGACY_BOOTSTRAP:-0}" = 1 ]; then
+      echo "[drain] legacy runner has no drain endpoint; one-time bootstrap override accepted"
+      idle_observations=2
+      break
+    fi
+    [ "$status" = 200 ] || { sleep 2; continue; }
+    active=$(node -e 'const v=JSON.parse(process.argv[1]); if(!Number.isInteger(v.active_turns)) process.exit(2); process.stdout.write(String(v.active_turns))' "$body") \
+      || { echo "FATAL: invalid Harness drain response"; exit 1; }
+    if [ "$active" = 0 ]; then idle_observations=$((idle_observations + 1)); else idle_observations=0; fi
+    [ "$idle_observations" -ge 2 ] && break
+    sleep 2
+  done
+  unset HARNESS_DRAIN_SECRET response body
+  [ "$idle_observations" -ge 2 ] || { echo "FATAL: Harness still has active turns after drain timeout"; exit 1; }
+  echo "[drain] runner is quiescent"
+fi
+
 # ── deploy named hetzner services (--no-deps, override pins the sha image) ──
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"

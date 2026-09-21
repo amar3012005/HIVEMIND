@@ -21084,6 +21084,16 @@ exit \$RC
               });
               const syncResults = [];
               for (const p of ingestPayloads) {
+                // Idempotent interactive saves need a durable receipt quickly. Keep
+                // canonical entity extraction, but move its LLM work behind the
+                // committed memory row exactly as the async ingest path does.
+                if (saveKey) {
+                  p.defer_entity_linking = true;
+                  if (p.__ingest_tree && p.tree) {
+                    if (p.tree.parent) p.tree.parent.defer_entity_linking = true;
+                    if (Array.isArray(p.tree.children)) p.tree.children.forEach((c) => { c.defer_entity_linking = true; });
+                  }
+                }
                 const result = await ingestRoutedPayloadCanonical(p, persistentMemoryEngine);
 
                 // Handle predict-calibrate skipped memories
@@ -21112,6 +21122,11 @@ exit \$RC
                         mutation: { operation: r.operation || 'tree_child', deprecatedIds: r.deprecatedIds || [] }
                       }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
                     }
+                  }
+                  if (saveKey) {
+                    persistentMemoryEngine.linkEntitiesForMemories(
+                      allRows.map((r) => ({ id: r.memoryId })).filter((row) => row.id),
+                    );
                   }
                   continue;
                 }
@@ -21154,6 +21169,10 @@ exit \$RC
                   pageindexHook?.onMemoryIngested(memory, {
                     mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
                   }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
+                }
+
+                if (saveKey && result.memoryId) {
+                  persistentMemoryEngine.linkEntitiesForMemories([memory || { id: result.memoryId }]);
                 }
 
                 // Auto-extract profile facts from ingested content

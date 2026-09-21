@@ -193,10 +193,18 @@ export function normalizeAgentScopeEvent(event) {
   if (!event || typeof event !== 'object') return null;
   const type = String(event.type || event.t || '').toUpperCase();
   const ts = Date.now();
+  // Preserve AgentScope's event identity and native discriminator. The Rooms
+  // reducer uses these to replay a reconnect without creating another block.
+  const sourceEventId = typeof event.id === 'string' && event.id ? event.id : null;
+  const native = (value) => ({
+    ...value,
+    type,
+    ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
+  });
 
   switch (type) {
     case 'REPLY_START':
-      return { t: WORK_RUN_EVENT.STATUS, status: 'thinking', ts };
+      return native({ t: WORK_RUN_EVENT.STATUS, status: 'thinking', reply_id: event.reply_id || event.id || null, ts });
 
     case 'REPLY_END': {
       // AgentScope's ReplyFinishedReason is exactly: completed | interrupted |
@@ -204,37 +212,78 @@ export function normalizeAgentScopeEvent(event) {
       // mean the run stopped without finishing its work.
       const reason = event.finished_reason || event.reason || 'completed';
       const failed = reason !== 'completed';
-      return {
+      return native({
         t: failed ? WORK_RUN_EVENT.FAILED : WORK_RUN_EVENT.STATUS,
         status: failed ? 'failed' : 'idle',
         reason,
+        finished_reason: reason,
         error: failed ? publicWorkRunError(event.error || reason) : null,
         ts,
-      };
+      });
     }
+
+    case 'TEXT_BLOCK_DELTA':
+    case 'TEXT_BLOCK_END':
+    case 'THINKING_BLOCK_DELTA':
+    case 'THINKING_BLOCK_END':
+      return native({
+        t: 'assistant.delta',
+        delta: String(event.delta ?? event.text ?? event.content ?? event.output ?? event.thinking ?? ''),
+        block_id: event.block_id || null,
+        reply_id: event.reply_id || null,
+        ts,
+      });
 
     case 'TOOL_CALL_START': {
       const tool = event.tool_call_name || event.tool_name || event.name || null;
-      return {
+      return native({
         t: isNativeTaskTool(tool) ? WORK_RUN_EVENT.PLAN : WORK_RUN_EVENT.TOOL_STARTED,
         tool,
+        tool_call_name: tool,
+        tool_call_id: event.tool_call_id || event.id || null,
         call_id: event.tool_call_id || event.id || null,
+        input: event.input ?? event.arguments ?? event.args,
         family: isNativeTaskTool(tool) ? 'task' : null,
         ts,
-      };
+      });
     }
+
+    case 'TOOL_CALL_DELTA':
+      return native({
+        t: 'tool.input.delta',
+        tool: event.tool_call_name || event.tool_name || event.name || null,
+        tool_call_name: event.tool_call_name || event.tool_name || event.name || null,
+        tool_call_id: event.tool_call_id || event.id || null,
+        call_id: event.tool_call_id || event.id || null,
+        delta: String(event.delta || '').slice(0, 12_000),
+        ts,
+      });
+
+    case 'TOOL_RESULT_TEXT_DELTA':
+      return native({
+        t: 'tool.output.delta',
+        tool: event.tool_call_name || event.tool_name || event.name || null,
+        tool_call_name: event.tool_call_name || event.tool_name || event.name || null,
+        tool_call_id: event.tool_call_id || event.id || null,
+        call_id: event.tool_call_id || event.id || null,
+        delta: String(event.delta || '').slice(0, 12_000),
+        ts,
+      });
 
     case 'TOOL_RESULT_END': {
       const tool = event.tool_call_name || event.tool_name || event.name || null;
-      return {
+      return native({
         t: isNativeTaskTool(tool) ? WORK_RUN_EVENT.PLAN : WORK_RUN_EVENT.TOOL_COMPLETED,
         tool,
+        tool_call_name: tool,
+        tool_call_id: event.tool_call_id || event.id || null,
         call_id: event.tool_call_id || event.id || null,
         family: isNativeTaskTool(tool) ? 'task' : null,
         state: event.state || 'success',
         result: toolResultPreview(event),
+        output: event.output ?? event.result ?? event.content ?? null,
         ts,
-      };
+      });
     }
 
     case 'REQUIRE_USER_CONFIRM': {

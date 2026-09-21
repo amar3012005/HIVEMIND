@@ -32,9 +32,7 @@ export async function runDesktopCanary({
   Sandbox,
   outputDir,
   keepAlive = false,
-  printStreamUrl = false,
   now = () => new Date(),
-  log = console.log,
 } = {}) {
   if (!Sandbox?.create) throw new TypeError('Sandbox.create() is required')
   if (!outputDir) throw new TypeError('outputDir is required')
@@ -65,7 +63,6 @@ export async function runDesktopCanary({
     await desktop.stream.start({ requireAuth: true })
     const authKey = await desktop.stream.getAuthKey()
     const streamUrl = desktop.stream.getUrl({ authKey })
-    if (printStreamUrl) log(`Interactive E2B stream URL (do not share): ${streamUrl}`)
 
     const screenshot = Buffer.from(await desktop.screenshot())
     const screenshotPath = path.join(outputDir, 'desktop.png')
@@ -90,7 +87,7 @@ export async function runDesktopCanary({
     }
     await writeFile(path.join(outputDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`)
     // The caller may open this URL locally for an operator, but it must never
-    // be persisted. The receipt and normal console output remain secret-free.
+    // be persisted or printed. The receipt and normal console output remain secret-free.
     return { receipt, streamUrl, desktop }
   } finally {
     if (desktop && !keepAlive) await desktop.kill()

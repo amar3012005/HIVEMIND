@@ -12,14 +12,12 @@ const { Sandbox } = await import('@e2b/desktop')
 const root = path.dirname(fileURLToPath(import.meta.url))
 const outputDir = path.resolve(root, '..', 'evidence', new Date().toISOString().replaceAll(':', '-'))
 const keepAlive = process.env.E2B_KEEP_ALIVE === '1'
-const printStreamUrl = process.env.E2B_PRINT_STREAM_URL === '1'
 const openStreamLocally = process.env.E2B_OPEN_STREAM === '1'
 
 const { receipt, streamUrl } = await runDesktopCanary({
   Sandbox,
   outputDir,
   keepAlive,
-  printStreamUrl,
 })
 
 if (openStreamLocally) {

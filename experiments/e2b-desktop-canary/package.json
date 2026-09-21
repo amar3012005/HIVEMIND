@@ -4,11 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=20.18.1 <21 || >=22"
+    "node": ">=22 <23"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "canary": "node src/run-canary.mjs"
+    "canary": "node src/run-canary.mjs",
+    "v1": "node src/run-v1.mjs",
+    "resume": "node src/resume-lease.mjs"
   },
   "dependencies": {
     "@e2b/desktop": "2.4.0"

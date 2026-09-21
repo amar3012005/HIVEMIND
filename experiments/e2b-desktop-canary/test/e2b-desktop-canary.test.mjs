@@ -29,7 +29,6 @@ test('records a non-secret E2B computer-use receipt and releases the sandbox', a
     Sandbox: { create: async () => desktop },
     outputDir,
     now: () => new Date('2026-09-21T12:00:00.000Z'),
-    log: () => assert.fail('stream URL must not be logged by default'),
   })
 
   assert.equal(killed, true)

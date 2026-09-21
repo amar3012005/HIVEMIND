@@ -76,6 +76,18 @@ try {
   });
   assert.equal(artifact.response.status, 201, JSON.stringify(artifact.payload));
   assert.equal(artifact.payload.status, 'completed');
+  const replayedArtifact = await post('/internal/hivemind/artifacts', {
+    agentscope_session_id: sessionId,
+    path: 'workspace/market-brief.md',
+    title: 'Sourced market brief',
+    content_type: 'text/markdown',
+  });
+  assert.equal(replayedArtifact.response.status, 201, JSON.stringify(replayedArtifact.payload));
+  assert.equal(replayedArtifact.payload.artifact_id, artifact.payload.artifact_id);
+  const linked = await prisma.$queryRawUnsafe(
+    `SELECT result_artifact_ids FROM "hivemind"."work_runs" WHERE id = $1::uuid`, workRunId,
+  );
+  assert.deepEqual(linked[0].result_artifact_ids, [artifact.payload.artifact_id]);
 
   const completed = await post('/internal/hivemind/workruns/complete', {
     agentscope_session_id: sessionId,

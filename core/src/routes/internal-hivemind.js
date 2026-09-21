@@ -470,7 +470,11 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
     if (workRunId) {
       await prisma.$executeRawUnsafe(
         `UPDATE "hivemind"."work_runs"
-            SET result_artifact_ids = result_artifact_ids || $1::jsonb
+            SET result_artifact_ids = CASE
+              WHEN COALESCE(result_artifact_ids, '[]'::jsonb) @> $1::jsonb
+                THEN COALESCE(result_artifact_ids, '[]'::jsonb)
+              ELSE COALESCE(result_artifact_ids, '[]'::jsonb) || $1::jsonb
+            END
           WHERE id = $2::uuid AND org_id = $3::uuid`,
         JSON.stringify([artifact.id]),
         workRunId,

@@ -4,6 +4,7 @@ import {
   applyRuntimeEvent,
   canTransitionWorkRun,
   completeWorkRun,
+  dispatchWorkRun,
   normalizeAgentScopeEvent,
 } from '../../src/employees/work-runs.js';
 
@@ -50,4 +51,34 @@ test('lifecycle rejects resurrection and completes only once', async () => {
   const completed = await completeWorkRun(prisma, 'run-1', { result: { ok: true } });
   assert.equal(completed.ok, true);
   assert.equal(status, 'completed');
+});
+
+test('dispatch creates the Core envelope before calling the AgentScope runtime', async () => {
+  const calls = [];
+  const prisma = {
+    $queryRawUnsafe: async (sql, ...params) => {
+      calls.push({ sql, params });
+      if (sql.includes('SELECT id FROM "hivemind"."hyper_rooms"')) return [{ id: 'room-1' }];
+      if (sql.startsWith('INSERT INTO "hivemind"."work_runs"')) return [{ id: 'run-1', status: 'queued' }];
+      if (sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events')) return [{ id: 'run-1', status: 'queued' }];
+      if (sql.startsWith('SELECT id, status FROM')) return [{ id: 'run-1', status: calls.filter((entry) => entry.sql.startsWith('UPDATE "hivemind"."work_runs" SET status')).length ? 'starting' : 'queued' }];
+      if (sql.startsWith('UPDATE "hivemind"."work_runs" SET status')) return [{ id: 'run-1', status: 'running' }];
+      throw new Error(`unexpected query: ${sql}`);
+    },
+    $transaction: async (fn) => fn({ hyperTurn: {
+      findFirst: async () => ({ seq: 4 }),
+      create: async () => ({ id: 'turn-1' }),
+    } }),
+  };
+  const result = await dispatchWorkRun({
+    prisma, orgId: 'org-1', userId: 'user-1', goal: 'Reply exactly READY',
+    runtimeFetch: async (_url, options) => {
+      assert.equal(options.body.turn_id, 'turn-1');
+      assert.equal(options.body.workrun_id, 'run-1');
+      return { ok: true, json: async () => ({ session_id: 'session-1', workspace_id: 'workspace-1' }) };
+    },
+  });
+  assert.equal(result.turnId, 'turn-1');
+  assert.equal(result.sessionId, 'session-1');
+  assert.ok(calls.find((entry) => entry.sql.startsWith('INSERT INTO "hivemind"."work_runs"')));
 });

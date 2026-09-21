@@ -1,3 +1,5 @@
+import { internalFetch } from '../internal/internal-fetch.js';
+
 /**
  * AgentScope WorkRun control-plane projection.
  *
@@ -152,4 +154,70 @@ export async function completeWorkRun(prisma, workRunId, { result = {}, error = 
     t: error ? 'workrun.failed' : 'workrun.completed', ...(error ? { error } : { result }), ts: Date.now(),
   });
   return outcome;
+}
+
+export const agentScopeRuntimeUrl = () =>
+  String(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
+
+/**
+ * Create HIVE's durable envelope, then hand precisely that envelope to the
+ * AgentScope service. The service receives no database credentials and never
+ * decides tenancy, room ownership, or policy.
+ */
+export async function dispatchWorkRun({
+  prisma, orgId, userId, goal, roomId = null, playbookId = null,
+  playbookVersion = null, scope = {}, chatModelConfig = null,
+  runtimeFetch = internalFetch,
+} = {}) {
+  if (!orgId || !userId || !String(goal || '').trim()) throw new Error('orgId, userId, and goal are required');
+  let resolvedRoomId = roomId;
+  if (!resolvedRoomId) {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT id FROM "hivemind"."hyper_rooms"
+       WHERE org_id = $1::uuid AND archived_at IS NULL
+       ORDER BY CASE WHEN agent_connectors ? '_company' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,
+      orgId,
+    );
+    resolvedRoomId = rows?.[0]?.id || null;
+  }
+  if (!resolvedRoomId) throw new Error('No active room is available for this WorkRun. Create or restore a room first.');
+
+  const turn = await prisma.$transaction(async (tx) => {
+    const last = await tx.hyperTurn.findFirst({ where: { roomId: resolvedRoomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
+    const seq = (last?.seq ?? 0) + 1;
+    return tx.hyperTurn.create({ data: {
+      roomId: resolvedRoomId, seq, userMessage: String(goal).slice(0, 8000), status: 'live',
+      idempotencyKey: `workrun:${resolvedRoomId}:${seq}:${Date.now()}`.slice(0, 64),
+      lines: [{ t: 'turn_ack', agent: 'director', content: 'Request received. Preparing the right context and capabilities.', immediate: true, ts: Date.now() }],
+    } });
+  });
+  const inserted = await prisma.$queryRawUnsafe(
+    `INSERT INTO "hivemind"."work_runs" (org_id, user_id, room_id, turn_id, goal, status, playbook_id, playbook_version, scope)
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 'queued', $6, $7, $8::jsonb) RETURNING *`,
+    orgId, userId, resolvedRoomId, turn.id, String(goal), playbookId, playbookVersion, JSON.stringify(scope || {}),
+  );
+  const workRun = inserted?.[0];
+  if (!workRun) throw new Error('WorkRun creation did not return a record');
+  await appendWorkRunEvent(prisma, workRun.id, { t: 'workrun.started', goal: String(goal).slice(0, 500), playbook: playbookId, ts: Date.now() });
+  await transitionWorkRun(prisma, workRun.id, 'starting');
+  try {
+    const response = await runtimeFetch(`${agentScopeRuntimeUrl()}/workrun/`, {
+      service: 'hm-agent-runtime', method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: {
+        workrun_id: workRun.id, agent_id: 'workrun-default', turn_id: turn.id, room_id: resolvedRoomId,
+        org_id: orgId, goal: String(goal), playbook_id: playbookId, playbook_version: playbookVersion,
+        scope, ...(chatModelConfig ? { chat_model_config: chatModelConfig } : {}),
+      }, userId, orgId, timeoutMs: 30_000,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || payload.error || `AgentScope runtime returned ${response.status}`);
+    const started = await transitionWorkRun(prisma, workRun.id, 'running', {
+      agentscopeSessionId: payload.session_id || null, workspaceId: payload.workspace_id || null,
+    });
+    return { workRun: started.run || workRun, turnId: turn.id, sessionId: payload.session_id || null };
+  } catch (error) {
+    await transitionWorkRun(prisma, workRun.id, 'failed', { error: `runtime dispatch failed: ${error.message}` });
+    await appendWorkRunEvent(prisma, workRun.id, { t: 'workrun.failed', error: 'The agent runtime could not start. Work is saved.', ts: Date.now() });
+    throw error;
+  }
 }

@@ -14568,6 +14568,126 @@ Write the persona now.`;
       }
     }
 
+    // ─── AgentScope WorkRuns ───────────────────────────────────────────────
+    // Browser access stays on the Core. The runtime is service-to-service only.
+    const workRunMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/session\/messages|\/session\/stream|\/chat|\/cancel)?$/);
+    if (pathname === '/v1/workruns' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const goal = String(body?.goal || '').trim();
+      if (!goal) return jsonResponse(res, { error: 'goal is required' }, 400);
+      try {
+        const { dispatchWorkRun } = await import('./employees/work-runs.js');
+        const created = await dispatchWorkRun({
+          prisma, orgId: current.session.orgId, userId: current.session.userId, goal,
+          roomId: typeof body.room_id === 'string' ? body.room_id : null,
+          playbookId: typeof body.playbook === 'string' ? body.playbook : null,
+          playbookVersion: typeof body.playbook_version === 'string' ? body.playbook_version : null,
+          scope: body.scope && typeof body.scope === 'object' ? body.scope : {},
+          chatModelConfig: body.chat_model_config && typeof body.chat_model_config === 'object' ? body.chat_model_config : null,
+        });
+        return jsonResponse(res, { workrun: created.workRun, turn_id: created.turnId }, 202);
+      } catch (error) {
+        console.warn('[workruns] dispatch failed:', error.message);
+        return jsonResponse(res, { error: error.message }, 502);
+      }
+    }
+    if (pathname === '/v1/workruns' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT * FROM "hivemind"."work_runs" WHERE user_id = $1::uuid ORDER BY created_at DESC LIMIT $2`,
+        current.session.userId, limit,
+      );
+      return jsonResponse(res, { workruns: rows || [] });
+    }
+    if (workRunMatch) {
+      const [, workRunId, sub = ''] = workRunMatch;
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const owned = await prisma.$queryRawUnsafe(
+        'SELECT * FROM "hivemind"."work_runs" WHERE id = $1::uuid AND user_id = $2::uuid',
+        workRunId, current.session.userId,
+      );
+      const run = owned?.[0];
+      if (!run) return jsonResponse(res, { error: 'WorkRun not found' }, 404);
+      if (!sub && req.method === 'GET') return jsonResponse(res, { workrun: run });
+      if (sub === '/events' && req.method === 'GET') {
+        const after = Number(url.searchParams.get('after')) || 0;
+        const events = Array.isArray(run.events) ? run.events : [];
+        return jsonResponse(res, { events: events.filter((event) => Number(event?.seq || 0) > after) });
+      }
+      if (sub === '/stream' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+        let cursor = 0;
+        let alive = true;
+        const close = () => { alive = false; clearInterval(poll); clearInterval(heartbeat); try { res.end(); } catch {} };
+        const send = (event, index) => { res.write(`id: ${index}\n`); res.write(`event: ${event.t || 'event'}\n`); res.write(`data: ${JSON.stringify(event)}\n\n`); };
+        const poll = setInterval(async () => {
+          if (!alive) return;
+          try {
+            const rows = await prisma.$queryRawUnsafe('SELECT status, events, result, error FROM "hivemind"."work_runs" WHERE id = $1::uuid', workRunId);
+            const latest = rows?.[0];
+            if (!latest) return close();
+            const events = Array.isArray(latest.events) ? latest.events : [];
+            for (let index = cursor; index < events.length; index += 1) send(events[index], index);
+            cursor = events.length;
+            if (['completed', 'failed', 'cancelled'].includes(latest.status)) { send({ t: 'workrun.state', status: latest.status, result: latest.result, error: latest.error }, cursor); close(); }
+          } catch (error) { try { res.write(`event: error\ndata: ${JSON.stringify({ message: error.message })}\n\n`); } catch { close(); } }
+        }, Math.max(250, Number(process.env.WORKRUN_STREAM_POLL_MS || 750)));
+        const heartbeat = setInterval(() => { try { res.write(':\n\n'); } catch { close(); } }, 15_000);
+        req.on('close', close);
+        return;
+      }
+      const runtimeBase = String(process.env.HM_AGENT_RUNTIME_URL || 'http://hm-agent-runtime-v2:8000').replace(/\/+$/, '');
+      const runtimeBinding = async () => {
+        const bindingRes = await internalFetch(`${runtimeBase}/workrun/${workRunId}`, { service: 'hm-agent-runtime', userId: current.session.userId, orgId: current.session.orgId, timeoutMs: 15_000 });
+        const binding = await bindingRes.json().catch(() => ({}));
+        if (!bindingRes.ok) throw new Error(binding.detail || 'runtime binding missing');
+        return binding;
+      };
+      if (sub === '/session/messages' && req.method === 'GET') {
+        try {
+          const binding = await runtimeBinding();
+          const upstream = await internalFetch(`${runtimeBase}/sessions/${encodeURIComponent(binding.session_id)}/messages?agent_id=${encodeURIComponent(binding.agent_id)}&limit=100`, { service: 'hm-agent-runtime', userId: current.session.userId, orgId: current.session.orgId, timeoutMs: 20_000 });
+          return jsonResponse(res, await upstream.json().catch(() => ({})), upstream.status);
+        } catch (error) { return jsonResponse(res, { error: error.message }, 502); }
+      }
+      if (sub === '/session/stream' && req.method === 'GET') {
+        try {
+          const binding = await runtimeBinding();
+          const { buildInternalHeaders } = await import('./internal/internal-fetch.js');
+          const upstream = await fetch(`${runtimeBase}/sessions/${encodeURIComponent(binding.session_id)}/stream?agent_id=${encodeURIComponent(binding.agent_id)}`, { headers: buildInternalHeaders({ userId: current.session.userId, orgId: current.session.orgId }) });
+          if (!upstream.ok || !upstream.body) return jsonResponse(res, { error: `runtime stream ${upstream.status}` }, 502);
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+          const reader = upstream.body.getReader(); const decoder = new TextDecoder();
+          while (true) { const { done, value } = await reader.read(); if (done) break; res.write(decoder.decode(value, { stream: true })); }
+          res.end(); return;
+        } catch (error) { return jsonResponse(res, { error: error.message }, 502); }
+      }
+      if (sub === '/chat' && req.method === 'POST') {
+        const body = await parseBody(req).catch(() => ({}));
+        const text = String(body?.text || '').trim();
+        if (!text) return jsonResponse(res, { error: 'text is required' }, 400);
+        try {
+          const binding = await runtimeBinding();
+          const upstream = await internalFetch(`${runtimeBase}/chat/`, { service: 'hm-agent-runtime', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { agent_id: binding.agent_id, session_id: binding.session_id, input: { name: 'user', role: 'user', content: [{ type: 'text', text }] } }, userId: current.session.userId, orgId: current.session.orgId, timeoutMs: 20_000 });
+          return jsonResponse(res, await upstream.json().catch(() => ({})), upstream.status);
+        } catch (error) { return jsonResponse(res, { error: error.message }, 502); }
+      }
+      if (sub === '/cancel' && req.method === 'POST') {
+        try {
+          const upstream = await internalFetch(`${runtimeBase}/workrun/${workRunId}/cancel`, { service: 'hm-agent-runtime', method: 'POST', userId: current.session.userId, orgId: current.session.orgId, timeoutMs: 15_000 });
+          if (!upstream.ok) return jsonResponse(res, { error: 'runtime cancellation failed' }, 502);
+          const { transitionWorkRun } = await import('./employees/work-runs.js');
+          const outcome = await transitionWorkRun(prisma, workRunId, 'cancelled');
+          return outcome.ok ? jsonResponse(res, { workrun: outcome.run }) : jsonResponse(res, { error: outcome.reason }, 409);
+        } catch (error) { return jsonResponse(res, { error: error.message }, 502); }
+      }
+    }
+
     // POST /v1/hyper-rooms/:id/turns — submit user message, kick a turn
     if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'POST') {
       const current = await requireSession(req, res);

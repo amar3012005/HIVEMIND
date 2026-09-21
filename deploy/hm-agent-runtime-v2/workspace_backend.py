@@ -49,7 +49,8 @@ from typing import Any
 
 _log = logging.getLogger("hm-agent-runtime.workspace")
 
-BACKEND = os.getenv("AGENTSCOPE_WORKSPACE_BACKEND", "local").strip().lower()
+BACKEND = os.getenv("AGENTSCOPE_WORKSPACE_BACKEND", "docker").strip().lower()
+ALLOW_UNSAFE_LOCAL = os.getenv("AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE", "0") == "1"
 # `per_session` is the default for WorkRuns, not `per_agent`.
 #
 # Two reasons, both structural:
@@ -133,13 +134,17 @@ def build_workspace_manager(basedir: str) -> Any:
     isolation = _isolation_policy()
 
     if BACKEND == "local":
+        if not ALLOW_UNSAFE_LOCAL:
+            raise RuntimeError(
+                "AGENTSCOPE_WORKSPACE_BACKEND=local is unsandboxed and is refused. "
+                "Use docker/e2b, or set AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE=1 "
+                "only for explicitly acknowledged single-tenant development.",
+            )
         from agentscope.app.workspace_manager import LocalWorkspaceManager
 
         _log.warning(
             "workspace backend=local: NO sandbox. All workspaces share one "
-            "filesystem namespace — single-tenant only. Set "
-            "AGENTSCOPE_WORKSPACE_BACKEND=docker (or e2b) before any "
-            "multi-tenant use.",
+            "filesystem namespace — explicitly acknowledged single-tenant development only.",
         )
         skills = _skill_paths()
         _log.info("seeding %d skill path(s) from %s", len(skills), SKILLS_DIR)
@@ -218,4 +223,5 @@ def build_workspace_manager(basedir: str) -> Any:
 
 def describe() -> str:
     note = " (single-node)" if BACKEND in _SINGLE_NODE else " (distributed)"
-    return f"backend={BACKEND}{note} isolation={ISOLATION} ttl={TTL:g}s"
+    acknowledgement = " unsafe-local=explicit" if BACKEND == "local" and ALLOW_UNSAFE_LOCAL else ""
+    return f"backend={BACKEND}{note}{acknowledgement} isolation={ISOLATION} ttl={TTL:g}s"

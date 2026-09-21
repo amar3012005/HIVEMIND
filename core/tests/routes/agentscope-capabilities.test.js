@@ -272,3 +272,62 @@ test('external action preparation creates a HIVE approval draft and never invoke
   assert.equal(result.body.executed, false);
   assert.equal(calls.some(({ sql }) => sql.includes('SET events')), true);
 });
+
+test('WorkRun completion exposes the native task and artifact gate without sealing an incomplete run', async () => {
+  const calls = [];
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql, ...args) => {
+      calls.push({ sql, args });
+      if (sql.includes('SELECT id, room_id, turn_id, status')) {
+        return [{ id: '33333333-3333-3333-3333-333333333333', room_id: '44444444-4444-4444-4444-444444444444', turn_id: '55555555-5555-5555-5555-555555555555', status: 'running' }];
+      }
+      return [];
+    },
+  };
+  const completionCalls = [];
+  const blocked = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, jsonResponse, prisma,
+    parseBody: async () => ({ agentscope_session_id: 'session-1', summary: 'Research is complete.' }),
+    completeWorkRunFn: async (...args) => {
+      completionCalls.push(args);
+      return { ok: false, reason: 'completion_contract_unmet', unmet: ['all_native_tasks_completed', 'has_min_artifacts'] };
+    },
+    pathname: '/internal/hivemind/workruns/complete',
+  });
+  assert.equal(blocked.statusCode, 409);
+  assert.deepEqual(blocked.body.unmet, ['all_native_tasks_completed', 'has_min_artifacts']);
+  assert.equal(completionCalls.length, 1);
+  assert.equal(completionCalls[0][1], '33333333-3333-3333-3333-333333333333');
+  assert.deepEqual(completionCalls[0][2], { result: { summary: 'Research is complete.', completed_by: 'agentscope' }, validate: true });
+  assert.equal(calls.some(({ sql }) => sql.includes('SELECT id, room_id, turn_id, status')), true);
+
+  const completed = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, jsonResponse, prisma,
+    parseBody: async () => ({ agentscope_session_id: 'session-1', summary: 'Research is complete.' }),
+    completeWorkRunFn: async () => ({ ok: true, run: { result: { summary: 'Research is complete.', completed_by: 'agentscope' } } }),
+    pathname: '/internal/hivemind/workruns/complete',
+  });
+  assert.equal(completed.statusCode, 200);
+  assert.equal(completed.body.status, 'completed');
+  assert.equal(completed.body.workrun_id, '33333333-3333-3333-3333-333333333333');
+});
+
+test('WorkRun completion rejects a missing summary before asking the completion gate', async () => {
+  let completionCalled = false;
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql) => sql.includes('SELECT id, room_id, turn_id, status')
+      ? [{ id: '33333333-3333-3333-3333-333333333333', room_id: '44444444-4444-4444-4444-444444444444', turn_id: '55555555-5555-5555-5555-555555555555', status: 'running' }]
+      : [],
+  };
+  const result = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, jsonResponse, prisma,
+    parseBody: async () => ({ agentscope_session_id: 'session-1' }),
+    completeWorkRunFn: async () => { completionCalled = true; return { ok: true }; },
+    pathname: '/internal/hivemind/workruns/complete',
+  });
+  assert.equal(result.statusCode, 400);
+  assert.equal(result.body.error, 'summary is required');
+  assert.equal(completionCalled, false);
+});

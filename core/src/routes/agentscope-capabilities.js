@@ -107,6 +107,7 @@ export async function handleAgentScopeCapabilityRoute({
   req, res, parseBody, jsonResponse, prisma, pathname, fetchInternal = internalFetch,
   composio = { discoverGovernedSessionReads, executeGovernedSessionRead, issueGovernedReadGrant, resolveGovernedReadGrant },
   artifactStorage = new CloudflareKnowledgeIngestClient({ logger: console }),
+  completeWorkRunFn = completeWorkRun,
 }) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
@@ -320,7 +321,7 @@ export async function handleAgentScopeCapabilityRoute({
     if (!run) return jsonResponse(res, { error: 'No active WorkRun matches this AgentScope session.' }, 404);
     const summary = String(body?.summary || '').trim();
     if (!summary) return jsonResponse(res, { error: 'summary is required' }, 400);
-    const outcome = await completeWorkRun(prisma, run.id, { result: { summary, completed_by: 'agentscope' }, validate: true });
+    const outcome = await completeWorkRunFn(prisma, run.id, { result: { summary, completed_by: 'agentscope' }, validate: true });
     if (!outcome.ok) return jsonResponse(res, { error: outcome.reason || 'Unable to complete WorkRun.', unmet: outcome.unmet || [] }, 409);
     return jsonResponse(res, { status: 'completed', workrun_id: run.id, result: outcome.run?.result || { summary } });
   }

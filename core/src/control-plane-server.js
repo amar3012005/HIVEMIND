@@ -134,6 +134,7 @@ import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
+import { handleInternalWorkRunEventRoute } from './routes/workruns.js';
 import { handleHarnessChatBootstrapRoute } from './routes/harness-chat.js';
 import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import {
@@ -15240,6 +15241,30 @@ Write the persona now.`;
       } catch (err) {
         console.warn('[hyper-rooms] turn-event append failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // AgentScope is allowed to report progress only through this authenticated
+    // ingress.  The Core normalizes its native event names into the small
+    // WorkRun vocabulary; the browser never connects to the runtime directly.
+    const internalWorkRunEventMatch = pathname.match(/^\/internal\/workruns\/([0-9a-f-]{36})\/event$/);
+    if (internalWorkRunEventMatch && req.method === 'POST') {
+      const { applyRuntimeEvent, completeWorkRun } = await import('./employees/work-runs.js');
+      try {
+        return await handleInternalWorkRunEventRoute({
+          req,
+          res,
+          parseBody,
+          jsonResponse,
+          hasInternalApiKey,
+          workRunId: internalWorkRunEventMatch[1],
+          applyRuntimeEvent,
+          completeWorkRun,
+          prisma,
+        });
+      } catch (error) {
+        console.warn('[workruns] event apply failed:', error.message);
+        return jsonResponse(res, { error: 'Unable to record AgentScope progress.' }, 500);
       }
     }
 

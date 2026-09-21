@@ -3645,6 +3645,38 @@ model HyperTurn {
   @@map("hyper_turns")
 }
 
+/// HIVE's durable projection of a single AgentScope-backed room execution.
+/// It stores lifecycle and compact UI events only; AgentScope remains the
+/// authority for session state and tasks.
+model WorkRun {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId               String    @map("org_id") @db.Uuid
+  userId              String    @map("user_id") @db.Uuid
+  roomId              String?   @map("room_id") @db.Uuid
+  turnId              String?   @unique @map("turn_id") @db.Uuid
+  goal                String    @db.Text
+  status              String    @default("queued") @db.VarChar(32)
+  agentscopeSessionId String?   @map("agentscope_session_id") @db.VarChar(120)
+  workspaceId         String?   @map("workspace_id") @db.VarChar(160)
+  playbookId          String?   @map("playbook_id") @db.VarChar(120)
+  playbookVersion     String?   @map("playbook_version") @db.VarChar(40)
+  scope               Json      @default("{}")
+  events              Json      @default("[]")
+  resultArtifactIds   Json      @default("[]") @map("result_artifact_ids")
+  result              Json      @default("{}")
+  error               String?   @db.Text
+  startedAt           DateTime? @map("started_at") @db.Timestamptz(6)
+  heartbeatAt         DateTime? @map("heartbeat_at") @db.Timestamptz(6)
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt])
+  @@index([orgId, status])
+  @@index([status, heartbeatAt])
+  @@map("work_runs")
+}
+
 /// HyperClaim — a durable, queryable claim/hypothesis/synthesis artifact emitted
 /// during a turn. Persisted from turn events (hypothesis | line:lead/synthesis |
 /// chain_of_thought) so the reasoning graph survives beyond the lines[] transcript.

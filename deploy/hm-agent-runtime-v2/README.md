@@ -31,10 +31,16 @@ Model served: `deepseek/deepseek-v4-flash` via
 ```bash
 cd <repo root>
 export DOCKER_GID=$(stat -f %g /var/run/docker.sock)   # macOS; lets the non-root user use the socket
+export HM_BUILD_REF=$(git rev-parse HEAD)               # Core can reject a stale runtime when opted in
 docker compose -f deploy/hm-agent-runtime-v2/docker-compose.yml up -d --build
 docker compose -f deploy/hm-agent-runtime-v2/docker-compose.yml ps
 curl -s -H "X-User-ID: demo" http://127.0.0.1:8000/health | python3 -m json.tool
 ```
+
+Set `HM_AGENT_RUNTIME_BUILD_REF` to the same immutable commit in hm-core to
+enable its pre-dispatch/recovery source-parity gate. The runtime exposes that
+non-secret build reference only through authenticated `GET /runtime/identity`;
+`/livez` remains a minimal unauthenticated liveness response.
 
 `.env` (git-ignored) holds the gateway values, copied from the running
 `hivemind-core` container so both share one egress path:

@@ -43,7 +43,11 @@ from fastapi import Depends, HTTPException, status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 
+from agentscope.agent import Agent
 from agentscope.app import SubAgentTemplate, create_app
+import hive_access_policy
+import hive_toolkit_groups
+import model_capabilities
 from agentscope.app.hub import ClawSkillHub, GitHubMCPHub
 from agentscope.app.message_bus import RedisMessageBus
 from agentscope.app.storage import RedisStorage
@@ -57,8 +61,8 @@ import hm_auth
 import hm_bridge
 import extra_agent_tools
 import agent_middlewares
+import observability
 from gateway_credential import CloudflareGatewayOpenAICredential
-from resource_access import HiveMindResourceAccessPolicy
 
 # --------------------------------------------------------------------------
 # Configuration (env-driven so the same image runs anywhere)
@@ -83,7 +87,6 @@ ENABLE_CHANNEL_WORKER = os.getenv("AGENTSCOPE_ENABLE_CHANNEL_WORKER", "1") == "1
 # dependency we do not need to boot, and an unreachable registry should not be
 # able to make startup noisy. Flip to "1" when you want the MCP/Skill pages.
 ENABLE_HUBS = os.getenv("AGENTSCOPE_ENABLE_HUBS", "0") == "1"
-_WORKRUN_PERMISSION = os.getenv("AGENTSCOPE_WORKRUN_PERMISSION_MODE", "bypass").strip().lower()
 
 
 def _log(msg: str) -> None:
@@ -170,8 +173,11 @@ succeeds or fails.
 - Keep private reasoning private; share only conclusions and evidence.
 
 Note: `TeamSay` is your ONLY channel to {leader_name}. Anything not sent \
-through it is invisible to the team.""",
+        through it is invisible to the team.""",
         permission_context=PermissionContext(mode=PermissionMode.EXPLORE),
+        # AgentScope otherwise inherits the leader's mode and would silently
+        # upgrade this research worker to full access.
+        override_leader_mode=True,
     ),
     SubAgentTemplate(
         type="writer",
@@ -227,8 +233,11 @@ succeeds or fails.
 - State your criteria, your verdict per item, and the evidence for each.
 
 Note: `TeamSay` is your ONLY channel to {leader_name}. Anything not sent \
-through it is invisible to the team.""",
+        through it is invisible to the team.""",
         permission_context=PermissionContext(mode=PermissionMode.EXPLORE),
+        # An analyst must remain a read-only safety boundary even when its
+        # leader can write to a workspace or a connected app.
+        override_leader_mode=True,
     ),
     SubAgentTemplate(
         type="reviewer",
@@ -261,14 +270,61 @@ succeeds or fails.
 - Report each defect with the claim, the problem, and what would fix it.
 
 Note: `TeamSay` is your ONLY channel to {leader_name}. Anything not sent \
-through it is invisible to the team.""",
+        through it is invisible to the team.""",
         permission_context=PermissionContext(mode=PermissionMode.EXPLORE),
+        # A reviewer is a safety boundary, not merely a prompt suggestion.
+        override_leader_mode=True,
     ),
 ]
 
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
+
+def _install_model_reject_logger() -> None:
+    """Log the real provider 400 body. Subclass hooks miss some model classes."""
+    try:
+        from agentscope.model._openai_chat._model import OpenAIChatModel
+    except Exception as exc:  # noqa: BLE001
+        _log(f"could not wrap OpenAIChatModel: {exc}")
+        return
+    orig = OpenAIChatModel._call_api
+
+    async def _logged(self, model_name, messages, tools=None, tool_choice=None, **generate_kwargs):
+        generate_kwargs["parallel_tool_calls"] = False
+        generate_kwargs.pop("audio", None)
+        generate_kwargs.pop("modalities", None)
+        try:
+            self.parameters.parallel_tool_calls = False
+        except Exception:
+            pass
+        names = []
+        for item in tools or []:
+            if isinstance(item, dict):
+                fn = item.get("function") or item
+                names.append(fn.get("name") if isinstance(fn, dict) else str(fn)[:40])
+        _log(f"model_call model={model_name} tools={len(tools or [])} names={names[:30]}")
+        try:
+            return await orig(
+                self, model_name, messages, tools=tools, tool_choice=tool_choice, **generate_kwargs,
+            )
+        except BaseException as exc:
+            body = getattr(exc, "body", None)
+            text = None
+            try:
+                text = getattr(getattr(exc, "response", None), "text", None)
+            except Exception:
+                text = None
+            _log(f"MODEL_REJECTED model={model_name} err={exc!r} body={body} text={str(text)[:2000]}")
+            raise
+
+    OpenAIChatModel._call_api = _logged
+
+
+_install_model_reject_logger()
+hive_toolkit_groups.patch_get_toolkit()
+observability.configure_tracing()
+
 
 app = create_app(
     storage=storage,
@@ -285,8 +341,11 @@ app = create_app(
     # runs once per agent assembly and receives the resolved principal, so every
     # tool call is scoped by hm-core rather than by anything the model controls.
     extra_agent_tools=extra_agent_tools.hivemind_tools,
+    # AgenticMemory and AgentScope-native OpenTelemetry spans. The workspace is
+    # passed by AgentScope itself, so no model-provided filesystem path enters
+    # either middleware.
     extra_agent_middlewares=agent_middlewares.hivemind_agent_middlewares,
-    resource_access_policy=HiveMindResourceAccessPolicy(),
+    resource_access_policy=hive_access_policy.HiveMindResourceAccessPolicy(),
     # Cloudflare AI Gateway credential type — routes provider calls through the
     # same gateway as hm-core. Registered unconditionally so the type is always
     # selectable; when the gateway env vars are absent the class falls back to
@@ -401,14 +460,17 @@ async def get_current_user_id(
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None, alias="X-User-ID"),
     x_hm_user_id: str | None = Header(default=None, alias="X-HM-User-Id"),
-    x_hm_org_id: str | None = Header(default=None, alias="X-HM-Org-Id"),
 ) -> str:
+    """Resolve the caller to hm-core's canonical user id.
+
+    `X-HM-User-Id` is the header hm-core's `buildInternalHeaders()` emits
+    alongside the master key, so the control plane needs no new client code.
+    """
     try:
         principal = await hm_auth.resolve_principal(
             api_key=x_api_key,
             authorization=authorization,
             legacy_user_id=x_hm_user_id or x_user_id,
-            org_id=x_hm_org_id,
         )
     except hm_auth.AuthError as exc:
         raise HTTPException(
@@ -416,7 +478,7 @@ async def get_current_user_id(
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
-    return principal.tenancy_key
+    return principal.user_id
 
 
 app.dependency_overrides[_default_user_dep] = get_current_user_id
@@ -472,7 +534,15 @@ _forwarders: dict[str, EventForwarder] = {}
 
 # The default model for a WorkRun when hm-core did not name one. Resolved from
 # env so the same image runs against a different provider without a code change.
-_DEFAULT_WORKRUN_MODEL = os.getenv("AGENTSCOPE_WORKRUN_MODEL", "deepseek/deepseek-v4-flash")
+_DEFAULT_WORKRUN_MODEL = os.getenv(
+    "AGENTSCOPE_WORKRUN_MODEL",
+    "deepseek/deepseek-v4-flash-0731",
+)
+
+# InjectionConfig.inject_runtime_state stays the Agent constructor default
+# (True). Manual compression tool is decided by model_capabilities, not the FE.
+_HYPERAGENT_CONTEXT = model_capabilities.context_config_for(_DEFAULT_WORKRUN_MODEL)
+_HYPERAGENT_REACT = model_capabilities.react_config_for(_DEFAULT_WORKRUN_MODEL)
 
 
 async def _resolve_agent(
@@ -497,7 +567,9 @@ async def _resolve_agent(
 
     # Reuse an existing record for this employee. The agent name is the slug so
     # the mapping is stable and inspectable rather than a random id.
-    name = hyperagent_slug or agent_ref
+    # v3: do not reuse agents minted with compression_tool / custom ContextConfig
+    # — those records made DeepSeek reject every request as invalid_request.
+    name = f"{hyperagent_slug or 'workrun-default'}-g0"
     existing = await app.state.storage.list_agents(user_id)
     for record in existing or []:
         if getattr(record.data, "name", None) == name:
@@ -515,51 +587,28 @@ async def _resolve_agent(
     return created.agent_id
 
 
-async def _ensure_model_credential(user_id: str) -> str | None:
-    """Return a usable credential id for ``user_id``, provisioning one if needed.
+async def _ensure_phase1_agent_config(user_id: str, record) -> None:
+    """Keep Task/injection defaults; never leave compression_tool on.
 
-    Why this exists: AgentScope's ``create_session`` requires the session's
-    ``chat_model_config`` to name a credential the user owns (or one shared to
-    them). hm-core does not send a ``chat_model_config`` — it is not the
-    runtime's job to know which provider key a tenant holds — so without this
-    the session is created with no model and the first chat call fails with
-    "The request to the model was rejected as invalid."
-
-    The credential is derived from the deployment's own gateway configuration,
-    which is the same gateway hm-core uses. It is created once per user and
-    reused: ``upsert_credential`` is keyed by the credential's own id, so a
-    second call for the same user is a no-op rather than a duplicate.
-
-    Returns ``None`` when the deployment has no model path configured, so the
-    caller can fail with a clear message instead of a generic model error.
+    DeepSeek via the gateway rejects the native compress tool as an invalid
+    request. Existing agent records that were patched on earlier this session
+    must be turned back off.
     """
-    existing = await app.state.storage.list_credentials(user_id)
-    if existing:
-        # Any credential the user already holds is theirs to use. Prefer the
-        # gateway type so a stale direct-routing credential does not shadow it.
-        for record in existing:
-            if getattr(record.data, "type", None) == "cloudflare_gateway_credential":
-                return record.id
-        return existing[0].id
-
-    if not gateway.enabled():
-        _log(
-            "no model credential for user %s and the Cloudflare AI Gateway is "
-            "disabled; set CLOUDFLARE_AI_GATEWAY_ENABLED=1 (and the account/"
-            "gateway/token/alias) or supply chat_model_config on the WorkRun",
-            user_id,
-        )
-        return None
-
-    # The gateway supplies the provider key via the BYOK alias, so the
-    # credential's own api_key is a placeholder — it is never transmitted.
-    credential = CloudflareGatewayOpenAICredential(
-        name="workrun-gateway",
-        api_key="gateway-byok",
-    )
-    credential_id = await app.state.storage.upsert_credential(user_id, credential)
-    _log(f"provisioned gateway model credential {credential_id} for user {user_id}")
-    return credential_id
+    data = record.data
+    ctx = getattr(data, "context_config", None)
+    dirty = False
+    if getattr(ctx, "compression_tool_enabled", False):
+        if ctx is not None and hasattr(ctx, "model_copy"):
+            data.context_config = ctx.model_copy(update={"compression_tool_enabled": False})
+        else:
+            data.context_config = _HYPERAGENT_CONTEXT
+        dirty = True
+    if getattr(data, "react_config", None) is None:
+        data.react_config = _HYPERAGENT_REACT
+        dirty = True
+    if dirty:
+        await app.state.storage.upsert_agent(user_id, record)
+        _log(f"phase1: compression_tool OFF on agent {record.id}")
 
 
 def _build_agent_system_prompt(hyperagent_slug: str | None) -> str:
@@ -578,29 +627,61 @@ You complete work orders end to end and report what you actually did.
 
 ## Operating rules
 
-1. **Ground every claim.** Before asserting a fact about this organization, its
+1. **Choose the smallest mode that satisfies the request.** When the user asks
+   for a self-contained answer that does not need organization facts, durable
+   work, external action, or a deliverable, answer directly and do not call a
+   tool, select a playbook, or create tasks. When the user only needs an
+   organization-specific fact or explanation, activate `hivemind`, retrieve
+   the smallest relevant company context, and answer without a playbook or
+   task plan. Use company-work mode only for a company action, deliverable, or
+   multi-step outcome; then follow the remaining rules.
+
+2. **Ground every company claim.** Before asserting a fact about this organization, its
    people, its customers, or its prior work, retrieve it with `hivemind_recall`
    or `hivemind_company_context`. A fact you did not retrieve is a guess, and a
    guess presented as a finding is the worst possible output.
 
-2. **Check what is already known before discovering anew.** Call
+3. **Check what is already known before discovering anew.** Call
    `hivemind_list_prospects` before searching for prospects. Re-discovering a
    known lead wastes the run and creates duplicates.
 
-3. **Use the web only for the outside world.** `hivemind_web_search` is for
+4. **Use the web only for the outside world.** `hivemind_web_search` is for
    company websites, public records, and news. Never use it for facts about this
    organization — those live in memory.
 
-4. **Persist what you find.** Save qualified prospects with
+5. **Persist what you find.** Save qualified prospects with
    `hivemind_save_prospect` and durable conclusions with `hivemind_save_memory`.
    Work that is not persisted did not happen.
 
-5. **Produce a real artifact.** When the task asks for a deliverable, write the
+6. **Produce a real artifact.** When the task asks for a deliverable, write the
    file into the workspace and register it with `hivemind_record_artifact`. A
    description of a deliverable is not a deliverable.
 
-6. **Report honestly.** If a tool fails, say so and say what you could not
-   determine. Never fill a gap with a plausible invention."""
+7. **Report honestly.** If a tool fails, say so and say what you could not
+   determine. Never fill a gap with a plausible invention.
+
+8. **Select the playbook before planning company work.** If the WorkRun playbook is General
+   (or unset), call `PlaybookList` then `PlaybookGet` on the id you choose. Do
+   not invent an id. Until that selection is complete, do not activate another
+   tool group or use a workspace, connected-app, web, memory, or team tool.
+
+9. **Operating plan is AgentScope Tasks.** After playbook selection, decompose
+   the WorkRun with `TaskCreate` (subject, description, `blocked_by` when a
+   step depends on another). Keep it current with `TaskUpdate`. Before
+   activating an execution group, use native `SkillViewer` to read the one
+   relevant Skill when one is available; never load every Skill speculatively.
+   Only then activate the one tool group needed by the current task. Injected
+   runtime state (tasks, time, context length) is ground truth — do not
+   contradict it from memory of an earlier turn. If a context-compression tool
+   is available, use it between major tasks when the run has been long.
+
+10. **Teams are explicit, native delegation.** Activate `team_tools` only for
+    independent planned tasks that genuinely benefit from parallel work. Create
+    one team, then use `AgentCreate` with the smallest suitable worker role.
+    Workers must report a terminal status and evidence using `TeamSay`; task
+    completion is not inferred from timing or a worker stream. Persist required
+    artifacts before `TeamDelete`, because transient workers are deleted with
+    their team. Never use a team for a simple answer or a sequential task."""
 
 
 def _build_workrun_prompt(
@@ -636,7 +717,22 @@ def _build_workrun_prompt(
         )
 
     parts.append(
-        "\n\nWork autonomously to completion. Do not ask for confirmation — "
+        "\n\nFor a self-contained direct answer, answer immediately with no "
+        "tools. For a company-grounded answer, activate hivemind, retrieve only "
+        "the needed context, and answer without a playbook or TaskCreate. For "
+        "company work, if the playbook is General or unset, first use "
+        "PlaybookList and PlaybookGet. Then create an operating plan with "
+        "TaskCreate for each step (use blocked_by for dependencies). Before "
+        "activating an execution group, use SkillViewer for the one relevant "
+        "Skill when available; do not load all Skills. Do not activate another "
+        "tool group until the plan and relevant Skill are ready; then activate "
+        "only the group required by the current task. Execute, updating tasks as "
+        "you go. Use team_tools only for independent planned tasks that need "
+        "parallel delegation; require each worker to TeamSay a terminal result "
+        "with evidence, and persist required artifacts before TeamDelete. When "
+        "selected-playbook work is actually complete, call "
+        "hivemind_complete_workrun so HIVE can validate its evidence contract. "
+        "Work autonomously to completion. Do not ask for confirmation — "
         "make the safest reversible choice and record it. When you are done, "
         "state plainly what you produced, what you verified, and what you could "
         "not determine.",
@@ -676,6 +772,113 @@ async def _dispatch_chat(
         chat_run_registry=app.state.chat_run_registry,
         message_bus=app.state.message_bus,
     )
+
+
+async def _ensure_workrun_forwarder(binding: WorkRunBinding) -> bool:
+    """Attach exactly one SSE forwarder to a durable WorkRun/session binding.
+
+    AgentScope retains the session and its event history in its own storage.
+    This helper only re-establishes HIVE's subscriber after an app restart; it
+    never sends a second user message and therefore cannot execute a WorkRun
+    twice.  The session stream replays buffered events to the new subscriber.
+    """
+    if not (hm_bridge.FORWARD_ENABLED and hm_bridge.HM_CORE_URL):
+        return False
+    if binding.workrun_id in _forwarders:
+        return False
+    forwarder = EventForwarder(
+        binding=binding,
+        master_key=hm_auth._master_key(),
+        on_confirmation=lambda event: _resume_workrun_confirmation(
+            user_id=binding.user_id,
+            agent_id=binding.agent_id,
+            session_id=binding.session_id,
+            event=event,
+        ),
+    )
+    stream_url = (
+        f"http://127.0.0.1:8000/sessions/{binding.session_id}/stream"
+        f"?agent_id={binding.agent_id}"
+    )
+    forwarder.start(stream_url, binding.user_id)
+    _forwarders[binding.workrun_id] = forwarder
+    return True
+
+
+async def _resume_workrun_confirmation(
+    *, user_id: str, agent_id: str, session_id: str, event: dict,
+) -> None:
+    """Resume a sandbox tool prompt without exposing an approval card.
+
+    HIVE authority gates for connected/external actions live in hm-core and are
+    deliberately unaffected. This only handles AgentScope's local workspace
+    permission event for an already isolated WorkRun.
+    """
+    from agentscope.app._router._chat import chat as _chat
+    from agentscope.app._router._schema._chat import ChatRequest
+
+    tool_calls = event.get("tool_calls") or []
+    reply_id = event.get("reply_id")
+    if not reply_id or not tool_calls:
+        raise ValueError("AgentScope confirmation event is missing continuation data")
+    await _chat(
+        request=ChatRequest(
+            agent_id=agent_id,
+            session_id=session_id,
+            input={
+                "type": "USER_CONFIRM_RESULT",
+                "reply_id": reply_id,
+                "confirm_results": [
+                    {"confirmed": True, "tool_call": call, "rules": None}
+                    for call in tool_calls
+                ],
+            },
+        ),
+        user_id=user_id,
+        chat_service=app.state.chat_service,
+        chat_run_registry=app.state.chat_run_registry,
+        message_bus=app.state.message_bus,
+    )
+
+
+async def _ensure_gateway_chat_model_config(user_id: str) -> dict:
+    """Bind every WorkRun session to the gateway DeepSeek model.
+
+    CreateAgentRequest has no chat model. Sessions without chat_model_config
+    call nothing valid and AgentScope reports invalid_request in ~80ms.
+    """
+    from agentscope.app._router._credential import create_credential as _create_credential
+    from agentscope.app._router._schema._credential import CreateCredentialRequest
+
+    cred_id = None
+    records = await app.state.storage.list_credentials(user_id)
+    for rec in records or []:
+        data = getattr(rec, "data", rec)
+        typ = data.get("type") if isinstance(data, dict) else getattr(data, "type", None)
+        if typ == "cloudflare_gateway_credential":
+            cred_id = getattr(rec, "id", None) or getattr(rec, "credential_id", None)
+            break
+    if not cred_id:
+        created = await _create_credential(
+            body=CreateCredentialRequest(
+                data={
+                    "type": "cloudflare_gateway_credential",
+                    "name": "workrun-gateway",
+                    "api_key": "gateway-managed",
+                },
+            ),
+            user_id=user_id,
+            storage=app.state.storage,
+        )
+        cred_id = created.credential_id
+        _log(f"minted gateway credential {cred_id} for user {user_id}")
+    model = os.getenv("AGENTSCOPE_WORKRUN_MODEL", _DEFAULT_WORKRUN_MODEL)
+    return {
+        "type": "cloudflare_gateway_credential",
+        "credential_id": cred_id,
+        "model": model,
+        "parameters": {"parallel_tool_calls": False},
+    }
 
 
 @app.post("/workrun/", tags=["workrun"], include_in_schema=True)
@@ -755,29 +958,8 @@ async def create_workrun_session(
     for key in ("workspace_id", "name", "chat_model_config"):
         if body.get(key) is not None:
             session_body[key] = body[key]
-
-    # A session with no model cannot run. hm-core does not send a
-    # chat_model_config (it is not the runtime's job to know a tenant's provider
-    # key), so when the caller did not name one, resolve the deployment's own
-    # gateway credential. Without this the session is created model-less and the
-    # first chat call fails with a generic "request to the model was rejected".
     if session_body.get("chat_model_config") is None:
-        credential_id = await _ensure_model_credential(user_id)
-        if credential_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "no model credential available for this user and no gateway "
-                    "configured; set CLOUDFLARE_AI_GATEWAY_ENABLED=1 or pass "
-                    "chat_model_config"
-                ),
-            )
-        session_body["chat_model_config"] = {
-            "type": "cloudflare_gateway_credential",
-            "credential_id": credential_id,
-            "model": _DEFAULT_WORKRUN_MODEL,
-            "parameters": {},
-        }
+        session_body["chat_model_config"] = await _ensure_gateway_chat_model_config(user_id)
 
     # One workspace per WorkRun, named for the run.
     #
@@ -809,33 +991,21 @@ async def create_workrun_session(
     )
     session_id = created.session_id
 
-    # ── Make the session autonomous ──
-    # A WorkRun is unattended by definition: hm-core dispatched it and no
-    # operator is watching the stream to answer a confirmation. AgentScope's
-    # default permission mode asks before every non-read-only tool, so a run
-    # that needs to write a file or run a command parks in `waiting_approval`
-    # forever — which is exactly what happened before this override.
-    #
-    # BYPASS is the right mode here, not DONT_ASK: DONT_ASK converts every ASK
-    # to a DENY, so the run would silently fail to write its artifact instead
-    # of parking. The run's own prompt already instructs it to work to
-    # completion without asking, and the workspace is isolated per run, so the
-    # blast radius of a bypassed confirmation is one sandbox.
-    #
-    # The mode is set on the persisted session state, which is what the chat
-    # service loads when it assembles the agent — setting it anywhere else
-    # would be overwritten on the next load.
-    record = await app.state.storage.get_session(user_id, resolved_agent_id, session_id)
-    if record is not None and getattr(record, "state", None) is not None:
-        record.state.permission_context.mode = PermissionMode.BYPASS
-        await app.state.storage.upsert_session(
-            user_id=user_id,
-            agent_id=resolved_agent_id,
-            config=record.config,
-            state=record.state,
-            session_id=session_id,
-        )
-        _log(f"workrun {workrun_id}: session {session_id} set to BYPASS (unattended)")
+    # AgentScope documents BYPASS for trusted unattended work in a sandbox.
+    # Every WorkRun already has a dedicated workspace/container; applying the
+    # mode here prevents routine Bash/file prompts while hm-core continues to
+    # own external-action authority and policy.
+    from agentscope.app._router._session import update_session as _update_session
+    from agentscope.app._router._schema._session import UpdateSessionRequest
+    await _update_session(
+        session_id=session_id,
+        body=UpdateSessionRequest(permission_mode=PermissionMode.BYPASS),
+        agent_id=resolved_agent_id,
+        user_id=user_id,
+        storage=app.state.storage,
+        access=app.state.resource_access_service,
+        message_bus=app.state.message_bus,
+    )
 
     # Read back the minted workspace id — hm-core stores it so a later WorkRun
     # can reuse the same workspace.
@@ -862,17 +1032,7 @@ async def create_workrun_session(
     # strictly required — but starting first means the very first event is
     # forwarded live rather than replayed, which keeps the progress log's
     # timestamps honest.
-    if hm_bridge.FORWARD_ENABLED and hm_bridge.HM_CORE_URL:
-        forwarder = EventForwarder(
-            binding=binding,
-            master_key=hm_auth._master_key(),
-        )
-        stream_url = (
-            f"http://127.0.0.1:8000/sessions/{session_id}/stream"
-            f"?agent_id={resolved_agent_id}"
-        )
-        forwarder.start(stream_url, user_id)
-        _forwarders[workrun_id] = forwarder
+    await _ensure_workrun_forwarder(binding)
 
     # ── Dispatch the goal ──
     # POST /chat returns immediately; all output arrives on the SSE stream the
@@ -914,6 +1074,68 @@ async def create_workrun_session(
     }
 
 
+@app.post("/workrun/recover", tags=["workrun"], include_in_schema=True)
+async def recover_workrun_session(
+    body: dict,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Reattach HIVE forwarding to an existing AgentScope session.
+
+    This endpoint is for the hm-core recovery loop after a runtime restart. It
+    is intentionally separate from ``POST /workrun/``: reusing creation would
+    make a missing in-memory binding look like permission to create a new
+    session and replay the goal.
+    """
+    workrun_id = str(body.get("workrun_id") or "").strip()
+    agent_id = str(body.get("agent_id") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    turn_id = str(body.get("turn_id") or "").strip()
+    room_id = str(body.get("room_id") or "").strip()
+    missing = [
+        name for name, value in (("workrun_id", workrun_id), ("agent_id", agent_id),
+                                 ("session_id", session_id), ("turn_id", turn_id),
+                                 ("room_id", room_id)) if not value
+    ]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"missing required field(s): {', '.join(missing)}")
+
+    record = await app.state.storage.get_session(user_id, agent_id, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="the persisted AgentScope session no longer exists")
+    workspace_id = getattr(getattr(record, "config", None), "workspace_id", None)
+    requested_workspace_id = body.get("workspace_id")
+    if requested_workspace_id and workspace_id and requested_workspace_id != workspace_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="session workspace does not match the durable WorkRun binding")
+
+    binding = WorkRunBinding(
+        workrun_id=workrun_id,
+        user_id=user_id,
+        org_id=body.get("org_id"),
+        agent_id=agent_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        room_id=room_id,
+        workspace_id=workspace_id or requested_workspace_id,
+    )
+    existing = await _workrun_store.get(workrun_id)
+    if existing is not None:
+        if (existing.user_id != user_id or existing.session_id != session_id
+                or existing.agent_id != agent_id or existing.turn_id != turn_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="existing WorkRun binding does not match the recovery request")
+        started = await _ensure_workrun_forwarder(existing)
+        return {"workrun_id": workrun_id, "session_id": session_id,
+                "workspace_id": existing.workspace_id, "recovered": started}
+
+    await _workrun_store.put(binding)
+    started = await _ensure_workrun_forwarder(binding)
+    return {"workrun_id": workrun_id, "session_id": session_id,
+            "workspace_id": binding.workspace_id, "recovered": started}
+
+
 @app.get("/workrun/{workrun_id}", tags=["workrun"])
 async def get_workrun(
     workrun_id: str,
@@ -932,6 +1154,24 @@ async def get_workrun(
         "room_id": binding.room_id,
         "workspace_id": binding.workspace_id,
         "forwarding": fwd.stats if fwd else None,
+    }
+
+
+@app.post("/workrun/{workrun_id}/cancel", tags=["workrun"])
+async def cancel_workrun(
+    workrun_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Cancel the active AgentScope run bound to a HIVE WorkRun."""
+    binding = await _workrun_store.get(workrun_id)
+    if binding is None or binding.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    released = await app.state.session_service.cancel_session_run(binding.session_id)
+    return {
+        "workrun_id": workrun_id,
+        "session_id": binding.session_id,
+        "cancelled": True,
+        "lock_released": released,
     }
 
 

@@ -13,10 +13,13 @@ file is how-to, not a second tool runtime.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from collections import OrderedDict
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 _log = logging.getLogger("hm-agent-runtime.middleware")
+_SESSION_WORKSPACES: OrderedDict[str, Any] = OrderedDict()
+_MAX_TRACKED_WORKSPACES = 512
 
 _COMPOSIO_SKILL = """---
 name: composio-connected-workflows
@@ -51,6 +54,46 @@ def _seed_composio_skill(workdir: str) -> None:
         path.write_text(_COMPOSIO_SKILL, encoding="utf-8")
 
 
+def _remember_workspace(session_id: str, workspace: Any) -> None:
+    """Keep the AgentScope-owned workspace handle for an active session.
+
+    A custom tool factory receives a session id but not the Workspace instance.
+    The middleware factory receives both, so this small registry is the native
+    bridge that lets ``hivemind_record_artifact`` read a file through the
+    configured AgentScope backend (Docker, E2B, etc.). It intentionally stores
+    no model-provided path and is bounded so old sessions cannot retain an
+    unbounded number of sandbox handles.
+    """
+    if not session_id or workspace is None:
+        return
+    _SESSION_WORKSPACES[session_id] = workspace
+    _SESSION_WORKSPACES.move_to_end(session_id)
+    while len(_SESSION_WORKSPACES) > _MAX_TRACKED_WORKSPACES:
+        _SESSION_WORKSPACES.popitem(last=False)
+
+
+async def read_workspace_file(session_id: str, path: str, *, max_bytes: int) -> bytes:
+    """Read one relative file via AgentScope's configured workspace backend."""
+    workspace = _SESSION_WORKSPACES.get(session_id)
+    if workspace is None:
+        raise RuntimeError("workspace is unavailable for this AgentScope session")
+
+    relative = PurePosixPath(str(path or ""))
+    if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("artifact path must be a workspace-relative path")
+
+    backend = workspace.get_backend()
+    target = backend.join_path(str(workspace.workdir), *relative.parts)
+    if not await backend.file_exists(target):
+        raise FileNotFoundError(f"artifact file does not exist: {path}")
+    payload = bytes(await backend.read_file(target))
+    if not payload:
+        raise ValueError("artifact file is empty")
+    if len(payload) > max_bytes:
+        raise ValueError(f"artifact exceeds the {max_bytes}-byte upload limit")
+    return payload
+
+
 async def hivemind_agent_middlewares(
     user_id: str,
     agent_id: str,
@@ -66,10 +109,18 @@ async def hivemind_agent_middlewares(
             session_id,
         )
         return []
+    _remember_workspace(session_id, workspace)
     try:
         _seed_composio_skill(str(workdir))
     except OSError as exc:
         _log.warning("could not seed composio skill: %s", exc)
-    from agentscope.middleware import AgenticMemoryMiddleware
+    from agentscope.middleware import AgenticMemoryMiddleware, TracingMiddleware
 
-    return [AgenticMemoryMiddleware(workdir=str(workdir))]
+    # These are AgentScope middlewares, attached to every assembled agent. The
+    # tracing middleware becomes a near-zero no-op until `setup_tracing()` has
+    # installed a real OpenTelemetry provider; keeping it here avoids a second
+    # execution/event pipeline when telemetry is enabled later.
+    return [
+        AgenticMemoryMiddleware(workdir=str(workdir)),
+        TracingMiddleware(),
+    ]

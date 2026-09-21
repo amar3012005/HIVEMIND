@@ -33,7 +33,9 @@ policy does not re-partition existing sessions.
 
 Configuration:
 
-    AGENTSCOPE_WORKSPACE_BACKEND    local|bubblewrap|docker|apple|e2b|daytona|opensandbox|k8s
+    AGENTSCOPE_WORKSPACE_BACKEND    local|bubblewrap|docker|apple|e2b|daytona|opensandbox|k8s (default: docker)
+    AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE=1
+                                     required to use the unsandboxed local backend
     AGENTSCOPE_WORKSPACE_ISOLATION  per_agent|per_session|per_user
     AGENTSCOPE_WORKSPACE_TTL        idle eviction seconds (default 3600)
     AGENTSCOPE_SANDBOX_IMAGE        base image for docker/k8s
@@ -49,7 +51,12 @@ from typing import Any
 
 _log = logging.getLogger("hm-agent-runtime.workspace")
 
-BACKEND = os.getenv("AGENTSCOPE_WORKSPACE_BACKEND", "local").strip().lower()
+# A missing setting must never turn an operating-system WorkRun into an
+# unsandboxed host-directory run. Compose also defaults to Docker, but this
+# code-level default protects direct Python starts and future deployment shapes
+# that do not use those files.
+BACKEND = os.getenv("AGENTSCOPE_WORKSPACE_BACKEND", "docker").strip().lower()
+ALLOW_UNSAFE_LOCAL = os.getenv("AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE", "0") == "1"
 # `per_session` is the default for WorkRuns, not `per_agent`.
 #
 # Two reasons, both structural:
@@ -133,6 +140,13 @@ def build_workspace_manager(basedir: str) -> Any:
     isolation = _isolation_policy()
 
     if BACKEND == "local":
+        if not ALLOW_UNSAFE_LOCAL:
+            raise RuntimeError(
+                "AGENTSCOPE_WORKSPACE_BACKEND=local is unsandboxed and is "
+                "refused by default. Use Docker/E2B/etc., or set "
+                "AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE=1 only for "
+                "deliberate single-tenant debugging.",
+            )
         from agentscope.app.workspace_manager import LocalWorkspaceManager
 
         _log.warning(
@@ -218,4 +232,5 @@ def build_workspace_manager(basedir: str) -> Any:
 
 def describe() -> str:
     note = " (single-node)" if BACKEND in _SINGLE_NODE else " (distributed)"
-    return f"backend={BACKEND}{note} isolation={ISOLATION} ttl={TTL:g}s"
+    unsafe = " unsafe-local=explicit" if BACKEND == "local" else ""
+    return f"backend={BACKEND}{note} isolation={ISOLATION} ttl={TTL:g}s{unsafe}"

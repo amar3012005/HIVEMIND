@@ -33,16 +33,24 @@ COPY deploy/hm-agent-runtime-v2/gateway_credential.py /app/gateway_credential.py
 COPY deploy/hm-agent-runtime-v2/hm_auth.py /app/hm_auth.py
 COPY deploy/hm-agent-runtime-v2/hm_bridge.py /app/hm_bridge.py
 COPY deploy/hm-agent-runtime-v2/workspace_backend.py /app/workspace_backend.py
+COPY deploy/hm-agent-runtime-v2/agent_middlewares.py /app/agent_middlewares.py
+COPY deploy/hm-agent-runtime-v2/resource_access.py /app/resource_access.py
+COPY deploy/hm-agent-runtime-v2/hive_access_policy.py /app/hive_access_policy.py
+COPY deploy/hm-agent-runtime-v2/hive_toolkit_groups.py /app/hive_toolkit_groups.py
+COPY deploy/hm-agent-runtime-v2/model_capabilities.py /app/model_capabilities.py
+COPY deploy/hm-agent-runtime-v2/observability.py /app/observability.py
+# Keep the runtime's compose contracts in the image as inspectable immutable
+# deployment metadata. They are used by the focused runtime contract tests and
+# let an image identify the workspace/scheduler policy it was built for.
+COPY deploy/hm-agent-runtime-v2/docker-compose.yml /app/docker-compose.yml
+COPY deploy/hm-agent-runtime-v2/docker-compose.local.yml /app/docker-compose.local.yml
 # The `extra_agent_tools` factory. app.py imports this at module load, so a
 # missing COPY is a hard ImportError at container start, not a degraded feature.
 COPY deploy/hm-agent-runtime-v2/extra_agent_tools.py /app/extra_agent_tools.py
-COPY deploy/hm-agent-runtime-v2/agent_middlewares.py /app/agent_middlewares.py
-COPY deploy/hm-agent-runtime-v2/resource_access.py /app/resource_access.py
 
-# Skill catalog seeded into every new workspace (see workspace_backend.py).
-# AgentScope copies these into `skills/.seed` and equips each agent's partition
-# from that template, so the playbook methods reach the agent through the native
-# Skill viewer. A missing COPY here is silent: the agent simply has no skills.
+# Compact, on-disk AgentScope skills.  They are discovered progressively by
+# the agent; they must be in the immutable image rather than hot-patched into
+# a running container.
 COPY deploy/hm-agent-runtime-v2/skills /app/skills
 
 # Model cards for the gateway-routed DeepSeek models. Tells the frontend the

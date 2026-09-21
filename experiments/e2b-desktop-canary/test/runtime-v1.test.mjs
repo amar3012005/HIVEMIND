@@ -68,6 +68,7 @@ test('same desktop supports agent, human edit, pause, controller reconnect, and 
   assert.match(observed.title, /HUMAN EDIT\./)
   assert.equal(reconnected.desktop.state.paused, true)
   assert.equal(reconnected.desktop.state.createOptions.allowInternetAccess, false)
+  assert.equal(reconnected.desktop.state.createOptions.timeoutMs, 15 * 60_000)
   const stored = await readFile(path.join(root, 'action-receipts.jsonl'), 'utf8')
   assert.doesNotMatch(stored, /private-stream-key|stream\.example/)
   await reconnected.kill()

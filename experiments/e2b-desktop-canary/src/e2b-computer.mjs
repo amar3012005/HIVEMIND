@@ -24,10 +24,10 @@ export class E2BComputer {
     this.now = now
   }
 
-  static async create({ Sandbox, leaseManager, owner, receipts, evidenceDir, metadata = {}, allowInternetAccess = false, now }) {
+  static async create({ Sandbox, leaseManager, owner, receipts, evidenceDir, metadata = {}, allowInternetAccess = false, timeoutMs = 15 * 60_000, now }) {
     const lease = await leaseManager.acquire(owner)
     try {
-      const desktop = await Sandbox.create({ metadata, allowInternetAccess })
+      const desktop = await Sandbox.create({ metadata, allowInternetAccess, timeoutMs })
       leaseManager.assignSandbox(lease.leaseId, desktop.sandboxId)
       const computer = new E2BComputer({ desktop, leaseManager, leaseId: lease.leaseId, receipts, evidenceDir, now })
       await computer.persistLease()

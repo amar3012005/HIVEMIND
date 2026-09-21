@@ -9,8 +9,9 @@ This is a separate, opt-in E2B implementation. It deliberately does not change
 the Docker/CDP/noVNC proof and is not connected to WorkRun or AgentScope.
 
 The pinned runtime is Node 22 LTS and `@e2b/desktop` `2.4.0` (see the committed
-lockfile). The wrapper exposes only computer lifecycle and interaction methods;
-there is no AgentScope dependency.
+lockfile). Each canary explicitly requests a 15-minute E2B lease; it does not
+rely on E2B's short default sandbox timeout. The wrapper exposes only computer
+lifecycle and interaction methods; there is no AgentScope dependency.
 
 ## Runtime V1 acceptance contract
 

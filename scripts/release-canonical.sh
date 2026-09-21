@@ -289,8 +289,8 @@ if [ -n "${REQUESTED[harness-runner]:-}" ]; then
       http://127.0.0.1:${HIVE_HARNESS_PORT:-3080}/api/hivemind/runner-drain-status || true)
     status=${response##*$'\n'}
     body=${response%$'\n'*}
-    if [ "$status" = 404 ] && [ "${HARNESS_DRAIN_LEGACY_BOOTSTRAP:-0}" = 1 ]; then
-      echo "[drain] legacy runner has no drain endpoint; one-time bootstrap override accepted"
+    if { [ "$status" = 404 ] || [ "$status" = 401 ]; } && [ "${HARNESS_DRAIN_LEGACY_BOOTSTRAP:-0}" = 1 ]; then
+      echo "[drain] legacy runner does not expose the authenticated drain contract; one-time bootstrap override accepted"
       idle_observations=2
       break
     fi

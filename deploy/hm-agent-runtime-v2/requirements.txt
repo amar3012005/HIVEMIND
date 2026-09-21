@@ -28,4 +28,9 @@
 #
 # Model providers need no extra: `openai`, `anthropic`, and `dashscope` are base
 # dependencies, so OpenAI/Anthropic credentials work out of the box.
-agentscope[service,storage-redis,tools,workspace-e2b]==2.0.8
+agentscope[service,storage-redis,tools,workspace-docker,workspace-e2b]==2.0.8
+# AgentScope's TracingMiddleware uses the SDK/exporter only when an explicit
+# OTLP endpoint is configured. Pin the major API contract for reproducible
+# observability rather than relying on a transitive extra.
+opentelemetry-sdk>=1.44,<2
+opentelemetry-exporter-otlp-proto-http>=1.44,<2

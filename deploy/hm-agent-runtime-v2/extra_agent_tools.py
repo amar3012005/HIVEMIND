@@ -665,29 +665,27 @@ class PlaybookGetTool(_HiveMindToolBase):
 
 
 class ComposioToolsTool(_HiveMindToolBase):
-    """List the third-party toolkits this organization has connected."""
+    """Discover tenant-scoped, governed connected-app read tools."""
 
     name: str = "hivemind_composio_tools"
 
-    description: str = """List the third-party toolkits this organization has \
-connected (Gmail, Sheets, and others).
-
-Call this BEFORE hivemind_composio_execute. It returns only toolkits that \
-actually have a grant behind them, so you do not attempt a call the \
-organization has not authorized."""
+    description: str = """Discover read-only connected-app tools for one toolkit
+and use case. Call this BEFORE hivemind_composio_execute. It returns short-lived
+tenant-scoped grants; it never exposes credentials or write tools."""
 
     class Params(BaseModel):
-        note: Optional[str] = Field(default=None, description="Optional. Do not set.")
+        toolkit: str = Field(description="Connected toolkit slug, e.g. gmail or googledrive.")
+        use_case: str = Field(description="What company work requires this read, stated briefly.")
 
     input_schema: dict = Params.model_json_schema()
 
-    async def call(self, note: Optional[str] = None) -> ToolChunk:
+    async def call(self, toolkit: str, use_case: str) -> ToolChunk:
         try:
             data = await _call_hm_core(
                 "/internal/hivemind/composio/tools",
                 user_id=self._user_id,
                 org_id=self._org_id,
-                method="GET",
+                body={"toolkit": toolkit, "use_case": use_case},
             )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
@@ -701,25 +699,22 @@ organization has not authorized."""
 
 
 class ComposioExecuteTool(_HiveMindToolBase):
-    """Run a tool on one of the organization's connected third-party accounts."""
+    """Run an authorized, tenant-scoped connected-app read."""
 
     name: str = "hivemind_composio_execute"
 
-    description: str = """Execute a tool on one of the organization's connected \
-third-party accounts (send an email, append a row, create a document).
+    description: str = """Execute a read-only connected-app tool using the
+short-lived grant returned by hivemind_composio_tools. Writes are deliberately
+unavailable here and must go through a separate approval-backed workflow."""
 
-The organization's OAuth grants live in Composio; you never see or handle a \
-credential. Call hivemind_composio_tools first to learn which toolkits are \
-connected and what their tool slugs are.
-
-This performs a REAL action on a real account. Do not call it to check whether \
-something would work."""
-
-    is_read_only: bool = False
+    is_read_only: bool = True
 
     class Params(BaseModel):
-        tool: str = Field(
-            description="The provider tool slug, e.g. 'GMAIL_SEND_EMAIL'.",
+        tool_slug: str = Field(
+            description="The exact read tool_slug returned by hivemind_composio_tools.",
+        )
+        grant_id: str = Field(
+            description="The exact short-lived grant_id returned for that tool.",
         )
         args: dict = Field(
             default_factory=dict,
@@ -728,20 +723,20 @@ something would work."""
 
     input_schema: dict = Params.model_json_schema()
 
-    async def call(self, tool: str, args: Optional[dict] = None) -> ToolChunk:
+    async def call(self, tool_slug: str, grant_id: str, args: Optional[dict] = None) -> ToolChunk:
         try:
             data = await _call_hm_core(
                 "/internal/hivemind/composio/execute",
                 user_id=self._user_id,
                 org_id=self._org_id,
-                body={"tool": tool, "args": args or {}},
+                body={"tool_slug": tool_slug, "grant_id": grant_id, "arguments": args or {}},
             )
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
-            toolkit = tool.split("_")[0].lower() if tool else None
+            toolkit = tool_slug.split("_")[0].lower() if tool_slug else None
             if any(s in msg.lower() for s in ("not connected", "no grant", "409", "unauthorized", "no connected")):
-                return _err(msg, tool=tool, need_connect=True, toolkit=toolkit)
-            return _err(msg, tool=tool)
+                return _err(msg, tool_slug=tool_slug, need_connect=True, toolkit=toolkit)
+            return _err(msg, tool_slug=tool_slug)
         return _ok(data)
 
 

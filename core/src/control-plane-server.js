@@ -15394,6 +15394,8 @@ Write the persona now.`;
       || pathname === '/internal/hivemind/memories'
       || pathname === '/internal/hivemind/recall'
       || pathname === '/internal/hivemind/web-search'
+      || pathname === '/internal/hivemind/composio/tools'
+      || pathname === '/internal/hivemind/composio/execute'
       || pathname === '/internal/hivemind/playbooks'
       || pathname === '/internal/hivemind/playbooks/get'
       || pathname === '/internal/hivemind/artifacts'

@@ -1,6 +1,12 @@
 import { internalFetch } from '../internal/internal-fetch.js';
 import crypto from 'node:crypto';
 import { appendWorkRunEvent, completeWorkRun } from '../employees/work-runs.js';
+import {
+  discoverGovernedSessionReads,
+  executeGovernedSessionRead,
+  issueGovernedReadGrant,
+  resolveGovernedReadGrant,
+} from '../connectors/composio/runtime-adapter.js';
 
 const UUID = /^[0-9a-f-]{36}$/i;
 const GLOBAL_PLAYBOOKS = Object.freeze([
@@ -88,7 +94,10 @@ async function companyRecords(prisma, kind, p) {
   return null;
 }
 
-export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jsonResponse, prisma, pathname, fetchInternal = internalFetch }) {
+export async function handleAgentScopeCapabilityRoute({
+  req, res, parseBody, jsonResponse, prisma, pathname, fetchInternal = internalFetch,
+  composio = { discoverGovernedSessionReads, executeGovernedSessionRead, issueGovernedReadGrant, resolveGovernedReadGrant },
+}) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
   const body = req.method === 'GET' ? {} : await parseBody(req).catch(() => ({}));
@@ -142,6 +151,49 @@ export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jso
       body: { org_id: p.orgId, user_id: p.userId, query, limit: Math.max(1, Math.min(10, Number(body?.limit) || 6)) },
     });
     return jsonResponse(res, await response.json().catch(() => ({})), response.status);
+  }
+  if (pathname === '/internal/hivemind/composio/tools') {
+    const toolkit = String(body?.toolkit || '').trim().toLowerCase();
+    const useCase = String(body?.use_case || '').trim().slice(0, 1200);
+    if (!toolkit || !/^[a-z0-9_-]+$/.test(toolkit) || !useCase) {
+      return jsonResponse(res, { error: 'toolkit and use_case are required' }, 400);
+    }
+    try {
+      const discovered = await composio.discoverGovernedSessionReads(
+        p.orgId, { toolkits: [toolkit], useCases: [useCase] },
+      );
+      const tools = (discovered.tools || []).map((tool) => {
+        const grant = composio.issueGovernedReadGrant({
+          orgId: p.orgId, userId: p.userId, toolkit: tool.toolkit || toolkit,
+          sessionId: tool.sessionId, toolSlug: tool.toolSlug,
+        });
+        return {
+          name: tool.name, tool_slug: tool.toolSlug, toolkit: tool.toolkit || toolkit,
+          description: tool.description, input_schema: tool.inputSchema,
+          effect: 'read', grant_id: grant.grantId, grant_expires_at: grant.expiresAt,
+        };
+      });
+      return jsonResponse(res, {
+        status: 'completed', authority: 'read_only', connected_toolkits: tools.length ? [toolkit] : [],
+        tools, searched_log_id: discovered.searchedLogId || null, schema_log_id: discovered.schemaLogId || null,
+      });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 502);
+    }
+  }
+  if (pathname === '/internal/hivemind/composio/execute') {
+    const toolSlug = String(body?.tool_slug || '').trim();
+    const grantId = String(body?.grant_id || '').trim();
+    const args = body?.arguments && typeof body.arguments === 'object' ? body.arguments : {};
+    if (!toolSlug || !grantId) return jsonResponse(res, { error: 'tool_slug and grant_id are required' }, 400);
+    try {
+      const grant = composio.resolveGovernedReadGrant({ grantId, orgId: p.orgId, userId: p.userId, toolSlug });
+      const result = await composio.executeGovernedSessionRead({ sessionId: grant.sessionId, toolSlug, args });
+      return jsonResponse(res, { status: 'completed', tool_slug: toolSlug, effect: 'read', result });
+    } catch (error) {
+      const denied = /(?:read_denied|grant_(?:denied|expired|invalid|scope_denied))/.test(String(error.message));
+      return jsonResponse(res, { error: error.message }, denied ? 403 : 502);
+    }
   }
   const recordMatch = pathname.match(/^\/internal\/hivemind\/context\/(people|projects|objectives|work|artifacts)$/);
   if (recordMatch && req.method === 'GET') {

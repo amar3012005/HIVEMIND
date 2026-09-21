@@ -105,3 +105,43 @@ test('memory saves and web search use canonical Core paths under the resolved pr
   assert.match(calls[1].url, /\/internal\/hyper\/web-search$/);
   assert.equal(calls[1].options.body.org_id, '22222222-2222-2222-2222-222222222222');
 });
+
+test('connected app capabilities issue scoped read grants and cannot execute writes', async () => {
+  const calls = [];
+  const prisma = { userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) } };
+  const composio = {
+    discoverGovernedSessionReads: async (orgId, options) => {
+      calls.push({ kind: 'discover', orgId, options });
+      return { tools: [{ name: 'GMAIL_FETCH_EMAILS', toolSlug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail', sessionId: 'session-1', description: 'Fetch email', inputSchema: { type: 'object' } }] };
+    },
+    issueGovernedReadGrant: ({ orgId, userId, toolSlug }) => {
+      calls.push({ kind: 'issue', orgId, userId, toolSlug });
+      return { grantId: 'grant-1', expiresAt: 12345 };
+    },
+    resolveGovernedReadGrant: ({ grantId, orgId, userId, toolSlug }) => {
+      calls.push({ kind: 'resolve', grantId, orgId, userId, toolSlug });
+      if (toolSlug.includes('SEND')) throw new Error('governed_session_grant_scope_denied');
+      return { sessionId: 'session-1' };
+    },
+    executeGovernedSessionRead: async (input) => { calls.push({ kind: 'execute', ...input }); return { successful: true, data: ['mail'] }; },
+  };
+  const tools = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ toolkit: 'gmail', use_case: 'Find a customer email' }), jsonResponse, prisma, composio,
+    pathname: '/internal/hivemind/composio/tools',
+  });
+  assert.equal(tools.statusCode, 200);
+  assert.equal(tools.body.authority, 'read_only');
+  assert.deepEqual(tools.body.tools[0].grant_id, 'grant-1');
+  const executed = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ tool_slug: 'GMAIL_FETCH_EMAILS', grant_id: 'grant-1', arguments: { query: 'invoice' } }), jsonResponse, prisma, composio,
+    pathname: '/internal/hivemind/composio/execute',
+  });
+  assert.equal(executed.statusCode, 200);
+  assert.equal(calls.find((call) => call.kind === 'execute').sessionId, 'session-1');
+  const denied = await handleAgentScopeCapabilityRoute({
+    req: baseReq, res: {}, parseBody: async () => ({ tool_slug: 'GMAIL_SEND_EMAIL', grant_id: 'grant-1' }), jsonResponse, prisma, composio,
+    pathname: '/internal/hivemind/composio/execute',
+  });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(calls.some((call) => call.kind === 'execute' && call.toolSlug === 'GMAIL_SEND_EMAIL'), false);
+});

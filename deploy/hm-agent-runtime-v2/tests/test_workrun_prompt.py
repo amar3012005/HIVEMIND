@@ -1,9 +1,32 @@
 import unittest
 
-from app import _DEFAULT_WORKRUN_MODEL, _build_agent_system_prompt, _build_workrun_prompt
+from app import (
+    _DEFAULT_WORKRUN_MODEL,
+    _build_agent_system_prompt,
+    _build_workrun_prompt,
+    _workrun_credential_mode,
+)
 
 
 class WorkRunPromptTests(unittest.TestCase):
+    def test_gateway_mode_never_uses_direct_provider_credential(self):
+        self.assertEqual(
+            _workrun_credential_mode(gateway_enabled=True, direct_key=None),
+            "cloudflare_gateway_credential",
+        )
+
+    def test_direct_mode_ignores_persisted_gateway_placeholder(self):
+        self.assertEqual(
+            _workrun_credential_mode(gateway_enabled=False, direct_key="configured"),
+            "openai_credential",
+        )
+
+    def test_direct_mode_without_key_requires_existing_direct_credential(self):
+        self.assertEqual(
+            _workrun_credential_mode(gateway_enabled=False, direct_key=None),
+            "existing_direct_credential",
+        )
+
     def test_default_workrun_model_has_a_shipped_gateway_card(self):
         self.assertEqual(_DEFAULT_WORKRUN_MODEL, "deepseek/deepseek-v4-flash")
 

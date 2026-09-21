@@ -533,6 +533,19 @@ _HYPERAGENT_CONTEXT = model_capabilities.context_config_for(_DEFAULT_WORKRUN_MOD
 _HYPERAGENT_REACT = model_capabilities.react_config_for(_DEFAULT_WORKRUN_MODEL)
 
 
+def _workrun_credential_mode(*, gateway_enabled: bool, direct_key: str | None) -> str:
+    """Return the only credential family valid for this runtime mode.
+
+    Keeping this decision pure makes the gateway/direct boundary testable without
+    booting FastAPI or touching persisted AgentScope credentials.
+    """
+    if gateway_enabled:
+        return "cloudflare_gateway_credential"
+    if direct_key:
+        return "openai_credential"
+    return "existing_direct_credential"
+
+
 async def _resolve_agent(
     *,
     user_id: str,
@@ -806,7 +819,11 @@ async def _ensure_gateway_chat_model_config(user_id: str) -> dict:
 
     cred_id = None
     records = await app.state.storage.list_credentials(user_id)
-    if gateway_enabled():
+    credential_mode = _workrun_credential_mode(
+        gateway_enabled=gateway_enabled(),
+        direct_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
+    )
+    if credential_mode == "cloudflare_gateway_credential":
         for rec in records or []:
             data = getattr(rec, "data", rec)
             typ = data.get("type") if isinstance(data, dict) else getattr(data, "type", None)

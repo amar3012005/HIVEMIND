@@ -411,7 +411,16 @@ export async function appendWorkRunEvent(prisma, workRunId, normalized) {
             ),
             heartbeat_at = now(),
             updated_at = now()
+      -- Native AgentScope events have stable source_event_id values. A stream
+      -- reconnect can replay an already persisted event, so reject that append
+      -- atomically instead of relying on a browser-only de-duplicator.
       WHERE id = $1::uuid
+        AND (
+          NOT (($3::jsonb -> 0) ? 'source_event_id')
+          OR NOT COALESCE(events, '[]'::jsonb) @> jsonb_build_array(
+            jsonb_build_object('source_event_id', $3::jsonb -> 0 ->> 'source_event_id')
+          )
+        )
       RETURNING id, status, heartbeat_at`,
     workRunId,
     MAX_EVENTS,

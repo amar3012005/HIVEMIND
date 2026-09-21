@@ -103,8 +103,9 @@ services:
       # truncated run reports a failure while a hung run reports nothing.
       AGENTSCOPE_MODEL_CALL_DEADLINE_S: ${AGENTSCOPE_MODEL_CALL_DEADLINE_S:-180}
       # --- sandbox backend ---
-      # local = no sandbox (single-tenant). Switch to e2b before multi-tenant.
-      AGENTSCOPE_WORKSPACE_BACKEND: ${AGENTSCOPE_WORKSPACE_BACKEND:-local}
+      # Docker gives every WorkRun a native, isolated AgentScope workspace.
+      # E2B remains an environment-level alternative for remote isolation.
+      AGENTSCOPE_WORKSPACE_BACKEND: ${AGENTSCOPE_WORKSPACE_BACKEND:-docker}
       AGENTSCOPE_WORKSPACE_ISOLATION: ${AGENTSCOPE_WORKSPACE_ISOLATION:-per_session}
       AGENTSCOPE_WORKSPACE_TTL: ${AGENTSCOPE_WORKSPACE_TTL:-3600}
       AGENTSCOPE_SANDBOX_IMAGE: ${AGENTSCOPE_SANDBOX_IMAGE:-python:3.12-slim}
@@ -125,6 +126,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - agent-runtime-workspaces:/data/workspaces
+      # Required only by AgentScope's Docker workspace backend; this runtime is
+      # local preview infrastructure and never publishes its own host port.
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - hivemind-network
     depends_on:

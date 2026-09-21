@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normalizeAgentScopeEvent } from '../../src/employees/work-runs.js';
+import { appendWorkRunEvent, normalizeAgentScopeEvent } from '../../src/employees/work-runs.js';
 
 test('preserves typed AgentScope transcript deltas for durable replay', () => {
   const text = normalizeAgentScopeEvent({
@@ -35,4 +35,22 @@ test('retains stable tool identity, input, and streamed output', () => {
   assert.equal(output.t, 'tool.output.delta');
   assert.equal(output.tool_call_id, 'call-1');
   assert.equal(output.source_event_id, 'event-tool-output');
+});
+
+test('rejects a replayed native event atomically by source_event_id', async () => {
+  let query = '';
+  const prisma = {
+    async $queryRawUnsafe(sql) {
+      query = sql;
+      return [];
+    },
+  };
+
+  const result = await appendWorkRunEvent(prisma, '00000000-0000-4000-8000-000000000001', {
+    t: 'assistant.delta', source_event_id: 'native-event-1', delta: 'chunk',
+  });
+
+  assert.equal(result, null);
+  assert.match(query, /source_event_id/);
+  assert.match(query, /jsonb_build_array/);
 });

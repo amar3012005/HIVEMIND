@@ -106,7 +106,23 @@ export function canTransition(from, to) {
  */
 export function runtimeScopeProjection(scope) {
   if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return {};
-  const { local_playbooks: local, ...compactScope } = scope;
+  const {
+    local_playbooks: local,
+    // These fields are resolved through the session-bound HIVE tools. Keeping
+    // them out of L0 prevents a caller from smuggling an entire company brain
+    // or playbook body into the first AgentScope prompt.
+    company_context: _companyContext,
+    company_profile: _companyProfile,
+    company_records: _companyRecords,
+    context: _fullContext,
+    playbook: _playbookBody,
+    playbook_body: _playbookBody2,
+    playbook_instructions: _playbookInstructions,
+    global_playbooks: _globalPlaybooks,
+    org_playbooks: _orgPlaybooks,
+    organization_playbooks: _organizationPlaybooks,
+    ...compactScope
+  } = scope;
   const localMetadata = localPlaybooks(local).map(({ id, name, description, scope: playbookScope, version }) => ({
     id,
     name,

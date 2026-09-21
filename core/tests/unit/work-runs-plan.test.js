@@ -1,11 +1,26 @@
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyRuntimeEvent,
   completeWorkRun,
   normalizeAgentScopeEvent,
+  runtimeScopeProjection,
   WORK_RUN_EVENT,
 } from '../../src/employees/work-runs.js';
+
+test('runtime L0 scope strips full company and playbook bodies', () => {
+  const projected = runtimeScopeProjection({
+    org_id: 'org-1', playbook_id: 'global:market-research',
+    company_context: 'COMPANY SECRET',
+    company_profile: { mission: 'full profile' },
+    playbook_instructions: 'long playbook body',
+    local_playbooks: [{ id: 'local:brief', name: 'Brief', description: 'short', instructions: 'long local body' }],
+  });
+  assert.deepEqual(projected, {
+    org_id: 'org-1', playbook_id: 'global:market-research',
+    local_playbooks: [{ id: 'local:local-brief', name: 'Brief', description: 'short', scope: 'local', version: '1.0.0' }],
+  });
+});
 
 describe('WorkRun Task tools → plan events (Phase 1)', () => {
   it('maps TaskCreate start to plan.updated, not a generic tool', () => {

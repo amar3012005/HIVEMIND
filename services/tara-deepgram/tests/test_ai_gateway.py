@@ -35,7 +35,7 @@ def test_tara_http_voice_inference_uses_gateway(monkeypatch):
     assert cartesia.endswith("/gateway/cartesia/tts/bytes")
 
 
-def test_deepgram_realtime_agent_uses_gateway(monkeypatch):
+def test_deepgram_realtime_agent_stays_direct_when_gateway_is_enabled(monkeypatch):
     for key, value in {
         "CLOUDFLARE_AI_GATEWAY_ENABLED": "true",
         "CLOUDFLARE_ACCOUNT_ID": "account",
@@ -47,5 +47,5 @@ def test_deepgram_realtime_agent_uses_gateway(monkeypatch):
         "wss://agent.deepgram.com/v1/agent/converse",
         {"Authorization": "Token provider"},
     )
-    assert url == "wss://gateway.ai.cloudflare.com/v1/account/gateway/deepgram/v1/agent/converse"
-    assert headers["cf-aig-authorization"] == "Bearer token"
+    assert url == "wss://agent.deepgram.com/v1/agent/converse"
+    assert headers == {"Authorization": "Token provider"}

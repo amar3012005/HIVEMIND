@@ -26,6 +26,22 @@ class WorkspaceBackendTests(unittest.TestCase):
         self.assertIn("backend=docker", backend.describe())
         self.assertIn("isolation=per_session", backend.describe())
 
+    def test_unsandboxed_local_backend_requires_an_explicit_development_acknowledgement(self):
+        blocked = self._load_backend(
+            AGENTSCOPE_WORKSPACE_BACKEND="local",
+            AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE="0",
+        )
+        with self.assertRaisesRegex(RuntimeError, "unsandboxed and is refused"):
+            blocked.build_workspace_manager("/tmp/hm-workspace-test")
+
+        allowed = self._load_backend(
+            AGENTSCOPE_WORKSPACE_BACKEND="local",
+            AGENTSCOPE_ALLOW_UNSAFE_LOCAL_WORKSPACE="1",
+        )
+        manager = allowed.build_workspace_manager("/tmp/hm-workspace-test")
+        self.assertEqual(type(manager).__name__, "LocalWorkspaceManager")
+        self.assertIn("unsafe-local=explicit", allowed.describe())
+
     def test_runnable_compose_profiles_default_to_isolated_workruns(self):
         runtime_root = Path(__file__).resolve().parents[1]
         for filename in ("docker-compose.yml", "docker-compose.local.yml"):

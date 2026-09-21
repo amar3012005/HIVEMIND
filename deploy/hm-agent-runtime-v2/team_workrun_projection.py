@@ -9,8 +9,10 @@ persists.  It never parses the tool's human-facing response text.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolChunk
 from agentscope.tool._base import ToolBase
 
@@ -58,6 +60,43 @@ async def _member_data(tool: Any, team: Any, name: str) -> dict[str, Any]:
     return {"member": name}
 
 
+async def _members_without_leader_report(tool: Any, team: Any) -> list[str]:
+    """Return created members that have not sent a native message to leader.
+
+    AgentScope delivers ``TeamSay`` to the leader as a team-origin HintBlock in
+    the leader session context.  This check relies on that framework-owned
+    delivery receipt rather than interpreting a worker's prose or inferring
+    completion from elapsed time.  It prevents a leader from using native
+    ``TeamDelete`` to cancel workers before their result has reached it.
+    """
+    leader = await tool._storage.get_session(
+        tool._user_id, tool._agent_id, tool._session_id,
+    )
+    senders: set[str] = set()
+    for message in list(getattr(getattr(leader, "state", None), "context", []) or []):
+        for block in list(getattr(message, "content", []) or []):
+            source = getattr(block, "source", None)
+            if not source:
+                continue
+            try:
+                provenance = json.loads(source) if isinstance(source, str) else source
+            except (TypeError, ValueError):
+                continue
+            if isinstance(provenance, dict) and provenance.get("label") == "team":
+                sender = str(provenance.get("sublabel") or "").strip()
+                if sender:
+                    senders.add(sender)
+
+    missing: list[str] = []
+    members = list(getattr(getattr(team, "data", None), "members", []) or [])
+    for member in members:
+        agent = await tool._storage.get_agent(member.owner_id, member.agent_id)
+        name = str(getattr(getattr(agent, "data", None), "name", "")).strip()
+        if name and name not in senders:
+            missing.append(name)
+    return sorted(set(missing))
+
+
 class WorkRunTeamTool(ToolBase):
     """A transparent ToolBase decorator for source-verified team tools."""
 
@@ -79,6 +118,16 @@ class WorkRunTeamTool(ToolBase):
 
     async def call(self, **kwargs: Any) -> ToolChunk:
         before = await _team_for(self._delegate)
+        if self.name == "TeamDelete" and before is not None:
+            missing = await _members_without_leader_report(self._delegate, before)
+            if missing:
+                return ToolChunk(
+                    content=[TextBlock(text=(
+                        "TeamDelete refused: wait for a native TeamSay report from "
+                        f"each member before dissolving the team. Missing: {', '.join(missing)}."
+                    ))],
+                    state=ToolResultState.ERROR,
+                )
         result = await self._delegate(**kwargs)
         if not isinstance(result, ToolChunk) or not _success(result):
             return result

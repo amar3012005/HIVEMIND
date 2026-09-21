@@ -200,6 +200,70 @@ class HiveToolkitGroupsTests(unittest.TestCase):
 
         asyncio.run(verify())
 
+    def test_native_team_delete_waits_for_a_worker_team_message(self):
+        class Storage:
+            def __init__(self, reported=False):
+                self.reported = reported
+
+            async def get_session(self, *_args):
+                blocks = []
+                if self.reported:
+                    blocks = [SimpleNamespace(source='{"label":"team","sublabel":"researcher"}')]
+                return SimpleNamespace(
+                    team_id="team-1",
+                    state=SimpleNamespace(context=[SimpleNamespace(content=blocks)]),
+                )
+
+            async def get_team(self, *_args):
+                return SimpleNamespace(
+                    id="team-1", session_id="leader-session",
+                    data=SimpleNamespace(name="Research", members=[
+                        SimpleNamespace(owner_id="user-1", agent_id="worker-agent", session_id="worker-session", role="created"),
+                    ]),
+                )
+
+            async def get_agent(self, *_args):
+                return SimpleNamespace(data=SimpleNamespace(name="researcher"))
+
+        class TeamDeleteDelegate:
+            name = "TeamDelete"
+            description = "native AgentScope TeamDelete"
+            input_schema = {"type": "object"}
+            is_concurrency_safe = False
+            is_read_only = False
+            is_state_injected = False
+            is_external_tool = False
+            is_mcp = False
+            mcp_name = None
+            _user_id = "user-1"
+            _agent_id = "leader-agent"
+            _session_id = "leader-session"
+
+            def __init__(self, storage):
+                self._storage = storage
+                self.called = False
+
+            async def check_permissions(self, *_args):
+                return None
+
+            async def __call__(self, **_kwargs):
+                self.called = True
+                return ToolChunk(content=[TextBlock(text="native success")])
+
+        async def verify():
+            blocked_delegate = TeamDeleteDelegate(Storage(reported=False))
+            blocked = await WorkRunTeamTool(blocked_delegate).call()
+            self.assertEqual(str(blocked.state).lower(), "error")
+            self.assertIn("Missing: researcher", blocked.content[0].text)
+            self.assertFalse(blocked_delegate.called)
+
+            allowed_delegate = TeamDeleteDelegate(Storage(reported=True))
+            allowed = await WorkRunTeamTool(allowed_delegate).call()
+            self.assertTrue(allowed_delegate.called)
+            self.assertEqual(allowed.metadata["hivemind_team"]["action"], "team_deleted")
+
+        asyncio.run(verify())
+
 
 if __name__ == "__main__":
     unittest.main()

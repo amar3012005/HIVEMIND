@@ -64,7 +64,9 @@ services:
       AGENTSCOPE_REDIS_PORT: "6379"
       AGENTSCOPE_REDIS_DB: "0"
       # --- workspace root (named volume below) ---
-      AGENTSCOPE_WORKSPACES: /data/workspaces
+      # A Docker workspace is re-bound into its child container. This must be
+      # a host-shared root, not a runtime-only named volume.
+      AGENTSCOPE_WORKSPACES: ${AGENTSCOPE_WORKSPACE_HOST_ROOT:-/tmp/hm-agent-runtime-workspaces}
       # --- Phase 1: this single process owns timers + channel connections ---
       AGENTSCOPE_ENABLE_SCHEDULER: "1"
       AGENTSCOPE_ENABLE_CHANNEL_WORKER: "1"
@@ -118,9 +120,9 @@ services:
       AGENTSCOPE_SANDBOX_IMAGE: ${AGENTSCOPE_SANDBOX_IMAGE:-python:3.12-slim}
       AGENTSCOPE_SANDBOX_NODE_VERSION: ${AGENTSCOPE_SANDBOX_NODE_VERSION:-20}
     volumes:
-      # Named volume, not a bind mount: keeps agent working files off the host
-      # filesystem and survives `docker compose down`.
-      - workspaces:/data/workspaces
+      # The exact same host path is visible to the runtime and Docker daemon,
+      # so AgentScope can bind a per-session child directory safely.
+      - ${AGENTSCOPE_WORKSPACE_HOST_ROOT:-/tmp/hm-agent-runtime-workspaces}:${AGENTSCOPE_WORKSPACE_HOST_ROOT:-/tmp/hm-agent-runtime-workspaces}
       # Docker socket for future sandbox/MCP work. Comment out if you do not
       # want the runtime to be able to drive the host's containers.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -135,4 +137,3 @@ services:
 
 volumes:
   redis-data:
-  workspaces:

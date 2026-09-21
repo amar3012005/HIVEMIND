@@ -69,7 +69,11 @@ services:
       AGENTSCOPE_REDIS_HOST: agent-runtime-redis
       AGENTSCOPE_REDIS_PORT: "6379"
       AGENTSCOPE_REDIS_DB: "0"
-      AGENTSCOPE_WORKSPACES: /data/workspaces
+      # DockerWorkspaceManager rebinds each per-session directory into a
+      # child container. Use a host-shared root rather than a Docker named
+      # volume: Docker Desktop cannot rebind a path that exists only inside
+      # this runtime container.
+      AGENTSCOPE_WORKSPACES: ${AGENTSCOPE_WORKSPACE_HOST_ROOT:-/tmp/hm-agent-runtime-workspaces}
       # --- single process owns timers + channel connections ---
       AGENTSCOPE_ENABLE_SCHEDULER: "1"
       AGENTSCOPE_ENABLE_CHANNEL_WORKER: "1"
@@ -125,7 +129,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
-      - agent-runtime-workspaces:/data/workspaces
+      - ${AGENTSCOPE_WORKSPACE_HOST_ROOT:-/tmp/hm-agent-runtime-workspaces}:${AGENTSCOPE_WORKSPACE_HOST_ROOT:-/tmp/hm-agent-runtime-workspaces}
       # Required only by AgentScope's Docker workspace backend; this runtime is
       # local preview infrastructure and never publishes its own host port.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -146,8 +150,6 @@ services:
 volumes:
   agent-runtime-redis-data:
     name: hm-agent-runtime-local-redis-data
-  agent-runtime-workspaces:
-    name: hm-agent-runtime-local-workspaces
 
 networks:
   # Created by docker-compose.local-stack.yml; this overlay joins it.

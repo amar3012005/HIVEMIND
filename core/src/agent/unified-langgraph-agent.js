@@ -62,12 +62,23 @@ function localized(locale, key, toolkit = '') {
   return (messages[language] || messages.en)[key];
 }
 
-function systemPrompt({ useTools, locale }) {
+function explicitDurableSaveRequest(message) {
+  const text = String(message || '').toLowerCase();
+  return /\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,120}\b(?:memory|hive[-\s]?mind)\b/.test(text);
+}
+
+function decisionSummaryRequest(message) {
+  const text = String(message || '').toLowerCase();
+  return /\bdecisions?\b/.test(text)
+    && /\b(?:summari[sz]e|recent|latest|list|show|what)\b/.test(text);
+}
+
+function systemPrompt({ useTools, locale, explicitSave = false }) {
   return `${ORGANIZATIONAL_BRAIN_PERSONA}
 
 You receive only the progressive gateway capability needed for the current step. Use recent conversation and the compact authenticated profile when sufficient. When available, use hivemind_meta only when organization memory, documents, history, a profile, or a durable save is needed. When available, use hivemind_connected_task for external apps: search once with complete atomic use cases, follow the returned connection state and selected slugs, load only selected schemas, then execute through the same gateway.
 
-Continue after every tool receipt as the same agent. If evidence is incomplete, make the next useful gateway call. Ask the user only for a real business choice that cannot be discovered. Never ask for provider IDs. Never claim that an approval draft was executed. Answer in ${locale || 'the user language'} with concise, well-structured Markdown. Use tables when the user requests multiple records and preserve evidence citations.`;
+Continue after every tool receipt as the same agent. If evidence is incomplete, make the next useful gateway call. Ask the user only for a real business choice that cannot be discovered. Never ask for provider IDs. Never claim that an approval draft was executed. Answer in ${locale || 'the user language'} with concise, well-structured Markdown. Use tables when the user requests multiple records and preserve evidence citations.${explicitSave ? '\n\nThe user explicitly requested a durable memory write. Your next HIVE action MUST be hivemind_meta with operation="save" and a self-contained title/content derived only from the current turn or recent conversation. Do not call recall as a substitute. If a destination scope was not stated, omit scope; Core will return the required scope choice.' : ''}`;
 }
 
 function safeHistory(history = [], limit = 3) {
@@ -223,9 +234,25 @@ async function defaultMetaExecutor(args, ctx) {
     const profile = await getSharedProfileStore(ctx.prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null);
     return { successful: true, data: { profile_context: compactText(profile, operation === 'context' ? 12000 : 4000) } };
   }
-  if (operation === 'recall') return executeGovernedCoreRead('hivemind_recall', recallArgs(args.recall, ctx), ctx);
+  if (operation === 'recall') {
+    if (!compactText(args?.recall?.query, 1200)) {
+      return {
+        successful: false,
+        error: 'hivemind_recall_query_required',
+        instruction: 'A recall call requires recall.query. If the user asked to save a memory, call hivemind_meta with operation="save" and save.title/save.content instead.',
+      };
+    }
+    return executeGovernedCoreRead('hivemind_recall', recallArgs(args.recall, ctx), ctx);
+  }
   if (operation !== 'save') return { successful: false, error: 'hivemind_meta_operation_invalid' };
   const save = args.save || {};
+  if (!compactText(save.title, 240) || !compactText(save.content, 8000)) {
+    return {
+      successful: false,
+      error: 'hivemind_save_payload_required',
+      instruction: 'A durable save requires a neutral save.title and self-contained save.content. Use the current turn or recent conversation; do not replace this write with recall.',
+    };
+  }
   const toolArgs = {
     title: save.title, content: save.content,
     tags: Array.isArray(save.tags) && save.tags.length >= 2 ? save.tags : ['hivemind', 'user-confirmed'],
@@ -523,14 +550,15 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       requestedToolkits = toolkitMentions(message, [...userAccounts, ...orgAccounts]);
     }
     const locale = ctx.language || 'en';
+    const explicitSave = explicitDurableSaveRequest(message);
     const messages = [
-      { role: 'system', content: systemPrompt({ useTools, locale }) },
+      { role: 'system', content: systemPrompt({ useTools, locale, explicitSave }) },
       ...(requestedToolkits.length ? [{ role: 'system', content: `The request explicitly names authenticated connected-app toolkit(s): ${requestedToolkits.join(', ')}. External app facts cannot be answered by hivemind_meta. Start or continue hivemind_connected_task search, then follow its connection, schema, and execution receipts before answering.` }] : []),
       ...(profile ? [{ role: 'system', content: `Authenticated compact profile:\n${compactText(profile, 1800)}` }] : []),
       ...safeHistory(ctx.conversationHistory, Math.max(1, Math.min(6, Number(ctx.historyTurns) || 3))),
       { role: 'user', content: message },
     ];
-    const patch = { runId, context: { locale, profile: compactText(profile, 1800) }, requestedToolkits, messages };
+    const patch = { runId, context: { locale, profile: compactText(profile, 1800), explicit_save: explicitSave }, requestedToolkits, messages };
     return transition({ ...state, runId }, 'running', patch, { reason_code: 'turn_admitted' });
   };
 
@@ -548,7 +576,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       ? state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
       : state.receipts.filter(substantiveMetaReadReceipt);
     const modelMessages = finalEvidenceReady ? [
-      { role: 'system', content: `Synthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.` },
+      { role: 'system', content: `Synthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
       { role: 'user', content: message },
       { role: 'system', content: `Verified receipts:\n${jsonText(finalReceipts).slice(0, 24000)}` },
     ] : state.messages;

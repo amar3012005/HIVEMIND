@@ -84,6 +84,66 @@ test('native HIVE recall streams its final answer from governed read receipts', 
   assert.equal(result.usage.at(-1).total_tokens, 9);
 });
 
+test('an explicit durable-save request repairs a malformed recall and executes the governed write', async () => {
+  const prisma = fakePrisma();
+  const calls = [];
+  let turn = 0;
+  const runtimeCtx = {
+    ...ctx(prisma, 'explicit-save'),
+    conversationHistory: [{ role: 'assistant', content: 'Rama is Amar\'s partner and accepted the Prague anniversary invitation.' }],
+    _tracedDispatch: async (name, args) => {
+      calls.push([name, args]);
+      assert.equal(name, 'hivemind_save_memory');
+      assert.equal(args.title, 'Rama');
+      assert.match(args.content, /Prague anniversary invitation/);
+      assert.equal(args.scope, undefined);
+      return { memoryId: 'memory-rama' };
+    },
+  };
+  const result = await runUnifiedMetaAgent({
+    message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
+    checkpointer: new MemorySaver(), composio: {},
+    modelStep: async ({ messages }) => {
+      turn += 1;
+      if (turn === 1) {
+        assert.match(messages[0].content, /explicitly requested a durable memory write/);
+        return { message: call('hivemind_meta', { operation: 'recall', recall: {} }, 'save-incorrect-recall') };
+      }
+      if (turn === 2) return { message: call('hivemind_meta', {
+        operation: 'save', save: {
+          title: 'Rama',
+          content: 'Rama is Amar\'s partner and accepted the Prague anniversary invitation.',
+          source_type: 'text',
+        },
+      }, 'save-rama') };
+      return { message: { role: 'assistant', content: 'I saved the dedicated memory about Rama.' } };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(calls.length, 1);
+  assert.match(result.response, /saved the dedicated memory/i);
+});
+
+test('decision summaries keep non-decision events out of the final synthesis', async () => {
+  const prisma = fakePrisma();
+  let turn = 0;
+  await runUnifiedMetaAgent({
+    message: 'Summarize my recent decisions', useTools: false, prisma, ctx: ctx(prisma, 'decision-summary'),
+    checkpointer: new MemorySaver(), composio: {},
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'recent decisions', limit: 10 } }, 'decision-recall') };
+      throw new Error('decision synthesis must use the verified receipt stream');
+    },
+    metaExecutor: async () => ({ successful: true, data: { memories: [{ title: 'Approved roadmap', memory_type: 'decision', content: 'Approved the September roadmap.' }, { title: 'Calendar invitation', memory_type: 'event', content: 'Accepted a trip invitation.' }] } }),
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages[0].content, /Do not label an email, calendar event, relationship, or inferred outcome as a decision/);
+      await onDelta('You approved the September roadmap.');
+      return { ok: true, content: 'You approved the September roadmap.' };
+    },
+  });
+});
+
 test('the same graph progressively searches, loads one selected schema, executes, and renders provider records', async () => {
   const prisma = fakePrisma();
   const events = [];

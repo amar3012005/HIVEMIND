@@ -220,6 +220,11 @@ def assemble_campaign_bundle(
         item.setdefault("confidence", "medium" if item.get("status") == "verified" else "low")
         item.setdefault("url", "")
     plan["evidence"] = evidence
+    verified_evidence_ids = {
+        str(item.get("id") or "")
+        for item in evidence
+        if item.get("status") == "verified" and item.get("source_type") != "derived"
+    }
 
     creative = plan.get("creative_system") if isinstance(plan.get("creative_system"), dict) else {}
     hypotheses = [row for row in (creative.get("hypotheses") or []) if isinstance(row, dict)]
@@ -258,6 +263,16 @@ def assemble_campaign_bundle(
         hypothesis["channels"] = hypothesis.get("channels") if isinstance(hypothesis.get("channels"), list) and hypothesis.get("channels") else list(channels)
     creative["hypotheses"] = hypotheses
     creative.setdefault("approved_claim_ids", [])
+    if isinstance(creative.get("approved_claim_ids"), list):
+        # The model may attach assumptions alongside a genuinely verified
+        # source when describing the creative system. Assumptions remain on
+        # the evidence board, but they cannot be used as approved public
+        # claims. Keep only deterministically verified provenance here; an
+        # empty result still fails governance below.
+        creative["approved_claim_ids"] = [
+            item for item in creative["approved_claim_ids"]
+            if str(item) in verified_evidence_ids
+        ]
     plan["creative_system"] = creative
 
     actions = [row for row in (plan.get("actions") or []) if isinstance(row, dict)]
@@ -289,6 +304,16 @@ def assemble_campaign_bundle(
         # Normalize a common model synonym without weakening governance:
         # "verified" still requires directly supporting verified evidence.
         action["claim_status"] = "verified" if claim_status == "claim" else claim_status
+        if action["claim_status"] == "verified":
+            # A verified action may cite a verified company/web fact and also
+            # list adjacent assumptions gathered during debate. Do not let
+            # those assumptions masquerade as support for the final copy.
+            # Filtering is safer than promoting them and still fails closed
+            # when no verified evidence remains.
+            action["evidence_ids"] = [
+                item for item in action["evidence_ids"]
+                if str(item) in verified_evidence_ids
+            ]
         creative_brief = action.get("creative_brief") if isinstance(action.get("creative_brief"), dict) else {}
         required = visuals_required or creative_brief.get("required") is True
         creative_brief["required"] = required

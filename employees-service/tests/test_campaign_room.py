@@ -217,6 +217,47 @@ def test_campaign_compiler_keeps_uncited_derived_evidence_unverified_by_governan
     )
 
 
+def test_campaign_compiler_excludes_assumptions_from_verified_action_and_creative_claims():
+    bundle = assemble_campaign_bundle(
+        {
+            "evidence": [
+                {
+                    "id": "company-fact",
+                    "claim": "The company describes the product as a memory engine.",
+                    "source": "Company website",
+                    "source_type": "web",
+                    "status": "verified",
+                    "url": "https://example.com/product",
+                },
+                {
+                    "id": "audience-assumption",
+                    "claim": "The audience prefers this positioning.",
+                    "source": "Agent inference",
+                    "source_type": "derived",
+                    "status": "assumption",
+                    "url": "",
+                },
+            ],
+            "creative_system": {
+                "approved_claim_ids": ["company-fact", "audience-assumption"],
+            },
+            "actions": [{
+                "id": "post-1",
+                "channel": "instagram",
+                "final_copy": "The company describes the product as a memory engine.",
+                "claim_status": "verified",
+                "evidence_ids": ["company-fact", "audience-assumption"],
+            }],
+        },
+        channels=["instagram"],
+        requirements=["goal", "channel:instagram"],
+        campaign_brief={"brief": {"duration_days": 14}},
+    )
+
+    assert bundle["actions"][0]["evidence_ids"] == ["company-fact"]
+    assert bundle["creative_system"]["approved_claim_ids"] == ["company-fact"]
+
+
 def test_campaign_compiler_completes_missing_creative_hypothesis_links_without_resynthesis():
     bundle = assemble_campaign_bundle(
         {

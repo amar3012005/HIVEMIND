@@ -303,6 +303,40 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     return true;
   }
+  if (corePath === '/projects' && req.method === 'POST') {
+    try {
+      const membership = await prisma.userOrganization.findUnique({
+        where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } },
+        select: { isActive: true },
+      });
+      if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+      const input = await parseBody(req).catch(() => null);
+      const projectName = typeof input?.name === 'string' ? input.name.trim() : '';
+      const description = typeof input?.description === 'string' ? input.description.trim() : null;
+      if (!projectName || projectName.length > 120 || (description && description.length > 1000)
+          || Object.keys(input || {}).some(key => !['name', 'description'].includes(key))) {
+        jsonResponse(res, { error: 'invalid_project_input' }, 400); return true;
+      }
+      const existing = await prisma.project.findFirst({
+        where: { orgId: claims.org_id, name: { equals: projectName, mode: 'insensitive' } },
+        select: { id: true, name: true, slug: true },
+      });
+      if (existing) {
+        jsonResponse(res, { created: false, project: existing, hint: 'An authorized project with this name already exists.' }, 200);
+        return true;
+      }
+      const project = await new TeamStore(prisma).createProject({
+        orgId: claims.org_id, name: projectName, description, createdBy: claims.sub,
+      });
+      jsonResponse(res, {
+        created: true,
+        project: { id: project.id, name: project.name, slug: project.slug, description: project.description || null },
+      }, 201);
+    } catch {
+      jsonResponse(res, { error: 'Project creation unavailable' }, 503);
+    }
+    return true;
+  }
   if (corePath === '/v1/hyperagents/profiles' && req.method === 'GET') {
     const result = await scopedHyperagentProfiles(prisma, claims);
     jsonResponse(res, result || { error: 'Organization membership required' }, result ? 200 : 403);

@@ -276,6 +276,35 @@ test('project catalog exposes only policy-authorized project labels to the ticke
   assert.match(calls[0].query, /project_members/);
 });
 
+test('project creation derives tenant and owner from the signed runner ticket', async () => {
+  const res = {}; const creates = [];
+  const projectId = 'eaf38536-7c4f-4ba9-a4d4-1be9a699965a';
+  await handleHarnessChatBootstrapRoute({
+    req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+    pathname: '/internal/v1/harness-chat/core/projects',
+    prisma: {
+      userOrganization: { findUnique: async () => ({ isActive: true, role: 'member' }) },
+      project: {
+        findFirst: async () => null,
+        findUnique: async () => null,
+        create: async ({ data }) => {
+          creates.push(data);
+          return { id: projectId, name: data.name, slug: 'atlas', description: data.description, status: 'active', members: [] };
+        },
+      },
+      $executeRawUnsafe: async () => 1,
+    },
+    parseBody: async () => ({ name: 'Atlas', description: 'Customer research' }),
+    jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
+    redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, fetchImpl: fetch,
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.created, true);
+  assert.equal(creates[0].orgId, orgId);
+  assert.equal(creates[0].createdBy, userId);
+  assert.deepEqual(creates[0].members.create, [{ userId, role: 'owner', addedById: userId }]);
+});
+
 test('receipt endpoint is admitted outside the Core proxy namespace', async () => {
   const rows = new Map();
   const model = {

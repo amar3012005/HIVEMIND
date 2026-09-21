@@ -8,6 +8,7 @@ import {
   chooseHiveRecallPolicy,
   createDecisionTurnState,
   createOpenRouterJevProvider,
+  hasExplicitHivemindSaveIntent,
   projectComposioDiscovery,
   translateRecallPolicy,
 } from '../../src/agent/decision-gateway.js';
@@ -90,6 +91,19 @@ test('explicit operational app intent bypasses the initial decision call', async
   const result = await chooseCapability({ gateway, turn, userQuery: 'Find my last Gmail from Rama',
     appMentions: ['gmail'], operationalAppIntent: true, fallback: async () => 'fallback' });
   assert.equal(result.choice, 'composio_search');
+  assert.equal(result.source, 'deterministic');
+  assert.equal(calls, 0);
+});
+
+test('explicit HIVE save intent bypasses Jev uncertainty and selects the direct save tool family', async () => {
+  let calls = 0;
+  const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('should not run'); } } });
+  const turn = createDecisionTurnState('turn-explicit-save');
+  const result = await chooseCapability({ gateway, turn,
+    userQuery: 'save this to hivemind The deployment is complete',
+    fallback: async () => 'fallback' });
+  assert.equal(hasExplicitHivemindSaveIntent('save this to hivemind The deployment is complete'), true);
+  assert.equal(result.choice, 'hivemind_save');
   assert.equal(result.source, 'deterministic');
   assert.equal(calls, 0);
 });

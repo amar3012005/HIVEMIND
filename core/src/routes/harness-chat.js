@@ -315,17 +315,25 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   let body;
   if (req.method !== 'GET') body = await parseBody(req).catch(() => null);
   const target = new URL(CORE_ROUTE_TARGETS.get(corePath) || corePath, redisConfig.coreApiBaseUrl);
+  const incoming = new URL(req.url || pathname, 'http://harness.internal');
   if (corePath === '/api/entities') {
-    const incoming = new URL(req.url || pathname, 'http://harness.internal');
     for (const [incomingKey, coreKey] of ENTITY_QUERY_KEYS) {
       const value = incoming.searchParams.get(incomingKey);
       if (value !== null) target.searchParams.set(coreKey, value);
     }
   }
+  if (corePath === '/api/memories/save-status') {
+    const idempotencyKey = incoming.searchParams.get('idempotency_key');
+    if (idempotencyKey !== null) target.searchParams.set('idempotency_key', idempotencyKey.slice(0, 200));
+  }
   if (corePath === '/api/memories') target.searchParams.set('sync', 'true');
+  const idempotencyHeader = typeof req.headers['x-idempotency-key'] === 'string'
+    ? req.headers['x-idempotency-key'].slice(0, 200)
+    : '';
   const headers = {
     accept: 'application/json', authorization: `Bearer ${getInternalApiKey()}`,
     'x-hm-user-id': claims.sub, 'x-hm-org-id': claims.org_id,
+    ...(idempotencyHeader ? { 'x-idempotency-key': idempotencyHeader } : {}),
     ...(body === undefined ? {} : { 'content-type': 'application/json' }),
   };
   const requestCore = (requestBody, timeoutMs) => fetchImpl(target, {

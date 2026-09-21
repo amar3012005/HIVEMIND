@@ -60,7 +60,8 @@ function fallbackReceipt(reason = 'current_selector') {
 
 export function decisionGatewayToolNames(selection, { connected = true } = {}) {
   if (selection === 'direct_answer' || selection === 'hivemind_context') return [];
-  if (selection === 'hivemind_meta' || selection === 'hivemind_save') return ['hivemind_meta'];
+  if (selection === 'hivemind_meta') return ['hivemind_meta'];
+  if (selection === 'hivemind_save') return ['hivemind_save_memory'];
   if (selection === 'composio_search' && connected) return ['hivemind_connected_task'];
   return null;
 }

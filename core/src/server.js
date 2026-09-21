@@ -20738,6 +20738,9 @@ exit \$RC
               if (prior?.status === 'completed' && prior.receipt) {
                 return jsonResponse(res, { ...prior.receipt, replayed: true, receipt: prior.receipt }, 200);
               }
+              if (prior && ['prepared', 'approved', 'executing'].includes(prior.status)) {
+                return jsonResponse(res, publicSaveStatus(prior), 202);
+              }
             }
             // Validate request body with scoping enforcement
             const scopedBody = {
@@ -20764,6 +20767,26 @@ exit \$RC
               const memoryLimitCheck = await planEnforcer.checkLimit(orgId, 'memories', 1);
               if (!memoryLimitCheck.allowed) {
                 return jsonResponse(res, planLimitBody(memoryLimitCheck, 'memories'), memoryLimitCheck.status || 402);
+              }
+            }
+
+            if (saveKey) {
+              try {
+                await upsertSaveOperation(prisma, {
+                  orgId,
+                  userId,
+                  idempotencyKey: saveKey,
+                  operationId: typeof body?.operation_id === 'string' ? body.operation_id : saveKey,
+                  status: 'executing',
+                  destinationScope: body?.scope,
+                  request: { title: validation.data.title, content: validation.data.content },
+                });
+              } catch (saveOperationError) {
+                console.error('Prepare memory save operation failed:', saveOperationError);
+                return jsonResponse(res, {
+                  error: 'Memory save receipt unavailable',
+                  message: 'The memory write was not started because its idempotency receipt could not be prepared.'
+                }, 503);
               }
             }
             
@@ -21185,6 +21208,23 @@ exit \$RC
               // All payloads skipped as redundant
               if (!firstSuccessResult) {
                 const skippedResult = syncResults[0] || {};
+                if (saveKey) {
+                  await upsertSaveOperation(prisma, {
+                    orgId,
+                    userId,
+                    idempotencyKey: saveKey,
+                    operationId: typeof body?.operation_id === 'string' ? body.operation_id : saveKey,
+                    status: 'completed',
+                    destinationScope: body?.scope,
+                    request: { title: validation.data.title, content: validation.data.content },
+                    receipt: {
+                      status: 'unchanged',
+                      skipped: true,
+                      reason: skippedResult.reason || 'canonical_duplicate',
+                      idempotency_key: saveKey,
+                    },
+                  });
+                }
                 return jsonResponse(res, {
                   success: true,
                   skipped: true,
@@ -21199,6 +21239,24 @@ exit \$RC
               }
 
               const firstMemory = await persistentMemoryStore.getMemory(firstSuccessResult.memoryId);
+
+              if (saveKey) {
+                await upsertSaveOperation(prisma, {
+                  orgId,
+                  userId,
+                  idempotencyKey: saveKey,
+                  operationId: typeof body?.operation_id === 'string' ? body.operation_id : saveKey,
+                  status: 'completed',
+                  destinationScope: body?.scope,
+                  request: { title: validation.data.title, content: validation.data.content },
+                  receipt: {
+                    status: 'saved',
+                    memory_id: firstSuccessResult.memoryId,
+                    receipt_id: `memory:${firstSuccessResult.memoryId}`,
+                    idempotency_key: saveKey,
+                  },
+                });
+              }
 
               const canonicalMode = admittedCanonicalMode;
               let projection;
@@ -21227,23 +21285,6 @@ exit \$RC
                   delta_extracted: firstSuccessResult.deltaExtracted ?? false
                 }
               };
-              if (saveKey) {
-                await upsertSaveOperation(prisma, {
-                  orgId,
-                  userId,
-                  idempotencyKey: saveKey,
-                  operationId: typeof body?.operation_id === 'string' ? body.operation_id : saveKey,
-                  status: 'completed',
-                  destinationScope: body?.scope,
-                  request: { title: validation.data.title, content: validation.data.content },
-                  receipt: {
-                    status: 'saved',
-                    memory_id: firstSuccessResult.memoryId,
-                    receipt_id: `memory:${firstSuccessResult.memoryId}`,
-                    idempotency_key: saveKey,
-                  },
-                }).catch(() => {});
-              }
               return jsonResponse(res, savedBody, 201);
             } catch (error) {
               console.error('Store memory failed:', error);

@@ -151,7 +151,11 @@ test('scoped proxy forwards a save-status replay lookup without allowing other m
   const res = {};
   const calls = [];
   const handled = await handleHarnessChatBootstrapRoute({
-    req: { method: 'GET', headers: { authorization: `Bearer ${token()}` } }, res,
+    req: {
+      method: 'GET',
+      url: '/internal/v1/harness-chat/core/api/memories/save-status?idempotency_key=hive-save%3Aabc',
+      headers: { authorization: `Bearer ${token()}`, 'x-idempotency-key': 'hive-save:abc' },
+    }, res,
     pathname: '/internal/v1/harness-chat/core/api/memories/save-status',
     prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
     parseBody: async () => ({}), jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
@@ -163,8 +167,9 @@ test('scoped proxy forwards a save-status replay lookup without allowing other m
   });
   assert.equal(handled, true);
   assert.equal(res.status, 200);
-  assert.equal(calls[0].url, 'http://core.test/api/memories/save-status');
+  assert.equal(calls[0].url, 'http://core.test/api/memories/save-status?idempotency_key=hive-save%3Aabc');
   assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.headers['x-idempotency-key'], 'hive-save:abc');
 });
 
 test('scoped proxy rejects invalid token before tenant lookup', async () => {

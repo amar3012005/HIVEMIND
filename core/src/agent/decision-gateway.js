@@ -192,11 +192,25 @@ export const CAPABILITY_OPTIONS = Object.freeze([
   { id: 'fallback_harness', criteria: 'None of the other choices is clearly supported; defer to the current chat model and tool-selection behavior.' },
 ]);
 
+/** Explicit HIVE save commands are syntax, not a probabilistic routing task. */
+export function hasExplicitHivemindSaveIntent(value) {
+  const query = clip(value, 4000).toLowerCase();
+  return /\b(?:save|store|file)\s+(?:this|that|it|the following)\s+(?:to|in|into)\s+(?:hive[- ]?mind|memory)\b/.test(query)
+    || /\b(?:save|store)\s+(?:this|that|the following)\s+as\s+(?:a\s+)?memory\b/.test(query)
+    || /\bremember\s+(?:this|that|the following)\b/.test(query);
+}
+
 export async function chooseCapability({ gateway, turn, userQuery, context, observation = null,
   appMentions = [], operationalAppIntent = false, fallback, signal }) {
   if (operationalAppIntent && appMentions.length) {
     const receipt = { source: 'deterministic', stage: 'capability', choice: 'composio_search',
       reason: 'explicit_operational_app_intent', appMentions: [...new Set(appMentions.map(value => String(value).toLowerCase()))] };
+    turn.decisions.push(receipt);
+    return receipt;
+  }
+  if (hasExplicitHivemindSaveIntent(userQuery)) {
+    const receipt = { source: 'deterministic', stage: 'capability', choice: 'hivemind_save',
+      reason: 'explicit_hivemind_save_intent' };
     turn.decisions.push(receipt);
     return receipt;
   }

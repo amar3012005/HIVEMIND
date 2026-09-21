@@ -4,6 +4,7 @@ import {
   ROUTINE_STATUS,
   canTransitionRoutine,
   nativeScheduleProjection,
+  normalizeChatModelConfig,
   normalizeRoutineInput,
   routineFireKey,
   routineWorkRunScope,
@@ -116,16 +117,17 @@ export async function handleRoutineRoutes({ req, res, url, prisma, requireSessio
       const normalized = normalizeRoutineInput(body);
       const agentId = String(body.agent_id || body.agent_runtime_id || '').trim();
       if (!agentId) throw new TypeError('agent_id is required');
+      const chatModelConfig = normalizeChatModelConfig(body.chat_model_config);
       const created = await createRoutine(prisma, {
         orgId, userId, createdBy: userId, input: { ...body, ...normalized },
         agentId, employeeId: body.employee_id || null,
-        chatModelConfig: body.chat_model_config || {},
+        chatModelConfig,
       });
       if (!created) throw new Error('routine insert returned no row');
       try {
         const schedule = await runtimeSchedule('POST', nativeScheduleProjection({
           routine: { ...body, ...normalized, timezone: body.timezone },
-          routineId: created.id, agentId, chatModelConfig: body.chat_model_config || {},
+          routineId: created.id, agentId, chatModelConfig,
         }));
         const nativeId = schedule.id || schedule.schedule_id || schedule.schedule?.id;
         if (!nativeId) throw new Error('runtime schedule response missing id');

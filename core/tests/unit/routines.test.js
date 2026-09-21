@@ -4,6 +4,7 @@ import {
   ROUTINE_STATUS,
   canTransitionRoutine,
   nativeScheduleProjection,
+  normalizeChatModelConfig,
   normalizeRoutineInput,
   routineFireKey,
   routineWorkRunScope,
@@ -31,6 +32,17 @@ test('routine lifecycle allows pause/resume but not resurrection after archive',
 test('routine input normalizes and rejects invalid playbook versions', () => {
   assert.equal(normalizeRoutineInput(routine).status, ROUTINE_STATUS.ACTIVE);
   assert.throws(() => normalizeRoutineInput({ ...routine, playbook_version: 0 }), /positive integer/);
+});
+
+test('chat model config matches AgentScope ScheduleData contract', () => {
+  assert.deepEqual(normalizeChatModelConfig({
+    type: 'cloudflare_gateway_credential', credential_id: 'cred-1',
+    model: 'deepseek/deepseek-v4-flash', parameters: { temperature: 0.2 },
+  }), {
+    type: 'cloudflare_gateway_credential', credential_id: 'cred-1',
+    model: 'deepseek/deepseek-v4-flash', parameters: { temperature: 0.2 },
+  });
+  assert.throws(() => normalizeChatModelConfig({ model: 'x' }), /chat_model_config\.type is required/);
 });
 
 test('native projection carries only a compact HIVE routine envelope', () => {

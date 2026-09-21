@@ -43,3 +43,26 @@ test('routine route ignores unrelated paths', async () => {
   assert.equal(handled, false);
   assert.equal(res.status, null);
 });
+
+test('routine POST rejects an incomplete AgentScope model config before persistence', async () => {
+  let persisted = false;
+  const res = response();
+  const prisma = {
+    async $queryRawUnsafe() { persisted = true; return []; },
+  };
+  await handleRoutineRoutes({
+    ...deps(prisma),
+    parseBody: async () => ({
+      room_id: '44444444-4444-4444-8444-444444444444', agent_id: 'ops-agent',
+      playbook_id: 'brief', playbook_version: 1, goal: 'daily brief',
+      schedule_type: 'cron', schedule_expression: '0 9 * * 1-5',
+      chat_model_config: { model: 'deepseek/deepseek-v4-flash' },
+    }),
+    req: { method: 'POST', headers: {} },
+    res,
+    url: new URL('http://x/v1/routines'),
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /chat_model_config\.type is required/);
+  assert.equal(persisted, false);
+});

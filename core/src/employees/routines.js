@@ -29,6 +29,22 @@ function requiredString(value, field) {
   return normalized;
 }
 
+/** AgentScope ScheduleData requires a complete ChatModelConfig. */
+export function normalizeChatModelConfig(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('chat_model_config is required');
+  }
+  const config = {
+    type: requiredString(input.type, 'chat_model_config.type'),
+    credential_id: requiredString(input.credential_id, 'chat_model_config.credential_id'),
+    model: requiredString(input.model, 'chat_model_config.model'),
+    parameters: input.parameters && typeof input.parameters === 'object' && !Array.isArray(input.parameters)
+      ? input.parameters
+      : {},
+  };
+  return Object.freeze(config);
+}
+
 /** Validate the HIVE-owned fields before a native schedule is created. */
 export function normalizeRoutineInput(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -86,7 +102,7 @@ export function nativeScheduleProjection({ routine, routineId, agentId, chatMode
     enabled: normalized.status === ROUTINE_STATUS.ACTIVE,
     stateful: false,
     permission_mode: 'bypass',
-    chat_model_config: chatModelConfig,
+    chat_model_config: normalizeChatModelConfig(chatModelConfig),
   };
 }
 

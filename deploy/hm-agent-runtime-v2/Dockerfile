@@ -84,6 +84,12 @@ RUN if [ "$DOCKER_GID" != "0" ]; then \
       getent group "$DOCKER_GID" >/dev/null || groupadd -g "$DOCKER_GID" dockergrp; \
       GRP=$(getent group "$DOCKER_GID" | cut -d: -f1); \
       usermod -aG "$GRP" appuser; \
+    else \
+      # Docker Desktop materializes a mounted socket as root:root inside the
+      # Linux VM even when the macOS host socket reports a different GID. The
+      # socket itself is an explicit compose mount; adding group 0 here only
+      # makes that opted-in capability usable by the non-root runtime user.
+      usermod -aG root appuser; \
     fi
 
 USER appuser

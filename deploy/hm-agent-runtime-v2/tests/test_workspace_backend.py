@@ -49,6 +49,27 @@ class WorkspaceBackendTests(unittest.TestCase):
                 compose = (runtime_root / filename).read_text()
                 self.assertIn("AGENTSCOPE_WORKSPACE_BACKEND: ${AGENTSCOPE_WORKSPACE_BACKEND:-docker}", compose)
                 self.assertIn("AGENTSCOPE_WORKSPACE_ISOLATION: ${AGENTSCOPE_WORKSPACE_ISOLATION:-per_session}", compose)
+                self.assertIn("/var/run/docker.sock:/var/run/docker.sock", compose)
+
+    def test_runtime_image_makes_the_explicit_docker_socket_mount_usable_on_desktop(self):
+        """Docker Desktop presents its socket as root:root inside Linux VMs.
+
+        The socket remains opt-in via Compose.  When mounted, appuser needs the
+        matching group or a DockerWorkspaceManager default becomes a runtime
+        failure instead of an isolated WorkRun sandbox.
+        """
+        runtime_root = Path(__file__).resolve().parents[1]
+        dockerfile_path = runtime_root / "Dockerfile"
+        if not dockerfile_path.exists():
+            self.skipTest("Dockerfile structural assertions run against the source tree")
+        dockerfile = dockerfile_path.read_text()
+        self.assertIn("ARG DOCKER_GID=0", dockerfile)
+        self.assertIn("usermod -aG root appuser", dockerfile)
+
+    def test_runtime_installs_agentscope_docker_workspace_driver(self):
+        runtime_root = Path(__file__).resolve().parents[1]
+        requirements = (runtime_root / "requirements.txt").read_text()
+        self.assertIn("workspace-docker", requirements)
 
 
 if __name__ == "__main__":

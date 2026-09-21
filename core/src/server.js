@@ -21082,6 +21082,16 @@ exit \$RC
                 smartIngestRouter,
                 enableSmartRouting: wantSmartRouting,
               });
+              const indexCommittedMemory = async (memory, result) => {
+                await qdrantClient.storeMemory(memory, {
+                  collectionName: 'HIVEMIND_PERSONAL'
+                });
+                invalidateAggregateCache({ userId, orgId, project: memory.project || null });
+                invalidateAggregateCache({ userId, orgId, project: null });
+                await pageindexHook?.onMemoryIngested(memory, {
+                  mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
+                });
+              };
               const syncResults = [];
               for (const p of ingestPayloads) {
                 // Idempotent interactive saves need a durable receipt quickly. Keep
@@ -21113,14 +21123,14 @@ exit \$RC
                     syncResults.push(r);
                     const m = await persistentMemoryStore.getMemory(r.memoryId);
                     if (m) {
-                      await qdrantClient.storeMemory(m, {
-                        collectionName: 'HIVEMIND_PERSONAL'
+                      const indexTask = indexCommittedMemory(m, {
+                        operation: r.operation || 'tree_child', deprecatedIds: r.deprecatedIds || [],
                       });
-                      invalidateAggregateCache({ userId, orgId, project: m.project || null });
-                      invalidateAggregateCache({ userId, orgId, project: null });
-                      pageindexHook?.onMemoryIngested(m, {
-                        mutation: { operation: r.operation || 'tree_child', deprecatedIds: r.deprecatedIds || [] }
-                      }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
+                      if (saveKey) {
+                        indexTask.catch(err => console.warn('[interactive-save] deferred indexing failed:', err.message));
+                      } else {
+                        await indexTask;
+                      }
                     }
                   }
                   if (saveKey) {
@@ -21159,16 +21169,12 @@ exit \$RC
 
                 const memory = await persistentMemoryStore.getMemory(result.memoryId);
                 if (memory) {
-                  await qdrantClient.storeMemory(memory, {
-                    collectionName: 'HIVEMIND_PERSONAL'
-                  });
-                  invalidateAggregateCache({ userId, orgId, project: memory.project || null });
-                  invalidateAggregateCache({ userId, orgId, project: null });
-
-                  // PageIndex assignment (project/halls/tags + keyword classification)
-                  pageindexHook?.onMemoryIngested(memory, {
-                    mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
-                  }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
+                  const indexTask = indexCommittedMemory(memory, result);
+                  if (saveKey) {
+                    indexTask.catch(err => console.warn('[interactive-save] deferred indexing failed:', err.message));
+                  } else {
+                    await indexTask;
+                  }
                 }
 
                 if (saveKey && result.memoryId) {
@@ -21184,13 +21190,20 @@ exit \$RC
 
                 // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)
                 if (result.factMemoryIds?.length > 0 && qdrantClient) {
-                  for (const factId of result.factMemoryIds) {
-                    try {
-                      const factMem = await persistentMemoryStore.getMemory(factId);
-                      if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
-                    } catch (factErr) {
-                      console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                  const indexFactMemories = async () => {
+                    for (const factId of result.factMemoryIds) {
+                      try {
+                        const factMem = await persistentMemoryStore.getMemory(factId);
+                        if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
+                      } catch (factErr) {
+                        console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                      }
                     }
+                  };
+                  if (saveKey) {
+                    indexFactMemories().catch(err => console.warn('[interactive-save] deferred fact indexing failed:', err.message));
+                  } else {
+                    await indexFactMemories();
                   }
                 }
 

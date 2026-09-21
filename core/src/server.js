@@ -21096,12 +21096,22 @@ exit \$RC
               for (const p of ingestPayloads) {
                 // Idempotent interactive saves need a durable receipt quickly. Keep
                 // canonical entity extraction, but move its LLM work behind the
-                // committed memory row exactly as the async ingest path does.
+                // committed memory row exactly as the async ingest path does. The
+                // enrichment queue below performs structured fact extraction after
+                // commit; running MemoryProcessor inline here would otherwise hold
+                // the first receipt behind a provider call for ~20 seconds.
                 if (saveKey) {
                   p.defer_entity_linking = true;
+                  p.skip_fact_extraction = true;
                   if (p.__ingest_tree && p.tree) {
-                    if (p.tree.parent) p.tree.parent.defer_entity_linking = true;
-                    if (Array.isArray(p.tree.children)) p.tree.children.forEach((c) => { c.defer_entity_linking = true; });
+                    if (p.tree.parent) {
+                      p.tree.parent.defer_entity_linking = true;
+                      p.tree.parent.skip_fact_extraction = true;
+                    }
+                    if (Array.isArray(p.tree.children)) p.tree.children.forEach((c) => {
+                      c.defer_entity_linking = true;
+                      c.skip_fact_extraction = true;
+                    });
                   }
                 }
                 const result = await ingestRoutedPayloadCanonical(p, persistentMemoryEngine);

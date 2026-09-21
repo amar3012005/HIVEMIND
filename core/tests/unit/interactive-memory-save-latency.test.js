@@ -11,6 +11,9 @@ test('idempotent interactive saves defer entity linking until after persistence'
   const syncRoute = source.slice(syncStart, syncEnd);
 
   assert.match(syncRoute, /if \(saveKey\) \{\s*p\.defer_entity_linking = true;/);
+  assert.match(syncRoute, /p\.skip_fact_extraction = true;/);
+  assert.match(syncRoute, /p\.tree\.parent\.skip_fact_extraction = true;/);
+  assert.match(syncRoute, /c\.skip_fact_extraction = true;/);
   assert.match(syncRoute, /persistentMemoryEngine\.linkEntitiesForMemories\(\[memory \|\| \{ id: result\.memoryId \}\]\)/);
   assert.match(syncRoute, /if \(saveKey\) \{\s*indexTask\.catch/);
   assert.match(syncRoute, /if \(saveKey\) \{\s*indexFactMemories\(\)\.catch/);

@@ -106,6 +106,7 @@ import {
 } from './runtime/runtime-role.js';
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { recoverStaleWorkRuns } from './employees/work-runs.js';
+import { SourceArtifactBackup } from './knowledge/source-artifact-backup.js';
 import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
@@ -12608,6 +12609,7 @@ Write the persona now.`;
     } = await import('./employees/work-runs.js');
 
     const WORKRUN_ID_RE = /^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/cancel|\/session\/messages|\/session\/stream|\/chat)?$/;
+    const WORKRUN_ARTIFACT_RE = /^\/v1\/workruns\/([0-9a-f-]{36})\/artifacts\/([0-9a-f-]{36})$/;
 
     // POST /v1/workruns — create a run and hand it to the runtime.
     if (pathname === '/v1/workruns' && req.method === 'POST') {
@@ -12682,6 +12684,60 @@ Write the persona now.`;
         limit,
       );
       return jsonResponse(res, { workruns: rows || [] });
+    }
+
+    const workRunArtifactMatch = pathname.match(WORKRUN_ARTIFACT_RE);
+    if (workRunArtifactMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [, workRunId, artifactId] = workRunArtifactMatch;
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT sa.id, sa.content_type, sa.storage_location, sa.payload, sa.metadata
+           FROM "hivemind"."work_runs" wr
+           JOIN "hivemind"."source_artifacts" sa ON sa.id = $3::uuid
+          WHERE wr.id = $1::uuid
+            AND wr.user_id = $2::uuid
+            AND wr.org_id = sa.org_id
+            AND wr.result_artifact_ids @> jsonb_build_array($3::text)`,
+        workRunId,
+        current.session.userId,
+        artifactId,
+      );
+      const artifact = rows?.[0];
+      if (!artifact) return jsonResponse(res, { error: 'Artifact not found' }, 404);
+      let bytes;
+      let contentType = String(artifact.content_type || 'application/octet-stream');
+      const location = String(artifact.storage_location || '');
+      if (location.startsWith('r2:') || location.startsWith('s3:')) {
+        const loaded = await new SourceArtifactBackup({ logger: console }).read({ key: location.slice(3) });
+        if (!loaded.found) return jsonResponse(res, { error: 'Artifact bytes are unavailable', reason: loaded.reason }, 502);
+        bytes = loaded.bytes;
+        contentType = loaded.contentType || contentType;
+      } else if (location === 'inline:source_artifacts.payload') {
+        let payload = artifact.payload || {};
+        if (typeof payload === 'string') {
+          try { payload = JSON.parse(payload); } catch { payload = {}; }
+        }
+        const encoded = payload.content_base64;
+        if (!encoded) return jsonResponse(res, { error: 'Artifact bytes are unavailable' }, 502);
+        bytes = Buffer.from(encoded, 'base64');
+      } else {
+        return jsonResponse(res, { error: 'Artifact storage receipt is invalid' }, 502);
+      }
+      let metadata = artifact.metadata || {};
+      if (typeof metadata === 'string') {
+        try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
+      }
+      const rawTitle = String(metadata.title || `artifact-${artifact.id}`);
+      const filename = rawTitle.replace(/[^a-zA-Z0-9._ -]+/g, '_').slice(0, 160) || `artifact-${artifact.id}`;
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': bytes.length,
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'private, no-store',
+      });
+      res.end(bytes);
+      return;
     }
 
     const workRunMatch = pathname.match(WORKRUN_ID_RE);

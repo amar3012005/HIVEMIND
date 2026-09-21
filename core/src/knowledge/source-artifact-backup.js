@@ -91,6 +91,55 @@ export class SourceArtifactBackup {
     }
   }
 
+  /** Read immutable bytes back from the configured private object store. */
+  async read({ key, maxBytes = 8 * 1024 * 1024 }) {
+    if (!this.enabled) return { found: false, reason: 'object_storage_not_configured' };
+    try {
+      const normalizedKey = String(key || '').replace(/^\/+/, '');
+      if (!normalizedKey) return { found: false, reason: 'object_key_required' };
+      const url = `${this.endpoint.replace(/\/$/, '')}/${this.bucket}/${normalizedKey}`;
+      const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+      const dateShort = date.slice(0, 8);
+      const emptySha256 = crypto.createHash('sha256').update('').digest('hex');
+      const host = new URL(url).host;
+      const canonicalReq = [
+        'GET', new URL(url).pathname, '', `host:${host}`,
+        `x-amz-content-sha256:${emptySha256}`, `x-amz-date:${date}`, '',
+        'host;x-amz-content-sha256;x-amz-date', emptySha256,
+      ].join('\n');
+      const stringToSign = [
+        'AWS4-HMAC-SHA256', date,
+        `${dateShort}/${this.region}/s3/aws4_request`,
+        crypto.createHash('sha256').update(canonicalReq).digest('hex'),
+      ].join('\n');
+      const kDate = crypto.createHmac('sha256', `AWS4${this.secretKey}`).update(dateShort).digest();
+      const kRegion = crypto.createHmac('sha256', kDate).update(this.region).digest();
+      const kService = crypto.createHmac('sha256', kRegion).update('s3').digest();
+      const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
+      const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
+      const auth = `AWS4-HMAC-SHA256 Credential=${this.accessKey}/${dateShort}/${this.region}/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=${signature}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Host: host, 'x-amz-content-sha256': emptySha256, 'x-amz-date': date, Authorization: auth },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!response.ok) return { found: false, reason: response.status === 404 ? 'object_not_found' : `object_store_http_${response.status}` };
+      const declared = Number(response.headers?.get?.('content-length') || 0);
+      if (declared > maxBytes) return { found: false, reason: 'object_too_large' };
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > maxBytes) return { found: false, reason: 'object_too_large' };
+      return {
+        found: true,
+        key: normalizedKey,
+        bytes,
+        contentType: response.headers?.get?.('content-type') || 'application/octet-stream',
+      };
+    } catch (err) {
+      this.logger.warn?.(`[source-backup] read failed: ${err.message}`);
+      return { found: false, reason: 'object_store_failed' };
+    }
+  }
+
   /** AWS SigV4 PUT — used for S3 / R2 / B2 compatible endpoints. */
   async backup({ artifactId, checksum, contentType, payload }) {
     const body = Buffer.isBuffer(payload) ? payload : Buffer.from(JSON.stringify(payload || {}), 'utf8');

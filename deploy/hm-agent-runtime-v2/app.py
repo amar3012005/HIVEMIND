@@ -790,39 +790,93 @@ async def _resume_workrun_confirmation(
 
 
 async def _ensure_gateway_chat_model_config(user_id: str) -> dict:
-    """Bind every WorkRun session to the gateway DeepSeek model.
+    """Bind every WorkRun session to the configured DeepSeek model.
 
     CreateAgentRequest has no chat model. Sessions without chat_model_config
     call nothing valid and AgentScope reports invalid_request in ~80ms.
+
+    Gateway credentials are only valid when the Cloudflare gateway is enabled.
+    In local/preview direct-routing mode, never reuse the persisted gateway
+    placeholder (``gateway-managed``): AgentScope would send it as an OpenAI
+    bearer token and every first turn would fail with a provider 401.
     """
     from agentscope.app._router._credential import create_credential as _create_credential
     from agentscope.app._router._schema._credential import CreateCredentialRequest
+    from cloudflare_gateway import enabled as gateway_enabled
 
     cred_id = None
     records = await app.state.storage.list_credentials(user_id)
-    for rec in records or []:
-        data = getattr(rec, "data", rec)
-        typ = data.get("type") if isinstance(data, dict) else getattr(data, "type", None)
-        if typ == "cloudflare_gateway_credential":
-            cred_id = getattr(rec, "id", None) or getattr(rec, "credential_id", None)
-            break
+    if gateway_enabled():
+        for rec in records or []:
+            data = getattr(rec, "data", rec)
+            typ = data.get("type") if isinstance(data, dict) else getattr(data, "type", None)
+            if typ == "cloudflare_gateway_credential":
+                cred_id = getattr(rec, "id", None) or getattr(rec, "credential_id", None)
+                break
+        if not cred_id:
+            created = await _create_credential(
+                body=CreateCredentialRequest(
+                    data={
+                        "type": "cloudflare_gateway_credential",
+                        "name": "workrun-gateway",
+                        "api_key": "gateway-managed",
+                    },
+                ),
+                user_id=user_id,
+                storage=app.state.storage,
+            )
+            cred_id = created.credential_id
+            _log(f"minted gateway credential {cred_id} for user {user_id}")
+        return {
+            "type": "cloudflare_gateway_credential",
+            "credential_id": cred_id,
+            "model": os.getenv("AGENTSCOPE_WORKRUN_MODEL", _DEFAULT_WORKRUN_MODEL),
+            "parameters": {"parallel_tool_calls": False},
+        }
+
+    # Direct mode is used by local preview. Prefer an explicit OpenRouter key,
+    # then OpenAI, and only fall back to an existing direct credential when the
+    # environment intentionally delegates credential ownership to AgentScope.
+    direct_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    direct_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    if direct_key:
+        for rec in records or []:
+            data = getattr(rec, "data", rec)
+            typ = data.get("type") if isinstance(data, dict) else getattr(data, "type", None)
+            base_url = data.get("base_url") if isinstance(data, dict) else getattr(data, "base_url", None)
+            if typ == "openai_credential" and base_url == direct_base_url:
+                cred_id = getattr(rec, "id", None) or getattr(rec, "credential_id", None)
+                break
+        if not cred_id:
+            created = await _create_credential(
+                body=CreateCredentialRequest(
+                    data={
+                        "type": "openai_credential",
+                        "name": "workrun-direct",
+                        "api_key": direct_key,
+                        "base_url": direct_base_url,
+                    },
+                ),
+                user_id=user_id,
+                storage=app.state.storage,
+            )
+            cred_id = created.credential_id
+            _log(f"minted direct model credential {cred_id} for user {user_id}")
+    else:
+        for rec in records or []:
+            data = getattr(rec, "data", rec)
+            typ = data.get("type") if isinstance(data, dict) else getattr(data, "type", None)
+            if typ == "openai_credential":
+                cred_id = getattr(rec, "id", None) or getattr(rec, "credential_id", None)
+                break
     if not cred_id:
-        created = await _create_credential(
-            body=CreateCredentialRequest(
-                data={
-                    "type": "cloudflare_gateway_credential",
-                    "name": "workrun-gateway",
-                    "api_key": "gateway-managed",
-                },
-            ),
-            user_id=user_id,
-            storage=app.state.storage,
+        raise RuntimeError(
+            "direct model routing is enabled but OPENROUTER_API_KEY/OPENAI_API_KEY "
+            "is not configured and no openai_credential exists",
         )
-        cred_id = created.credential_id
-        _log(f"minted gateway credential {cred_id} for user {user_id}")
     model = os.getenv("AGENTSCOPE_WORKRUN_MODEL", _DEFAULT_WORKRUN_MODEL)
     return {
-        "type": "cloudflare_gateway_credential",
+        "type": "openai_credential",
         "credential_id": cred_id,
         "model": model,
         "parameters": {"parallel_tool_calls": False},

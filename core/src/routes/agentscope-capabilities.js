@@ -1,4 +1,6 @@
 import { internalFetch } from '../internal/internal-fetch.js';
+import crypto from 'node:crypto';
+import { appendWorkRunEvent, completeWorkRun } from '../employees/work-runs.js';
 
 const UUID = /^[0-9a-f-]{36}$/i;
 const GLOBAL_PLAYBOOKS = Object.freeze([
@@ -40,6 +42,27 @@ async function workRunScope(prisma, sessionId, p) {
   return { roomPlaybook: row.room_playbook, localPlaybooks: row.scope?.local_playbooks, runId: row.id || null };
 }
 
+function decodeArtifact(contentBase64) {
+  const encoded = String(contentBase64 || '').replace(/\s/g, '');
+  if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) {
+    throw new Error('content_base64 must be valid base64 data');
+  }
+  const bytes = Buffer.from(encoded, 'base64');
+  if (!bytes.length) throw new Error('Artifact content must not be empty');
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('Artifact exceeds the 8 MiB WorkRun limit');
+  return bytes;
+}
+
+async function scopedWorkRun(prisma, sessionId, p) {
+  if (!sessionId) return null;
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id, room_id, turn_id, status FROM "hivemind"."work_runs"
+     WHERE agentscope_session_id = $1 AND user_id = $2::uuid AND org_id = $3::uuid LIMIT 1`,
+    sessionId, p.userId, p.orgId,
+  );
+  return rows?.[0] || null;
+}
+
 export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jsonResponse, prisma, pathname }) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
@@ -72,6 +95,46 @@ export async function handleAgentScopeCapabilityRoute({ req, res, parseBody, jso
     const response = await internalFetch(`${String(process.env.HIVEMIND_CORE_API_BASE_URL || process.env.HIVEMIND_API_URL || 'http://localhost:8050').replace(/\/$/, '')}/api/recall`, { service: 'hm-core', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { query, limit: Math.max(1, Math.min(25, Number(body.limit) || 8)), mode: 'quick' }, userId: p.userId, orgId: p.orgId, timeoutMs: 60_000 });
     const payload = await response.json().catch(() => ({}));
     return jsonResponse(res, payload, response.status);
+  }
+  if (pathname === '/internal/hivemind/artifacts') {
+    const sessionId = String(body?.agentscope_session_id || '').trim();
+    const run = await scopedWorkRun(prisma, sessionId, p);
+    if (!run) return jsonResponse(res, { error: 'No active WorkRun matches this AgentScope session.' }, 404);
+    let bytes;
+    try { bytes = decodeArtifact(body?.content_base64); }
+    catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+    const path = String(body?.path || '').trim().replace(/^\/+/, '');
+    const title = String(body?.title || '').trim();
+    if (!path || path.includes('..') || !title) return jsonResponse(res, { error: 'A safe relative path and title are required.' }, 400);
+    const checksum = crypto.createHash('sha256').update(bytes).digest('hex');
+    const artifact = await prisma.sourceArtifact.upsert({
+      where: { userId_orgId_checksum_sourcePlatform: { userId: p.userId, orgId: p.orgId, checksum, sourcePlatform: 'agentscope_workrun' } },
+      create: {
+        userId: p.userId, orgId: p.orgId, artifactType: 'generated', sourcePlatform: 'agentscope_workrun',
+        sourceId: `${run.id}:${path}`, contentType: String(body?.content_type || 'application/octet-stream').slice(0, 100),
+        sizeBytes: bytes.length, checksum, storageLocation: 'inline:source_artifacts.payload',
+        payload: { contract: 'agentscope-workrun-artifact.v1', content_base64: bytes.toString('base64'), title, path },
+        metadata: { workrun_id: run.id, room_id: run.room_id, turn_id: run.turn_id, path, title },
+      },
+      update: {},
+      select: { id: true, checksum: true, contentType: true, sizeBytes: true, createdAt: true },
+    });
+    await prisma.$queryRawUnsafe(
+      `UPDATE "hivemind"."work_runs"
+       SET result_artifact_ids = CASE WHEN result_artifact_ids ? $2 THEN result_artifact_ids ELSE result_artifact_ids || jsonb_build_array($2::text) END,
+           updated_at = now() WHERE id = $1::uuid`, run.id, artifact.id,
+    );
+    await appendWorkRunEvent(prisma, run.id, { t: 'artifact.created', artifact_id: artifact.id, path, title, ts: Date.now() });
+    return jsonResponse(res, { status: 'completed', artifact: { id: artifact.id, title, path, content_type: artifact.contentType, size_bytes: Number(artifact.sizeBytes), checksum: artifact.checksum } });
+  }
+  if (pathname === '/internal/hivemind/workruns/complete') {
+    const run = await scopedWorkRun(prisma, String(body?.agentscope_session_id || '').trim(), p);
+    if (!run) return jsonResponse(res, { error: 'No active WorkRun matches this AgentScope session.' }, 404);
+    const summary = String(body?.summary || '').trim();
+    if (!summary) return jsonResponse(res, { error: 'summary is required' }, 400);
+    const outcome = await completeWorkRun(prisma, run.id, { result: { summary, completed_by: 'agentscope' } });
+    if (!outcome.ok) return jsonResponse(res, { error: outcome.reason || 'Unable to complete WorkRun.' }, 409);
+    return jsonResponse(res, { status: 'completed', workrun_id: run.id, result: outcome.run?.result || { summary } });
   }
   return jsonResponse(res, { error: 'Unknown AgentScope capability.' }, 404);
 }

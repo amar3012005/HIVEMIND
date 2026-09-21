@@ -15394,6 +15394,8 @@ Write the persona now.`;
       || pathname === '/internal/hivemind/recall'
       || pathname === '/internal/hivemind/playbooks'
       || pathname === '/internal/hivemind/playbooks/get'
+      || pathname === '/internal/hivemind/artifacts'
+      || pathname === '/internal/hivemind/workruns/complete'
     ) {
       const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
       if (!hasInternalApiKey(apiKey)) return jsonResponse(res, { error: 'Unauthorized' }, 401);

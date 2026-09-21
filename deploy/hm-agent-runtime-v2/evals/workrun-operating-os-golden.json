@@ -1,0 +1,33 @@
+{
+  "contract": "hivemind.agentscope.workrun-operating-os-golden.v1",
+  "description": "Deterministic prompt-contract checks for the three governed WorkRun modes. These checks do not claim model-quality evaluation; a separately configured provider-backed canary is required for that.",
+  "scenarios": [
+    {
+      "id": "direct-answer",
+      "required": [
+        "self-contained direct answer",
+        "answer immediately with no tools"
+      ]
+    },
+    {
+      "id": "grounded-company-answer",
+      "required": [
+        "company-grounded answer",
+        "activate hivemind",
+        "retrieve only the needed context",
+        "answer without a playbook or TaskCreate"
+      ]
+    },
+    {
+      "id": "company-work",
+      "required_sequence": [
+        "PlaybookList",
+        "PlaybookGet",
+        "TaskCreate",
+        "SkillViewer",
+        "activate another tool group",
+        "hivemind_complete_workrun"
+      ]
+    }
+  ]
+}

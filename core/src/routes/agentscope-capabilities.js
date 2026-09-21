@@ -258,8 +258,17 @@ export async function handleAgentScopeCapabilityRoute({
     catch (error) { return jsonResponse(res, { error: error.message }, 400); }
     const path = String(body?.path || '').trim().replace(/^\/+/, '');
     const title = String(body?.title || '').trim();
-    if (!path || path.includes('..') || !title) return jsonResponse(res, { error: 'A safe relative path and title are required.' }, 400);
+    if (!path || path.includes('..') || path.length > 400 || !title || title.length > 500) return jsonResponse(res, { error: 'A safe relative path (max 400 characters) and title (max 500 characters) are required.' }, 400);
     const checksum = crypto.createHash('sha256').update(bytes).digest('hex');
+    // SourceArtifact already provides the immutable content receipt and a
+    // version column. A stable room/path source id lets successive generated
+    // bytes form one version chain while R2 remains content-addressed.
+    const artifactKey = `workrun:${run.room_id}:${path}`;
+    const prior = await prisma.sourceArtifact.findFirst({
+      where: { userId: p.userId, orgId: p.orgId, sourcePlatform: 'agentscope_workrun', sourceId: artifactKey },
+      orderBy: { version: 'desc' }, select: { id: true, checksum: true, version: true },
+    });
+    const version = prior && prior.checksum !== checksum ? Math.max(1, Number(prior.version || 0) + 1) : Math.max(1, Number(prior?.version || 1));
     let durableObject = null;
     if (artifactStorage?.configured?.()) {
       try {
@@ -279,24 +288,28 @@ export async function handleAgentScopeCapabilityRoute({
       where: { userId_orgId_checksum_sourcePlatform: { userId: p.userId, orgId: p.orgId, checksum, sourcePlatform: 'agentscope_workrun' } },
       create: {
         userId: p.userId, orgId: p.orgId, artifactType: 'generated', sourcePlatform: 'agentscope_workrun',
-        sourceId: `${run.id}:${path}`, contentType: String(body?.content_type || 'application/octet-stream').slice(0, 100),
-        sizeBytes: bytes.length, checksum,
+        sourceId: artifactKey, contentType: String(body?.content_type || 'application/octet-stream').slice(0, 100),
+        sizeBytes: bytes.length, checksum, version,
         storageLocation: durableObject?.objectKey ? `r2:${durableObject.objectKey}` : 'inline:source_artifacts.payload',
         payload: durableObject?.objectKey
           ? { contract: 'agentscope-workrun-artifact.v1', object_key: durableObject.objectKey, etag: durableObject.etag || null, title, path }
           : { contract: 'agentscope-workrun-artifact.v1', content_base64: bytes.toString('base64'), title, path },
-        metadata: { workrun_id: run.id, room_id: run.room_id, turn_id: run.turn_id, path, title, durable_object_key: durableObject?.objectKey || null },
+        metadata: {
+          workrun_id: run.id, room_id: run.room_id, turn_id: run.turn_id, path, title,
+          artifact_key: artifactKey, previous_artifact_id: prior?.checksum !== checksum ? prior?.id || null : null,
+          durable_object_key: durableObject?.objectKey || null,
+        },
       },
       update: {},
-      select: { id: true, checksum: true, contentType: true, sizeBytes: true, createdAt: true },
+      select: { id: true, checksum: true, contentType: true, sizeBytes: true, version: true, createdAt: true },
     });
     await prisma.$queryRawUnsafe(
       `UPDATE "hivemind"."work_runs"
        SET result_artifact_ids = CASE WHEN result_artifact_ids ? $2 THEN result_artifact_ids ELSE result_artifact_ids || jsonb_build_array($2::text) END,
            updated_at = now() WHERE id = $1::uuid`, run.id, artifact.id,
     );
-    await appendWorkRunEvent(prisma, run.id, { t: 'artifact.created', artifact_id: artifact.id, path, title, ts: Date.now() });
-    return jsonResponse(res, { status: 'completed', artifact: { id: artifact.id, title, path, content_type: artifact.contentType, size_bytes: Number(artifact.sizeBytes), checksum: artifact.checksum } });
+    await appendWorkRunEvent(prisma, run.id, { t: 'artifact.created', artifact_id: artifact.id, path, title, version: artifact.version, ts: Date.now() });
+    return jsonResponse(res, { status: 'completed', artifact: { id: artifact.id, title, path, content_type: artifact.contentType, size_bytes: Number(artifact.sizeBytes), checksum: artifact.checksum, version: artifact.version } });
   }
   if (pathname === '/internal/hivemind/workruns/complete') {
     const run = await scopedWorkRun(prisma, String(body?.agentscope_session_id || '').trim(), p);

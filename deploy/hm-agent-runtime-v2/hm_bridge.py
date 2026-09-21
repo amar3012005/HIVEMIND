@@ -276,7 +276,9 @@ class EventForwarder:
     async def _forward(self, client: httpx.AsyncClient, event: dict[str, Any]) -> None:
         if event.get("type") in _SKIP_EVENT_TYPES:
             return
-        if event.get("type") == "CUSTOM" and event.get("name") != "state_updated":
+        # State snapshots and HIVE-owned artifact receipts are both durable
+        # product events. Other custom messages are transient runtime noise.
+        if event.get("type") == "CUSTOM" and event.get("name") not in {"state_updated", "artifact.created"}:
             return
 
         # WorkRuns execute inside their own AgentScope workspace/container.

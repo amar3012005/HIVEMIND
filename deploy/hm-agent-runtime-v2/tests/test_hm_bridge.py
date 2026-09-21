@@ -67,6 +67,16 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.posts), 1)
         self.assertEqual(client.posts[0][1]["json"]["event"]["name"], "state_updated")
 
+    async def test_artifact_receipt_custom_event_is_forwarded(self):
+        client = _Client()
+        forwarder = EventForwarder(binding=self.binding, master_key="test-key", base_url="http://hm-core.test")
+        await forwarder._forward(client, {
+            "type": "CUSTOM", "name": "artifact.created",
+            "value": {"artifact_id": "artifact-1", "path": "reports/brief.md"},
+        })
+        self.assertEqual(len(client.posts), 1)
+        self.assertEqual(client.posts[0][1]["json"]["event"]["name"], "artifact.created")
+
     async def test_workrun_confirmation_is_resumed_internally_not_forwarded(self):
         client = _Client()
         resumed = []

@@ -103,6 +103,22 @@ export function normalizeAgentScopeEvent(event) {
     return { t: 'tool.output.delta', call_id: callId, delta: String(event.delta || '').slice(0, 12_000), ts };
   }
   if (type === 'TOOL_RESULT_END') {
+    const team = asObject(event.metadata?.hivemind_team, null);
+    if (team?.team_id && team?.action) {
+      return {
+        t: 'team.updated',
+        team_id: team.team_id,
+        action: team.action,
+        team_name: team.team_name || null,
+        leader_session_id: team.leader_session_id || null,
+        member: team.member || null,
+        member_agent_id: team.member_agent_id || null,
+        member_session_id: team.member_session_id || null,
+        member_origin: team.member_origin || null,
+        recipient: team.recipient || null,
+        ts,
+      };
+    }
     return nativeTask(tool)
       ? { t: 'plan.updated', family: 'task', tool, call_id: callId, ts }
       : { t: 'tool.completed', tool, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), metadata: event.metadata || {}, ts };

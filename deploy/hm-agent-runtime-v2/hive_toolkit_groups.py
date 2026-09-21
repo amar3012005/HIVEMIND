@@ -187,6 +187,12 @@ def patch_get_toolkit() -> None:
 
         toolkit = await orig(*args, extra_factory=capture, **kwargs)
         separate_native_tool_groups(toolkit, workspace_tool_names)
+        # The stock Team tools override ``__call__`` directly, so ordinary
+        # ToolMiddleware cannot observe their completed lifecycle.  Decorate
+        # the existing AgentScope objects instead; this preserves their native
+        # storage, message bus, worker session and wakeup semantics.
+        from team_workrun_projection import instrument_team_tools
+        instrument_team_tools(toolkit)
         _basic, groups = extra_groups_for(captured)
         for group in groups:
             if all(g.name != group.name for g in toolkit.tool_groups):

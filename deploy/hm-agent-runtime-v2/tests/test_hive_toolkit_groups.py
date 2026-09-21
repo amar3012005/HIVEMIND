@@ -3,7 +3,8 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
-from agentscope.tool import TaskCreate, Toolkit
+from agentscope.message import TextBlock
+from agentscope.tool import TaskCreate, Toolkit, ToolChunk
 from agentscope.workspace import LocalWorkspace
 from hive_toolkit_groups import (
     TEAM_TOOL_NAMES,
@@ -11,6 +12,7 @@ from hive_toolkit_groups import (
     partition_hive_tools,
     separate_native_tool_groups,
 )
+from team_workrun_projection import WorkRunTeamTool
 from extra_agent_tools import hivemind_tools
 
 
@@ -119,6 +121,55 @@ class HiveToolkitGroupsTests(unittest.TestCase):
                 "hivemind_artifacts",
             }.issubset(names))
             self.assertFalse(names & {tool.name for tool in groups["basic"]})
+
+        asyncio.run(verify())
+
+    def test_native_team_result_carries_storage_derived_member_identity(self):
+        class Storage:
+            async def get_session(self, *_args):
+                return SimpleNamespace(team_id="team-1")
+
+            async def get_team(self, *_args):
+                return SimpleNamespace(
+                    id="team-1", session_id="leader-session",
+                    data=SimpleNamespace(name="Research", members=[
+                        SimpleNamespace(owner_id="user-1", agent_id="worker-agent", session_id="worker-session", role="created"),
+                    ]),
+                )
+
+            async def get_agent(self, *_args):
+                return SimpleNamespace(data=SimpleNamespace(name="researcher"))
+
+        class AgentCreateDelegate:
+            name = "AgentCreate"
+            description = "native AgentScope AgentCreate"
+            input_schema = {"type": "object"}
+            is_concurrency_safe = False
+            is_read_only = True
+            is_state_injected = False
+            is_external_tool = False
+            is_mcp = False
+            mcp_name = None
+            _storage = Storage()
+            _user_id = "user-1"
+            _agent_id = "leader-agent"
+            _session_id = "leader-session"
+
+            async def check_permissions(self, *_args):
+                return None
+
+            async def __call__(self, **_kwargs):
+                return ToolChunk(content=[TextBlock(text="native success")])
+
+        async def verify():
+            result = await WorkRunTeamTool(AgentCreateDelegate()).call(
+                name="researcher", description="read", prompt="research",
+            )
+            projection = result.metadata["hivemind_team"]
+            self.assertEqual(projection["action"], "member_created")
+            self.assertEqual(projection["team_id"], "team-1")
+            self.assertEqual(projection["member_session_id"], "worker-session")
+            self.assertNotIn("prompt", projection)
 
         asyncio.run(verify())
 

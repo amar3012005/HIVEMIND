@@ -37,6 +37,7 @@ COPY deploy/hm-agent-runtime-v2/agent_middlewares.py /app/agent_middlewares.py
 COPY deploy/hm-agent-runtime-v2/resource_access.py /app/resource_access.py
 COPY deploy/hm-agent-runtime-v2/hive_access_policy.py /app/hive_access_policy.py
 COPY deploy/hm-agent-runtime-v2/hive_toolkit_groups.py /app/hive_toolkit_groups.py
+COPY deploy/hm-agent-runtime-v2/team_workrun_projection.py /app/team_workrun_projection.py
 COPY deploy/hm-agent-runtime-v2/model_capabilities.py /app/model_capabilities.py
 COPY deploy/hm-agent-runtime-v2/observability.py /app/observability.py
 # Keep the runtime's compose contracts in the image as inspectable immutable

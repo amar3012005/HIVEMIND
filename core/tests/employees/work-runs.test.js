@@ -48,6 +48,21 @@ test('AgentScope tool input and output deltas retain the call identity for durab
   assert.equal(output.call_id, 'call-1');
 });
 
+test('native AgentScope team metadata becomes a durable WorkRun lifecycle event', () => {
+  const normalized = normalizeAgentScopeEvent({
+    type: 'TOOL_RESULT_END', tool_call_id: 'team-call', state: 'success', metadata: {
+      hivemind_team: {
+        action: 'member_created', team_id: 'team-1', team_name: 'Research',
+        leader_session_id: 'leader-1', member: 'researcher',
+        member_agent_id: 'agent-2', member_session_id: 'session-2', member_origin: 'created',
+      },
+    },
+  });
+  assert.equal(normalized.t, 'team.updated');
+  assert.equal(normalized.team_id, 'team-1');
+  assert.equal(normalized.member_session_id, 'session-2');
+});
+
 test('lifecycle rejects resurrection and completes only once', async () => {
   assert.equal(canTransitionWorkRun('completed', 'running'), false);
   let status = 'running';

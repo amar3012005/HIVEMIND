@@ -1,5 +1,3 @@
-import { createInterface } from 'node:readline/promises'
-import { stdin, stdout } from 'node:process'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,6 +18,17 @@ const computer = await E2BComputer.create({
   evidenceDir: path.join(runDir, 'artifacts'), metadata: { app: 'hivemind', test: 'computer-runtime-v1' }, allowInternetAccess: false,
 })
 
+async function waitForHumanEdit(timeoutMs = 5 * 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const windowId = await computer.desktop.getCurrentWindowId()
+    const title = await computer.desktop.getWindowTitle(windowId)
+    if (title.includes('HUMAN EDIT.')) return title
+    await computer.desktop.wait(2_000)
+  }
+  throw new Error('Timed out waiting for HUMAN EDIT. in the same Chrome session.')
+}
+
 try {
   await computer.prepareSafeFixture()
   await computer.writeDraft(AGENT_DRAFT)
@@ -29,9 +38,8 @@ try {
     await new Promise((resolve, reject) => execFile('open', [streamUrl], error => error ? reject(error) : resolve()))
   }
   // The URL and auth key stay process-local; never write or print them.
-  const readline = createInterface({ input: stdin, output: stdout })
-  await readline.question('Edit the field through the authenticated local stream, then press Enter here to verify the same desktop. ')
-  readline.close()
+  console.log('Authenticated stream opened locally. Waiting up to five minutes for the human edit in the same Chrome session.')
+  await waitForHumanEdit()
   await computer.stopHumanStream()
   const observed = await computer.observe('human-edit')
   if (!observed.title.includes('HUMAN EDIT.')) throw new Error('Human edit was not observable in the same Chrome session.')

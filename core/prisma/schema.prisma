@@ -3852,7 +3852,7 @@ model TaraTurn {
 model TaraRuntimeConfig {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId          String   @unique @map("org_id") @db.Uuid
-  defaultProvider String  @default("deepgram") @map("default_provider") @db.VarChar(32)
+  defaultProvider String  @default("grok") @map("default_provider") @db.VarChar(32)
   revision       Int      @default(1)
   deepgramConfig Json     @default("{}") @map("deepgram_config")
   grokConfig     Json     @default("{}") @map("grok_config")

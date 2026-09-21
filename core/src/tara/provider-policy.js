@@ -10,11 +10,10 @@ function baseUrl(provider) {
 }
 
 function configuredOrder(runtime) {
-  const preferred = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
-  const configured = [runtime?.deepgramConfig, runtime?.grokConfig]
-    .flatMap((value) => Array.isArray(value?.provider_order) ? value.provider_order : [])
-    .map(String).filter((value) => ['deepgram', 'grok'].includes(value));
-  return [...new Set([preferred, ...configured, preferred === 'grok' ? 'deepgram' : 'grok'])];
+  // Browser and campaign voice execution use the same product policy: Grok is
+  // the single enabled TARA provider. Do not fall back to Deepgram when a
+  // historical runtime row or an old provider_order is present.
+  return ['grok'];
 }
 
 async function probe(fetchImpl, url) {

@@ -2,7 +2,10 @@ import crypto from 'node:crypto';
 import { buildOrgBrief } from './org-brief.js';
 import { RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 
-const PROVIDERS = new Set(['deepgram', 'grok']);
+// TARA's browser/runtime voice product is Grok-only. Keep Deepgram adapters
+// available for historic-call reads, but never create or select new Deepgram
+// sessions from workspace configuration.
+const PROVIDERS = new Set(['grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
 const RUNTIME_OPERATOR_PROVIDER = 'grok';
 // Runtime-admin check-in voice. Overridable via TARA_RUNTIME_OPERATOR_VOICE_ID.
@@ -182,9 +185,17 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
   const grokPublicWs = (process.env.TARA_GROK_PUBLIC_WS_URL || 'wss://core.singulancelabs.com/voice-grok/voice').replace(/\/$/, '');
 
   async function configFor(orgId) {
-    return prisma.taraRuntimeConfig.upsert({
+    const row = await prisma.taraRuntimeConfig.upsert({
       where: { orgId }, update: {},
-      create: { orgId, defaultProvider: 'deepgram', deepgramConfig: {}, grokConfig: DEFAULT_GROK_CONFIG },
+      create: { orgId, defaultProvider: 'grok', deepgramConfig: {}, grokConfig: DEFAULT_GROK_CONFIG },
+    });
+    // Existing organizations may have been created before Grok became the
+    // product default. Normalize at the runtime boundary as well as in the
+    // migration, so a restored/older database cannot silently reopen Deepgram.
+    if (row.defaultProvider === 'grok') return row;
+    return prisma.taraRuntimeConfig.update({
+      where: { orgId },
+      data: { defaultProvider: 'grok', revision: { increment: 1 } },
     });
   }
   function serviceAuthorized(req) {
@@ -205,7 +216,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const expected = Number(body.expected_revision);
       if (!Number.isInteger(expected) || expected !== current.revision) return reply(res, { error: 'stale_revision', revision: current.revision }, 409);
       const provider = body.default_provider || current.defaultProvider;
-      if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
+      if (provider !== 'grok') return reply(res, { error: 'grok_is_the_only_enabled_tara_provider' }, 400);
       let grok;
       try { grok = validatedGrokConfig(current.grokConfig, body.grok || {}); }
       catch (error) { return reply(res, { error: error.message }, error.statusCode || 400); }

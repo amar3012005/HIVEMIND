@@ -62,11 +62,49 @@ import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-re
 import { CloudflareChatSessionClient, nativeOrchestratorFor } from './agent/v2/cloudflare-chat-session-client.js';
 import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
 import { reconcileProgressiveApproval } from './agent/progressive-approval-events.js';
+import { appendWorkRunEvent } from './employees/work-runs.js';
 
-async function projectProgressiveApproval(prisma, draft) {
-  if (draft?.toolArgs?._harness_version !== 'progressive-v1') return;
-  try { await reconcileProgressiveApproval({ prisma, draft }); }
-  catch { console.warn('[progressive-approval] projection deferred; canonical draft receipt retained'); }
+const UUID = /^[0-9a-f-]{36}$/i;
+
+// A pending write is the canonical approval record.  WorkRun events are a
+// tenant-scoped projection for the transcript only: they never execute or
+// retry a provider operation.  Keeping this projection here lets every
+// governed approval path (including AgentScope) reuse the existing executor.
+async function projectPendingWriteReceipt(prisma, draft) {
+  if (!draft) return;
+  if (draft.toolArgs?._harness_version === 'progressive-v1') {
+    try { await reconcileProgressiveApproval({ prisma, draft }); }
+    catch { console.warn('[progressive-approval] projection deferred; canonical draft receipt retained'); }
+  }
+  if (!['sent', 'failed', 'cancelled', 'expired'].includes(draft.status)) return;
+  if (!UUID.test(String(draft.traceId || ''))) return;
+  const workRunId = String(draft.traceId);
+  try {
+    const runs = await prisma.$queryRawUnsafe(
+      `SELECT id FROM "hivemind"."work_runs"
+       WHERE id = $1::uuid AND user_id = $2::uuid AND org_id = $3::uuid
+       AND NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements(COALESCE(events, '[]'::jsonb)) AS event
+         WHERE event->>'t' = 'external_action.resolved' AND event->>'approval_id' = $4
+       )`,
+      workRunId, draft.userId, draft.orgId, String(draft.id),
+    );
+    if (!runs?.[0]) return;
+    await appendWorkRunEvent(prisma, workRunId, {
+      t: 'external_action.resolved',
+      approval_id: String(draft.id),
+      tool: draft.toolName || 'external action',
+      status: draft.status,
+      summary: String(draft.preview || '').slice(0, 500) || null,
+      result: draft.status === 'sent' ? draft.result || null : null,
+      error: draft.status === 'failed' ? String(draft.errorMsg || 'External action failed.').slice(0, 500) : null,
+      ts: Date.now(),
+    });
+  } catch (error) {
+    // Approval state is already durable.  A later authenticated list call can
+    // reconcile this cosmetic WorkRun receipt without ever replaying a write.
+    console.warn(`[workrun-approval] projection deferred: ${error.message}`);
+  }
 }
 function publicPendingWrite(draft) {
   if (!draft || typeof draft !== 'object') return draft;
@@ -10375,14 +10413,14 @@ exit \$RC
             const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } });
             if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
             if (row.status !== 'draft') {
-              await projectProgressiveApproval(prisma, row);
+              await projectPendingWriteReceipt(prisma, row);
               return jsonResponse(res, { error: `draft already ${row.status}` }, 409);
             }
             if (!row.expiresAt || new Date(row.expiresAt).getTime() <= Date.now()) {
               await prisma.pendingWrite.updateMany({
                 where: { id: draftId, userId, orgId, status: 'draft' }, data: { status: 'expired' },
               });
-              await projectProgressiveApproval(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }));
+              await projectPendingWriteReceipt(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }));
               return jsonResponse(res, { error: 'draft expired' }, 410);
             }
             if (row.toolArgs?._harness_version === 'langgraph-meta-loop-v2') {
@@ -10415,7 +10453,7 @@ exit \$RC
                 data: { status: 'cancelled' },
               });
               if (cancelled.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
-              await projectProgressiveApproval(prisma, { ...row, status: 'cancelled' });
+              await projectPendingWriteReceipt(prisma, { ...row, status: 'cancelled' });
               return jsonResponse(res, { ok: true, status: 'cancelled', id: draftId });
             }
             let approvalCredit = null;
@@ -10470,7 +10508,7 @@ exit \$RC
                 if (progressiveArgs && !final) return jsonResponse(res, {
                   ok: false, status: 'unknown', error: 'Provider returned but its receipt could not be persisted. Do not retry automatically.',
                 }, 502);
-                await projectProgressiveApproval(prisma, final);
+                await projectPendingWriteReceipt(prisma, final);
                 return jsonResponse(res, {
                   ok,
                   status: ok ? 'sent' : 'failed',
@@ -10503,7 +10541,7 @@ exit \$RC
                 where: { id: draftId },
                 data: { status: 'failed', errorMsg: execErr.message },
               }).catch(() => {});
-              await projectProgressiveApproval(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }).catch(() => null));
+              await projectPendingWriteReceipt(prisma, await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } }).catch(() => null));
               return jsonResponse(res, { ok: false, error: execErr.message }, 500);
             }
           } catch (err) {
@@ -24456,7 +24494,7 @@ exit \$RC
               },
             });
             // Repair only projections of canonical terminal receipts, never re-execute a tool.
-            await Promise.all(rows.map(row => projectProgressiveApproval(prisma, row)));
+            await Promise.all(rows.map(row => projectPendingWriteReceipt(prisma, row)));
             return jsonResponse(res, { drafts: rows.map(publicPendingWrite) });
           }
           break;

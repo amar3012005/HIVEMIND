@@ -5,7 +5,10 @@ import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayCompatUrl, gatewayPr
 import { recordAiUsage, resolveAiModelPolicy } from './ai-governance.js';
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
-export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'openai/gpt-oss-20b:nitro';
+// Keep the legacy HIVE surfaces on the same fast, streaming model contract as
+// the native Harness.  The Gateway-backed provider below is deliberately
+// shared; mobile chat must never silently fall back to an older direct route.
+export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'z-ai/glm-5.3-flash:nitro';
 export const DEFAULT_CHAT_CANDIDATE_SYNTHESIS_MODEL = 'nvidia/nemotron-3.5-lightning:nitro';
 export const DEFAULT_HQ_AWAKENING_MODEL = 'deepseek/deepseek-v4-flash-0731';
 export const DEFAULT_HQ_DISPATCH_MODEL = 'deepseek/deepseek-v4-flash-0731';
@@ -13,6 +16,10 @@ export const DEFAULT_HQ_DISPATCH_MODEL = 'deepseek/deepseek-v4-flash-0731';
 const LEGACY_SYNTHESIS_DEFAULTS = new Set([
   'gpt-oss-120b',
   'openai/gpt-oss-120b',
+  // Production previously configured this as the final model. Treat it as a
+  // migration default rather than letting an old environment value split the
+  // legacy mobile surface from the native Harness.
+  'openai/gpt-oss-20b:nitro',
 ]);
 
 export function resolveChatSynthesisModel(selectedModel) {
@@ -151,6 +158,24 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey, concreteGate
     };
   }
 
+  if (requested.startsWith('z-ai/')) {
+    if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
+    return {
+      provider: 'openrouter:z-ai',
+      url: gatewayOpenRouter ? gatewayProviderUrl('openrouter', OPENROUTER_CHAT_URL) : OPENROUTER_CHAT_URL,
+      apiKey: openRouterApiKey,
+      wireModel: requested,
+      // The Nitro suffix owns fastest-provider selection.  Supplying an
+      // explicit order or sort here would defeat it and make Core diverge from
+      // the native Harness route.
+      providerPolicy: {
+        allow_fallbacks: true,
+        require_parameters: true,
+        data_collection: 'deny',
+      },
+    };
+  }
+
   if (!fallbackApiKey) throw new Error('chat_provider_not_configured:groq');
   return {
     provider: 'groq',
@@ -193,21 +218,31 @@ function prepareOpenRouterBody(body, route) {
       && body.reasoning_effort == null) {
     body.reasoning_effort = 'low';
   }
+  const isGptOss = /^openai\/gpt-oss-/i.test(route.wireModel);
+  const requiresOpenRouterReasoning = /^z-ai\/glm-5\.3-flash(?::|$)/i.test(route.wireModel);
+  const requestedReasoningEffort = body.reasoning?.effort || body.reasoning_effort;
   // A caller can decide its request shape before policy resolution. Once an
   // admin policy upgrades that request from GPT-OSS to a non-reasoning model
   // such as GPT-4.1, carrying the stale GPT-OSS-only parameter makes
   // OpenRouter reject every provider with a misleading "no endpoints" 404.
   // Only GPT-OSS receives this compatibility parameter.
-  if (!/^openai\/gpt-oss-/i.test(route.wireModel)) delete body.reasoning_effort;
-  // Do not send OpenRouter's provider-specific reasoning switch from a
-  // caller-selected model. Admin policy resolution can replace that model
-  // before this request is sent; `reasoning: { enabled: false }` then reaches
-  // providers where reasoning is mandatory and makes every endpoint reject
-  // the request. HIVE-MIND's normal chat path does not need hidden reasoning:
-  // GPT-OSS is bounded with `reasoning_effort: low` above and non-reasoning
-  // models receive neither control. This also makes primary and secondary
-  // requests share the exact same Cloudflare Gateway contract.
-  delete body.reasoning;
+  if (!isGptOss) delete body.reasoning_effort;
+  // GLM Flash Nitro requires OpenRouter reasoning to be enabled.  Map the
+  // Core's OpenAI-compatible effort field to the exact request shape used by
+  // the native Harness before removing stale controls for every other model.
+  if (requiresOpenRouterReasoning) {
+    body.reasoning = { effort: requestedReasoningEffort || 'low' };
+  } else {
+    // Do not send OpenRouter's provider-specific reasoning switch from a
+    // caller-selected model. Admin policy resolution can replace that model
+    // before this request is sent; `reasoning: { enabled: false }` then reaches
+    // providers where reasoning is mandatory and makes every endpoint reject
+    // the request. HIVE-MIND's normal chat path does not need hidden reasoning:
+    // GPT-OSS is bounded with `reasoning_effort: low` above and non-reasoning
+    // models receive neither control. This also makes primary and secondary
+    // requests share the exact same Cloudflare Gateway contract.
+    delete body.reasoning;
+  }
   const callerProviderPolicy = body.provider || {};
   body.provider = { ...(route.providerPolicy || {}), ...callerProviderPolicy };
   if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {

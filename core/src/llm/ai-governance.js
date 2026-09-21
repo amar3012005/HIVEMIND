@@ -6,7 +6,9 @@ export const MODEL_POLICY_DEFAULTS = Object.freeze({
   // arguments, semantic review and synthesis. Nitro is the low-latency route.
   progressive_agent: ['openai/gpt-oss-20b:nitro', null],
   chat_planner: ['google/gemini-2.5-flash-lite', 'openai/gpt-oss-20b:nitro'],
-  chat_synthesis: ['openai/gpt-oss-20b:nitro', 'nvidia/nemotron-3.5-lightning:nitro'],
+  // Match the native Harness for every user-visible HIVE answer.  The
+  // OpenRouter route supplies GLM's required low-reasoning request shape.
+  chat_synthesis: ['z-ai/glm-5.3-flash:nitro', 'openai/gpt-oss-20b:nitro'],
   compound_subtask: ['openai/gpt-oss-20b:nitro', 'google/gemini-2.5-flash-lite'],
   ingestion_extraction: ['google/gemini-2.5-flash-lite', 'deepseek/deepseek-v4-flash-0731'],
   entity_linking: ['google/gemini-2.5-flash-lite', 'deepseek/deepseek-v4-flash-0731'],

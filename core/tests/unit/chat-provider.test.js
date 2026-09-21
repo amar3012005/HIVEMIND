@@ -11,25 +11,67 @@ import {
   DEFAULT_HQ_DISPATCH_MODEL,
   resolveChatCompletionRoute,
   shouldPolicyFallbackStatus,
+  resolveChatSynthesisModel,
 } from '../../src/llm/chat-provider.js';
 import { configureAiGovernance, invalidateAiModelPolicyCache } from '../../src/llm/ai-governance.js';
+import { MODEL_POLICY_DEFAULTS } from '../../src/llm/ai-governance.js';
 
-test('chat model policy uses Gemini Flash-Lite planning and GPT-OSS-20B Nitro synthesis', () => {
+test('chat model policy uses Gemini Flash-Lite planning and the Harness GLM Nitro synthesis model', () => {
   assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'google/gemini-2.5-flash-lite');
-  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'openai/gpt-oss-20b:nitro');
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'z-ai/glm-5.3-flash:nitro');
+  assert.equal(MODEL_POLICY_DEFAULTS.chat_synthesis[0], DEFAULT_CHAT_SYNTHESIS_MODEL);
 });
 
 test('HQ bounded language tasks use DeepSeek without changing Room synthesis policy', () => {
   assert.equal(DEFAULT_HQ_AWAKENING_MODEL, 'deepseek/deepseek-v4-flash-0731');
   assert.equal(DEFAULT_HQ_DISPATCH_MODEL, 'deepseek/deepseek-v4-flash-0731');
-  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'openai/gpt-oss-20b:nitro');
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'z-ai/glm-5.3-flash:nitro');
+});
+
+test('GLM Flash Nitro uses the Gateway-backed OpenRouter route with required low reasoning', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  let captured;
+  try {
+    const route = resolveChatCompletionRoute(DEFAULT_CHAT_SYNTHESIS_MODEL);
+    assert.equal(route.provider, 'openrouter:z-ai');
+    assert.equal(route.wireModel, 'z-ai/glm-5.3-flash:nitro');
+    await chatCompletionStream(DEFAULT_CHAT_SYNTHESIS_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low' }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        captured = JSON.parse(options.body);
+        return new Response('data: {"choices":[{"delta":{"content":"Ready"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+          status: 200, headers: { 'content-type': 'text/event-stream' },
+        });
+      },
+    });
+    assert.equal(captured.reasoning_effort, undefined);
+    assert.deepEqual(captured.reasoning, { effort: 'low' });
+    assert.equal(captured.stream, true);
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
+test('a prior Core final-model default migrates legacy chat synthesis to the Harness model', () => {
+  const prior = process.env.HIVEMIND_AGENT_FINAL_MODEL;
+  process.env.HIVEMIND_AGENT_FINAL_MODEL = 'openai/gpt-oss-20b:nitro';
+  try {
+    assert.equal(resolveChatSynthesisModel('gpt-oss-120b'), DEFAULT_CHAT_SYNTHESIS_MODEL);
+  } finally {
+    if (prior == null) delete process.env.HIVEMIND_AGENT_FINAL_MODEL;
+    else process.env.HIVEMIND_AGENT_FINAL_MODEL = prior;
+  }
 });
 
 test('GPT-OSS-20B Nitro final synthesis uses OpenRouter variant routing without manual provider order', () => {
   const prior = process.env.OPENROUTER_API_KEY;
   process.env.OPENROUTER_API_KEY = 'or-test';
   try {
-    const route = resolveChatCompletionRoute(DEFAULT_CHAT_SYNTHESIS_MODEL);
+    const route = resolveChatCompletionRoute('openai/gpt-oss-20b:nitro');
     assert.equal(route.provider, 'openrouter:openai');
     assert.equal(route.wireModel, 'openai/gpt-oss-20b:nitro');
     assert.equal(route.providerPolicy.sort, undefined);

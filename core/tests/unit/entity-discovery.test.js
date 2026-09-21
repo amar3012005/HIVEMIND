@@ -152,3 +152,21 @@ test('entity finder fails closed for an invalid supplied scope', async () => {
   assert.equal(result.error, 'invalid_scope');
   assert.deepEqual(result.matches, []);
 });
+
+test('entity finder keeps tag-backed discovery available when an optional registry is unavailable', async () => {
+  const prisma = {
+    entity: { findMany: async () => { throw new Error('legacy_registry_unavailable'); } },
+    canonicalEntity: { findMany: async () => { throw new Error('canonical_registry_unavailable'); } },
+    memoryEntityLink: { findMany: async () => [] },
+    memory: { findMany: async () => [] },
+    userOrganization: { findMany: async () => [] },
+  };
+  const memoryStore = {
+    listMemories: async () => ({ memories: [
+      { id: 'm1', scope: 'organization', created_at: '2026-09-21T00:00:00Z', tags: ['entity:singulance'] },
+    ] }),
+  };
+  const result = await findEntities({ prisma, memoryStore, orgId: 'org', userId: 'user', query: 'Singulance', accessContext: { orgRole: 'owner' } });
+  assert.equal(result.degraded, null);
+  assert.deepEqual(result.matches.map(match => match.entity_id), ['tag:singulance']);
+});

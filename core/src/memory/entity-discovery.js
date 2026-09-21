@@ -386,7 +386,10 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
     const memberIds = ids.filter((id) => id.startsWith('member:')).map((id) => id.slice('member:'.length)).filter(Boolean);
     const registryIds = ids.filter((id) => !id.startsWith('tag:') && !id.startsWith('member:'));
     const onlyNonRegistryIds = ids.length > 0 && registryIds.length === 0;
-    const legacy = prisma.entity && !onlyNonRegistryIds
+    // Each registry is an optional projection of the same tenant-authorized
+    // inventory. A stale legacy table or a transient canonical query must not
+    // turn a healthy tag/member discovery path into a 503 for the entire UI.
+    const legacy = typeof prisma.entity?.findMany === 'function' && !onlyNonRegistryIds
       ? prisma.entity.findMany({
           where: {
             orgId,
@@ -400,7 +403,7 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
           take: registryIds.length ? registryIds.length : MAX_CANDIDATES,
         })
       : Promise.resolve([]);
-    const [legacyRows, canonicalRows, tagRows, memberRows] = await Promise.all([
+    const sources = await Promise.allSettled([
       legacy,
       onlyNonRegistryIds
         ? Promise.resolve([])
@@ -416,7 +419,11 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
         ? authorizedMemberRows({ prisma, orgId, memberIds, entityTypes: types, scopeFilter })
         : Promise.resolve([]),
     ]);
-    return { rows: dedupeRows([...legacyRows, ...canonicalRows, ...(tagRows || []), ...(memberRows || [])]), degraded: null };
+    const rows = sources.flatMap((source) => source.status === 'fulfilled' ? source.value : []);
+    // Degrade only when every available authorized inventory failed. An empty
+    // but healthy inventory is a valid zero-match result, not an outage.
+    const allFailed = sources.length > 0 && sources.every((source) => source.status === 'rejected');
+    return { rows: dedupeRows(rows), degraded: allFailed ? 'entity_index_unavailable' : null };
   } catch {
     return { rows: [], degraded: 'entity_index_unavailable' };
   }

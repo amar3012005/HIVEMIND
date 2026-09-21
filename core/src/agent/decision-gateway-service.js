@@ -60,10 +60,14 @@ function fallbackReceipt(reason = 'current_selector') {
 
 export function decisionGatewayToolNames(selection, { connected = true } = {}) {
   if (selection === 'direct_answer' || selection === 'hivemind_context') return [];
-  if (selection === 'hivemind_meta') return ['hivemind_meta'];
+  if (['hivemind_meta', 'hivemind_memory_lookup', 'hivemind_entity_lookup', 'hivemind_hyperagent_directory', 'hivemind_request'].includes(selection)) return ['hivemind_meta'];
   if (selection === 'hivemind_profile_update') return ['hivemind_update_profile'];
   if (selection === 'hivemind_save') return ['hivemind_save_memory', 'hivemind_batch_save_memories'];
-  if (selection === 'composio_search' && connected) return ['hivemind_connected_task'];
+  if (['composio_search', 'composio_read', 'composio_action'].includes(selection) && connected) return ['hivemind_connected_task'];
+  if (selection === 'web_research') return ['hivemind_web_search'];
+  // Multi-domain requests stay on the native surface. Subsequent JEV stages
+  // constrain each provider-backed operation after evidence is available.
+  if (selection === 'multi_task' || selection === 'workflow_plan') return undefined;
   return null;
 }
 

@@ -186,10 +186,19 @@ export class DecisionGateway {
 export const CAPABILITY_OPTIONS = Object.freeze([
   { id: 'direct_answer', criteria: 'The request can be answered from the current conversation and compact authenticated context without retrieving fresh information or changing state.' },
   { id: 'hivemind_context', criteria: 'Read only: the user asks about their current identity, organization, company profile, role, mission, ICP, location, or maintained preferences. Never select for a requested profile change.' },
-  { id: 'hivemind_meta', criteria: 'The request needs HIVE-MIND recall, entity discovery, HyperAgent profiles, or the status of a prior memory save.' },
+  { id: 'hivemind_memory_lookup', criteria: 'Read only: answer needs stored HIVE-MIND memories, decisions, documents, evidence, historical facts, or prior work.' },
+  { id: 'hivemind_entity_lookup', criteria: 'Read only: resolve a named person, company, project, product, document, or topic into a canonical HIVE-MIND entity before recall.' },
+  { id: 'hivemind_hyperagent_directory', criteria: 'Read only: answer needs the authenticated organization HyperAgent directory, assignments, roles, or available digital employees.' },
+  { id: 'hivemind_request', criteria: 'The request is a HIVE-MIND system request whose exact read operation must be selected from the typed HIVE meta contract.' },
+  { id: 'hivemind_meta', criteria: 'Read only: general HIVE-MIND recall, entity discovery, HyperAgent profiles, or prior memory-save status when a more specific HIVE intent is not clear.' },
   { id: 'hivemind_profile_update', criteria: 'The user explicitly asks to change their own maintained profile field: name, role, company, language, location, or timezone. This is not a memory preference.' },
   { id: 'hivemind_save', criteria: 'The user explicitly asks to remember a stable fact, preference, decision, correction, relationship, or completed outcome as durable memory.' },
-  { id: 'composio_search', criteria: 'The request needs information or an action in an external connected application such as email, calendar, files, CRM, messaging, or social media.' },
+  { id: 'composio_read', criteria: 'The request needs read-only information from an external connected application such as email, calendar, files, CRM, messaging, or social media.' },
+  { id: 'composio_action', criteria: 'The request explicitly asks to create, update, send, publish, or otherwise act in an external connected application. The exact provider action remains approval-gated.' },
+  { id: 'composio_search', criteria: 'The request needs an external connected application but it is not yet clear whether the resulting provider capability is read-only or an action.' },
+  { id: 'web_research', criteria: 'The request explicitly needs current public-web research or HIVE-MIND has insufficient internal evidence and an external verification is necessary.' },
+  { id: 'multi_task', criteria: 'The request has multiple dependent outcomes spanning HIVE-MIND, connected applications, web research, or a combination. Preserve the native combined surface; each provider action is decided again after its evidence is returned.' },
+  { id: 'workflow_plan', criteria: 'The request is primarily to plan or coordinate a multi-step workflow without enough settled facts to execute a provider-backed operation yet.' },
   { id: 'fallback_harness', criteria: 'None of the other choices is clearly supported; defer to the current chat model and tool-selection behavior.' },
 ]);
 
@@ -216,7 +225,7 @@ export async function chooseCapability({ gateway, turn, userQuery, context, obse
     return receipt;
   }
   return gateway.choose({ turn, stage: 'capability', userQuery, context, observation, options: CAPABILITY_OPTIONS,
-    instructions: 'Choose the one capability family that should be exposed next. Completed receipts in observation are authoritative: do not repeat them, and follow the order of the still-unsatisfied outcomes explicitly requested by the user. Select fallback_harness when the evidence does not clearly support another choice.',
+    instructions: 'Choose exactly one initial intent family. Use only the user request, server-derived authenticated scope, and bounded completed receipts as evidence. Never infer an app, recipient, tool, identifier, credential, or external side effect. A compound request is multi_task; do not collapse it to one provider operation. Connected-app choices authorize discovery only, not execution. Completed receipts are authoritative: do not repeat them, and follow the still-unsatisfied outcomes explicitly requested by the user. Select fallback_harness when the evidence does not clearly support another choice.',
     fallback, signal });
 }
 

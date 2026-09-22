@@ -60,21 +60,52 @@ function deriveBoundedClaim({ title, content, entities, knownAt, timeZone }) {
     if (titleActor) people = [{ name: titleActor, kind: 'person' }];
   }
   const teach = plain(content).match(/\b(?:he|she|they|[\p{L}][\p{L} .'-]{1,100})\s+(?:started\s+)?(?:teaches|teaching|teach)\s+([\p{L}][\p{L}0-9 +#.-]{1,120}?)(?:\s+from\s+tomorrow|[.!?]|$)/iu);
-  if (!teach) return null;
-  const pronounSubject = /^\s*(he|she|they)\b/i.test(plain(content));
-  const subject = pronounSubject
-    ? (people.length === 1 ? people[0] : null)
-    : typed.find((e) => text.toLowerCase().includes(plain(e.name).toLowerCase())) || null;
-  if (!subject) return { unresolved_subject: true };
-  const objectName = teach[1].replace(/\s+too$/i, '').trim();
-  const matchedObject = typed.find((e) => normalizeEntity(e.name) === normalizeEntity(objectName));
-  const object = matchedObject
-    ? { ...matchedObject, kind: normalizeEntityKind(matchedObject.kind) === 'concept' ? 'technology' : matchedObject.kind }
-    : { name: objectName, kind: 'technology' };
-  return {
-    subject, predicate: 'teaches', object, confidence: 1,
-    qualifiers: {}, valid_from: resolveTomorrow(text, knownAt, timeZone),
-  };
+  if (teach) {
+    const pronounSubject = /^\s*(he|she|they)\b/i.test(plain(content));
+    const subject = pronounSubject
+      ? (people.length === 1 ? people[0] : null)
+      : typed.find((e) => text.toLowerCase().includes(plain(e.name).toLowerCase())) || null;
+    if (!subject) return { unresolved_subject: true };
+    const objectName = teach[1].replace(/\s+too$/i, '').trim();
+    const matchedObject = typed.find((e) => normalizeEntity(e.name) === normalizeEntity(objectName));
+    const object = matchedObject
+      ? { ...matchedObject, kind: normalizeEntityKind(matchedObject.kind) === 'concept' ? 'technology' : matchedObject.kind }
+      : { name: objectName, kind: 'technology' };
+    return {
+      subject, predicate: 'teaches', object, confidence: 1,
+      qualifiers: {}, valid_from: resolveTomorrow(text, knownAt, timeZone),
+    };
+  }
+
+  // Deliberately narrow non-model fallback for explicit, present-tense SVO
+  // statements. It creates at most one claim, requires an exact known entity
+  // for the subject, and stops before contextual clauses such as "for ...".
+  // This lets ordinary evidence-backed saves project useful dossiers without
+  // making the profile layer infer a fact from an entity mention alone.
+  const explicit = [
+    { predicate: 'responsible_for', expression: /^\s*(.+?)\s+(?:leads?|is\s+leading)\s+(?:the\s+)?(.+?)(?:\s+for\s+[^,.;()]+)?\s*(?:[,.;(]|$)/iu },
+    { predicate: 'responsible_for', expression: /^\s*(.+?)\s+is\s+responsible\s+for\s+(.+?)\s*(?:[,.;(]|$)/iu },
+    { predicate: 'manages', expression: /^\s*(.+?)\s+manages\s+(?:the\s+)?(.+?)\s*(?:[,.;(]|$)/iu },
+    { predicate: 'works_for', expression: /^\s*(.+?)\s+(?:works?\s+for|is\s+employed\s+by)\s+(.+?)\s*(?:[,.;(]|$)/iu },
+    { predicate: 'member_of', expression: /^\s*(.+?)\s+is\s+(?:a\s+)?member\s+of\s+(.+?)\s*(?:[,.;(]|$)/iu },
+    { predicate: 'located_in', expression: /^\s*(.+?)\s+is\s+located\s+in\s+(.+?)\s*(?:[,.;(]|$)/iu },
+  ];
+  const sentence = plain(content) || plain(title);
+  for (const candidate of explicit) {
+    const match = sentence.match(candidate.expression);
+    if (!match) continue;
+    const subjectName = plain(match[1]);
+    const objectName = plain(match[2]).replace(/\s+the$/i, '').trim();
+    const subject = typed.find((entity) => normalizeEntity(entity.name) === normalizeEntity(subjectName));
+    if (!subject) return { unresolved_subject: true };
+    const object = typed.find((entity) => normalizeEntity(entity.name) === normalizeEntity(objectName))
+      || { name: objectName, kind: 'concept' };
+    return {
+      subject, predicate: candidate.predicate, object, confidence: 1,
+      qualifiers: {}, valid_from: resolveTomorrow(text, knownAt, timeZone),
+    };
+  }
+  return null;
 }
 
 export function prepareCanonicalProjection(input = {}) {

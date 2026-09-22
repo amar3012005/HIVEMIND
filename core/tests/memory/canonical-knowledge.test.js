@@ -55,6 +55,22 @@ test('Uwe canary resolves bounded title pronoun and local tomorrow', () => {
   assert.equal(result.claims[0].assertionStatus, 'user_asserted');
 });
 
+test('explicit leadership evidence creates one bounded claim for an entity dossier', () => {
+  const result = prepareCanonicalProjection({
+    title: 'Rama leads SINGULANCE Singapore incorporation',
+    content: 'Rama leads the Singapore incorporation for SINGULANCE, coordinated with Nora.',
+    entities: [
+      { name: 'Rama', kind: 'concept' },
+      { name: 'Singapore incorporation', kind: 'concept' },
+      { name: 'SINGULANCE', kind: 'concept' },
+      { name: 'Nora', kind: 'concept' },
+    ],
+  });
+  assert.deepEqual(result.claims.map(({ subject, predicate, object }) => ({
+    subject: subject.name, predicate, object: object.name,
+  })), [{ subject: 'Rama', predicate: 'responsible_for', object: 'Singapore incorporation' }]);
+});
+
 test('claim reads are reserved for read/full modes in the server contract', () => {
   const server = fs.readFileSync(new URL('../../src/server.js', import.meta.url), 'utf8');
   const route = server.slice(server.indexOf('const claimsMatch = pathname.match'), server.indexOf('const relsMatch = pathname.match'));

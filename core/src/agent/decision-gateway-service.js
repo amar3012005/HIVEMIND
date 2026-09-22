@@ -28,6 +28,18 @@ function actorAllowlist(env) {
 // transport configuration, never a chat-routing decision.
 export function decisionGatewayProviderConfig(env = process.env) {
   const explicit = String(env.JEV_DECISIONS_URL || '').trim();
+  // JEV can use a dedicated OpenRouter credential without changing the
+  // shared OPENROUTER_API_KEY used by chat, embeddings, visual generation,
+  // and other Core services.
+  const directJevKey = String(env.JEV_OPENROUTER_API_KEY || '').trim();
+  if (directJevKey) {
+    return {
+      endpoint: explicit || 'https://openrouter.ai/api/alpha/decisions',
+      apiKey: directJevKey,
+      model: String(env.JEV_MODEL || '~typesafe/jev-latest').trim(),
+      headers: {},
+    };
+  }
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim();
   const gatewayId = String(env.CLOUDFLARE_AI_GATEWAY_ID || '').trim();
   const gatewayToken = String(env.CLOUDFLARE_AI_GATEWAY_TOKEN || '').trim();

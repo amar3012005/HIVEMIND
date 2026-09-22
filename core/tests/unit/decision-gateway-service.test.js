@@ -2,6 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { decideRuntimeStage, decisionGatewayProviderConfig, decisionGatewayToolNames } from '../../src/agent/decision-gateway-service.js';
 
+test('dedicated JEV OpenRouter key bypasses Gateway without changing shared OpenRouter credentials', () => {
+  const config = decisionGatewayProviderConfig({
+    JEV_OPENROUTER_API_KEY: 'jev-only-key',
+    OPENROUTER_API_KEY: 'shared-key',
+    CLOUDFLARE_AI_GATEWAY_ENABLED: 'true',
+    CLOUDFLARE_ACCOUNT_ID: 'account',
+    CLOUDFLARE_AI_GATEWAY_ID: 'gateway',
+    CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  });
+  assert.equal(config.endpoint, 'https://openrouter.ai/api/alpha/decisions');
+  assert.equal(config.apiKey, 'jev-only-key');
+  assert.equal(config.model, '~typesafe/jev-latest');
+  assert.deepEqual(config.headers, {});
+});
+
 test('OpenRouter JEV uses its typed Decisions API through Cloudflare Gateway', () => {
   const config = decisionGatewayProviderConfig({
     CLOUDFLARE_AI_GATEWAY_ENABLED: 'true',

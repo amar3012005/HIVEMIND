@@ -28,7 +28,10 @@ try {
     workRunId, orgId, userId, roomId, 'AgentScope stale recovery canary', WORK_RUN_STATUS.RUNNING, staleAt,
   );
 
-  const first = await failStaleWorkRuns(prisma, { before: new Date(Date.now() - 5 * 60 * 1000) });
+  const first = await failStaleWorkRuns(prisma, {
+    before: new Date(Date.now() - 5 * 60 * 1000),
+    ids: [workRunId],
+  });
   assert.deepEqual(first, { attempted: 1, failed: 1, skipped: 0 });
   const rows = await prisma.$queryRawUnsafe(
     `SELECT status, events FROM "hivemind"."work_runs" WHERE id = $1::uuid`, workRunId,
@@ -37,7 +40,10 @@ try {
   const failedEvents = (rows[0].events || []).filter((event) => event.t === 'workrun.failed');
   assert.equal(failedEvents.length, 1);
 
-  const replay = await failStaleWorkRuns(prisma, { before: new Date(Date.now() - 5 * 60 * 1000) });
+  const replay = await failStaleWorkRuns(prisma, {
+    before: new Date(Date.now() - 5 * 60 * 1000),
+    ids: [workRunId],
+  });
   assert.deepEqual(replay, { attempted: 0, failed: 0, skipped: 0 });
   console.log(`workrun-stale-recovery-db-canary-ok workrun=${workRunId} failed_events=${failedEvents.length}`);
 } finally {

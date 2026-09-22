@@ -35,4 +35,26 @@ test('stale recovery refuses an invalid cutoff and cannot accidentally sweep eve
     () => failStaleWorkRuns({}, { before: new Date(), statuses: [] }),
     /non-empty array/,
   );
+  await assert.rejects(
+    () => failStaleWorkRuns({}, { before: new Date(), ids: [] }),
+    /ids must be null or a non-empty array/,
+  );
+});
+
+test('stale recovery can be scoped to an explicit fixture set', async () => {
+  let selected;
+  const prisma = {
+    async $queryRawUnsafe(sql, ...params) {
+      selected = { sql, params };
+      return [];
+    },
+  };
+  const ids = ['11111111-1111-4111-8111-111111111111'];
+  const result = await failStaleWorkRuns(prisma, {
+    before: new Date('2026-09-19T00:00:00.000Z'),
+    ids,
+  });
+  assert.deepEqual(result, { attempted: 0, failed: 0, skipped: 0 });
+  assert.match(selected.sql, /id = ANY\(\$3::uuid\[\]\)/);
+  assert.deepEqual(selected.params[2], ids);
 });

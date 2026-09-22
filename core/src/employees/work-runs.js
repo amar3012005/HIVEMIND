@@ -848,12 +848,13 @@ export async function completeWorkRun(prisma, workRunId, { result = {}, error = 
  * one replica may perform recovery.
  *
  * @param {object} prisma
- * @param {{ before: Date, statuses?: string[], reason?: string }} options
+ * @param {{ before: Date, statuses?: string[], ids?: string[], reason?: string }} options
  * @returns {Promise<{ attempted: number, failed: number, skipped: number }>}
  */
 export async function failStaleWorkRuns(prisma, {
   before,
   statuses = [WORK_RUN_STATUS.STARTING, WORK_RUN_STATUS.RUNNING],
+  ids = null,
   reason = 'runtime heartbeat expired',
 } = {}) {
   if (!(before instanceof Date) || Number.isNaN(before.valueOf())) {
@@ -862,13 +863,16 @@ export async function failStaleWorkRuns(prisma, {
   if (!Array.isArray(statuses) || statuses.length === 0) {
     throw new Error('statuses must be a non-empty array');
   }
+  if (ids !== null && (!Array.isArray(ids) || ids.length === 0)) {
+    throw new Error('ids must be null or a non-empty array');
+  }
 
+  const idClause = ids ? '\n         AND id = ANY($3::uuid[])' : '';
   const rows = await prisma.$queryRawUnsafe(
     `SELECT id, status FROM "hivemind"."work_runs"
        WHERE status = ANY($1::text[])
-         AND COALESCE(heartbeat_at, started_at, created_at) < $2::timestamptz`,
-    statuses,
-    before.toISOString(),
+         AND COALESCE(heartbeat_at, started_at, created_at) < $2::timestamptz${idClause}`,
+    ...(ids ? [statuses, before.toISOString(), ids] : [statuses, before.toISOString()]),
   );
 
   let failed = 0;

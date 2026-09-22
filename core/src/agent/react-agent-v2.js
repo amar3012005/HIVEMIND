@@ -267,7 +267,12 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
 }
 
 async function callValidatedClaimStream({ message, messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en', source = null }) {
-  const streamInstruction = `STREAMING OUTPUT CONTRACT: Return exactly one JSON object matching the supplied strict response schema and no markdown. Every factual sentence in response must have a corresponding claims item with valid delivered citation IDs. Decompose every independent requested detail in coverage. For broad, detailed, comprehensive, overview, comparison, or additional-information requests, use all distinct relevant delivered passages and normally produce 3-5 non-duplicate grounded claims when the evidence supports them. Never emit uncited prose or mark the response sufficient while a requested detail is absent.`;
+  // Do not use JSON-schema response_format on the stream: OpenRouter providers
+  // commonly buffer a schema-constrained object until it is complete. Instead
+  // make each claim an independently parseable NDJSON frame and validate it
+  // before emitting it to the browser. This preserves the citation boundary
+  // while restoring real incremental output.
+  const streamInstruction = `STREAMING OUTPUT CONTRACT: Emit newline-delimited JSON only; no markdown and no enclosing array/object. Emit one or more claim frames as soon as each is ready: {"type":"claim","text":"one factual sentence","citation_ids":["delivered citation id"]}. End with exactly one meta frame: {"type":"meta","confidence":number,"gaps":string[],"follow_ups":string[],"coverage":[]}. Every factual sentence must be one claim frame with valid delivered citation IDs. Decompose every independent requested detail in coverage. For broad, detailed, comprehensive, overview, comparison, or additional-information requests, use all distinct relevant delivered passages and normally emit 3-5 non-duplicate grounded claims when evidence supports them. Never emit uncited prose or mark the response sufficient while a requested detail is absent.`;
   const streamedClaims = [];
   const rejectedClaims = [];
   let meta = {};
@@ -351,7 +356,6 @@ async function callValidatedClaimStream({ message, messages, model, apiKey, maxT
         ? { reasoning: { enabled: false } }
         : { reasoning_effort: 'low' }),
       prompt_cache_key: promptCacheKey,
-      response_format: GROUNDED_SYNTHESIS_RESPONSE_FORMAT,
     }),
     signal,
   }, {

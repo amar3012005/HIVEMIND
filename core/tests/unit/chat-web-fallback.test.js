@@ -36,6 +36,12 @@ test('an explicit web request searches once after recall even when internal cont
   assert.equal(publicWebFallbackEligible({ plan: explicit, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000, enabled: true }), true);
 });
 
+test('an explicit public page pull is user-authorized even when opportunistic web fallback is off', () => {
+  const explicit = { ...plan, web_fallback: { ...plan.web_fallback, reason: 'explicit_web' } };
+  assert.equal(publicWebFallbackEligible({ plan: explicit, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000, enabled: false }), true);
+  assert.equal(publicWebFallbackEligible({ plan: explicit, coverage: { complete: true, retrieval_timed_out: true }, hasRuntime: true, remainingMs: 1000, enabled: false }), false);
+});
+
 test('public web packet retains bounded content, URLs and retrieval time for synthesis and explicit save', () => {
   const packet = webResultPacket({
     id: 'job-1', status: 'succeeded', completed_at: '2026-08-26T10:00:00Z',

@@ -1,18 +1,24 @@
 export function publicWebFallbackEligible({ plan = {}, coverage = {}, hasRuntime = false, remainingMs = 0, enabled = false } = {}) {
   const policy = plan.web_fallback || {};
-  return enabled === true
-    && plan.needs_web === true
+  const eligibleRequest = plan.needs_web === true
     && policy.allowed === true
+    && !coverage.retrieval_timed_out
+    && !coverage.retrieval_unavailable
+    && Boolean(policy.query)
+    && hasRuntime
+    && remainingMs > 0;
+  if (!eligibleRequest) return false;
+  // An explicit request is the caller's per-turn consent for the bounded,
+  // public-only Web Intelligence tool. It must not depend on a global toggle
+  // that otherwise keeps opportunistic/current-information lookups off.
+  if (policy.reason === 'explicit_web') return true;
+  // The remaining fallback modes are intentionally rollout-controlled.
+  return enabled === true
     // An explicit web request cannot be fulfilled by internal evidence alone;
     // recall still runs first for context, then exactly one public search runs.
     // For implicit current/competitor fallback, a complete workspace answer
     // suppresses the external call.
-    && (policy.reason === 'explicit_web' || coverage.complete !== true)
-    && coverage.retrieval_timed_out !== true
-    && coverage.retrieval_unavailable !== true
-    && Boolean(policy.query)
-    && hasRuntime
-    && remainingMs > 0;
+    && coverage.complete !== true;
 }
 
 export function webResultPacket(job, query) {

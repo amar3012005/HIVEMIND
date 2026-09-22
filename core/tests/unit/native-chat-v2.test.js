@@ -38,6 +38,19 @@ test('public web fallback compiles as a recall-first policy and unsafe source fa
   assert.ok(checked.repairs.includes('external_fallback.unsafe'));
 });
 
+test('an explicit public page pull cannot be downgraded to memory-only recall', () => {
+  const decision = compileNativePlan(
+    validateNativePlan(makePlan({ query: 'TARA and Hyperagents product detail' })),
+    'Pull the /products/tara and /products/hyperagents pages for full product detail',
+  );
+  assert.deepEqual(decision.web_fallback, {
+    allowed: true,
+    query: 'Pull the /products/tara and /products/hyperagents pages for full product detail',
+    reason: 'explicit_web',
+  });
+  assert.equal(intentDecisionToPlan(decision, 'Pull the pages').needs_web, true);
+});
+
 test('TurnContextBuilder bounds history, profile and authorized projects', () => {
   const context = buildTurnContext({ message: ' hello ', history: Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `t${i}` })), profileContext: 'x'.repeat(3000), projectCatalog: Array.from({ length: 30 }, (_, i) => ({ id: `${i}`, name: `P${i}` })) });
   assert.equal(context.message, 'hello'); assert.equal(context.history.length, 4);
@@ -46,10 +59,11 @@ test('TurnContextBuilder bounds history, profile and authorized projects', () =>
 
 test('planner classifies additional source follow-ups as multi-point detailed coverage', () => {
   const prompt = buildNativePlannerPrompt();
-  assert.equal(NATIVE_PLANNER_PROMPT_VERSION, 'native-chat-planner.v2.2');
+  assert.equal(NATIVE_PLANNER_PROMPT_VERSION, 'native-chat-planner.v2.4');
   assert.match(prompt, /source follow-up asking what else/i);
   assert.match(prompt, /response\.shape=overview/);
   assert.match(prompt, /multiple distinct additional points/i);
+  assert.match(prompt, /pull, fetch, crawl, scrape, read, or extract/i);
 });
 
 test('compiler carries the replaceable recent public checkpoint independently of planner phrasing', () => {

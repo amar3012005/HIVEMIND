@@ -68,6 +68,21 @@ function explicitDurableSaveRequest(message) {
   return /\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,120}\b(?:memory|hive[-\s]?mind)\b/.test(text);
 }
 
+// A completed answer followed by a short imperative such as "save it" is a
+// continuation of that answer, not a new recall request.  Keep this narrow:
+// it requires a referential save phrase and a prior assistant payload, so a
+// standalone request such as "save it for later" still asks for the fact.
+function referentialSaveRequest(message) {
+  const text = compactText(message, 240).toLowerCase();
+  return /^(?:please\s+)?(?:save|store|record|remember|retain|write)\s+(?:it|this|that|the above|the previous(?: answer| response)?|the last(?: answer| response)?)\s*(?:to|in)?\s*(?:hive[-\s]?mind|memory)?[.!]?$/i.test(text);
+}
+
+function contextualSaveContinuationRequest(message, history = []) {
+  if (!referentialSaveRequest(message)) return false;
+  return [...(Array.isArray(history) ? history : [])].reverse()
+    .some(row => row?.role === 'assistant' && compactText(row?.content, 8000));
+}
+
 function explicitlyRequestedMemoryScope(message) {
   const text = String(message || '').toLowerCase();
   if (/\b(?:personal|private)\s+(?:memory|hive[-\s]?mind)\b/.test(text)) return 'personal';
@@ -78,7 +93,7 @@ function explicitlyRequestedMemoryScope(message) {
 
 function explicitSaveDraft(message, history = []) {
   const request = String(message || '').trim();
-  if (!explicitDurableSaveRequest(request)) return null;
+  if (!explicitDurableSaveRequest(request) && !contextualSaveContinuationRequest(request, history)) return null;
   const inline = request.match(/\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,100}?\b(?:memory|hive[-\s]?mind)\b\s*[:\-]\s*(.+)$/i)?.[1];
   const subject = request.match(/\babout\s+([^,.!?;]+)|\bremember\s+([^,.!?;]+)$/i);
   const namedSubject = compactText(subject?.[1] || subject?.[2] || '', 120);
@@ -653,7 +668,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       requestedToolkits = toolkitMentions(message, [...userAccounts, ...orgAccounts]);
     }
     const locale = ctx.language || 'en';
-    const explicitSave = explicitDurableSaveRequest(message);
+    // The direct request and the short follow-up form both feed the same
+    // governed write path.  This is capability behavior for every source and
+    // agent, not a per-app or per-person exception.
+    const explicitSave = explicitDurableSaveRequest(message)
+      || referentialSaveRequest(message);
     const saveDraft = explicitSave ? explicitSaveDraft(message, ctx.conversationHistory) : null;
     const messages = [
       { role: 'system', content: systemPrompt({ useTools, locale, explicitSave }) },

@@ -115,6 +115,63 @@ test('an explicit durable-save request uses the prior verified turn without a pl
   assert.match(result.response, /saved the dedicated memory/i);
 });
 
+test('a generic save-it continuation saves the completed answer without recall or a model turn', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  const calls = [];
+  const events = [];
+  const runtimeCtx = {
+    ...ctx(prisma, 'save-it-continuation'),
+    conversationHistory: [{
+      role: 'assistant',
+      content: 'Rama accepted the Prague anniversary invitation on September 14, 2026.',
+    }],
+    _tracedDispatch: async (name, args) => {
+      calls.push([name, args]);
+      assert.equal(name, 'hivemind_save_memory');
+      if (calls.length === 1) return {
+        saved: false,
+        needs_project_choice: true,
+        message: 'Choose a destination.',
+        scope_options: [{ scope: 'personal', label: 'Personal' }],
+        draft: { title: args.title, content: args.content, tags: args.tags },
+      };
+      assert.equal(args.scope, 'personal');
+      assert.match(args.content, /Prague anniversary invitation/);
+      return { saved: true, id: 'memory-save-it' };
+    },
+  };
+  const modelStep = async () => { throw new Error('save-it continuation must not invoke model or recall'); };
+  const initial = await runUnifiedMetaAgent({
+    message: 'save it', useTools: false, prisma, ctx: runtimeCtx,
+    checkpointer, composio: {}, modelStep,
+  });
+  assert.equal(initial.status, 'needs_input');
+  assert.equal(initial.inputRequests[0].kind, 'memory_scope');
+  assert.equal(calls.length, 1);
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: false, prisma, ctx: runtimeCtx, checkpointer, composio: {}, modelStep,
+    onEvent: event => events.push(event), choice: { value: 'personal', run_id: initial.run.id },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(calls.length, 2);
+  assert.match(resumed.response, /Saved this memory in your personal memory/);
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['Saved this memory in your personal memory.']);
+});
+
+test('a bare save-it request without a completed answer asks for content without calling recall', async () => {
+  const prisma = fakePrisma();
+  let modelTurns = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'save it', useTools: false, prisma, ctx: ctx(prisma, 'save-it-no-context'),
+    checkpointer: new MemorySaver(), composio: {},
+    modelStep: async () => { modelTurns += 1; throw new Error('missing continuation payload must not reach model'); },
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.equal(modelTurns, 0);
+  assert.match(result.response, /specific fact, decision, or note/i);
+});
+
 test('an explicit save without facts asks once before any tool or model call', async () => {
   const prisma = fakePrisma();
   let turns = 0;

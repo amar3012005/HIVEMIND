@@ -45,6 +45,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from agentscope.agent import Agent
 from agentscope.app import SubAgentTemplate, create_app
+from agentscope.app._bus_ops import MessageBusKeys
 import hive_access_policy
 import hive_toolkit_groups
 import hive_scheduler
@@ -95,6 +96,14 @@ ENABLE_CHANNEL_WORKER = os.getenv("AGENTSCOPE_ENABLE_CHANNEL_WORKER", "1") == "1
 # able to make startup noisy. Flip to "1" when you want the MCP/Skill pages.
 ENABLE_HUBS = os.getenv("AGENTSCOPE_ENABLE_HUBS", "0") == "1"
 
+# AgentScope's native session-run lock is a Redis lease. Keep the documented
+# ten-minute default in normal deployments, while allowing preview/recovery
+# canaries to use a shorter bounded lease. We deliberately rely on natural
+# expiry rather than deleting locks during startup, which could interrupt a
+# live worker on another replica.
+SESSION_RUN_TTL_SECS = max(5, int(os.getenv("AGENTSCOPE_SESSION_RUN_TTL_SECS", "600")))
+MessageBusKeys.SESSION_RUN_TTL_SECS = SESSION_RUN_TTL_SECS
+
 
 def _log(msg: str) -> None:
     print(f"[hm-agent-runtime-v2] {msg}", flush=True)
@@ -129,6 +138,7 @@ if not DOWNLOAD_SECRET:
 storage = RedisStorage(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 message_bus = RedisMessageBus(host=REDIS_HOST, port=REDIS_PORT)
+_log(f"AgentScope session lease ttl={SESSION_RUN_TTL_SECS}s")
 
 # --------------------------------------------------------------------------
 # Workspace — backend is a configuration choice, not a code change.

@@ -1,0 +1,10 @@
+{
+  "name": "hm-computer-operator-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "playwright-core": "1.55.0"
+  }
+}

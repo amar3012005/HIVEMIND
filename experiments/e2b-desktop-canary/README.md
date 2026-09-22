@@ -32,6 +32,26 @@ clicks stay local. The current E2B Desktop template is retained as the visible
 handoff proof; the next live acceptance must use a custom E2B template with
 Chromium, `playwright-core`, the worker, and a local fixture preinstalled.
 
+### Live DOM template canary
+
+The committed `template/worker/` package and `build:dom-template` command make
+that custom image. It inherits E2B's `desktop` template rather than recreating
+its graphical environment, then installs and verifies Node 22, `playwright-core`, the generic
+operator, and the network-free fixture worker. The build uses 2 vCPU and 4 GB
+RAM only for this canary; it is not a production capacity declaration.
+
+```sh
+E2B_API_KEY=... npm run build:dom-template
+E2B_API_KEY=... npm run dom-canary
+```
+
+The DOM canary starts the visible Chrome as an E2B-managed background process
+with loopback CDP, runs the worker *inside the same microVM*, and captures a
+secret-free receipt and screenshot. It intentionally disables internet access
+and only uses a fixture written into that sandbox. The first live success is
+therefore proof of local DOM candidate selection and execution, not proof of
+an authenticated social-media workflow.
+
 ## Scope
 
 This is a separate, opt-in E2B implementation. It deliberately does not change

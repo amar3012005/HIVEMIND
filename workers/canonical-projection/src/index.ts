@@ -114,7 +114,10 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
       const completed: CoreResult = await step.do('mark projection complete', STANDARD_RETRY, () => core(this.env, params, 'complete'));
       const claims = (persisted as any)?.receipt?.projection?.claims || (persisted as any)?.projection?.claims || [];
       const entityIds = [...new Set(claims.flatMap((claim: any) => [claim?.subjectEntityId, claim?.objectEntityId]).filter((id: unknown) => typeof id === 'string'))];
-      const profileMode = await evaluateEntityProfileMode(this.env, params.org_id, '');
+      // New admissions preserve the actor identity. This makes the entity-profile
+      // Flagship rule exact to the organization/user that admitted the memory.
+      // Pre-release queued messages have no actor and remain safely off.
+      const profileMode = await evaluateEntityProfileMode(this.env, params.org_id, params.user_id || '');
       if (profileMode !== 'off') {
         await step.do('queue entity profile projections', STANDARD_RETRY, async () => {
           for (const entityId of entityIds) {
@@ -214,7 +217,7 @@ export default {
       if (!validUuid(orgId) || !validUuid(userId)) return Response.json({ error: 'invalid_identity' }, { status: 400 });
       const mode = await evaluateProjectionMode(env, orgId, userId);
       if (mode === 'off') return Response.json({ error: 'feature_disabled' }, { status: 403 });
-      const params = { memory_id: admission.memory_id, org_id: admission.org_id, processing_version: admission.processing_version, required_projection: mode };
+      const params = { memory_id: admission.memory_id, org_id: admission.org_id, user_id: userId, processing_version: admission.processing_version, required_projection: mode };
       if (!validParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
       await env.PROJECTION_QUEUE.send(params, { contentType: 'json' });
       return Response.json({ ok: true, queued: true, instance_id: workflowInstanceId(params), required_projection: mode }, { status: 202 });

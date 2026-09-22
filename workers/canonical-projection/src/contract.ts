@@ -9,6 +9,8 @@ export type CoreStageName = typeof CORE_STAGE_NAMES[number];
 export type ProjectionParams = {
   memory_id: string;
   org_id: string;
+  /** New admissions retain the actor for exact Flagship targeting. Older queued jobs omit it. */
+  user_id?: string;
   processing_version: number;
   required_projection: ProjectionMode;
 };
@@ -35,9 +37,11 @@ export function validMode(value: unknown): value is ProjectionMode {
 export function validParams(value: unknown): value is ProjectionParams {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const input = value as Record<string, unknown>;
-  return Object.keys(input).length === 4
+  const keyCount = Object.keys(input).length;
+  return (keyCount === 4 || keyCount === 5)
     && validUuid(input.memory_id)
     && validUuid(input.org_id)
+    && (input.user_id === undefined || validUuid(input.user_id))
     && Number.isInteger(input.processing_version)
     && Number(input.processing_version) > 0
     && validMode(input.required_projection);

@@ -25297,6 +25297,12 @@ exit \$RC
                 const nativeMetaMode = chatAdmission.nativeMetaMode === 'unified-meta-v2'
                   ? 'unified-meta-v2'
                   : (!useTools && chatAdmission.nativeMetaMode === 'native-meta-v1' ? 'native-meta-v1' : 'off');
+                // The typed JEV planner is part of the admitted unified graph,
+                // never a global routing switch. Flagship's fail-closed target
+                // admission is therefore also the boundary for activating it.
+                const unifiedDecisionEnv = nativeMetaMode === 'unified-meta-v2'
+                  ? { ...process.env, JEV_DECISION_GATEWAY_MODE: 'active' }
+                  : undefined;
                 let durableChatStore = null;
                 let durableChatTurn = null;
                 if (durableChatMode !== 'off') {
@@ -25441,6 +25447,7 @@ exit \$RC
                         userId, orgId,
                         recallReliabilityV1,
                         nativeMetaMode,
+                        decisionEnv: unifiedDecisionEnv,
                         unifiedDag: chatAdmission.unifiedDag,
                         orchestratorV2Mode: chatAdmission.orchestratorV2Mode,
                         compoundOrchestrator: chatAdmission.compoundOrchestrator,
@@ -25538,6 +25545,7 @@ exit \$RC
                     userId, orgId,
                     recallReliabilityV1,
                     nativeMetaMode,
+                    decisionEnv: unifiedDecisionEnv,
                     unifiedDag: chatAdmission.unifiedDag,
                     orchestratorV2Mode: chatAdmission.orchestratorV2Mode,
                     compoundOrchestrator: chatAdmission.compoundOrchestrator,

@@ -80,6 +80,25 @@ test('every Jev stage receives the bounded stage context contract', async () => 
   assert.equal(JSON.stringify(context).includes('must-not-reach-jev'), false);
 });
 
+test('capability decisions bound combined context and observation before provider dispatch', async () => {
+  let captured;
+  const gateway = new DecisionGateway({ provider: {
+    async decideChoice({ state }) {
+      captured = state;
+      return { choice: 'multi_task', probability: 0.99, margin: 0.98 };
+    },
+  } });
+  const huge = 'evidence '.repeat(8000);
+  const receipt = await chooseCapability({
+    gateway, turn: createDecisionTurnState('bounded-capability'), userQuery: 'Read, save, and send.',
+    context: { profile: huge, recent_turns: Array.from({ length: 12 }, () => ({ role: 'assistant', content: huge })), workflow: { completed_receipts: [{ data: huge }] } },
+    observation: { completed_receipts: Array.from({ length: 8 }, () => ({ raw_provider_payload: huge })) },
+    fallback: async ({ reason }) => ({ source: 'fallback', choice: 'fallback_harness', reason }),
+  });
+  assert.equal(receipt.choice, 'multi_task');
+  assert.ok(JSON.stringify(captured).length < 10000);
+});
+
 test('Jev provider accepts Cloudflare Gateway BYOK headers without a direct provider key', async () => {
   let request;
   const provider = createOpenRouterJevProvider({

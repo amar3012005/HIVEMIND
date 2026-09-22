@@ -226,8 +226,12 @@ export class DecisionGateway {
     if (typeof fallback !== 'function') throw new TypeError('decision_fallback_required');
     const input = {
       userQuery: clip(userQuery, 4000),
-      context: boundedProjection(buildJevDecisionContext(stage, context)),
-      observation: boundedProjection(observation),
+      // These two fields are subsequently wrapped in one provider state.
+      // Bound them independently here, rather than allowing two individually
+      // 10k projections to overflow the final decision request and turn a
+      // valid plan into decision_state_exceeds_budget.
+      context: boundedProjection(buildJevDecisionContext(stage, context), { maxChars: 4800, maxDepth: 5, maxItems: 16 }),
+      observation: boundedProjection(observation, { maxChars: 3800, maxDepth: 5, maxItems: 16 }),
     };
     if (turn.disabled) return useFallback({ turn, fallback, reason: turn.fallbackReason || 'decision_gateway_disabled_for_turn', stage, input });
     try {

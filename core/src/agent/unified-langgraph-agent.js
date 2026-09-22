@@ -407,6 +407,25 @@ function jevWorkflowContext(state, phase) {
   };
 }
 
+// A compound operation can survive an initial routing fallback: the governed
+// receipts themselves prove that it has more than one completed operation.
+// This matters after an interrupt/resume, where the durable checkpoint must
+// continue from evidence rather than treating a successful scoped write as a
+// complete response merely because the initial decision did not fit its
+// bounded context. This is operation-based, never provider-specific.
+function hasCompoundWorkflowEvidence(state) {
+  const receipts = Array.isArray(state?.receipts) ? state.receipts : [];
+  const hasConnectedOperation = receipts.some(receipt => receipt?.tool === 'hivemind_connected_task'
+    || Boolean(receipt?.tool && /^composio/i.test(String(receipt.tool)))
+    || Boolean(receipt?.action === 'execute' && receipt?.tool && !/^hivemind_/i.test(String(receipt.tool))));
+  const hasMemoryWrite = receipts.some(receipt => receipt?.action === 'save'
+    && ['hivemind_meta', 'hivemind_save_memory'].includes(String(receipt?.tool || ''))
+    && receipt?.successful !== false);
+  return state?.plan?.intent === 'multi_task'
+    || Boolean(state?.workflowTransition)
+    || (hasConnectedOperation && hasMemoryWrite);
+}
+
 function narrowConnectedSearch(compact, slug) {
   return {
     ...compact,
@@ -901,7 +920,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         actor_id: ctx.userId,
         context: state.context,
         observation: {
-          completed_receipts: state.receipts.slice(-8),
+          // JEV routes from receipt meaning, never raw provider output.
+          // Raw Gmail/document payloads can exceed the decision budget and
+          // silently degrade the initial plan to fallback_harness.
+          completed_receipts: decisionReceiptSummaries(state.receipts),
           selected_tool_slugs: state.selectedSlugs.slice(-12),
           prior_receipts: decisionReceiptSummaries(ctx.priorReceipts || []),
         },
@@ -1177,8 +1199,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // select the next still-unsatisfied outcome (for example a connected
     // action that depends on the retrieved evidence).  This is intentionally
     // operation-generic; it does not encode any provider or recipient.
+    const saveCompletesCompound = call.name === 'hivemind_meta' && call.args.operation === 'save'
+      && hasCompoundWorkflowEvidence({
+        ...state,
+        receipts: [...state.receipts, { tool: underlying, action: 'save', successful: receipt?.successful !== false }],
+      });
     if (call.name === 'hivemind_meta' && call.args.operation === 'save'
-      && receipt?.successful !== false && state.plan?.intent !== 'multi_task') {
+      && receipt?.successful !== false && !saveCompletesCompound) {
       const receipts = [...state.receipts, {
         tool: underlying, action: 'save', status: receipt?.status || null,
         successful: true, data: exposed, error: null,
@@ -1223,7 +1250,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   // the original request plus compact receipt state, rather than letting the
   // synthesis model silently end the workflow after its first read.
   const workflowTransitionNode = async state => {
-    if (state.plan?.intent !== 'multi_task' || state.workflowTransition || !workflowEvidenceReady(state)) return {};
+    if (!hasCompoundWorkflowEvidence(state) || state.workflowTransition || !workflowEvidenceReady(state)) return {};
     let decision;
     try {
       decision = await decisionStage({
@@ -1350,7 +1377,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // terminal answer merely because this one write succeeded when the plan
     // still has dependent outcomes.  The receipt/stage is visible immediately
     // and the next JEV transition decides what remains.
-    if (state.plan?.intent === 'multi_task') {
+    if (hasCompoundWorkflowEvidence(state)) {
       return {
         pendingMemoryScope: null,
         pendingSaveDraft: null,
@@ -1383,9 +1410,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const routeWorkflowTransition = state => state.result ? 'seal' : 'model';
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const routeMemoryScope = state => state.result ? 'seal'
-    : state.plan?.intent === 'multi_task' ? 'workflow_transition' : 'model';
+    : hasCompoundWorkflowEvidence(state) ? 'workflow_transition' : 'model';
   const routeApproval = state => state.result ? 'seal'
-    : state.plan?.intent === 'multi_task' ? 'workflow_transition' : 'model';
+    : hasCompoundWorkflowEvidence(state) ? 'workflow_transition' : 'model';
   const sealNode = async state => {
     onEvent({ type: 'finish', text: state.result.response });
     const terminalState = state.result.status === 'completed' ? 'sealed'

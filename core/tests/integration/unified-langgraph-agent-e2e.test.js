@@ -214,6 +214,50 @@ test('a multi-task scope save returns to JEV and reaches the remaining governed 
   assert.equal(turn, 3);
 });
 
+test('a scoped compound write resumes its remaining action even when the initial decision fell back', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  const stages = [];
+  let turn = 0;
+  const runtimeCtx = {
+    ...ctx(prisma, 'fallback-read-save-send'),
+    _tracedDispatch: async (name, args) => ({ saved: name === 'hivemind_save_memory', memory_id: 'saved-fallback', title: args.title, scope: args.scope }),
+  };
+  const decisionStage = async input => {
+    stages.push(input.stage);
+    if (input.stage === 'capability') return {
+      status: 'defer', selected: null, authoritative: false,
+      receipt: { source: 'fallback', reason: 'decision_state_exceeds_budget' },
+    };
+    return {
+      status: 'selected', selected: 'composio_action', authoritative: true,
+      receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'resume-action' },
+    };
+  };
+  const modelStep = async () => {
+    turn += 1;
+    if (turn === 1) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'SOURCE_READ', arguments: { query: 'latest records' } }, 'fallback-read') };
+    if (turn === 2) return { message: call('hivemind_meta', { operation: 'save', save: { title: 'Retrieved records', content: 'Grounded evidence.', tags: ['retrieved'] } }, 'fallback-save') };
+    return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'MESSAGE_SEND', arguments: { recipient: 'person@example.test', body: 'Follow-up.' } }, 'fallback-send') };
+  };
+  const connectedExecutor = async args => args.tool_slug === 'SOURCE_READ'
+    ? { successful: true, data: { records: [{ id: 'record-1' }] }, state: { selectedSlugs: ['SOURCE_READ'], primarySlugs: ['SOURCE_READ'] } }
+    : { successful: true, approval: { slug: 'MESSAGE_SEND', arguments: args.arguments, schema: { type: 'object', required: ['recipient', 'body'], properties: { recipient: { type: 'string' }, body: { type: 'string' } } } } };
+  const first = await runUnifiedMetaAgent({
+    message: 'Read source records, save them to HIVE-MIND, and send a follow-up.', useTools: true, prisma,
+    ctx: runtimeCtx, checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor,
+    metaExecutor: async args => ({ successful: true, data: { needs_project_choice: true, title: args.save.title, scopes: [{ scope: 'personal', label: 'Personal' }] } }),
+  });
+  assert.equal(first.status, 'needs_input');
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: true, prisma, ctx: { ...runtimeCtx, unifiedRunId: first.run.id }, checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor,
+    choice: { scope: 'personal', run_id: first.run.id },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(prisma.drafts[0].toolName, 'MESSAGE_SEND');
+  assert.deepEqual(stages, ['capability', 'workflow_transition']);
+});
+
 test('the in-graph plan node calls JEV once and reuses its typed decision for the model surface', async () => {
   const prisma = fakePrisma();
   const decisionStages = [];

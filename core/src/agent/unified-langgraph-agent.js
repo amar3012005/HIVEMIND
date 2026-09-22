@@ -236,6 +236,16 @@ function invalidFinal(text, receipts) {
   return /(?:i can(?:not|'t) directly display|i can only confirm|i can show you(?:\.|$)|cannot retrieve the other|need to (?:access|connect to)|please confirm (?:that )?i can proceed|don[’']t have a direct connection)/i.test(answer);
 }
 
+// A high-confidence, no-tool JEV decision has already completed the only
+// routing step this graph needs.  Sending it through the buffered tool-capable
+// model loop would re-plan the turn and withhold every visible token until
+// that second inference completes.  These intents have no executor authority
+// and can therefore use the receipt-safe final stream immediately.
+function isImmediateStreamIntent(plan) {
+  if (plan?.authoritative !== true) return false;
+  return ['direct_answer', 'workflow_plan', 'fallback_harness'].includes(String(plan.intent || ''));
+}
+
 async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
   const primary = resolveChatSynthesisModel(model);
   const fallback = process.env.UNIFIED_META_FALLBACK_MODEL || 'google/gemini-2.5-flash-lite';
@@ -654,7 +664,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const emitDecision = event => {
     onEvent({ type: 'decision', ...event });
     if (event.source === 'jev' || event.source === 'deterministic') {
-      console.info(`[JevDecision] ${JSON.stringify({ runtime: 'legacy', ...event })}`);
+      console.info(`[JevDecision] ${JSON.stringify({ runtime: UNIFIED_META_HARNESS_VERSION, ...event })}`);
     }
   };
 
@@ -832,6 +842,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // response or allowing another tool decision mid-stream.
     const metaReadEvidenceReady = !useTools && state.receipts.some(substantiveMetaReadReceipt);
     const finalEvidenceReady = providerEvidenceReady || metaReadEvidenceReady;
+    const immediateStream = isImmediateStreamIntent(state.plan);
+    const canStreamFinal = (finalEvidenceReady || immediateStream) && streamFinal;
     const finalReceipts = providerEvidenceReady
       ? state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
       : state.receipts.filter(substantiveMetaReadReceipt);
@@ -843,8 +855,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       ...state.messages,
       { role: 'system', content: executorInstruction(state.plan?.intent, { preparedSave: state.pendingSaveDraft }) },
     ];
-    if (finalEvidenceReady && streamFinal) {
+    if (canStreamFinal) {
       let emitted = false;
+      let firstDeltaAtMs = null;
       const streamed = await streamFinal({
         messages: modelMessages, model: ctx.model, apiKey: ctx._apiKey, signal: ctx._signal,
         onDelta: async delta => {
@@ -852,24 +865,28 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
           if (!text) return;
           if (!emitted) {
             emitted = true;
-            onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
+            firstDeltaAtMs = Date.now();
+            onEvent({ type: 'answer_started', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
           }
           // `delta` is the stable chat SSE contract. `text` remains for older
           // consumers that already render the unified-v2 event shape.
-          onEvent({ type: 'answer_delta', schema_version: 1, delta: text, text, grounded: true, run_id: state.runId });
+          onEvent({ type: 'answer_delta', schema_version: 1, delta: text, text, grounded: finalEvidenceReady, run_id: state.runId });
         },
       });
       const response = markdownText(streamed.content, 24000);
       if (!response) throw new Error('unified_final_stream_empty');
-      if (!emitted) onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
-      onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
+      if (!emitted) {
+        firstDeltaAtMs = Date.now();
+        onEvent({ type: 'answer_started', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
+      }
+      onEvent({ type: 'answer_completed', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
       return {
         messages: [...state.messages, { role: 'assistant', content: response }],
         pendingTool: null,
         usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage,
-        timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || Date.now(), completion_at_ms: Date.now() },
+        timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || firstDeltaAtMs || Date.now(), completion_at_ms: Date.now() },
         result: outputShape({ ...state, usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage,
-          timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || Date.now(), completion_at_ms: Date.now() } }, response),
+          timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || firstDeltaAtMs || Date.now(), completion_at_ms: Date.now() } }, response),
       };
     }
     // Reuse the plan-node decision for every model pass in this turn. In

@@ -120,6 +120,31 @@ test('the in-graph plan node calls JEV once and reuses its typed decision for th
     && event.selected === 'direct_answer' && event.source === 'jev'));
 });
 
+test('an authoritative JEV direct-answer decision streams without buffered re-planning', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'Who are you?', useTools: false, prisma, ctx: ctx(prisma, 'direct-answer-stream'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async () => ({
+      status: 'selected', selected: 'direct_answer', authoritative: true,
+      receipt: { source: 'jev', probability: 0.98, margin: 0.94, requestId: 'direct-stream-plan' },
+    }),
+    modelStep: async () => { throw new Error('direct-answer must not enter buffered model planning'); },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.equal(messages.at(-1).role, 'system');
+      assert.match(messages.at(-1).content, /Answer directly from the supplied context/);
+      await onDelta('I am ');
+      await onDelta('HIVE-MIND.');
+      return { ok: true, content: 'I am HIVE-MIND.', usage: { total_tokens: 4 } };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.response, 'I am HIVE-MIND.');
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['I am ', 'HIVE-MIND.']);
+  assert.equal(result.run.scratch.plan.intent, 'direct_answer');
+});
+
 test('an explicit durable-save request crosses the JEV plan node before one governed write', async () => {
   const prisma = fakePrisma();
   const calls = [];

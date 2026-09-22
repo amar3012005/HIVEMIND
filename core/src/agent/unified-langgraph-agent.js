@@ -1003,10 +1003,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       source: plan.source, authoritative: plan.authoritative, probability: plan.probability,
       margin: plan.margin, request_id: plan.request_id, run_id: state.runId });
     const timings = { ...state.timings, plan_completed_at_ms: Date.now() };
-    // The initial JEV decision is the authorization boundary. When it selects
-    // a save and admission already has a grounded capsule, execute the typed
-    // HIVE save directly; do not ask a second model to rediscover the same
-    // operation. An absent capsule remains an explicit user-input state.
+    // The initial JEV decision is the authorization boundary.  It selects the
+    // save capability, but the final synthesis model owns construction of the
+    // rich, source-grounded capsule through the save tool schema.  Do not
+    // directly persist the admission's minimal continuation draft: that draft
+    // merely identifies the evidence, while the tool-call context contains
+    // the contract for a meaningful header, tags, entities, dates, and source
+    // references.  An absent capsule remains an explicit user-input state.
     if (plan.authoritative && plan.intent === 'hivemind_save') {
       if (!state.pendingSaveDraft) {
         return {
@@ -1015,15 +1018,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
           result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
         };
       }
-      return {
-        plan,
-        timings,
-        pendingTool: {
-          id: `jev-save-${state.runId}`,
-          name: 'hivemind_meta',
-          args: { operation: 'save', save: state.pendingSaveDraft },
-        },
-      };
+      return { plan, timings };
     }
     // In decision-gateway-off environments retain the established typed save
     // admission behavior: a referential save without an answer is a missing

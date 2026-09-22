@@ -45,6 +45,20 @@ function saveCapabilityDecision(input) {
   };
 }
 
+function richSaveToolCall(id = 'rich-save') {
+  return {
+    message: call('hivemind_meta', { operation: 'save', save: {
+      title: 'Rama Santhoshi — relationship and Prague anniversary invitation',
+      content: 'Rama Santhoshi is supported by the prior conversation as Amar\'s partner and accepted the Prague anniversary invitation on September 14, 2026. The source is the preceding assistant answer; no unsupported details are asserted.',
+      source_type: 'conversation',
+      tags: ['person:rama-santhoshi', 'place:prague', 'event:anniversary-invitation'],
+      entities: ['Rama Santhoshi', 'Amar', 'Prague'],
+      dates: ['2026-09-14'],
+      source_refs: ['conversation:prior-assistant-answer'],
+    } }, id),
+  };
+}
+
 test('one model-tool graph handles native recall and final synthesis with only hivemind_meta', async () => {
   const prisma = fakePrisma();
   const seenTools = [];
@@ -429,11 +443,16 @@ test('an explicit durable-save request crosses the JEV plan node before one gove
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer: new MemorySaver(), composio: {},
     decisionStage: saveCapabilityDecision,
-    modelStep: async () => { turn += 1; throw new Error('authorized save must not invoke a second model turn'); },
+    modelStep: async ({ messages, tools }) => {
+      turn += 1;
+      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+      assert.match(messages.at(-1).content, /source-grounded memory capsule/i);
+      return richSaveToolCall('explicit-rich-save');
+    },
   });
   assert.equal(result.status, 'completed');
   assert.equal(calls.length, 1);
-  assert.equal(turn, 0);
+  assert.equal(turn, 1);
   assert.match(result.response, /Added .* company brain/i);
   assert.equal(result.run.scratch.plan.intent, 'hivemind_save');
 });
@@ -464,7 +483,12 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
       return { saved: true, id: 'memory-save-it', title: args.title, scope: args.scope };
     },
   };
-  const modelStep = async () => { throw new Error('save-it continuation must not invoke model or recall'); };
+  let initialModelTurns = 0;
+  const modelStep = async () => {
+    initialModelTurns += 1;
+    if (initialModelTurns > 1) throw new Error('scope continuation must not invoke model or recall');
+    return richSaveToolCall('referential-rich-save');
+  };
   const initial = await runUnifiedMetaAgent({
     message: 'save all of it as one memory', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer, composio: {}, modelStep, decisionStage: saveCapabilityDecision,
@@ -505,7 +529,11 @@ test('a referential save continuation tells the JEV plan about its prepared grou
       return { status: 'selected', selected: 'hivemind_save', authoritative: true,
         receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'referential-save' } };
     },
-    modelStep: async () => { throw new Error('a prepared referential save must not enter fallback model planning'); },
+    modelStep: async ({ messages, tools }) => {
+      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+      assert.match(messages.at(-1).content, /Prepared prior-turn evidence/i);
+      return richSaveToolCall('referential-jev-rich-save');
+    },
   });
   assert.equal(seen.length, 1);
   assert.equal(result.status, 'completed');
@@ -566,7 +594,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
   const modelStep = async () => {
     turn += 1;
     if (turn > 1) throw new Error('scope continuation must complete from its checkpoint without a second model turn');
-    return { message: { role: 'assistant', content: 'Saved in your personal memory.' } };
+    return richSaveToolCall('scope-rich-save');
   };
   const initial = await runUnifiedMetaAgent({
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
@@ -587,7 +615,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
   assert.equal(resumed.status, 'completed');
   assert.equal(writes, 2);
   assert.match(resumed.response, /personal company brain/i);
-  assert.equal(turn, 0);
+  assert.equal(turn, 1);
 });
 
 test('a standalone organization scope save seals from its receipt without a fallback pass', async () => {
@@ -613,7 +641,7 @@ test('a standalone organization scope save seals from its receipt without a fall
   const initial = await runUnifiedMetaAgent({
     message: 'Save this as one memory', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer, composio: {}, decisionStage: saveCapabilityDecision,
-    modelStep: async () => { throw new Error('a completed standalone scope save must not re-enter fallback planning'); },
+    modelStep: async () => richSaveToolCall('organization-rich-save'),
   });
   assert.equal(initial.status, 'needs_input');
   const resumed = await runUnifiedMetaAgent({
@@ -651,7 +679,12 @@ test('scope continuation preserves the original canonical save payload and emits
   const initial = await runUnifiedMetaAgent({
     message: 'Save this to Hivemind as one memory', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer, composio: {}, decisionStage: saveCapabilityDecision,
-    modelStep: async () => { throw new Error('authorized save must not invoke a model turn'); },
+    modelStep: async () => ({ message: call('hivemind_meta', { operation: 'save', save: {
+      title: 'Reliability release decision — approved evidence',
+      content: 'The release decision was approved with evidence A and B, as stated in the preceding assistant answer.',
+      source_type: 'conversation', tags: ['decision:reliability-release'],
+      entities: ['Reliability release'], source_refs: ['conversation:prior-assistant-answer'],
+    } }, 'scope-payload-rich-save') }),
   });
   assert.equal(initial.status, 'needs_input');
   const resumed = await runUnifiedMetaAgent({

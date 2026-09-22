@@ -13,6 +13,7 @@ file is how-to, not a second tool runtime.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,11 @@ async def hivemind_agent_middlewares(
     session_id: str,
     workspace: Any = None,
 ) -> list:
+    from agentscope.middleware import AgenticMemoryMiddleware, TracingMiddleware
+
+    middlewares = []
+    if os.getenv("AGENTSCOPE_OTEL_ENABLED", "0") == "1":
+        middlewares.append(TracingMiddleware())
     workdir = getattr(workspace, "workdir", None) if workspace is not None else None
     if not workdir:
         _log.debug(
@@ -65,11 +71,10 @@ async def hivemind_agent_middlewares(
             agent_id,
             session_id,
         )
-        return []
+        return middlewares
     try:
         _seed_composio_skill(str(workdir))
     except OSError as exc:
         _log.warning("could not seed composio skill: %s", exc)
-    from agentscope.middleware import AgenticMemoryMiddleware
-
-    return [AgenticMemoryMiddleware(workdir=str(workdir))]
+    middlewares.insert(0, AgenticMemoryMiddleware(workdir=str(workdir)))
+    return middlewares

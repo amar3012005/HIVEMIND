@@ -49,6 +49,7 @@ import hive_access_policy
 import hive_toolkit_groups
 import hive_scheduler
 import model_capabilities
+import agentscope_tracing
 from agentscope.app.hub import ClawSkillHub, GitHubMCPHub
 from agentscope.app.message_bus import RedisMessageBus
 from agentscope.app.storage import RedisStorage
@@ -61,6 +62,7 @@ import cloudflare_gateway as gateway
 import hm_auth
 import hm_bridge
 import extra_agent_tools
+import agent_middlewares
 from gateway_credential import CloudflareGatewayOpenAICredential
 
 # AgentScope remains the sole scheduler owner. HIVE only replaces the trigger
@@ -323,6 +325,11 @@ def _install_model_reject_logger() -> None:
 
 _install_model_reject_logger()
 hive_toolkit_groups.patch_get_toolkit()
+_tracing_status = agentscope_tracing.configure()
+if _tracing_status.get("enabled"):
+    _log(f"AgentScope tracing enabled reason={_tracing_status.get('reason')}")
+elif os.getenv("AGENTSCOPE_OTEL_ENABLED", "0") == "1":
+    _log(f"AgentScope tracing not enabled reason={_tracing_status.get('reason')}")
 
 
 app = create_app(
@@ -340,6 +347,7 @@ app = create_app(
     # runs once per agent assembly and receives the resolved principal, so every
     # tool call is scoped by hm-core rather than by anything the model controls.
     extra_agent_tools=extra_agent_tools.hivemind_tools,
+    extra_agent_middlewares=agent_middlewares.hivemind_agent_middlewares,
     resource_access_policy=hive_access_policy.HiveMindResourceAccessPolicy(),
     # Cloudflare AI Gateway credential type — routes provider calls through the
     # same gateway as hm-core. Registered unconditionally so the type is always

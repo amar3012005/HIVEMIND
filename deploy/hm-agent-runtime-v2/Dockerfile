@@ -34,6 +34,7 @@ COPY deploy/hm-agent-runtime-v2/hm_auth.py /app/hm_auth.py
 COPY deploy/hm-agent-runtime-v2/hm_bridge.py /app/hm_bridge.py
 COPY deploy/hm-agent-runtime-v2/workspace_backend.py /app/workspace_backend.py
 COPY deploy/hm-agent-runtime-v2/agent_middlewares.py /app/agent_middlewares.py
+COPY deploy/hm-agent-runtime-v2/agentscope_tracing.py /app/agentscope_tracing.py
 COPY deploy/hm-agent-runtime-v2/resource_access.py /app/resource_access.py
 COPY deploy/hm-agent-runtime-v2/hive_access_policy.py /app/hive_access_policy.py
 COPY deploy/hm-agent-runtime-v2/hive_toolkit_groups.py /app/hive_toolkit_groups.py

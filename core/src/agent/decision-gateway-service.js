@@ -23,7 +23,10 @@ function actorAllowlist(env) {
     .split(',').map(value => value.trim().toLowerCase()).filter(Boolean));
 }
 
-function decisionProviderConfig(env) {
+// Shared only with isolated, non-interactive decision workflows. Callers still
+// own their policy, authorization, and any side effect; this function exposes
+// transport configuration, never a chat-routing decision.
+export function decisionGatewayProviderConfig(env = process.env) {
   const explicit = String(env.JEV_DECISIONS_URL || '').trim();
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim();
   const gatewayId = String(env.CLOUDFLARE_AI_GATEWAY_ID || '').trim();
@@ -99,7 +102,7 @@ export async function decideRuntimeStage(input = {}, {
   const userQuery = boundedString(input.user_query, 4000);
   if (!userQuery) return { status: 'defer', mode, stage, reason: 'decision_query_required' };
 
-  const providerConfig = decisionProviderConfig(env);
+  const providerConfig = decisionGatewayProviderConfig(env);
   const gateway = new DecisionGateway({
     provider: provider || createOpenRouterJevProvider({
       apiKey: providerConfig.apiKey,

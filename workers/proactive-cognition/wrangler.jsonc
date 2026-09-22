@@ -1,0 +1,60 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-proactive-cognition",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "HIVEMIND_CONTROL_URL": "http://127.0.0.1:3000",
+    "PROACTIVE_COGNITION_ENABLED": "false",
+    "PROACTIVE_COGNITION_FLAG": "proactive_cognition_v1",
+    "PROACTIVE_RECONCILE_LIMIT": "100"
+  },
+  "flagship": [{
+    "binding": "FLAGS",
+    "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+    "remote": true
+  }],
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "queues": {
+    "producers": [{ "binding": "PROACTIVE_QUEUE", "queue": "hivemind-proactive-cognition-local" }],
+    "consumers": [{
+      "queue": "hivemind-proactive-cognition-local",
+      "max_batch_size": 1,
+      "max_batch_timeout": 1,
+      "max_retries": 8,
+      "dead_letter_queue": "hivemind-proactive-cognition-dlq-local",
+      "max_concurrency": 5,
+      "retry_delay": 60
+    }]
+  },
+  "workflows": [{
+    "name": "hivemind-proactive-cognition-local",
+    "binding": "PROACTIVE_WORKFLOW",
+    "class_name": "ProactiveCognitionWorkflow"
+  }],
+  "env": {
+    "production": {
+      "name": "hivemind-proactive-cognition-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com",
+        "PROACTIVE_COGNITION_ENABLED": "false",
+        "PROACTIVE_COGNITION_FLAG": "proactive_cognition_v1",
+        "PROACTIVE_RECONCILE_LIMIT": "100"
+      },
+      "flagship": [{
+        "binding": "FLAGS",
+        "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+        "remote": true
+      }],
+      "queues": {
+        "producers": [{ "binding": "PROACTIVE_QUEUE", "queue": "hivemind-proactive-cognition-production" }],
+        "consumers": [{ "queue": "hivemind-proactive-cognition-production", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 8, "dead_letter_queue": "hivemind-proactive-cognition-dlq-production", "max_concurrency": 5, "retry_delay": 60 }]
+      },
+      "workflows": [{ "name": "hivemind-proactive-cognition-production", "binding": "PROACTIVE_WORKFLOW", "class_name": "ProactiveCognitionWorkflow" }]
+    }
+  }
+}

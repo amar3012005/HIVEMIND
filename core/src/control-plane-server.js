@@ -193,8 +193,18 @@ import {
   startInvitationActivation,
   startSignupActivation,
 } from './lifecycle/activation-lifecycle.js';
+import {
+  evaluateProactiveSchedule,
+  getProactiveSettings,
+  isAuthorizedProactiveCognitionRequest,
+  listEligibleProactiveSchedules,
+  proactiveCognitionEnabled,
+  recordProactiveFeedback,
+  setProactiveSettings,
+} from './proactive-cognition/service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const clean = (value, limit = 400) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 
 // Welcome-email idempotency: send at most once per login session (not per page
 // render). Keyed by sessionId; cleared naturally on process restart.
@@ -3712,6 +3722,29 @@ const server = http.createServer(async (req, res) => {
       console.warn('[activation-lifecycle] worker request failed:', error.message);
       return jsonResponse(res, { error: 'activation_delivery_failed', retryable: true }, 502);
     }
+  }
+
+  // Proactive cognition is an isolated, opt-in background capability. The
+  // Worker carries opaque schedule ids only; Core remains the sole reader of
+  // HIVE activity, policy evaluator, and owner of every delivery receipt.
+  if (pathname.startsWith('/internal/proactive-cognition/')) {
+    if (!isAuthorizedProactiveCognitionRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!proactiveCognitionEnabled()) return jsonResponse(res, { error: 'proactive_cognition_disabled', retryable: false }, 403);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    if (pathname === '/internal/proactive-cognition/eligible') {
+      return jsonResponse(res, { schedules: await listEligibleProactiveSchedules({ prisma, limit: body.limit }) });
+    }
+    if (pathname === '/internal/proactive-cognition/evaluate') {
+      const scheduleId = String(body.schedule_id || '');
+      const mode = ['shadow', 'deliver'].includes(String(body.mode)) ? String(body.mode) : 'shadow';
+      try {
+        return jsonResponse(res, await evaluateProactiveSchedule({ prisma, scheduleId, mode }));
+      } catch (error) {
+        return jsonResponse(res, { error: clean(error?.message || 'proactive_evaluation_failed', 240), retryable: true }, 502);
+      }
+    }
+    return jsonResponse(res, { error: 'Not found' }, 404);
   }
 
   // Cloudflare Workflows is the durable clock for Day 1. These endpoints are
@@ -8645,6 +8678,48 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { items, unread });
     } catch {
       return jsonResponse(res, { error: 'Notifications unavailable' }, 503);
+    }
+  }
+
+  // Explicit per-user consent and quiet hours for proactive cognition. This is
+  // intentionally separate from the global Worker/Flagship gates: a global
+  // rollout can never opt a person in, and an opted-in person can stop at any
+  // time without waiting for an edge configuration change.
+  if (pathname === '/v1/proactive-cognition/settings') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      if (req.method === 'GET') {
+        return jsonResponse(res, { settings: await getProactiveSettings({ prisma, userId: current.session.userId, orgId: current.session.orgId }) });
+      }
+      if (req.method === 'PATCH') {
+        const body = await parseBody(req).catch(() => ({}));
+        return jsonResponse(res, { settings: await setProactiveSettings({ prisma, userId: current.session.userId, orgId: current.session.orgId, input: body }) });
+      }
+      return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    } catch (error) {
+      return jsonResponse(res, { error: clean(error?.message || 'proactive_settings_failed', 240) }, 400);
+    }
+  }
+
+  const proactiveFeedbackMatch = pathname.match(/^\/v1\/proactive-cognition\/deliveries\/([0-9a-f-]{36})\/feedback$/i);
+  if (proactiveFeedbackMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      return jsonResponse(res, await recordProactiveFeedback({
+        prisma, userId: current.session.userId, orgId: current.session.orgId,
+        deliveryId: proactiveFeedbackMatch[1], action: body.action, note: body.note,
+      }));
+    } catch (error) {
+      return jsonResponse(res, { error: clean(error?.message || 'proactive_feedback_failed', 240) }, 400);
     }
   }
 

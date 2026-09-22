@@ -112,8 +112,13 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
       const persisted: CoreResult = await step.do('persist canonical projection', STANDARD_RETRY, () => core(this.env, params, 'persist'));
       await step.do('reconcile projection receipts', { ...STANDARD_RETRY, retries: { limit: 8, delay: '30 seconds', backoff: 'exponential' } }, () => core(this.env, params, 'reconcile'));
       const completed: CoreResult = await step.do('mark projection complete', STANDARD_RETRY, () => core(this.env, params, 'complete'));
-      const claims = (persisted as any)?.receipt?.projection?.claims || (persisted as any)?.projection?.claims || [];
-      const entityIds = [...new Set(claims.flatMap((claim: any) => [claim?.subjectEntityId, claim?.objectEntityId]).filter((id: unknown) => typeof id === 'string'))];
+      const projection = (persisted as any)?.receipt?.projection || (persisted as any)?.projection || {};
+      const claims = Array.isArray(projection.claims) ? projection.claims : [];
+      const linkedEntityIds = Array.isArray(projection.entity_ids) ? projection.entity_ids : [];
+      const entityIds = [...new Set([
+        ...linkedEntityIds,
+        ...claims.flatMap((claim: any) => [claim?.subjectEntityId, claim?.objectEntityId]),
+      ].filter((id: unknown) => typeof id === 'string' && validUuid(id)))];
       // New admissions preserve the actor identity. This makes the entity-profile
       // Flagship rule exact to the organization/user that admitted the memory.
       // Pre-release queued messages have no actor and remain safely off.

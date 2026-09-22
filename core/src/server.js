@@ -268,7 +268,20 @@ async function handleCanonicalProjectionStageCallback({ req, res, pathname }) {
     if (begun.duplicate) { jsonResponse(res, { ok: true, idempotent: true, receipt: begun.receipt }); return true; }
     if (!begun.accepted) { jsonResponse(res, { error: begun.reason || 'projection_stage_rejected' }, 409); return true; }
     let receipt = { memory_id: memoryId, stage, processing_version: body.processing_version || 1, required_projection: requiredProjection };
-    if (stage === 'persist') receipt.projection = await projectCanonicalKnowledge({ prisma, mode: requiredProjection, processingVersion: body.processing_version || 1, input: canonicalProjectionInput({ memoryId, orgId, payload: memory, requestBody: body }) });
+    if (stage === 'persist') {
+      const projection = await projectCanonicalKnowledge({ prisma, mode: requiredProjection, processingVersion: body.processing_version || 1, input: canonicalProjectionInput({ memoryId, orgId, payload: memory, requestBody: body }) });
+      // Dossier projection is evidence-first: a memory already verified for this
+      // tenant may name canonical entities even when it yields no normalized
+      // relationship claim. Return only their opaque IDs to the Worker; the
+      // Worker then asks Core to authorize and materialize each dossier.
+      const linkedEntities = await prisma.memoryEntityLink.findMany({
+        where: { memoryId }, select: { entityId: true },
+      });
+      receipt.projection = {
+        ...projection,
+        entity_ids: [...new Set(linkedEntities.map((link) => link.entityId))],
+      };
+    }
     await finishProjectionStage({ prisma, attempt: begun.attempt, stage, receipt, failure: stage === 'failed' ? 'workflow_failed' : null });
     jsonResponse(res, { ok: true, receipt }); return true;
   } catch (error) {

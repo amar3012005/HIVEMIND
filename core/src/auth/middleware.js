@@ -29,6 +29,8 @@ const OAUTH_SCOPE_MAP = {
   'tools.invoke': 'mcp',
   'workspace.connect': 'mcp',
   'mcp.connect': 'mcp',
+  'ops.deploy': 'ops:deploy',
+  'ops:deploy': 'ops:deploy',
   'memory:read': 'memory:read',
   'memory:write': 'memory:write',
   mcp: 'mcp'

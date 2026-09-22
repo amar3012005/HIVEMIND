@@ -2923,14 +2923,17 @@ const aggregateCache = new Map();
 
 // OAuth 2.1 authorization code + refresh token stores
 const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.singulancelabs.com';
-const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'web.search', 'tools.invoke', 'workspace.connect', 'mcp.connect'];
+// Public OAuth scopes deliberately use dot notation. Internal service checks use
+// colon notation, so this module is the one translation boundary.
+const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'web.search', 'tools.invoke', 'workspace.connect', 'mcp.connect', 'ops.deploy'];
 const OAUTH_SCOPE_TO_INTERNAL = {
   'memory.read': 'memory:read',
   'memory.write': 'memory:write',
   'web.search': 'web:search',
   'tools.invoke': 'mcp',
   'workspace.connect': 'mcp',
-  'mcp.connect': 'mcp'
+  'mcp.connect': 'mcp',
+  'ops.deploy': 'ops:deploy'
 };
 // Accept both dot-style (memory.read) and colon-style (memory:read) on the
 // authorization request so ChatGPT / Custom GPTs (colon convention) work
@@ -2939,6 +2942,7 @@ const OAUTH_SCOPE_ALIASES = {
   'memory:read': 'memory.read',
   'memory:write': 'memory.write',
   'web:search': 'web.search',
+  'ops:deploy': 'ops.deploy',
   mcp: 'mcp.connect',
 };
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
@@ -4083,6 +4087,28 @@ async function resolveOAuthSession(req) {
   }
 
   return null;
+}
+
+// Deployment is an operator capability, never a general MCP capability. A
+// client may request `ops.deploy`, but it is issued only to an active
+// organization owner/admin or the explicitly configured local administrator.
+async function canGrantOpsDeployScope({ userId, orgId, authProvider } = {}) {
+  if (authProvider === 'local_admin') return true;
+  if (!prisma || !userId || !orgId) return false;
+  try {
+    const membership = await prisma.userOrganization.findUnique({
+      where: { userId_orgId: { userId, orgId } },
+      select: { role: true, roles: true, isActive: true },
+    });
+    const roles = new Set([
+      ...(membership?.role ? [membership.role] : []),
+      ...(Array.isArray(membership?.roles) ? membership.roles : []),
+    ]);
+    return membership?.isActive === true && (roles.has('owner') || roles.has('admin'));
+  } catch (err) {
+    console.warn('[oauth] unable to resolve ops.deploy authorization:', err?.message || err);
+    return false;
+  }
 }
 
 async function createOAuthSession(res, payload) {
@@ -5930,6 +5956,9 @@ exit \$RC
 
     const session = await resolveOAuthSession(req);
     if (session?.userId) {
+      if (requestedScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(session)) {
+        return jsonResponse(res, { error: 'access_denied', error_description: 'An active organization owner or administrator role is required for ops.deploy.' }, 403);
+      }
       const consentStateId = await oauthSessionStore.createAuthState({
         kind: 'oauth_consent',
         payload: {
@@ -6207,6 +6236,9 @@ exit \$RC
     if (disallowed.length > 0) {
       return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
     }
+    if (requestedScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(session)) {
+      return jsonResponse(res, { error: 'access_denied', error_description: 'An active organization owner or administrator role is required for ops.deploy.' }, 403);
+    }
 
     const consentState = await oauthSessionStore.consumeAuthState(oauthStateId);
     if (!consentState || consentState.kind !== 'oauth_consent' || !consentState.payload) {
@@ -6260,6 +6292,7 @@ exit \$RC
       codeChallengeMethod,
       userId: session.userId || DEFAULT_USER,
       orgId: session.orgId || DEFAULT_ORG,
+      authProvider: session.authProvider || null,
       workspaceId: session.workspaceId || null,
       resource,
       state,
@@ -6363,6 +6396,9 @@ exit \$RC
       if (disallowed.length > 0) {
         return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
       }
+      if (oauthScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(entry)) {
+        return jsonResponse(res, { error: 'access_denied', error_description: 'The ops.deploy authorization is no longer valid.' }, 403);
+      }
       const internalScopes = mapOAuthScopesToInternalScopes(oauthScopes);
       if (internalScopes.length === 0) {
         return jsonResponse(res, { error: 'invalid_scope', error_description: 'No internal scopes resolved from requested scopes.' }, 400);
@@ -6385,6 +6421,7 @@ exit \$RC
         clientId,
         userId: entry.userId,
         orgId: entry.orgId,
+        authProvider: entry.authProvider || null,
         workspaceId: entry.workspaceId || null,
         resource: entry.resource || OAUTH_RESOURCE_DEFAULT,
         scopes: oauthScopes,
@@ -6431,6 +6468,12 @@ exit \$RC
       if (record.revokedAt || Date.now() > Number(record.expiresAt || 0)) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token expired or revoked.' }, 400);
       }
+      const refreshScopes = normalizeRequestedScopes(record.scopes || [], ['memory.read']);
+      if (refreshScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(record)) {
+        await markRefreshTokenRevoked(record.refreshHash);
+        await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_ops_scope_revoked');
+        return jsonResponse(res, { error: 'access_denied', error_description: 'The ops.deploy authorization is no longer valid.' }, 403);
+      }
 
       await markRefreshTokenRevoked(record.refreshHash);
       await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_refresh_rotation');
@@ -6440,7 +6483,7 @@ exit \$RC
         userId: record.userId,
         orgId: record.orgId,
         internalScopes: Array.isArray(record.internalScopes) ? record.internalScopes : mapOAuthScopesToInternalScopes(record.scopes || []),
-        oauthScopes: normalizeRequestedScopes(record.scopes || [], ['memory.read']),
+        oauthScopes: refreshScopes,
         workspaceId: record.workspaceId || null,
         resource: record.resource || OAUTH_RESOURCE_DEFAULT
       });

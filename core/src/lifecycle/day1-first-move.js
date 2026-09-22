@@ -7,6 +7,91 @@ import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, r
 
 export const DAY_ONE_VERSION = 'day-1-first-move-v2';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
+const DAY_ONE_LIFECYCLE_DAY = 1;
+
+function recipientHash(email = '') {
+  return crypto.createHash('sha256').update(String(email).trim().toLowerCase()).digest('hex');
+}
+
+function recipientHint(email = '') {
+  const [local = '', domain = ''] = String(email).trim().toLowerCase().split('@');
+  return `${local.slice(0, 2)}***@${domain}`.slice(0, 160);
+}
+
+// This is intentionally a lifecycle generation, never a Worker instance or
+// room ID.  A duplicate HQ room must not produce another Day-1 email.
+function dayOneWorkflowGeneration(state = {}) {
+  return String(state.lifecycle_generation || '1').slice(0, 128);
+}
+
+async function reserveDayOneDelivery({ prisma, orgId, email, hqRoomId, turnId, outputSha256, generation }) {
+  const leaseUntil = new Date(Date.now() + SENDING_LEASE_MS);
+  const inserted = await prisma.$queryRawUnsafe(
+    `INSERT INTO hivemind.lifecycle_email_deliveries
+       (org_id, recipient_hash, recipient_hint, lifecycle_day, workflow_generation, hq_room_id, turn_id, output_sha256, status, send_lease_until)
+     VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, $7::uuid, $8, 'reserved', $9)
+     ON CONFLICT (org_id, recipient_hash, lifecycle_day, workflow_generation) DO NOTHING
+     RETURNING id, status, provider, delivery_status, provider_receipts`,
+    orgId, recipientHash(email), recipientHint(email), DAY_ONE_LIFECYCLE_DAY, generation, hqRoomId, turnId, outputSha256, leaseUntil,
+  );
+  if (inserted?.[0]) return { action: 'send', delivery: inserted[0] };
+
+  const existingRows = await prisma.$queryRawUnsafe(
+    `SELECT id, status, provider, delivery_status, provider_receipts, send_lease_until
+       FROM hivemind.lifecycle_email_deliveries
+      WHERE org_id=$1::uuid AND recipient_hash=$2 AND lifecycle_day=$3 AND workflow_generation=$4
+      LIMIT 1`,
+    orgId, recipientHash(email), DAY_ONE_LIFECYCLE_DAY, generation,
+  );
+  const delivery = existingRows?.[0];
+  if (!delivery) throw new Error('day1_delivery_ledger_unavailable');
+  if (delivery.status === 'accepted') return { action: 'accepted', delivery };
+  if (delivery.status === 'reserved' && (!delivery.send_lease_until || new Date(delivery.send_lease_until).getTime() <= Date.now())) {
+    const reclaimed = await prisma.$queryRawUnsafe(
+      `UPDATE hivemind.lifecycle_email_deliveries
+          SET send_lease_until=$5, updated_at=CURRENT_TIMESTAMP
+        WHERE id=$1::uuid AND status='reserved'
+          AND (send_lease_until IS NULL OR send_lease_until <= CURRENT_TIMESTAMP)
+        RETURNING id, status, provider, delivery_status, provider_receipts`,
+      delivery.id, orgId, recipientHash(email), generation, leaseUntil,
+    );
+    if (reclaimed?.[0]) return { action: 'send', delivery: reclaimed[0] };
+  }
+  return { action: 'reconcile', delivery };
+}
+
+async function markDayOneDeliverySubmitted({ prisma, deliveryId }) {
+  const rows = await prisma.$queryRawUnsafe(
+    `UPDATE hivemind.lifecycle_email_deliveries
+        SET status='submitted_unknown', submission_started_at=CURRENT_TIMESTAMP,
+            provider_attempts=provider_attempts+1, send_lease_until=NULL, updated_at=CURRENT_TIMESTAMP,
+            provider_receipts=provider_receipts || jsonb_build_array(jsonb_build_object('at', CURRENT_TIMESTAMP, 'outcome', 'submission_started'))
+      WHERE id=$1::uuid AND status='reserved'
+      RETURNING id`,
+    deliveryId,
+  );
+  if (!rows?.length) throw new Error('day1_delivery_claim_lost');
+}
+
+async function settleDayOneDelivery({ prisma, deliveryId, delivery }) {
+  const outcome = delivery.ok ? 'accepted' : 'rejected';
+  const rows = await prisma.$queryRawUnsafe(
+    `UPDATE hivemind.lifecycle_email_deliveries
+        SET status=$2, provider=$3, delivery_status=$4,
+            accepted_at=CASE WHEN $2='accepted' THEN CURRENT_TIMESTAMP ELSE accepted_at END,
+            rejected_at=CASE WHEN $2='rejected' THEN CURRENT_TIMESTAMP ELSE rejected_at END,
+            last_error=CASE WHEN $2='rejected' THEN $5 ELSE NULL END,
+            updated_at=CURRENT_TIMESTAMP,
+            provider_receipts=provider_receipts || jsonb_build_array(jsonb_build_object(
+              'at', CURRENT_TIMESTAMP, 'outcome', $2, 'provider', $3,
+              'delivery_status', $4, 'message_id', $6, 'error', $5))
+      WHERE id=$1::uuid AND status='submitted_unknown'
+      RETURNING id, status, provider, delivery_status, provider_receipts`,
+    deliveryId, outcome, delivery.provider || null, delivery.deliveryStatus || (delivery.ok ? 'accepted' : null), String(delivery.error || delivery.reason || '').slice(0, 240) || null, delivery.messageId || null,
+  );
+  if (!rows?.[0]) throw new Error('day1_delivery_settlement_lost');
+  return rows[0];
+}
 const DEFAULT_APP_URL = 'https://next.singulancelabs.com/hivemind/app/employees';
 const DELIVERABLE_ROOM_STATUSES = new Set(['complete', 'blocked']);
 
@@ -542,27 +627,23 @@ export async function deliverDayOneFirstMove({
   if (!output) throw new Error('day1_sealed_output_missing');
   const outputSha256 = crypto.createHash('sha256').update(output, 'utf8').digest('hex');
   const outputLength = Buffer.byteLength(output, 'utf8');
-  const claimedAt = new Date().toISOString();
-  const sendingState = { ...state, status: 'sending', delivery_claimed_at: claimedAt };
-  const claimed = await prisma.$queryRawUnsafe(
-    `UPDATE "hivemind"."hyper_rooms"
-        SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true)
-      WHERE id = $2::uuid
-        AND (
-          COALESCE("agent_connectors" #>> '{_company,day1_first_move,status}', '') NOT IN ('sending', 'sent')
-          OR (
-            "agent_connectors" #>> '{_company,day1_first_move,status}' = 'sending'
-            AND COALESCE(("agent_connectors" #>> '{_company,day1_first_move,delivery_claimed_at}')::timestamptz, to_timestamp(0)) < now() - ($3::bigint * interval '1 millisecond')
-          )
-        )
-    RETURNING id`,
-    JSON.stringify(sendingState), hq.id, SENDING_LEASE_MS,
-  );
-  if (!claimed?.length) throw new Error('day1_delivery_in_progress');
-  Object.assign(state, sendingState);
   try {
     const owner = await prisma.user.findUnique({ where: { id: hq.user_id }, select: { email: true } });
     if (!owner?.email) throw new Error('day1_recipient_missing');
+    const generation = dayOneWorkflowGeneration(state);
+    const reservation = await reserveDayOneDelivery({ prisma, orgId, email: owner.email, hqRoomId: hq.id, turnId: state.turn_id, outputSha256, generation });
+    if (reservation.action === 'accepted') {
+      const receipts = Array.isArray(reservation.delivery.provider_receipts) ? reservation.delivery.provider_receipts : [];
+      const lastReceipt = receipts.at(-1) || {};
+      Object.assign(state, { status: 'sent', lifecycle_generation: generation, provider: reservation.delivery.provider || null, delivery_status: reservation.delivery.delivery_status || 'accepted', message_id: lastReceipt.message_id || state.message_id || null, output_sha256: outputSha256, output_length: outputLength });
+      await prisma.$executeRawUnsafe(
+        `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
+        JSON.stringify(state), hq.id,
+      );
+      return { ok: true, accepted: false, status: 'sent', provider: reservation.delivery.provider || null, message_id: lastReceipt.message_id || null, output_sha256: outputSha256, output_length: outputLength };
+    }
+    if (reservation.action !== 'send') return { ok: false, accepted: false, status: 'reconcile_required', retryable: false, reason: 'day1_delivery_reconciliation_required' };
+    await markDayOneDeliverySubmitted({ prisma, deliveryId: reservation.delivery.id });
     const task = (company.tasks || []).find((item) => item.id === state.task_id) || {};
     const companyName = clean(company.company || company.profile?.company_name || 'Your company', 110);
     const taskTitle = clean(task.title || 'Your first research move', 160);
@@ -575,6 +656,10 @@ export async function deliverDayOneFirstMove({
     const slug = companyName.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'company';
     const delivery = await sendEmail({
       templateId: 'day1_first_move', to: owner.email, rendered,
+      // A provider timeout is ambiguous.  The ledger records it as
+      // submitted_unknown and blocks replay instead of making a second send.
+      providerAttempts: 1,
+      providerFallback: false,
       attachments: [{ filename: `${slug}-day-1-research-report.pdf`, type: 'application/pdf', content: pdf }],
       notification: {
         orgId,
@@ -588,15 +673,19 @@ export async function deliverDayOneFirstMove({
         data: { lifecycle_day: 1, company: companyName, task_title: taskTitle },
       },
     });
+    const settled = await settleDayOneDelivery({ prisma, deliveryId: reservation.delivery.id, delivery });
     if (!delivery.ok) throw new Error(`day1_delivery_${delivery.error || delivery.reason || 'failed'}`);
-    Object.assign(state, { status: 'sent', sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null, output_sha256: outputSha256, output_length: outputLength });
+    Object.assign(state, { status: 'sent', lifecycle_generation: generation, sent_at: new Date().toISOString(), provider: settled.provider || delivery.provider, delivery_status: settled.delivery_status || delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null, output_sha256: outputSha256, output_length: outputLength });
     await prisma.$executeRawUnsafe(
       `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
       JSON.stringify(state), hq.id,
     );
     return { ok: true, accepted: true, status: 'sent', provider: delivery.provider, message_id: delivery.messageId || null, room_id: state.room_id, turn_id: state.turn_id, output_sha256: outputSha256, output_length: outputLength };
   } catch (error) {
-    Object.assign(state, { status: 'failed', failed_at: new Date().toISOString(), failure_reason: String(error.message || 'delivery_failed').slice(0, 240) });
+    // Do not turn submitted_unknown into failed: after any transport error,
+    // Cloudflare may have accepted the request.  A later worker must reconcile
+    // the durable ledger rather than submit another provider request.
+    Object.assign(state, { status: 'delivery_reconciliation_required', failed_at: new Date().toISOString(), failure_reason: String(error.message || 'delivery_failed').slice(0, 240) });
     await prisma.$executeRawUnsafe(
       `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
       JSON.stringify(state), hq.id,

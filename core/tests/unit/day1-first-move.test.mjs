@@ -15,6 +15,43 @@ import {
   selectDayOneResearchTask,
 } from '../../src/lifecycle/day1-first-move.js';
 import { lifecycleEmailShell } from '../../src/email/templates/cartesia-lifecycle.js';
+
+function dayOneDeliveryLedgerMock({ hq, company }) {
+  let ledger = null;
+  return {
+    async query(sql, ...args) {
+      if (sql.includes('SELECT id, user_id')) return [hq];
+      if (sql.includes('INSERT INTO hivemind.lifecycle_email_deliveries')) {
+        if (ledger) return [];
+        ledger = { id: 'ledger-1', status: 'reserved', provider: null, delivery_status: null, provider_receipts: [] };
+        return [ledger];
+      }
+      if (sql.includes('SELECT id, status, provider, delivery_status, provider_receipts, send_lease_until')) return ledger ? [ledger] : [];
+      if (sql.includes("SET status='submitted_unknown'")) {
+        assert.equal(ledger?.status, 'reserved');
+        ledger = { ...ledger, status: 'submitted_unknown', provider_receipts: [...ledger.provider_receipts, { outcome: 'submission_started' }] };
+        return [{ id: ledger.id }];
+      }
+      if (sql.includes('SET status=$2, provider=$3, delivery_status=$4')) {
+        const [, status, provider, deliveryStatus, error, messageId] = args;
+        ledger = {
+          ...ledger,
+          status,
+          provider,
+          delivery_status: deliveryStatus,
+          provider_receipts: [...ledger.provider_receipts, { outcome: status, provider, delivery_status: deliveryStatus, message_id: messageId, error }],
+        };
+        return [ledger];
+      }
+      if (sql.includes('UPDATE "hivemind"."hyper_rooms"')) {
+        company.day1_first_move = JSON.parse(args[0]);
+        return [{ id: hq.id }];
+      }
+      return [];
+    },
+    ledger: () => ledger,
+  };
+}
 import { nextLocalLifecycleMorning } from '../../src/lifecycle/local-morning.js';
 
 test('lifecycle morning is the following calendar day at 09:00 in the workspace timezone', () => {
@@ -281,15 +318,9 @@ test('Day 1 delivers a sealed blocked research report with its evidence gaps int
   };
   const hq = { id: 'hq-1', user_id: 'user-1', company };
   let sends = 0;
+  const ledger = dayOneDeliveryLedgerMock({ hq, company });
   const prisma = {
-    async $queryRawUnsafe(sql, ...args) {
-      if (sql.includes('SELECT id, user_id')) return [hq];
-      if (sql.includes('UPDATE "hivemind"."hyper_rooms"')) {
-        company.day1_first_move = JSON.parse(args[0]);
-        return [{ id: hq.id }];
-      }
-      return [];
-    },
+    $queryRawUnsafe: ledger.query,
     async $executeRawUnsafe(_sql, value) { company.day1_first_move = JSON.parse(value); return 1; },
     hyperTurn: { findFirst: async () => ({ id: 'turn-1', roomId: 'room-1', status: 'blocked', sealedAt: new Date(), lines: [{ t: 'final_report', text: output }, { t: 'seal', status: 'blocked' }] }) },
     user: { findUnique: async () => ({ email: 'canary@example.test' }) },
@@ -373,15 +404,9 @@ test('delivery persists exact output evidence and a duplicate retry sends nothin
   };
   const hq = { id: 'hq-1', user_id: 'user-1', company };
   let sends = 0;
+  const ledger = dayOneDeliveryLedgerMock({ hq, company });
   const prisma = {
-    async $queryRawUnsafe(sql, ...args) {
-      if (sql.includes('SELECT id, user_id')) return [hq];
-      if (sql.includes('UPDATE "hivemind"."hyper_rooms"')) {
-        company.day1_first_move = JSON.parse(args[0]);
-        return [{ id: hq.id }];
-      }
-      return [];
-    },
+    $queryRawUnsafe: ledger.query,
     async $executeRawUnsafe(_sql, value) { company.day1_first_move = JSON.parse(value); return 1; },
     hyperTurn: { findFirst: async () => ({ id: 'turn-1', roomId: 'room-1', status: 'complete', sealedAt: new Date('2026-08-29T12:00:00Z'), lines: [{ t: 'final_report', text: output }, { t: 'seal', status: 'complete' }] }) },
     user: { findUnique: async () => ({ email: 'canary@example.test' }) },
@@ -390,10 +415,12 @@ test('delivery persists exact output evidence and a duplicate retry sends nothin
     const args = {
       prisma, orgId: 'org-1', hqRoomId: 'hq-1',
       renderPdf: async (html) => { assert.match(html, /A source-backed result\./); return Buffer.from('portrait-pdf'); },
-      sendEmail: async ({ rendered, attachments }) => {
+      sendEmail: async ({ rendered, attachments, providerAttempts, providerFallback }) => {
         sends += 1;
         assert.match(rendered.text, /A source-backed result\./);
         assert.equal(attachments[0].type, 'application/pdf');
+        assert.equal(providerAttempts, 1);
+        assert.equal(providerFallback, false);
         return { ok: true, provider: 'cloudflare', deliveryStatus: 'accepted', messageId: 'msg-canary-1' };
       },
     };
@@ -406,6 +433,41 @@ test('delivery persists exact output evidence and a duplicate retry sends nothin
     assert.equal(duplicate.accepted, false);
     assert.equal(duplicate.message_id, 'msg-canary-1');
     assert.equal(sends, 1);
+    assert.deepEqual(ledger.ledger().provider_receipts.map((receipt) => receipt.outcome), ['submission_started', 'accepted']);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+  }
+});
+
+test('an ambiguous provider outcome is retained for reconciliation and is never replayed', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+  const company = {
+    company: 'Canary Co',
+    tasks: [{ id: 'research-1', title: 'Validate demand' }],
+    day1_first_move: { status: 'completed', task_id: 'research-1', room_id: 'room-1', turn_id: 'turn-1' },
+  };
+  const hq = { id: 'hq-1', user_id: 'user-1', company };
+  const ledger = dayOneDeliveryLedgerMock({ hq, company });
+  let sends = 0;
+  const prisma = {
+    $queryRawUnsafe: ledger.query,
+    async $executeRawUnsafe(_sql, value) { company.day1_first_move = JSON.parse(value); return 1; },
+    hyperTurn: { findFirst: async () => ({ id: 'turn-1', roomId: 'room-1', status: 'complete', sealedAt: new Date(), lines: [{ t: 'final_report', text: 'Verified result.' }, { t: 'seal', status: 'complete' }] }) },
+    user: { findUnique: async () => ({ email: 'canary@example.test' }) },
+  };
+  try {
+    const args = {
+      prisma, orgId: 'org-1', hqRoomId: 'hq-1', renderPdf: async () => Buffer.from('pdf'),
+      sendEmail: async () => { sends += 1; throw new DOMException('timed out', 'TimeoutError'); },
+    };
+    await assert.rejects(() => deliverDayOneFirstMove(args), /timed out/);
+    const replay = await deliverDayOneFirstMove(args);
+    assert.equal(replay.status, 'reconcile_required');
+    assert.equal(replay.retryable, false);
+    assert.equal(sends, 1);
+    assert.equal(ledger.ledger().status, 'submitted_unknown');
+    assert.deepEqual(ledger.ledger().provider_receipts.map((receipt) => receipt.outcome), ['submission_started']);
   } finally {
     if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
   }

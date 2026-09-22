@@ -380,6 +380,36 @@ model ActivationLifecycle {
   @@map("activation_lifecycles")
 }
 
+/// Provider-facing lifecycle email authority.  Unlike room JSON state, this
+/// row is recipient-scoped and remains durable across workflow retries.
+model LifecycleEmailDelivery {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId               String    @map("org_id") @db.Uuid
+  recipientHash       String    @map("recipient_hash") @db.Char(64)
+  recipientHint       String    @map("recipient_hint") @db.VarChar(160)
+  lifecycleDay        Int       @map("lifecycle_day") @db.SmallInt
+  workflowGeneration  String    @map("workflow_generation") @db.VarChar(128)
+  hqRoomId            String?   @map("hq_room_id") @db.Uuid
+  turnId              String?   @map("turn_id") @db.Uuid
+  outputSha256        String?   @map("output_sha256") @db.Char(64)
+  status              String    @default("reserved") @db.VarChar(32)
+  provider            String?   @db.VarChar(64)
+  deliveryStatus      String?   @map("delivery_status") @db.VarChar(64)
+  providerReceipts    Json      @default("[]") @map("provider_receipts")
+  providerAttempts    Int       @default(0) @map("provider_attempts")
+  sendLeaseUntil      DateTime? @map("send_lease_until") @db.Timestamptz(6)
+  submissionStartedAt DateTime? @map("submission_started_at") @db.Timestamptz(6)
+  acceptedAt          DateTime? @map("accepted_at") @db.Timestamptz(6)
+  rejectedAt          DateTime? @map("rejected_at") @db.Timestamptz(6)
+  lastError           String?   @map("last_error") @db.VarChar(240)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, recipientHash, lifecycleDay, workflowGeneration])
+  @@index([status, submissionStartedAt])
+  @@map("lifecycle_email_deliveries")
+}
+
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
 /// Members can be granted team-scope memory access via TeamMember.
 model Team {

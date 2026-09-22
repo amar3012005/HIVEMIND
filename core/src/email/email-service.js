@@ -168,7 +168,7 @@ function normalizeAttachments(attachments = []) {
     }));
 }
 
-async function sendWithCloudflare({ config, to, from, rendered, templateId, threadHeaders, attachments = [] }) {
+async function sendWithCloudflare({ config, to, from, rendered, templateId, threadHeaders, attachments = [], maxAttempts = 2 }) {
   const url = `${CLOUDFLARE_SEND_BASE}/${encodeURIComponent(config.accountId)}/email/sending/send`;
   // Cloudflare's Email Sending API rejects the request outright
   // (errors[0].code 10202, "email.sending.error.email.invalid") if a custom
@@ -178,7 +178,8 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
   // Cloudflare assigns and returns its own message_id in the response instead,
   // so we drop ours for this provider and use theirs as the thread anchor.
   const { 'Message-ID': _ignoredMessageId, ...cfHeaders } = threadHeaders || {};
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const attempts = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -216,13 +217,13 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
       log(transient && attempt === 0 ? 'warn' : 'error', 'send_failed', {
         provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to), status: res.status, error, attempt,
       });
-      if (!transient || attempt === 1) return { ok: false, provider: 'cloudflare', retryable: transient, error };
+      if (!transient || attempt === attempts - 1) return { ok: false, provider: 'cloudflare', retryable: transient, error };
     } catch (err) {
       const retryable = err?.name === 'TimeoutError' || err?.name === 'AbortError' || err instanceof TypeError;
       log(attempt === 0 && retryable ? 'warn' : 'error', 'send_error', {
         provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to), error: err?.name || 'request_error', attempt,
       });
-      if (!retryable || attempt === 1) return { ok: false, provider: 'cloudflare', retryable, error: 'request_failed' };
+      if (!retryable || attempt === attempts - 1) return { ok: false, provider: 'cloudflare', retryable, error: 'request_failed' };
     }
     await new Promise((resolve) => setTimeout(resolve, 600));
   }
@@ -448,15 +449,15 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 }
 
 /** Send a fully rendered branded message through the canonical delivery path. */
-export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification } = {}) {
+export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification, providerAttempts = 2, providerFallback = true } = {}) {
   if (!to || !validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
   const providers = configuredProviders();
   const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
   if (!providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
   if (providers.cloudflare) {
-    const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {} });
-    if (result.ok || result.permanent || !gmail) return projectAcceptedEmail({ to, rendered, templateId, result, notification });
+    const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {}, maxAttempts: providerAttempts });
+    if (result.ok || result.permanent || !gmail || !providerFallback) return projectAcceptedEmail({ to, rendered, templateId, result, notification });
   }
   const result = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {} });
   return projectAcceptedEmail({ to, rendered, templateId, result, notification });

@@ -68,6 +68,20 @@ try {
     JSON.stringify([{ t: 'plan.updated', tasks: [{ id: 'task-1', state: 'completed' }] }]),
   );
 
+  // Seed the same ordered native AgentScope milestones the runtime forwards.
+  // The telemetry endpoint must derive these from the durable WorkRun log,
+  // rather than from browser timing marks.  This comes after the compact plan
+  // projection above so the canary does not overwrite the event log.
+  for (const event of [
+    { type: 'REPLY_START', id: 'telemetry-reply' },
+    { type: 'THINKING_BLOCK_DELTA', id: 'telemetry-thinking', delta: 'plan' },
+    { type: 'TOOL_CALL_START', id: 'telemetry-tool', tool_call_name: 'PlaybookGet' },
+    { type: 'TEXT_BLOCK_DELTA', id: 'telemetry-answer', delta: 'ready' },
+  ]) {
+    const forwarded = await post(`/internal/workruns/${workRunId}/event`, { event });
+    assert.equal(forwarded.response.ok, true, JSON.stringify(forwarded.payload));
+  }
+
   const artifact = await post('/internal/hivemind/artifacts', {
     agentscope_session_id: sessionId,
     path: 'workspace/market-brief.md',
@@ -96,6 +110,29 @@ try {
   assert.equal(completed.response.ok, true, JSON.stringify(completed.payload));
   assert.equal(completed.payload.status, 'completed');
   assert.equal(completed.payload.workrun_id, workRunId);
+
+  // The browser endpoint is session-authenticated; inspect the same durable
+  // row through the control-plane module here so this service canary remains
+  // independent of a browser cookie.  The endpoint itself is covered by the
+  // route/unit tests and delegates to this exact function.
+  const { workRunTelemetry } = await import('/app/src/employees/work-runs.js');
+  const telemetryRows = await prisma.$queryRawUnsafe(
+    `SELECT events, created_at FROM "hivemind"."work_runs" WHERE id = $1::uuid`,
+    workRunId,
+  );
+  const telemetry = workRunTelemetry(telemetryRows[0].events, {
+    submittedAt: new Date(telemetryRows[0].created_at).valueOf(),
+  });
+  const { marks, elapsed } = telemetry;
+  for (const key of ['submit', 'acknowledgement', 'first_thinking', 'first_tool', 'first_answer', 'completion']) {
+    assert.equal(Number.isFinite(Number(marks[key])), true, `missing telemetry mark: ${key}`);
+    assert.equal(Number.isFinite(Number(elapsed[key])), true, `missing telemetry elapsed: ${key}`);
+  }
+  assert.ok(marks.submit <= marks.acknowledgement);
+  assert.ok(marks.acknowledgement <= marks.first_thinking);
+  assert.ok(marks.first_thinking <= marks.first_tool);
+  assert.ok(marks.first_tool <= marks.first_answer);
+  assert.ok(marks.first_answer <= marks.completion);
   console.log(`workrun-completion-evidence-canary-ok workrun=${workRunId}`);
 } finally {
   await prisma.$executeRawUnsafe(

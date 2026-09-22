@@ -3978,6 +3978,44 @@ function sanitizeHtml(value) {
   ));
 }
 
+// Public remote-MCP OAuth must have its own server-rendered authentication
+// surface. Sending an unauthenticated connector through the dashboard SPA
+// creates a redirect loop when the dashboard session cannot yet be consumed
+// by the OAuth issuer: the SPA sees its own session and immediately returns
+// to /oauth/authorize, which sends it back to the SPA. Keep the complete
+// authorization request on the issuer and hand the browser directly to the
+// configured identity provider instead.
+function renderOAuthAuthenticationHtml({ client, loginUrl, requestedScopes }) {
+  const clientName = sanitizeHtml(client?.client_name || 'your app');
+  const scopeSummary = requestedScopes
+    .map((scope) => `<span class="scope">${sanitizeHtml(scope)}</span>`)
+    .join('');
+
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verify your HIVEMIND account · ${clientName}</title>
+<style>
+  :root{color-scheme:light;--ink:#0a0a0a;--muted:#686868;--line:#e3e0db;--blue:#117dff;--wash:#faf9f4}
+  *{box-sizing:border-box} html,body{min-height:100%;margin:0} body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(1000px 580px at 50% -120px,#edf5ff 0%,rgba(237,245,255,0) 60%),var(--wash);color:var(--ink);display:grid;place-items:center;padding:24px}
+  .card{width:min(100%,470px);background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:24px;padding:34px 32px 28px;box-shadow:0 28px 80px -34px rgba(26,45,80,.3),0 1px 0 rgba(255,255,255,.9) inset;animation:enter .32s ease-out both}
+  @keyframes enter{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .brand{display:flex;align-items:center;justify-content:center;gap:10px;padding-bottom:22px;border-bottom:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:800;letter-spacing:.16em;font-size:13px}.mark{width:24px;height:24px;border-radius:9px;background:linear-gradient(135deg,#0b86ff,#8cd6ff);display:grid;place-items:center;color:white;font-family:Georgia,serif;font-size:18px;line-height:1}
+  .eyebrow{margin:27px 0 8px;color:#717171;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase}.connect{display:flex;align-items:center;gap:12px;margin:17px 0 20px}.app{width:45px;height:45px;border-radius:13px;display:grid;place-items:center;background:#f4f2ed;border:1px solid var(--line);font-size:20px;font-weight:750;color:#4b4740}.arrow{color:#9b9b9b;font-size:20px}.hm{width:45px;height:45px;border-radius:13px;display:grid;place-items:center;background:#edf5ff;border:1px solid #cfe4ff;color:#117dff;font-weight:800;font-size:18px}
+  h1{font-size:29px;letter-spacing:-.045em;line-height:1.08;margin:0 0 12px;font-weight:750}.copy{color:var(--muted);font-size:15px;line-height:1.58;margin:0}.scopes{margin:23px 0;border:1px solid var(--line);border-radius:14px;padding:15px;background:#fcfbf9}.label{font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;letter-spacing:.11em;color:#898681;text-transform:uppercase;margin-bottom:10px}.scope-list{display:flex;flex-wrap:wrap;gap:7px}.scope{border:1px solid #dce7f5;background:#fff;border-radius:99px;padding:5px 9px;color:#3d556f;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+  .continue{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px 18px;border:0;border-radius:12px;color:white;background:linear-gradient(180deg,#2b8bff,#117dff);font:700 15px/1 Inter,ui-sans-serif,system-ui;cursor:pointer;text-decoration:none;box-shadow:0 12px 22px -12px rgba(17,125,255,.72)}.continue:hover{background:linear-gradient(180deg,#2385ff,#0870e9)}.security{margin:17px 0 0;color:#999;font-size:12px;line-height:1.5;text-align:center}.security strong{color:#65615a}.foot{margin-top:24px;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#aaa;font-size:10px;letter-spacing:.08em;text-transform:uppercase}@media(max-width:460px){body{padding:16px}.card{padding:28px 22px 24px}h1{font-size:26px}}
+</style></head><body><main class="card">
+  <div class="brand"><span class="mark">✦</span><span>HIVEMIND</span></div>
+  <div class="eyebrow">Secure connection</div>
+  <div class="connect"><div class="app">${clientName.slice(0, 1).toUpperCase()}</div><span class="arrow">→</span><div class="hm">✦</div></div>
+  <h1>Verify your account</h1>
+  <p class="copy"><strong>${clientName}</strong> needs your consent to connect to your HIVEMIND memory and tools.</p>
+  <section class="scopes"><div class="label">Requested access</div><div class="scope-list">${scopeSummary}</div></section>
+  <a class="continue" href="${sanitizeHtml(loginUrl)}">Continue with HIVEMIND <span aria-hidden="true">→</span></a>
+  <p class="security"><strong>You will review access before anything is connected.</strong><br>HIVEMIND never shares your password with ${clientName}.</p>
+  <div class="foot">EU hosted · GDPR aligned</div>
+</main></body></html>`;
+}
+
 function buildOAuthWwwAuthenticate({ error = 'invalid_token', description = 'Bearer token missing or invalid', requiredScope = null, req = null } = {}) {
   // Same canonical-FE-host normalization as discovery doc. Claude reads
   // these URIs from WWW-Authenticate to bootstrap OAuth — must match the
@@ -6062,32 +6100,34 @@ exit \$RC
       return;
     }
 
-    // Primary login button → dashboard branded login page
-    // (/hivemind/login). That page handles Google SSO + email/password +
-    // Zitadel under one HIVEMIND-branded UI, the same flow CLI and the
-    // browser extension use. After login the dashboard sets hm_cp_session
-    // for the SINGULANCE domain and redirects back to /oauth/authorize,
-    // where resolveOAuthSession() recognises the cookie automatically.
+    // Do not bounce remote connectors through /hivemind/login. That SPA
+    // immediately returns already-authenticated browsers to this endpoint;
+    // if a stale or host-only dashboard cookie cannot be read here, the two
+    // services redirect to each other forever and the page visibly blinks.
     //
-    // The login page is served by the public SINGULANCE frontend. The return
-    // destination is the authoritative core OAuth endpoint; returning to a
-    // frontend SPA route would bypass the authorization-code issuer.
-    const dashboardFeBase = process.env.HIVEMIND_FRONTEND_BASE_URL
-      || process.env.HIVEMIND_DASHBOARD_URL
-      || 'https://next.singulancelabs.com';
-    // req.url already carries the full OAuth request. Keep it on the Core
-    // issuer after dashboard sign-in so the code is minted by this service.
-    const reqUrlPath = req.url.startsWith('/') ? req.url : `/${req.url}`;
-    const returnTo = `${OAUTH_BASE_URL}${reqUrlPath}`;
-    const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
-
-    // OAuth clients must use the product's canonical, authenticated login
-    // surface. Rendering the old admin-secret form here exposed an internal
-    // operator fallback in a public connector journey and made the login
-    // experience diverge from HIVE-MIND. Preserve the complete OAuth request
-    // in cli_return_to so login returns to this Core issuer to mint the code.
-    res.writeHead(302, { Location: dashboardLoginUrl });
-    res.end();
+    // Instead keep the authorization request at its issuer, show the branded
+    // MCP authentication surface, and use the OAuth-specific Zitadel callback
+    // to create hm_oauth_session before rendering consent. This is the same
+    // one-shot, server-owned handoff pattern used by the CLI flow, but never
+    // exposes an operator login or an external redirect target to the FE.
+    const loginParams = new URLSearchParams({
+      response_type: responseType,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: requestedScopes.join(' '),
+      state,
+      code_challenge: codeChallenge,
+      code_challenge_method: codeChallengeMethod,
+      resource,
+    });
+    const loginUrl = `/oauth/login/zitadel?${loginParams.toString()}`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.writeHead(200);
+    res.end(renderOAuthAuthenticationHtml({
+      client,
+      loginUrl,
+      requestedScopes,
+    }));
     return;
   }
 

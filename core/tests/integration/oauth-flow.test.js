@@ -85,8 +85,11 @@ test('OAuth authorization code + refresh + revoke flow works end-to-end', async 
     });
 
     const loginPageResp = await fetch(`${baseUrl}/oauth/authorize?${authorizeParams.toString()}`, { redirect: 'manual' });
-    assert.equal(loginPageResp.status, 302);
-    assert.match(loginPageResp.headers.get('location') || '', /\/hivemind\/login\?cli_return_to=/);
+    assert.equal(loginPageResp.status, 200);
+    const loginPageHtml = await loginPageResp.text();
+    assert.match(loginPageHtml, /Verify your account/);
+    assert.match(loginPageHtml, /\/oauth\/login\/zitadel\?/);
+    assert.doesNotMatch(loginPageHtml, /cli_return_to/);
 
     const loginResp = await fetch(`${baseUrl}/oauth/login`, {
       method: 'POST',
@@ -225,8 +228,11 @@ test('OAuth token endpoint rejects invalid PKCE verifier and invalid consent sta
     });
 
     const loginPageResp = await fetch(`${baseUrl}/oauth/authorize?${params.toString()}`, { redirect: 'manual' });
-    assert.equal(loginPageResp.status, 302);
-    assert.match(loginPageResp.headers.get('location') || '', /\/hivemind\/login\?cli_return_to=/);
+    assert.equal(loginPageResp.status, 200);
+    const loginPageHtml = await loginPageResp.text();
+    assert.match(loginPageHtml, /Verify your account/);
+    assert.match(loginPageHtml, /\/oauth\/login\/zitadel\?/);
+    assert.doesNotMatch(loginPageHtml, /cli_return_to/);
 
     const loginResp = await fetch(`${baseUrl}/oauth/login`, {
       method: 'POST',

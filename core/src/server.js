@@ -6070,8 +6070,18 @@ exit \$RC
     const returnTo = `${dashboardFeBase}${reqUrlPath}`;
     const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
 
-    const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;
+    // Do not render a second, legacy admin-secret login page here.  Remote MCP
+    // clients (Claude, Perplexity, ChatGPT) must use the same authenticated
+    // HIVEMIND login surface as the product, then return to this exact OAuth
+    // request through cli_return_to.  Keeping this as a redirect also avoids
+    // exposing an “admin login” affordance to public connector users.
+    res.writeHead(302, { Location: dashboardLoginUrl });
+    res.end();
+    return;
 
+    // Retained below only as source-level compatibility for older snapshots;
+    // the redirect above makes this legacy renderer unreachable.
+    const dashboardButton = '';
     const loginHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HiveMind Sign In</title>

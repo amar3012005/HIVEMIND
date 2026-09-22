@@ -100,7 +100,7 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
+import { configureSystemEmailDeliveryReceiptSink, configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { queueMeetingFinalization } from './knowledge/meeting-finalization-worker.js';
 import { addRealtimeParticipant, createRealtimeMeeting, deleteRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
@@ -167,6 +167,7 @@ import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 import { announcementForAdmin, announcementMetrics, nextWorkspaceAnnouncement, normalizeAnnouncementInput, recordWorkspaceAnnouncementDelivery } from './workspace/announcements.js';
 import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
+import { createSystemEmailDeliveryReceiptSink, recordCloudflareEmailDeliveryEvent } from './workspace/system-email-delivery-ledger.js';
 import { resolveInvitationBaseUrl, resolvePublicAppUrl, resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import {
   deliverDayOneFirstMove,
@@ -328,6 +329,7 @@ const emailIdentity = createEmailIdentityService({ prisma, publicBaseUrl: defaul
 const emailPostLoginRedirect = `${defaultFrontendBaseUrl.replace(/\/$/, '')}/hivemind/app/overview?auth=callback`;
 const emailAllowedOrigins = [new URL(defaultFrontendBaseUrl).origin];
 configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
+configureSystemEmailDeliveryReceiptSink(createSystemEmailDeliveryReceiptSink(prisma));
 const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
@@ -2064,6 +2066,38 @@ async function findActivationLifecycles({ userId = null, email = null, invitatio
   return activationLifecycleTimeline(rows);
 }
 
+function emailDeliveryTimeline(rows = []) {
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    source: row.source || 'system_email',
+    template_id: row.template_id || 'system_email',
+    subject: row.subject || 'System email',
+    provider: row.provider || null,
+    provider_message_id: row.provider_message_id || null,
+    delivery_status: row.delivery_status || row.status || 'unknown',
+    sent_at: row.accepted_at || row.created_at || null,
+    updated_at: row.updated_at || null,
+    provider_receipts: Array.isArray(row.provider_receipts) ? row.provider_receipts.slice(-8) : [],
+  }));
+}
+
+/** Admin-only transactional-email receipt projection. */
+async function findPlatformEmailTimeline({ email } = {}) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return [];
+  const hash = crypto.createHash('sha256').update(normalized).digest('hex');
+  const system = await prisma.$queryRawUnsafe(
+    `SELECT id, 'system_email' AS source, template_id, subject, provider, provider_message_id,
+            delivery_status, provider_receipts, accepted_at, created_at, updated_at
+       FROM hivemind.system_email_deliveries
+      WHERE recipient_hash=$1
+      ORDER BY created_at DESC
+      LIMIT 200`,
+    hash,
+  );
+  return emailDeliveryTimeline(system);
+}
+
 async function getPlatformUserLifecycle(userId) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -2082,10 +2116,12 @@ async function getPlatformUserLifecycle(userId) {
   // organization. Return it even for a newly signed-in user.
   const activation = await findActivationLifecycles({ userId: user.id, email: user.email }).catch(() => []);
   const organizations = user.organizations.map((membership) => membership.org).filter(Boolean);
+  const emailTimeline = await findPlatformEmailTimeline({ email: user.email }).catch(() => []);
   if (!organizations.length) {
     return {
       user: { id: user.id, email: user.email, display_name: user.displayName || null },
       activation,
+      email_timeline: emailTimeline,
       organizations: [],
       totals: { organizations: 0, awakened: 0, lifecycle_count: 0, activation_count: activation.length, completed: 0, in_progress: 0, failed: 0 },
     };
@@ -2119,6 +2155,7 @@ async function getPlatformUserLifecycle(userId) {
   return {
     user: { id: user.id, email: user.email, display_name: user.displayName || null },
     activation,
+    email_timeline: emailTimeline,
     organizations: lifecycleOrganizations,
     totals: { ...totals, activation_count: activation.length },
   };
@@ -3660,6 +3697,24 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Cloudflare Email Sending event subscriptions forward one normalized event
+  // here through the lifecycle Queue consumer. The provider message ID is the
+  // only join key; browser and admin callers cannot mutate this evidence.
+  if (pathname === '/internal/lifecycle/email-events') {
+    if (!isAuthorizedActivationLifecycleRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    const events = Array.isArray(body?.events) ? body.events.slice(0, 50) : [body];
+    try {
+      const results = [];
+      for (const event of events) results.push(await recordCloudflareEmailDeliveryEvent(prisma, event));
+      return jsonResponse(res, { accepted: results.length, applied: results.filter((result) => result.applied).length, results });
+    } catch (error) {
+      console.warn('[email-delivery-ledger] Cloudflare event persistence failed:', error.message);
+      return jsonResponse(res, { error: 'email_event_persistence_failed', retryable: true }, 502);
+    }
+  }
+
   // Activation reminders use Cloudflare Workflows only as the durable clock.
   // PostgreSQL remains authoritative: every delivery is revalidated here so
   // a delayed workflow can never remind a user who has already progressed.
@@ -3707,6 +3762,7 @@ const server = http.createServer(async (req, res) => {
           body: copy.body,
           resourceType: 'activation_lifecycle',
           resourceId: lifecycle.id,
+          activationId: lifecycle.id,
           href: copy.href,
           data: { stage: lifecycle.stage, activation_id: lifecycle.id, generation: lifecycle.generation },
         } : undefined,

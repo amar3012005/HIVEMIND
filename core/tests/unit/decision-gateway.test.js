@@ -116,28 +116,28 @@ test('Jev provider accepts Cloudflare Gateway service authorization without a BY
   assert.equal(result.choice, 'direct');
 });
 
-test('explicit operational app intent bypasses the initial decision call', async () => {
+test('explicit operational app intent remains evidence for the initial JEV decision', async () => {
   let calls = 0;
-  const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('should not run'); } } });
+  const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('provider_unavailable'); } } });
   const turn = createDecisionTurnState('turn-explicit-app');
   const result = await chooseCapability({ gateway, turn, userQuery: 'Find my last Gmail from Rama',
     appMentions: ['gmail'], operationalAppIntent: true, fallback: async () => 'fallback' });
-  assert.equal(result.choice, 'composio_search');
-  assert.equal(result.source, 'deterministic');
-  assert.equal(calls, 0);
+  assert.equal(result.source, 'fallback');
+  assert.equal(result.reason, 'provider_unavailable');
+  assert.equal(calls, 1);
 });
 
-test('explicit HIVE save intent bypasses Jev uncertainty and selects the direct save tool family', async () => {
+test('explicit HIVE save intent remains evidence for the initial JEV decision', async () => {
   let calls = 0;
-  const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('should not run'); } } });
+  const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('provider_unavailable'); } } });
   const turn = createDecisionTurnState('turn-explicit-save');
   const result = await chooseCapability({ gateway, turn,
     userQuery: 'save this to hivemind The deployment is complete',
     fallback: async () => 'fallback' });
   assert.equal(hasExplicitHivemindSaveIntent('save this to hivemind The deployment is complete'), true);
-  assert.equal(result.choice, 'hivemind_save');
-  assert.equal(result.source, 'deterministic');
-  assert.equal(calls, 0);
+  assert.equal(result.source, 'fallback');
+  assert.equal(result.reason, 'provider_unavailable');
+  assert.equal(calls, 1);
 });
 
 test('provider failure falls back in the same turn and opens the turn circuit', async () => {

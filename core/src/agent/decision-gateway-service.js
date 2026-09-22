@@ -3,6 +3,7 @@ import {
   chooseCapability,
   chooseComposioAction,
   chooseComposioArgumentReview,
+  chooseWorkflowTransition,
   chooseHiveMetaOperation,
   chooseHiveRecallPolicy,
   createDecisionTurnState,
@@ -11,7 +12,7 @@ import {
 } from './decision-gateway.js';
 
 const VALID_MODES = new Set(['off', 'shadow', 'active']);
-const VALID_STAGES = new Set(['capability', 'composio_selection', 'composio_argument_review', 'hivemind_meta_selection', 'hivemind_recall_filters']);
+const VALID_STAGES = new Set(['capability', 'composio_selection', 'composio_argument_review', 'workflow_transition', 'hivemind_meta_selection', 'hivemind_recall_filters']);
 
 function modeFromEnv(env) {
   const mode = String(env.JEV_DECISION_GATEWAY_MODE || 'off').trim().toLowerCase();
@@ -172,6 +173,8 @@ export async function decideRuntimeStage(input = {}, {
       proposedArguments: input.proposed_arguments || input.proposedArguments || {},
       progress: input.progress || null,
     });
+  } else if (stage === 'workflow_transition') {
+    receipt = await chooseWorkflowTransition(common);
   } else if (stage === 'hivemind_meta_selection') {
     receipt = await chooseHiveMetaOperation(common);
   } else {

@@ -92,6 +92,48 @@ test('native HIVE recall streams its final answer from governed read receipts', 
   assert.equal(result.usage.at(-1).total_tokens, 9);
 });
 
+test('a multi-task receipt uses JEV to continue into one grounded memory save before sealing', async () => {
+  const prisma = fakePrisma();
+  const decisionStages = [];
+  const seenTools = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Get all information from HIVE-MIND about Rama and save it as one memory.',
+    useTools: false, prisma, ctx: ctx(prisma, 'multi-recall-save'), checkpointer: new MemorySaver(), composio: {},
+    decisionStage: async input => {
+      decisionStages.push(input.stage);
+      if (input.stage === 'capability') {
+        return { status: 'selected', selected: 'multi_task', authoritative: true,
+          receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'multi-plan' } };
+      }
+      assert.equal(input.stage, 'workflow_transition');
+      assert.equal(input.context.workflow.phase, 'post_receipt');
+      assert.equal(input.observation.completed_receipts.at(-1).action, 'recall');
+      return { status: 'selected', selected: 'hivemind_save', authoritative: true,
+        receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'multi-save' } };
+    },
+    modelStep: async ({ tools }) => {
+      seenTools.push(tools.map(tool => tool.function.name));
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'Rama', mode: 'fact', limit: 10 } }, 'multi-1') };
+      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+      return { message: call('hivemind_meta', { operation: 'save', save: {
+        title: 'Rama Santhoshi: retrieved relationship and correspondence',
+        content: 'Rama Santhoshi is supported by retrieved HIVE memories about correspondence and a Prague event.',
+        tags: ['rama-santhoshi', 'retrieved'], entities: ['Rama Santhoshi'], dates: ['2026-09-14'], source_refs: ['memory:rama-1'],
+      } }, 'multi-2') };
+    },
+    metaExecutor: async args => (args.operation === 'recall'
+      ? { successful: true, data: { memories: [{ id: 'rama-1', title: 'Rama correspondence', content: 'Prague event on 2026-09-14.' }] } }
+      : { successful: true, data: { saved: true, title: args.save.title, scope: 'personal', memory_id: 'saved-rama-1' } }),
+  });
+  assert.equal(result.status, 'completed');
+  assert.match(result.response, /Rama Santhoshi/);
+  assert.deepEqual(decisionStages, ['capability', 'workflow_transition']);
+  assert.deepEqual(seenTools, [['hivemind_meta'], ['hivemind_meta']]);
+  assert.ok(result.steps.some(step => step.summary === 'Memory saved'));
+});
+
 test('the in-graph plan node calls JEV once and reuses its typed decision for the model surface', async () => {
   const prisma = fakePrisma();
   const decisionStages = [];

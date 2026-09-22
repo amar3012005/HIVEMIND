@@ -402,6 +402,36 @@ export async function chooseComposioArgumentReview({ gateway, turn, userQuery, c
   });
 }
 
+// A multi-task run remains inside the same LangGraph turn.  Once a governed
+// read has produced evidence, JEV decides the *next* intent from a compact
+// receipt projection.  It never receives raw provider schemas or authority to
+// execute a tool; the graph continues to own those concerns.
+export const WORKFLOW_TRANSITION_OPTIONS = Object.freeze([
+  { id: 'hivemind_memory_lookup', criteria: 'Another HIVE memory retrieval is still a necessary prerequisite for an unsatisfied requested outcome.' },
+  { id: 'hivemind_entity_lookup', criteria: 'Resolve a canonical HIVE entity before a remaining outcome can be grounded.' },
+  { id: 'hivemind_save', criteria: 'The request explicitly asks to save, retain, record, or create a HIVE memory from the completed governed evidence. Create the source-grounded memory capsule next; scope or approval remains graph-governed.' },
+  { id: 'composio_read', criteria: 'A further connected-app read is required to satisfy a remaining requested outcome.' },
+  { id: 'composio_action', criteria: 'A requested connected-app change remains after its required evidence is available. The graph must still discover schema and request approval before execution.' },
+  { id: 'web_research', criteria: 'A remaining requested outcome requires current public-web evidence.' },
+  { id: 'synthesize', criteria: 'Every requested outcome is satisfied by the completed governed receipts. Produce the final answer from those receipts only.' },
+  { id: 'ask_user', criteria: 'A material target, scope, recipient, or business choice is missing and cannot be discovered from the request, prior turns, or governed receipts.' },
+  { id: 'fallback_harness', criteria: 'The next safe workflow step is not supported by the supplied request and receipts. Keep the fallback explicit and do not execute a tool.' },
+]);
+
+export async function chooseWorkflowTransition({ gateway, turn, userQuery, context, observation = null, fallback, signal }) {
+  return gateway.choose({
+    turn,
+    stage: 'workflow_transition',
+    userQuery,
+    context,
+    observation,
+    options: WORKFLOW_TRANSITION_OPTIONS,
+    instructions: 'Choose exactly one next intent for this already-admitted multi-task workflow. Use the original request, compact authenticated context, recent turns, and completed governed receipts. Preserve dependency order: never synthesize while an explicitly requested dependent outcome remains. A request to retrieve/search/read/collect and then save must select hivemind_save only after the source receipt exists. A selected write does not authorize execution: the graph still owns its schema, scope checkpoint, approval, idempotency, and receipt. Never repeat a completed receipt, invent an outcome, or use fallback as a hidden re-plan.',
+    fallback,
+    signal,
+  });
+}
+
 export const HIVE_META_OPTIONS = Object.freeze([
   { id: 'entities', criteria: 'Resolve a named person, company, project, document, product, or subject to a canonical HIVE-MIND entity before retrieval.' },
   { id: 'recall', criteria: 'Retrieve stored memories, documents, decisions, evidence, or historical facts from the authenticated HIVE-MIND scope.' },

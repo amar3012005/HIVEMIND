@@ -26,6 +26,10 @@ const State = Annotation.Root({
   // The plan is a durable, typed routing decision made inside this graph. It
   // constrains the existing model/tool loop; it is never an external router.
   plan: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  // A multi-task receipt can select one bounded next intent. This is cleared
+  // when that executor emits its next receipt, so every transition is tied to
+  // fresh governed evidence instead of an implicit model re-plan.
+  workflowTransition: Annotation({ reducer: (_left, right) => right, default: () => null }),
   // Bounded node timings are persisted with the run receipt so latency can be
   // attributed to plan, executor, first visible answer, receipt, and seal.
   timings: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
@@ -225,6 +229,11 @@ function substantiveMetaReadReceipt(receipt) {
   if (data == null) return false;
   if (typeof data !== 'object') return String(data).trim().length > 0;
   return Object.keys(data).length > 0;
+}
+
+function workflowEvidenceReady(state) {
+  return state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
+    || state.receipts.some(substantiveMetaReadReceipt);
 }
 
 function invalidFinal(text, receipts) {
@@ -613,6 +622,14 @@ function outputShape(state, response, status = 'completed') {
           probability: state.plan.probability,
           margin: state.plan.margin,
         } : null,
+        workflow_transition: state.workflowTransition ? {
+          intent: state.workflowTransition.intent,
+          source: state.workflowTransition.source,
+          authoritative: state.workflowTransition.authoritative,
+          probability: state.workflowTransition.probability,
+          margin: state.workflowTransition.margin,
+          receipt_count: state.workflowTransition.receipt_count,
+        } : null,
         timings: state.timings,
       },
     },
@@ -735,6 +752,14 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
             probability: (patch.plan || state.plan).probability,
             margin: (patch.plan || state.plan).margin,
           } : null,
+          workflow_transition: (patch.workflowTransition || state.workflowTransition) ? {
+            intent: (patch.workflowTransition || state.workflowTransition).intent,
+            source: (patch.workflowTransition || state.workflowTransition).source,
+            authoritative: (patch.workflowTransition || state.workflowTransition).authoritative,
+            probability: (patch.workflowTransition || state.workflowTransition).probability,
+            margin: (patch.workflowTransition || state.workflowTransition).margin,
+            receipt_count: (patch.workflowTransition || state.workflowTransition).receipt_count,
+          } : null,
           timings: patch.timings || state.timings || {},
           event_sequence: sequence },
       } }).catch(() => {});
@@ -757,6 +782,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       runId,
       context: null,
       plan: null,
+      workflowTransition: null,
       messages: [],
       receipts: [],
       steps: [],
@@ -865,11 +891,48 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     emitDecision({ stage: 'capability', status: decision.status, selected: plan.intent,
       source: plan.source, authoritative: plan.authoritative, probability: plan.probability,
       margin: plan.margin, request_id: plan.request_id, run_id: state.runId });
-    return { plan, timings: { ...state.timings, plan_completed_at_ms: Date.now() } };
+    const timings = { ...state.timings, plan_completed_at_ms: Date.now() };
+    // The initial JEV decision is the authorization boundary. When it selects
+    // a save and admission already has a grounded capsule, execute the typed
+    // HIVE save directly; do not ask a second model to rediscover the same
+    // operation. An absent capsule remains an explicit user-input state.
+    if (plan.authoritative && plan.intent === 'hivemind_save') {
+      if (!state.pendingSaveDraft) {
+        return {
+          plan,
+          timings,
+          result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
+        };
+      }
+      return {
+        plan,
+        timings,
+        pendingTool: {
+          id: `jev-save-${state.runId}`,
+          name: 'hivemind_meta',
+          args: { operation: 'save', save: state.pendingSaveDraft },
+        },
+      };
+    }
+    // In decision-gateway-off environments retain the established typed save
+    // admission behavior: a referential save without an answer is a missing
+    // payload checkpoint, never a model/recall request.
+    if (!plan.authoritative && plan.reason === 'decision_gateway_off'
+      && state.context?.explicit_save_language && !state.pendingSaveDraft) {
+      return {
+        plan,
+        timings,
+        result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
+      };
+    }
+    return { plan, timings };
   };
 
   const modelNode = async state => {
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
+    const transitionIntent = state.workflowTransition?.intent || null;
+    const continueWorkflow = transitionIntent && transitionIntent !== 'synthesize';
+    const selectedIntent = continueWorkflow ? transitionIntent : state.plan?.intent;
     const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     // Native HIVE reads are already governed and projected before entering the
@@ -877,20 +940,29 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // we do connected-app receipts, without streaming an unvalidated planner
     // response or allowing another tool decision mid-stream.
     const metaReadEvidenceReady = !useTools && state.receipts.some(substantiveMetaReadReceipt);
-    const finalEvidenceReady = providerEvidenceReady || metaReadEvidenceReady;
-    const immediateStream = isImmediateStreamIntent(state.plan);
+    const connectedReceiptMissing = useTools && state.requestedToolkits.length > 0 && !providerEvidenceReady;
+    // A receipt in a compound turn is evidence for the post-receipt JEV
+    // decision, not permission to synthesize early. Only an explicit
+    // `synthesize` transition can complete the workflow after evidence.
+    const finalEvidenceReady = !continueWorkflow && !connectedReceiptMissing && (providerEvidenceReady || metaReadEvidenceReady);
+    const immediateStream = !continueWorkflow && isImmediateStreamIntent(state.plan);
     const canStreamFinal = (finalEvidenceReady || immediateStream) && streamFinal;
     const finalReceipts = providerEvidenceReady
       ? state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
       : state.receipts.filter(substantiveMetaReadReceipt);
+    const executionMessages = [
+      ...(continueWorkflow ? [{ role: 'system', content: `The bounded JEV workflow transition selected ${selectedIntent}. This is the next required outcome of the original request. Completed governed receipts are authoritative evidence; do not repeat their retrieval or synthesize early.` }] : []),
+      { role: 'system', content: executorInstruction(selectedIntent, { preparedSave: state.pendingSaveDraft }) },
+    ];
+    const repair = state.messages.at(-1)?.role === 'system'
+      && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present)/i.test(state.messages.at(-1)?.content || '')
+      ? state.messages.at(-1) : null;
     const modelMessages = finalEvidenceReady ? [
       { role: 'system', content: `Synthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
       { role: 'user', content: message },
       { role: 'system', content: `Verified receipts:\n${jsonText(finalReceipts).slice(0, 24000)}` },
-    ] : [
-      ...state.messages,
-      { role: 'system', content: executorInstruction(state.plan?.intent, { preparedSave: state.pendingSaveDraft }) },
-    ];
+    ] : repair ? [...state.messages.slice(0, -1), ...executionMessages, repair]
+      : [...state.messages, ...executionMessages];
     if (canStreamFinal) {
       let emitted = false;
       let firstDeltaAtMs = null;
@@ -929,8 +1001,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // particular, a tool receipt must not trigger a second capability model
     // call; later Composio selection is a separate bounded decision over the
     // dynamically discovered provider tools.
-    const tools = providerEvidenceReady ? []
-      : decisionToolSurface(state.plan?.intent || 'fallback_harness', useTools);
+    // Non-canary deployments can leave the decision gateway disabled. Preserve
+    // their established typed graph loop, while an active-but-unavailable JEV
+    // decision remains the explicit constrained fallback_harness path.
+    const legacyGatewayOff = !state.plan?.authoritative && state.plan?.reason === 'decision_gateway_off';
+    const tools = providerEvidenceReady && !continueWorkflow ? []
+      : legacyGatewayOff ? unifiedMetaTools({ useTools })
+        : decisionToolSurface(selectedIntent || 'fallback_harness', useTools);
     const turn = await callModel({
       messages: modelMessages, tools, model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
@@ -1083,7 +1160,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       };
     }
     return {
-      ...statePatch, pendingTool: null, timings: { ...executorTimings, receipt_at_ms: Date.now() }, callFingerprints: [...state.callFingerprints, fingerprint],
+      ...statePatch, pendingTool: null, workflowTransition: null, timings: { ...executorTimings, receipt_at_ms: Date.now() }, callFingerprints: [...state.callFingerprints, fingerprint],
       messages: [...state.messages, toolMessage(call, exposed)],
       receipts: [...state.receipts, {
         tool: underlying,
@@ -1096,6 +1173,50 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       }],
       steps: [...state.steps, { kind: 'tool', slug: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed' }],
     };
+  };
+
+  // This node is deliberately between a completed tool receipt and the next
+  // model pass. It gives compound requests one bounded JEV transition over
+  // the original request plus compact receipt state, rather than letting the
+  // synthesis model silently end the workflow after its first read.
+  const workflowTransitionNode = async state => {
+    if (state.plan?.intent !== 'multi_task' || state.workflowTransition || !workflowEvidenceReady(state)) return {};
+    let decision;
+    try {
+      decision = await decisionStage({
+        runtime: 'legacy', stage: 'workflow_transition', turn_id: state.runId,
+        user_query: message, actor_id: ctx.userId,
+        context: {
+          ...(state.context || {}),
+          current_phase: 'post_receipt',
+          workflow: jevWorkflowContext(state, 'post_receipt'),
+        },
+        observation: {
+          completed_receipts: decisionReceiptSummaries(state.receipts),
+          selected_tool_slugs: state.selectedSlugs.slice(-12),
+          prior_receipts: decisionReceiptSummaries(ctx.priorReceipts || []),
+        },
+      }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
+    } catch (error) {
+      decision = { status: 'defer', selected: null, authoritative: false,
+        receipt: { source: 'fallback', reason: compactText(error?.message || error || 'workflow_transition_unavailable', 240) } };
+    }
+    const authoritative = decision.status === 'selected' && decision.authoritative === true;
+    const intent = authoritative ? String(decision.selected || 'fallback_harness') : 'fallback_harness';
+    const workflowTransition = {
+      intent,
+      authoritative,
+      source: decision.receipt?.source || 'fallback',
+      probability: decision.receipt?.probability ?? null,
+      margin: decision.receipt?.margin ?? null,
+      request_id: decision.receipt?.requestId || null,
+      reason: decision.receipt?.reason || decision.reason || null,
+      receipt_count: state.receipts.length,
+    };
+    emitDecision({ stage: 'workflow_transition', status: decision.status, selected: intent,
+      source: workflowTransition.source, authoritative, probability: workflowTransition.probability,
+      margin: workflowTransition.margin, request_id: workflowTransition.request_id, run_id: state.runId });
+    return { workflowTransition, timings: { ...state.timings, workflow_transition_completed_at_ms: Date.now() } };
   };
 
   const connectionNode = async state => {
@@ -1199,7 +1320,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const routeModel = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
   const routeContext = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'classify_plan');
   const routePlan = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
-  const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model')));
+  const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'workflow_transition')));
+  const routeWorkflowTransition = state => state.result ? 'seal' : 'model';
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const routeMemoryScope = state => state.result ? 'seal' : 'model';
   const sealNode = async state => {
@@ -1214,6 +1336,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addNode('classify_plan', planNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.15 } })
     .addNode('model', modelNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('tool', toolNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
+    .addNode('workflow_transition', workflowTransitionNode, { retryPolicy: { maxAttempts: 1 } })
     .addNode('connection', connectionNode)
     .addNode('memory_scope', memoryScopeNode)
     .addNode('approval', approvalNode)
@@ -1222,7 +1345,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addConditionalEdges('admit_context', routeContext, ['classify_plan', 'tool', 'seal'])
     .addConditionalEdges('classify_plan', routePlan, ['model', 'tool', 'seal'])
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
-    .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval', 'seal'])
+    .addConditionalEdges('tool', routeTool, ['workflow_transition', 'connection', 'memory_scope', 'approval', 'seal'])
+    .addConditionalEdges('workflow_transition', routeWorkflowTransition, ['model', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
     .addConditionalEdges('memory_scope', routeMemoryScope, ['model', 'seal'])
     .addEdge('approval', 'model').addEdge('seal', END)

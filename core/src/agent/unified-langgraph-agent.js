@@ -160,7 +160,7 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
     composio_action: 'Use the generic connected-app subgraph: discover capability, select tool, load schema, compile arguments, request approval for the write, execute after approval, then answer from its receipt. Never claim an action completed without that receipt.',
     composio_search: 'Use the generic connected-app discovery subgraph first. From discovery decide the actual capability, schema, arguments, approval if needed, execution, and receipt. Do not assume a specific application tool.',
     web_research: 'Use governed web research for current public information. Cite the retrieved evidence and distinguish it from internal HIVE memory.',
-    multi_task: 'Preserve every requested outcome. Execute the necessary generic HIVE, connected-app, and/or web steps in dependency order, with a governed receipt for each write or external result.',
+    multi_task: 'Preserve every requested outcome as one governed workflow. First identify prerequisites, then execute reads/research before any write that depends on their result. For example, if the user asks to retrieve, search, read, or collect information and save/send/update it, first obtain the governed source receipt, then create the source-grounded payload from that receipt, request any required scope or approval, and execute the write. Do not stop after the first outcome; do not save a placeholder, prior answer, or invented summary before the requested evidence exists. Every read, write, approval, and final claim must have its own receipt.',
     workflow_plan: 'Return an actionable, bounded workflow plan. Do not execute side effects or claim external results.',
     fallback_harness: 'The decision is unavailable or uncertain. Do not call tools. Explain that the request cannot yet be safely routed and ask the smallest clarifying question needed.',
   };
@@ -645,7 +645,11 @@ function savedMemoryAcknowledgement(receipt, scope) {
 function decisionToolSurface(selection, useTools) {
   const current = unifiedMetaTools({ useTools });
   const names = decisionGatewayToolNames(selection, { connected: useTools });
-  if (names === null) return current;
+  // `undefined` is the explicit full-governed-surface marker for compound
+  // workflows such as multi_task.  It is not an empty tool list: the
+  // executor still needs its typed HIVE/connected tools to complete each
+  // dependency in order.
+  if (!Array.isArray(names)) return current;
   const constrained = current.filter(tool => names.includes(tool.function.name));
   // The decision taxonomy is shared with other runtimes that expose more
   // native tools. Never turn a valid LangGraph intent into a dead-end merely

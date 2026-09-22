@@ -145,6 +145,47 @@ test('an authoritative JEV direct-answer decision streams without buffered re-pl
   assert.equal(result.run.scratch.plan.intent, 'direct_answer');
 });
 
+test('a JEV multi-task plan completes HIVE retrieval before its dependent memory save', async () => {
+  const prisma = fakePrisma();
+  const operations = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Get all information from HIVE-MIND about Rama and save it as one memory.',
+    useTools: false, prisma, ctx: ctx(prisma, 'multi-read-save'), checkpointer: new MemorySaver(), composio: {},
+    decisionStage: async () => ({
+      status: 'selected', selected: 'multi_task', authoritative: true,
+      receipt: { source: 'jev', probability: 0.99, margin: 0.98, requestId: 'multi-read-save-plan' },
+    }),
+    modelStep: async ({ messages }) => {
+      turn += 1;
+      if (turn === 1) {
+        assert.match(messages.at(-1).content, /First identify prerequisites/);
+        return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'Rama', mode: 'fact', limit: 15 } }, 'multi-recall') };
+      }
+      return { message: call('hivemind_meta', {
+        operation: 'save', save: {
+          title: 'Rama — HIVE-MIND record',
+          content: 'Rama is documented in the governed HIVE receipts as a contact with relevant recorded correspondence.',
+          tags: ['person:rama', 'source:hivemind'],
+          entities: [{ name: 'Rama', type: 'person' }],
+          source_refs: [{ id: 'rama-memory-1', title: 'Rama correspondence' }],
+        },
+      }, 'multi-save') };
+    },
+    metaExecutor: async args => {
+      operations.push(args.operation);
+      if (args.operation === 'recall') return { successful: true, data: { memories: [{ id: 'rama-memory-1', title: 'Rama correspondence', content: 'Verified record.' }] } };
+      assert.equal(args.operation, 'save');
+      assert.match(args.save.content, /governed HIVE receipts/);
+      return { successful: true, data: { saved: true, id: 'rama-summary', title: args.save.title, scope: 'personal' } };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(operations, ['recall', 'save']);
+  assert.equal(result.run.scratch.plan.intent, 'multi_task');
+  assert.match(result.response, /Rama/);
+});
+
 test('an explicit durable-save request crosses the JEV plan node before one governed write', async () => {
   const prisma = fakePrisma();
   const calls = [];

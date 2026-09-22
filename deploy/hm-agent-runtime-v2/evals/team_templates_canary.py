@@ -8,6 +8,7 @@ roles remain differentiated by permission and prompt contract.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 
 
@@ -15,6 +16,14 @@ def main() -> int:
     sys.path.insert(0, "/app")
     import app  # noqa: WPS433 - the canary must inspect the runtime wiring
     from agentscope.app._tool import AgentCreate, TeamCreate, TeamSay
+    from agentscope.app.message_bus import InMemoryMessageBus
+    from agentscope.app.message_bus._keys import MessageBusKeys
+    from agentscope.app.storage import (
+        AgentData,
+        AgentRecord,
+        SessionConfig,
+        SessionRecord,
+    )
 
     templates = {template.type: template for template in app._SUBAGENT_TEMPLATES}
     expected = {"researcher", "writer", "analyst", "reviewer"}
@@ -53,13 +62,104 @@ def main() -> int:
     if not TeamCreate.name or not TeamSay.name:
         raise AssertionError("native team tools are unavailable")
 
+    # Run the native TeamCreate -> AgentCreate path with a tiny in-memory
+    # storage double.  This exercises AgentScope's actual team mutations and
+    # inbox delivery without invoking a model or a second HIVE runner.
+    user_id, agent_id, session_id = "canary-user", "leader-agent", "leader-session"
+    leader = AgentRecord(
+        user_id=user_id,
+        data=AgentData(name="leader", context_config=templates["writer"].context_config, react_config=templates["writer"].react_config),
+    )
+    leader.id = agent_id
+    leader_session = SessionRecord(
+        user_id=user_id,
+        agent_id=agent_id,
+        id=session_id,
+        config=SessionConfig(workspace_id="canary-workspace"),
+    )
+
+    class StorageDouble:
+        def __init__(self):
+            self.agents = {(user_id, agent_id): leader}
+            self.sessions = {session_id: leader_session}
+            self.teams = {}
+
+        async def get_session(self, _user, _agent, sid):
+            return self.sessions.get(sid)
+
+        async def get_team(self, _user, team_id):
+            return self.teams.get(team_id)
+
+        async def upsert_team(self, _user, team):
+            self.teams[team.id] = team
+
+        async def set_session_team_id(self, _user, sid, team_id):
+            self.sessions[sid].team_id = team_id
+
+        async def get_agent(self, owner, aid):
+            return self.agents.get((owner, aid))
+
+        async def upsert_agent(self, _user, agent):
+            self.agents[(agent.user_id, agent.id)] = agent
+
+        async def upsert_session(self, *, user_id, agent_id, config, state, origin):
+            session = SessionRecord(
+                user_id=user_id,
+                agent_id=agent_id,
+                config=config,
+                state=state,
+                origin=origin,
+            )
+            self.sessions[session.id] = session
+            return session
+
+    storage = StorageDouble()
+    bus = InMemoryMessageBus()
+    create = TeamCreate(storage, bus, None, user_id, session_id, agent_id)
+    created = asyncio.run(create(name="evidence-team", description="Canary team"))
+    if "created" not in str(created.content[0].text):
+        raise AssertionError(f"native TeamCreate failed: {created}")
+    spawn = AgentCreate(
+        storage,
+        bus,
+        None,
+        user_id,
+        session_id,
+        agent_id,
+        sub_agent_templates=templates,
+    )
+    spawned = asyncio.run(
+        spawn(
+            name="researcher-1",
+            description="Investigate the canary",
+            prompt="Return one evidence-backed finding.",
+            subagent_type="researcher",
+        ),
+    )
+    if spawned.state.value == "error":
+        raise AssertionError(f"native AgentCreate failed: {spawned}")
+    workers = [a for (owner, _), a in storage.agents.items() if owner == user_id and a.id != agent_id]
+    if len(workers) != 1 or "read-only" not in workers[0].data.system_prompt:
+        raise AssertionError("researcher worker was not created with its differentiated prompt")
+    worker_session = next(
+        (session for session in storage.sessions.values() if session.agent_id == workers[0].id),
+        None,
+    )
+    if worker_session is None or not awaitable_queue_has(bus, MessageBusKeys.inbox(worker_session.id)):
+        raise AssertionError("AgentCreate did not deliver the native team message")
+
     print(
         "team-templates-canary-ok "
         f"templates={','.join(sorted(templates))} "
         "subagent_types=5 differentiated_prompts=4 "
-        "readonly=researcher,analyst",
+        "readonly=researcher,analyst native_run=team_create+agent_create",
     )
     return 0
+
+
+def awaitable_queue_has(bus, key: str) -> bool:
+    """Synchronous inspection helper for the in-memory bus canary."""
+    return bool(bus._queues.get(key))
 
 
 if __name__ == "__main__":

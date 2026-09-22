@@ -464,10 +464,20 @@ export async function appendWorkRunEvent(prisma, workRunId, normalized) {
                         WITH ORDINALITY AS retained(value, ord)
                      WHERE ord > jsonb_array_length(COALESCE(events, '[]'::jsonb)) - ($2::int - 1)
                   ) || jsonb_build_array(
-                    jsonb_set($3::jsonb -> 0, '{seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
+                    jsonb_set($3::jsonb -> 0, '{seq}', to_jsonb(
+                      COALESCE(
+                        ((COALESCE(events, '[]'::jsonb) -> -1) ->> 'seq')::int,
+                        jsonb_array_length(COALESCE(events, '[]'::jsonb))
+                      ) + 1
+                    ))
                   )
                 ELSE COALESCE(events, '[]'::jsonb) || jsonb_build_array(
-                  jsonb_set($3::jsonb -> 0, '{seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
+                  jsonb_set($3::jsonb -> 0, '{seq}', to_jsonb(
+                    COALESCE(
+                      ((COALESCE(events, '[]'::jsonb) -> -1) ->> 'seq')::int,
+                      jsonb_array_length(COALESCE(events, '[]'::jsonb))
+                    ) + 1
+                  ))
                 )
               END
             ),

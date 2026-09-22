@@ -561,6 +561,43 @@ test('a save without a stated destination interrupts once for scope and resumes 
   assert.equal(turn, 0);
 });
 
+test('a standalone organization scope save seals from its receipt without a fallback pass', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  let writes = 0;
+  const runtimeCtx = {
+    ...ctx(prisma, 'save-organization-seal'),
+    conversationHistory: [{ role: 'assistant', content: 'The organization approved the reliability release.' }],
+    _tracedDispatch: async (_name, args) => {
+      writes += 1;
+      if (writes === 1) return {
+        saved: false,
+        needs_project_choice: true,
+        message: 'Choose a destination.',
+        scope_options: [{ scope: 'organization', label: 'Organization' }],
+        draft: { title: args.title, content: args.content, tags: args.tags, memory_type: 'fact' },
+      };
+      assert.equal(args.scope, 'organization');
+      return { saved: true, id: 'memory-organization', title: args.title, scope: args.scope };
+    },
+  };
+  const initial = await runUnifiedMetaAgent({
+    message: 'Save this as one memory', useTools: false, prisma, ctx: runtimeCtx,
+    checkpointer, composio: {}, decisionStage: saveCapabilityDecision,
+    modelStep: async () => { throw new Error('a completed standalone scope save must not re-enter fallback planning'); },
+  });
+  assert.equal(initial.status, 'needs_input');
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: false, prisma, ctx: runtimeCtx, checkpointer, composio: {},
+    choice: { value: 'organization', run_id: initial.run.id },
+    modelStep: async () => { throw new Error('the receipt must seal the standalone save'); },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(writes, 2);
+  assert.match(resumed.response, /organization company brain/i);
+  assert.equal(resumed.run.scratch.workflow_transition, null);
+});
+
 test('scope continuation preserves the original canonical save payload and emits a final receipt stream', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

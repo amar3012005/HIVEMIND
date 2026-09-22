@@ -426,6 +426,16 @@ function hasCompoundWorkflowEvidence(state) {
     || (hasConnectedOperation && hasMemoryWrite);
 }
 
+// A successful save admitted as a standalone JEV `hivemind_save` intent is a
+// terminal governed write.  Do not let stale transition metadata turn that
+// receipt back into a generic model/fallback pass that can ask for the already
+// selected destination again.  Genuine multi-task work is still identified by
+// the initial intent or its completed cross-operation receipts.
+function mustContinueAfterMemorySave(state, receipts) {
+  if (state?.plan?.authoritative === true && state?.plan?.intent === 'hivemind_save') return false;
+  return hasCompoundWorkflowEvidence({ ...state, receipts });
+}
+
 function narrowConnectedSearch(compact, slug) {
   return {
     ...compact,
@@ -1241,10 +1251,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // action that depends on the retrieved evidence).  This is intentionally
     // operation-generic; it does not encode any provider or recipient.
     const saveCompletesCompound = call.name === 'hivemind_meta' && call.args.operation === 'save'
-      && hasCompoundWorkflowEvidence({
-        ...state,
-        receipts: [...state.receipts, { tool: underlying, action: 'save', successful: receipt?.successful !== false }],
-      });
+      && mustContinueAfterMemorySave(state, [
+        ...state.receipts, { tool: underlying, action: 'save', successful: receipt?.successful !== false },
+      ]);
     if (call.name === 'hivemind_meta' && call.args.operation === 'save'
       && receipt?.successful !== false && !saveCompletesCompound) {
       const receipts = [...state.receipts, {
@@ -1462,7 +1471,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // terminal answer merely because this one write succeeded when the plan
     // still has dependent outcomes.  The receipt/stage is visible immediately
     // and the next JEV transition decides what remains.
-    if (hasCompoundWorkflowEvidence({ ...state, receipts })) {
+    if (mustContinueAfterMemorySave(state, receipts)) {
       return {
         pendingMemoryScope: null,
         pendingSaveDraft: null,

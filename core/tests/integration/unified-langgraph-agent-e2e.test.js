@@ -80,6 +80,8 @@ test('native HIVE recall streams its final answer from governed read receipts', 
     },
     finalStream: async ({ messages, onDelta }) => {
       assert.deepEqual(messages.map(row => row.role), ['system', 'user', 'system']);
+      assert.match(messages[0].content, /organization's living memory/i);
+      assert.match(messages[0].content, /generic chatbox/i);
       await onDelta('You have been ');
       await onDelta('working on durable chat.');
       return { ok: true, content: 'You have been working on durable chat.', usage: { total_tokens: 9 } };

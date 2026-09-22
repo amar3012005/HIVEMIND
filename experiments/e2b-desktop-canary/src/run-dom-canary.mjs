@@ -6,7 +6,12 @@ import path from 'node:path'
 if (!process.env.E2B_API_KEY) throw new Error('E2B_API_KEY is required in this process environment; never commit or log it.')
 
 const { Sandbox } = await import('@e2b/desktop')
-const template = process.env.E2B_TEMPLATE_NAME ?? 'hm-computer-operator-canary-v3'
+const template = process.env.E2B_TEMPLATE_NAME ?? 'hm-computer-operator-canary-v4'
+const useJev = process.env.HM_JEV_CANARY === '1'
+const jevModel = process.env.HM_JEV_MODEL ?? '~typesafe/jev-latest'
+if (useJev && (!process.env.HM_JEV_DECISIONS_URL || !process.env.HM_JEV_GATEWAY_TOKEN || (!process.env.HM_JEV_BYOK_ALIAS && !process.env.HM_JEV_PROVIDER_API_KEY))) {
+  throw new Error('HM_JEV_CANARY requires the Cloudflare Gateway route and credential plus either a BYOK alias or provider credential; never commit or log values.')
+}
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outputDir = path.join(root, 'evidence', new Date().toISOString().replaceAll(':', '-'))
 const fixturePath = '/home/user/hm-computer-worker/profile.html'
@@ -32,7 +37,9 @@ let chrome
 try {
   phase('create_desktop')
   desktop = await Sandbox.create(template, {
-    allowInternetAccess: false,
+    // The deterministic fixture remains network-isolated. The one Jev request
+    // needs egress to the existing Cloudflare Gateway custom-provider route.
+    allowInternetAccess: useJev,
     timeoutMs: 5 * 60_000,
     requestTimeoutMs: 60_000,
     metadata: { app: 'hivemind', test: 'dom-operator-canary-v1' },
@@ -71,7 +78,18 @@ try {
     {
     cwd: '/home/user/hm-computer-worker',
     timeoutMs: 60_000,
-    envs: { DISPLAY: ':0', HM_CDP_ENDPOINT: 'http://127.0.0.1:9222' },
+    envs: {
+      DISPLAY: ':0',
+      HM_CDP_ENDPOINT: 'http://127.0.0.1:9222',
+      ...(useJev ? {
+        HM_JEV_CANARY: '1',
+        HM_JEV_DECISIONS_URL: process.env.HM_JEV_DECISIONS_URL,
+        HM_JEV_GATEWAY_TOKEN: process.env.HM_JEV_GATEWAY_TOKEN,
+        ...(process.env.HM_JEV_BYOK_ALIAS ? { HM_JEV_BYOK_ALIAS: process.env.HM_JEV_BYOK_ALIAS } : {}),
+        ...(process.env.HM_JEV_PROVIDER_API_KEY ? { HM_JEV_PROVIDER_API_KEY: process.env.HM_JEV_PROVIDER_API_KEY } : {}),
+        HM_JEV_MODEL: jevModel,
+      } : {}),
+    },
     },
   )
   phase('capture_evidence')
@@ -94,12 +112,31 @@ try {
     contract: 'hivemind.e2b-dom-operator-canary.v1',
     sandbox_id: desktop.sandboxId,
     template,
+    decision: useJev ? { provider: 'cloudflare-custom-openrouter', model: jevModel, mode: 'ambiguous-dom-only' } : { provider: 'deterministic' },
     result,
     screenshot: { path: screenshotPath, sha256: createHash('sha256').update(screenshot).digest('hex') },
     status: result.status,
   }
   await writeFile(path.join(outputDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`)
   console.log(JSON.stringify({ status: receipt.status, sandbox_id: receipt.sandbox_id, receipt_path: path.join(outputDir, 'receipt.json'), screenshot_path: screenshotPath }, null, 2))
+} catch (error) {
+  // A decision-provider failure is evidence too. Preserve a deliberately
+  // compact, secret-free receipt so a caller can distinguish a safe stop from
+  // a missing browser action. Do not serialize provider responses or headers.
+  const message = String(error?.message || 'unknown DOM canary failure')
+    .replace(/Bearer\s+[^\s]+/ig, 'Bearer [redacted]')
+    .slice(0, 500)
+  const receipt = {
+    contract: 'hivemind.e2b-dom-operator-canary.v1',
+    sandbox_id: desktop?.sandboxId ?? null,
+    template,
+    decision: useJev ? { provider: 'cloudflare-custom-openrouter', model: jevModel, mode: 'ambiguous-dom-only' } : { provider: 'deterministic' },
+    status: 'failed_closed',
+    error: { code: 'dom_canary_failed', message },
+  }
+  await writeFile(path.join(outputDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`)
+  console.error(JSON.stringify({ status: receipt.status, receipt_path: path.join(outputDir, 'receipt.json'), error: receipt.error.code }))
+  throw error
 } finally {
   await chrome?.kill().catch(() => {})
   await desktop?.kill().catch(() => {})

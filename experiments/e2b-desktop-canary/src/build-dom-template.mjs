@@ -5,7 +5,7 @@ import { Template, defaultBuildLogger } from 'e2b'
 if (!process.env.E2B_API_KEY) throw new Error('E2B_API_KEY is required in this process environment; never commit or log it.')
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const name = process.env.E2B_TEMPLATE_NAME ?? 'hm-computer-operator-canary-v3'
+const name = process.env.E2B_TEMPLATE_NAME ?? 'hm-computer-operator-canary-v4'
 
 // Preserve E2B's maintained graphical Desktop base. Node and Playwright are
 // added to a child template so the visible Xfce/Chrome handoff remains intact.

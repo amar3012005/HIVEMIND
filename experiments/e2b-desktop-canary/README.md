@@ -52,6 +52,34 @@ and only uses a fixture written into that sandbox. The first live success is
 therefore proof of local DOM candidate selection and execution, not proof of
 an authenticated social-media workflow.
 
+### Cloudflare custom OpenRouter Jev decision canary
+
+The optional Jev adapter is strictly a third selection path. It receives a
+bounded current DOM candidate table only after exact and local-rule selection
+cannot select one safe control. It returns one existing candidate id plus a
+probability; the local driver still re-observes and executes the click. It does
+not generate prose, own the browser loop, or bypass the authority boundary.
+
+It uses Cloudflare AI Gateway's provider-specific route so OpenRouter's native
+Decisions API path is retained. The canary receives an exact preconfigured
+`HM_JEV_DECISIONS_URL`, a Cloudflare Gateway token, and either a BYOK alias or
+a provider credential only at process launch. None belongs in a source file,
+receipt, or command output.
+
+```sh
+E2B_API_KEY=... \
+HM_JEV_CANARY=1 \
+HM_JEV_DECISIONS_URL=https://gateway.ai.cloudflare.com/v1/.../custom-decision-jev/api/alpha/decisions \
+HM_JEV_GATEWAY_TOKEN=... \
+HM_JEV_BYOK_ALIAS=... \
+npm run dom-canary
+```
+
+This mode enables sandbox egress only for the one short-lived canary. A failed
+provider decision produces a redacted `failed_closed` receipt and executes no
+browser action; it never falls back to a direct OpenRouter request. Keep the
+default DOM canary network-free.
+
 ## Scope
 
 This is a separate, opt-in E2B implementation. It deliberately does not change

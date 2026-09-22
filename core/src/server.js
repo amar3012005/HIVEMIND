@@ -2950,7 +2950,15 @@ const OAUTH_SCOPE_ALIASES = {
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
 const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);
 const OAUTH_SESSION_COOKIE_NAME = process.env.HIVEMIND_OAUTH_SESSION_COOKIE || 'hm_oauth_session';
-const OAUTH_SESSION_SECRET = requireSessionSecret('HIVEMIND_OAUTH_SESSION_SECRET', ['SESSION_SECRET']);
+// The dashboard/control-plane is the issuer of hm_cp_session. Prefer its
+// signing secret whenever a dedicated OAuth secret is not configured so Core
+// can verify the browser session after an external connector returns from the
+// branded sign-in surface. Falling straight back to SESSION_SECRET can diverge
+// in production even though both services share Redis.
+const OAUTH_SESSION_SECRET = requireSessionSecret('HIVEMIND_OAUTH_SESSION_SECRET', [
+  'HIVEMIND_CONTROL_PLANE_SESSION_SECRET',
+  'SESSION_SECRET'
+]);
 const OAUTH_AUTH_STATE_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_AUTH_STATE_TTL_SECONDS || 10 * 60);
 const OAUTH_RESOURCE_DEFAULT = process.env.HIVEMIND_OAUTH_RESOURCE_DEFAULT || OAUTH_BASE_URL;
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes

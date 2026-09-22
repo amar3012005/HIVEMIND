@@ -2404,17 +2404,23 @@ async function parseBodyWithRaw(req, maxBytes = Infinity) {
   return { raw, parsed };
 }
 
-// Cookie domain: parent of every hivemind.davinciai.eu subdomain so the
-// session is visible to:
-//   • hivemind.davinciai.eu     (FE / Vercel — /oauth/authorize lives here)
-//   • api.hivemind.davinciai.eu (control plane — sets the cookie)
-//   • core.hivemind.davinciai.eu (core API)
-// One sign-in propagates to every surface — dashboard, MCP, ChatGPT
-// connector, Claude custom connector — without per-host re-auth.
+// Cookie domain: parent of every public product subdomain so the session is
+// visible to the frontend, control plane and Core issuer. One sign-in must
+// propagate to the MCP OAuth callback, otherwise a connector appears to sign
+// in successfully but /oauth/authorize has no authenticated session.
+function defaultSessionCookieDomain(publicBaseUrl) {
+  try {
+    const host = new URL(publicBaseUrl).hostname.toLowerCase();
+    if (host === 'singulancelabs.com' || host.endsWith('.singulancelabs.com')) return '.singulancelabs.com';
+    if (host === 'hivemind.davinciai.eu' || host.endsWith('.hivemind.davinciai.eu')) return '.hivemind.davinciai.eu';
+  } catch {
+    // An explicit env value remains the authoritative configuration.
+  }
+  return null;
+}
+
 const SESSION_COOKIE_DOMAIN = process.env.HIVEMIND_SESSION_COOKIE_DOMAIN
-  || (CONFIG.publicBaseUrl.includes('hivemind.davinciai.eu')
-    ? '.hivemind.davinciai.eu'
-    : null);
+  || defaultSessionCookieDomain(CONFIG.publicBaseUrl);
 
 function _cookieDomainAttr() {
   return SESSION_COOKIE_DOMAIN ? `; Domain=${SESSION_COOKIE_DOMAIN}` : '';

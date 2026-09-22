@@ -5,10 +5,11 @@ export const ENTITY_PROFILE_MODES = new Set(['off', 'shadow', 'dynamic_auto', 'r
 const FACT_CLASSES = new Set(['static', 'dynamic', 'relationship', 'historical']);
 const hash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-export function entityProfileMode({ evaluatedMode, env = process.env } = {}) {
-  if (String(env.ENTITY_PROFILE_PROJECTION_KILL_SWITCH || '').toLowerCase() === 'true') return 'off';
-  if (String(env.ENTITY_PROFILE_PROJECTION_ENABLED || '').toLowerCase() !== 'true') return 'off';
-  const mode = String(evaluatedMode || env.ENTITY_PROFILE_PROJECTION_MODE || 'off').toLowerCase();
+// Core trusts only a signed, explicit admission mode from the Cloudflare
+// Worker.  There is deliberately no second environment flag: Flagship is the
+// single rollout and rollback authority.
+export function entityProfileMode({ evaluatedMode } = {}) {
+  const mode = String(evaluatedMode || 'off').toLowerCase();
   return ENTITY_PROFILE_MODES.has(mode) ? mode : 'off';
 }
 

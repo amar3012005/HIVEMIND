@@ -23,6 +23,9 @@ const MAX_STEPS = 12;
 const State = Annotation.Root({
   runId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   context: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  // The plan is a durable, typed routing decision made inside this graph. It
+  // constrains the existing model/tool loop; it is never an external router.
+  plan: Annotation({ reducer: (_left, right) => right, default: () => null }),
   messages: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   receipts: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   steps: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -521,7 +524,18 @@ function outputShape(state, response, status = 'completed') {
     run: {
       id: state.runId, status: status === 'completed' ? 'sealed' : status,
       composioSessionId: state.sessionId,
-      scratch: { harness_version: UNIFIED_META_HARNESS_VERSION, selected_tool_slugs: state.selectedSlugs, workflow_session_id: state.workflowSessionId },
+      scratch: {
+        harness_version: UNIFIED_META_HARNESS_VERSION,
+        selected_tool_slugs: state.selectedSlugs,
+        workflow_session_id: state.workflowSessionId,
+        plan: state.plan ? {
+          intent: state.plan.intent,
+          source: state.plan.source,
+          authoritative: state.plan.authoritative,
+          probability: state.plan.probability,
+          margin: state.plan.margin,
+        } : null,
+      },
     },
     steps: state.steps, sources, citations: sources, draftIds: state.pendingApproval ? [state.pendingApproval.id] : [],
     pendingActions: state.pendingApproval ? [{ id: state.pendingApproval.id }] : [], inputRequests: [], resumeState: null,
@@ -570,7 +584,12 @@ function memoryScopeRequest(receipt, runId, preparedSave = null) {
 function decisionToolSurface(selection, useTools) {
   const current = unifiedMetaTools({ useTools });
   const names = decisionGatewayToolNames(selection, { connected: useTools });
-  return names === null ? current : current.filter(tool => names.includes(tool.function.name));
+  if (names === null) return current;
+  const constrained = current.filter(tool => names.includes(tool.function.name));
+  // The decision taxonomy is shared with other runtimes that expose more
+  // native tools. Never turn a valid LangGraph intent into a dead-end merely
+  // because this graph has a smaller governed surface.
+  return constrained.length || names.length === 0 ? constrained : current;
 }
 
 export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useTools = false, onEvent = () => {}, composio, prisma, modelStep, finalStream, metaExecutor, connectedExecutor, decisionStage = decideRuntimeStage }) {
@@ -614,7 +633,15 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       await prisma.agentRun.update({ where: { id: state.runId }, data: {
         status, steps: patch.steps || state.steps || [], composioSessionId: patch.sessionId || state.sessionId || null,
         scratch: { runtime: UNIFIED_META_HARNESS_VERSION, graph_thread_id: ctx.unifiedGraphThreadId, use_tools: useTools === true,
-          workflow_session_id: patch.workflowSessionId || state.workflowSessionId || null, selected_tool_slugs: patch.selectedSlugs || state.selectedSlugs || [], event_sequence: sequence },
+          workflow_session_id: patch.workflowSessionId || state.workflowSessionId || null, selected_tool_slugs: patch.selectedSlugs || state.selectedSlugs || [],
+          plan: (patch.plan || state.plan) ? {
+            intent: (patch.plan || state.plan).intent,
+            source: (patch.plan || state.plan).source,
+            authoritative: (patch.plan || state.plan).authoritative,
+            probability: (patch.plan || state.plan).probability,
+            margin: (patch.plan || state.plan).margin,
+          } : null,
+          event_sequence: sequence },
       } }).catch(() => {});
     }
     onEvent({ ...safeEventEnvelope({ event: appended.event, runId: state.runId, state: status, sequence }), type: 'agent_state', state: status });
@@ -634,6 +661,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       ...state,
       runId,
       context: null,
+      plan: null,
       messages: [],
       receipts: [],
       steps: [],
@@ -699,6 +727,40 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     return transition(freshTurnState, 'running', patch, { reason_code: 'turn_admitted' });
   };
 
+  // JEV is deliberately a node *within* LangGraph. It produces a typed plan
+  // for this turn, while every subsequent search, schema selection, approval,
+  // execution, receipt, and synthesis remains owned by the graph.
+  const planNode = async state => {
+    let decision;
+    try {
+      decision = await decisionStage({
+        runtime: 'legacy', stage: 'capability', turn_id: state.runId, user_query: message,
+        actor_id: ctx.userId,
+        context: state.context,
+        observation: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
+        app_mentions: state.requestedToolkits,
+        operational_app_intent: state.requestedToolkits.length > 0,
+      }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
+    } catch (error) {
+      decision = { status: 'defer', selected: null, authoritative: false,
+        receipt: { source: 'fallback', reason: compactText(error?.message || error || 'decision_gateway_unavailable', 240) } };
+    }
+    const authoritative = decision.status === 'selected' && decision.authoritative === true;
+    const plan = {
+      intent: authoritative ? String(decision.selected || 'fallback_harness') : 'fallback_harness',
+      authoritative,
+      source: decision.receipt?.source || 'fallback',
+      probability: decision.receipt?.probability ?? null,
+      margin: decision.receipt?.margin ?? null,
+      request_id: decision.receipt?.requestId || null,
+      reason: decision.receipt?.reason || decision.reason || null,
+    };
+    emitDecision({ stage: 'capability', status: decision.status, selected: plan.intent,
+      source: plan.source, authoritative: plan.authoritative, probability: plan.probability,
+      margin: plan.margin, request_id: plan.request_id, run_id: state.runId });
+    return { plan };
+  };
+
   const modelNode = async state => {
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
@@ -744,30 +806,12 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         result: outputShape({ ...state, usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage }, response),
       };
     }
-    let tools = [];
-    if (!providerEvidenceReady) {
-      let decision;
-      try {
-        decision = await decisionStage({
-          runtime: 'legacy', stage: 'capability', turn_id: state.runId, user_query: message,
-          actor_id: ctx.userId,
-          context: state.context,
-          observation: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
-          app_mentions: state.requestedToolkits,
-          operational_app_intent: state.requestedToolkits.length > 0,
-        }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
-      } catch (error) {
-        decision = { status: 'defer', selected: null, authoritative: false,
-          receipt: { source: 'fallback', reason: compactText(error?.message || error || 'decision_gateway_unavailable', 240) } };
-      }
-      tools = decision.status === 'selected' && decision.authoritative
-        ? decisionToolSurface(decision.selected, useTools)
-        : unifiedMetaTools({ useTools });
-      emitDecision({ stage: 'capability', status: decision.status, selected: decision.selected || null,
-        source: decision.receipt?.source || 'fallback', authoritative: decision.authoritative === true,
-        probability: decision.receipt?.probability ?? null, margin: decision.receipt?.margin ?? null,
-        request_id: decision.receipt?.requestId || null, run_id: state.runId });
-    }
+    // Reuse the plan-node decision for every model pass in this turn. In
+    // particular, a tool receipt must not trigger a second capability model
+    // call; later Composio selection is a separate bounded decision over the
+    // dynamically discovered provider tools.
+    const tools = providerEvidenceReady ? []
+      : (state.plan?.authoritative ? decisionToolSurface(state.plan.intent, useTools) : unifiedMetaTools({ useTools }));
     const turn = await callModel({
       messages: modelMessages, tools, model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
@@ -998,7 +1042,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   };
 
   const routeModel = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
-  const routeContext = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
+  const routeContext = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'classify_plan');
+  const routePlan = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
   const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model')));
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const routeMemoryScope = state => state.result ? 'seal' : 'model';
@@ -1011,6 +1056,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
 
   return new StateGraph(State)
     .addNode('admit_context', contextNode)
+    .addNode('classify_plan', planNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.15 } })
     .addNode('model', modelNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('tool', toolNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
     .addNode('connection', connectionNode)
@@ -1018,7 +1064,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addNode('approval', approvalNode)
     .addNode('seal', sealNode)
     .addEdge(START, 'admit_context')
-    .addConditionalEdges('admit_context', routeContext, ['model', 'tool', 'seal'])
+    .addConditionalEdges('admit_context', routeContext, ['classify_plan', 'tool', 'seal'])
+    .addConditionalEdges('classify_plan', routePlan, ['model', 'tool', 'seal'])
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
     .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])

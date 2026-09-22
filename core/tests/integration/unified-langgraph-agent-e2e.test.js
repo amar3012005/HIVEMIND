@@ -84,6 +84,34 @@ test('native HIVE recall streams its final answer from governed read receipts', 
   assert.equal(result.usage.at(-1).total_tokens, 9);
 });
 
+test('the in-graph plan node calls JEV once and reuses its typed decision for the model surface', async () => {
+  const prisma = fakePrisma();
+  const decisionStages = [];
+  const seenTools = [];
+  const events = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'Hello, who are you?', useTools: false, prisma, ctx: ctx(prisma, 'plan-node'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async input => {
+      decisionStages.push(input.stage);
+      return { status: 'selected', selected: 'direct_answer', authoritative: true,
+        receipt: { source: 'jev', probability: 0.98, margin: 0.94, requestId: 'plan-decision-1' } };
+    },
+    modelStep: async ({ tools }) => {
+      seenTools.push(tools.map(tool => tool.function.name));
+      return { message: { role: 'assistant', content: 'I am HIVE-MIND.' } };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(decisionStages, ['capability']);
+  assert.deepEqual(seenTools, [[]]);
+  assert.deepEqual(result.run.scratch.plan, {
+    intent: 'direct_answer', source: 'jev', authoritative: true, probability: 0.98, margin: 0.94,
+  });
+  assert.ok(events.some(event => event.type === 'decision' && event.stage === 'capability'
+    && event.selected === 'direct_answer' && event.source === 'jev'));
+});
+
 test('an explicit durable-save request uses the prior verified turn without a planner tool decision', async () => {
   const prisma = fakePrisma();
   const calls = [];
@@ -414,6 +442,7 @@ test('receipt-grounded final synthesis emits progressive SSE deltas without chan
 test('Jev narrows legacy Composio discovery and blocks an unselected write in the same turn', async () => {
   const prisma = fakePrisma();
   const events = [];
+  const decisionStages = [];
   let turn = 0;
   const modelStep = async () => {
     turn += 1;
@@ -444,9 +473,12 @@ test('Jev narrows legacy Composio discovery and blocks an unselected write in th
     },
     async executeToolsParallel() { return [{ successful: true, data: { messages: [{ subject: 'Hello', received_at: '2026-09-20' }] } }]; },
   };
-  const decisionStage = async input => input.stage === 'composio_selection'
-    ? { status: 'selected', selected: 'use:GMAIL_FETCH_EMAILS', authoritative: true, receipt: { source: 'jev' } }
-    : { status: 'selected', selected: 'composio_search', authoritative: true, receipt: { source: 'jev' } };
+  const decisionStage = async input => {
+    decisionStages.push(input.stage);
+    return input.stage === 'composio_selection'
+      ? { status: 'selected', selected: 'use:GMAIL_FETCH_EMAILS', authoritative: true, receipt: { source: 'jev' } }
+      : { status: 'selected', selected: 'composio_search', authoritative: true, receipt: { source: 'jev' } };
+  };
   const result = await runUnifiedMetaAgent({
     message: 'Find my last email from Rama. Do not modify it.', useTools: true, prisma,
     ctx: ctx(prisma, 'jev-read'), checkpointer: new MemorySaver(), modelStep, composio, decisionStage,
@@ -457,6 +489,7 @@ test('Jev narrows legacy Composio discovery and blocks an unselected write in th
   assert.ok(result.steps.some(step => step.slug === 'hivemind_connected_task' && step.status === 'error'));
   assert.ok(events.some(event => event.type === 'decision' && event.stage === 'composio_selection'
     && event.selected === 'use:GMAIL_FETCH_EMAILS' && event.source === 'jev'));
+  assert.deepEqual(decisionStages, ['capability', 'composio_selection']);
   assert.deepEqual(result.run.scratch.selected_tool_slugs, ['GMAIL_FETCH_EMAILS']);
 });
 

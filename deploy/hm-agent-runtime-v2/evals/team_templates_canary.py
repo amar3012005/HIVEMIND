@@ -15,7 +15,7 @@ import sys
 def main() -> int:
     sys.path.insert(0, "/app")
     import app  # noqa: WPS433 - the canary must inspect the runtime wiring
-    from agentscope.app._tool import AgentCreate, TeamCreate, TeamSay
+    from agentscope.app._tool import AgentCreate, TeamCreate, TeamDelete, TeamSay
     from agentscope.app.message_bus import InMemoryMessageBus
     from agentscope.app.message_bus._keys import MessageBusKeys
     from agentscope.app.storage import (
@@ -99,6 +99,13 @@ def main() -> int:
         async def get_agent(self, owner, aid):
             return self.agents.get((owner, aid))
 
+        async def list_sessions(self, owner, aid):
+            return [
+                session
+                for session in self.sessions.values()
+                if session.user_id == owner and session.agent_id == aid
+            ]
+
         async def upsert_agent(self, _user, agent):
             self.agents[(agent.user_id, agent.id)] = agent
 
@@ -112,6 +119,34 @@ def main() -> int:
             )
             self.sessions[session.id] = session
             return session
+
+        async def delete_session(self, owner, aid, sid):
+            session = self.sessions.get(sid)
+            if session is None:
+                return False
+            if session.user_id != owner or session.agent_id != aid:
+                return False
+            del self.sessions[sid]
+            return True
+
+        async def delete_agent(self, owner, aid):
+            existed = self.agents.pop((owner, aid), None) is not None
+            return existed
+
+        async def list_schedules(self, _owner):
+            return []
+
+        async def delete_schedule(self, _owner, _schedule_id):
+            return True
+
+        async def delete_team(self, owner, team_id):
+            team = self.teams.pop(team_id, None)
+            if team is None:
+                return False
+            leader_session = self.sessions.get(team.session_id)
+            if leader_session is not None:
+                leader_session.team_id = None
+            return True
 
     storage = StorageDouble()
     bus = InMemoryMessageBus()
@@ -148,11 +183,35 @@ def main() -> int:
     if worker_session is None or not awaitable_queue_has(bus, MessageBusKeys.inbox(worker_session.id)):
         raise AssertionError("AgentCreate did not deliver the native team message")
 
+    # Exercise native TeamSay against the just-created roster.  The initial
+    # AgentCreate prompt remains in the worker inbox and this second delivery
+    # must be addressed by the worker's display name, not an HIVE-side id.
+    say = TeamSay(storage, bus, None, user_id, session_id, agent_id)
+    said = asyncio.run(say("Send one durable status update.", to="researcher-1"))
+    if said.state.value == "error" or "Delivered to 1" not in said.content[0].text:
+        raise AssertionError(f"native TeamSay failed: {said}")
+    if len(bus._queues.get(MessageBusKeys.inbox(worker_session.id), [])) < 2:
+        raise AssertionError("TeamSay did not append to the worker inbox")
+
+    # Dissolve through AgentScope's native TeamDelete cascade.  This proves
+    # created workers/sessions are removed while the leader survives and is
+    # detached from the team.
+    delete = TeamDelete(storage, bus, None, user_id, session_id, agent_id)
+    deleted = asyncio.run(delete())
+    if deleted.state.value == "error" or "dissolved" not in deleted.content[0].text:
+        raise AssertionError(f"native TeamDelete failed: {deleted}")
+    if storage.teams or workers[0].id in {aid for (_owner, aid) in storage.agents}:
+        raise AssertionError("TeamDelete left durable team/worker records")
+    if worker_session.id in storage.sessions or storage.sessions[session_id].team_id is not None:
+        raise AssertionError("TeamDelete did not preserve/detach the leader correctly")
+    if MessageBusKeys.inbox(worker_session.id) in bus._queues:
+        raise AssertionError("TeamDelete did not purge the worker inbox")
+
     print(
         "team-templates-canary-ok "
         f"templates={','.join(sorted(templates))} "
         "subagent_types=5 differentiated_prompts=4 "
-        "readonly=researcher,analyst native_run=team_create+agent_create",
+        "readonly=researcher,analyst native_run=team_create+agent_create+say+delete",
     )
     return 0
 

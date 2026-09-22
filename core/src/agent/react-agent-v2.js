@@ -3710,7 +3710,14 @@ export async function runReactAgentV2({
         resumeState: unified.resumeState,
       }, {
         prisma: ctx.prisma,
-        durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+        // A targeted unified LangGraph session is an authenticated, resumable
+        // workflow even when the legacy durable-chat flag is off.  Keeping its
+        // scope-picker checkpoint only in Redis/local memory made a refresh
+        // lose the selected destination and fall back to the generic
+        // "orchestration resumed" UI.  Persist the opaque continuation record
+        // for this graph only; V2/legacy callers retain their existing policy.
+        durable: ctx.nativeMetaMode === 'unified-meta-v2'
+          || ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
         parentTurnId: ctx.durableChatTurnId || null,
       });
       continuation = { schema_version: 1, token: stored.token, expires_at: stored.expires_at, requests: unified.inputRequests };

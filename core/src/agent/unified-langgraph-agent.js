@@ -586,6 +586,17 @@ function memoryScopeRequest(receipt, runId, preparedSave = null) {
   };
 }
 
+function savedMemoryAcknowledgement(receipt, scope) {
+  const data = receipt?.data || receipt || {};
+  const title = compactText(data.title || 'this memory', 160);
+  const scopeLabel = scope === 'project' ? 'selected project' : scope;
+  // The write receipt is the only synchronous authority. Entity and
+  // relationship enrichment is deliberately asynchronous in the canonical
+  // ingestion pipeline, so acknowledge the durable save immediately without
+  // pretending those derived links have already completed.
+  return `Added “${title}” to your ${scopeLabel} company brain. It is durable and searchable now; canonical indexing will connect its people, organizations, dates, and relationships in the background.`;
+}
+
 function decisionToolSurface(selection, useTools) {
   const current = unifiedMetaTools({ useTools });
   const names = decisionGatewayToolNames(selection, { connected: useTools });
@@ -963,7 +974,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         successful: true, data: exposed, error: null,
       }];
       const steps = [...state.steps, { kind: 'tool', slug: underlying, status: 'completed', summary: 'Memory saved' }];
-      const response = 'Saved this memory.';
+      const response = savedMemoryAcknowledgement(receipt, receipt?.data?.scope || call.args?.save?.scope || 'personal');
       onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
       onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: true, run_id: state.runId });
       onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
@@ -1069,8 +1080,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       throw new Error(`unified_memory_scope_save_failed:${compactText(receipt?.error || receipt?.data?.error || 'unknown', 160)}`);
     }
     const exposed = publicToolResult(receipt);
-    const scopeLabel = saveArgs.scope === 'project' ? 'selected project' : saveArgs.scope;
-    const response = `Saved this memory in your ${scopeLabel} memory.`;
+    const response = savedMemoryAcknowledgement(receipt, saveArgs.scope);
     const receipts = [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: true, data: exposed }];
     const steps = [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope' }];
     onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope', run_id: state.runId });

@@ -30,7 +30,7 @@ test('initial response exposes presentation marker and execution receipt metadat
 
 test('both durable continuation branches retain locale, thread identity and response marker', () => {
   const enable = server.indexOf("if (stored.resumeState?.kind === 'enable_tools')");
-  const durable = server.indexOf("if (stored.resumeState?.kind === 'durable_agent')", enable);
+  const durable = server.indexOf("if (['durable_agent', 'governed_langgraph', 'unified_langgraph'].includes(stored.resumeState?.kind))", enable);
   const end = server.indexOf("const { runCompoundOrchestrator }", durable);
   for (const section of [server.slice(enable, durable), server.slice(durable, end)]) {
     assert.match(section, /language: stored\.language/);
@@ -45,4 +45,12 @@ test('both durable continuation branches retain locale, thread identity and resp
 test('initial and continuation streaming done events preserve the full response object', () => {
   assert.match(server, /emit\(\{ type: 'done', \.\.\.result \}\)/);
   assert.match(server, /emit\(\{ type: 'done', \.\.\.continued \}\)/);
+});
+
+test('a targeted unified LangGraph scope choice is durable even when legacy durable chat is off', () => {
+  assert.match(helper, /ctx\.nativeMetaMode === 'unified-meta-v2'[\s\S]*\|\| \['session', 'workflow', 'full'\]\.includes\(ctx\.durableChatMode\)/);
+  const continuation = server.slice(server.indexOf('if (body?.continuation_token)'), server.indexOf('const choice = body?.continuation_response'));
+  assert.match(continuation, /const durableUnifiedContinuation = continuationNativeMetaMode === 'unified-meta-v2'/);
+  assert.match(continuation, /const continuationPersistenceEnabled = continuationMode !== 'off' \|\| durableUnifiedContinuation/);
+  assert.match(continuation, /if \(continuationPersistenceEnabled\)/);
 });

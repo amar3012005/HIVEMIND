@@ -24893,17 +24893,25 @@ exit \$RC
               const continuationDecisionEnv = continuationNativeMetaMode === 'unified-meta-v2'
                 ? { ...process.env, JEV_DECISION_GATEWAY_MODE: 'active' }
                 : undefined;
+              // The unified graph owns an explicit persisted checkpoint (for
+              // example, a memory-scope selection).  It must claim that
+              // checkpoint from Postgres even while the legacy durable-chat
+              // rollout is off, otherwise a browser refresh silently falls
+              // through to the old cache-only continuation path.
+              const durableUnifiedContinuation = continuationNativeMetaMode === 'unified-meta-v2';
+              const continuationPersistenceEnabled = continuationMode !== 'off' || durableUnifiedContinuation;
+              const continuationTurnMode = continuationMode !== 'off' ? continuationMode : 'session';
               let continuationStore = null;
               let continuationTurn = null;
               let continuationClaim = null;
-              if (continuationMode !== 'off') {
+              if (continuationPersistenceEnabled) {
                 try {
                   continuationStore = new DurableChatTurnStore({ prisma, notifier: cloudflareChatSessionClient });
                   const admitted = await continuationStore.createOrReuse({
                     orgId, userId,
                     threadId: body?.thread_id || body?.conversation_id || null,
                     idempotencyKey: chatCreditKey,
-                    mode: continuationMode,
+                    mode: continuationTurnMode,
                     requestPayload: {
                       continuation_token_digest: crypto.createHash('sha256').update(body.continuation_token).digest('hex'),
                       continuation_response: body?.continuation_response || {},
@@ -25036,7 +25044,7 @@ exit \$RC
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     }, {
                       prisma,
-                      durable: ['session', 'workflow', 'full'].includes(continuationMode),
+                      durable: continuationPersistenceEnabled,
                       parentTurnId: continuationTurn?.id || null,
                     });
                     continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: durable.inputRequests };
@@ -25123,7 +25131,7 @@ exit \$RC
                       threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     }, {
                       prisma,
-                      durable: ['session', 'workflow', 'full'].includes(continuationMode),
+                      durable: continuationPersistenceEnabled,
                       parentTurnId: continuationTurn?.id || null,
                     });
                     continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: durable.inputRequests };
@@ -25200,7 +25208,7 @@ exit \$RC
                     resumeState: compound.resumeState,
                   }, {
                     prisma,
-                    durable: ['session', 'workflow', 'full'].includes(continuationMode),
+                    durable: continuationPersistenceEnabled,
                     parentTurnId: continuationTurn?.id || null,
                   });
                   continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: compound.inputRequests };

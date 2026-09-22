@@ -145,7 +145,7 @@ test('an explicit durable-save request crosses the JEV plan node before one gove
   assert.equal(result.status, 'completed');
   assert.equal(calls.length, 1);
   assert.equal(turn, 0);
-  assert.match(result.response, /saved (this|the) memory/i);
+  assert.match(result.response, /Added .* company brain/i);
   assert.equal(result.run.scratch.plan.intent, 'hivemind_save');
 });
 
@@ -172,7 +172,7 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
       };
       assert.equal(args.scope, 'personal');
       assert.match(args.content, /Prague anniversary invitation/);
-      return { saved: true, id: 'memory-save-it' };
+      return { saved: true, id: 'memory-save-it', title: args.title, scope: args.scope };
     },
   };
   const modelStep = async () => { throw new Error('save-it continuation must not invoke model or recall'); };
@@ -189,8 +189,9 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
   });
   assert.equal(resumed.status, 'completed');
   assert.equal(calls.length, 2);
-  assert.match(resumed.response, /Saved this memory in your personal memory/);
-  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['Saved this memory in your personal memory.']);
+  assert.match(resumed.response, /Added .* to your personal company brain/);
+  assert.match(resumed.response, /canonical indexing will connect/i);
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), [resumed.response]);
 });
 
 test('a bare save-it request without a completed answer asks for content without calling recall', async () => {
@@ -240,7 +241,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
         };
       }
       assert.equal(args.scope, 'personal');
-      return { saved: true, id: 'memory-scoped' };
+      return { saved: true, id: 'memory-scoped', title: args.title, scope: args.scope };
     },
   };
   const modelStep = async () => {
@@ -261,7 +262,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
   });
   assert.equal(resumed.status, 'completed');
   assert.equal(writes, 2);
-  assert.match(resumed.response, /personal memory/i);
+  assert.match(resumed.response, /personal company brain/i);
   assert.equal(turn, 0);
 });
 
@@ -283,7 +284,7 @@ test('scope continuation preserves the original canonical save payload and emits
         draft: { title: 'Release decision', content: 'truncated' },
         scope_options: [{ scope: 'personal', label: 'Personal' }],
       };
-      return { saved: true, id: 'memory-payload' };
+      return { saved: true, id: 'memory-payload', title: args.title, scope: args.scope };
     },
   };
   const initial = await runUnifiedMetaAgent({
@@ -300,7 +301,8 @@ test('scope continuation preserves the original canonical save payload and emits
   assert.equal(resumed.status, 'completed');
   assert.equal(calls.length, 2);
   assert.match(calls[1].content, /release decision was approved/i);
-  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['Saved this memory in your personal memory.']);
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), [resumed.response]);
+  assert.match(resumed.response, /company brain/i);
   assert.equal(resumed.steps?.at(-1)?.slug, 'hivemind_save_memory');
 });
 

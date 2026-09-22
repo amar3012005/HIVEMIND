@@ -140,6 +140,9 @@ message_bus = RedisMessageBus(host=REDIS_HOST, port=REDIS_PORT)
 import workspace_backend
 
 workspace_manager = workspace_backend.build_workspace_manager(WORKSPACES_DIR)
+# Artifact registration must verify bytes through this same native manager;
+# the AgentScope extra-tool factory itself only receives identity arguments.
+extra_agent_tools.configure_workspace_manager(workspace_manager)
 
 # --------------------------------------------------------------------------
 # Employee roles — sub-agent templates

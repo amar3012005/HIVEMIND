@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from hm_bridge import EventForwarder, WorkRunBinding, build_execution_identity
+import extra_agent_tools
 from extra_agent_tools import RecordArtifactTool
 
 
@@ -98,11 +99,44 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
             return {"artifact_id": "artifact-1"}
 
         tool = RecordArtifactTool("user-1", "org-1", "agentscope-session-1")
-        with patch("extra_agent_tools._call_hm_core", call_hm_core):
+        with patch.object(extra_agent_tools, "_WORKSPACE_MANAGER", None), patch("extra_agent_tools._call_hm_core", call_hm_core):
             await tool.call("deliverables/report.md", "Report")
 
         self.assertEqual(captured["path"], "/internal/hivemind/artifacts")
         self.assertEqual(captured["body"]["agentscope_session_id"], "agentscope-session-1")
+
+    async def test_artifact_tool_rejects_missing_workspace_file(self):
+        class Backend:
+            workdir = "/workspace"
+
+            def abspath(self, value):
+                return value
+
+            def join_path(self, root, path):
+                return f"{root}/{path}"
+
+            async def file_exists(self, _path):
+                return False
+
+        class Workspace:
+            workdir = "/workspace"
+
+            def get_backend(self):
+                return Backend()
+
+        class Manager:
+            async def get_workspace(self, *_args):
+                return Workspace()
+
+        tool = RecordArtifactTool("user-1", "org-1", "session-1", "agent-1")
+        with patch.object(extra_agent_tools, "_WORKSPACE_MANAGER", Manager()), patch(
+            "extra_agent_tools._call_hm_core",
+        ) as call_core:
+            result = await tool.call("deliverables/missing.md", "Missing")
+
+        self.assertEqual(result.state.value, "error")
+        self.assertIn("does not exist", result.content[0].text)
+        call_core.assert_not_called()
 
 
 if __name__ == "__main__":

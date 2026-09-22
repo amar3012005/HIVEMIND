@@ -71,6 +71,19 @@ MASTER_API_KEY = os.getenv("HIVEMIND_MASTER_API_KEY", "").strip()
 # tool error the model can react to, not as a stalled run.
 _TOOL_TIMEOUT = float(os.getenv("HM_TOOL_TIMEOUT", "60"))
 
+# AgentScope's documented extra-tool factory receives only
+# ``(user_id, agent_id, session_id)``.  The app wires the already-created
+# native workspace manager here once at startup so artifact registration can
+# verify the file in the *same* workspace that the built-in file tools use.
+# This is a resolver, not a second workspace or executor.
+_WORKSPACE_MANAGER: Any | None = None
+
+
+def configure_workspace_manager(workspace_manager: Any) -> None:
+    """Bind the native AgentScope workspace manager used by artifact checks."""
+    global _WORKSPACE_MANAGER  # noqa: PLW0603 - process-wide app wiring
+    _WORKSPACE_MANAGER = workspace_manager
+
 
 _TENANCY_RE = re.compile(
     r"^org:([0-9a-f-]{36}):user:([0-9a-f-]{36})$",
@@ -216,6 +229,8 @@ class _HiveMindToolBase(ToolBase):
         user_id: str,
         org_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        workspace_user_id: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._user_id = user_id
@@ -224,6 +239,11 @@ class _HiveMindToolBase(ToolBase):
         # hm-core link a registered workspace artifact to the caller's durable
         # WorkRun without making the WorkRun id part of a tool schema.
         self._session_id = session_id
+        self._agent_id = agent_id
+        # Workspace identity is AgentScope's original tenant key.  Do not use
+        # the UUID-normalized HIVE principal here when the service is running
+        # with its namespaced ``org:<org>:user:<user>`` identity.
+        self._workspace_user_id = workspace_user_id or user_id
 
     async def check_permissions(
         self,
@@ -588,6 +608,22 @@ artifact is not an artifact."""
         content_type: Optional[str] = None,
     ) -> ToolChunk:
         try:
+            if _WORKSPACE_MANAGER is not None:
+                workspace = await _WORKSPACE_MANAGER.get_workspace(
+                    self._workspace_user_id,
+                    self._agent_id or self._session_id,
+                    self._session_id,
+                )
+                backend = workspace.get_backend()
+                candidate = backend.abspath(backend.join_path(workspace.workdir, path))
+                root = backend.abspath(workspace.workdir).rstrip("/") + "/"
+                if not candidate.startswith(root):
+                    return _err("artifact path must stay inside the AgentScope workspace", path=path)
+                if not await backend.file_exists(candidate):
+                    return _err("artifact path does not exist in the AgentScope workspace", path=path)
+                contents = await backend.read_file(candidate)
+                if not contents:
+                    return _err("artifact path is empty in the AgentScope workspace", path=path)
             data = await _call_hm_core(
                 "/internal/hivemind/artifacts",
                 user_id=self._user_id,
@@ -787,7 +823,16 @@ async def hivemind_tools(
     instead, because the user→org mapping is hm-core's data.
     """
     user_uuid, org_uuid = _split_principal(user_id, None)
-    tools: list[ToolBase] = [cls(user_uuid, org_uuid, session_id) for cls in _TOOL_CLASSES]
+    tools: list[ToolBase] = [
+        cls(
+            user_uuid,
+            org_uuid,
+            session_id,
+            agent_id,
+            workspace_user_id=user_id,
+        )
+        for cls in _TOOL_CLASSES
+    ]
     _log.info(
         "assembled %d HIVE-MIND tools for user=%s agent=%s session=%s",
         len(tools),

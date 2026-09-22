@@ -121,6 +121,18 @@ test('active mode reviews schema-bound connected-app arguments after selection',
   assert.equal(result.authoritative, true);
 });
 
+test('post-receipt workflow transitions accept a calibrated constrained choice below admission threshold', async () => {
+  const result = await decideRuntimeStage({
+    stage: 'workflow_transition', user_query: 'Read records, save them, then send a follow-up.', actor_id: 'user-1',
+    context: { workflow: { intent: 'multi_task', completed_receipts: [{ tool: 'SOURCE_READ', action: 'execute', successful: true }, { tool: 'hivemind_save_memory', action: 'save', successful: true }] } },
+  }, {
+    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },
+    provider: { async decideChoice() { return { choice: 'composio_action', probability: 0.55, margin: 0.12, probabilities: { composio_action: 0.55, synthesize: 0.43 } }; } },
+  });
+  assert.equal(result.status, 'selected');
+  assert.equal(result.selected, 'composio_action');
+});
+
 test('provider errors and low confidence stay fail-open to the current selector', async () => {
   const unavailable = await decideRuntimeStage({ stage: 'capability', user_query: 'Find my last email', actor_id: 'user-1' }, {
     env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },

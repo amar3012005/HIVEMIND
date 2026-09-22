@@ -130,6 +130,20 @@ export async function decideRuntimeStage(input = {}, {
   if (!userQuery) return { status: 'defer', mode, stage, reason: 'decision_query_required' };
 
   const providerConfig = decisionGatewayProviderConfig(env);
+  // Post-receipt workflow transitions choose among a small, already-governed
+  // set of next operations. Their selection cannot execute a write: schema,
+  // explicit scope, approval, idempotency, and receipts remain graph-owned.
+  // A global 0.80 threshold is appropriate for initial admission but rejects
+  // useful calibrated choices in this narrower multi-outcome stage.
+  const workflowTransition = stage === 'workflow_transition';
+  const minProbability = finiteThreshold(
+    workflowTransition ? env.JEV_WORKFLOW_MIN_PROBABILITY : env.JEV_MIN_PROBABILITY,
+    workflowTransition ? 0.5 : 0.8,
+  );
+  const minMargin = finiteThreshold(
+    workflowTransition ? env.JEV_WORKFLOW_MIN_MARGIN : env.JEV_MIN_MARGIN,
+    workflowTransition ? 0.05 : 0.2,
+  );
   const gateway = new DecisionGateway({
     provider: provider || createOpenRouterJevProvider({
       apiKey: providerConfig.apiKey,
@@ -138,8 +152,8 @@ export async function decideRuntimeStage(input = {}, {
       model: providerConfig.model,
       timeoutMs: Number(env.JEV_TIMEOUT_MS || 3500),
     }),
-    minProbability: finiteThreshold(env.JEV_MIN_PROBABILITY, 0.8),
-    minMargin: finiteThreshold(env.JEV_MIN_MARGIN, 0.2),
+    minProbability,
+    minMargin,
   });
   const turn = createDecisionTurnState(input.turn_id ?? null);
   const fallback = async ({ reason }) => fallbackReceipt(reason);

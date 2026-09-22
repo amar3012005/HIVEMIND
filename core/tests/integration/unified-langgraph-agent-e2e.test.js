@@ -143,7 +143,7 @@ test('an explicit durable-save request uses the prior verified turn without a pl
   assert.match(result.response, /saved the dedicated memory/i);
 });
 
-test('a generic save-it continuation saves the completed answer without recall or a model turn', async () => {
+test('a referential save-all-as-one-memory continuation saves without recall or a model turn', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();
   const calls = [];
@@ -171,7 +171,7 @@ test('a generic save-it continuation saves the completed answer without recall o
   };
   const modelStep = async () => { throw new Error('save-it continuation must not invoke model or recall'); };
   const initial = await runUnifiedMetaAgent({
-    message: 'save it', useTools: false, prisma, ctx: runtimeCtx,
+    message: 'save all of it as one memory', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer, composio: {}, modelStep,
   });
   assert.equal(initial.status, 'needs_input');

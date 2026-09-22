@@ -24876,7 +24876,23 @@ exit \$RC
                 consumeChatContinuation, createChatContinuation,
                 claimDurableChatContinuation, settleDurableChatContinuation, releaseDurableChatContinuation,
               } = await import('./agent/chat-continuation-store.js');
-              const continuationMode = await cloudflareChatSessionClient.modeFor({ orgId, userId }).catch(() => 'off');
+              // A continuation is the same authenticated turn, not a new
+              // generic V2 request. Re-evaluate the bounded surface admission
+              // so a targeted unified graph resumes with its original runtime
+              // contract and scoped decision environment.
+              const continuationSurface = body?.client_surface === 'mobile' || body?.client_surface === 'desktop'
+                ? body.client_surface
+                : /\b(?:android|iphone|ipad|ipod|mobile)\b/i.test(String(req.headers['user-agent'] || '')) ? 'mobile' : 'desktop';
+              const continuationAdmission = await cloudflareChatSessionClient
+                .admissionFor({ orgId, userId, surface: continuationSurface })
+                .catch(() => ({ mode: 'off', nativeMetaMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false }));
+              const continuationMode = continuationAdmission.mode;
+              const continuationNativeMetaMode = continuationAdmission.nativeMetaMode === 'unified-meta-v2'
+                ? 'unified-meta-v2'
+                : 'off';
+              const continuationDecisionEnv = continuationNativeMetaMode === 'unified-meta-v2'
+                ? { ...process.env, JEV_DECISION_GATEWAY_MODE: 'active' }
+                : undefined;
               let continuationStore = null;
               let continuationTurn = null;
               let continuationClaim = null;
@@ -25054,6 +25070,11 @@ exit \$RC
                     historyTurns: stored.historyTurns ?? 6,
                     durableChatMode: continuationMode,
                     userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
+                    nativeMetaMode: continuationNativeMetaMode,
+                    decisionEnv: continuationDecisionEnv,
+                    unifiedDag: continuationAdmission.unifiedDag === true,
+                    orchestratorV2Mode: continuationAdmission.orchestratorV2Mode || 'off',
+                    compoundOrchestrator: continuationAdmission.compoundOrchestrator === true,
                     prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                     threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))

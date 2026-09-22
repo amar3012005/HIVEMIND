@@ -359,6 +359,17 @@ async function defaultMetaExecutor(args, ctx) {
       instruction: 'A durable save requires a neutral save.title and self-contained save.content. Use the current turn or recent conversation; do not replace this write with recall.',
     };
   }
+  // The model owns capsule construction, but the canonical boundary must
+  // reject a shallow placeholder instead of allowing it to become durable
+  // memory. This is capability-generic: every LangGraph save goes through
+  // the same validation, regardless of source or intent.
+  if (/^(?:saved memory|this memory|memory|untitled)$/i.test(compactText(save.title, 240).trim())) {
+    return {
+      successful: false,
+      error: 'hivemind_save_capsule_generic',
+      instruction: 'Use a specific title naming the principal subject, event, or decision. Include grounded content plus supported tags, entities, dates, and source_refs when available; do not use a generic title such as "Saved memory".',
+    };
+  }
   const toolArgs = {
     title: save.title, content: save.content,
     tags: Array.isArray(save.tags) && save.tags.length >= 2 ? save.tags : ['hivemind', 'user-confirmed'],
@@ -1207,6 +1218,20 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         receipts,
         steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'needs_input', summary: response }],
         result: outputShape({ ...state, receipts }, response, 'needs_input'),
+      };
+    }
+    if (call.name === 'hivemind_meta' && call.args.operation === 'save'
+      && receipt?.successful === false && receipt?.error === 'hivemind_save_capsule_generic') {
+      // A shallow capsule is a model-contract error, not a user-input
+      // checkpoint. Keep the same graph turn alive so the executor model can
+      // repair its tool call with the rich capsule contract.
+      const receipts = [...state.receipts, { tool: call.name, action: 'save', successful: false, error: receipt.error, data: null }];
+      return {
+        pendingTool: null,
+        callFingerprints: [...state.callFingerprints, fingerprint],
+        messages: [...state.messages, toolMessage(call, receipt)],
+        receipts,
+        steps: [...state.steps, { kind: 'tool', slug: 'hivemind_save_memory', status: 'retryable_error', summary: 'Memory capsule needs a specific grounded title' }],
       };
     }
     if (call.name === 'hivemind_meta' && call.args.operation === 'save' && receipt?.data?.needs_project_choice) {

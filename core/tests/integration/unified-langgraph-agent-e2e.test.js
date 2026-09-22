@@ -457,6 +457,36 @@ test('an explicit durable-save request crosses the JEV plan node before one gove
   assert.equal(result.run.scratch.plan.intent, 'hivemind_save');
 });
 
+test('the canonical save boundary rejects a generic placeholder capsule', async () => {
+  const prisma = fakePrisma();
+  const calls = [];
+  let modelTurns = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Save this important deployment decision', useTools: false, prisma,
+    ctx: {
+      ...ctx(prisma, 'reject-generic-save'),
+      conversationHistory: [{ role: 'assistant', content: 'The Core release is pinned to commit 067b4dad.' }],
+      _tracedDispatch: async (name, args) => {
+        calls.push([name, args]);
+        assert.notEqual(args.title, 'Saved memory');
+        return { saved: true, id: 'memory-rich-after-retry', title: args.title, scope: 'personal' };
+      },
+    },
+    checkpointer: new MemorySaver(), composio: {},
+    modelStep: async () => {
+      modelTurns += 1;
+      if (modelTurns === 1) return call('hivemind_meta', { operation: 'save', save: {
+        title: 'Saved memory', content: 'The Core release is pinned to commit 067b4dad.',
+      } }, 'generic-save');
+      return richSaveToolCall('rich-after-generic-rejection');
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(modelTurns, 2);
+  assert.equal(calls.length, 1);
+  assert.match(result.response, /Added .* company brain/i);
+});
+
 test('a referential save-all-as-one-memory continuation saves without recall or a model turn', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

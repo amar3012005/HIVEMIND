@@ -117,7 +117,14 @@ def main() -> None:
             "input": {
                 "name": "reconnect-canary",
                 "role": "user",
-                "content": [{"type": "text", "text": "Reply with exactly RECONNECT_OK. Do not use tools."}],
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Use the native TaskCreate tool to create exactly one task with subject "
+                        "Reconnect canary task and description Durable replay check. Then reply "
+                        "with exactly RECONNECT_OK. Do not use any other tools."
+                    ),
+                }],
             },
         },
         headers,
@@ -139,6 +146,17 @@ def main() -> None:
     text = "".join(event.get("delta") or "" for event in replayed if event.get("type") == "TEXT_BLOCK_DELTA")
     if "RECONNECT_OK" not in text:
         raise AssertionError(f"reconnect replay lost final text: {text!r}")
+
+    tool_starts = [
+        event for event in replayed
+        if event.get("type") == "TOOL_CALL_START"
+        and (event.get("tool_call_name") or event.get("tool_name") or event.get("name")) == "TaskCreate"
+    ]
+    if not tool_starts:
+        raise AssertionError(
+            "reconnect replay did not preserve a native TaskCreate call: "
+            f"{len(tool_starts)} identities={[event.get('id') or event.get('event_id') or event.get('source_event_id') for event in tool_starts]}"
+        )
 
     identities = [event.get("id") or event.get("event_id") for event in replayed]
     identities = [identity for identity in identities if identity]

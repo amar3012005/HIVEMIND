@@ -29,8 +29,9 @@ test('Jev decision adapter uses the configured Cloudflare custom-provider decisi
   assert.equal(calls[0].init.headers['cf-aig-byok-alias'], 'openrouter-production')
   assert.equal(calls[0].init.headers.Authorization, undefined)
   const body = JSON.parse(calls[0].init.body)
-  assert.equal(body.decisionsRequest.model, '~typesafe/jev-latest')
-  assert.deepEqual(Object.keys(body.decisionsRequest.questions.target.criteria), ['following', 'followers'])
+  assert.equal(body.model, '~typesafe/jev-latest')
+  assert.equal(typeof body.state, 'object')
+  assert.deepEqual(Object.keys(body.questions.target.criteria), ['following', 'followers'])
 })
 
 test('Jev adapter does not disclose provider errors or credentials', async () => {
@@ -45,4 +46,26 @@ test('Jev adapter does not disclose provider errors or credentials', async () =>
     assert.doesNotMatch(error.message, /never-disclose-this|upstream failure/)
     return true
   })
+})
+
+test('Jev adapter can be explicitly configured for a one-off direct OpenRouter canary', async () => {
+  let request
+  const engine = createJevDecisionEngine({
+    decisionsUrl: 'https://openrouter.example/api/alpha/decisions',
+    apiKey: 'direct-secret',
+    httpReferer: 'https://next.singulancelabs.com',
+    title: 'HIVE-MIND JEV canary',
+    fetchImpl: async (_url, init) => {
+      request = init
+      return new Response(JSON.stringify({
+        answers: { target: { choice: 'followers', probabilities: { followers: 0.9 } } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+
+  const decision = await engine.choose({ plan: {}, candidates })
+  assert.equal(decision.source, 'openrouter-jev')
+  assert.equal(request.headers.Authorization, 'Bearer direct-secret')
+  assert.equal(request.headers['HTTP-Referer'], 'https://next.singulancelabs.com')
+  assert.equal(request.headers['cf-aig-authorization'], undefined)
 })

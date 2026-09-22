@@ -80,6 +80,27 @@ provider decision produces a redacted `failed_closed` receipt and executes no
 browser action; it never falls back to a direct OpenRouter request. Keep the
 default DOM canary network-free.
 
+### One-off direct OpenRouter public Jev canary
+
+`public-jev-canary` is a separate, explicit evaluation path for validating the
+native Decisions API before the Cloudflare custom-provider route is corrected.
+It is not a runtime fallback and must not be used for WorkRun or AgentScope.
+The bounded job has only `read` and `navigate` permissions: it visits
+`example.com`, lets Jev choose the observed public `Learn more` link only when
+deterministic selection is unresolved, extracts IANA's visible `Example
+Domains` heading, and independently verifies that heading through a second
+public HTTP read. Its receipt stores only public URLs, decision metadata, and
+the redacted operator trace.
+
+```sh
+E2B_API_KEY=... HM_JEV_API_KEY=... npm run public-jev-canary
+```
+
+The direct credential exists solely in the launch environment of the
+short-lived sandbox and is never written to the template, source, screenshot,
+or receipt. Rotate any credential that was shared through chat before a future
+run.
+
 ## Scope
 
 This is a separate, opt-in E2B implementation. It deliberately does not change

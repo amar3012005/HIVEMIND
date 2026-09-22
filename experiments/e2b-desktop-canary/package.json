@@ -12,6 +12,7 @@
     "v1": "node src/run-v1.mjs",
     "build:dom-template": "node src/build-dom-template.mjs",
     "dom-canary": "node src/run-dom-canary.mjs",
+    "public-jev-canary": "node src/run-public-jev-canary.mjs",
     "resume": "node src/resume-lease.mjs",
     "open-stream": "node src/open-stream-proxy.mjs"
   },

@@ -5,7 +5,7 @@ import { Template, defaultBuildLogger } from 'e2b'
 if (!process.env.E2B_API_KEY) throw new Error('E2B_API_KEY is required in this process environment; never commit or log it.')
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const name = process.env.E2B_TEMPLATE_NAME ?? 'hm-computer-operator-canary-v4'
+const name = process.env.E2B_TEMPLATE_NAME ?? 'hm-computer-operator-canary-v5'
 
 // Preserve E2B's maintained graphical Desktop base. Node and Playwright are
 // added to a child template so the visible Xfce/Chrome handoff remains intact.
@@ -22,6 +22,7 @@ const template = Template({ fileContextPath: root })
   .makeDir('/home/user/hm-computer-worker', { user: 'user' })
   .copy('template/worker/package.json', '/home/user/hm-computer-worker/package.json', { user: 'user' })
   .copy('template/worker/canary.mjs', '/home/user/hm-computer-worker/canary.mjs', { user: 'user' })
+  .copy('template/worker/public-jev-canary.mjs', '/home/user/hm-computer-worker/public-jev-canary.mjs', { user: 'user' })
   .copy('src/operator', '/home/user/hm-computer-worker/operator', { user: 'user' })
   .setWorkdir('/home/user/hm-computer-worker')
   .runCmd('npm install --ignore-scripts --omit=dev --no-audit --no-fund')

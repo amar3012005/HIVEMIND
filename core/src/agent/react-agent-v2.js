@@ -3609,6 +3609,18 @@ export async function runReactAgentV2({
           onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
         }
         let finalText = durable.summary;
+        // The durable path previously emitted only finish, which made a
+        // correctly streamed transport appear frozen until completion. Keep
+        // the canonical final event, but expose bounded sentence deltas so
+        // SSE clients can render progressively without leaking tool payloads.
+        onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+        const chunks = String(finalText || '').match(/[^.!?\n]+[.!?]+(?:\s+|$)|[^\n]+\n+|[^.!?\n]+$/g) || [String(finalText || '')];
+        for (const delta of chunks) {
+          if (!delta) continue;
+          onEvent?.({ type: 'answer_delta', schema_version: 1, delta, validated: true });
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
         onEvent?.({ type: 'finish', text: finalText });
         onEvent?.({ type: 'turn_completed', grounded: false, operation: 'durable_agent', success: durable.status !== 'error' });
         return {

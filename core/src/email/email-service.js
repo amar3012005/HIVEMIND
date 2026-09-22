@@ -230,7 +230,7 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
   return { ok: false, provider: 'cloudflare', retryable: true, error: 'send_failed' };
 }
 
-async function sendWithGmail({ connectionId, to, from, rendered, templateId, threadHeaders, attachments = [] }) {
+async function sendWithGmail({ connectionId, to, from, rendered, templateId, threadHeaders, attachments = [], maxAttempts = 2 }) {
   const raw = buildRawMessage({
     to,
     from,
@@ -240,7 +240,8 @@ async function sendWithGmail({ connectionId, to, from, rendered, templateId, thr
     threadHeaders,
     attachments,
   });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const attempts = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const bearer = await fetchBearerFromNango(GMAIL_PROVIDER, connectionId);
       const res = await fetch(GMAIL_SEND_URL, {
@@ -260,12 +261,12 @@ async function sendWithGmail({ connectionId, to, from, rendered, templateId, thr
       log(transient && attempt === 0 ? 'warn' : 'error', 'send_failed', {
         provider: 'gmail_nango', templateId, recipientDomain: recipientDomain(to), status: res.status, attempt,
       });
-      if (!transient || attempt === 1) return { ok: false, provider: 'gmail_nango', retryable: transient, error: `http_${res.status}` };
+      if (!transient || attempt === attempts - 1) return { ok: false, provider: 'gmail_nango', retryable: transient, error: `http_${res.status}` };
     } catch (err) {
       log(attempt === 0 ? 'warn' : 'error', 'send_error', {
         provider: 'gmail_nango', templateId, recipientDomain: recipientDomain(to), error: err?.name || 'request_error', attempt,
       });
-      if (attempt === 1) return { ok: false, provider: 'gmail_nango', retryable: true, error: 'request_failed' };
+      if (attempt === attempts - 1) return { ok: false, provider: 'gmail_nango', retryable: true, error: 'request_failed' };
     }
     await new Promise((resolve) => setTimeout(resolve, 600));
   }
@@ -398,7 +399,7 @@ function buildRawMessage({ to, from, subject, text, html, threadHeaders, attachm
  *   root on the first send, then passes it back in on every later send.
  * @returns {Promise<{ok: boolean, skipped?: boolean, messageId?: string, error?: string}>}
  */
-export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread, attachments = [], notification } = {}) {
+export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread, attachments = [], notification, providerAttempts = 2, providerFallback = true } = {}) {
   if (!to) return { ok: false, skipped: true, error: 'no_recipient' };
   if (!validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
@@ -433,17 +434,17 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
   };
 
   if (providers.cloudflare) {
-    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders, attachments });
+    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders, attachments, maxAttempts: providerAttempts });
     // Cloudflare rejects our self-minted Message-ID (see sendWithCloudflare) —
     // prefer its own returned message_id for thread continuity; only fall
     // back to our mint if Cloudflare's response is somehow missing one.
-    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) {
+    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail || !providerFallback) {
       const result = { ...cloudflareResult, messageId: cloudflareResult.messageId || mintedMessageId };
       return projectAcceptedEmail({ to, rendered, templateId, result, notification });
     }
     log('warn', 'provider_fallback', { from: 'cloudflare', to: 'gmail_nango', templateId, recipientDomain: recipientDomain(to) });
   }
-  const gmailResult = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, threadHeaders, attachments });
+  const gmailResult = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, threadHeaders, attachments, maxAttempts: providerAttempts });
   const result = { ...gmailResult, messageId: gmailResult.messageId || mintedMessageId };
   return projectAcceptedEmail({ to, rendered, templateId, result, notification });
 }
@@ -459,7 +460,7 @@ export async function sendRenderedSystemEmail({ to, rendered, from, connectionId
     const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {}, maxAttempts: providerAttempts });
     if (result.ok || result.permanent || !gmail || !providerFallback) return projectAcceptedEmail({ to, rendered, templateId, result, notification });
   }
-  const result = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {} });
+  const result = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {}, maxAttempts: providerAttempts });
   return projectAcceptedEmail({ to, rendered, templateId, result, notification });
 }
 

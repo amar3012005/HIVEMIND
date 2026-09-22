@@ -45,6 +45,7 @@ model User {
   identities                UserIdentity[]
   authIdentityEvents        AuthIdentityEvent[]
   harnessSessions           HarnessSession[]
+  accountAdminNotifications AccountAdminNotification[]
 
   @@map("users")
 }
@@ -2644,6 +2645,33 @@ model AuditLog {
   @@index([userId, createdAt(sort: Desc)], map: "audit_logs_user_created_idx")
   @@index([requestId])
   @@map("audit_logs")
+}
+
+/// Provider-facing account-created admin notifications. The recipient address
+/// is never persisted directly: only a hash and masked operational hint are
+/// retained so callback replay cannot issue a duplicate email.
+model AccountAdminNotification {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String   @map("user_id") @db.Uuid
+  recipientHash       String   @map("recipient_hash") @db.Char(64)
+  recipientHint       String   @map("recipient_hint") @db.VarChar(160)
+  notificationType    String   @default("account_created") @map("notification_type") @db.VarChar(64)
+  status              String   @default("reserved") @db.VarChar(32)
+  provider            String?  @db.VarChar(64)
+  deliveryStatus      String?  @map("delivery_status") @db.VarChar(64)
+  providerReceipts    Json     @default("[]") @map("provider_receipts")
+  providerAttempts    Int      @default(0) @map("provider_attempts")
+  sendLeaseUntil      DateTime? @map("send_lease_until") @db.Timestamptz(6)
+  submissionStartedAt DateTime? @map("submission_started_at") @db.Timestamptz(6)
+  acceptedAt          DateTime? @map("accepted_at") @db.Timestamptz(6)
+  rejectedAt          DateTime? @map("rejected_at") @db.Timestamptz(6)
+  lastError           String?  @map("last_error") @db.VarChar(240)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, recipientHash, notificationType], map: "account_admin_notifications_once_uq")
+  @@map("account_admin_notifications")
 }
 
 /// GDPR right to portability and erasure requests

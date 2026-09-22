@@ -110,6 +110,7 @@ import { advanceRoomBrief, claimRoomResponse, patchRoomState, releaseRoomRespons
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
+import { createSignupAdminNotificationDispatcher } from './email/signup-admin-notification-dispatcher.js';
 import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { narrativeLanguageInstruction, normalizePreferredLanguage } from './hyper/preferred-language.js';
@@ -318,6 +319,20 @@ configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
 const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
+const signupAdminNotifications = createSignupAdminNotificationDispatcher({ prisma, sendEmail: sendSystemEmail });
+
+// Account creation must never wait on an administrator's mailbox. The
+// dispatcher owns a durable provider-facing ledger, so callback replay only
+// observes the existing receipt instead of notifying administrators twice.
+function queueSignupAdminNotification(user, source) {
+  setImmediate(() => signupAdminNotifications.deliver(user, { source })
+    .then((delivery) => {
+      if (!delivery.ok && !delivery.skipped) {
+        console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'admin_signup_notification_failed', userId: user?.id || null, error: delivery.error || 'delivery_failed' }));
+      }
+    })
+    .catch((error) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'admin_signup_notification_failed', userId: user?.id || null, error: error.message }))));
+}
 async function taraProviderFor(orgId) {
   const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId }, select: { defaultProvider: true, revision: true, grokConfig: true } }).catch(() => null);
   const provider = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
@@ -4950,6 +4965,7 @@ const server = http.createServer(async (req, res) => {
       const verified = await emailIdentity.verify({ challengeId: String(body.challenge_id), code: body?.code, linkToken: body?.link_token });
       if (!verified.ok) return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
       let user = await prisma.user.findUnique({ where: { email: verified.email } });
+      let createdAccount = false;
       if (user?.deletedAt) return jsonResponse(res, { ok: false, error: 'This account is unavailable.' }, 403);
       if (!user) {
         const admission = verified.challenge.intent === 'register'
@@ -4957,6 +4973,7 @@ const server = http.createServer(async (req, res) => {
           : null;
         if (!admission) return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
         user = await upsertVerifiedEmailUser(verified.email);
+        createdAccount = true;
       } else {
         await prisma.userIdentity.upsert({
           where: { provider_providerSubject: { provider: 'email', providerSubject: verified.email } },
@@ -4968,6 +4985,7 @@ const server = http.createServer(async (req, res) => {
       const membership = await resolveSessionOrg(user.id);
       if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
+      if (createdAccount) queueSignupAdminNotification(user, 'email_signup');
       // A newly authenticated person without an organization has reached the
       // next activation stage. Generation invalidates any queued invite mail.
       if (!membership.org) {
@@ -5197,6 +5215,7 @@ const server = http.createServer(async (req, res) => {
         locale: userInfo.locale,
       });
       console.log(`[google-auth] User upserted - id: ${user.id}, email: ${user.email}`);
+      if (!existingPlatformUser) queueSignupAdminNotification(user, 'google_signup');
 
       const { org } = await resolveCurrentOrg(user.id);
       console.log(`[google-auth] Organization resolved - orgId: ${org?.id || 'none'}`);
@@ -5571,6 +5590,7 @@ const server = http.createServer(async (req, res) => {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel(userInfo);
+      if (!existingPlatformUser) queueSignupAdminNotification(user, 'zitadel_signup');
       const { org } = await resolveCurrentOrg(user.id);
 
       // JIT Provisioning: if org resolved and OrgSsoConfig has jitProvisioning=true,

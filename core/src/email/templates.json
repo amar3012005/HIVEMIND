@@ -48,6 +48,13 @@
     "preheader": "Your enterprise AI Operating System is ready.",
     "text": "Hi {{name}},\n\nWelcome back to {{orgName}}'s HIVEMIND workspace.\n\nOpen HIVEMIND:\n{{appUrl}}\n\nThe HIVEMIND team"
   },
+  "admin_new_account_created": {
+    "layout": "singulance_transactional",
+    "subject": "New HIVEMIND account: {{userName}}",
+    "preheader": "{{userName}} has created a HIVE-MIND account.",
+    "text": "A new HIVE-MIND account was created.\n\nName: {{userName}}\nEmail: {{userEmail}}\nSign-up path: {{authSource}}\nCreated: {{createdAt}}\n\nThis is an internal operational notification.",
+    "html": "<div style=\"margin:0 0 16px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:2px;color:#117dff\">ACCOUNT CREATED</div><h1 style=\"margin:0 0 18px;font-family:'Space Grotesk',Arial,sans-serif;font-size:28px;line-height:36px;color:#0a0a0a\">A new HIVE-MIND account was created</h1><p style=\"margin:0 0 18px;font-size:16px;line-height:25px;color:#525252\"><strong>{{userName}}</strong> has just created a HIVE-MIND account.</p><div style=\"padding:16px 18px;background:#f6f8ff;border-left:3px solid #117dff;font-size:14px;line-height:23px;color:#414141\"><strong>Name</strong>: {{userName}}<br><strong>Email</strong>: {{userEmail}}<br><strong>Sign-up path</strong>: {{authSource}}<br><strong>Created</strong>: {{createdAt}}</div><p style=\"margin:22px 0 0;font-size:12px;line-height:20px;color:#7b7b7b\">Internal operational notification. No action is required.</p>"
+  },
   "team_invite": {
     "layout": "singulance_transactional",
     "subject": "{{orgName}} is on HIVEMIND — you're invited 🐝",

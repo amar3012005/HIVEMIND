@@ -10,6 +10,22 @@ type RecallFlagEnv = FlagEnv & {
 type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
 type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
 type EntityDiscoveryFlagEnv = FlagEnv & { ENTITY_DISCOVERY_FLAG?: string };
+type EntityProfileFlagEnv = FlagEnv & { ENTITY_PROFILE_PROJECTION_FLAG?: string; ENTITY_PROFILE_PROJECTION_ENABLED?: string };
+
+export async function evaluateEntityProfileMode(env: EntityProfileFlagEnv, orgId: string, userId: string): Promise<'off' | 'shadow' | 'dynamic_auto' | 'review_only'> {
+  if (String(env.ENTITY_PROFILE_PROJECTION_ENABLED) !== 'true' || !validUuid(orgId)) return 'off';
+  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
+  try {
+    const details = await env.FLAGS.getStringDetails(
+      env.ENTITY_PROFILE_PROJECTION_FLAG || 'entity_profile_projection_v1', 'off',
+      { targetingKey: `${orgId}:${userId || 'workflow'}`, org_id: orgId, user_id: userId || null, environment: env.ENVIRONMENT },
+    );
+    return ['shadow', 'dynamic_auto', 'review_only'].includes(details.value) ? details.value as 'shadow' | 'dynamic_auto' | 'review_only' : 'off';
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'entity_profile_projection_flag_error', org_id: orgId, message: error instanceof Error ? error.message : String(error) }));
+    return 'off';
+  }
+}
 
 export async function evaluateGovernedRoomCanary(
   env: GovernedRoomFlagEnv, orgId: string, userId: string, email: string,

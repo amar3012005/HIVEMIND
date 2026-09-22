@@ -58,6 +58,8 @@ import { resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
 import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
+import { entityProfileMode, getEntityProfileDossier, projectEntityProfile } from './memory/entity-profile-projection.js';
+import { admitEntityProfileAttempt, completeEntityProfileAttempt, failEntityProfileAttempt } from './memory/entity-profile-projection-attempts.js';
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
 import { admitProjectionAttempt, beginProjectionStage, finishCoreFallback, finishProjectionStage, projectionAttemptStatus, releaseProjectionStage, selectCoreFallback } from './memory/canonical-projection-attempts.js';
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
@@ -6649,6 +6651,32 @@ exit \$RC
     if (await handleCanonicalProjectionStageCallback({ req, res, pathname })) return;
     return jsonResponse(res, { error: 'not_found' }, 404);
   }
+  if (pathname.match(/^\/internal\/entity-profile-projection\/v1\/entities\/[^/]+\/project$/) && req.method === 'POST') {
+    const match = pathname.match(/^\/internal\/entity-profile-projection\/v1\/entities\/([^/]+)\/project$/);
+    let rawBody;
+    try { rawBody = (await readBoundedBuffer(req, 64 * 1024)).toString('utf8'); } catch { return jsonResponse(res, { error: 'invalid_body' }, 400); }
+    const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+    if (!verified.ok) return jsonResponse(res, { error: 'invalid_projection_signature' }, 401);
+    if (!(await consumeCanonicalProjectionNonce(verified.nonce))) return jsonResponse(res, { error: 'replayed_projection_nonce' }, 409);
+    let payload; try { payload = JSON.parse(rawBody); } catch { return jsonResponse(res, { error: 'invalid_json' }, 400); }
+    const entityId = match?.[1]; const requestedOrg = String(payload?.org_id || '');
+    const mode = entityProfileMode({ evaluatedMode: payload?.required_projection });
+    if (!entityId || !requestedOrg || mode === 'off') return jsonResponse(res, { error: 'invalid_projection_request' }, 400);
+    const sourceWatermark = String(payload?.source_watermark || '').slice(0, 128);
+    if (!sourceWatermark) return jsonResponse(res, { error: 'source_watermark_required' }, 400);
+    let attempt;
+    try {
+      const admitted = await admitEntityProfileAttempt({ prisma, organizationId: requestedOrg, entityId, sourceWatermark, admittedMode: mode });
+      attempt = admitted.attempt;
+      if (admitted.reused && attempt.status === 'COMPLETED') return jsonResponse(res, { ok: true, idempotent: true, receipt: attempt.stageReceipts?.complete || null });
+      const result = await projectEntityProfile({ prisma, organizationId: requestedOrg, entityId, mode, sourceWatermark });
+      await completeEntityProfileAttempt({ prisma, attempt, receipt: result });
+      return jsonResponse(res, { ok: true, receipt: result });
+    } catch (error) {
+      if (attempt) await failEntityProfileAttempt({ prisma, attempt, error }).catch(() => null);
+      return jsonResponse(res, { error: error.message }, 503);
+    }
+  }
 
   // API Routes
   // /v2/chat is an isolated native-orchestrator acceptance route. It enters
@@ -11065,6 +11093,61 @@ exit \$RC
         const segs = rest.split('/');
         const entityId = segs[0];
         if (!entityId) return jsonResponse(res, { error: 'entity id required' }, 400);
+        // Entity dossiers are an authorized read model. The organization check is
+        // intentionally first: an ID from another tenant is indistinguishable
+        // from a missing entity, and no fact/evidence query runs before it.
+        if (segs[1] === 'profile') {
+          const entity = await prisma.canonicalEntity.findFirst({ where: { id: entityId, organizationId: orgId } });
+          if (!entity) return jsonResponse(res, { error: 'not found' }, 404);
+          if (req.method === 'GET') {
+            try {
+              const dossier = await getEntityProfileDossier({ prisma, organizationId: orgId, entityId, includeEvidence: url.searchParams.get('evidence') === 'true' });
+              return jsonResponse(res, dossier || { error: 'not found' }, dossier ? 200 : 404);
+            } catch (e) { return jsonResponse(res, { error: e.message }, 500); }
+          }
+          if (segs[2] === 'project' && req.method === 'POST') {
+            const mode = entityProfileMode({ evaluatedMode: body?.mode || 'review_only' });
+            if (mode === 'off') return jsonResponse(res, { error: 'entity_profile_projection_disabled' }, 403);
+            try {
+              const watermark = String(body?.source_watermark || `manual:${Date.now()}`).slice(0, 128);
+              const result = await projectEntityProfile({ prisma, organizationId: orgId, entityId, mode, sourceWatermark: watermark });
+              return jsonResponse(res, result, 202);
+            } catch (e) { return jsonResponse(res, { error: e.message }, 500); }
+          }
+          if (!(await canManageCognition(prisma, { orgId, userId, principal }))) return jsonResponse(res, { error: 'forbidden' }, 403);
+          if (segs[2] === 'reviews' && segs[4] && req.method === 'POST') {
+            const review = await prisma.entityProfileReview.findFirst({ where: { id: segs[3], organizationId: orgId, profileFact: { entityId } } });
+            if (!review) return jsonResponse(res, { error: 'not found' }, 404);
+            const action = segs[4];
+            if (!['approve', 'reject'].includes(action)) return jsonResponse(res, { error: 'invalid_action' }, 400);
+            await prisma.$transaction([
+              prisma.entityProfileReview.update({ where: { id: review.id }, data: { status: action === 'approve' ? 'approved' : 'rejected', resolvedByUserId: userId, resolutionNote: String(body?.note || '').slice(0, 2000), resolvedAt: new Date() } }),
+              prisma.entityProfileFact.update({ where: { id: review.profileFactId }, data: { status: action === 'approve' ? 'active' : 'rejected' } }),
+            ]);
+            return jsonResponse(res, { ok: true, action });
+          }
+          if (segs[2] === 'link-user' && req.method === 'POST') {
+            const targetUserId = String(body?.user_id || '');
+            const method = String(body?.verification_method || 'admin_verified');
+            const target = await prisma.user.findFirst({ where: { id: targetUserId, organizations: { some: { orgId, isActive: true } } } });
+            if (!target) return jsonResponse(res, { error: 'verified organization user required' }, 400);
+            const link = await prisma.userEntityIdentityLink.upsert({
+              where: { organizationId_userId_entityId: { organizationId: orgId, userId: targetUserId, entityId } },
+              update: { verificationMethod: method, verifiedAt: new Date(), revokedAt: null },
+              create: { organizationId: orgId, userId: targetUserId, entityId, verificationMethod: method, verifiedAt: new Date() },
+            });
+            return jsonResponse(res, { link });
+          }
+          if (segs[2] === 'correct' && req.method === 'POST') {
+            const prior = await prisma.entityProfileFact.findFirst({ where: { id: body?.profile_fact_id, entityId, organizationId: orgId } });
+            const claim = await prisma.canonicalClaim.findFirst({ where: { id: body?.canonical_claim_id, organizationId: orgId, OR: [{ subjectEntityId: entityId }, { objectEntityId: entityId }] } });
+            if (!prior || !claim) return jsonResponse(res, { error: 'valid profile fact and canonical claim required' }, 400);
+            const next = await prisma.entityProfileFact.create({ data: { organizationId: orgId, entityId, canonicalClaimId: claim.id, factClass: prior.factClass, factKey: `${prior.factKey}:correction:${Date.now()}`, value: body?.value ?? prior.value, confidence: claim.confidence, freshnessAt: claim.knownAt, status: 'review', decision: 'review', sourceWatermark: `correction:${claim.id}`, supersedesFactId: prior.id } });
+            await prisma.entityProfileReview.create({ data: { organizationId: orgId, profileFactId: next.id, kind: 'correction', requestedByUserId: userId } });
+            return jsonResponse(res, { fact: next, review_required: true }, 201);
+          }
+          return jsonResponse(res, { error: 'not found' }, 404);
+        }
         if (segs[1] === 'merge' && req.method === 'POST') {
           try {
             const dstId = body?.target_entity_id || body?.dst_id;

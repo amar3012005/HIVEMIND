@@ -46,6 +46,7 @@ model User {
   authIdentityEvents        AuthIdentityEvent[]
   harnessSessions           HarnessSession[]
   accountAdminNotifications AccountAdminNotification[]
+  entityIdentityLinks       UserEntityIdentityLink[] @relation("UserEntityIdentityLinks")
 
   @@map("users")
 }
@@ -4403,6 +4404,8 @@ model CanonicalEntity {
   memoryLinks MemoryEntityLink[]
   subjectClaims CanonicalClaim[] @relation("CanonicalClaimSubject")
   objectClaims  CanonicalClaim[] @relation("CanonicalClaimObject")
+  profileFacts  EntityProfileFact[]
+  identityLinks UserEntityIdentityLink[] @relation("EntityUserIdentityLinks")
 
   @@index([organizationId, entityKind])
   @@unique([organizationId, identityKey], map: "canonical_entities_org_identity_key")
@@ -4476,6 +4479,7 @@ model CanonicalClaim {
   supersedes          CanonicalClaim? @relation("ClaimSupersession", fields: [supersedesClaimId], references: [id], onDelete: SetNull)
   supersededBy        CanonicalClaim[] @relation("ClaimSupersession")
   evidence            ClaimEvidenceLink[]
+  profileFacts        EntityProfileFact[]
 
   @@unique([organizationId, claimKey])
   @@index([organizationId, subjectEntityId, predicateId])
@@ -4501,6 +4505,113 @@ model ClaimEvidenceLink {
   @@unique([claimId, memoryId, sourceDigest])
   @@index([memoryId])
   @@map("claim_evidence_links")
+}
+
+/// Read-model facts for an entity dossier.  This is never an authority: every
+/// row points back to a canonical claim and immutable supporting evidence.
+model EntityProfileFact {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId      String   @map("organization_id") @db.Uuid
+  entityId            String   @map("entity_id") @db.Uuid
+  canonicalClaimId    String   @map("canonical_claim_id") @db.Uuid
+  factClass           String   @map("fact_class") @db.VarChar(20)
+  factKey             String   @map("fact_key") @db.VarChar(160)
+  value               Json
+  confidence          Decimal  @db.Decimal(4, 3)
+  freshnessAt         DateTime @map("freshness_at") @db.Timestamptz(6)
+  status              String   @default("active") @db.VarChar(20)
+  decision            String   @default("core") @db.VarChar(20)
+  projectionVersion   Int      @default(1) @map("projection_version")
+  sourceWatermark     String   @map("source_watermark") @db.VarChar(128)
+  supersedesFactId    String?  @map("supersedes_fact_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  entity              CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  claim               CanonicalClaim @relation(fields: [canonicalClaimId], references: [id], onDelete: Restrict)
+  evidence            EntityProfileFactEvidence[]
+  reviews             EntityProfileReview[]
+  supersedes          EntityProfileFact? @relation("EntityProfileFactSupersession", fields: [supersedesFactId], references: [id], onDelete: SetNull)
+  supersededBy        EntityProfileFact[] @relation("EntityProfileFactSupersession")
+
+  @@unique([entityId, canonicalClaimId, factKey, projectionVersion], map: "entity_profile_facts_entity_claim_key_version")
+  @@index([organizationId, entityId, status, freshnessAt])
+  @@map("entity_profile_facts")
+}
+
+/// Immutable evidence copied by reference from canonical claim evidence.
+model EntityProfileFactEvidence {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  profileFactId String   @map("profile_fact_id") @db.Uuid
+  memoryId      String   @map("memory_id") @db.Uuid
+  documentId    String?  @map("document_id") @db.Uuid
+  segmentId     String?  @map("segment_id") @db.Uuid
+  exactQuote    String?  @map("exact_quote")
+  sourceDigest  String   @map("source_digest") @db.VarChar(64)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  profileFact   EntityProfileFact @relation(fields: [profileFactId], references: [id], onDelete: Cascade)
+
+  @@unique([profileFactId, memoryId, sourceDigest])
+  @@index([memoryId])
+  @@map("entity_profile_fact_evidence")
+}
+
+/// Immutable projection admission/retry ledger keyed by entity and source state.
+model EntityProfileProjectionAttempt {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId     String   @map("organization_id") @db.Uuid
+  entityId           String   @map("entity_id") @db.Uuid
+  sourceWatermark    String   @map("source_watermark") @db.VarChar(128)
+  admittedMode       String   @map("admitted_mode") @db.VarChar(20)
+  workflowInstanceId String?  @map("workflow_instance_id") @db.VarChar(200)
+  status             String   @default("ADMISSION_PENDING") @db.VarChar(32)
+  stageReceipts      Json     @default("{}") @map("stage_receipts")
+  retryCount         Int      @default(0) @map("retry_count")
+  lastError          String?  @map("last_error") @db.Text
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt        DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@unique([entityId, sourceWatermark], map: "entity_profile_attempt_entity_watermark")
+  @@unique([workflowInstanceId], map: "entity_profile_attempt_workflow")
+  @@index([organizationId, status, updatedAt])
+  @@map("entity_profile_projection_attempts")
+}
+
+/// Human review is required for static, relationship, ambiguity, and conflicts.
+model EntityProfileReview {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId     String   @map("organization_id") @db.Uuid
+  profileFactId      String   @map("profile_fact_id") @db.Uuid
+  kind               String   @db.VarChar(32)
+  status             String   @default("pending") @db.VarChar(20)
+  requestedByUserId  String?  @map("requested_by_user_id") @db.Uuid
+  resolvedByUserId   String?  @map("resolved_by_user_id") @db.Uuid
+  resolutionNote     String?  @map("resolution_note") @db.Text
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt         DateTime? @map("resolved_at") @db.Timestamptz(6)
+  profileFact        EntityProfileFact @relation(fields: [profileFactId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@map("entity_profile_reviews")
+}
+
+/// An explicit verified link only. It deliberately does not project entity facts
+/// into UserProfile and does not grant extra entity visibility.
+model UserEntityIdentityLink {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId     String   @map("organization_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  entityId           String   @map("entity_id") @db.Uuid
+  verificationMethod String   @map("verification_method") @db.VarChar(40)
+  verifiedAt         DateTime @default(now()) @map("verified_at") @db.Timestamptz(6)
+  revokedAt          DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user               User     @relation("UserEntityIdentityLinks", fields: [userId], references: [id], onDelete: Cascade)
+  entity             CanonicalEntity @relation("EntityUserIdentityLinks", fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId, entityId])
+  @@index([organizationId, entityId])
+  @@map("user_entity_identity_links")
 }
 
 model MemoryProjectionState {

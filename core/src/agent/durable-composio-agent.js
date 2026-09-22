@@ -1886,7 +1886,20 @@ export async function runDurableComposioAgent({
           turn_id: run.id,
           user_query: message,
           actor_id: ctx?.userId,
-          context: run.scratch.conversation_context || null,
+          context: {
+            recent_turns: run.scratch.conversation_context || [],
+            authenticated_scope: { user_id: ctx?.userId || null, org_id: ctx?.orgId || null, project_id: ctx?.projectId || null },
+            current_intent: intent || null,
+            current_phase: 'composio_argument_review',
+            workflow: {
+              intent: intent || null,
+              phase: 'composio_argument_review',
+              requested_outcomes: (run.scratch.outcomes || []).slice(0, 12).map(outcome => ({ id: outcome.id, status: outcome.status, depends_on: outcome.depends_on || [] })),
+              completed_receipts: (run.steps || []).slice(-8).map(step => ({ tool: step.slug || step.tool || null, status: step.status || null, kind: step.kind || null })),
+              selected_tool_slugs: (run.scratch.primary_tool_slugs || []).slice(-12),
+              connection_scope: run.scratch.connection_scope || null,
+            },
+          },
           selected_tool: {
             slug: call.slug,
             toolkit: toolkitFromSlug(call.slug),
@@ -2059,7 +2072,20 @@ export async function runDurableComposioAgent({
           turn_id: run.id,
           user_query: message,
           actor_id: ctx?.userId,
-          context: run.scratch.conversation_context || null,
+          context: {
+            recent_turns: run.scratch.conversation_context || [],
+            authenticated_scope: { user_id: ctx?.userId || null, org_id: ctx?.orgId || null, project_id: ctx?.projectId || null },
+            current_intent: intent || null,
+            current_phase: 'composio_selection',
+            workflow: {
+              intent: intent || null,
+              phase: 'composio_selection',
+              requested_outcomes: (run.scratch.outcomes || []).slice(0, 12).map(outcome => ({ id: outcome.id, status: outcome.status, depends_on: outcome.depends_on || [] })),
+              completed_receipts: (run.steps || []).slice(-8).map(step => ({ tool: step.slug || step.tool || null, status: step.status || null, kind: step.kind || null })),
+              selected_tool_slugs: (run.scratch.primary_tool_slugs || []).slice(-12),
+              connection_scope: run.scratch.connection_scope || null,
+            },
+          },
           discovery: {
             sessionId: discovery.sessionId || null,
             workflowSessionId: discovery.workflowSessionId || null,

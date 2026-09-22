@@ -368,6 +368,31 @@ function workflowId(discovery) {
   return discovery?.workflowSessionId || discovery?.searchResponse?.data?.session?.id || discovery?.session?.id || null;
 }
 
+// Receipts can hold provider payloads that are valuable to the final answer
+// but inappropriate for a routing decision.  JEV needs only completion and
+// dependency evidence to select the next graph transition.
+function decisionReceiptSummaries(receipts = []) {
+  return (Array.isArray(receipts) ? receipts : []).slice(-8).map(receipt => ({
+    tool: compactText(receipt?.tool || receipt?.slug || '', 160),
+    action: compactText(receipt?.action || '', 80),
+    status: compactText(receipt?.status || '', 80),
+    successful: receipt?.successful !== false,
+    error: receipt?.successful === false ? compactText(receipt?.error || '', 240) : null,
+  }));
+}
+
+function jevWorkflowContext(state, phase) {
+  return {
+    intent: state.plan?.intent || null,
+    phase,
+    requested_outcomes: state.plan?.intent === 'multi_task' ? ['complete every requested outcome in dependency order'] : [],
+    completed_receipts: decisionReceiptSummaries(state.receipts),
+    selected_tool_slugs: state.selectedSlugs.slice(-12),
+    connection_scope: state.connectionScope || null,
+    pending_action: state.pendingApproval ? 'approval' : state.pendingMemoryScope ? 'memory_scope' : state.pendingConnection ? 'connection' : null,
+  };
+}
+
 function narrowConnectedSearch(compact, slug) {
   return {
     ...compact,
@@ -453,14 +478,18 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
       try {
         decision = await decisionStage({
           runtime: 'legacy', stage: 'composio_selection', turn_id: state.runId,
-          user_query: ctx.requestMessage, actor_id: ctx.userId, context: state.context,
+          user_query: ctx.requestMessage, actor_id: ctx.userId,
           discovery: {
             sessionId: discovery.sessionId,
             workflowSessionId: discovery.workflowSessionId,
             tools: discovery.tools,
             toolkitConnectionStatuses: discovery.toolkitConnectionStatuses || {},
           },
-          progress: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
+          // Context is a small durable graph projection, while discovery is
+          // separately projected by the decision gateway.  Neither exposes
+          // a raw provider schema or result body to JEV.
+          context: { ...state.context, current_intent: state.plan?.intent || null, current_phase: 'composio_selection', workflow: jevWorkflowContext(state, 'composio_selection') },
+          progress: { completed_receipts: decisionReceiptSummaries(state.receipts), selected_tool_slugs: state.selectedSlugs.slice(-12) },
         }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
       } catch (error) {
         decision = { status: 'defer', selected: null, authoritative: false,
@@ -786,6 +815,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         system_policy: PLAN_SYSTEM_CONTRACT,
         recent_turns: safeHistory(ctx.conversationHistory, 5),
         explicit_save_language: explicitSave,
+        authenticated_scope: { user_id: ctx.userId || null, org_id: ctx.orgId || null, project_id: ctx.projectId || null },
+        current_phase: 'capability',
+        workflow: { phase: 'capability', requested_outcomes: [], completed_receipts: [], selected_tool_slugs: [] },
       },
       requestedToolkits,
       messages,
@@ -811,7 +843,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         observation: {
           completed_receipts: state.receipts.slice(-8),
           selected_tool_slugs: state.selectedSlugs.slice(-12),
-          prior_receipts: (ctx.priorReceipts || []).slice(-8),
+          prior_receipts: decisionReceiptSummaries(ctx.priorReceipts || []),
         },
         app_mentions: state.requestedToolkits,
         operational_app_intent: state.requestedToolkits.length > 0,

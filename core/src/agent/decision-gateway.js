@@ -4,6 +4,66 @@ const DEFAULT_MODEL = '~typesafe/jev-latest';
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const clip = (value, limit = 1200) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 
+// JEV is a typed decision service, not a second chat agent.  Every caller
+// must therefore give it the same small, explicit orientation packet instead
+// of letting each graph node accidentally pass a different history shape.
+// Keep provider schemas, credentials, and raw connected-app results out of
+// this packet; those remain with the typed executor and receipt projector.
+const STAGE_CONTEXT_CONTRACTS = Object.freeze({
+  capability: 'Choose one initial intent from the user request, authenticated context, recent turns, and prior receipts. Do not execute or infer a provider action.',
+  composio_selection: 'Choose one returned connected-app capability that advances the current unblocked outcome. Do not infer arguments, execute, or skip unmet dependencies.',
+  composio_argument_review: 'Review only whether proposed schema-bound arguments preserve the request. Do not construct arguments, approve a write, or execute.',
+  hivemind_meta_selection: 'Choose one read-only HIVE meta operation supported by the request and workflow state. Do not create or mutate memory.',
+  hivemind_recall_filters: 'Choose retrieval filters only. Do not formulate a new request, retrieve records, or make a final claim.',
+});
+
+function compactDecisionTurns(value) {
+  const rows = Array.isArray(value) ? value : [];
+  return rows.filter(row => ['user', 'assistant'].includes(row?.role) && typeof row?.content === 'string')
+    .slice(-10).map(row => ({ role: row.role, content: clip(row.content, 1400) }));
+}
+
+/**
+ * Build the context shared by every JEV stage.  This is intentionally an
+ * allow-list: graph state can contain full schemas and provider results, but
+ * JEV needs only the decision-relevant projection.
+ */
+export function buildJevDecisionContext(stage, context = null) {
+  const source = isObject(context) ? context : {};
+  const recentTurns = compactDecisionTurns(Array.isArray(context)
+    ? context
+    : (source.recent_turns || source.conversation_history || source.conversation_context));
+  const authenticatedScope = isObject(source.authenticated_scope) ? source.authenticated_scope : {};
+  const workflow = isObject(source.workflow) ? source.workflow : {};
+  return {
+    context_version: 'jev-stage-context-v1',
+    decision_contract: {
+      stage,
+      instruction: STAGE_CONTEXT_CONTRACTS[stage] || 'Make only the typed decision requested by this stage. Execution remains owned by the LangGraph executor.',
+    },
+    system_policy: clip(source.system_policy, 1800),
+    authenticated_context: {
+      locale: clip(source.locale || source.language, 40),
+      profile: clip(source.profile, 1800),
+      scope: boundedProjection({
+        user_id: authenticatedScope.user_id || null,
+        org_id: authenticatedScope.org_id || null,
+        project_id: authenticatedScope.project_id || null,
+      }, { maxChars: 600, maxDepth: 2, maxItems: 6 }),
+    },
+    recent_turns: recentTurns,
+    workflow: boundedProjection({
+      intent: source.current_intent || workflow.intent || null,
+      phase: source.current_phase || workflow.phase || null,
+      requested_outcomes: workflow.requested_outcomes || [],
+      completed_receipts: workflow.completed_receipts || [],
+      selected_tool_slugs: workflow.selected_tool_slugs || [],
+      connection_scope: workflow.connection_scope || null,
+      pending_action: workflow.pending_action || null,
+    }, { maxChars: 7000, maxDepth: 5, maxItems: 16 }),
+  };
+}
+
 function boundedProjection(value, { maxChars = 10000, maxDepth = 6, maxItems = 24 } = {}) {
   let stringLimit = 1400;
   const visit = (entry, depth = 0) => {
@@ -164,7 +224,11 @@ export class DecisionGateway {
   async choose({ turn, stage, userQuery, context = null, observation = null, options, instructions, validate, fallback, signal }) {
     if (!turn || !Array.isArray(turn.decisions)) throw new TypeError('decision_turn_state_required');
     if (typeof fallback !== 'function') throw new TypeError('decision_fallback_required');
-    const input = { userQuery: clip(userQuery, 4000), context: boundedProjection(context), observation: boundedProjection(observation) };
+    const input = {
+      userQuery: clip(userQuery, 4000),
+      context: boundedProjection(buildJevDecisionContext(stage, context)),
+      observation: boundedProjection(observation),
+    };
     if (turn.disabled) return useFallback({ turn, fallback, reason: turn.fallbackReason || 'decision_gateway_disabled_for_turn', stage, input });
     try {
       const result = await this.provider.decideChoice({ state: { stage, ...input }, options, instructions, signal });
@@ -218,7 +282,7 @@ export async function chooseCapability({ gateway, turn, userQuery, context, obse
   // App and save signals are evidence in the one plan node, never an external
   // deterministic router. JEV owns the capability choice for every turn.
   const planningContext = {
-    ...(context && typeof context === 'object' ? context : {}),
+    ...(isObject(context) ? context : { recent_turns: Array.isArray(context) ? context : [] }),
     planning_hints: {
       app_mentions: [...new Set(appMentions.map(value => String(value).toLowerCase()))],
       operational_app_intent: operationalAppIntent === true,
@@ -379,7 +443,7 @@ const RECALL_QUESTIONS = Object.freeze({
 
 export async function chooseHiveRecallPolicy({ gateway, turn, userQuery, context = null, fallback, signal }) {
   const stage = 'hivemind_recall_filters';
-  const input = { userQuery: clip(userQuery, 4000), context: boundedProjection(context) };
+  const input = { userQuery: clip(userQuery, 4000), context: boundedProjection(buildJevDecisionContext(stage, context)) };
   if (turn.disabled) return useFallback({ turn, fallback, reason: turn.fallbackReason || 'decision_gateway_disabled_for_turn', stage, input });
   try {
     if (!gateway?.provider || typeof gateway.provider.decideQuestions !== 'function') throw new Error('decision_questions_provider_missing');

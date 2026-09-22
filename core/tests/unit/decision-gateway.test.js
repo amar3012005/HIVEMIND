@@ -8,6 +8,7 @@ import {
   chooseHiveRecallPolicy,
   createDecisionTurnState,
   createOpenRouterJevProvider,
+  buildJevDecisionContext,
   hasExplicitHivemindSaveIntent,
   projectComposioDiscovery,
   translateRecallPolicy,
@@ -60,6 +61,23 @@ test('OpenRouter provider maps opaque option keys back to stable capability ids'
   assert.ok(Math.abs(result.margin - 0.91) < 1e-9);
   assert.equal(requests[0].model, '~typesafe/jev-latest');
   assert.equal(requests[0].questions.decision.type, 'choice');
+});
+
+test('every Jev stage receives the bounded stage context contract', async () => {
+  const context = buildJevDecisionContext('composio_selection', {
+    locale: 'en', profile: 'Authenticated organization profile', system_policy: 'Decide only.',
+    provider_schema: { api_key: 'must-not-reach-jev' },
+    authenticated_scope: { user_id: 'user-1', org_id: 'org-1', project_id: 'project-1' },
+    recent_turns: [{ role: 'user', content: 'Find my latest email.' }, { role: 'assistant', content: 'I will use the connected app.' }],
+    workflow: { intent: 'multi_task', phase: 'composio_selection', completed_receipts: [{ tool: 'hivemind_meta', successful: true }], selected_tool_slugs: ['GMAIL_FETCH_EMAILS'] },
+  });
+  assert.equal(context.context_version, 'jev-stage-context-v1');
+  assert.match(context.decision_contract.instruction, /unblocked outcome/i);
+  assert.equal(context.authenticated_context.scope.org_id, 'org-1');
+  assert.equal(context.recent_turns.length, 2);
+  assert.equal(context.workflow.intent, 'multi_task');
+  assert.deepEqual(context.workflow.selected_tool_slugs, ['GMAIL_FETCH_EMAILS']);
+  assert.equal(JSON.stringify(context).includes('must-not-reach-jev'), false);
 });
 
 test('Jev provider accepts Cloudflare Gateway BYOK headers without a direct provider key', async () => {

@@ -131,6 +131,18 @@ class HiveToolkitGroupsTests(unittest.TestCase):
 
         asyncio.run(verify())
 
+    def test_every_injected_hivemind_tool_has_agent_scope_metadata(self):
+        async def verify():
+            tools = await hivemind_tools(
+                "11111111-1111-4111-8111-111111111111",
+                "agent-1",
+                "session-1",
+            )
+            missing = [tool.name for tool in tools if not str(getattr(tool, "description", "")).strip()]
+            self.assertEqual(missing, [])
+
+        asyncio.run(verify())
+
 
 if __name__ == "__main__":
     unittest.main()

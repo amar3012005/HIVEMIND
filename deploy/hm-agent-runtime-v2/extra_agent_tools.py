@@ -380,6 +380,10 @@ do not leave it blank in your reply."""
 class _CompanyRecordsTool(_HiveMindToolBase):
     """Base class for one bounded, tenancy-gated company record collection."""
 
+    description: str = (
+        "Read one bounded collection of the organization's durable company "
+        "records. Results are scoped by HIVE-MIND tenancy and are read-only."
+    )
     record_kind: str
 
     class Params(BaseModel):

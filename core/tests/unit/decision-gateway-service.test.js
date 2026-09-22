@@ -14,13 +14,13 @@ test('OpenRouter JEV uses its typed Decisions API through Cloudflare Gateway', (
   assert.equal(config.model, 'typesafe/jev-1.13');
 });
 
-test('configured decision JEV provider keeps its Cloudflare-owned credential binding', () => {
+test('configured decision JEV provider forwards its configured Cloudflare credential alias', () => {
   const config = decisionGatewayProviderConfig({
     CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
     CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
     JEV_GATEWAY_PROVIDER: 'custom-decision-jev', JEV_GATEWAY_BYOK_ALIAS: 'default',
   });
-  assert.equal(config.headers['cf-aig-byok-alias'], undefined);
+  assert.equal(config.headers['cf-aig-byok-alias'], 'default');
   assert.match(config.endpoint, /custom-decision-jev\/api\/v1\/systemone$/);
 });
 import { CAPABILITY_OPTIONS } from '../../src/agent/decision-gateway.js';

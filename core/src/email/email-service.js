@@ -52,6 +52,7 @@ const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL || 'https
 let _templates = null;
 let _warnedNoProvider = false;
 let _notificationSink = null;
+let _deliveryReceiptSink = null;
 
 // Transactional email is deliberately separate from user-connected Gmail. A
 // caller selects an approved template and recipient; this module owns
@@ -135,11 +136,35 @@ export function configureSystemEmailNotificationSink(sink) {
   _notificationSink = typeof sink === 'function' ? sink : null;
 }
 
+/**
+ * Persist a provider-neutral delivery receipt outside the mail transport.
+ * The receipt ledger is intentionally advisory to the sender: accepting an
+ * email must never be rolled back because the admin timeline is unavailable.
+ */
+export function configureSystemEmailDeliveryReceiptSink(sink) {
+  _deliveryReceiptSink = typeof sink === 'function' ? sink : null;
+}
+
 async function projectAcceptedEmail({ to, rendered, templateId, result, notification }) {
-  if (!result?.ok || !_notificationSink) return result;
+  let enriched = result;
+  if (_deliveryReceiptSink) {
+    try {
+      const receipt = await _deliveryReceiptSink({ to, rendered, templateId, result, notification });
+      enriched = { ...result, deliveryReceipt: receipt || { recorded: false } };
+    } catch (error) {
+      log('error', 'delivery_receipt_failed', {
+        templateId,
+        provider: result?.provider || null,
+        recipientDomain: recipientDomain(to),
+        error: error?.name || 'receipt_error',
+      });
+      enriched = { ...result, deliveryReceipt: { recorded: false, error: 'receipt_failed' } };
+    }
+  }
+  if (!result?.ok || !_notificationSink) return enriched;
   try {
     const projection = await _notificationSink({ to, rendered, templateId, result, notification });
-    return { ...result, platformNotification: projection || { created: 0 } };
+    return { ...enriched, platformNotification: projection || { created: 0 } };
   } catch (error) {
     // Provider acceptance is authoritative. Inbox projection is independently
     // retryable/observable and must never make a delivered email look failed.
@@ -149,7 +174,7 @@ async function projectAcceptedEmail({ to, rendered, templateId, result, notifica
       recipientDomain: recipientDomain(to),
       error: error?.name || 'projection_error',
     });
-    return { ...result, platformNotification: { created: 0, error: 'projection_failed' } };
+    return { ...enriched, platformNotification: { created: 0, error: 'projection_failed' } };
   }
 }
 
@@ -591,5 +616,6 @@ export default {
   queueSystemEmailBundle,
   sendTeamInvitationEmails,
   configureSystemEmailNotificationSink,
+  configureSystemEmailDeliveryReceiptSink,
   renderTemplate,
 };

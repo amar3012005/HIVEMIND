@@ -2,8 +2,14 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { NonRetryableError } from 'cloudflare:workflows';
 
 type Params = { activation_id: string; generation: number; sequence: number; target_at: string };
+type EmailSendingEvent = {
+  type: `cf.email.sending.message.${string}`;
+  payload: { messageId: string; eventId?: string; delivery?: { status?: string } };
+  metadata?: { eventTimestamp?: string; eventSubscriptionId?: string };
+};
 type EligibleResponse = { activations?: Params[] };
-type Env = { ACTIVATION_WORKFLOW: Workflow<Params>; ACTIVATION_ADMISSION: Queue<Params>; FLAGS: Flagship; HIVEMIND_CONTROL_URL: string; HIVEMIND_ACTIVATION_WORKFLOW_SECRET: string };
+type QueuePayload = Params | EmailSendingEvent;
+type Env = { ACTIVATION_WORKFLOW: Workflow<Params>; ACTIVATION_ADMISSION: Queue<QueuePayload>; FLAGS: Flagship; HIVEMIND_CONTROL_URL: string; HIVEMIND_ACTIVATION_WORKFLOW_SECRET: string };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function enabled(env: Env, activationId: string) {
@@ -12,6 +18,13 @@ function enabled(env: Env, activationId: string) {
 function valid(value: unknown): value is Params {
   const input = value as Partial<Params> | null;
   return Boolean(input && UUID.test(String(input.activation_id || '')) && Number.isInteger(input.generation) && Number.isInteger(input.sequence) && Number(input.sequence) >= 0 && Number.isFinite(Date.parse(String(input.target_at || ''))));
+}
+function validEmailEvent(value: unknown): value is EmailSendingEvent {
+  const event = value as Partial<EmailSendingEvent> | null;
+  return Boolean(event && typeof event.type === 'string'
+    && event.type.startsWith('cf.email.sending.message.')
+    && typeof event.payload?.messageId === 'string'
+    && event.payload.messageId.length > 0 && event.payload.messageId.length <= 512);
 }
 function authorized(request: Request, env: Env) { return request.headers.get('authorization') === `Bearer ${env.HIVEMIND_ACTIVATION_WORKFLOW_SECRET}`; }
 function id(params: Params) { return `activation-${params.activation_id}-${params.generation}-${params.sequence}`; }
@@ -77,8 +90,17 @@ export default {
     await start(env, params);
     return Response.json({ ok: true, instance_id: id(params) }, { status: 202 });
   },
-  async queue(batch: MessageBatch<Params>, env: Env) {
+  async queue(batch: MessageBatch<QueuePayload>, env: Env) {
     for (const message of batch.messages) {
+      // The Email Sending event subscription is intentionally allowed to use
+      // this durable lifecycle queue. It carries no provider credentials and
+      // is filtered to Cloudflare's outbound event envelope before Core sees
+      // it. Unknown queue traffic is acknowledged, never interpreted.
+      if (validEmailEvent(message.body)) {
+        try { await control(env, '/internal/lifecycle/email-events', message.body); message.ack(); }
+        catch (error) { if (error instanceof NonRetryableError) message.ack(); else message.retry({ delaySeconds: 60 }); }
+        continue;
+      }
       if (!valid(message.body)) { message.ack(); continue; }
       try { await start(env, message.body); message.ack(); }
       catch (error) { if (error instanceof NonRetryableError) message.ack(); else message.retry({ delaySeconds: 60 }); }

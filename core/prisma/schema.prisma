@@ -380,6 +380,31 @@ model ActivationLifecycle {
   @@map("activation_lifecycles")
 }
 
+/// Provider-neutral transactional-email delivery evidence for authorized
+/// platform support and lifecycle reconciliation. Recipient addresses remain
+/// in the identity tables; only a hash and redacted hint live here.
+model SystemEmailDelivery {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipientHash     String    @map("recipient_hash") @db.Char(64)
+  recipientHint     String    @map("recipient_hint") @db.VarChar(160)
+  orgId             String?   @map("org_id") @db.Uuid
+  userId            String?   @map("user_id") @db.Uuid
+  activationId      String?   @map("activation_id") @db.Uuid
+  templateId        String    @map("template_id") @db.VarChar(120)
+  subject           String    @db.VarChar(300)
+  provider          String?   @db.VarChar(64)
+  providerMessageId String?   @map("provider_message_id") @db.VarChar(512)
+  deliveryStatus    String    @map("delivery_status") @db.VarChar(64)
+  providerReceipts  Json      @default("[]") @map("provider_receipts")
+  acceptedAt        DateTime? @map("accepted_at") @db.Timestamptz(6)
+  rejectedAt        DateTime? @map("rejected_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([recipientHash, createdAt(sort: Desc)])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@map("system_email_deliveries")
+}
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
 /// Members can be granted team-scope memory access via TeamMember.
 model Team {

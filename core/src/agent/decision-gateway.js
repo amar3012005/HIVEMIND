@@ -426,7 +426,7 @@ export async function chooseWorkflowTransition({ gateway, turn, userQuery, conte
     context,
     observation,
     options: WORKFLOW_TRANSITION_OPTIONS,
-    instructions: 'Choose exactly one next intent for this already-admitted multi-task workflow. Use the original request, compact authenticated context, recent turns, and completed governed receipts. Preserve dependency order: never synthesize while an explicitly requested dependent outcome remains. A request to retrieve/search/read/collect and then save must select hivemind_save only after the source receipt exists. A selected write does not authorize execution: the graph still owns its schema, scope checkpoint, approval, idempotency, and receipt. Never repeat a completed receipt, invent an outcome, or use fallback as a hidden re-plan.',
+    instructions: 'Choose exactly one next intent for this already-admitted multi-task workflow. Use the original request, compact authenticated context, recent turns, and completed governed receipts. Preserve dependency order: never synthesize while any explicitly requested outcome remains. Treat each completed receipt as satisfying only its own operation class. For example, a request to retrieve/search/read/collect and then save and send has three obligations: after the read select hivemind_save, after the save select composio_action, and select synthesize only after the approved action receipt exists. A selected write does not authorize execution: the graph still owns its schema, scope checkpoint, approval, idempotency, and receipt. Never repeat a completed receipt, invent an outcome, or use fallback as a hidden re-plan.',
     fallback,
     signal,
   });

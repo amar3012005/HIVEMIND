@@ -966,7 +966,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const transitionIntent = state.workflowTransition?.intent || null;
     const continueWorkflow = transitionIntent && transitionIntent !== 'synthesize';
-    const selectedIntent = continueWorkflow ? transitionIntent : state.plan?.intent;
+    // `synthesize` is itself an authoritative terminal transition. Preserve
+    // it here so the tool surface is closed after JEV has confirmed that all
+    // obligations have receipts, rather than reopening the initial multi-task
+    // surface.
+    const selectedIntent = transitionIntent || state.plan?.intent;
     const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     // Native HIVE reads are already governed and projected before entering the
@@ -1039,7 +1043,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // their established typed graph loop, while an active-but-unavailable JEV
     // decision remains the explicit constrained fallback_harness path.
     const legacyGatewayOff = !state.plan?.authoritative && state.plan?.reason === 'decision_gateway_off';
-    const tools = providerEvidenceReady && !continueWorkflow ? []
+    const tools = finalEvidenceReady ? []
       : legacyGatewayOff ? unifiedMetaTools({ useTools })
         : decisionToolSurface(selectedIntent || 'fallback_harness', useTools);
     const turn = await callModel({
@@ -1167,11 +1171,14 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const exposed = publicToolResult(receipt);
     const underlying = call.name === 'hivemind_connected_task' && call.args.action === 'execute' ? call.args.tool_slug : call.name;
     onEvent({ type: 'tool_result', name: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed', run_id: state.runId });
-    // A completed governed memory write is authoritative regardless of the
-    // wording that led to it. Seal the receipt directly; never re-enter a
-    // model/retrieval loop after any successful save.
+    // A standalone save is terminal once its durable receipt exists.  A save
+    // inside a multi-task turn is only one completed obligation: retain its
+    // receipt and return through the bounded JEV transition node so it can
+    // select the next still-unsatisfied outcome (for example a connected
+    // action that depends on the retrieved evidence).  This is intentionally
+    // operation-generic; it does not encode any provider or recipient.
     if (call.name === 'hivemind_meta' && call.args.operation === 'save'
-      && receipt?.successful !== false) {
+      && receipt?.successful !== false && state.plan?.intent !== 'multi_task') {
       const receipts = [...state.receipts, {
         tool: underlying, action: 'save', status: receipt?.status || null,
         successful: true, data: exposed, error: null,
@@ -1193,6 +1200,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
           timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() } }, response),
       };
     }
+    const receiptSummary = call.name === 'hivemind_meta' && call.args.operation === 'save'
+      && receipt?.successful !== false ? 'Memory saved' : (receipt?.error || 'Completed');
     return {
       ...statePatch, pendingTool: null, workflowTransition: null, timings: { ...executorTimings, receipt_at_ms: Date.now() }, callFingerprints: [...state.callFingerprints, fingerprint],
       messages: [...state.messages, toolMessage(call, exposed)],
@@ -1205,7 +1214,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         data: exposed,
         error: receipt?.error || null,
       }],
-      steps: [...state.steps, { kind: 'tool', slug: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed' }],
+      steps: [...state.steps, { kind: 'tool', slug: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receiptSummary }],
     };
   };
 
@@ -1296,6 +1305,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const exposed = publicToolResult(receipt);
     return {
       pendingApproval: null,
+      workflowTransition: null,
       messages: [...state.messages, { role: 'system', content: jsonText({ approval: successful ? 'executed_once' : 'execution_failed', receipt: exposed }) }],
       receipts: [...state.receipts, { tool: row.toolName, action: 'execute', status: successful ? 'executed' : 'failed', successful, data: exposed, error: receipt?.error || null }],
       steps: [...state.steps, { kind: 'approval', slug: row.toolName, status: successful ? 'completed' : 'failed', summary: successful ? 'Approved action completed once' : 'Approved action failed' }],
@@ -1333,10 +1343,25 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       throw new Error(`unified_memory_scope_save_failed:${compactText(receipt?.error || receipt?.data?.error || 'unknown', 160)}`);
     }
     const exposed = publicToolResult(receipt);
-    const response = savedMemoryAcknowledgement(receipt, saveArgs.scope);
     const receipts = [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: true, data: exposed }];
     const steps = [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope' }];
     onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope', run_id: state.runId });
+    // Scope selection is an interrupt inside the same graph.  Do not emit a
+    // terminal answer merely because this one write succeeded when the plan
+    // still has dependent outcomes.  The receipt/stage is visible immediately
+    // and the next JEV transition decides what remains.
+    if (state.plan?.intent === 'multi_task') {
+      return {
+        pendingMemoryScope: null,
+        pendingSaveDraft: null,
+        workflowTransition: null,
+        messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'completed', receipt: exposed }) }],
+        receipts,
+        steps,
+        timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now() },
+      };
+    }
+    const response = savedMemoryAcknowledgement(receipt, saveArgs.scope);
     onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
     onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: true, run_id: state.runId });
     onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
@@ -1357,7 +1382,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'workflow_transition')));
   const routeWorkflowTransition = state => state.result ? 'seal' : 'model';
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
-  const routeMemoryScope = state => state.result ? 'seal' : 'model';
+  const routeMemoryScope = state => state.result ? 'seal'
+    : state.plan?.intent === 'multi_task' ? 'workflow_transition' : 'model';
+  const routeApproval = state => state.result ? 'seal'
+    : state.plan?.intent === 'multi_task' ? 'workflow_transition' : 'model';
   const sealNode = async state => {
     onEvent({ type: 'finish', text: state.result.response });
     const terminalState = state.result.status === 'completed' ? 'sealed'
@@ -1382,8 +1410,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addConditionalEdges('tool', routeTool, ['workflow_transition', 'connection', 'memory_scope', 'approval', 'seal'])
     .addConditionalEdges('workflow_transition', routeWorkflowTransition, ['model', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
-    .addConditionalEdges('memory_scope', routeMemoryScope, ['model', 'seal'])
-    .addEdge('approval', 'model').addEdge('seal', END)
+    .addConditionalEdges('memory_scope', routeMemoryScope, ['workflow_transition', 'model', 'seal'])
+    .addConditionalEdges('approval', routeApproval, ['workflow_transition', 'model', 'seal']).addEdge('seal', END)
     .compile({ checkpointer });
 }
 

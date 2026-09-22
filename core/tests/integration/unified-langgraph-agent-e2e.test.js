@@ -62,7 +62,7 @@ test('one model-tool graph handles native recall and final synthesis with only h
   });
   assert.equal(result.status, 'completed');
   assert.match(result.response, /Rama/);
-  assert.deepEqual(seenTools, [['hivemind_meta'], ['hivemind_meta']]);
+  assert.deepEqual(seenTools, [['hivemind_meta'], []]);
   assert.equal(result.run.scratch.harness_version, UNIFIED_META_HARNESS_VERSION);
 });
 
@@ -108,20 +108,28 @@ test('a multi-task receipt uses JEV to continue into one grounded memory save be
       }
       assert.equal(input.stage, 'workflow_transition');
       assert.equal(input.context.workflow.phase, 'post_receipt');
-      assert.equal(input.observation.completed_receipts.at(-1).action, 'recall');
-      return { status: 'selected', selected: 'hivemind_save', authoritative: true,
-        receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'multi-save' } };
+      if (input.observation.completed_receipts.at(-1).action === 'recall') {
+        return { status: 'selected', selected: 'hivemind_save', authoritative: true,
+          receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'multi-save' } };
+      }
+      assert.equal(input.observation.completed_receipts.at(-1).action, 'save');
+      return { status: 'selected', selected: 'synthesize', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.98, requestId: 'multi-seal' } };
     },
     modelStep: async ({ tools }) => {
       seenTools.push(tools.map(tool => tool.function.name));
       turn += 1;
       if (turn === 1) return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'Rama', mode: 'fact', limit: 10 } }, 'multi-1') };
-      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
-      return { message: call('hivemind_meta', { operation: 'save', save: {
-        title: 'Rama Santhoshi: retrieved relationship and correspondence',
-        content: 'Rama Santhoshi is supported by retrieved HIVE memories about correspondence and a Prague event.',
-        tags: ['rama-santhoshi', 'retrieved'], entities: ['Rama Santhoshi'], dates: ['2026-09-14'], source_refs: ['memory:rama-1'],
-      } }, 'multi-2') };
+      if (turn === 2) {
+        assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+        return { message: call('hivemind_meta', { operation: 'save', save: {
+          title: 'Rama Santhoshi: retrieved relationship and correspondence',
+          content: 'Rama Santhoshi is supported by retrieved HIVE memories about correspondence and a Prague event.',
+          tags: ['rama-santhoshi', 'retrieved'], entities: ['Rama Santhoshi'], dates: ['2026-09-14'], source_refs: ['memory:rama-1'],
+        } }, 'multi-2') };
+      }
+      assert.deepEqual(tools.map(tool => tool.function.name), []);
+      return { message: { role: 'assistant', content: 'Rama Santhoshi was saved from the governed HIVE evidence.' } };
     },
     metaExecutor: async args => (args.operation === 'recall'
       ? { successful: true, data: { memories: [{ id: 'rama-1', title: 'Rama correspondence', content: 'Prague event on 2026-09-14.' }] } }
@@ -129,9 +137,81 @@ test('a multi-task receipt uses JEV to continue into one grounded memory save be
   });
   assert.equal(result.status, 'completed');
   assert.match(result.response, /Rama Santhoshi/);
-  assert.deepEqual(decisionStages, ['capability', 'workflow_transition']);
-  assert.deepEqual(seenTools, [['hivemind_meta'], ['hivemind_meta']]);
+  assert.deepEqual(decisionStages, ['capability', 'workflow_transition', 'workflow_transition']);
+  assert.deepEqual(seenTools, [['hivemind_meta'], ['hivemind_meta'], []]);
   assert.ok(result.steps.some(step => step.summary === 'Memory saved'));
+});
+
+test('a multi-task scope save returns to JEV and reaches the remaining governed action', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  const stages = [];
+  let turn = 0;
+  const runtimeCtx = {
+    ...ctx(prisma, 'read-save-send'),
+    _tracedDispatch: async (name, args) => {
+      assert.equal(name, 'hivemind_save_memory');
+      assert.equal(args.scope, 'personal');
+      return { saved: true, memory_id: 'saved-1', title: args.title, scope: args.scope };
+    },
+  };
+  const decisionStage = async input => {
+    stages.push(input.stage);
+    if (input.stage === 'capability') return {
+      status: 'selected', selected: 'multi_task', authoritative: true,
+      receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'plan' },
+    };
+    const action = input.observation.completed_receipts.at(-1).action;
+    const selected = action === 'save' ? 'composio_action' : 'hivemind_save';
+    return {
+      status: 'selected', selected, authoritative: true,
+      receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: `transition-${action}` },
+    };
+  };
+  const modelStep = async ({ tools }) => {
+    turn += 1;
+    if (turn === 1) return { message: call('hivemind_connected_task', {
+      action: 'execute', tool_slug: 'SOURCE_READ', arguments: { query: 'latest records' },
+    }, 'read-1') };
+    if (turn === 2) return { message: call('hivemind_meta', { operation: 'save', save: {
+      title: 'Retrieved records', content: 'Grounded records from the completed source read.', tags: ['retrieved', 'user-confirmed'],
+    } }, 'save-1') };
+    assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_connected_task']);
+    return { message: call('hivemind_connected_task', {
+      action: 'execute', tool_slug: 'MESSAGE_SEND', arguments: { recipient: 'person@example.test', body: 'A follow-up based on the retrieved records.' },
+    }, 'send-1') };
+  };
+  const connectedExecutor = async args => {
+    if (args.tool_slug === 'SOURCE_READ') return {
+      successful: true,
+      data: { records: [{ id: 'record-1', subject: 'Source evidence' }] },
+      state: { selectedSlugs: ['SOURCE_READ'], primarySlugs: ['SOURCE_READ'] },
+    };
+    assert.equal(args.tool_slug, 'MESSAGE_SEND');
+    return {
+      successful: true,
+      approval: {
+        slug: 'MESSAGE_SEND',
+        arguments: args.arguments,
+        schema: { type: 'object', required: ['recipient', 'body'], properties: { recipient: { type: 'string' }, body: { type: 'string' } } },
+      },
+    };
+  };
+  const first = await runUnifiedMetaAgent({
+    message: 'Read source records, save them to HIVE-MIND, and send a follow-up.',
+    useTools: true, prisma, ctx: runtimeCtx, checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor,
+    metaExecutor: async args => ({ successful: true, data: { needs_project_choice: true, title: args.save.title, scopes: [{ scope: 'personal', label: 'Personal' }] } }),
+  });
+  assert.equal(first.status, 'needs_input');
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: true, prisma,
+    ctx: { ...runtimeCtx, unifiedRunId: first.run.id }, checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor,
+    choice: { scope: 'personal', run_id: first.run.id },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(prisma.drafts[0].toolName, 'MESSAGE_SEND');
+  assert.deepEqual(stages, ['capability', 'workflow_transition', 'workflow_transition']);
+  assert.equal(turn, 3);
 });
 
 test('the in-graph plan node calls JEV once and reuses its typed decision for the model surface', async () => {
@@ -194,9 +274,11 @@ test('a JEV multi-task plan completes HIVE retrieval before its dependent memory
   const result = await runUnifiedMetaAgent({
     message: 'Get all information from HIVE-MIND about Rama and save it as one memory.',
     useTools: false, prisma, ctx: ctx(prisma, 'multi-read-save'), checkpointer: new MemorySaver(), composio: {},
-    decisionStage: async () => ({
-      status: 'selected', selected: 'multi_task', authoritative: true,
-      receipt: { source: 'jev', probability: 0.99, margin: 0.98, requestId: 'multi-read-save-plan' },
+    decisionStage: async input => ({
+      status: 'selected', selected: input.stage === 'capability' ? 'multi_task'
+        : input.observation.completed_receipts.at(-1).action === 'recall' ? 'hivemind_save' : 'synthesize',
+      authoritative: true,
+      receipt: { source: 'jev', probability: 0.99, margin: 0.98, requestId: `multi-read-save-${input.stage}` },
     }),
     modelStep: async ({ messages }) => {
       turn += 1;
@@ -204,7 +286,7 @@ test('a JEV multi-task plan completes HIVE retrieval before its dependent memory
         assert.match(messages.at(-1).content, /First identify prerequisites/);
         return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'Rama', mode: 'fact', limit: 15 } }, 'multi-recall') };
       }
-      return { message: call('hivemind_meta', {
+      if (turn === 2) return { message: call('hivemind_meta', {
         operation: 'save', save: {
           title: 'Rama — HIVE-MIND record',
           content: 'Rama is documented in the governed HIVE receipts as a contact with relevant recorded correspondence.',
@@ -213,6 +295,7 @@ test('a JEV multi-task plan completes HIVE retrieval before its dependent memory
           source_refs: [{ id: 'rama-memory-1', title: 'Rama correspondence' }],
         },
       }, 'multi-save') };
+      return { message: { role: 'assistant', content: 'Rama was saved from the governed evidence.' } };
     },
     metaExecutor: async args => {
       operations.push(args.operation);

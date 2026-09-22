@@ -187,22 +187,22 @@ export class DecisionGateway {
 }
 
 export const CAPABILITY_OPTIONS = Object.freeze([
-  { id: 'direct_answer', criteria: 'The request can be answered from the current conversation and compact authenticated context without retrieving fresh information or changing state.' },
-  { id: 'hivemind_context', criteria: 'Read only: the user asks about their current identity, organization, company profile, role, mission, ICP, location, or maintained preferences. Never select for a requested profile change.' },
-  { id: 'hivemind_memory_lookup', criteria: 'Read only: answer needs stored HIVE-MIND memories, decisions, documents, evidence, historical facts, or prior work.' },
-  { id: 'hivemind_entity_lookup', criteria: 'Read only: resolve a named person, company, project, product, document, or topic into a canonical HIVE-MIND entity before recall.' },
-  { id: 'hivemind_hyperagent_directory', criteria: 'Read only: answer needs the authenticated organization HyperAgent directory, assignments, roles, or available digital employees.' },
-  { id: 'hivemind_request', criteria: 'The request is a HIVE-MIND system request whose exact read operation must be selected from the typed HIVE meta contract.' },
-  { id: 'hivemind_meta', criteria: 'Read only: general HIVE-MIND recall, entity discovery, HyperAgent profiles, or prior memory-save status when a more specific HIVE intent is not clear.' },
-  { id: 'hivemind_profile_update', criteria: 'The user explicitly asks to change their own maintained profile field: name, role, company, language, location, or timezone. This is not a memory preference.' },
-  { id: 'hivemind_save', criteria: 'The user explicitly asks to remember a stable fact, preference, decision, correction, relationship, or completed outcome as durable memory.' },
-  { id: 'composio_read', criteria: 'The request needs read-only information from an external connected application such as email, calendar, files, CRM, messaging, or social media.' },
-  { id: 'composio_action', criteria: 'The request explicitly asks to create, update, send, publish, or otherwise act in an external connected application. The exact provider action remains approval-gated.' },
-  { id: 'composio_search', criteria: 'The request needs an external connected application but it is not yet clear whether the resulting provider capability is read-only or an action.' },
-  { id: 'web_research', criteria: 'The request explicitly needs current public-web research or HIVE-MIND has insufficient internal evidence and an external verification is necessary.' },
-  { id: 'multi_task', criteria: 'The request has multiple dependent outcomes spanning HIVE-MIND, connected applications, web research, or a combination. Preserve the native combined surface; each provider action is decided again after its evidence is returned.' },
-  { id: 'workflow_plan', criteria: 'The request is primarily to plan or coordinate a multi-step workflow without enough settled facts to execute a provider-backed operation yet.' },
-  { id: 'fallback_harness', criteria: 'None of the other choices is clearly supported; defer to the current chat model and tool-selection behavior.' },
+  { id: 'direct_answer', criteria: 'Answer only from the current request, compact authenticated context, and recent turns. Select when no fresh retrieval, external application, web verification, or state change is needed. Never use for a request to save, update, search, send, or create.' },
+  { id: 'hivemind_context', criteria: 'Read the authenticated user or organization profile: identity, role, company, mission, maintained preferences, locale, or location. This is profile/context lookup only; a requested change is hivemind_profile_update.' },
+  { id: 'hivemind_memory_lookup', criteria: 'Read stored HIVE-MIND memories, decisions, documents, evidence, past work, or historical facts. Select when the user asks what HIVE knows, remembers, or has recorded about a subject. The executor must form a concrete recall query.' },
+  { id: 'hivemind_entity_lookup', criteria: 'Resolve a named person, organization, project, product, document, or topic into a canonical HIVE entity before or instead of recall. Use when identity/entity relationships are the requested result, not merely a broad history summary.' },
+  { id: 'hivemind_hyperagent_directory', criteria: 'Read the authenticated organization HyperAgent directory: agents, assignments, roles, ownership, availability, or digital employees. Do not use for general company memory or an external application.' },
+  { id: 'hivemind_request', criteria: 'Perform a typed HIVE system request whose exact governed operation is determined by the HIVE meta contract, such as a time-aware, comparison, project, or evidence request that is not covered by the more specific intents.' },
+  { id: 'hivemind_meta', criteria: 'Use the general HIVE meta toolkit only when the request is a HIVE-native read but does not clearly fit context, memory lookup, entity lookup, HyperAgent directory, or a typed HIVE request. It is read-only.' },
+  { id: 'hivemind_profile_update', criteria: 'Change the authenticated user\'s maintained profile field, for example their own name, role, company, language, location, or timezone. This is a governed write and must not be used to save a general memory.' },
+  { id: 'hivemind_save', criteria: 'Create one durable HIVE memory because the user explicitly asks to save, remember, retain, record, or file supported information. The executor creates a source-grounded memory capsule and asks for a scope only if one was not stated. Never substitute recall for this write.' },
+  { id: 'composio_read', criteria: 'Read information from a connected external application such as email, calendar, files, CRM, messaging, source control, or social media. The executor must first discover capability, then select a read tool, load its schema, compile arguments, execute, and return a receipt.' },
+  { id: 'composio_action', criteria: 'Create, update, send, publish, delete, or otherwise change data in a connected external application. The executor discovers the capability and schema, compiles arguments, requests approval for any write, executes only after approval, and returns a receipt.' },
+  { id: 'composio_search', criteria: 'Use a connected external application, but the request does not yet establish whether the eventual provider operation is a read or write, or which toolkit capability is needed. Discover first; do not guess a provider, recipient, or tool.' },
+  { id: 'web_research', criteria: 'Retrieve current public-web information when the user explicitly asks to search, verify, or research the web, or when internal HIVE evidence is explicitly insufficient and public verification is necessary.' },
+  { id: 'multi_task', criteria: 'The request contains two or more materially distinct or dependent outcomes across HIVE, connected applications, web research, or writes. Preserve each requested outcome and execute through the generic bounded subgraph with receipts and approvals.' },
+  { id: 'workflow_plan', criteria: 'The user asks to design, sequence, coordinate, or explain a workflow rather than execute a settled provider-backed operation. Return an actionable plan without inventing external results or side effects.' },
+  { id: 'fallback_harness', criteria: 'Use only when the request cannot be safely classified from the supplied request, compact context, recent turns, and receipts. This is an explicit unavailable-decision state, not permission to silently invoke an unconstrained tool loop.' },
 ]);
 
 /** Explicit HIVE save commands are syntax, not a probabilistic routing task. */
@@ -215,20 +215,18 @@ export function hasExplicitHivemindSaveIntent(value) {
 
 export async function chooseCapability({ gateway, turn, userQuery, context, observation = null,
   appMentions = [], operationalAppIntent = false, fallback, signal }) {
-  if (operationalAppIntent && appMentions.length) {
-    const receipt = { source: 'deterministic', stage: 'capability', choice: 'composio_search',
-      reason: 'explicit_operational_app_intent', appMentions: [...new Set(appMentions.map(value => String(value).toLowerCase()))] };
-    turn.decisions.push(receipt);
-    return receipt;
-  }
-  if (hasExplicitHivemindSaveIntent(userQuery)) {
-    const receipt = { source: 'deterministic', stage: 'capability', choice: 'hivemind_save',
-      reason: 'explicit_hivemind_save_intent' };
-    turn.decisions.push(receipt);
-    return receipt;
-  }
-  return gateway.choose({ turn, stage: 'capability', userQuery, context, observation, options: CAPABILITY_OPTIONS,
-    instructions: 'Choose exactly one initial intent family. Use only the user request, server-derived authenticated scope, and bounded completed receipts as evidence. Never infer an app, recipient, tool, identifier, credential, or external side effect. A compound request is multi_task; do not collapse it to one provider operation. Connected-app choices authorize discovery only, not execution. Completed receipts are authoritative: do not repeat them, and follow the still-unsatisfied outcomes explicitly requested by the user. Select fallback_harness when the evidence does not clearly support another choice.',
+  // App and save signals are evidence in the one plan node, never an external
+  // deterministic router. JEV owns the capability choice for every turn.
+  const planningContext = {
+    ...(context && typeof context === 'object' ? context : {}),
+    planning_hints: {
+      app_mentions: [...new Set(appMentions.map(value => String(value).toLowerCase()))],
+      operational_app_intent: operationalAppIntent === true,
+      explicit_memory_save_language: hasExplicitHivemindSaveIntent(userQuery),
+    },
+  };
+  return gateway.choose({ turn, stage: 'capability', userQuery, context: planningContext, observation, options: CAPABILITY_OPTIONS,
+    instructions: 'Choose exactly one initial intent family. Use the request, compact system policy, authenticated profile, five recent turns, and bounded completed receipts as evidence. Never infer an app, recipient, tool, identifier, credential, fact, relationship, or external side effect. A compound request is multi_task; do not collapse it to one provider operation. Connected-app choices authorize generic discovery only, not execution. Completed receipts are authoritative: do not repeat them, and follow still-unsatisfied requested outcomes. Select fallback_harness only when no intent is safely supported; it must remain explicit and constrained.',
     fallback, signal });
 }
 

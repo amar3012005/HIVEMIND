@@ -25,10 +25,15 @@ export const HIVEMIND_META_TOOL = Object.freeze({
         save: {
           type: 'object', additionalProperties: false, required: ['title', 'content'],
           properties: {
-            title: { type: 'string' }, content: { type: 'string' },
+            title: { type: 'string', description: 'Specific header naming the principal subject, event, or decision; never use a generic title such as Saved memory.' },
+            content: { type: 'string', description: 'Source-grounded memory capsule with supported facts, uncertainty, details, and relationships only; never include credentials or authentication material.' },
             source_type: { type: 'string', enum: ['text', 'conversation', 'documentation', 'decision'] },
             tags: { type: 'array', items: { type: 'string' }, maxItems: 50 },
             project: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+            entities: { type: 'array', items: { type: 'string' }, maxItems: 24, description: 'Supported people, organizations, products, places, and other named entities.' },
+            dates: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Supported dates/times exactly as stated or ISO-normalized when explicit.' },
+            source_refs: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Supporting receipt ids, source titles, or URLs. Never include OTPs, reset links, passwords, or credentials.' },
+            event_time: { type: 'string', description: 'Explicit ISO event time only.' },
             relationship: { type: 'string', enum: ['update', 'extend', 'derive'] }, related_to: { type: 'string' },
           },
         },

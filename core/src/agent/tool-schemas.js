@@ -176,8 +176,8 @@ export const TOOL_SCHEMAS = [
       parameters: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: '3-8 words, searchable.' },
-          content: { type: 'string', description: 'The fact, one claim per memory.' },
+          title: { type: 'string', description: 'Specific searchable header naming the principal subject, event, or decision; never use a generic title such as "Saved memory".' },
+          content: { type: 'string', description: 'Source-grounded compact capsule: preserve material facts, uncertainty, people, organizations, products, places, dates, identifiers, relationships, decisions, and supported evidence. Never invent facts or include credentials.' },
           tags: { type: 'array', items: { type: 'string' }, minItems: 2 },
           memory_type: { type: 'string', enum: [...CANONICAL_MEMORY_TYPES] },
           project_id: {
@@ -193,7 +193,9 @@ export const TOOL_SCHEMAS = [
             enum: ['personal', 'project', 'team', 'organization'],
             description: 'Memory scope. Defaults to personal. Use "organization" when the user explicitly says "save to the whole company"; use "project" when project_id/project is set; use "team" rarely.',
           },
-          entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entity names preserved by the router.' },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 24, description: 'Explicit supported people, organizations, products, places, and other entities; preserved by canonical ingestion.' },
+          dates: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Explicit supported ISO dates/times or faithful source date strings. Do not infer missing dates.' },
+          source_refs: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Source titles, receipt ids, URLs, or citations supporting this capsule. Never include passwords, OTPs, reset links, or credentials.' },
           event_time: { type: 'string', description: 'ISO event/valid time explicitly supplied by the user.' },
           _memory_admission: { type: 'string', enum: ['trusted_fact', 'user_assertion'], description: 'Internal provenance supplied by chat planning. A user assertion remains recallable but is not promoted into independently verified background.' },
           _require_explicit_scope: { type: 'boolean', description: 'Internal chat orchestration flag. When true, the save handler returns a destination choice instead of inferring or defaulting an omitted scope.' },

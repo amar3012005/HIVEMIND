@@ -50,14 +50,25 @@ test('capability mapping returns only the schema family for the next model step'
   assert.deepEqual(decisionGatewayToolNames('hivemind_memory_lookup'), ['hivemind_meta']);
   assert.deepEqual(decisionGatewayToolNames('hivemind_entity_lookup'), ['hivemind_meta']);
   assert.deepEqual(decisionGatewayToolNames('hivemind_profile_update'), ['hivemind_update_profile']);
-  assert.deepEqual(decisionGatewayToolNames('hivemind_save'), ['hivemind_save_memory', 'hivemind_batch_save_memories']);
+  assert.deepEqual(decisionGatewayToolNames('hivemind_save'), ['hivemind_meta']);
   assert.deepEqual(decisionGatewayToolNames('composio_search'), ['hivemind_connected_task']);
   assert.deepEqual(decisionGatewayToolNames('composio_read'), ['hivemind_connected_task']);
   assert.deepEqual(decisionGatewayToolNames('composio_action'), ['hivemind_connected_task']);
   assert.deepEqual(decisionGatewayToolNames('web_research'), ['hivemind_web_search']);
   assert.equal(decisionGatewayToolNames('multi_task'), undefined);
-  assert.equal(decisionGatewayToolNames('composio_search', { connected: false }), null);
-  assert.equal(decisionGatewayToolNames('fallback_harness'), null);
+  assert.deepEqual(decisionGatewayToolNames('composio_search', { connected: false }), []);
+  assert.deepEqual(decisionGatewayToolNames('fallback_harness'), []);
+});
+
+test('capability taxonomy gives Jev a distinct governed meaning for every plan choice', () => {
+  const options = CAPABILITY_OPTIONS;
+  assert.equal(options.length, 16);
+  for (const option of options) {
+    assert.ok(option.id);
+    assert.ok(option.criteria.length >= 80, `${option.id} must have an operational description`);
+  }
+  assert.match(options.find(option => option.id === 'hivemind_save').criteria, /scope|capsule/i);
+  assert.match(options.find(option => option.id === 'fallback_harness').criteria, /not permission to silently/i);
 });
 
 test('shadow mode records a confident decision but is not authoritative', async () => {

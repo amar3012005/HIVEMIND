@@ -1085,6 +1085,10 @@ const TOOL_HANDLERS = {
     const provenanceTag = memoryAdmission === 'user_assertion' ? 'provenance:user-assertion' : 'provenance:user-fact';
     const plannedEntities = [...new Set((Array.isArray(args.entities) ? args.entities : [])
       .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
+    const sourceRefs = [...new Set((Array.isArray(args.source_refs) ? args.source_refs : [])
+      .map((reference) => String(reference || '').trim()).filter(Boolean))].slice(0, 12);
+    const supportedDates = [...new Set((Array.isArray(args.dates) ? args.dates : [])
+      .map((date) => String(date || '').trim()).filter(Boolean))].slice(0, 12);
     // Planner-selected entities are already part of the canonical save
     // contract. Persist their normalized tags in the same write so a just-saved
     // memory is entity-recallable before asynchronous enrichment completes (or
@@ -1113,7 +1117,7 @@ const TOOL_HANDLERS = {
         source_platform: 'talk-to-hive', source_type: 'chat-turn', via: 'react-agent',
         source_id: args._source_id || null,
         original_content: args._original_content || args.content,
-        metadata: { memory_admission: memoryAdmission },
+        metadata: { memory_admission: memoryAdmission, source_refs: sourceRefs, dates: supportedDates },
       },
     };
     let saved;

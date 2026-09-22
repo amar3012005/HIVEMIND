@@ -26,6 +26,9 @@ const State = Annotation.Root({
   // The plan is a durable, typed routing decision made inside this graph. It
   // constrains the existing model/tool loop; it is never an external router.
   plan: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  // Bounded node timings are persisted with the run receipt so latency can be
+  // attributed to plan, executor, first visible answer, receipt, and seal.
+  timings: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
   messages: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   receipts: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   steps: Annotation({ reducer: (_left, right) => right, default: () => [] }),
@@ -130,12 +133,39 @@ function systemPrompt({ useTools, locale, explicitSave = false }) {
 
 You receive only the progressive gateway capability needed for the current step. Use recent conversation and the compact authenticated profile when sufficient. When available, use hivemind_meta only when organization memory, documents, history, a profile, or a durable save is needed. When available, use hivemind_connected_task for external apps: search once with complete atomic use cases, follow the returned connection state and selected slugs, load only selected schemas, then execute through the same gateway.
 
-Continue after every tool receipt as the same agent. If evidence is incomplete, make the next useful gateway call. Ask the user only for a real business choice that cannot be discovered. Never ask for provider IDs. Never claim that an approval draft was executed. Answer in ${locale || 'the user language'} with concise, well-structured Markdown. Use tables when the user requests multiple records and preserve evidence citations.${explicitSave ? '\n\nThe user explicitly requested a durable memory write. Your next HIVE action MUST be hivemind_meta with operation="save" and a self-contained title/content derived only from the current turn or recent conversation. Do not call recall as a substitute. If a destination scope was not stated, omit scope; Core will return the required scope choice.' : ''}`;
+Continue after every tool receipt as the same agent. If evidence is incomplete, make the next useful gateway call. Ask the user only for a real business choice that cannot be discovered. Never ask for provider IDs. Never claim that an approval draft was executed. Answer in ${locale || 'the user language'} with concise, well-structured Markdown. Use tables when the user requests multiple records and preserve evidence citations.`;
 }
 
 function safeHistory(history = [], limit = 3) {
   return (Array.isArray(history) ? history : []).filter(row => ['user', 'assistant'].includes(row?.role) && row?.content)
     .slice(-limit * 2).map(row => ({ role: row.role, content: compactText(row.content, 1400) }));
+}
+
+const PLAN_SYSTEM_CONTRACT = 'Select exactly one intent. The graph, not the decision model, owns authorization, schemas, execution, approvals, receipts, and final synthesis. Do not infer facts or side effects; use only the request, profile, recent turns, and completed governed receipts.';
+
+const MEMORY_CAPSULE_CONTRACT = 'Create a source-grounded memory capsule, not a shallow summary. Use a specific title header identifying the principal subject, event, or decision. Preserve material facts and uncertainty. Capture supported people, organizations, products, places, dates, times, identifiers, amounts, events, relationships, decisions, and source references. Include only details supported by the current request, prior-turn evidence, or governed tool receipts; never invent facts or relationships. Keep authentication codes, passwords, reset links, and sensitive credentials out of memory. Return title, content, tags, entities, dates, source_refs, and scope.';
+
+function executorInstruction(intent, { preparedSave = null } = {}) {
+  const contracts = {
+    direct_answer: 'Answer directly from the supplied context. Do not call a tool.',
+    hivemind_context: 'Use the HIVE meta tool only for authenticated context/profile. Do not perform a write.',
+    hivemind_memory_lookup: 'Use the HIVE meta tool for recall with a concrete non-empty query derived from the request. Do not call recall with an omitted query and do not write memory.',
+    hivemind_entity_lookup: 'Use the HIVE meta tool to resolve the requested canonical entity before making any broader claim. Do not infer a relationship absent from the receipt.',
+    hivemind_hyperagent_directory: 'Use the HIVE meta tool only for authenticated HyperAgent directory/assignment information.',
+    hivemind_request: 'Use the typed HIVE meta operation that best matches the request. Keep its arguments grounded in the request and receipts.',
+    hivemind_meta: 'Use one read-only HIVE meta operation with complete typed arguments. Never use a blank recall query.',
+    hivemind_profile_update: 'Use the governed profile-update tool only for the authenticated user\'s explicit requested field change. Do not treat third-party facts as profile changes.',
+    hivemind_save: `${MEMORY_CAPSULE_CONTRACT} Call hivemind_meta once with operation="save" and the capsule in save. If scope is unstated, omit it so the governed scope checkpoint asks the user. Do not call recall as a substitute.`,
+    composio_read: 'Use the generic connected-app subgraph: discover capability, select a read tool, load only its schema, compile complete typed arguments, execute, then answer from its receipt. Do not guess a provider-specific tool.',
+    composio_action: 'Use the generic connected-app subgraph: discover capability, select tool, load schema, compile arguments, request approval for the write, execute after approval, then answer from its receipt. Never claim an action completed without that receipt.',
+    composio_search: 'Use the generic connected-app discovery subgraph first. From discovery decide the actual capability, schema, arguments, approval if needed, execution, and receipt. Do not assume a specific application tool.',
+    web_research: 'Use governed web research for current public information. Cite the retrieved evidence and distinguish it from internal HIVE memory.',
+    multi_task: 'Preserve every requested outcome. Execute the necessary generic HIVE, connected-app, and/or web steps in dependency order, with a governed receipt for each write or external result.',
+    workflow_plan: 'Return an actionable, bounded workflow plan. Do not execute side effects or claim external results.',
+    fallback_harness: 'The decision is unavailable or uncertain. Do not call tools. Explain that the request cannot yet be safely routed and ask the smallest clarifying question needed.',
+  };
+  const prepared = preparedSave ? `\n\nPrepared prior-turn evidence for this save (use only what is supported; improve the generic title and extract supported entities/dates/source references):\n${jsonText(preparedSave).slice(0, 10000)}` : '';
+  return `Selected executor intent: ${intent || 'fallback_harness'}.\n${contracts[intent] || contracts.fallback_harness}${prepared}`;
 }
 
 function toolkitMentions(message, accounts = []) {
@@ -309,6 +339,10 @@ async function defaultMetaExecutor(args, ctx) {
     title: save.title, content: save.content,
     tags: Array.isArray(save.tags) && save.tags.length >= 2 ? save.tags : ['hivemind', 'user-confirmed'],
     source_type: save.source_type || 'text',
+    ...(Array.isArray(save.entities) ? { entities: save.entities } : {}),
+    ...(Array.isArray(save.dates) ? { dates: save.dates } : {}),
+    ...(Array.isArray(save.source_refs) ? { source_refs: save.source_refs } : {}),
+    ...(save.event_time ? { event_time: save.event_time } : {}),
     ...(save.project ? { project: save.project } : {}),
     // A model must not turn a vague "save this" into an unstated personal
     // or organization write. Scope is user authority, so accept only a
@@ -540,6 +574,7 @@ function outputShape(state, response, status = 'completed') {
           probability: state.plan.probability,
           margin: state.plan.margin,
         } : null,
+        timings: state.timings,
       },
     },
     steps: state.steps, sources, citations: sources, draftIds: state.pendingApproval ? [state.pendingApproval.id] : [],
@@ -657,6 +692,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
             probability: (patch.plan || state.plan).probability,
             margin: (patch.plan || state.plan).margin,
           } : null,
+          timings: patch.timings || state.timings || {},
           event_sequence: sequence },
       } }).catch(() => {});
     }
@@ -697,6 +733,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       callFingerprints: [],
       result: null,
       usage: [],
+      timings: { admitted_at_ms: Date.now() },
       status: 'received',
       eventSequence: 0,
     };
@@ -719,22 +756,29 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       || referentialSaveRequest(message);
     const saveDraft = explicitSave ? explicitSaveDraft(message, ctx.conversationHistory) : null;
     const messages = [
-      { role: 'system', content: systemPrompt({ useTools, locale, explicitSave }) },
+      { role: 'system', content: systemPrompt({ useTools, locale }) },
       ...(requestedToolkits.length ? [{ role: 'system', content: `The request explicitly names authenticated connected-app toolkit(s): ${requestedToolkits.join(', ')}. External app facts cannot be answered by hivemind_meta. Start or continue hivemind_connected_task search, then follow its connection, schema, and execution receipts before answering.` }] : []),
       ...(profile ? [{ role: 'system', content: `Authenticated compact profile:\n${compactText(profile, 1800)}` }] : []),
-      ...safeHistory(ctx.conversationHistory, Math.max(1, Math.min(6, Number(ctx.historyTurns) || 3))),
+      // The plan receives a stable five-turn window. Tool-specific guidance is
+      // deliberately withheld until the selected executor node below.
+      ...safeHistory(ctx.conversationHistory, 5),
       { role: 'user', content: message },
     ];
     const patch = {
       runId,
-      context: { locale, profile: compactText(profile, 1800), explicit_save: explicitSave },
+      context: {
+        locale,
+        profile: compactText(profile, 1800),
+        system_policy: PLAN_SYSTEM_CONTRACT,
+        recent_turns: safeHistory(ctx.conversationHistory, 5),
+        explicit_save_language: explicitSave,
+      },
       requestedToolkits,
       messages,
-      // Explicit writes still enter the plan node. JEV decides the typed
-      // capability; when it selects hivemind_save, the graph compiles this
-      // prepared payload directly into the governed save, without a second
-      // model turn or an accidental recall fallback.
+      // A prior-answer candidate is evidence for the selected executor, not a
+      // bypass around the one JEV plan node or a precompiled tool call.
       pendingSaveDraft: saveDraft,
+      timings: { ...freshTurnState.timings, context_ready_at_ms: Date.now() },
       result: null,
     };
     return transition(freshTurnState, 'running', patch, { reason_code: 'turn_admitted' });
@@ -750,7 +794,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         runtime: 'legacy', stage: 'capability', turn_id: state.runId, user_query: message,
         actor_id: ctx.userId,
         context: state.context,
-        observation: { completed_receipts: state.receipts.slice(-8), selected_tool_slugs: state.selectedSlugs.slice(-12) },
+        observation: {
+          completed_receipts: state.receipts.slice(-8),
+          selected_tool_slugs: state.selectedSlugs.slice(-12),
+          prior_receipts: (ctx.priorReceipts || []).slice(-8),
+        },
         app_mentions: state.requestedToolkits,
         operational_app_intent: state.requestedToolkits.length > 0,
       }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
@@ -771,26 +819,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     emitDecision({ stage: 'capability', status: decision.status, selected: plan.intent,
       source: plan.source, authoritative: plan.authoritative, probability: plan.probability,
       margin: plan.margin, request_id: plan.request_id, run_id: state.runId });
-    if (state.context?.explicit_save === true) {
-      const saveDraft = state.pendingSaveDraft;
-      if (!saveDraft) {
-        return {
-          plan,
-          result: outputShape({ ...state, plan }, MISSING_SAVE_RESPONSE, 'needs_input'),
-        };
-      }
-      if (authoritative && plan.intent === 'hivemind_save') {
-        return {
-          plan,
-          pendingTool: {
-            id: `explicit-save-${state.runId}`,
-            name: 'hivemind_meta',
-            args: { operation: 'save', save: saveDraft },
-          },
-        };
-      }
-    }
-    return { plan };
+    return { plan, timings: { ...state.timings, plan_completed_at_ms: Date.now() } };
   };
 
   const modelNode = async state => {
@@ -810,7 +839,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       { role: 'system', content: `Synthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts.${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
       { role: 'user', content: message },
       { role: 'system', content: `Verified receipts:\n${jsonText(finalReceipts).slice(0, 24000)}` },
-    ] : state.messages;
+    ] : [
+      ...state.messages,
+      { role: 'system', content: executorInstruction(state.plan?.intent, { preparedSave: state.pendingSaveDraft }) },
+    ];
     if (finalEvidenceReady && streamFinal) {
       let emitted = false;
       const streamed = await streamFinal({
@@ -835,7 +867,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         messages: [...state.messages, { role: 'assistant', content: response }],
         pendingTool: null,
         usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage,
-        result: outputShape({ ...state, usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage }, response),
+        timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || Date.now(), completion_at_ms: Date.now() },
+        result: outputShape({ ...state, usage: streamed.usage ? [...state.usage, streamed.usage] : state.usage,
+          timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || Date.now(), completion_at_ms: Date.now() } }, response),
       };
     }
     // Reuse the plan-node decision for every model pass in this turn. In
@@ -843,7 +877,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // call; later Composio selection is a separate bounded decision over the
     // dynamically discovered provider tools.
     const tools = providerEvidenceReady ? []
-      : (state.plan?.authoritative ? decisionToolSurface(state.plan.intent, useTools) : unifiedMetaTools({ useTools }));
+      : decisionToolSurface(state.plan?.intent || 'fallback_harness', useTools);
     const turn = await callModel({
       messages: modelMessages, tools, model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
@@ -873,7 +907,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     onEvent({ type: 'answer_started', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
     onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: finalEvidenceReady, run_id: state.runId });
     onEvent({ type: 'answer_completed', schema_version: 1, grounded: finalEvidenceReady, run_id: state.runId });
-    return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, response) };
+    return { messages, pendingTool: null, usage,
+      timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || Date.now(), completion_at_ms: Date.now() },
+      result: outputShape({ ...state, messages, usage,
+        timings: { ...state.timings, first_answer_delta_at_ms: state.timings.first_answer_delta_at_ms || Date.now(), completion_at_ms: Date.now() } }, response) };
   };
 
   const toolNode = async state => {
@@ -884,6 +921,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       return { pendingTool: null, messages: [...state.messages, toolMessage(call, receipt)], receipts: [...state.receipts, receipt] };
     }
     onEvent({ type: 'tool_start', name: call.name, arguments: call.args, run_id: state.runId });
+    const executorTimings = { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now() };
     if (call.name === '__invalid_tool__') {
       const receipt = {
         successful: false,
@@ -895,6 +933,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       onEvent({ type: 'tool_result', name: call.requestedName || call.name, status: 'error', summary: receipt.error, run_id: state.runId });
       return {
         pendingTool: null,
+        timings: executorTimings,
         callFingerprints: [...state.callFingerprints, fingerprint],
         messages: [...state.messages, toolMessage(call, receipt)],
         receipts: [...state.receipts, { tool: call.requestedName || call.name, successful: false, data: receipt, error: receipt.error }],
@@ -915,7 +954,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         messages: [...state.messages, toolMessage(call, receipt)], receipts: [...state.receipts, { ...receipt, data: receipt }],
         steps: [...state.steps, { kind: 'write', slug: receipt.tool_slug, status: 'draft_created', summary: receipt.message }],
       };
-      return transition(state, 'awaiting_approval', patch, { tool_slug: receipt.tool_slug, reason_code: 'write_approval_required' });
+      return transition(state, 'awaiting_approval', { ...patch, timings: { ...executorTimings, receipt_at_ms: Date.now() } }, { tool_slug: receipt.tool_slug, reason_code: 'write_approval_required' });
     }
     if (call.name === 'hivemind_meta' && call.args.operation === 'save'
       && receipt?.successful === false && receipt?.error === 'hivemind_save_payload_required') {
@@ -939,7 +978,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         receipts: [...state.receipts, { tool: call.name, action: 'save', successful: true, data: receipt.data }],
         steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'waiting', summary: request.prompt }],
       };
-      return transition(state, 'awaiting_input', patch, { tool_slug: 'hivemind_save_memory', reason_code: 'memory_scope_required' });
+      return transition(state, 'awaiting_input', { ...patch, timings: { ...executorTimings, receipt_at_ms: Date.now() } }, { tool_slug: 'hivemind_save_memory', reason_code: 'memory_scope_required' });
     }
     if (receipt?.disconnected?.length || receipt?.connection?.redirectUrl) {
       const toolkits = receipt.disconnected?.length ? receipt.disconnected : receipt.connection.toolkits;
@@ -959,16 +998,16 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         receipts: [...state.receipts, { tool: call.name, successful: true, data: receipt.data }],
         steps: [...state.steps, { kind: 'connection', slug: toolkits[0], status: 'waiting', summary: request.prompt }],
       };
-      return transition(state, 'awaiting_input', patch, { tool_slug: toolkits[0], reason_code: 'connection_required' });
+      return transition(state, 'awaiting_input', { ...patch, timings: { ...executorTimings, receipt_at_ms: Date.now() } }, { tool_slug: toolkits[0], reason_code: 'connection_required' });
     }
     const exposed = publicToolResult(receipt);
     const underlying = call.name === 'hivemind_connected_task' && call.args.action === 'execute' ? call.args.tool_slug : call.name;
     onEvent({ type: 'tool_result', name: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed', run_id: state.runId });
-    // Once JEV has selected an explicit memory save and Core returns its
-    // durable receipt, no synthesis pass may reinterpret the user write or
-    // issue a recall. Seal this governed state transition directly.
+    // A completed governed memory write is authoritative regardless of the
+    // wording that led to it. Seal the receipt directly; never re-enter a
+    // model/retrieval loop after any successful save.
     if (call.name === 'hivemind_meta' && call.args.operation === 'save'
-      && state.context?.explicit_save === true && receipt?.successful !== false) {
+      && receipt?.successful !== false) {
       const receipts = [...state.receipts, {
         tool: underlying, action: 'save', status: receipt?.status || null,
         successful: true, data: exposed, error: null,
@@ -985,11 +1024,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         messages: [...state.messages, toolMessage(call, exposed), { role: 'assistant', content: response }],
         receipts,
         steps,
-        result: outputShape({ ...state, pendingTool: null, pendingSaveDraft: null, receipts, steps }, response),
+        timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() },
+        result: outputShape({ ...state, pendingTool: null, pendingSaveDraft: null, receipts, steps,
+          timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() } }, response),
       };
     }
     return {
-      ...statePatch, pendingTool: null, callFingerprints: [...state.callFingerprints, fingerprint],
+      ...statePatch, pendingTool: null, timings: { ...executorTimings, receipt_at_ms: Date.now() }, callFingerprints: [...state.callFingerprints, fingerprint],
       messages: [...state.messages, toolMessage(call, exposed)],
       receipts: [...state.receipts, {
         tool: underlying,
@@ -1064,6 +1105,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       content: draft.content,
       tags: Array.isArray(draft.tags) && draft.tags.length >= 2 ? draft.tags : ['hivemind', 'user-confirmed'],
       memory_type: draft.memory_type || 'fact',
+      ...(Array.isArray(draft.entities) ? { entities: draft.entities } : {}),
+      ...(Array.isArray(draft.dates) ? { dates: draft.dates } : {}),
+      ...(Array.isArray(draft.source_refs) ? { source_refs: draft.source_refs } : {}),
+      ...(draft.event_time ? { event_time: draft.event_time } : {}),
       _memory_admission: 'user_assertion', _require_explicit_scope: true,
     };
     if (['personal', 'organization', 'team'].includes(selected)) saveArgs.scope = selected;
@@ -1092,7 +1137,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'completed', receipt: exposed }) }, { role: 'assistant', content: response }],
       receipts,
       steps,
-      result: outputShape({ ...state, pendingMemoryScope: null, receipts, steps }, response),
+      timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() },
+      result: outputShape({ ...state, pendingMemoryScope: null, receipts, steps,
+        timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() } }, response),
     };
   };
 

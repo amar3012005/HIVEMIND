@@ -433,6 +433,15 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
       if (!toolkits.length) toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
       if (!toolkits.length && active.length === 1) toolkits = active;
 
+      // The model can describe a capability ("email", "files", "chat") but
+      // Tool Router accepts only provider toolkit slugs. Resolve every
+      // supplied concept against the authenticated connection set before a
+      // session exists; this is provider-agnostic and never guesses a tool.
+      if (toolkits.length && typeof composio.resolveToolkitConcepts === 'function') {
+        const resolved = await composio.resolveToolkitConcepts(toolkits, { preferred: active });
+        if (resolved.length) toolkits = resolved;
+      }
+
       // Existing tenants may still own connections under the authenticated
       // organization subject. Prefer user scope, but migrate transparently to
       // org scope when the requested app is active only there.
@@ -442,6 +451,10 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
         const explicitlyNamedOrg = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
         if (explicitlyNamedOrg.length) toolkits = explicitlyNamedOrg;
         if (!toolkits.length) toolkits = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
+        if (toolkits.length && typeof composio.resolveToolkitConcepts === 'function') {
+          const resolved = await composio.resolveToolkitConcepts(toolkits, { preferred: orgActive });
+          if (resolved.length) toolkits = resolved;
+        }
         if (toolkits.length && toolkits.every(toolkit => orgActive.includes(toolkit))) {
           connectionScope = 'org';
           active = orgActive;

@@ -659,6 +659,33 @@ test('connected search generically infers an explicitly named active toolkit whe
   assert.deepEqual(discoveredToolkits, ['gmail']);
 });
 
+test('connected capability concepts are resolved to valid authenticated toolkit slugs before session creation', async () => {
+  const prisma = fakePrisma();
+  const resolved = [];
+  let discovered = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Search my email for the five newest messages', useTools: true, prisma,
+    ctx: ctx(prisma, 'resolve-email-concept'), checkpointer: new MemorySaver(),
+    modelStep: async () => ({ message: call('hivemind_connected_task', {
+      action: 'search', toolkits: ['email'], queries: [{ use_case: 'Get the five newest email messages' }],
+    }, 'resolve-email-1') }),
+    composio: {
+      async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; },
+      async resolveToolkitConcepts(concepts, { preferred }) {
+        resolved.push({ concepts, preferred });
+        return ['gmail'];
+      },
+      async discoverSessionTools(_org, input) {
+        discovered = input.toolkits;
+        return { sessionId: 'resolve-email-session', primaryToolSlugs: [], relatedToolSlugs: [], toolkitConnectionStatuses: { gmail: 'connected' } };
+      },
+    },
+  });
+  assert.equal(result.status, 'error');
+  assert.ok(resolved.some(row => JSON.stringify(row) === JSON.stringify({ concepts: ['email'], preferred: ['gmail'] })));
+  assert.deepEqual(discovered, ['gmail']);
+});
+
 test('a named connected toolkit cannot seal from hivemind_meta without Composio discovery', async () => {
   const prisma = fakePrisma();
   const observed = [];

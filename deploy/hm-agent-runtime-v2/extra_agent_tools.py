@@ -71,6 +71,8 @@ MASTER_API_KEY = os.getenv("HIVEMIND_MASTER_API_KEY", "").strip()
 # Tool calls are on the agent's critical path. A hung hm-core must surface as a
 # tool error the model can react to, not as a stalled run.
 _TOOL_TIMEOUT = float(os.getenv("HM_TOOL_TIMEOUT", "60"))
+_WEB_SEARCH_TEXT_LIMIT = int(os.getenv("HIVEMIND_WEB_SEARCH_TEXT_LIMIT", "6000"))
+_WEB_SEARCH_LIST_LIMIT = int(os.getenv("HIVEMIND_WEB_SEARCH_LIST_LIMIT", "12"))
 _ARTIFACT_DURABLE = os.getenv("HIVEMIND_ARTIFACT_DURABLE", "0") == "1"
 _ARTIFACT_MAX_BYTES = int(os.getenv("HIVEMIND_ARTIFACT_MAX_BYTES", str(10 * 1024 * 1024)))
 
@@ -187,6 +189,25 @@ def _ok(payload: Any) -> ToolChunk:
         content=[TextBlock(type="text", text=text)],
         state=ToolResultState.SUCCESS,
     )
+
+
+def _compact_web_search_payload(payload: Any) -> Any:
+    """Bound page bodies before they become persistent AgentScope context."""
+    def trim(value: Any) -> Any:
+        if isinstance(value, str):
+            if len(value) <= _WEB_SEARCH_TEXT_LIMIT:
+                return value
+            return value[:_WEB_SEARCH_TEXT_LIMIT] + "\n[truncated by runtime]"
+        if isinstance(value, list):
+            items = [trim(item) for item in value[:_WEB_SEARCH_LIST_LIMIT]]
+            if len(value) > _WEB_SEARCH_LIST_LIMIT:
+                items.append(f"[{len(value) - _WEB_SEARCH_LIST_LIMIT} more results omitted]")
+            return items
+        if isinstance(value, dict):
+            return {key: trim(item) for key, item in value.items()}
+        return value
+
+    return trim(payload)
 
 
 def _err(message: str, **context: Any) -> ToolChunk:
@@ -579,7 +600,7 @@ Searching the web for internal facts returns plausible strangers."""
             )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc), query=query)
-        return _ok(data)
+        return _ok(_compact_web_search_payload(data))
 
 
 class RecordArtifactTool(_HiveMindToolBase):

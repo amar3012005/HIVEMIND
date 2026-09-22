@@ -14,6 +14,7 @@
     "open-stream": "node src/open-stream-proxy.mjs"
   },
   "dependencies": {
-    "@e2b/desktop": "2.4.0"
+    "@e2b/desktop": "2.4.0",
+    "playwright-core": "1.55.0"
   }
 }

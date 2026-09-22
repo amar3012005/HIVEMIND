@@ -3,6 +3,35 @@
 This is a separate, opt-in proof for E2B Desktop. It does not alter the local
 Docker/CDP/noVNC canary and it is not connected to WorkRun.
 
+## DOM-first Computer Operator baseline
+
+`src/operator/` is the standalone execution core for the next canary. It has
+no AgentScope dependency and receives one bounded job, compiles it to a browser
+plan, then operates through an injected driver. The driver can be Playwright
+over CDP in a custom E2B template, while E2B Desktop's authenticated stream
+remains only the human-view/takeover channel.
+
+The core is intentionally site-agnostic: it has no X, Spotify, company, or
+credential-specific code. It chooses actions in this order:
+
+1. exact DOM target supplied by the bounded plan;
+2. unambiguous local candidate rules;
+3. optional typed decision engine (Jev or a local compatible runtime);
+4. optional visual fallback;
+5. pause for a human when confidence or authority is insufficient.
+
+It enforces a step/time budget and stops after repeated browser states instead
+of retrying a click loop. The offline test uses a mock public-profile fixture:
+one natural-language objective becomes a bounded plan, selects the `Followers`
+candidate through DOM metadata, and returns a structured count receipt without
+calling a model.
+
+`PlaywrightDriver` connects to an existing Chromium CDP endpoint. That endpoint
+must be reachable *inside the E2B microVM* so DOM inspection, selection, and
+clicks stay local. The current E2B Desktop template is retained as the visible
+handoff proof; the next live acceptance must use a custom E2B template with
+Chromium, `playwright-core`, the worker, and a local fixture preinstalled.
+
 ## Scope
 
 This is a separate, opt-in E2B implementation. It deliberately does not change

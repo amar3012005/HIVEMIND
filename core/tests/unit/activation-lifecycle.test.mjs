@@ -6,8 +6,10 @@ import {
   advanceActivationForEmail,
   claimActivationReminder,
   isActivationLifecycleEnabled,
+  recordActivationReminder,
   renderActivationReminderEmail,
   scheduleActivationWorkflow,
+  startInvitationActivation,
   startSignupActivation,
 } from '../../src/lifecycle/activation-lifecycle.js';
 
@@ -52,6 +54,33 @@ test('direct signup joins the same recipient lifecycle without retaining raw ema
   });
   assert.deepEqual(activation, { id: 'activation', generation: 1 });
   assert.doesNotMatch(query, /person@example\.test/);
+});
+
+test('admin invitations schedule five absolute reminders at 12-hour intervals through hour 60', async () => {
+  const issuedAt = new Date('2026-09-22T09:00:00.000Z');
+  let values;
+  await startInvitationActivation({
+    prisma: {
+      $queryRawUnsafe: async (_sql, ...args) => {
+        values = args;
+        return [{ id: 'activation', generation: 1 }];
+      },
+    },
+    invite: { id: '11111111-1111-1111-1111-111111111111', orgId: '22222222-2222-2222-2222-222222222222', email: 'person@example.test' },
+    now: issuedAt,
+  });
+  assert.equal(values[6].toISOString(), '2026-09-22T21:00:00.000Z');
+
+  let query = '';
+  await recordActivationReminder({
+    prisma: { $queryRawUnsafe: async (sql) => { query = sql; return []; } },
+    activationId: '11111111-1111-1111-1111-111111111111',
+    generation: 1,
+  });
+  for (const hour of [24, 36, 48, 60]) {
+    assert.match(query, new RegExp(`created_at \\+ interval '${hour} hours'`));
+  }
+  assert.doesNotMatch(query, /240 hours/);
 });
 
 test('enterprise invitation reminders use the persisted recipient before signup', async () => {

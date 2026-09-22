@@ -9,8 +9,11 @@ export const ACTIVATION_STAGES = Object.freeze({
   STOPPED: 'stopped',
 });
 
+// Invitation reminders are absolute elapsed windows from the successfully
+// delivered invitation.  Keeping these as absolute offsets prevents retries,
+// queue delay, or provider latency from stretching the journey.
 const REMINDER_HOURS = Object.freeze({
-  [ACTIVATION_STAGES.INVITED_PENDING_SIGNUP]: [24, 96, 240],
+  [ACTIVATION_STAGES.INVITED_PENDING_SIGNUP]: [12, 24, 36, 48, 60],
   [ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY]: [24, 96],
   [ACTIVATION_STAGES.ONBOARDING_IN_PROGRESS]: [24, 72],
 });
@@ -191,8 +194,10 @@ export async function recordActivationReminder({ prisma, activationId, generatio
     `UPDATE hivemind.activation_lifecycles
         SET reminder_count=reminder_count+1, last_reminder_at=$3,
             next_reminder_at=CASE
-              WHEN stage='invited_pending_signup' AND reminder_count+1=1 THEN $3 + interval '96 hours'
-              WHEN stage='invited_pending_signup' AND reminder_count+1=2 THEN $3 + interval '240 hours'
+              WHEN stage='invited_pending_signup' AND reminder_count+1=1 THEN created_at + interval '24 hours'
+              WHEN stage='invited_pending_signup' AND reminder_count+1=2 THEN created_at + interval '36 hours'
+              WHEN stage='invited_pending_signup' AND reminder_count+1=3 THEN created_at + interval '48 hours'
+              WHEN stage='invited_pending_signup' AND reminder_count+1=4 THEN created_at + interval '60 hours'
               WHEN stage='signed_in_pending_company' AND reminder_count+1=1 THEN $3 + interval '96 hours'
               WHEN stage='onboarding_in_progress' AND reminder_count+1=1 THEN $3 + interval '72 hours'
               ELSE NULL END,

@@ -49,6 +49,12 @@ import {
 } from './runtime/runtime-role.js';
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
+import {
+  PUBLIC_MCP_OAUTH_SCOPES,
+  mapPublicMcpOAuthScopesToInternal,
+  normalizePublicMcpOAuthScopes,
+  removeOperatorScopesFromOAuthPrincipal,
+} from './auth/oauth-scope-policy.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { isOrganizationAdmin } from './workspace/access-policy.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
@@ -2927,26 +2933,7 @@ const aggregateCache = new Map();
 const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.singulancelabs.com';
 // Public OAuth scopes deliberately use dot notation. Internal service checks use
 // colon notation, so this module is the one translation boundary.
-const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'web.search', 'tools.invoke', 'workspace.connect', 'mcp.connect', 'ops.deploy'];
-const OAUTH_SCOPE_TO_INTERNAL = {
-  'memory.read': 'memory:read',
-  'memory.write': 'memory:write',
-  'web.search': 'web:search',
-  'tools.invoke': 'mcp',
-  'workspace.connect': 'mcp',
-  'mcp.connect': 'mcp',
-  'ops.deploy': 'ops:deploy'
-};
-// Accept both dot-style (memory.read) and colon-style (memory:read) on the
-// authorization request so ChatGPT / Custom GPTs (colon convention) work
-// alongside the original MCP clients (dot convention).
-const OAUTH_SCOPE_ALIASES = {
-  'memory:read': 'memory.read',
-  'memory:write': 'memory.write',
-  'web:search': 'web.search',
-  'ops:deploy': 'ops.deploy',
-  mcp: 'mcp.connect',
-};
+const OAUTH_SCOPES_SUPPORTED = PUBLIC_MCP_OAUTH_SCOPES;
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
 const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);
 const OAUTH_SESSION_COOKIE_NAME = process.env.HIVEMIND_OAUTH_SESSION_COOKIE || 'hm_oauth_session';
@@ -3930,30 +3917,11 @@ async function getOAuthClientById(clientId) {
 }
 
 function normalizeRequestedScopes(scopeInput, fallbackScopes = ['memory.read']) {
-  const rawScopes = Array.isArray(scopeInput)
-    ? scopeInput
-    : String(scopeInput || '')
-      .split(/[\s+]/)
-      .map(s => s.trim())
-      .filter(Boolean);
-
-  const normalized = rawScopes
-    .map(scope => OAUTH_SCOPE_ALIASES[scope] || scope)
-    .filter(scope => OAUTH_SCOPES_SUPPORTED.includes(scope));
-
-  if (normalized.length === 0) {
-    return Array.isArray(fallbackScopes) ? fallbackScopes : ['memory.read'];
-  }
-
-  return Array.from(new Set(normalized));
+  return normalizePublicMcpOAuthScopes(scopeInput, fallbackScopes);
 }
 
 function mapOAuthScopesToInternalScopes(scopes) {
-  const requested = normalizeRequestedScopes(scopes, []);
-  const mapped = requested
-    .map(scope => OAUTH_SCOPE_TO_INTERNAL[scope])
-    .filter(Boolean);
-  return Array.from(new Set(mapped));
+  return mapPublicMcpOAuthScopesToInternal(scopes);
 }
 
 function parseCookies(req) {
@@ -4097,28 +4065,6 @@ async function resolveOAuthSession(req) {
   }
 
   return null;
-}
-
-// Deployment is an operator capability, never a general MCP capability. A
-// client may request `ops.deploy`, but it is issued only to an active
-// organization owner/admin or the explicitly configured local administrator.
-async function canGrantOpsDeployScope({ userId, orgId, authProvider } = {}) {
-  if (authProvider === 'local_admin') return true;
-  if (!prisma || !userId || !orgId) return false;
-  try {
-    const membership = await prisma.userOrganization.findUnique({
-      where: { userId_orgId: { userId, orgId } },
-      select: { role: true, roles: true, isActive: true },
-    });
-    const roles = new Set([
-      ...(membership?.role ? [membership.role] : []),
-      ...(Array.isArray(membership?.roles) ? membership.roles : []),
-    ]);
-    return membership?.isActive === true && (roles.has('owner') || roles.has('admin'));
-  } catch (err) {
-    console.warn('[oauth] unable to resolve ops.deploy authorization:', err?.message || err);
-    return false;
-  }
 }
 
 async function createOAuthSession(res, payload) {
@@ -4480,6 +4426,9 @@ async function authenticateApiKey(req) {
       ok: true,
       principal: {
         ...resolvedAccess,
+        scopes: oauthMetadata
+          ? removeOperatorScopesFromOAuthPrincipal(resolvedAccess.scopes)
+          : resolvedAccess.scopes,
         containerTags: persistedContainerTags,
         oauth: oauthMetadata,
         rawKey: apiKey,
@@ -4502,21 +4451,25 @@ async function authenticateApiKey(req) {
   record.lastUsedAt = new Date().toISOString();
   saveApiKeyStore(store);
 
+  const fileOAuthMetadata = (() => {
+    try {
+      return record.description ? JSON.parse(record.description) : null;
+    } catch {
+      return null;
+    }
+  })();
+
   return {
     ok: true,
     principal: {
       keyId: record.id,
       userId: record.userId || DEFAULT_USER,
       orgId: record.orgId || DEFAULT_ORG,
-      scopes: record.scopes || [],
+      scopes: fileOAuthMetadata?.kind === 'oauth_access_token'
+        ? removeOperatorScopesFromOAuthPrincipal(record.scopes)
+        : (record.scopes || []),
       containerTags: record.containerTags || null,
-      oauth: (() => {
-        try {
-          return record.description ? JSON.parse(record.description) : null;
-        } catch {
-          return null;
-        }
-      })(),
+      oauth: fileOAuthMetadata,
       rawKey: apiKey
     }
   };
@@ -5966,9 +5919,6 @@ exit \$RC
 
     const session = await resolveOAuthSession(req);
     if (session?.userId) {
-      if (requestedScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(session)) {
-        return jsonResponse(res, { error: 'access_denied', error_description: 'An active organization owner or administrator role is required for ops.deploy.' }, 403);
-      }
       const consentStateId = await oauthSessionStore.createAuthState({
         kind: 'oauth_consent',
         payload: {
@@ -6139,58 +6089,15 @@ exit \$RC
     res.writeHead(302, { Location: dashboardLoginUrl });
     res.end();
     return;
-
-    // Kept below only for source compatibility with older local snapshots.
-    // The redirect above makes this renderer unreachable for remote clients.
-    const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;
-
-    const loginHtml = `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HiveMind Sign In</title>
-<style>
-  body{font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;background:#fafaf6;color:#0a0a0a;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#fff;border:1px solid #e3e0db;border-radius:18px;padding:2.2rem;max-width:420px;width:92%;box-shadow:0 20px 60px rgba(10,10,10,.08)}
-  .brand{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:1.4rem;padding-bottom:1.2rem;border-bottom:1px solid #f3f1ec}
-  .brand img,.brand svg{width:72px;height:72px;margin-bottom:.6rem}
-  .brand-title{font-size:.78rem;font-weight:700;letter-spacing:.18em;color:#737373;text-transform:uppercase}
-  h1{font-size:1.2rem;margin:0 0 .4rem;color:#0a0a0a}
-  p{font-size:.9rem;color:#737373;margin:0 0 1rem}
-  label{display:block;font-size:.85rem;color:#0a0a0a;margin-bottom:.3rem;font-weight:600}
-  input[type=password]{width:100%;padding:.65rem;border:1px solid #e3e0db;border-radius:10px;background:#fafaf6;color:#0a0a0a;margin-bottom:.8rem;box-sizing:border-box;font-size:.95rem}
-  input[type=password]:focus{outline:none;border-color:#0a0a0a;background:#fff}
-  button{width:100%;padding:.72rem;background:#0a0a0a;color:#fff;border:none;border-radius:10px;cursor:pointer;font-weight:600;font-size:.95rem}
-  button:hover{background:#1a1a1a}
-  .divider{margin:.9rem 0;text-align:center;color:#a3a3a3;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase}
-</style></head><body>
-<div class="card">
-  <div class="brand">
-    <img src="/oauth/logo.png" alt="HIVEMIND" width="72" height="72" style="border-radius:14px;object-fit:cover">
-    <div class="brand-title">HIVEMIND</div>
-  </div>
-  <h1>Sign in to HiveMind</h1>
-  <p>${sanitizeHtml(client.client_name)} needs your consent to connect.</p>
-  ${dashboardButton}
-  <div class="divider">or use local admin login</div>
-  <form method="POST" action="/oauth/login">
-    <input type="hidden" name="client_id" value="${sanitizeHtml(clientId)}">
-    <input type="hidden" name="redirect_uri" value="${sanitizeHtml(redirectUri)}">
-    <input type="hidden" name="scope" value="${sanitizeHtml(requestedScopes.join(' '))}">
-    <input type="hidden" name="state" value="${sanitizeHtml(state)}">
-    <input type="hidden" name="code_challenge" value="${sanitizeHtml(codeChallenge)}">
-    <input type="hidden" name="code_challenge_method" value="${sanitizeHtml(codeChallengeMethod)}">
-    <input type="hidden" name="resource" value="${sanitizeHtml(resource)}">
-    <label for="admin_secret">Admin Secret</label>
-    <input type="password" id="admin_secret" name="admin_secret" required autofocus>
-    <button type="submit">Sign In</button>
-  </form>
-</div></body></html>`;
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.writeHead(200);
-    res.end(loginHtml);
-    return;
   }
 
   if (pathname === '/oauth/login' && req.method === 'POST') {
+    // This shortcut exists only for local integration tests. Public OAuth must
+    // authenticate through the branded HIVE-MIND login and must never expose
+    // the operator admin secret on the Internet.
+    if (IS_PRODUCTION) {
+      return jsonResponse(res, { error: 'not_found' }, 404);
+    }
     const rawBody = await new Promise((resolve) => {
       let data = '';
       req.on('data', chunk => data += chunk);
@@ -6255,10 +6162,6 @@ exit \$RC
     if (disallowed.length > 0) {
       return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
     }
-    if (requestedScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(session)) {
-      return jsonResponse(res, { error: 'access_denied', error_description: 'An active organization owner or administrator role is required for ops.deploy.' }, 403);
-    }
-
     const consentState = await oauthSessionStore.consumeAuthState(oauthStateId);
     if (!consentState || consentState.kind !== 'oauth_consent' || !consentState.payload) {
       return jsonResponse(res, { error: 'invalid_request', error_description: 'Consent state is invalid or expired.' }, 400);
@@ -6415,9 +6318,6 @@ exit \$RC
       if (disallowed.length > 0) {
         return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
       }
-      if (oauthScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(entry)) {
-        return jsonResponse(res, { error: 'access_denied', error_description: 'The ops.deploy authorization is no longer valid.' }, 403);
-      }
       const internalScopes = mapOAuthScopesToInternalScopes(oauthScopes);
       if (internalScopes.length === 0) {
         return jsonResponse(res, { error: 'invalid_scope', error_description: 'No internal scopes resolved from requested scopes.' }, 400);
@@ -6488,11 +6388,7 @@ exit \$RC
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token expired or revoked.' }, 400);
       }
       const refreshScopes = normalizeRequestedScopes(record.scopes || [], ['memory.read']);
-      if (refreshScopes.includes('ops.deploy') && !await canGrantOpsDeployScope(record)) {
-        await markRefreshTokenRevoked(record.refreshHash);
-        await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_ops_scope_revoked');
-        return jsonResponse(res, { error: 'access_denied', error_description: 'The ops.deploy authorization is no longer valid.' }, 403);
-      }
+      const refreshedInternalScopes = mapOAuthScopesToInternalScopes(refreshScopes);
 
       await markRefreshTokenRevoked(record.refreshHash);
       await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_refresh_rotation');
@@ -6501,7 +6397,7 @@ exit \$RC
         clientId,
         userId: record.userId,
         orgId: record.orgId,
-        internalScopes: Array.isArray(record.internalScopes) ? record.internalScopes : mapOAuthScopesToInternalScopes(record.scopes || []),
+        internalScopes: refreshedInternalScopes,
         oauthScopes: refreshScopes,
         workspaceId: record.workspaceId || null,
         resource: record.resource || OAUTH_RESOURCE_DEFAULT
@@ -6510,6 +6406,8 @@ exit \$RC
       const rotatedRefreshToken = generateRawRefreshToken();
       const rotatedRecord = {
         ...record,
+        scopes: refreshScopes,
+        internalScopes: refreshedInternalScopes,
         refreshHash: hashRefreshToken(rotatedRefreshToken),
         accessTokenHash: hashPersistedApiKey(accessToken),
         accessTokenId,
@@ -6520,13 +6418,12 @@ exit \$RC
       };
       await persistRefreshTokenRecord(rotatedRefreshToken, rotatedRecord);
 
-      const oauthScopes = normalizeRequestedScopes(record.scopes || [], ['memory.read']);
       return jsonResponse(res, {
         access_token: accessToken,
         token_type: 'bearer',
         expires_in: Math.max(1, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000)),
         refresh_token: rotatedRefreshToken,
-        scope: oauthScopes.join(' '),
+        scope: refreshScopes.join(' '),
         claims: {
           iss: OAUTH_BASE_URL,
           aud: record.resource || OAUTH_RESOURCE_DEFAULT,
@@ -6534,7 +6431,7 @@ exit \$RC
           sub: record.userId,
           org_id: record.orgId,
           workspace_id: record.workspaceId || null,
-          scope: oauthScopes.join(' ')
+          scope: refreshScopes.join(' ')
         }
       });
     }

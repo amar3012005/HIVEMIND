@@ -70,6 +70,7 @@ test('every Jev stage receives the bounded stage context contract', async () => 
     authenticated_scope: { user_id: 'user-1', org_id: 'org-1', project_id: 'project-1' },
     recent_turns: [{ role: 'user', content: 'Find my latest email.' }, { role: 'assistant', content: 'I will use the connected app.' }],
     workflow: { intent: 'multi_task', phase: 'composio_selection', completed_receipts: [{ tool: 'hivemind_meta', successful: true }], selected_tool_slugs: ['GMAIL_FETCH_EMAILS'] },
+    planning_hints: { explicit_memory_save_language: true, prepared_memory_save: true },
   });
   assert.equal(context.context_version, 'jev-stage-context-v1');
   assert.match(context.decision_contract.instruction, /unblocked outcome/i);
@@ -77,6 +78,7 @@ test('every Jev stage receives the bounded stage context contract', async () => 
   assert.equal(context.recent_turns.length, 2);
   assert.equal(context.workflow.intent, 'multi_task');
   assert.deepEqual(context.workflow.selected_tool_slugs, ['GMAIL_FETCH_EMAILS']);
+  assert.deepEqual(context.planning_hints, { explicit_memory_save_language: true, prepared_memory_save: true });
   assert.equal(JSON.stringify(context).includes('must-not-reach-jev'), false);
 });
 

@@ -52,6 +52,13 @@ export function buildJevDecisionContext(stage, context = null) {
       }, { maxChars: 600, maxDepth: 2, maxItems: 6 }),
     },
     recent_turns: recentTurns,
+    // These are graph-derived facts about the current admission, rather than
+    // a second router.  In particular, a short referential request such as
+    // "save this" is only meaningful when the graph has already recovered a
+    // source-grounded draft from the preceding assistant turn.  Without this
+    // bounded signal, JEV correctly sees an underspecified request and may
+    // select fallback_harness even though a governed save is ready.
+    planning_hints: boundedProjection(source.planning_hints || {}, { maxChars: 1200, maxDepth: 3, maxItems: 12 }),
     workflow: boundedProjection({
       intent: source.current_intent || workflow.intent || null,
       phase: source.current_phase || workflow.phase || null,
@@ -290,7 +297,9 @@ export async function chooseCapability({ gateway, turn, userQuery, context, obse
     planning_hints: {
       app_mentions: [...new Set(appMentions.map(value => String(value).toLowerCase()))],
       operational_app_intent: operationalAppIntent === true,
-      explicit_memory_save_language: hasExplicitHivemindSaveIntent(userQuery),
+      explicit_memory_save_language: hasExplicitHivemindSaveIntent(userQuery)
+        || context?.explicit_save_language === true,
+      prepared_memory_save: context?.pending_save?.available === true,
     },
   };
   return gateway.choose({ turn, stage: 'capability', userQuery, context: planningContext, observation, options: CAPABILITY_OPTIONS,

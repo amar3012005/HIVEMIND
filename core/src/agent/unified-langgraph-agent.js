@@ -939,6 +939,16 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         system_policy: PLAN_SYSTEM_CONTRACT,
         recent_turns: safeHistory(ctx.conversationHistory, 5),
         explicit_save_language: explicitSave,
+        // Keep the full capsule out of JEV, but tell the plan node that this
+        // turn has a grounded, graph-prepared save payload from the current
+        // message or preceding assistant evidence.  This lets JEV classify a
+        // compact continuation ("save this") without creating a second
+        // heuristic route or exposing raw conversation/provider content.
+        pending_save: saveDraft ? {
+          available: true,
+          source: saveDraft.source_type || 'conversation',
+          has_explicit_scope: Boolean(saveDraft.scope),
+        } : { available: false },
         authenticated_scope: { user_id: ctx.userId || null, org_id: ctx.orgId || null, project_id: ctx.projectId || null },
         current_phase: 'capability',
         workflow: { phase: 'capability', requested_outcomes: [], completed_receipts: [], selected_tool_slugs: [] },

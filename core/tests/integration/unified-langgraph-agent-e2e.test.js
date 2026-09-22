@@ -483,6 +483,35 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
   assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), [resumed.response]);
 });
 
+test('a referential save continuation tells the JEV plan about its prepared grounded draft', async () => {
+  const prisma = fakePrisma();
+  const seen = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'save this', useTools: false, prisma,
+    ctx: {
+      ...ctx(prisma, 'save-this-jev-context'),
+      conversationHistory: [{ role: 'assistant', content: 'PR #707 is blocked because the Strix trial ended.' }],
+      _tracedDispatch: async (name) => {
+        assert.equal(name, 'hivemind_save_memory');
+        return { saved: true, id: 'saved-jev-context', title: 'PR #707 review status', scope: 'organization' };
+      },
+    },
+    checkpointer: new MemorySaver(), composio: {},
+    decisionStage: async input => {
+      seen.push(input);
+      assert.equal(input.stage, 'capability');
+      assert.equal(input.context.explicit_save_language, true);
+      assert.deepEqual(input.context.pending_save, { available: true, source: 'conversation', has_explicit_scope: false });
+      return { status: 'selected', selected: 'hivemind_save', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'referential-save' } };
+    },
+    modelStep: async () => { throw new Error('a prepared referential save must not enter fallback model planning'); },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(result.status, 'completed');
+  assert.match(result.response, /organization company brain/i);
+});
+
 test('a bare save-it request without a completed answer asks for content without calling recall', async () => {
   const prisma = fakePrisma();
   let modelTurns = 0;

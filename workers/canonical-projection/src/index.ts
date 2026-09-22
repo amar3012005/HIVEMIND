@@ -95,6 +95,15 @@ async function core(env: RuntimeEnv, params: ProjectionParams, stage: CoreStageN
   return body as CoreResult;
 }
 
+async function linkedEntityIds(env: RuntimeEnv, params: ProjectionParams): Promise<string[]> {
+  const pathname = `/internal/entity-profile-projection/v1/memories/${params.memory_id}/entities`;
+  const signed = await signCoreRequest(env.CANONICAL_PROJECTION_HMAC_SECRET, pathname, params);
+  const response = await fetch(`${env.HIVEMIND_CORE_URL.replace(/\/$/, '')}${pathname}`, { method: 'POST', headers: signed.headers, body: signed.body });
+  if (!response.ok) throw new Error(`linked_entities_http_${response.status}`);
+  const body: any = await response.json().catch(() => ({}));
+  return Array.isArray(body.entity_ids) ? body.entity_ids.filter((id: unknown) => typeof id === 'string' && validUuid(id)) : [];
+}
+
 const STANDARD_RETRY = {
   retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' },
   timeout: '5 minutes',
@@ -120,9 +129,18 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
       const claims = Array.isArray(projection.claims) ? projection.claims : [];
       const linkedEntityIds = Array.isArray(projection.entity_ids) ? projection.entity_ids : [];
       const completedEntityIds = Array.isArray((completed as any)?.receipt?.entity_ids) ? (completed as any).receipt.entity_ids : [];
+      let settledEntityIds = completedEntityIds;
+      // The linker is intentionally detached from the memory write. Poll the
+      // signed, tenant-checked Core view a bounded number of times rather than
+      // turning an entity-free memory into a failed canonical workflow.
+      for (let attempt = 1; attempt <= 3 && settledEntityIds.length === 0; attempt += 1) {
+        settledEntityIds = await step.do(`read settled canonical entity links ${attempt}`, STANDARD_RETRY, () => linkedEntityIds(this.env, params));
+        if (settledEntityIds.length === 0 && attempt < 3) await step.sleep(`wait for canonical entity links ${attempt}`, '5 seconds');
+      }
       const entityIds = [...new Set([
         ...linkedEntityIds,
         ...completedEntityIds,
+        ...settledEntityIds,
         ...claims.flatMap((claim: any) => [claim?.subjectEntityId, claim?.objectEntityId]),
       ].filter((id: unknown) => typeof id === 'string' && validUuid(id)))];
       // New admissions preserve the actor identity. This makes the entity-profile

@@ -6699,6 +6699,24 @@ exit \$RC
       return jsonResponse(res, { error: error.message }, 503);
     }
   }
+  if (pathname.match(/^\/internal\/entity-profile-projection\/v1\/memories\/[^/]+\/entities$/) && req.method === 'POST') {
+    const match = pathname.match(/^\/internal\/entity-profile-projection\/v1\/memories\/([^/]+)\/entities$/);
+    let rawBody;
+    try { rawBody = (await readBoundedBuffer(req, 64 * 1024)).toString('utf8'); } catch { return jsonResponse(res, { error: 'invalid_body' }, 400); }
+    const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+    if (!verified.ok) return jsonResponse(res, { error: 'invalid_projection_signature' }, 401);
+    if (!(await consumeCanonicalProjectionNonce(verified.nonce))) return jsonResponse(res, { error: 'replayed_projection_nonce' }, 409);
+    let payload; try { payload = JSON.parse(rawBody); } catch { return jsonResponse(res, { error: 'invalid_json' }, 400); }
+    const memoryId = match?.[1]; const requestedOrg = String(payload?.org_id || '');
+    const memory = memoryId && await persistentMemoryStore.getMemory(memoryId);
+    if (!memory || !requestedOrg || (memory.org_id || memory.orgId) !== requestedOrg) return jsonResponse(res, { error: 'Not found' }, 404);
+    try {
+      const linkedEntities = await prisma.memoryEntityLink.findMany({ where: { memoryId }, select: { entityId: true } });
+      return jsonResponse(res, { ok: true, entity_ids: [...new Set(linkedEntities.map((link) => link.entityId))] });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 503);
+    }
+  }
 
   // API Routes
   // /v2/chat is an isolated native-orchestrator acceptance route. It enters

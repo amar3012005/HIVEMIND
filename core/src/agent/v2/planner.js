@@ -4,8 +4,12 @@ import { NATIVE_PLAN_TOOL_NAME, createNativePlanTool } from './planner-schema.js
 import { buildNativePlannerDynamicContext, buildNativePlannerPrompt, NATIVE_PLANNER_PROMPT_VERSION } from './planner-prompt.js';
 import { validateNativePlanResult } from './plan-validator.js';
 
-const PRIMARY = process.env.NATIVE_CHAT_V2_PLANNER_MODEL || 'google/gemini-2.5-flash';
-const FALLBACK = process.env.NATIVE_CHAT_V2_PLANNER_FALLBACK_MODEL || 'google/gemini-2.5-flash';
+// This is the latency-critical request made before any V2 answer can reach
+// the browser.  Keep it on the same Gateway-backed Nitro path as synthesis:
+// a slow standalone Gemini planner makes an otherwise streamed turn appear
+// buffered.  Deployments can still override both choices explicitly.
+const PRIMARY = process.env.NATIVE_CHAT_V2_PLANNER_MODEL || 'z-ai/glm-5.3-flash:nitro';
+const FALLBACK = process.env.NATIVE_CHAT_V2_PLANNER_FALLBACK_MODEL || 'openai/gpt-oss-20b:nitro';
 
 export async function planNativeTurn({ context, apiKey, signal, fetchImpl, nativeMeta = false } = {}) {
   const stable = getStaticPromptArtifact({

@@ -524,6 +524,23 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
   return { response: text.trim(), usage: data.usage };
 }
 
+// A direct V2 turn already has a validated planner draft, so it deliberately
+// avoids a second synthesis inference.  It must still use the public SSE
+// contract: emitting only `finish` made the browser wait for the complete
+// planner result and incorrectly present the turn as non-streaming.
+async function emitCompletedText({ onEvent, text }) {
+  const response = String(text || '').trim();
+  onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+  const chunks = response.match(/[^.!?\n]+[.!?]+(?:\s+|$)|[^\n]+\n+|[^.!?\n]+$/g) || [response];
+  for (const delta of chunks) {
+    if (!delta) continue;
+    onEvent?.({ type: 'answer_delta', schema_version: 1, delta, validated: true });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
+  onEvent?.({ type: 'finish', text: response });
+}
+
 
 // ── STEP 3 — Evidence gather (no LLM) ──────────────────────────────────
 
@@ -4230,7 +4247,7 @@ export async function runReactAgentV2({
             source_type: 'public_web',
           }))
           : [];
-        onEvent?.({ type: 'finish', text: response });
+        await emitCompletedText({ onEvent, text: response });
         onEvent?.({ type: 'turn_completed', grounded: recentSources.length > 0, operation: 'direct' });
         return {
           response, sources: recentSources, citations: recentSources,
@@ -4247,7 +4264,7 @@ export async function runReactAgentV2({
         profileContext: preloadedProfileContext,
       });
       recordUsage('direct', usage);
-      onEvent?.({ type: 'finish', text: response });
+      await emitCompletedText({ onEvent, text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct' });
       return {
         response,
@@ -4403,7 +4420,7 @@ export async function runReactAgentV2({
           // Provider degradation must not erase a successful write receipt.
         }
       }
-      onEvent?.({ type: 'finish', text: response });
+      await emitCompletedText({ onEvent, text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: succeeded });
       return {
         response, sources: [], steps: [{ tool: toolName, args: toolArgs, result_summary: succeeded ? 'completed' : String(result?.error || 'failed') }],
@@ -4547,7 +4564,7 @@ export async function runReactAgentV2({
       const ackText = saveSucceeded
         ? mutationConfirmation('saved', intentDecision.response_language || language, saveResult)
         : `${intentDecision.failure_response || 'Memory save failed.'} (${saveResult.error || 'operation_failed'})`;
-      onEvent?.({ type: 'finish', text: ackText });
+      await emitCompletedText({ onEvent, text: ackText });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'save', success: saveSucceeded });
       return {
         response: ackText, sources: [], steps,
@@ -4575,7 +4592,7 @@ export async function runReactAgentV2({
         profileContext: preloadedProfileContext,
       });
       recordUsage('direct', usage);
-      onEvent?.({ type: 'finish', text: response });
+      await emitCompletedText({ onEvent, text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct', success: true });
       return {
         response,

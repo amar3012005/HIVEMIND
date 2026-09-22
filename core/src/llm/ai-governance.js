@@ -5,7 +5,7 @@ export const MODEL_POLICY_DEFAULTS = Object.freeze({
   // Governed connector turns need one predictable model for planning, schema
   // arguments, semantic review and synthesis. Nitro is the low-latency route.
   progressive_agent: ['openai/gpt-oss-20b:nitro', null],
-  chat_planner: ['google/gemini-2.5-flash-lite', 'openai/gpt-oss-20b:nitro'],
+  chat_planner: ['z-ai/glm-5.3-flash:nitro', 'openai/gpt-oss-20b:nitro'],
   // Match the native Harness for every user-visible HIVE answer.  The
   // OpenRouter route supplies GLM's required low-reasoning request shape.
   chat_synthesis: ['z-ai/glm-5.3-flash:nitro', 'openai/gpt-oss-20b:nitro'],

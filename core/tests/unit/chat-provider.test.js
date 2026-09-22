@@ -16,8 +16,8 @@ import {
 import { configureAiGovernance, invalidateAiModelPolicyCache } from '../../src/llm/ai-governance.js';
 import { MODEL_POLICY_DEFAULTS } from '../../src/llm/ai-governance.js';
 
-test('chat model policy uses Gemini Flash-Lite planning and the Harness GLM Nitro synthesis model', () => {
-  assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'google/gemini-2.5-flash-lite');
+test('chat model policy uses Harness GLM Nitro for both planning and synthesis', () => {
+  assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'z-ai/glm-5.3-flash:nitro');
   assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'z-ai/glm-5.3-flash:nitro');
   assert.equal(MODEL_POLICY_DEFAULTS.chat_synthesis[0], DEFAULT_CHAT_SYNTHESIS_MODEL);
 });
@@ -288,7 +288,7 @@ test('streaming retries the policy secondary after a provider-capability 404', a
   }
 });
 
-test('Gemini planner request uses OpenRouter and preserves required tool parameters', async () => {
+test('GLM Nitro planner request uses OpenRouter and preserves required tool parameters', async () => {
   const prior = process.env.OPENROUTER_API_KEY;
   process.env.OPENROUTER_API_KEY = 'or-test';
   let captured;
@@ -309,7 +309,8 @@ test('Gemini planner request uses OpenRouter and preserves required tool paramet
     });
     assert.equal(response.status, 200);
     assert.equal(captured.url, 'https://openrouter.ai/api/v1/chat/completions');
-    assert.equal(captured.body.model, 'google/gemini-2.5-flash-lite');
+    assert.equal(captured.body.model, 'z-ai/glm-5.3-flash:nitro');
+    assert.deepEqual(captured.body.reasoning, { effort: 'low' });
     assert.equal(captured.body.max_tokens, 650);
     assert.equal(captured.body.max_completion_tokens, undefined);
     assert.equal(captured.body.provider.require_parameters, true);
@@ -327,7 +328,7 @@ test('admin model policy uses Cloudflare concrete provider route and secondary f
   Object.assign(process.env, { CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_AI_GATEWAY_ID: 'gw',
     CLOUDFLARE_AI_GATEWAY_TOKEN: 'token', CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'openrouter-key', CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: 'legacy-route' });
   configureAiGovernance({ $queryRawUnsafe: async (sql) => sql.includes('ai_model_policies')
-    ? [{ use_case: 'chat_planner', primary_model: 'google/gemini-2.5-flash-lite', secondary_model: 'openai/gpt-oss-20b:nitro', enabled: true, revision: 4 }]
+    ? [{ use_case: 'chat_planner', primary_model: 'z-ai/glm-5.3-flash:nitro', secondary_model: 'openai/gpt-oss-20b:nitro', enabled: true, revision: 4 }]
     : [] });
   invalidateAiModelPolicyCache();
   const calls = [];
@@ -342,7 +343,8 @@ test('admin model policy uses Cloudflare concrete provider route and secondary f
     assert.equal(response.status, 200);
     assert.equal(calls.length, 2);
     assert.match(calls[0].url, /\/openrouter\/chat\/completions$/);
-    assert.equal(calls[0].body.model, 'google/gemini-2.5-flash-lite');
+    assert.equal(calls[0].body.model, 'z-ai/glm-5.3-flash:nitro');
+    assert.deepEqual(calls[0].body.reasoning, { effort: 'low' });
     assert.equal(calls[1].body.model, 'openai/gpt-oss-20b:nitro');
     assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer token');
     assert.equal(calls[0].headers.get('authorization'), null);

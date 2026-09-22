@@ -11,6 +11,22 @@ function temporalDecision(plan) {
   return null;
 }
 
+// A public page retrieval is an explicit user request for external evidence,
+// not a request to reinterpret whatever happens to be in workspace memory.
+// Keep this deliberately narrow: it requires an action verb plus either an
+// absolute URL or a route-shaped public page reference. The Web Intelligence
+// boundary still owns network access, rate limits, and result validation.
+function explicitPublicPageRequest(message) {
+  const text = String(message || '').trim();
+  if (!text) return null;
+  const asksToRetrieve = /\b(?:crawl|extract|fetch|open|pull|read|scrape)\b/i.test(text);
+  const hasAbsoluteUrl = /\bhttps?:\/\/[^\s<>"']+/i.test(text);
+  const hasRoute = /(?:^|\s)\/[a-z0-9][a-z0-9._~\-/]*/i.test(text);
+  const namesPublicPage = /\b(?:page|pages|site|website|web)\b/i.test(text);
+  if (!asksToRetrieve || (!hasAbsoluteUrl && !(hasRoute && namesPublicPage))) return null;
+  return text.slice(0, 800);
+}
+
 export function compileNativePlan(plan, message, context = {}) {
   const step = plan.steps[0];
   const descriptiveSourceHint = plan.operation === 'source_read'
@@ -20,6 +36,16 @@ export function compileNativePlan(plan, message, context = {}) {
   const operation = plan.operation === 'event_range' || descriptiveSourceHint ? 'recall'
     : ['snapshot', 'diff', 'timeline'].includes(plan.operation) ? 'timeline'
       : plan.operation;
+  const explicitPublicQuery = explicitPublicPageRequest(message);
+  const webFallback = plan.external_fallback?.allowed ? {
+    allowed: true,
+    query: plan.external_fallback.query,
+    reason: plan.external_fallback.reason,
+  } : explicitPublicQuery ? {
+    allowed: true,
+    query: explicitPublicQuery,
+    reason: 'explicit_web',
+  } : { allowed: false, query: null, reason: null };
   return {
     version: plan.schema_version, _router: 'native-v2', operation,
     response_language: plan.response.language,
@@ -39,11 +65,7 @@ export function compileNativePlan(plan, message, context = {}) {
     side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',
     source: descriptiveSourceHint ? null : plan.references.source,
     time: temporalDecision(plan), aggregate: plan.aggregate,
-    web_fallback: plan.external_fallback?.allowed ? {
-      allowed: true,
-      query: plan.external_fallback.query,
-      reason: plan.external_fallback.reason,
-    } : { allowed: false, query: null, reason: null },
+    web_fallback: webFallback,
     // Always carry the single replaceable public-source checkpoint into the
     // next turn. The planner flag remains useful telemetry, but correctness no
     // longer depends on a small model recognizing phrases such as "that

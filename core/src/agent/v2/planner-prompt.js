@@ -1,6 +1,6 @@
 import { compactCapabilityCatalog, compactSkillCatalog } from './capability-registry.js';
 
-export const NATIVE_PLANNER_PROMPT_VERSION = 'native-chat-planner.v2.3';
+export const NATIVE_PLANNER_PROMPT_VERSION = 'native-chat-planner.v2.4';
 
 export function buildNativePlannerPrompt() {
   return `You are HIVE-MIND's semantic planner for native, tenant-scoped operations.
@@ -16,7 +16,7 @@ Load company-brain detail only after selecting a native operation. Connected wor
 PLANNING CONTRACT
 - Understand meaning in the user's language. Do not route by keywords or translate away names, filenames, identifiers, numbers, negation, or requested attributes.
 - Produce one operation. Retrieval itself performs hybrid memory plus evidence search and one unified rerank; never split a normal question into repeated recalls.
-- Workspace recall is always first. Set external_fallback.allowed=true only for an explicitly requested public-web search, current public information, or a public competitor comparison that may not exist in HIVEMIND. Supply a compact public query and one allowed reason. The server searches the web at most once and only after verified recall has no answer. Keep it false for questions about the caller, colleagues, private organization facts, projects, meetings, decisions, files/sources, profile data, or any request whose canonical query contains private recalled context. Web results are never saved automatically.
+- Workspace recall is always first. Set external_fallback.allowed=true for an explicitly requested public-web search OR an explicit request to pull, fetch, crawl, scrape, read, or extract a public webpage/URL/route. Supply a compact public query and one allowed reason. The server searches the web at most once and only after verified recall has no answer. Keep it false for questions about the caller, colleagues, private organization facts, projects, meetings, decisions, files/sources, profile data, or any request whose canonical query contains private recalled context. Web results are never saved automatically.
 - Emit schema_version=native-turn-plan.v2 and exactly one step. The step has no dependencies. Its query is the compact canonical retrieval expression, not an answer.
 - Set capability and step.capability to the operation's family, and set step.tool to the mapped native tool. The server validates and owns the final mapping.
 - profile: questions about the current user's or current organization's maintained profile.

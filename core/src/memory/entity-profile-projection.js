@@ -84,8 +84,68 @@ export async function getEntityProfileDossier({ prisma, organizationId, entityId
   if (!entity) return null;
   const facts = await prisma.entityProfileFact.findMany({
     where: { organizationId, entityId, status: { in: ['active', 'review', 'superseded'] } },
-    include: includeEvidence ? { evidence: true, reviews: true, claim: { include: { predicate: true } } } : { reviews: true },
+    include: {
+      reviews: true,
+      claim: { include: { predicate: true } },
+      ...(includeEvidence ? { evidence: true } : {}),
+    },
     orderBy: [{ factClass: 'asc' }, { freshnessAt: 'desc' }], take: 200,
   });
-  return { entity, facts };
+  return { entity, facts, timeline: buildEntityProfileTimeline(facts) };
+}
+
+/**
+ * A bi-temporal, evidence-first view of an entity profile.
+ * valid_at answers when the underlying claim was known to be true; recorded_at
+ * answers when HIVE recorded the fact or human review. Neither field is model
+ * generated, so a timeline remains auditable and replay-safe.
+ */
+export function buildEntityProfileTimeline(facts = []) {
+  const events = [];
+  for (const fact of facts) {
+    const predicate = fact.claim?.predicate?.name || fact.value?.predicate || fact.factKey || 'Profile fact';
+    const evidenceCount = Array.isArray(fact.evidence) ? fact.evidence.length : 0;
+    const validAt = fact.freshnessAt || null;
+    events.push({
+      id: `fact:${fact.id}`,
+      kind: 'fact',
+      title: predicate,
+      fact_id: fact.id,
+      fact_class: fact.factClass,
+      status: fact.status,
+      decision: fact.decision,
+      value: fact.value,
+      evidence_count: evidenceCount,
+      valid_at: validAt,
+      recorded_at: fact.createdAt || null,
+      updated_at: fact.updatedAt || null,
+    });
+    for (const review of fact.reviews || []) {
+      events.push({
+        id: `review:${review.id}:requested`,
+        kind: 'review_requested',
+        title: review.kind === 'relationship' ? 'Relationship review requested' : 'Fact review requested',
+        fact_id: fact.id,
+        status: review.status,
+        valid_at: validAt,
+        recorded_at: review.createdAt || null,
+      });
+      if (review.resolvedAt) {
+        events.push({
+          id: `review:${review.id}:resolved`,
+          kind: 'review_resolved',
+          title: review.status === 'approved' ? 'Fact approved' : 'Fact rejected',
+          fact_id: fact.id,
+          status: review.status,
+          valid_at: validAt,
+          recorded_at: review.resolvedAt,
+        });
+      }
+    }
+  }
+  return events.sort((left, right) => {
+    const validOrder = new Date(left.valid_at || 0).getTime() - new Date(right.valid_at || 0).getTime();
+    if (validOrder) return validOrder;
+    return new Date(left.recorded_at || 0).getTime() - new Date(right.recorded_at || 0).getTime();
+  });
 }

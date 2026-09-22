@@ -514,14 +514,30 @@ function outputShape(state, response, status = 'completed') {
   };
 }
 
-function memoryScopeRequest(receipt, runId) {
+function memoryScopeRequest(receipt, runId, preparedSave = null) {
   const data = receipt?.data || receipt || {};
   const scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
   const projects = Array.isArray(data.projects) ? data.projects : [];
+  // The checkpoint, not a follow-up model turn, is the authority for a
+  // scope-picker continuation. Core may return a normalized draft, while the
+  // graph already has the exact user-approved payload and its evidence. Keep
+  // both, preferring the original non-empty fields so resuming cannot silently
+  // replace the selected memory with a lossy provider draft.
+  const returnedDraft = data.draft && typeof data.draft === 'object' ? data.draft : {};
+  const originalDraft = preparedSave && typeof preparedSave === 'object' ? preparedSave : {};
+  const draft = {
+    ...returnedDraft,
+    ...originalDraft,
+    title: originalDraft.title || returnedDraft.title || null,
+    content: originalDraft.content || returnedDraft.content || null,
+    tags: Array.isArray(originalDraft.tags) && originalDraft.tags.length ? originalDraft.tags : returnedDraft.tags,
+    memory_type: originalDraft.memory_type || returnedDraft.memory_type || 'fact',
+    source_refs: Array.isArray(originalDraft.source_refs) ? originalDraft.source_refs : returnedDraft.source_refs,
+  };
   return {
     kind: 'memory_scope', run_id: runId, blocking: true,
     prompt: compactText(data.message || 'Choose where this memory belongs before it is saved.', 500),
-    draft: data.draft || null,
+    draft,
     options: [
       ...scopeOptions.map(option => ({
         id: String(option.scope || option.id || ''), value: String(option.scope || option.id || ''),
@@ -820,7 +836,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       };
     }
     if (call.name === 'hivemind_meta' && call.args.operation === 'save' && receipt?.data?.needs_project_choice) {
-      const request = memoryScopeRequest(receipt, state.runId);
+      const request = memoryScopeRequest(receipt, state.runId, call.args?.save);
       const patch = {
         ...statePatch, pendingTool: null, pendingMemoryScope: request,
         callFingerprints: [...state.callFingerprints, fingerprint],
@@ -938,15 +954,27 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     } else {
       throw new Error('unified_memory_scope_invalid');
     }
+    onEvent({ type: 'tool_start', name: 'hivemind_save_memory', arguments: saveArgs, run_id: state.runId });
     const receipt = await executeGovernedCoreWrite('hivemind_save_memory', saveArgs, ctx);
     if (receipt?.successful === false || receipt?.data?.saved !== true) {
+      onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'error', summary: receipt?.error || receipt?.data?.error || 'Memory save failed', run_id: state.runId });
       throw new Error(`unified_memory_scope_save_failed:${compactText(receipt?.error || receipt?.data?.error || 'unknown', 160)}`);
     }
+    const exposed = publicToolResult(receipt);
+    const scopeLabel = saveArgs.scope === 'project' ? 'selected project' : saveArgs.scope;
+    const response = `Saved this memory in your ${scopeLabel} memory.`;
+    const receipts = [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: true, data: exposed }];
+    const steps = [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope' }];
+    onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope', run_id: state.runId });
+    onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
+    onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: true, run_id: state.runId });
+    onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
     return {
       pendingMemoryScope: null,
-      messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'completed', receipt: publicToolResult(receipt) }) }],
-      receipts: [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: true, data: publicToolResult(receipt) }],
-      steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'completed', summary: 'Memory saved in selected scope' }],
+      messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'completed', receipt: exposed }) }, { role: 'assistant', content: response }],
+      receipts,
+      steps,
+      result: outputShape({ ...state, pendingMemoryScope: null, receipts, steps }, response),
     };
   };
 
@@ -954,6 +982,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const routeContext = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
   const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'model')));
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
+  const routeMemoryScope = state => state.result ? 'seal' : 'model';
   const sealNode = async state => {
     onEvent({ type: 'finish', text: state.result.response });
     const terminalState = state.result.status === 'completed' ? 'sealed'
@@ -974,7 +1003,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
     .addConditionalEdges('tool', routeTool, ['model', 'connection', 'memory_scope', 'approval', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
-    .addEdge('memory_scope', 'model')
+    .addConditionalEdges('memory_scope', routeMemoryScope, ['model', 'seal'])
     .addEdge('approval', 'model').addEdge('seal', END)
     .compile({ checkpointer });
 }

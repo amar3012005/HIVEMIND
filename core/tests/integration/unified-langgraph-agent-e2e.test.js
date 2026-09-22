@@ -153,6 +153,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
   };
   const modelStep = async () => {
     turn += 1;
+    if (turn > 1) throw new Error('scope continuation must complete from its checkpoint without a second model turn');
     return { message: { role: 'assistant', content: 'Saved in your personal memory.' } };
   };
   const initial = await runUnifiedMetaAgent({
@@ -169,6 +170,45 @@ test('a save without a stated destination interrupts once for scope and resumes 
   assert.equal(resumed.status, 'completed');
   assert.equal(writes, 2);
   assert.match(resumed.response, /personal memory/i);
+  assert.equal(turn, 0);
+});
+
+test('scope continuation preserves the original canonical save payload and emits a final receipt stream', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  const events = [];
+  const calls = [];
+  const runtimeCtx = {
+    ...ctx(prisma, 'save-scope-payload'),
+    conversationHistory: [{ role: 'assistant', content: 'The release decision was approved with evidence A and B.' }],
+    _tracedDispatch: async (_name, args) => {
+      calls.push(args);
+      if (calls.length === 1) return {
+        saved: false,
+        needs_project_choice: true,
+        message: 'Choose a destination.',
+        // Simulate an older Core draft that omitted tags and source evidence.
+        draft: { title: 'Release decision', content: 'truncated' },
+        scope_options: [{ scope: 'personal', label: 'Personal' }],
+      };
+      return { saved: true, id: 'memory-payload' };
+    },
+  };
+  const initial = await runUnifiedMetaAgent({
+    message: 'Save this to Hivemind as one memory', useTools: false, prisma, ctx: runtimeCtx,
+    checkpointer, composio: {}, modelStep: async () => ({ message: { role: 'assistant', content: 'unused' } }),
+  });
+  assert.equal(initial.status, 'needs_input');
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: false, prisma, ctx: runtimeCtx, checkpointer, composio: {},
+    onEvent: event => events.push(event), choice: { value: 'personal', run_id: initial.run.id },
+    modelStep: async () => { throw new Error('scope continuation must not invoke the model'); },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].content, /release decision was approved/i);
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['Saved this memory in your personal memory.']);
+  assert.equal(resumed.steps?.at(-1)?.slug, 'hivemind_save_memory');
 });
 
 test('decision summaries keep non-decision events out of the final synthesis', async () => {

@@ -56,6 +56,18 @@ describe('native meta Flagship admission', () => {
     } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
     expect(await evaluateNativeMetaMode(env, url)).toBe('native-meta-v1');
     expect(context?.targetingKey).toBe('org-1:user-1');
+    expect(context?.surface).toBe('desktop');
+  });
+  it('passes mobile as a bounded Flagship targeting attribute', async () => {
+    let context: Record<string, unknown> | undefined;
+    const env = {
+      NATIVE_META_FLAG: 'hivemind-unified-meta-loop-v2', ENVIRONMENT: 'production',
+      FLAGS: { getStringDetails: async (_key: string, _fallback: string, ctx?: Record<string, string | number | boolean>) => {
+        context = ctx; return { value: 'unified-meta-v2' };
+      } },
+    } as unknown as Parameters<typeof evaluateNativeMetaMode>[0];
+    expect(await evaluateNativeMetaMode(env, new URL('https://worker/mode?org_id=org-1&user_id=user-1&surface=mobile'))).toBe('unified-meta-v2');
+    expect(context?.surface).toBe('mobile');
   });
   it('admits the unified graph through a string flag while rejecting unknown modes', async () => {
     const env = {

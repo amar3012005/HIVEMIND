@@ -96,7 +96,8 @@ function targetingContext(env: Env, url: URL): Record<string, string> | null {
   const orgId = url.searchParams.get('org_id') || '';
   const userId = url.searchParams.get('user_id') || '';
   if (!orgId || !userId) return null;
-  return { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT };
+  const surface = url.searchParams.get('surface') === 'mobile' ? 'mobile' : 'desktop';
+  return { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, surface, environment: env.ENVIRONMENT };
 }
 
 async function evaluateMode(env: Env, url: URL): Promise<ChatMode> {

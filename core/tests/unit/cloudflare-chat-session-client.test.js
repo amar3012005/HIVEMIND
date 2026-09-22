@@ -28,6 +28,19 @@ test('missing protected Worker credentials avoids any Cloudflare request', async
   assert.equal(called, false);
 }));
 
+test('admission forwards a bounded mobile surface without changing the tenant identity', async () => withEnv({
+  CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
+}, async () => {
+  let requested = '';
+  const client = new CloudflareChatSessionClient({ fetchImpl: async (url) => {
+    requested = String(url); return Response.json({ mode: 'off' });
+  } });
+  await client.admissionFor({ orgId: 'org', userId: 'user', surface: 'mobile' });
+  assert.match(requested, /org_id=org/);
+  assert.match(requested, /user_id=user/);
+  assert.match(requested, /surface=mobile/);
+}));
+
 test('native meta admission fails closed and flag off preserves Native V2', async () => withEnv({
   CLOUDFLARE_CHAT_AGENT_URL: 'https://chat.example', CLOUDFLARE_CHAT_AGENT_SECRET: 'secret',
 }, async () => {

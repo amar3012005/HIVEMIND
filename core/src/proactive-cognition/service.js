@@ -195,7 +195,7 @@ async function decideReflection({ activity, userId, orgId, env, provider = null 
   if (!provider && !config) return { outcome: 'wait', source: 'unavailable', reason: 'decision_provider_unconfigured' };
   const decisionProvider = provider || createOpenRouterJevProvider({
     apiKey: config.apiKey, endpoint: config.endpoint, headers: config.headers,
-    model: env.JEV_MODEL, timeoutMs: Math.max(500, Math.min(5000, Number(env.HIVEMIND_PROACTIVE_JEV_TIMEOUT_MS || 2500))),
+    model: config.model, timeoutMs: Math.max(500, Math.min(5000, Number(env.HIVEMIND_PROACTIVE_JEV_TIMEOUT_MS || 2500))),
     siteName: 'HIVE-MIND Proactive Cognition',
   });
   try {

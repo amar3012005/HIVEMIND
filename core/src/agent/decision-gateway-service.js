@@ -36,9 +36,15 @@ export function decisionGatewayProviderConfig(env = process.env) {
   const gatewayEnabled = String(env.CLOUDFLARE_AI_GATEWAY_ENABLED || '').toLowerCase() === 'true';
   if (!explicit && gatewayEnabled && accountId && gatewayId && gatewayToken && provider) {
     const base = String(env.CLOUDFLARE_AI_GATEWAY_BASE_URL || 'https://gateway.ai.cloudflare.com').replace(/\/+$/, '');
+    // TypeSafe's native endpoint is /api/v1/systemone. OpenRouter exposes the
+    // same typed Decisions contract separately, at /api/alpha/decisions. Do
+    // not send JEV through chat completions: it does not generate text.
+    const isOpenRouter = provider === 'custom-openrouter' || provider === 'openrouter';
+    const path = String(env.JEV_GATEWAY_PATH || (isOpenRouter ? '/api/alpha/decisions' : '/api/v1/systemone')).replace(/^\/?/, '/');
     return {
-      endpoint: `${base}/v1/${encodeURIComponent(accountId)}/${encodeURIComponent(gatewayId)}/${encodeURIComponent(provider)}/api/v1/systemone`,
+      endpoint: `${base}/v1/${encodeURIComponent(accountId)}/${encodeURIComponent(gatewayId)}/${encodeURIComponent(provider)}${path}`,
       apiKey: '',
+      model: String(env.JEV_MODEL || (isOpenRouter ? 'typesafe/jev-1.13' : '')).trim() || undefined,
       headers: {
         'cf-aig-authorization': `Bearer ${gatewayToken}`,
         'cf-aig-skip-cache': 'true',
@@ -46,7 +52,7 @@ export function decisionGatewayProviderConfig(env = process.env) {
       },
     };
   }
-  return { endpoint: explicit || undefined, apiKey: env.OPENROUTER_API_KEY, headers: {} };
+  return { endpoint: explicit || undefined, apiKey: env.OPENROUTER_API_KEY, model: env.JEV_MODEL, headers: {} };
 }
 
 function finiteThreshold(value, fallback) {
@@ -108,7 +114,7 @@ export async function decideRuntimeStage(input = {}, {
       apiKey: providerConfig.apiKey,
       endpoint: providerConfig.endpoint,
       headers: providerConfig.headers,
-      model: env.JEV_MODEL,
+      model: providerConfig.model,
       timeoutMs: Number(env.JEV_TIMEOUT_MS || 3500),
     }),
     minProbability: finiteThreshold(env.JEV_MIN_PROBABILITY, 0.8),

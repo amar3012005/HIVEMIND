@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isProgressiveHarnessEnabled, resolveHarnessIntent, chooseProgressiveAction,
   boundedEvidence, buildProgressiveSynthesisMessages, PROGRESSIVE_PROMPT_BUDGETS,
-  buildProgressiveConversationContext, reviewProgressiveArguments, PROGRESSIVE_HARNESS_MODEL } from '../../src/agent/progressive-harness.js';
+  buildProgressiveConversationContext, reviewProgressiveArguments, PROGRESSIVE_HARNESS_MODEL,
+  compileExplicitConnectedRead } from '../../src/agent/progressive-harness.js';
 
 test('flag requires literal true and an explicitly allowed tenant', () => {
   const env = { USE_TOOLS_PROGRESSIVE_HARNESS: 'true', USE_TOOLS_PROGRESSIVE_HARNESS_ORGS: 'org-a, org-b' };
@@ -13,6 +14,23 @@ test('flag requires literal true and an explicitly allowed tenant', () => {
   assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_ORGS: '*' }, { orgId: 'org-a' }), false);
   assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_USERS: 'user-a' }, { orgId: 'org-a', userId: 'user-a' }), true);
   assert.equal(isProgressiveHarnessEnabled({ ...env, USE_TOOLS_PROGRESSIVE_HARNESS_USERS: 'user-a' }, { orgId: 'org-a', userId: 'user-b' }), false);
+});
+
+test('explicit connected-source reads suppress an incorrect memory fallback without app-specific routing', async () => {
+  const compiled = compileExplicitConnectedRead('What are my last 5 emails from Rama?', ['gmail', 'slack']);
+  assert.deepEqual(compiled, {
+    source: 'mailbox', apps: ['gmail'], person: 'Rama', limit: 5,
+    known_fields: 'source:mailbox, order:newest, person:Rama, limit:5',
+    use_case: 'retrieve requested records from the connected mailbox',
+  });
+  const intent = await resolveHarnessIntent({ message: 'What are my last 5 emails from Rama?', connected: ['gmail'], generateImpl: async () => ({
+    kind: 'lookup', apps: [], person: '', use_case: 'recall known information', known_fields: '', language: 'en', needs_memory: true,
+    outcomes: [{ id: 'memory', description: 'Recall saved information', kind: 'memory' }],
+  }) });
+  assert.equal(intent.needs_memory, false);
+  assert.deepEqual(intent.apps, ['gmail']);
+  assert.equal(intent.person, 'Rama');
+  assert.equal(intent.outcomes[0].kind, 'read');
 });
 
 test('default intent and action planners use valid POST requests through the real provider adapter', async () => {

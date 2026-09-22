@@ -880,6 +880,9 @@ export async function getOrCreateAgentRun({ prisma, ctx, message, choice = null 
     scratch: {
       workflow_session_id: existing?.scratch?.workflow_session_id || null,
       custom_toolkit_attached: existing?.scratch?.custom_toolkit_attached || null,
+      // Discovery is tenant-scoped, contains no provider tokens, and expires
+      // quickly. Carry it only to the next fresh turn in this conversation.
+      capability_cache: existing?.scratch?.capability_cache || null,
     },
   };
 }
@@ -1206,6 +1209,31 @@ export async function chooseNextDurableAction({ observation, generateImpl } = {}
   return governNextAction(fallbackNextDurableAction(observation), observation);
 }
 
+const CAPABILITY_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function usableCapabilityCache(cache, connected, requestedApps) {
+  if (!cache || cache.version !== 1 || !Number.isFinite(cache.expires_at) || cache.expires_at <= Date.now()) return null;
+  if (!Array.isArray(cache.cards) || !cache.cards.length) return null;
+  const allowed = new Set(Array.isArray(connected) ? connected : []);
+  const wanted = new Set(Array.isArray(requestedApps) && requestedApps.length ? requestedApps : allowed);
+  const cards = cache.cards.filter(card => card && typeof card.slug === 'string' && typeof card.toolkit === 'string'
+    && allowed.has(card.toolkit) && wanted.has(card.toolkit) && card.schema?.properties);
+  return cards.length ? { ...cache, cards } : null;
+}
+
+function compactCapabilityCache({ cards, sessionId, workflowSessionId, toolkits }) {
+  return {
+    version: 1,
+    created_at: Date.now(),
+    expires_at: Date.now() + CAPABILITY_CACHE_TTL_MS,
+    session_id: sessionId || null,
+    workflow_session_id: workflowSessionId || null,
+    toolkits: [...new Set(toolkits || [])].slice(0, 12),
+    cards: (cards || []).slice(0, 48).map(card => ({ slug: card.slug, toolkit: card.toolkit,
+      authority: card.authority, description: String(card.description || '').slice(0, 600), schema: card.schema })),
+  };
+}
+
 async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, picked, run }) {
   const send = emit;
   emit = event => send({ ...event, run_id: run.id, harness_version: 'progressive-v1', language: run.scratch.language || ctx.language || null });
@@ -1334,11 +1362,18 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     if (picked?.values && typeof picked.values === 'object') run.scratch.field_values = { ...run.scratch.field_values, ...picked.values };
     run.status = 'running';
     const svc = composio || await import('../connectors/composio/composio-service.js');
+    const turnStartedAt = Date.now();
+    const markStage = (stage) => {
+      const elapsed_ms = Date.now() - turnStartedAt;
+      run.scratch.stage_timings = [...(run.scratch.stage_timings || []).filter(item => item.stage !== stage), { stage, elapsed_ms }].slice(-12);
+      emit({ type: 'agent_timing', stage, elapsed_ms });
+    };
     const accounts = await svc.listConnectedAccounts(ctx.orgId);
     const connected = [...new Set(accounts.filter(a => a.status === 'ACTIVE').map(a => a.toolkit).filter(Boolean))];
     run.scratch.connected_toolkits = connected;
     const intent = run.scratch.intent || await resolveHarnessIntent({ message: run.goal || message, connected, conversationContext,
       language: ctx.language || '', generateImpl: ctx.resolveHarnessIntent, signal: ctx._signal });
+    markStage('route');
     run.scratch.intent = intent;
     run.scratch.language = intent.language;
     const outcomes = intent.outcomes;
@@ -1352,6 +1387,14 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     const draftReceipts = run.scratch.draft_receipts || [];
     run.scratch.draft_receipts = draftReceipts;
     const covered = () => new Set([...reads, ...draftReceipts].filter(r => r.successful).flatMap(r => r.outcome_ids || []));
+    const cached = usableCapabilityCache(run.scratch.capability_cache, connected, intent.apps);
+    if (cached) {
+      run.composioSessionId = cached.session_id || run.composioSessionId;
+      run.scratch.workflow_session_id = cached.workflow_session_id || run.scratch.workflow_session_id;
+      run.scratch.capabilities = cached.cards;
+      run.scratch.discovery_attempted = true;
+      markStage('capability_cache');
+    }
     const cards = run.scratch.capabilities || [];
     run.scratch.capabilities = cards;
     const connect = async (toolkit) => {
@@ -1378,6 +1421,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
         const text = await ctx.synthesizeDurableAnswer({ message, language: intent.language, reads, steps: run.steps, conversationContext,
           recallText: run.scratch.recall_text || '', status: run.status, messages });
         if (typeof text !== 'string' || !text.trim()) throw new Error('Synthesis returned no answer');
+        markStage('synthesis_complete');
         return text;
       }
       const { chatCompletionFetch } = await import('../llm/chat-provider.js');
@@ -1387,6 +1431,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       const payload = await response.json();
       const text = payload?.choices?.[0]?.message?.content;
       if (typeof text !== 'string' || !text.trim()) throw new Error('Synthesis returned no answer');
+      markStage('synthesis_complete');
       return text;
     };
     const { default: Ajv } = await import('ajv');
@@ -1461,6 +1506,9 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
           const prior = cards.findIndex(c => c.slug === slug);
           if (prior >= 0) cards[prior] = card; else if (cards.length < 48) cards.push(card);
         }
+        run.scratch.capability_cache = compactCapabilityCache({ cards, sessionId: run.composioSessionId,
+          workflowSessionId: run.scratch.workflow_session_id, toolkits: discoveryToolkits });
+        markStage('capability_discovery');
         finishTool(emit, run, 'COMPOSIO_SEARCH_TOOLS', { kind: 'search', status: 'completed', summary: `${cards.length} capabilities discovered`,
           args: { query: next.query }, extra: { executor: 'composio' } });
         continue;
@@ -1611,6 +1659,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       const [receipt] = await svc.executeToolsParallel(ctx.orgId, [{ slug: card.slug, arguments: args }], { sessionId: run.composioSessionId, allowDirectFallback: false });
       if (!receipt) throw new Error('Provider returned no receipt');
       reads.push({ slug: card.slug, args: structuredClone(args), argsHash, outcome_ids: next.outcome_ids, successful: receipt.successful === true, data: boundedEvidence(receipt.data, 6000), error: receipt.successful ? null : 'Provider read failed' });
+      markStage('tool_execution');
       finishTool(emit, run, card.slug, { kind: 'read', status: receipt.successful ? 'completed' : 'error', summary: receipt.successful ? summarizeToolData(receipt.data, 160) : 'Provider read failed', extra: { executor: 'composio' }, args });
     }
     return fail('Execution step budget exhausted before all requested outcomes were satisfied.');

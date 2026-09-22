@@ -25290,9 +25290,14 @@ exit \$RC
                 // Cloudflare latches one runtime for the authenticated turn.
                 // native-meta-v1 remains native-only; unified-meta-v2 uses the
                 // same graph and session in both capability-latch modes.
-                const nativeMetaMode = chatAdmission.nativeMetaMode === 'unified-meta-v2'
+                // Mobile chat is the production default surface.  Do not let
+                // an old per-user unified-loop experiment reintroduce the
+                // serial model/tool latency there: standard V2 owns native
+                // reads and the progressive harness owns governed tools.
+                // Desktop canaries retain their explicitly admitted behavior.
+                const nativeMetaMode = requestedSurface !== 'mobile' && chatAdmission.nativeMetaMode === 'unified-meta-v2'
                   ? 'unified-meta-v2'
-                  : (!useTools ? chatAdmission.nativeMetaMode : 'off');
+                  : (!useTools && chatAdmission.nativeMetaMode === 'native-meta-v1' ? 'native-meta-v1' : 'off');
                 let durableChatStore = null;
                 let durableChatTurn = null;
                 if (durableChatMode !== 'off') {

@@ -20,5 +20,9 @@ test('welcome renderer is self-contained and renders one footer', () => {
   assert.match(rendered.html, /\.hm-shell\{width:100%!important/);
   assert.equal((rendered.html.match(/SINGULANCE · HIVEMIND · OPERATING SYSTEM/g) || []).length, 1);
   assert.doesNotMatch(rendered.html, /welcome-cartesia/);
-  assert.equal((rendered.html.match(/<img\b/gi) || []).length, 1);
+  assert.equal((rendered.html.match(/<img\b/gi) || []).length, 4);
+  assert.match(rendered.html, /humation-avatar\.svg\?seed=hivemind-brain/);
+  assert.match(rendered.html, /humation-avatar\.svg\?seed=hivemind-os/);
+  assert.match(rendered.html, /humation-avatar\.svg\?seed=hivemind-voice/);
+  assert.match(rendered.html, /width:72px;height:72px;max-width:none;margin:-8px 0 0 -12px/);
 });

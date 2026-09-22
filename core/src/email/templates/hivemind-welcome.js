@@ -8,6 +8,7 @@
  */
 
 import { emailBrandLockup } from './cartesia-lifecycle.js';
+import { renderHivemindEmailTeam } from '../humation-avatar.js';
 
 const BLUE = '#117dff';
 const BORDER = '#e7e4dd';
@@ -34,6 +35,7 @@ function accountWelcome({ name, appUrl, year, orgName, accountType, welcomeKind,
   <tr><td class="hm-head" style="padding:24px 34px 22px;background:#ffffff;text-align:left">
     ${emailBrandLockup({ compact: true })}
     <div style="margin-top:22px;font:700 9px/14px ${MONO};letter-spacing:2.5px;color:${BLUE}">HIVEMIND / SYSTEM MESSAGE</div>
+    ${renderHivemindEmailTeam({ variant: 'face-strip' })}
   </td></tr>
   <tr><td class="hm-welcome" style="padding:38px 52px 40px;border-top:1px solid ${BORDER};background:#ffffff;text-align:left">
     <div style="font:700 8px/12px ${MONO};letter-spacing:2px;color:${BLUE}">${state}</div>

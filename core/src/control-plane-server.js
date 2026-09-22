@@ -100,7 +100,7 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { configureSystemEmailDeliveryReceiptSink, configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
+import { configureSystemEmailDeliveryReceiptSink, configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery, systemEmailAddress, systemEmailFrom } from './email/email-service.js';
 import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { queueMeetingFinalization } from './knowledge/meeting-finalization-worker.js';
 import { addRealtimeParticipant, createRealtimeMeeting, deleteRealtimeMeeting, refreshRealtimeParticipant } from './operating-room/realtimekit-client.js';
@@ -3561,7 +3561,7 @@ const server = http.createServer(async (req, res) => {
       templateId: 'enterprise_invitation',
       to: invitation.recipientEmail,
       // Sender identity is configured server-side; the browser never supplies it.
-      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
+      from: systemEmailFrom(),
       vars: {
         companyName: invitation.companyName,
         workspaceName: invitation.workspaceName || invitation.companyName,
@@ -4445,7 +4445,7 @@ const server = http.createServer(async (req, res) => {
     if (action === 'preview') return jsonResponse(res, { rendered, campaign: found.campaign });
     if (found.campaign.status !== 'active') return jsonResponse(res, { error: 'Invitation is not active' }, 409);
     const delivery = await sendRenderedSystemEmail({ to: found.row.referrerEmail,
-      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>', rendered, templateId: 'partner_referral_invitation' });
+      from: systemEmailFrom(), rendered, templateId: 'partner_referral_invitation' });
     await markPartnerReferralDelivery({ prisma, campaignId, delivery });
     await audit({ eventType: delivery.ok ? 'commercial.partner_referral_sent' : 'commercial.partner_referral_delivery_failed', eventCategory: 'billing', action: 'create', resourceType: 'partner_referral', resourceId: campaignId,
       metadata: { operator: operator.operator, session_id: operator.sessionId, recipient: found.row.referrerEmailHint, provider: delivery.provider || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
@@ -4572,13 +4572,13 @@ const server = http.createServer(async (req, res) => {
         const previewUrl = `${base}/hivemind/invite?personal_invite=generated-when-sent`;
         if (action === 'preview') {
           const rendered = renderTemplate('personal_invitation', invitationTemplateVars({ kind: 'personal', application, invitationUrl: previewUrl }));
-          return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
+          return jsonResponse(res, { from: systemEmailAddress(), to: application.email, ...rendered });
         }
         const token = createPersonalInvitationLink({ configuredCode: PERSONAL_SIGNUP_INVITATION_CODE, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: 14 * 86400 });
         if (!token) throw new Error('Invitation service is unavailable');
         const invitationUrl = `${base}/hivemind/invite?personal_invite=${encodeURIComponent(token)}`;
         const delivery = await sendSystemEmail({ templateId: 'personal_invitation', to: application.email,
-          from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
+          from: systemEmailFrom(),
           vars: invitationTemplateVars({ kind: 'personal', application, invitationUrl }) });
         if (!delivery.ok) return jsonResponse(res, { error: delivery.error || 'Email delivery failed' }, 502);
         application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { status: 'invited', invitationSentAt: new Date() } });
@@ -4595,7 +4595,7 @@ const server = http.createServer(async (req, res) => {
           invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent`,
           accessCode: 'Generated securely when sent',
         }));
-        return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
+        return jsonResponse(res, { from: systemEmailAddress(), to: application.email, ...rendered });
       }
       const rotated = await rotateEnterpriseInvitationSecrets({ prisma, invitationId: invitation.id, rotateCode: true, rotateLink: true });
       const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: invitation.id } });
@@ -4648,7 +4648,7 @@ const server = http.createServer(async (req, res) => {
           metadata: { operator: operator.operator, session_id: operator.sessionId },
           ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
         return jsonResponse(res, {
-          from: 'welcome@admin.singulancelabs.com',
+          from: systemEmailAddress(),
           to: invitation.recipientEmail,
           invitation: publicEnterpriseInvitation(invitation),
           ...rendered,
@@ -5569,7 +5569,7 @@ const server = http.createServer(async (req, res) => {
     const delivery = await sendSystemEmail({
       templateId: 'runtime_waitlist_confirmation',
       to: email,
-      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
+      from: systemEmailFrom(),
       vars: {
         email,
         nameSuffix: name ? `, ${name}` : '',

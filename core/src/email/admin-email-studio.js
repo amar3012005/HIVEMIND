@@ -64,9 +64,9 @@ export function normalizeAdminEmailMessage(input = {}, { appUrl } = {}) {
   const recipients = recipientsFrom(input);
   const senderDomain = boundedText(input.sender_domain || 'admin.singulancelabs.com', 'Sender domain', 120).toLowerCase();
   if (!ADMIN_EMAIL_SENDER_DOMAINS.includes(senderDomain)) throw new Error('Sender domain is unavailable');
-  const senderLocal = boundedText(input.sender_local || 'welcome', 'Sender prefix', 64).toLowerCase();
+  const senderLocal = boundedText(input.sender_local || 'amar', 'Sender prefix', 64).toLowerCase();
   if (!SENDER_LOCAL_PART.test(senderLocal)) throw new Error('Sender prefix is invalid');
-  const fromName = boundedText(input.from_name || 'Singulance', 'Sender name', 120);
+  const fromName = boundedText(input.from_name || 'Amar at SINGULANCE', 'Sender name', 120);
   const fromAddress = `${senderLocal}@${senderDomain}`;
   const from = fromName ? `${fromName} <${fromAddress}>` : fromAddress;
 

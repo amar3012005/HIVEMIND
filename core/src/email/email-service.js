@@ -13,7 +13,7 @@
  * Cloudflare Email Sending (primary):
  *   CLOUDFLARE_EMAIL_API_TOKEN
  *   CLOUDFLARE_ACCOUNT_ID
- *   CLOUDFLARE_EMAIL_FROM             (verified sender, defaults to SYSTEM_EMAIL_FROM)
+ *   HIVEMIND_SYSTEM_EMAIL_FROM        (optional verified sender override)
  *
  * Gmail-over-Nango (fallback):
  *   SYSTEM_EMAIL_NANGO_CONNECTION_ID  (the connection_id you used when you
@@ -46,6 +46,14 @@ const GMAIL_PROVIDER = process.env.SYSTEM_EMAIL_NANGO_PROVIDER_KEY || 'gmail';
 const GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
 const CLOUDFLARE_SEND_BASE = 'https://api.cloudflare.com/client/v4/accounts';
 const SEND_TIMEOUT_MS = 15_000;
+// Keep automated product mail recognisable and separate from user-connected
+// Gmail. Older deployments used welcome@; map that legacy value forward so a
+// managed environment cannot silently retain the noisy sender identity.
+export const DEFAULT_SYSTEM_EMAIL_FROM = 'Amar at SINGULANCE <amar@admin.singulancelabs.com>';
+const LEGACY_WELCOME_SENDERS = new Set([
+  'welcome@admin.singulancelabs.com',
+  'singulance <welcome@admin.singulancelabs.com>',
+]);
 
 const APP_URL = resolvePublicAppUrl();
 
@@ -115,15 +123,36 @@ function validFromHeader(value) {
   return !value || (typeof value === 'string' && value.length <= 512 && !/[\r\n]/.test(value));
 }
 
+/**
+ * Resolve the product sender once for every provider. A deliberate override is
+ * still possible for an emergency sender migration, but the retired
+ * welcome@ address is never selected for newly sent automated mail.
+ */
+export function systemEmailFrom() {
+  const configured = String(
+    process.env.HIVEMIND_SYSTEM_EMAIL_FROM
+      || process.env.CLOUDFLARE_EMAIL_FROM
+      || process.env.SYSTEM_EMAIL_FROM
+      || '',
+  ).trim();
+  return LEGACY_WELCOME_SENDERS.has(configured.toLowerCase()) ? DEFAULT_SYSTEM_EMAIL_FROM : (configured || DEFAULT_SYSTEM_EMAIL_FROM);
+}
+
+export function systemEmailAddress() {
+  const from = systemEmailFrom();
+  const match = from.match(/<([^<>]+)>/);
+  return (match?.[1] || from).trim().toLowerCase();
+}
+
 function configuredProviders() {
   const cloudflare = {
     token: process.env.CLOUDFLARE_EMAIL_API_TOKEN || '',
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
-    from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || '',
+    from: systemEmailFrom(),
   };
   const gmail = {
     connectionId: process.env.SYSTEM_EMAIL_NANGO_CONNECTION_ID || '',
-    from: process.env.SYSTEM_EMAIL_FROM || '',
+    from: systemEmailFrom(),
   };
   return {
     cloudflare: cloudflare.token && cloudflare.accountId && cloudflare.from ? cloudflare : null,
@@ -438,7 +467,7 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
   const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
   if (!providers.cloudflare && !gmail) {
     if (!_warnedNoProvider) {
-      log('warn', 'no_provider', { hint: 'set CLOUDFLARE_EMAIL_API_TOKEN/CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_EMAIL_FROM or SYSTEM_EMAIL_NANGO_CONNECTION_ID' });
+      log('warn', 'no_provider', { hint: 'set CLOUDFLARE_EMAIL_API_TOKEN/CLOUDFLARE_ACCOUNT_ID or SYSTEM_EMAIL_NANGO_CONNECTION_ID' });
       _warnedNoProvider = true;
     }
     return { ok: false, skipped: true, error: 'no_email_provider' };

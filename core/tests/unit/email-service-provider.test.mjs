@@ -6,6 +6,7 @@ const originalEnv = {
   CLOUDFLARE_EMAIL_API_TOKEN: process.env.CLOUDFLARE_EMAIL_API_TOKEN,
   CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
   CLOUDFLARE_EMAIL_FROM: process.env.CLOUDFLARE_EMAIL_FROM,
+  HIVEMIND_SYSTEM_EMAIL_FROM: process.env.HIVEMIND_SYSTEM_EMAIL_FROM,
   SYSTEM_EMAIL_NANGO_CONNECTION_ID: process.env.SYSTEM_EMAIL_NANGO_CONNECTION_ID,
   SYSTEM_EMAIL_FROM: process.env.SYSTEM_EMAIL_FROM,
 };
@@ -87,6 +88,22 @@ test('Cloudflare is the primary transactional provider and reports queued delive
   assert.equal(body.to, 'owner@example.com');
   assert.match(body.html, /background:#117dff/);
   assert.match(body.html, /HIVEMIND/);
+});
+
+test('the retired welcome sender resolves to the named system sender', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Singulance <welcome@admin.singulancelabs.com>',
+  });
+  let request;
+  global.fetch = async (_url, init) => {
+    request = init;
+    return new Response(JSON.stringify({ success: true, result: { queued: ['owner@example.com'] } }), { status: 200 });
+  };
+  const result = await sendSystemEmail({ templateId: 'welcome_login', to: 'owner@example.com' });
+  assert.equal(result.ok, true);
+  assert.equal(JSON.parse(request.body).from, 'Amar at SINGULANCE <amar@admin.singulancelabs.com>');
 });
 
 test('a thread\'s inReplyTo becomes real In-Reply-To/References headers on the request, via Cloudflare\'s documented headers passthrough', async () => {

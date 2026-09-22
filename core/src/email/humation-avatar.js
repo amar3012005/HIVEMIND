@@ -114,10 +114,22 @@ export function humationAvatarPublicUrl(employee = {}, baseUrl = '') {
  * consistently support flex, pseudo-elements, or SVG data URLs, so the team
  * uses our public, cache-versioned avatar endpoint in regular img tags.
  */
-export function renderHivemindEmailTeam({ caption = 'YOUR TEAM IS READY' } = {}) {
+export function renderHivemindEmailTeam({ caption = 'YOUR TEAM IS READY', variant = 'card' } = {}) {
+  const faceStrip = variant === 'face-strip';
   const people = HIVEMIND_EMAIL_TEAM.map((member) => {
     const lane = humationLaneVisual(member.roleArchetype);
-    return `<td width="72" align="center" valign="top" style="width:72px;padding:0 4px"><div style="width:58px;height:58px;margin:0 auto 7px;border:1px solid ${lane.color};border-radius:50%;background:${lane.background};overflow:hidden"><img src="${humationAvatarPublicUrl(member)}" width="58" height="58" alt="${escapeAttribute(member.name)}" style="display:block;width:58px;height:58px;border:0" /></div><div style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;line-height:12px;font-weight:700;letter-spacing:1.4px;color:#666">${escapeAttribute(member.name)}</div></td>`;
+    // The full Humation SVG includes a body. The email treatment deliberately
+    // enlarges it inside a clipped circle, leaving a face-first portrait rather
+    // than reusing a flattened screenshot or an unrelated illustration.
+    const avatar = faceStrip
+      ? `<div style="width:48px;height:48px;margin:0 auto 6px;border:2px solid #ffffff;border-radius:50%;background:${lane.background};overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.12)"><img src="${humationAvatarPublicUrl(member)}" width="72" height="72" alt="${escapeAttribute(member.name)}" style="display:block;width:72px;height:72px;max-width:none;margin:-8px 0 0 -12px;border:0" /></div>`
+      : `<div style="width:58px;height:58px;margin:0 auto 7px;border:1px solid ${lane.color};border-radius:50%;background:${lane.background};overflow:hidden"><img src="${humationAvatarPublicUrl(member)}" width="58" height="58" alt="${escapeAttribute(member.name)}" style="display:block;width:58px;height:58px;border:0" /></div>`;
+    const width = faceStrip ? 60 : 72;
+    const padding = faceStrip ? '0 2px' : '0 4px';
+    return `<td width="${width}" align="center" valign="top" style="width:${width}px;padding:${padding}">${avatar}<div style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:${faceStrip ? 8 : 9}px;line-height:12px;font-weight:700;letter-spacing:${faceStrip ? 1.2 : 1.4}px;color:#666">${escapeAttribute(member.name)}</div></td>`;
   }).join('');
+  if (faceStrip) {
+    return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;margin:18px 0 0"><tr><td align="left"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>${people}</tr></table></td></tr></table>`;
+  }
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;margin:0 0 22px"><tr><td style="padding:14px 14px 13px;background:#f7f7f4;border:1px solid #e8e6df;border-radius:8px"><div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;line-height:12px;font-weight:700;letter-spacing:1.5px;color:#117dff">${escapeAttribute(caption)}</div><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>${people}</tr></table></td></tr></table>`;
 }

@@ -7,6 +7,7 @@ test('admin email studio only permits approved welcome templates and server-owne
   assert.equal(message.to, 'owner@example.com');
   assert.equal(message.vars.name, 'Ada Lovelace');
   assert.equal(message.vars.appUrl, 'https://next.singulancelabs.com/hivemind/app');
+  assert.equal(message.from, 'Amar at SINGULANCE <amar@admin.singulancelabs.com>');
   assert.ok(Object.hasOwn(ADMIN_EMAIL_TEMPLATES, message.templateId));
 });
 

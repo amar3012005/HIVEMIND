@@ -86,7 +86,7 @@ export async function getEntityProfileDossier({ prisma, organizationId, entityId
     where: { organizationId, entityId, status: { in: ['active', 'review', 'superseded'] } },
     include: {
       reviews: true,
-      claim: { include: { predicate: true } },
+      claim: { include: { predicate: true, objectEntity: true } },
       ...(includeEvidence ? { evidence: true } : {}),
     },
     orderBy: [{ factClass: 'asc' }, { freshnessAt: 'desc' }], take: 200,
@@ -114,7 +114,10 @@ export function buildEntityProfileTimeline(facts = []) {
       fact_class: fact.factClass,
       status: fact.status,
       decision: fact.decision,
-      value: fact.value,
+      value: {
+        ...(fact.value || {}),
+        object_entity_name: fact.claim?.objectEntity?.canonicalName || fact.value?.object_entity_name || null,
+      },
       evidence_count: evidenceCount,
       valid_at: validAt,
       recorded_at: fact.createdAt || null,

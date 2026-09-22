@@ -384,6 +384,32 @@ app = create_app(
     ],
 )
 
+# AgentScope's public POST /chat route can be used for follow-up turns without
+# passing through our WorkRun creation path. Normalize at the workspace-manager
+# boundary as well, so sessions created by older runtime versions cannot fail
+# when Docker derives the sandbox container name from a legacy colon-delimited
+# workspace id.
+_workspace_get_workspace = workspace_manager.get_workspace
+
+
+async def _safe_get_workspace(user_id, agent_id, session_id, workspace_id=None):  # type: ignore[no-untyped-def]
+    safe_workspace_id = (
+        workspace_backend.sanitize_workspace_id(workspace_id)
+        if workspace_id
+        else workspace_id
+    )
+    if workspace_id and safe_workspace_id != workspace_id:
+        _log(f"normalized legacy workspace id {workspace_id!r} -> {safe_workspace_id!r}")
+    return await _workspace_get_workspace(
+        user_id,
+        agent_id,
+        session_id,
+        workspace_id=safe_workspace_id,
+    )
+
+
+workspace_manager.get_workspace = _safe_get_workspace
+
 # --------------------------------------------------------------------------
 # Web UI — a single static page served from the same origin as the API.
 # --------------------------------------------------------------------------
@@ -602,6 +628,11 @@ async def _resolve_agent(
     existing = await app.state.storage.list_agents(user_id)
     for record in existing or []:
         if getattr(record.data, "name", None) == name:
+            # Existing records may predate the phase-1 DeepSeek contract and
+            # still carry compression-tool/custom context settings. Normalize
+            # them before reusing the identity; otherwise the next chat is
+            # rejected by the provider as an invalid request.
+            await _ensure_phase1_agent_config(user_id, record)
             return record.id
 
     created = await _create_agent(
@@ -774,6 +805,12 @@ async def _dispatch_chat(
     (single-run-per-session), which is why the WorkRun binding is idempotent —
     a retried dispatch must not attempt a second chat.
     """
+    # WorkRuns created before the workspace-id boundary fix can still contain
+    # provider-style ids such as ``workrun:<uuid>``. Docker rejects those when
+    # it derives the sandbox container name, so repair the persisted session
+    # before dispatching the next turn (including follow-up turns).
+    await _normalize_session_workspace(user_id=user_id, agent_id=agent_id, session_id=session_id)
+
     from agentscope.app._router._chat import chat as _chat
     from agentscope.app._router._schema._chat import ChatRequest
 
@@ -792,6 +829,31 @@ async def _dispatch_chat(
         chat_run_registry=app.state.chat_run_registry,
         message_bus=app.state.message_bus,
     )
+
+
+async def _normalize_session_workspace(*, user_id: str, agent_id: str, session_id: str) -> None:
+    """Migrate legacy WorkRun workspace ids before AgentScope provisions Docker."""
+    record = await app.state.storage.get_session(user_id, agent_id, session_id)
+    config = getattr(record, "config", None) if record is not None else None
+    current = getattr(config, "workspace_id", None) if config is not None else None
+    if not current:
+        return
+    safe = workspace_backend.sanitize_workspace_id(current)
+    if safe == current:
+        return
+    if hasattr(config, "model_copy"):
+        config = config.model_copy(update={"workspace_id": safe})
+    else:  # pragma: no cover - AgentScope 2.x uses Pydantic models
+        config.workspace_id = safe
+    await app.state.storage.upsert_session(
+        user_id,
+        agent_id,
+        config=config,
+        state=getattr(record, "state", None),
+        session_id=session_id,
+        origin=getattr(record, "origin", None),
+    )
+    _log(f"normalized legacy workspace id session={session_id} {current!r} -> {safe!r}")
 
 
 async def _resume_workrun_confirmation(

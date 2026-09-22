@@ -85,9 +85,8 @@ test('OAuth authorization code + refresh + revoke flow works end-to-end', async 
     });
 
     const loginPageResp = await fetch(`${baseUrl}/oauth/authorize?${authorizeParams.toString()}`, { redirect: 'manual' });
-    assert.equal(loginPageResp.status, 200);
-    const loginHtml = await loginPageResp.text();
-    assert.ok(loginHtml.includes('Sign in to HiveMind'));
+    assert.equal(loginPageResp.status, 302);
+    assert.match(loginPageResp.headers.get('location') || '', /\/hivemind\/login\?cli_return_to=/);
 
     const loginResp = await fetch(`${baseUrl}/oauth/login`, {
       method: 'POST',
@@ -225,9 +224,9 @@ test('OAuth token endpoint rejects invalid PKCE verifier and invalid consent sta
       code_challenge_method: 'S256'
     });
 
-    const loginPageResp = await fetch(`${baseUrl}/oauth/authorize?${params.toString()}`);
-    const html = await loginPageResp.text();
-    assert.ok(html.includes('Sign in to HiveMind'));
+    const loginPageResp = await fetch(`${baseUrl}/oauth/authorize?${params.toString()}`, { redirect: 'manual' });
+    assert.equal(loginPageResp.status, 302);
+    assert.match(loginPageResp.headers.get('location') || '', /\/hivemind\/login\?cli_return_to=/);
 
     const loginResp = await fetch(`${baseUrl}/oauth/login`, {
       method: 'POST',

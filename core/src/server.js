@@ -6123,6 +6123,17 @@ exit \$RC
     const returnTo = `${OAUTH_BASE_URL}${reqUrlPath}`;
     const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
 
+    // OAuth clients must use the product's canonical, authenticated login
+    // surface. Rendering the old admin-secret form here exposed an internal
+    // operator fallback in a public connector journey and made the login
+    // experience diverge from HIVE-MIND. Preserve the complete OAuth request
+    // in cli_return_to so login returns to this Core issuer to mint the code.
+    res.writeHead(302, { Location: dashboardLoginUrl });
+    res.end();
+    return;
+
+    // Kept below only for source compatibility with older local snapshots.
+    // The redirect above makes this renderer unreachable for remote clients.
     const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;
 
     const loginHtml = `<!DOCTYPE html>

@@ -2950,7 +2950,15 @@ const OAUTH_SCOPE_ALIASES = {
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
 const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);
 const OAUTH_SESSION_COOKIE_NAME = process.env.HIVEMIND_OAUTH_SESSION_COOKIE || 'hm_oauth_session';
-const OAUTH_SESSION_SECRET = requireSessionSecret('HIVEMIND_OAUTH_SESSION_SECRET', ['SESSION_SECRET']);
+// The dashboard/control-plane is the issuer of hm_cp_session. Prefer its
+// signing secret whenever a dedicated OAuth secret is not configured so Core
+// can verify the browser session after an external connector returns from the
+// branded sign-in surface. Falling straight back to SESSION_SECRET can diverge
+// in production even though both services share Redis.
+const OAUTH_SESSION_SECRET = requireSessionSecret('HIVEMIND_OAUTH_SESSION_SECRET', [
+  'HIVEMIND_CONTROL_PLANE_SESSION_SECRET',
+  'SESSION_SECRET'
+]);
 const OAUTH_AUTH_STATE_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_AUTH_STATE_TTL_SECONDS || 10 * 60);
 const OAUTH_RESOURCE_DEFAULT = process.env.HIVEMIND_OAUTH_RESOURCE_DEFAULT || OAUTH_BASE_URL;
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -6123,6 +6131,17 @@ exit \$RC
     const returnTo = `${OAUTH_BASE_URL}${reqUrlPath}`;
     const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
 
+    // OAuth clients must use the product's canonical, authenticated login
+    // surface. Rendering the old admin-secret form here exposed an internal
+    // operator fallback in a public connector journey and made the login
+    // experience diverge from HIVE-MIND. Preserve the complete OAuth request
+    // in cli_return_to so login returns to this Core issuer to mint the code.
+    res.writeHead(302, { Location: dashboardLoginUrl });
+    res.end();
+    return;
+
+    // Kept below only for source compatibility with older local snapshots.
+    // The redirect above makes this renderer unreachable for remote clients.
     const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;
 
     const loginHtml = `<!DOCTYPE html>

@@ -198,8 +198,10 @@ import {
   getProactiveSettings,
   isAuthorizedProactiveCognitionRequest,
   listEligibleProactiveSchedules,
+  listProactiveEvaluations,
   proactiveCognitionEnabled,
   recordProactiveFeedback,
+  runProactiveHistoricalDryRun,
   setProactiveSettings,
 } from './proactive-cognition/service.js';
 
@@ -3729,9 +3731,23 @@ const server = http.createServer(async (req, res) => {
   // HIVE activity, policy evaluator, and owner of every delivery receipt.
   if (pathname.startsWith('/internal/proactive-cognition/')) {
     if (!isAuthorizedProactiveCognitionRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!proactiveCognitionEnabled()) return jsonResponse(res, { error: 'proactive_cognition_disabled', retryable: false }, 403);
     if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
     const body = await parseBody(req).catch(() => ({}));
+    // A service-token historical dry run deliberately remains available while
+    // delivery is globally disabled. It writes only inspectable evaluations;
+    // it cannot reserve a ledger row, send mail, or advance the live schedule.
+    if (pathname === '/internal/proactive-cognition/dry-run') {
+      const scheduleId = String(body.schedule_id || '');
+      try {
+        return jsonResponse(res, await runProactiveHistoricalDryRun({
+          prisma, scheduleId,
+          windowEnds: Array.isArray(body.window_ends) ? body.window_ends : [],
+        }));
+      } catch (error) {
+        return jsonResponse(res, { error: clean(error?.message || 'proactive_dry_run_failed', 240), retryable: false }, 400);
+      }
+    }
+    if (!proactiveCognitionEnabled()) return jsonResponse(res, { error: 'proactive_cognition_disabled', retryable: false }, 403);
     if (pathname === '/internal/proactive-cognition/eligible') {
       return jsonResponse(res, { schedules: await listEligibleProactiveSchedules({ prisma, limit: body.limit }) });
     }
@@ -8702,6 +8718,22 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Method not allowed' }, 405);
     } catch (error) {
       return jsonResponse(res, { error: clean(error?.message || 'proactive_settings_failed', 240) }, 400);
+    }
+  }
+
+  if (pathname === '/v1/proactive-cognition/evaluations' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
+      return jsonResponse(res, { evaluations: await listProactiveEvaluations({
+        prisma, userId: current.session.userId, orgId: current.session.orgId, limit,
+      }) });
+    } catch (error) {
+      return jsonResponse(res, { error: clean(error?.message || 'proactive_evaluations_failed', 240) }, 400);
     }
   }
 

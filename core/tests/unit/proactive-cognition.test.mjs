@@ -5,6 +5,7 @@ import {
   isAuthorizedProactiveCognitionRequest,
   normalizeProactiveSettings,
   proactiveCognitionEnabled,
+  runProactiveHistoricalDryRun,
 } from '../../src/proactive-cognition/service.js';
 
 const USER = '11111111-1111-4111-8111-111111111111';
@@ -67,4 +68,58 @@ test('shadow evaluation makes one typed JEV decision and never sends email', asy
   assert.equal(result.status, 'completed');
   assert.equal(result.decision, 'send_reflection');
   assert.equal(calls.some((sql) => sql.includes('proactive_delivery_ledger')), false);
+});
+
+test('delivery is deterministically suppressed after an accepted delivery in the rolling day', async () => {
+  const calls = [];
+  const prisma = {
+    async $queryRawUnsafe(sql) {
+      calls.push(sql);
+      if (sql.includes('FROM "hivemind"."proactive_user_schedules" s')) return [{
+        id: SCHEDULE, user_id: USER, org_id: ORG, trigger_key: 'decision_reflection.v1', enabled: true,
+        timezone: 'UTC', quiet_start_hour: 21, quiet_end_hour: 8, next_evaluate_at: '2026-09-22T12:00:00.000Z',
+        email: 'owner@example.test', display_name: 'Owner',
+      }];
+      if (sql.includes('FROM "hivemind"."memories"')) return [
+        { id: '44444444-4444-4444-8444-444444444444', title: 'Confirm renewal owner', tags: [], source_type: 'conversation', scope: 'personal', created_at: '2026-09-22T11:00:00.000Z' },
+        { id: '55555555-5555-4555-8555-555555555555', title: 'Approve proposal', tags: [], source_type: 'conversation', scope: 'personal', created_at: '2026-09-22T10:00:00.000Z' },
+      ];
+      if (sql.includes('FROM "hivemind"."audit_logs"')) return [];
+      if (sql.includes('FROM "hivemind"."proactive_delivery_ledger"') && sql.includes("status='accepted'")) return [{ id: '77777777-7777-4777-8777-777777777777' }];
+      if (sql.includes('INSERT INTO "hivemind"."proactive_evaluations"')) return [{ id: '66666666-6666-4666-8666-666666666666' }];
+      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
+    },
+    async $executeRawUnsafe() { return 1; },
+  };
+  const result = await evaluateProactiveSchedule({
+    prisma, scheduleId: SCHEDULE, mode: 'deliver', now: new Date('2026-09-22T12:01:00.000Z'),
+    provider: { async decideQuestions() { return { answers: { action: { choice: 'send_reflection' } } }; } },
+    env: { CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'token', JEV_GATEWAY_BYOK_ALIAS: 'custom-openrouter' },
+  });
+  assert.equal(result.status, 'suppressed');
+  assert.equal(result.reason, 'one_delivery_per_rolling_24_hours');
+  assert.equal(calls.some((sql) => sql.includes('INSERT INTO "hivemind"."proactive_delivery_ledger"')), false);
+});
+
+test('historical dry run stores decisions without advancing the live schedule', async () => {
+  let scheduleAdvances = 0;
+  const prisma = {
+    async $queryRawUnsafe(sql) {
+      if (sql.includes('FROM "hivemind"."proactive_user_schedules" s')) return [{
+        id: SCHEDULE, user_id: USER, org_id: ORG, trigger_key: 'decision_reflection.v1', enabled: true,
+        timezone: 'UTC', quiet_start_hour: 21, quiet_end_hour: 8, next_evaluate_at: '2026-09-22T12:00:00.000Z', email: 'owner@example.test', display_name: 'Owner',
+      }];
+      if (sql.includes('FROM "hivemind"."memories"')) return [];
+      if (sql.includes('FROM "hivemind"."audit_logs"')) return [];
+      if (sql.includes('INSERT INTO "hivemind"."proactive_evaluations"')) return [{ id: '66666666-6666-4666-8666-666666666666' }];
+      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
+    },
+    async $executeRawUnsafe(sql) { if (sql.includes('next_evaluate_at')) scheduleAdvances += 1; return 1; },
+  };
+  const result = await runProactiveHistoricalDryRun({
+    prisma, scheduleId: SCHEDULE, windowEnds: ['2026-09-22T12:00:00.000Z'], now: new Date('2026-09-22T13:00:00.000Z'),
+  });
+  assert.equal(result.mode, 'historical_dry_run');
+  assert.equal(result.evaluations[0].status, 'skipped');
+  assert.equal(scheduleAdvances, 0);
 });

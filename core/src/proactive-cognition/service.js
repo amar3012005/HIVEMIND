@@ -8,6 +8,7 @@ export const PROACTIVE_TRIGGER_KEY = 'decision_reflection.v1';
 export const PROACTIVE_POLICY_VERSION = 'decision_reflection_policy.v1';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_MS = 6 * 60 * 60 * 1000;
+const DELIVERY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const MAX_ACTIVITY_ITEMS = 12;
 
 function clean(value, limit = 400) {
@@ -15,8 +16,9 @@ function clean(value, limit = 400) {
 }
 
 function asDate(value, fallback = new Date()) {
+  if (!value) return fallback;
   const date = value ? new Date(value) : fallback;
-  return Number.isNaN(date.getTime()) ? fallback : date;
+  return !date || Number.isNaN(date.getTime()) ? fallback : date;
 }
 
 function uuid(value) { return UUID.test(String(value || '')); }
@@ -64,6 +66,25 @@ export async function getProactiveSettings({ prisma, userId, orgId }) {
     userId, orgId, PROACTIVE_TRIGGER_KEY,
   );
   return rowSettings(rows?.[0]);
+}
+
+export async function listProactiveEvaluations({ prisma, userId, orgId, limit = 20 }) {
+  if (!uuid(userId) || !uuid(orgId)) throw new Error('proactive_identity_invalid');
+  const bounded = Math.max(1, Math.min(50, Number(limit) || 20));
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id, trigger_key, window_start, window_end, mode, status, decision, policy_version, created_at
+       FROM "hivemind"."proactive_evaluations"
+      WHERE user_id=$1::uuid AND org_id=$2::uuid
+      ORDER BY created_at DESC LIMIT $3`,
+    userId, orgId, bounded,
+  );
+  return (rows || []).map((row) => ({
+    id: String(row.id), trigger_key: clean(row.trigger_key, 120),
+    window_start: row.window_start, window_end: row.window_end,
+    mode: clean(row.mode, 24), status: clean(row.status, 32),
+    decision: row.decision && typeof row.decision === 'object' ? row.decision : {},
+    policy_version: clean(row.policy_version, 120), created_at: row.created_at,
+  }));
 }
 
 export async function setProactiveSettings({ prisma, userId, orgId, input, now = new Date() }) {
@@ -246,7 +267,22 @@ async function setDelivery({ prisma, id, status, provider = null, messageId = nu
   );
 }
 
-export async function evaluateProactiveSchedule({ prisma, scheduleId, mode = 'shadow', now = new Date(), env = process.env, provider = null }) {
+async function hasRecentAcceptedDelivery({ prisma, scheduleId, now }) {
+  const since = new Date(now.getTime() - DELIVERY_COOLDOWN_MS);
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT id FROM "hivemind"."proactive_delivery_ledger"
+      WHERE schedule_id=$1::uuid AND status='accepted'
+        AND COALESCE(completed_at, created_at) >= $2
+      ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1`,
+    scheduleId, since,
+  );
+  return Boolean(rows?.[0]?.id);
+}
+
+export async function evaluateProactiveSchedule({
+  prisma, scheduleId, mode = 'shadow', now = new Date(), env = process.env,
+  provider = null, windowEnd = null, advance = true,
+}) {
   if (!uuid(scheduleId)) throw new Error('proactive_schedule_invalid');
   const rows = await prisma.$queryRawUnsafe(
     `SELECT s.id, s.user_id, s.org_id, s.trigger_key, s.enabled, s.timezone, s.quiet_start_hour, s.quiet_end_hour, s.next_evaluate_at,
@@ -257,19 +293,30 @@ export async function evaluateProactiveSchedule({ prisma, scheduleId, mode = 'sh
   );
   const schedule = rows?.[0];
   if (!schedule || schedule.enabled !== true || schedule.trigger_key !== PROACTIVE_TRIGGER_KEY) return { status: 'stale_or_disabled' };
-  const to = asDate(schedule.next_evaluate_at, now);
+  const to = asDate(windowEnd || schedule.next_evaluate_at, now);
   const from = new Date(to.getTime() - WINDOW_MS);
   const activity = await compileActivity({ prisma, userId: schedule.user_id, orgId: schedule.org_id, from, to });
   const nextAt = new Date(Math.max(now.getTime(), to.getTime()) + WINDOW_MS);
   if (activity.counts.total < 2) {
     const evaluationId = await recordEvaluation({ prisma, schedule, from, to, mode, activity, decision: { outcome: 'wait', source: 'deterministic', reason: 'insufficient_activity' }, status: 'skipped' });
-    await advanceSchedule({ prisma, scheduleId, nextAt, lastEvaluatedAt: now });
+    if (advance) await advanceSchedule({ prisma, scheduleId, nextAt, lastEvaluatedAt: now });
     return { status: 'skipped', reason: 'insufficient_activity', evaluation_id: evaluationId };
   }
   const decision = await decideReflection({ activity, userId: schedule.user_id, orgId: schedule.org_id, env, provider });
-  const shouldSend = mode === 'deliver' && decision.outcome === 'send_reflection' && !quietHours(now, schedule);
-  const evaluationId = await recordEvaluation({ prisma, schedule, from, to, mode, activity, decision, status: shouldSend ? 'ready' : 'completed' });
-  await advanceSchedule({ prisma, scheduleId, nextAt, lastEvaluatedAt: now });
+  const quiet = quietHours(now, schedule);
+  const dailyCapHit = mode === 'deliver' && decision.outcome === 'send_reflection' && !quiet
+    ? await hasRecentAcceptedDelivery({ prisma, scheduleId, now })
+    : false;
+  const shouldSend = mode === 'deliver' && decision.outcome === 'send_reflection' && !quiet && !dailyCapHit;
+  const finalDecision = dailyCapHit
+    ? { ...decision, outcome: 'wait', source: 'deterministic_policy', reason: 'one_delivery_per_rolling_24_hours' }
+    : decision;
+  const evaluationId = await recordEvaluation({
+    prisma, schedule, from, to, mode, activity, decision: finalDecision,
+    status: shouldSend ? 'ready' : (dailyCapHit ? 'suppressed' : 'completed'),
+  });
+  if (advance) await advanceSchedule({ prisma, scheduleId, nextAt, lastEvaluatedAt: now });
+  if (dailyCapHit) return { status: 'suppressed', reason: 'one_delivery_per_rolling_24_hours', evaluation_id: evaluationId };
   if (!shouldSend) return { status: 'completed', evaluation_id: evaluationId, decision: decision.outcome, mode };
 
   const focusTitle = safeTitle(activity.recent_memories[0]?.title);
@@ -301,6 +348,23 @@ export async function evaluateProactiveSchedule({ prisma, scheduleId, mode = 'sh
     await setDelivery({ prisma, id: ledger.id, status: 'indeterminate', error: clean(error?.message || error, 240) });
     return { status: 'delivery_indeterminate', evaluation_id: evaluationId };
   }
+}
+
+export async function runProactiveHistoricalDryRun({ prisma, scheduleId, windowEnds = [], now = new Date(), env = process.env, provider = null }) {
+  const ends = [...new Set((Array.isArray(windowEnds) ? windowEnds : [])
+    .map((value) => asDate(value, null))
+    .filter((value) => value && value <= now && value >= new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000)))
+    .map((value) => value.toISOString()))]
+    .slice(0, 28);
+  if (!ends.length) throw new Error('proactive_dry_run_window_required');
+  const evaluations = [];
+  for (const end of ends) {
+    evaluations.push(await evaluateProactiveSchedule({
+      prisma, scheduleId, mode: 'historical_dry_run', now, env, provider,
+      windowEnd: new Date(end), advance: false,
+    }));
+  }
+  return { status: 'completed', mode: 'historical_dry_run', evaluations };
 }
 
 export async function recordProactiveFeedback({ prisma, userId, orgId, deliveryId, action, note = null }) {

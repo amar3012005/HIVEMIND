@@ -73,4 +73,6 @@ test('rejects a replayed native event atomically by source_event_id', async () =
   assert.equal(result, null);
   assert.match(query, /source_event_id/);
   assert.match(query, /jsonb_build_array/);
+  assert.match(query, /jsonb_array_elements/);
+  assert.doesNotMatch(query, /events\s*->\s*-\(/);
 });

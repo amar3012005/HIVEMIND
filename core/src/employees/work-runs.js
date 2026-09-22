@@ -458,8 +458,17 @@ export async function appendWorkRunEvent(prisma, workRunId, normalized) {
         SET events = (
               CASE
                 WHEN jsonb_array_length(COALESCE(events, '[]'::jsonb)) >= $2::int
-                  THEN (COALESCE(events, '[]'::jsonb) -> -($2::int - 1)) || jsonb_set($3::jsonb, '{0,seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
-                ELSE COALESCE(events, '[]'::jsonb) || jsonb_set($3::jsonb, '{0,seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
+                  THEN (
+                    SELECT COALESCE(jsonb_agg(value ORDER BY ord), '[]'::jsonb)
+                      FROM jsonb_array_elements(COALESCE(events, '[]'::jsonb))
+                        WITH ORDINALITY AS retained(value, ord)
+                     WHERE ord > jsonb_array_length(COALESCE(events, '[]'::jsonb)) - ($2::int - 1)
+                  ) || jsonb_build_array(
+                    jsonb_set($3::jsonb -> 0, '{seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
+                  )
+                ELSE COALESCE(events, '[]'::jsonb) || jsonb_build_array(
+                  jsonb_set($3::jsonb -> 0, '{seq}', to_jsonb(jsonb_array_length(COALESCE(events, '[]'::jsonb)) + 1))
+                )
               END
             ),
             heartbeat_at = now(),

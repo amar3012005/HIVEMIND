@@ -258,6 +258,58 @@ test('a scoped compound write resumes its remaining action even when the initial
   assert.deepEqual(stages, ['capability', 'workflow_transition']);
 });
 
+test('a timed-out scoped compound save preserves its checkpoint and resumes the remaining action after one retry', async () => {
+  const prisma = fakePrisma();
+  const checkpointer = new MemorySaver();
+  let saves = 0;
+  let turn = 0;
+  const runtimeCtx = {
+    ...ctx(prisma, 'retryable-scope-save'),
+    _tracedDispatch: async (name, args) => {
+      assert.equal(name, 'hivemind_save_memory');
+      assert.equal(args.scope, 'organization');
+      assert.match(args._source_id, /^unified-memory-save:/);
+      saves += 1;
+      if (saves === 1) throw new Error('tool:hivemind_save_memory deadline exceeded');
+      return { saved: true, memory_id: 'saved-after-retry', title: args.title, scope: args.scope };
+    },
+  };
+  const decisionStage = async input => input.stage === 'capability'
+    ? { status: 'selected', selected: 'multi_task', authoritative: true, receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'retry-plan' } }
+    : { status: 'selected', selected: 'composio_action', authoritative: true, receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'retry-transition' } };
+  const modelStep = async () => {
+    turn += 1;
+    if (turn === 1) return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'SOURCE_READ', arguments: { query: 'latest records' } }, 'retry-read') };
+    if (turn === 2) return { message: call('hivemind_meta', { operation: 'save', save: { title: 'Retrieved records', content: 'Grounded source records.', tags: ['retrieved', 'user-confirmed'] } }, 'retry-save') };
+    return { message: call('hivemind_connected_task', { action: 'execute', tool_slug: 'MESSAGE_SEND', arguments: { recipient: 'person@example.test', body: 'Follow-up.' } }, 'retry-send') };
+  };
+  const connectedExecutor = async args => args.tool_slug === 'SOURCE_READ'
+    ? { successful: true, data: { records: [{ id: 'record-1' }] }, state: { selectedSlugs: ['SOURCE_READ'], primarySlugs: ['SOURCE_READ'] } }
+    : { successful: true, approval: { slug: 'MESSAGE_SEND', arguments: args.arguments, schema: { type: 'object', required: ['recipient', 'body'], properties: { recipient: { type: 'string' }, body: { type: 'string' } } } } };
+  const metaExecutor = async args => ({ successful: true, data: { needs_project_choice: true, title: args.save.title, scopes: [{ scope: 'organization', label: 'Organization' }] } });
+
+  const scoped = await runUnifiedMetaAgent({
+    message: 'Read source records, save them to HIVE-MIND, and send a follow-up.', useTools: true, prisma, ctx: runtimeCtx,
+    checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor, metaExecutor,
+  });
+  assert.equal(scoped.status, 'needs_input');
+  const retryPrompt = await runUnifiedMetaAgent({
+    message: '', useTools: true, prisma, ctx: { ...runtimeCtx, unifiedRunId: scoped.run.id }, checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor, metaExecutor,
+    choice: { scope: 'organization', run_id: scoped.run.id },
+  });
+  assert.equal(retryPrompt.status, 'needs_input');
+  assert.equal(retryPrompt.inputRequests[0].kind, 'memory_save_retry');
+  assert.equal(retryPrompt.inputRequests[0].selected_scope, 'organization');
+  const resumed = await runUnifiedMetaAgent({
+    message: '', useTools: true, prisma, ctx: { ...runtimeCtx, unifiedRunId: scoped.run.id }, checkpointer, composio: {}, decisionStage, modelStep, connectedExecutor, metaExecutor,
+    choice: { action: 'retry', run_id: scoped.run.id },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(prisma.drafts[0].toolName, 'MESSAGE_SEND');
+  assert.equal(saves, 2);
+  assert.ok(resumed.steps.some(step => step.summary === 'Memory saved in selected scope'));
+});
+
 test('the in-graph plan node calls JEV once and reuses its typed decision for the model surface', async () => {
   const prisma = fakePrisma();
   const decisionStages = [];

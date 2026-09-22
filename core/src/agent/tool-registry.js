@@ -1081,6 +1081,35 @@ const TOOL_HANDLERS = {
       ? explicitScope
       : (hasProject ? 'project' : (autoScope || 'personal'));
 
+    // Callers that own a durable workflow checkpoint may supply a stable
+    // provenance id for one user-authorized save. Check it before entering
+    // canonical ingestion so a transport timeout can be retried safely: the
+    // original write may already have committed after its caller gave up.
+    // This is intentionally generic to hivemind_save_memory; it is not tied to
+    // one chat surface, source, person, or provider.
+    const operationSourceId = typeof args._source_id === 'string' ? args._source_id.trim() : '';
+    const provenanceStore = ctx.prisma || ctx.persistentMemoryStore?.client || null;
+    if (operationSourceId && provenanceStore?.sourceMetadata?.findFirst) {
+      const existing = await provenanceStore.sourceMetadata.findFirst({
+        where: {
+          sourceId: operationSourceId,
+          sourcePlatform: 'talk-to-hive',
+          memory: { orgId: ctx.orgId },
+        },
+        select: { memoryId: true },
+      }).catch(() => null);
+      if (existing?.memoryId) {
+        return {
+          saved: true,
+          deduplicated: true,
+          memory_id: existing.memoryId,
+          title: args.title,
+          scope,
+          receipt: { status: 'already_saved', operation_id: operationSourceId },
+        };
+      }
+    }
+
     const memoryAdmission = args._memory_admission === 'user_assertion' ? 'user_assertion' : 'trusted_fact';
     const provenanceTag = memoryAdmission === 'user_assertion' ? 'provenance:user-assertion' : 'provenance:user-fact';
     const plannedEntities = [...new Set((Array.isArray(args.entities) ? args.entities : [])

@@ -739,6 +739,32 @@ function savedMemoryAcknowledgement(receipt, scope) {
   return `Added “${title}” to your ${scopeLabel} company brain. It is durable and searchable now; canonical indexing will connect its people, organizations, dates, and relationships in the background.`;
 }
 
+// A scope choice is an authority decision, not a one-shot transport attempt.
+// Keep a stable operation id on the checkpoint so a recoverable Core timeout
+// can resume the exact canonical write without re-running discovery, planning,
+// retrieval, or asking for the destination again.
+function memorySaveOperationId(state, ctx, draft, scope) {
+  const material = [ctx.orgId, ctx.userId, state.runId, scope, draft?.title, draft?.content, draft?.memory_type]
+    .map(value => String(value ?? '')).join('\u0000');
+  return `unified-memory-save:${crypto.createHash('sha256').update(material).digest('hex')}`;
+}
+
+function memorySaveRetryRequest(request, { scope, operationId, error }) {
+  return {
+    ...request,
+    kind: 'memory_save_retry',
+    selected_scope: scope,
+    save_operation_id: operationId,
+    blocking: true,
+    prompt: 'Memory save is temporarily unavailable. Your source evidence and selected destination are preserved. Retry the exact save, or cancel this save while keeping the completed workflow evidence.',
+    error: compactText(error || 'Memory save failed', 300),
+    options: [
+      { id: 'retry', value: 'retry', label: 'Retry save' },
+      { id: 'cancel', value: 'cancel', label: 'Cancel save' },
+    ],
+  };
+}
+
 function decisionToolSurface(selection, useTools) {
   const current = unifiedMetaTools({ useTools });
   const names = decisionGatewayToolNames(selection, { connected: useTools });
@@ -1342,7 +1368,32 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const memoryScopeNode = async state => {
     const request = state.pendingMemoryScope;
     const choice = interrupt(request);
-    const raw = compactText(choice?.scope || choice?.value || choice, 300);
+    const retrying = request?.kind === 'memory_save_retry';
+    const retryAction = compactText(choice?.action || choice?.value || choice, 80).toLowerCase();
+    if (retrying && ['cancel', 'reject', 'cancelled'].includes(retryAction)) {
+      const steps = [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'cancelled', summary: 'Memory save cancelled; completed evidence retained' }];
+      onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'cancelled', summary: 'Memory save cancelled; completed evidence retained', run_id: state.runId });
+      if (hasCompoundWorkflowEvidence(state)) {
+        return {
+          pendingMemoryScope: null,
+          pendingSaveDraft: null,
+          workflowTransition: null,
+          messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'cancelled', reason: 'user_cancelled', completed_evidence_retained: true }) }],
+          steps,
+        };
+      }
+      const response = 'Memory save was cancelled. The information was not written.';
+      return {
+        pendingMemoryScope: null,
+        pendingSaveDraft: null,
+        steps,
+        result: outputShape({ ...state, pendingMemoryScope: null, pendingSaveDraft: null, steps }, response),
+      };
+    }
+    if (retrying && retryAction !== 'retry') throw new Error('unified_memory_save_retry_invalid');
+    const raw = retrying
+      ? compactText(request.selected_scope, 300)
+      : compactText(choice?.scope || choice?.value || choice, 300);
     const selected = raw.toLowerCase();
     const draft = request?.draft || {};
     const saveArgs = {
@@ -1354,6 +1405,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       ...(Array.isArray(draft.dates) ? { dates: draft.dates } : {}),
       ...(Array.isArray(draft.source_refs) ? { source_refs: draft.source_refs } : {}),
       ...(draft.event_time ? { event_time: draft.event_time } : {}),
+      // This is intentionally stable across the retry interrupt. The
+      // canonical ingestion boundary receives provenance that identifies one
+      // user-authorized write, never a new chat attempt.
+      _source_id: request?.save_operation_id || memorySaveOperationId(state, ctx, draft, selected),
       _memory_admission: 'user_assertion', _require_explicit_scope: true,
     };
     if (['personal', 'organization', 'team'].includes(selected)) saveArgs.scope = selected;
@@ -1366,8 +1421,23 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     onEvent({ type: 'tool_start', name: 'hivemind_save_memory', arguments: saveArgs, run_id: state.runId });
     const receipt = await executeGovernedCoreWrite('hivemind_save_memory', saveArgs, ctx);
     if (receipt?.successful === false || receipt?.data?.saved !== true) {
-      onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'error', summary: receipt?.error || receipt?.data?.error || 'Memory save failed', run_id: state.runId });
-      throw new Error(`unified_memory_scope_save_failed:${compactText(receipt?.error || receipt?.data?.error || 'unknown', 160)}`);
+      const error = receipt?.error || receipt?.data?.error || 'Memory save failed';
+      const operationId = saveArgs._source_id;
+      const retryRequest = memorySaveRetryRequest(request, { scope: raw, operationId, error });
+      const exposedFailure = publicToolResult(receipt);
+      onEvent({ type: 'tool_result', name: 'hivemind_save_memory', status: 'retryable_error', summary: compactText(error, 300), run_id: state.runId });
+      // Never throw out of a governed write node after an ambiguous timeout.
+      // The graph checkpoint is now the recovery authority: it retains every
+      // completed receipt, the exact scope, and the stable operation id for a
+      // deliberate retry. That prevents an unrelated planner/recall fallback
+      // from replacing a partially-completed compound workflow.
+      return {
+        pendingMemoryScope: retryRequest,
+        receipts: [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: false, retryable: true, data: exposedFailure, error: compactText(error, 300), operation_id: operationId }],
+        steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'retryable_error', summary: 'Memory save needs retry; selected scope retained' }],
+        messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'retryable_error', error: compactText(error, 300), scope: saveArgs.scope, operation_id: operationId }) }],
+        timings: { ...state.timings, memory_save_failed_at_ms: Date.now() },
+      };
     }
     const exposed = publicToolResult(receipt);
     const receipts = [...state.receipts, { tool: 'hivemind_save_memory', action: 'save', successful: true, data: exposed }];
@@ -1410,7 +1480,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const routeWorkflowTransition = state => state.result ? 'seal' : 'model';
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const routeMemoryScope = state => state.result ? 'seal'
-    : hasCompoundWorkflowEvidence(state) ? 'workflow_transition' : 'model';
+    : state.pendingMemoryScope?.kind === 'memory_save_retry' ? 'memory_scope'
+      : hasCompoundWorkflowEvidence(state) ? 'workflow_transition' : 'model';
   const routeApproval = state => state.result ? 'seal'
     : hasCompoundWorkflowEvidence(state) ? 'workflow_transition' : 'model';
   const sealNode = async state => {
@@ -1437,7 +1508,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addConditionalEdges('tool', routeTool, ['workflow_transition', 'connection', 'memory_scope', 'approval', 'seal'])
     .addConditionalEdges('workflow_transition', routeWorkflowTransition, ['model', 'seal'])
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
-    .addConditionalEdges('memory_scope', routeMemoryScope, ['workflow_transition', 'model', 'seal'])
+    .addConditionalEdges('memory_scope', routeMemoryScope, ['memory_scope', 'workflow_transition', 'model', 'seal'])
     .addConditionalEdges('approval', routeApproval, ['workflow_transition', 'model', 'seal']).addEdge('seal', END)
     .compile({ checkpointer });
 }

@@ -28,11 +28,12 @@ export function nativeOrchestratorFor({ useTools = false, nativeMetaMode = 'off'
 export class CloudflareChatSessionClient {
   constructor({ fetchImpl = fetch, logger = console } = {}) { this.fetchImpl = fetchImpl; this.logger = logger; }
 
-  async admissionFor({ orgId, userId }) {
+  async admissionFor({ orgId, userId, surface = 'desktop' }) {
     const config = configuration();
     if (!config || !orgId || !userId) return defaultAdmission();
     try {
-      const response = await this.fetchImpl(`${config.baseUrl}/mode?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, {
+      const normalizedSurface = surface === 'mobile' ? 'mobile' : 'desktop';
+      const response = await this.fetchImpl(`${config.baseUrl}/mode?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}&surface=${normalizedSurface}`, {
         headers: { authorization: `Bearer ${config.secret}` }, signal: AbortSignal.timeout(3000),
       });
       if (!response.ok) return defaultAdmission();

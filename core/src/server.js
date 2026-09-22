@@ -25276,8 +25276,15 @@ exit \$RC
                 // Additive durable execution envelope. The selected mode is
                 // evaluated once and latched on the turn. Flag/Worker/schema
                 // failures fail closed to the unchanged Chat V2 path.
+                // The public mobile chat does not use a separate Core route.
+                // Pass a bounded surface attribute to the edge admission rule
+                // so an experiment can be mobile-only without affecting this
+                // same user's desktop sessions.
+                const requestedSurface = body?.client_surface === 'mobile' || body?.client_surface === 'desktop'
+                  ? body.client_surface
+                  : /\b(?:android|iphone|ipad|ipod|mobile)\b/i.test(String(req.headers['user-agent'] || '')) ? 'mobile' : 'desktop';
                 const chatAdmission = await cloudflareChatSessionClient
-                  .admissionFor({ orgId, userId })
+                  .admissionFor({ orgId, userId, surface: requestedSurface })
                   .catch(() => ({ mode: 'off', nativeMetaMode: 'off', unifiedDag: false, orchestratorV2Mode: 'off', compoundOrchestrator: false, meetingLifecycleMode: 'off' }));
                 let durableChatMode = chatAdmission.mode;
                 // Cloudflare latches one runtime for the authenticated turn.

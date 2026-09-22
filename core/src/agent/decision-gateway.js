@@ -85,7 +85,10 @@ export function createOpenRouterJevProvider({
     if (apiKey && !preparedHeaders.has('authorization') && !preparedHeaders.has('cf-aig-byok-alias')) {
       preparedHeaders.set('authorization', `Bearer ${apiKey}`);
     }
-    if (!preparedHeaders.has('authorization') && !preparedHeaders.has('cf-aig-byok-alias')) {
+    // A Cloudflare AI Gateway service authorization is sufficient for a
+    // configured custom provider. Do not require a BYOK header as well: the
+    // provider may own its `default` credential selection internally.
+    if (!preparedHeaders.has('authorization') && !preparedHeaders.has('cf-aig-byok-alias') && !preparedHeaders.has('cf-aig-authorization')) {
       throw new Error('decision_provider_api_key_missing');
     }
     preparedHeaders.set('content-type', 'application/json');

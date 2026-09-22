@@ -84,6 +84,20 @@ test('Jev provider accepts Cloudflare Gateway BYOK headers without a direct prov
   assert.equal(request.headers.get('authorization'), null);
 });
 
+test('Jev provider accepts Cloudflare Gateway service authorization without a BYOK alias', async () => {
+  const provider = createOpenRouterJevProvider({
+    apiKey: '', endpoint: 'https://gateway.example/custom-decision-jev/api/v1/systemone',
+    headers: { 'cf-aig-authorization': 'Bearer gateway-token' },
+    fetchImpl: async () => new Response(JSON.stringify({ answers: { decision: {
+      type: 'choice', choice: 'option_0', probabilities: { option_0: 0.97, option_1: 0.03 },
+    } } }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  });
+  const result = await provider.decideChoice({ state: 'hello', instructions: 'Choose.', options: [
+    { id: 'direct', criteria: 'Answer directly.' }, { id: 'tools', criteria: 'Use tools.' },
+  ] });
+  assert.equal(result.choice, 'direct');
+});
+
 test('explicit operational app intent bypasses the initial decision call', async () => {
   let calls = 0;
   const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('should not run'); } } });

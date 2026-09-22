@@ -4,10 +4,10 @@ import { entityProfileMode } from '../../src/memory/entity-profile-projection.js
 import { validateEntityProfileDecision } from '../../src/memory/entity-profile-jev.js';
 import { entityProfileWorkflowInstanceId } from '../../src/memory/entity-profile-projection-attempts.js';
 
-test('entity profile projection fails closed unless enabled and explicitly admitted', () => {
-  assert.equal(entityProfileMode({ evaluatedMode: 'dynamic_auto', env: {} }), 'off');
-  assert.equal(entityProfileMode({ evaluatedMode: 'dynamic_auto', env: { ENTITY_PROFILE_PROJECTION_ENABLED: 'true' } }), 'dynamic_auto');
-  assert.equal(entityProfileMode({ evaluatedMode: 'dynamic_auto', env: { ENTITY_PROFILE_PROJECTION_ENABLED: 'true', ENTITY_PROFILE_PROJECTION_KILL_SWITCH: 'true' } }), 'off');
+test('entity profile projection accepts only an explicit Worker admission mode', () => {
+  assert.equal(entityProfileMode(), 'off');
+  assert.equal(entityProfileMode({ evaluatedMode: 'dynamic_auto' }), 'dynamic_auto');
+  assert.equal(entityProfileMode({ evaluatedMode: 'untrusted' }), 'off');
 });
 
 test('JEV decisions are constrained to the narrow entity-profile contract', () => {

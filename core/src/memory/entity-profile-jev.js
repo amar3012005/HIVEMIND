@@ -23,7 +23,6 @@ export function validateEntityProfileDecision(value) {
 // JEV is advisory only. The caller must still verify authorization, evidence,
 // duplicate keys, confidence, and the fact-class rollout policy before writing.
 export async function decideEntityProfileCandidate({ candidate, fetchImpl = fetch, env = process.env }) {
-  if (String(env.ENTITY_PROFILE_JEV_ENABLED || '').toLowerCase() !== 'true') return null;
   const endpoint = gatewayCompatUrl('/chat/completions');
   const model = String(env.ENTITY_PROFILE_JEV_MODEL || '').trim();
   if (!endpoint || !model) return null;

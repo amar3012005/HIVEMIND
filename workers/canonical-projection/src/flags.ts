@@ -10,10 +10,10 @@ type RecallFlagEnv = FlagEnv & {
 type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
 type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
 type EntityDiscoveryFlagEnv = FlagEnv & { ENTITY_DISCOVERY_FLAG?: string };
-type EntityProfileFlagEnv = FlagEnv & { ENTITY_PROFILE_PROJECTION_FLAG?: string; ENTITY_PROFILE_PROJECTION_ENABLED?: string };
+type EntityProfileFlagEnv = FlagEnv & { ENTITY_PROFILE_PROJECTION_FLAG?: string };
 
 export async function evaluateEntityProfileMode(env: EntityProfileFlagEnv, orgId: string, userId: string): Promise<'off' | 'shadow' | 'dynamic_auto' | 'review_only'> {
-  if (String(env.ENTITY_PROFILE_PROJECTION_ENABLED) !== 'true' || !validUuid(orgId)) return 'off';
+  if (!validUuid(orgId)) return 'off';
   if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
   try {
     const details = await env.FLAGS.getStringDetails(

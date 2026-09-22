@@ -511,6 +511,7 @@ test('an explicit save without facts asks once before any tool or model call', a
 test('a save without a stated destination interrupts once for scope and resumes the same durable write', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();
+  const events = [];
   let writes = 0;
   let turn = 0;
   const runtimeCtx = {
@@ -539,10 +540,15 @@ test('a save without a stated destination interrupts once for scope and resumes 
   const initial = await runUnifiedMetaAgent({
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer, modelStep, composio: {}, decisionStage: saveCapabilityDecision,
+    onEvent: event => events.push(event),
   });
   assert.equal(initial.status, 'needs_input');
   assert.equal(initial.inputRequests[0].kind, 'memory_scope');
   assert.equal(writes, 1);
+  const scopePrepared = events.find(event => event.type === 'tool_result' && event.name === 'hivemind_save_memory');
+  assert.equal(scopePrepared.status, 'needs_input');
+  assert.match(scopePrepared.summary, /prepared; choose a destination/i);
+  assert.equal(scopePrepared.harness_version, UNIFIED_META_HARNESS_VERSION);
   const resumed = await runUnifiedMetaAgent({
     message: '', useTools: false, prisma, ctx: runtimeCtx, checkpointer, modelStep, composio: {},
     choice: { value: 'personal', run_id: initial.run.id },

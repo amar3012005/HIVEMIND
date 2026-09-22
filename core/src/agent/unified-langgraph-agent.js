@@ -781,6 +781,15 @@ function decisionToolSurface(selection, useTools) {
 }
 
 export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useTools = false, onEvent = () => {}, composio, prisma, modelStep, finalStream, metaExecutor, connectedExecutor, decisionStage = decideRuntimeStage }) {
+  // Every event from the unified graph is explicitly versioned.  The mobile
+  // renderer uses this contract to distinguish a real terminal receipt from
+  // an interrupt (scope, connection, retry) instead of inferring completion
+  // from a generic `tool_result` event.
+  const eventSink = onEvent;
+  onEvent = (event = {}) => eventSink({
+    ...event,
+    harness_version: event.harness_version || UNIFIED_META_HARNESS_VERSION,
+  });
   const callModel = modelStep || defaultModelStep;
   // Test seams provide a modelStep; keep those deterministic unless they
   // explicitly inject a finalStream. Production uses the stream by default.
@@ -1187,12 +1196,18 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     }
     if (call.name === 'hivemind_meta' && call.args.operation === 'save' && receipt?.data?.needs_project_choice) {
       const request = memoryScopeRequest(receipt, state.runId, call.args?.save);
+      // This is only preparation for a governed write.  It must never be
+      // represented as a successful memory save or counted as a write receipt.
+      onEvent({
+        type: 'tool_result', name: 'hivemind_save_memory', status: 'needs_input',
+        summary: 'Memory prepared; choose a destination to save it', run_id: state.runId,
+      });
       const patch = {
         ...statePatch, pendingTool: null, pendingMemoryScope: request,
         callFingerprints: [...state.callFingerprints, fingerprint],
         messages: [...state.messages, toolMessage(call, receipt)],
-        receipts: [...state.receipts, { tool: call.name, action: 'save', successful: true, data: receipt.data }],
-        steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'waiting', summary: request.prompt }],
+        receipts: [...state.receipts, { tool: call.name, action: 'save_scope_prepare', status: 'needs_input', successful: true, data: receipt.data }],
+        steps: [...state.steps, { kind: 'memory_scope', slug: 'hivemind_save_memory', status: 'needs_input', summary: 'Memory prepared; choose a destination to save it' }],
       };
       return transition(state, 'awaiting_input', { ...patch, timings: { ...executorTimings, receipt_at_ms: Date.now() } }, { tool_slug: 'hivemind_save_memory', reason_code: 'memory_scope_required' });
     }
@@ -1447,7 +1462,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // terminal answer merely because this one write succeeded when the plan
     // still has dependent outcomes.  The receipt/stage is visible immediately
     // and the next JEV transition decides what remains.
-    if (hasCompoundWorkflowEvidence(state)) {
+    if (hasCompoundWorkflowEvidence({ ...state, receipts })) {
       return {
         pendingMemoryScope: null,
         pendingSaveDraft: null,

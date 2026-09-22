@@ -40,6 +40,10 @@ export function decisionGatewayProviderConfig(env = process.env) {
     // same typed Decisions contract separately, at /api/alpha/decisions. Do
     // not send JEV through chat completions: it does not generate text.
     const isOpenRouter = provider === 'custom-openrouter' || provider === 'openrouter';
+    // `custom-decision-jev` is a Cloudflare-configured provider with its own
+    // credential binding. A caller-side alias may override that binding and
+    // select a stale credential instead.
+    const providerOwnsCredential = provider === 'custom-decision-jev';
     const path = String(env.JEV_GATEWAY_PATH || (isOpenRouter ? '/api/alpha/decisions' : '/api/v1/systemone')).replace(/^\/?/, '/');
     return {
       endpoint: `${base}/v1/${encodeURIComponent(accountId)}/${encodeURIComponent(gatewayId)}/${encodeURIComponent(provider)}${path}`,
@@ -48,7 +52,7 @@ export function decisionGatewayProviderConfig(env = process.env) {
       headers: {
         'cf-aig-authorization': `Bearer ${gatewayToken}`,
         'cf-aig-skip-cache': 'true',
-        ...(alias ? { 'cf-aig-byok-alias': alias } : {}),
+        ...(alias && !providerOwnsCredential ? { 'cf-aig-byok-alias': alias } : {}),
       },
     };
   }

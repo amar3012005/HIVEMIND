@@ -67,6 +67,7 @@ test('shadow evaluation makes one typed JEV decision and never sends email', asy
   });
   assert.equal(result.status, 'completed');
   assert.equal(result.decision, 'send_reflection');
+  assert.equal(calls.some((sql) => sql.includes('source_platform AS source_type')), true);
   assert.equal(calls.some((sql) => sql.includes('proactive_delivery_ledger')), false);
 });
 

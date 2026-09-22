@@ -145,7 +145,10 @@ function safeTitle(value) {
 async function compileActivity({ prisma, userId, orgId, from, to }) {
   const [memories, audits] = await Promise.all([
     prisma.$queryRawUnsafe(
-      `SELECT id, title, tags, source_type, scope, created_at
+      // The durable memory schema calls this source_platform. Keep the bounded
+      // activity projection's stable source_type field so policy code stays
+      // independent of storage naming, without querying a legacy column.
+      `SELECT id, title, tags, source_platform AS source_type, scope, created_at
          FROM "hivemind"."memories"
         WHERE user_id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL
           AND created_at >= $3 AND created_at < $4

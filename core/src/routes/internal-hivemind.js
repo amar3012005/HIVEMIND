@@ -30,6 +30,7 @@
 
 import { internalFetch } from '../internal/internal-fetch.js';
 import { classifyComposioToolAuthority, createComposioDraft } from '../agent/compound-orchestrator.js';
+import { SourceArtifactBackup } from '../knowledge/source-artifact-backup.js';
 
 // The runtime's tool calls are on the agent's critical path. A hung backing
 // service must surface as a tool error, not as a stalled run.
@@ -415,6 +416,25 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
     return jsonResponse(res, { error: 'path and title are required' }, 400);
   }
   const contentType = String(body?.content_type || 'application/octet-stream').slice(0, 100);
+  const encodedBytes = String(body?.bytes_base64 || '').trim();
+  const requireDurable = body?.require_durable === true;
+  let artifactBytes = null;
+  if (encodedBytes) {
+    if (!/^[A-Za-z0-9+/=_-]+$/.test(encodedBytes)) {
+      return jsonResponse(res, { error: 'bytes_base64 is malformed' }, 400);
+    }
+    artifactBytes = Buffer.from(encodedBytes, 'base64');
+    if (!artifactBytes.length || artifactBytes.length > 10 * 1024 * 1024) {
+      return jsonResponse(res, { error: 'durable artifact bytes must be 1..10485760 bytes' }, 400);
+    }
+  }
+  const backup = new SourceArtifactBackup({ logger: console, prisma });
+  if (requireDurable && !artifactBytes) {
+    return jsonResponse(res, { error: 'durable artifact bytes are required' }, 400);
+  }
+  if (requireDurable && !backup.enabled) {
+    return jsonResponse(res, { error: 'durable artifact storage is not configured' }, 503);
+  }
   let workRunId = UUID_RE.test(String(body?.workrun_id || '')) ? String(body.workrun_id) : null;
   const agentScopeSessionId = String(body?.agentscope_session_id || '').trim().slice(0, 120);
 
@@ -440,11 +460,9 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
       workRunId = UUID_RE.test(String(matchedId || '')) ? String(matchedId) : null;
     }
 
-    // The checksum is over the identity of the artifact (its path + title), not
-    // its bytes: the runtime holds the bytes in a sandbox hm-core cannot read,
-    // and a pointer row is what makes the artifact citable. Dedup on this key
-    // stops a re-run from filing the same deliverable twice.
-    const checksum = await sha256Hex(`${principal.orgId}:${workRunId || ''}:${artifactPath}:${title}`);
+    // Pointer-only registrations deduplicate by identity. Durable registrations
+    // deduplicate by verified bytes so retries cannot create a second object.
+    const checksum = await sha256Hex(artifactBytes || `${principal.orgId}:${workRunId || ''}:${artifactPath}:${title}`);
     const rows = await prisma.$queryRawUnsafe(
       `INSERT INTO "hivemind"."source_artifacts"
          (user_id, org_id, artifact_type, source_platform, source_id, content_type,
@@ -465,6 +483,32 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
     );
     const artifact = rows?.[0];
     if (!artifact) return jsonResponse(res, { error: 'artifact insert returned no row' }, 500);
+
+    let durability = 'workspace_pointer';
+    if (artifactBytes) {
+      const uploaded = await backup.backup({
+        artifactId: artifact.id,
+        checksum,
+        contentType,
+        payload: artifactBytes,
+      });
+      if (!uploaded && requireDurable) {
+        return jsonResponse(res, { error: 'durable artifact upload failed' }, 502);
+      }
+      if (uploaded) {
+        const objectKey = `${artifact.id}/${checksum}`;
+        await prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."source_artifacts"
+              SET storage_location = $1,
+                  metadata = metadata || $2::jsonb
+            WHERE id = $3::uuid`,
+          `r2:${objectKey}`,
+          JSON.stringify({ durable: true, byte_count: artifactBytes.length, object_key: objectKey }),
+          artifact.id,
+        );
+        durability = 'object_storage';
+      }
+    }
 
     // Link the artifact to its WorkRun so the run's result is inspectable.
     if (workRunId) {
@@ -487,6 +531,7 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
       artifact_id: artifact.id,
       title,
       path: artifactPath,
+      durability,
     }, 201);
   } catch (err) {
     return jsonResponse(res, { error: err.message }, 500);
@@ -495,7 +540,7 @@ export async function handleInternalRecordArtifactRoute({ req, res, jsonResponse
 
 async function sha256Hex(value) {
   const { createHash } = await import('crypto');
-  return createHash('sha256').update(String(value)).digest('hex');
+  return createHash('sha256').update(Buffer.isBuffer(value) ? value : String(value)).digest('hex');
 }
 
 /**

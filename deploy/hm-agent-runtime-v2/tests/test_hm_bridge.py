@@ -105,6 +105,47 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["path"], "/internal/hivemind/artifacts")
         self.assertEqual(captured["body"]["agentscope_session_id"], "agentscope-session-1")
 
+    async def test_artifact_tool_durable_mode_sends_verified_bytes(self):
+        captured = {}
+
+        async def call_hm_core(path, **kwargs):
+            captured.update(kwargs)
+            return {"artifact_id": "artifact-durable"}
+
+        class Backend:
+            workdir = "/workspace"
+
+            def abspath(self, value):
+                return value
+
+            def join_path(self, root, path):
+                return f"{root}/{path}"
+
+            async def file_exists(self, _path):
+                return True
+
+            async def read_file(self, _path):
+                return b"artifact bytes"
+
+        class Workspace:
+            workdir = "/workspace"
+
+            def get_backend(self):
+                return Backend()
+
+        class Manager:
+            async def get_workspace(self, *_args):
+                return Workspace()
+
+        tool = RecordArtifactTool("user-1", "org-1", "session-1", "agent-1")
+        with patch.object(extra_agent_tools, "_WORKSPACE_MANAGER", Manager()), patch.object(
+            extra_agent_tools, "_ARTIFACT_DURABLE", True
+        ), patch.object(extra_agent_tools, "_call_hm_core", call_hm_core):
+            await tool.call("deliverables/report.md", "Report")
+
+        self.assertEqual(captured["body"]["bytes_base64"], "YXJ0aWZhY3QgYnl0ZXM=")
+        self.assertTrue(captured["body"]["require_durable"])
+
     async def test_artifact_tool_rejects_missing_workspace_file(self):
         class Backend:
             workdir = "/workspace"

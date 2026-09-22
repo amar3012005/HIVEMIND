@@ -46,6 +46,7 @@ endpoint, not a new framework.
 from __future__ import annotations
 
 import json
+import base64
 import logging
 import os
 import re
@@ -70,6 +71,8 @@ MASTER_API_KEY = os.getenv("HIVEMIND_MASTER_API_KEY", "").strip()
 # Tool calls are on the agent's critical path. A hung hm-core must surface as a
 # tool error the model can react to, not as a stalled run.
 _TOOL_TIMEOUT = float(os.getenv("HM_TOOL_TIMEOUT", "60"))
+_ARTIFACT_DURABLE = os.getenv("HIVEMIND_ARTIFACT_DURABLE", "0") == "1"
+_ARTIFACT_MAX_BYTES = int(os.getenv("HIVEMIND_ARTIFACT_MAX_BYTES", str(10 * 1024 * 1024)))
 
 # AgentScope's documented extra-tool factory receives only
 # ``(user_id, agent_id, session_id)``.  The app wires the already-created
@@ -612,6 +615,7 @@ artifact is not an artifact."""
         content_type: Optional[str] = None,
     ) -> ToolChunk:
         try:
+            artifact_bytes = None
             if _WORKSPACE_MANAGER is not None:
                 workspace = await _WORKSPACE_MANAGER.get_workspace(
                     self._workspace_user_id,
@@ -628,6 +632,17 @@ artifact is not an artifact."""
                 contents = await backend.read_file(candidate)
                 if not contents:
                     return _err("artifact path is empty in the AgentScope workspace", path=path)
+                if _ARTIFACT_DURABLE:
+                    raw = contents if isinstance(contents, bytes) else str(contents).encode("utf-8")
+                    if len(raw) > _ARTIFACT_MAX_BYTES:
+                        return _err(
+                            "artifact exceeds the configured durable upload limit",
+                            path=path,
+                            max_bytes=_ARTIFACT_MAX_BYTES,
+                        )
+                    artifact_bytes = base64.b64encode(raw).decode("ascii")
+                else:
+                    artifact_bytes = None
             data = await _call_hm_core(
                 "/internal/hivemind/artifacts",
                 user_id=self._user_id,
@@ -637,6 +652,10 @@ artifact is not an artifact."""
                     "title": title,
                     "content_type": content_type,
                     "agentscope_session_id": self._session_id,
+                    **({
+                        "bytes_base64": artifact_bytes,
+                        "require_durable": True,
+                    } if _ARTIFACT_DURABLE else {}),
                 },
             )
         except Exception as exc:  # noqa: BLE001

@@ -64,7 +64,7 @@
       "name": "hivemind-canonical-projection-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
+        "HIVEMIND_CORE_URL": "https://core.singulancelabs.com",
         "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
         "CANONICAL_KNOWLEDGE_ENABLED": "true",
         "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",

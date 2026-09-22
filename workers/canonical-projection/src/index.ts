@@ -95,7 +95,7 @@ async function core(env: RuntimeEnv, params: ProjectionParams, stage: CoreStageN
   return body as CoreResult;
 }
 
-async function linkedEntityIds(env: RuntimeEnv, params: ProjectionParams): Promise<string[]> {
+async function loadLinkedEntityIds(env: RuntimeEnv, params: ProjectionParams): Promise<string[]> {
   const pathname = `/internal/entity-profile-projection/v1/memories/${params.memory_id}/entities`;
   const signed = await signCoreRequest(env.CANONICAL_PROJECTION_HMAC_SECRET, pathname, params);
   const response = await fetch(`${env.HIVEMIND_CORE_URL.replace(/\/$/, '')}${pathname}`, { method: 'POST', headers: signed.headers, body: signed.body });
@@ -134,7 +134,7 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
       // signed, tenant-checked Core view a bounded number of times rather than
       // turning an entity-free memory into a failed canonical workflow.
       for (let attempt = 1; attempt <= 3 && settledEntityIds.length === 0; attempt += 1) {
-        settledEntityIds = await step.do(`read settled canonical entity links ${attempt}`, STANDARD_RETRY, () => linkedEntityIds(this.env, params));
+        settledEntityIds = await step.do(`read settled canonical entity links ${attempt}`, STANDARD_RETRY, () => loadLinkedEntityIds(this.env, params));
         if (settledEntityIds.length === 0 && attempt < 3) await step.sleep(`wait for canonical entity links ${attempt}`, '5 seconds');
       }
       const entityIds = [...new Set([

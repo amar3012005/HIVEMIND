@@ -1,6 +1,9 @@
 import { resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
 
-export const DAY0_LIFECYCLE_FLAG_KEY = 'day0_onboarding_v1';
+// One Flagship switch owns every deterministic stage before the company is
+// fully activated.  The dedicated edge endpoint remains stable so callers do
+// not need to know rollout-provider details.
+export const DAY0_LIFECYCLE_FLAG_KEY = 'pre_onboarding_lifecycle_v1';
 
 // Flagship is the sole Day-0 rollout authority. The edge evaluates the flag
 // against the authenticated org/user supplied by Core and fails closed.

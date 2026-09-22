@@ -4,7 +4,7 @@ import { DAY0_LIFECYCLE_FLAG_KEY, isDayZeroLifecycleEnabled } from '../../src/li
 
 const env = { HIVEMIND_PUBLIC_ORIGIN: 'https://dev.next.singulancelabs.com', HIVE_HARNESS_EDGE_EVAL_SECRET: 'test-secret' };
 
-test('accepts only the Day-0 Cloudflare Flagship receipt', async () => {
+test('accepts only the unified pre-onboarding Cloudflare Flagship receipt', async () => {
   let seen;
   const enabled = await isDayZeroLifecycleEnabled({
     orgId: 'org-1', userId: 'user-1', env,

@@ -24,7 +24,7 @@ this is a recovery path, not the primary admission path.
 The lifecycle is fail-closed behind two independent production gates:
 
 1. Control Plane requires `HIVEMIND_D1_WORKFLOW_ENABLED=true` exactly. Missing values and every other spelling are disabled.
-2. The Worker evaluates Cloudflare Flagship boolean `day1_first_move_v1` with `targetingKey` and `org_id` set to the organization UUID. Its fallback and default variation are `false`.
+2. The Worker evaluates Cloudflare Flagship boolean `pre_onboarding_lifecycle_v1` with `targetingKey` and `org_id` set to the organization UUID. This is the shared rollback boundary for invitation, sign-in, company-setup, Day 0, and Day 1 lifecycle stages. Its fallback and default variation are `false`.
 
 Keep the Flagship default off. Production activation must use an exact `org_id` canary rule; never change the default variation to on before canary acceptance. The Worker re-evaluates before instance creation, prepare, event delivery, and final delivery. The backend gate protects scheduling, reconciliation, prepare, event notification, and delivery if the edge configuration is wrong.
 

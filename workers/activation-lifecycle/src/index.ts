@@ -6,8 +6,15 @@ type EligibleResponse = { activations?: Params[] };
 type Env = { ACTIVATION_WORKFLOW: Workflow<Params>; ACTIVATION_ADMISSION: Queue<Params>; FLAGS: Flagship; HIVEMIND_CONTROL_URL: string; HIVEMIND_ACTIVATION_WORKFLOW_SECRET: string };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * One rollback boundary for every deterministic pre-onboarding stage.  The
+ * activation id is intentionally kept in the evaluation context so an exact
+ * recipient canary remains possible before the default is widened.
+ */
+const PRE_ONBOARDING_LIFECYCLE_FLAG = 'pre_onboarding_lifecycle_v1';
+
 function enabled(env: Env, activationId: string) {
-  return env.FLAGS.getBooleanDetails('activation_lifecycle_v1', false, { targetingKey: activationId, activation_id: activationId }).then((result) => result.value === true);
+  return env.FLAGS.getBooleanDetails(PRE_ONBOARDING_LIFECYCLE_FLAG, false, { targetingKey: activationId, activation_id: activationId }).then((result) => result.value === true);
 }
 function valid(value: unknown): value is Params {
   const input = value as Partial<Params> | null;

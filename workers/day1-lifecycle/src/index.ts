@@ -30,7 +30,11 @@ type Env = {
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DAY1_FLAG = 'day1_first_move_v1';
+// Day 1 is the terminal continuation of the same deterministic
+// pre-onboarding lifecycle.  It must share the exact rollback boundary with
+// invitation reminders and Day 0 rather than requiring a coordinated set of
+// independent Flagship changes.
+const DAY1_FLAG = 'pre_onboarding_lifecycle_v1';
 const DELIVERABLE_ROOM_STATUSES = new Set(['complete', 'blocked']);
 
 function instanceId(env: Env, hqRoomId: string): string {

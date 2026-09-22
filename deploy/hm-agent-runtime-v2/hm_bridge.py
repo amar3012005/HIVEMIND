@@ -201,6 +201,7 @@ class EventForwarder:
         base_url: str = HM_CORE_URL,
         event_path: str = HM_CORE_EVENT_PATH,
         on_confirmation: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
+        on_external_execution: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
         self._binding = binding
         self._master_key = master_key
@@ -211,6 +212,9 @@ class EventForwarder:
         self._forwarded = 0
         self._failed = 0
         self._on_confirmation = on_confirmation
+        self._on_external_execution = on_external_execution
+        self._external_keys: set[str] = set()
+        self._external_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def stats(self) -> dict[str, int]:
@@ -234,6 +238,9 @@ class EventForwarder:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        for task in list(self._external_tasks):
+            task.cancel()
+        self._external_tasks.clear()
 
     async def _run(self, stream_url: str, user_id: str) -> None:
         headers = {
@@ -286,6 +293,28 @@ class EventForwarder:
         if event.get("type") == "REQUIRE_USER_CONFIRM" and self._on_confirmation is not None:
             await self._on_confirmation(event)
             return
+
+        if event.get("type") == "REQUIRE_EXTERNAL_EXECUTION" and self._on_external_execution is not None:
+            # The stream replays after reconnect; execute one event once and
+            # resume it with one result event containing all pending calls.
+            calls = event.get("tool_calls") or []
+            key = f"{event.get('reply_id', '')}:{','.join(str(call.get('id', '')) for call in calls)}"
+            if key not in self._external_keys:
+                self._external_keys.add(key)
+                task = asyncio.create_task(
+                    self._on_external_execution(event),
+                    name=f"external-tool:{self._binding.workrun_id}:{event.get('reply_id', 'unknown')}",
+                )
+                self._external_tasks.add(task)
+                def _external_done(done: asyncio.Task[Any]) -> None:
+                    self._external_tasks.discard(done)
+                    try:
+                        done.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:  # noqa: BLE001 - keep the tailer alive
+                        _log.warning("external execution resume failed: %s", exc)
+                task.add_done_callback(_external_done)
 
         # Two sinks, deliberately:
         #

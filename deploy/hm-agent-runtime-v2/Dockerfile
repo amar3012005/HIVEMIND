@@ -43,6 +43,7 @@ COPY deploy/hm-agent-runtime-v2/model_capabilities.py /app/model_capabilities.py
 # The `extra_agent_tools` factory. app.py imports this at module load, so a
 # missing COPY is a hard ImportError at container start, not a degraded feature.
 COPY deploy/hm-agent-runtime-v2/extra_agent_tools.py /app/extra_agent_tools.py
+COPY deploy/hm-agent-runtime-v2/computer_executor.py /app/computer_executor.py
 
 # Compact, on-disk AgentScope skills.  They are discovered progressively by
 # the agent; they must be in the immutable image rather than hot-patched into

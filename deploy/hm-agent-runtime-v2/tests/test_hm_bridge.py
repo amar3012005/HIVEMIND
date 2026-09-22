@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -89,6 +90,30 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         await forwarder._forward(client, event)
         self.assertEqual(resumed, [event])
         self.assertEqual(client.posts, [])
+
+    async def test_external_execution_is_scheduled_once_across_replay(self):
+        resumed = []
+
+        async def resume(event):
+            resumed.append(event)
+
+        forwarder = EventForwarder(
+            binding=self.binding,
+            master_key="test-key",
+            base_url="http://hm-core.test",
+            on_external_execution=resume,
+        )
+        event = {
+            "type": "REQUIRE_EXTERNAL_EXECUTION",
+            "reply_id": "reply-1",
+            "tool_calls": [{"id": "call-1", "name": "computer_run_task"}],
+        }
+        client = _Client()
+        await forwarder._forward(client, event)
+        await forwarder._forward(client, event)
+        await asyncio.sleep(0)
+        self.assertEqual(resumed, [event])
+        self.assertEqual(len(client.posts), 2)
 
     async def test_artifact_tool_forwards_server_minted_session_identity(self):
         captured = {}

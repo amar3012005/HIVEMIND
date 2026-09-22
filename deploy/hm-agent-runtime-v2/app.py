@@ -35,6 +35,7 @@ Design rules applied here
 from __future__ import annotations
 
 import logging
+import json
 import os
 import sys
 
@@ -56,12 +57,15 @@ from agentscope.app.message_bus import RedisMessageBus
 from agentscope.app.storage import RedisStorage
 from agentscope.app.workspace_manager import IsolationPolicy, LocalWorkspaceManager
 from agentscope.permission import PermissionContext, PermissionMode
+from agentscope.event import ExternalExecutionResultEvent
+from agentscope.message import TextBlock, ToolResultBlock, ToolResultState
 
 # Cloudflare AI Gateway: same gateway hm-core uses, OpenRouter BYOK route.
 # See cloudflare_gateway.py for the verified request shape.
 import cloudflare_gateway as gateway
 import hm_auth
 import hm_bridge
+from computer_executor import ComputerExecutorError, ComputerPoolExecutor
 import extra_agent_tools
 import agent_middlewares
 from gateway_credential import CloudflareGatewayOpenAICredential
@@ -107,6 +111,9 @@ MessageBusKeys.SESSION_RUN_TTL_SECS = SESSION_RUN_TTL_SECS
 
 def _log(msg: str) -> None:
     print(f"[hm-agent-runtime-v2] {msg}", flush=True)
+
+
+_computer_executor = ComputerPoolExecutor()
 
 
 # AgentScope logs through the stdlib `logging` module, and its own logger is not
@@ -892,6 +899,66 @@ async def _resume_workrun_confirmation(
     )
 
 
+async def _resume_workrun_external(
+    *, user_id: str, org_id: str | None, agent_id: str, session_id: str, event: dict,
+) -> None:
+    """Execute a parked external tool and resume its original reply."""
+    from agentscope.app._router._chat import chat as _chat
+    from agentscope.app._router._schema._chat import ChatRequest
+
+    results = []
+    for call in event.get("tool_calls") or []:
+        call_id = str(call.get("id") or call.get("tool_call_id") or "")
+        name = str(call.get("name") or "")
+        raw_input = call.get("input") or {}
+        try:
+            if name != "computer_run_task":
+                raise ComputerExecutorError(f"unsupported external tool: {name}")
+            if isinstance(raw_input, str):
+                raw_input = json.loads(raw_input)
+            run = await _computer_executor.run(
+                user_id=user_id,
+                org_id=org_id,
+                agent_run_id=session_id,
+                objective=str(raw_input.get("objective") or ""),
+                allowed_domains=list(raw_input.get("allowed_domains") or []),
+                capabilities=list(raw_input.get("capabilities") or []),
+                max_steps=int(raw_input.get("max_steps", 30)),
+                timeout_seconds=int(raw_input.get("timeout_seconds", 180)),
+            )
+            payload = {
+                "status": run.get("status"),
+                "computer_run_id": run.get("computer_run_id"),
+                "result": run.get("result"),
+                "evidence": run.get("evidence") or [],
+            }
+            state = ToolResultState.SUCCESS if run.get("status") == "completed" else ToolResultState.ERROR
+        except Exception as exc:  # noqa: BLE001 - resume with structured failure
+            payload = {"status": "failed_closed", "error": str(exc)}
+            state = ToolResultState.ERROR
+        results.append(ToolResultBlock(
+            id=call_id,
+            name=name,
+            output=[TextBlock(type="text", text=json.dumps(payload, ensure_ascii=False, default=str))],
+            state=state,
+        ))
+
+    reply_id = event.get("reply_id")
+    if not reply_id or not results:
+        return
+    await _chat(
+        request=ChatRequest(
+            agent_id=agent_id,
+            session_id=session_id,
+            input=ExternalExecutionResultEvent(reply_id=reply_id, execution_results=results),
+        ),
+        user_id=user_id,
+        chat_service=app.state.chat_service,
+        chat_run_registry=app.state.chat_run_registry,
+        message_bus=app.state.message_bus,
+    )
+
+
 async def _ensure_gateway_chat_model_config(user_id: str) -> dict:
     """Bind every WorkRun session to the configured DeepSeek model.
 
@@ -1155,6 +1222,13 @@ async def create_workrun_session(
             master_key=hm_auth._master_key(),
             on_confirmation=lambda event: _resume_workrun_confirmation(
                 user_id=user_id,
+                agent_id=resolved_agent_id,
+                session_id=session_id,
+                event=event,
+            ),
+            on_external_execution=lambda event: _resume_workrun_external(
+                user_id=user_id,
+                org_id=body.get("org_id"),
                 agent_id=resolved_agent_id,
                 session_id=session_id,
                 event=event,

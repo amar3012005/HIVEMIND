@@ -296,6 +296,46 @@ class _HiveMindToolBase(ToolBase):
         )
 
 
+class ComputerRunTask(_HiveMindToolBase):
+    """Delegate one bounded browser/desktop objective to the E2B operator.
+
+    This is an AgentScope external tool. It intentionally has no ``call``
+    implementation: AgentScope emits REQUIRE_EXTERNAL_EXECUTION and the
+    runtime bridge submits the job to the computer pool.
+    """
+
+    name: str = "computer_run_task"
+    description: str = (
+        "Delegate a bounded browser or desktop objective to the HIVE-MIND "
+        "Computer Operator. Use direct HIVE or connected-app tools first. "
+        "Declare allowed domains and capabilities explicitly."
+    )
+    is_external_tool: bool = True
+    is_read_only: bool = False
+    is_concurrency_safe: bool = False
+
+    class Params(BaseModel):
+        objective: str = Field(description="One bounded browser or desktop objective.")
+        allowed_domains: list[str] = Field(description="Host names the operator may visit.")
+        capabilities: list[str] = Field(
+            description="Declared effects, for example navigate and read.",
+        )
+        max_steps: int = Field(default=30, ge=1, le=50)
+        timeout_seconds: int = Field(default=180, ge=1, le=900)
+
+    input_schema: dict = Params.model_json_schema()
+    metadata_schema: dict = {
+        "type": "object",
+        "properties": {
+            "computer_run_id": {"type": "string"},
+            "status": {"type": "string"},
+            "result": {"type": "object"},
+            "evidence": {"type": "array"},
+        },
+        "required": ["computer_run_id", "status"],
+    }
+
+
 class RecallTool(_HiveMindToolBase):
     """Search HIVE-MIND memory for facts relevant to the current task."""
 
@@ -822,6 +862,7 @@ something would work."""
 # tool here is one the prospect-research acceptance test actually needs. Adding
 # a capability is adding a class above and a line here.
 _TOOL_CLASSES = (
+    ComputerRunTask,
     CompanyContextTool,
     PeopleTool,
     ProjectsTool,

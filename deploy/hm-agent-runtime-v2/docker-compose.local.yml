@@ -121,6 +121,13 @@ services:
       AGENTSCOPE_SANDBOX_IMAGE: ${AGENTSCOPE_SANDBOX_IMAGE:-python:3.12-slim}
       AGENTSCOPE_SANDBOX_NODE_VERSION: ${AGENTSCOPE_SANDBOX_NODE_VERSION:-20}
       E2B_API_KEY: ${E2B_API_KEY:-}
+      # Optional local Computer Operator bridge. The pool server runs on the
+      # host during the canary; absence of either value keeps the tool
+      # fail-closed and does not affect ordinary AgentScope turns.
+      HIVEMIND_COMPUTER_POOL_URL: ${HIVEMIND_COMPUTER_POOL_URL:-http://host.docker.internal:8789}
+      HIVEMIND_COMPUTER_POOL_CONTROL_TOKEN: ${HIVEMIND_COMPUTER_POOL_CONTROL_TOKEN:-}
+      HIVEMIND_COMPUTER_POOL_POLL_SECS: ${HIVEMIND_COMPUTER_POOL_POLL_SECS:-1}
+      HIVEMIND_COMPUTER_POOL_MAX_WAIT_SECS: ${HIVEMIND_COMPUTER_POOL_MAX_WAIT_SECS:-900}
       # --- Cloudflare AI Gateway (same gateway as hm-core) ---
       CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
       CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}

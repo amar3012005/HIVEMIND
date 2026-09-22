@@ -25,7 +25,11 @@ def validate_company_task(events: list[dict]) -> dict:
     if not answer:
         errors.append("stream must contain an answer")
 
-    company_markers = {"HIVEMIND_COMPANY_CONTEXT", "PLAYBOOKLIST", "PLAYBOOKGET", "TASKCREATE", "SKILLVIEWER"}
+    # AgentScope's SkillViewer class is exposed by the 2.0.8 toolkit under its
+    # native registered name ``Skill``. Accept the conceptual name as well so
+    # synthetic contract fixtures remain readable without masking the runtime
+    # event identity.
+    company_markers = {"HIVEMIND_COMPANY_CONTEXT", "PLAYBOOKLIST", "PLAYBOOKGET", "TASKCREATE", "SKILL", "SKILLVIEWER"}
     company_work = bool(company_markers.intersection({tool.upper() for tool in tools}))
     if company_work:
         positions = {marker: next((i for i, tool in enumerate(tools) if tool.upper() == marker), None) for marker in company_markers}
@@ -37,8 +41,15 @@ def validate_company_task(events: list[dict]) -> dict:
             errors.append("PlaybookList must precede PlaybookGet")
         if positions["TASKCREATE"] is None:
             errors.append("company work must create a native task plan")
-        if positions["SKILLVIEWER"] is None:
+        skill_position = next(
+            (position for marker, position in positions.items() if marker in {"SKILL", "SKILLVIEWER"} and position is not None),
+            None,
+        )
+        if skill_position is None:
             errors.append("company work must load the selected Skill on demand")
-        if answer and any(position is not None and position > answer[0] for position in positions.values()):
+        if answer and any(
+            position is not None and marker not in {"SKILL", "SKILLVIEWER"} and position > answer[0]
+            for marker, position in positions.items()
+        ):
             errors.append("company-task layers must precede the answer")
     return {"ok": not errors, "errors": errors, "company_work": company_work}

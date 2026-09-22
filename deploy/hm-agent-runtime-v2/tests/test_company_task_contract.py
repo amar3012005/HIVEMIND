@@ -27,6 +27,19 @@ class CompanyTaskContractTests(unittest.TestCase):
         self.assertTrue(verdict["ok"], verdict)
         self.assertTrue(verdict["company_work"])
 
+    def test_company_work_accepts_agentscope_native_skill_registration_name(self):
+        verdict = validate_company_task([
+            {"type": "REPLY_START"},
+            {"type": "TOOL_CALL_START", "tool_call_name": "hivemind_company_context"},
+            {"type": "TOOL_CALL_START", "tool_call_name": "PlaybookList"},
+            {"type": "TOOL_CALL_START", "tool_call_name": "PlaybookGet"},
+            {"type": "TOOL_CALL_START", "tool_call_name": "TaskCreate"},
+            {"type": "TOOL_CALL_START", "tool_call_name": "Skill"},
+            {"type": "TEXT_BLOCK_DELTA", "delta": "Completed with evidence."},
+            {"type": "REPLY_END", "finished_reason": "completed"},
+        ])
+        self.assertTrue(verdict["ok"], verdict)
+
     def test_company_answer_before_playbook_is_rejected(self):
         verdict = validate_company_task([
             {"type": "REPLY_START"},

@@ -6711,6 +6711,30 @@ exit \$RC
 
   // HMAC-authenticated Cloudflare workflow callbacks live outside user API auth.
   if (pathname.startsWith('/internal/canonical-projection/')) {
+    // Repair is intentionally separate from staged Workflows: it reconstructs
+    // an already-authorized memory after an extractor upgrade. Route it here,
+    // before the generic stage dispatcher, so the outer auth boundary cannot
+    // turn a valid signed repair into a misleading 404.
+    if (pathname === '/internal/canonical-projection/repair' && req.method === 'POST') {
+      let rawBody;
+      try { rawBody = (await readBoundedBuffer(req, 64 * 1024)).toString('utf8'); } catch { return jsonResponse(res, { error: 'invalid_body' }, 400); }
+      const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+      if (!verified.ok) return jsonResponse(res, { error: 'invalid_projection_signature', reason: verified.reason }, 401);
+      let repair; try { repair = JSON.parse(rawBody); } catch { return jsonResponse(res, { error: 'invalid_json' }, 400); }
+      if (!repair?.memory_id || !repair?.org_id) return jsonResponse(res, { error: 'memory_id and org_id required' }, 400);
+      try {
+        const memory = await persistentMemoryStore.getMemory(repair.memory_id);
+        if (!memory || (memory.org_id || memory.orgId) !== repair.org_id) return jsonResponse(res, { error: 'Not found' }, 404);
+        const mode = canonicalKnowledgeMode({ evaluatedMode: repair.mode || 'write' });
+        const projection = await projectCanonicalKnowledge({ prisma, mode, input: canonicalProjectionInput({
+          memoryId: repair.memory_id, orgId: repair.org_id, payload: memory,
+          requestBody: { entities: repair.entities || [], claims: repair.claims || [], timezone: repair.timezone },
+        }) });
+        return jsonResponse(res, { ok: true, workflow_id: `claim-${repair.memory_id}-v${repair.processing_version || 1}`, projection });
+      } catch (error) {
+        return jsonResponse(res, { ok: false, error: error.message }, 503);
+      }
+    }
     if (await handleCanonicalProjectionStageCallback({ req, res, pathname })) return;
     return jsonResponse(res, { error: 'not_found' }, 404);
   }

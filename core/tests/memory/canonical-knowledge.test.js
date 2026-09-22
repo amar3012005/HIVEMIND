@@ -87,6 +87,13 @@ test('projection status exposes operational attempt metadata without an artifact
   assert.doesNotMatch(route, /memory\.content|claims:|vectors:/);
 });
 
+test('signed canonical repair is routed before the generic internal stage dispatcher', () => {
+  const server = fs.readFileSync(new URL('../../src/server.js', import.meta.url), 'utf8');
+  const internal = server.slice(server.indexOf('// HMAC-authenticated Cloudflare workflow callbacks'), server.indexOf("if (pathname.match(/^\\/internal\\/entity-profile-projection"));
+  assert.match(internal, /pathname === '\/internal\/canonical-projection\/repair'/);
+  assert.ok(internal.indexOf("pathname === '/internal/canonical-projection/repair'") < internal.indexOf('handleCanonicalProjectionStageCallback'));
+});
+
 test('only a deterministic Worker admission rejection is marked safe for Core fallback', async () => {
   const prior = { enabled: process.env.CANONICAL_KNOWLEDGE_ENABLED, url: process.env.CANONICAL_PROJECTION_WORKFLOW_URL, secret: process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET };
   process.env.CANONICAL_KNOWLEDGE_ENABLED = 'true'; process.env.CANONICAL_PROJECTION_WORKFLOW_URL = 'https://projection.test'; process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = 'secret';

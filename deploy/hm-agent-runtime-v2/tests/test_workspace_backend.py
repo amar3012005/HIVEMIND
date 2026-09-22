@@ -94,6 +94,15 @@ class WorkspaceBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "escapes the workspace base directory"):
             manager._workdir_for("../outside")
 
+    def test_workspace_ids_are_safe_for_docker_container_names(self):
+        backend = self._load_backend(AGENTSCOPE_WORKSPACE_BACKEND="docker")
+        self.assertEqual(
+            backend.sanitize_workspace_id("workrun:1234/abcd"),
+            "workrun-1234-abcd",
+        )
+        self.assertEqual(backend.sanitize_workspace_id("already-safe_1.2"), "already-safe_1.2")
+        self.assertEqual(backend.sanitize_workspace_id("///"), "workspace")
+
 
 if __name__ == "__main__":
     unittest.main()

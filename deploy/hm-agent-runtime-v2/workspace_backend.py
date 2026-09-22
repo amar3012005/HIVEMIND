@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 _log = logging.getLogger("hm-agent-runtime.workspace")
@@ -87,6 +88,21 @@ SKILLS_DIR = os.getenv(
     "AGENTSCOPE_SKILLS_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills"),
 )
+
+
+def sanitize_workspace_id(value: str) -> str:
+    """Return a stable workspace id accepted by every AgentScope backend.
+
+    Docker-backed workspaces use the id in a container name, whose grammar
+    excludes separators such as ``:`` and ``/``.  Keep ordinary ids unchanged,
+    replace unsupported runs with ``-``, and provide a deterministic fallback
+    for empty or punctuation-only values.
+    """
+    raw = str(value or "").strip()
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-")
+    if not safe:
+        safe = "workspace"
+    return safe[:128]
 
 
 def _skill_paths() -> list[str]:

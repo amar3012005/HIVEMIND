@@ -995,13 +995,21 @@ async def create_workrun_session(
     # `per_session` isolation would mint a random UUID, which is correct but
     # anonymous: an operator looking at a sandbox cannot tell which run it
     # belongs to, and a later WorkRun cannot deliberately reuse or deliberately
-    # avoid it. Naming it `workrun:<uuid>` makes the isolation boundary legible
-    # and makes the id stable across a retry of the same run.
+    # avoid it. Naming it `workrun-<uuid>` makes the isolation boundary legible
+    # and makes the id stable across a retry of the same run. The hyphen is
+    # intentional: Docker container names reject the colon in ``workrun:<uuid>``.
     #
     # An explicit id from the caller wins — hm-core may have already bound a
     # workspace to this run and be asking the runtime to reuse it.
     if session_body.get("workspace_id") is None:
-        session_body["workspace_id"] = f"workrun:{workrun_id}"
+        session_body["workspace_id"] = f"workrun-{workrun_id}"
+
+    # Callers may have persisted an older id or supplied a provider-style id
+    # containing ``:`` or ``/``. Normalize at the AgentScope boundary so every
+    # configured workspace backend receives a valid, deterministic identifier.
+    session_body["workspace_id"] = workspace_backend.sanitize_workspace_id(
+        session_body["workspace_id"],
+    )
 
     # Reuse AgentScope's own create_session route handler rather than
     # reimplementing it: that keeps every invariant (agent visibility check,

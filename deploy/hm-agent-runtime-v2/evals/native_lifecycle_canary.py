@@ -64,7 +64,12 @@ async def _prove_schedule(storage: RedisStorage, bus: RedisMessageBus) -> None:
     sessions = await storage.list_sessions_by_schedule(user_id, schedule_id)
     assert len(sessions) == 1, sessions
     inbox = await bus.queue_drain(MessageBusKeys.inbox(sessions[0].id))
-    wakeups = await bus.queue_drain(MessageBusKeys.wakeup_queue())
+    wakeups = []
+    for _ in range(20):
+        wakeups = await bus.queue_drain(MessageBusKeys.wakeup_queue())
+        if wakeups:
+            break
+        await asyncio.sleep(0.02)
     assert len(inbox) == 1 and "scheduled-task" in inbox[0][1]["hint"], inbox
     assert len(wakeups) == 1 and wakeups[0][1]["session_id"] == sessions[0].id, wakeups
     print("scheduler-durable-canary-ok", sessions[0].id, "inbox=1", "wakeups=1")

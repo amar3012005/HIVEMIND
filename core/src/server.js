@@ -6106,21 +6106,19 @@ exit \$RC
     // (/hivemind/login). That page handles Google SSO + email/password +
     // Zitadel under one HIVEMIND-branded UI, the same flow CLI and the
     // browser extension use. After login the dashboard sets hm_cp_session
-    // on hivemind.davinciai.eu and redirects back to /oauth/authorize,
+    // for the SINGULANCE domain and redirects back to /oauth/authorize,
     // where resolveOAuthSession() recognises the cookie automatically.
     //
-    // returnTo MUST use the public dashboard origin (hivemind.davinciai.eu)
-    // not the upstream core origin. Vercel rewrites /oauth/authorize back
-    // to core, and the dashboard cookie hm_cp_session is scoped to that
-    // host — so the OAuth flow stays end-to-end on one domain.
+    // The login page is served by the public SINGULANCE frontend. The return
+    // destination is the authoritative core OAuth endpoint; returning to a
+    // frontend SPA route would bypass the authorization-code issuer.
     const dashboardFeBase = process.env.HIVEMIND_FRONTEND_BASE_URL
       || process.env.HIVEMIND_DASHBOARD_URL
-      || 'https://hivemind.davinciai.eu';
-    // Strip any upstream-side prefix and force the canonical /oauth/authorize
-    // path on the dashboard origin. req.url already carries the full query
-    // string (response_type, client_id, etc.).
+      || 'https://next.singulancelabs.com';
+    // req.url already carries the full OAuth request. Keep it on the Core
+    // issuer after dashboard sign-in so the code is minted by this service.
     const reqUrlPath = req.url.startsWith('/') ? req.url : `/${req.url}`;
-    const returnTo = `${dashboardFeBase}${reqUrlPath}`;
+    const returnTo = `${OAUTH_BASE_URL}${reqUrlPath}`;
     const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
 
     const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;

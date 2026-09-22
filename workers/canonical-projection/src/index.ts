@@ -1,14 +1,17 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { evaluateEntityDiscoveryCanary, evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from './flags';
+import { evaluateEntityDiscoveryCanary, evaluateEntityProfileMode, evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from './flags';
 import { signCoreRequest } from './security';
 import {
   type ProjectionParams,
+  type EntityProfileParams,
   type CoreStageName,
   coreStagePath,
   validParams,
+  validEntityProfileParams,
   validUuid,
   workflowInstanceId,
+  entityProfileWorkflowInstanceId,
 } from './contract';
 import { admitQueuedProjection } from './queue-admission';
 
@@ -109,6 +112,16 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
       const persisted: CoreResult = await step.do('persist canonical projection', STANDARD_RETRY, () => core(this.env, params, 'persist'));
       await step.do('reconcile projection receipts', { ...STANDARD_RETRY, retries: { limit: 8, delay: '30 seconds', backoff: 'exponential' } }, () => core(this.env, params, 'reconcile'));
       const completed: CoreResult = await step.do('mark projection complete', STANDARD_RETRY, () => core(this.env, params, 'complete'));
+      const claims = (persisted as any)?.receipt?.projection?.claims || (persisted as any)?.projection?.claims || [];
+      const entityIds = [...new Set(claims.flatMap((claim: any) => [claim?.subjectEntityId, claim?.objectEntityId]).filter((id: unknown) => typeof id === 'string'))];
+      const profileMode = await evaluateEntityProfileMode(this.env, params.org_id, '');
+      if (profileMode !== 'off') {
+        await step.do('queue entity profile projections', STANDARD_RETRY, async () => {
+          for (const entityId of entityIds) {
+            await this.env.ENTITY_PROFILE_QUEUE.send({ entity_id: entityId, org_id: params.org_id, source_watermark: `memory-${params.memory_id}-v${params.processing_version}`, required_projection: profileMode }, { contentType: 'json' });
+          }
+        });
+      }
       console.log(JSON.stringify({ event: 'canonical_projection_completed', instance_id: event.instanceId, ...params, receipt_id: completed.receipt_id || persisted.receipt_id }));
       return { ok: true, instance_id: event.instanceId, receipt_id: completed.receipt_id || persisted.receipt_id, reused: completed.reused || persisted.reused };
     } catch (error) {
@@ -120,6 +133,26 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
   }
 }
 
+export class EntityProfileWorkflow extends WorkflowEntrypoint<RuntimeEnv, EntityProfileParams> {
+  async run(event: WorkflowEvent<EntityProfileParams>, step: WorkflowStep) {
+    if (!validEntityProfileParams(event.payload)) throw new NonRetryableError('invalid_entity_profile_payload');
+    const params = event.payload;
+    const pathname = `/internal/entity-profile-projection/v1/entities/${params.entity_id}/project`;
+    const execute = async () => {
+      const signed = await signCoreRequest(this.env.CANONICAL_PROJECTION_HMAC_SECRET, pathname, params);
+      const response = await fetch(`${this.env.HIVEMIND_CORE_URL.replace(/\/$/, '')}${pathname}`, { method: 'POST', headers: signed.headers, body: signed.body });
+      if (!response.ok) {
+        const body: any = await response.json().catch(() => ({}));
+        const message = String(body?.error || `core_http_${response.status}`);
+        if ([400, 401, 403, 404, 409, 422].includes(response.status)) throw new NonRetryableError(message);
+        throw new Error(message);
+      }
+      return response.json();
+    };
+    return step.do('project evidence-backed entity dossier', STANDARD_RETRY, execute);
+  }
+}
+
 export default {
   async fetch(request: Request, env: RuntimeEnv): Promise<Response> {
     if (!await authorized(request, env)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -128,6 +161,24 @@ export default {
       const orgId = url.searchParams.get('org_id') || '';
       const userId = url.searchParams.get('user_id') || '';
       return Response.json({ mode: await evaluateProjectionMode(env, orgId, userId), org_id: orgId, user_id: userId });
+    }
+    if (url.pathname === '/entity-profile-enabled' && request.method === 'GET') {
+      const orgId = url.searchParams.get('org_id') || '';
+      const userId = url.searchParams.get('user_id') || '';
+      return Response.json({ mode: await evaluateEntityProfileMode(env, orgId, userId), org_id: orgId, user_id: userId });
+    }
+    if (url.pathname === '/entity-profile-start' && request.method === 'POST') {
+      let input: unknown;
+      try { input = await boundedJson(request); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      const admission = input as Record<string, unknown>;
+      const orgId = String(admission?.org_id || '');
+      const userId = request.headers.get('x-hivemind-user-id') || '';
+      const mode = await evaluateEntityProfileMode(env, orgId, userId);
+      const params = { entity_id: admission?.entity_id, org_id: orgId, source_watermark: admission?.source_watermark, required_projection: mode };
+      if (mode === 'off') return Response.json({ error: 'feature_disabled' }, { status: 403 });
+      if (!validEntityProfileParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
+      await env.ENTITY_PROFILE_QUEUE.send(params, { contentType: 'json' });
+      return Response.json({ ok: true, queued: true, instance_id: entityProfileWorkflowInstanceId(params) }, { status: 202 });
     }
     if (url.pathname === '/recall-enabled' && request.method === 'GET') {
       const orgId = url.searchParams.get('org_id') || '';
@@ -179,8 +230,14 @@ export default {
     return Response.json({ error: 'Not found' }, { status: 404 });
   },
 
-  async queue(batch: MessageBatch<ProjectionParams>, env: RuntimeEnv): Promise<void> {
+  async queue(batch: MessageBatch<ProjectionParams | EntityProfileParams>, env: RuntimeEnv): Promise<void> {
     for (const message of batch.messages) {
+      if (validEntityProfileParams(message.body)) {
+        try { await env.ENTITY_PROFILE_WORKFLOW.create({ id: entityProfileWorkflowInstanceId(message.body), params: message.body }); }
+        catch { message.retry(); continue; }
+        message.ack();
+        continue;
+      }
       if (!validParams(message.body)) { message.ack(); continue; }
       try {
         await admitQueuedProjection(env.PROJECTION_WORKFLOW, message.body);
@@ -191,4 +248,4 @@ export default {
       message.ack();
     }
   },
-} satisfies ExportedHandler<RuntimeEnv, ProjectionParams>;
+} satisfies ExportedHandler<RuntimeEnv, ProjectionParams | EntityProfileParams>;

@@ -14,7 +14,9 @@
     "RECALL_PARALLEL_RELIABILITY_ENABLED": "false",
     "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
     "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
-    "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1"
+    "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1",
+    "ENTITY_PROFILE_PROJECTION_FLAG": "entity_profile_projection_v1",
+    "ENTITY_PROFILE_PROJECTION_ENABLED": "false"
   },
   "flagship": [{
     "binding": "FLAGS",
@@ -22,7 +24,7 @@
     "remote": true
   }],
   "queues": {
-    "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-local" }],
+    "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-local" }, { "binding": "ENTITY_PROFILE_QUEUE", "queue": "hivemind-entity-profile-projection-local" }],
     "consumers": [{
       "queue": "hivemind-canonical-projection-local",
       "max_batch_size": 10,
@@ -31,13 +33,13 @@
       "dead_letter_queue": "hivemind-canonical-projection-dlq-local",
       "max_concurrency": 5,
       "retry_delay": 30
-    }]
+    }, { "queue": "hivemind-entity-profile-projection-local", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-entity-profile-projection-dlq-local", "max_concurrency": 5, "retry_delay": 30 }]
   },
   "workflows": [{
     "name": "hivemind-canonical-projection-workflow-local",
     "binding": "PROJECTION_WORKFLOW",
     "class_name": "CanonicalProjectionWorkflow"
-  }],
+  }, { "name": "hivemind-entity-profile-projection-workflow-local", "binding": "ENTITY_PROFILE_WORKFLOW", "class_name": "EntityProfileWorkflow" }],
   "env": {
     "local": {
       "name": "hivemind-canonical-projection-local",
@@ -50,14 +52,14 @@
         "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
         "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
         "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
-        "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1"
+        "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1", "ENTITY_PROFILE_PROJECTION_FLAG": "entity_profile_projection_v1", "ENTITY_PROFILE_PROJECTION_ENABLED": "false"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {
-        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-local" }],
-        "consumers": [{ "queue": "hivemind-canonical-projection-local", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-local", "max_concurrency": 5, "retry_delay": 30 }]
+        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-local" }, { "binding": "ENTITY_PROFILE_QUEUE", "queue": "hivemind-entity-profile-projection-local" }],
+        "consumers": [{ "queue": "hivemind-canonical-projection-local", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-local", "max_concurrency": 5, "retry_delay": 30 }, { "queue": "hivemind-entity-profile-projection-local", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-entity-profile-projection-dlq-local", "max_concurrency": 5, "retry_delay": 30 }]
       },
-      "workflows": [{ "name": "hivemind-canonical-projection-workflow-local", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }]
+      "workflows": [{ "name": "hivemind-canonical-projection-workflow-local", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }, { "name": "hivemind-entity-profile-projection-workflow-local", "binding": "ENTITY_PROFILE_WORKFLOW", "class_name": "EntityProfileWorkflow" }]
     },
     "production": {
       "name": "hivemind-canonical-projection-production",
@@ -70,14 +72,14 @@
         "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
         "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1",
         "HYPER_GOVERNED_ROOM_FLAG": "hyperagents_governed_room_v1",
-        "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1"
+        "ENTITY_DISCOVERY_FLAG": "entity_discovery_v1", "ENTITY_PROFILE_PROJECTION_FLAG": "entity_profile_projection_v1", "ENTITY_PROFILE_PROJECTION_ENABLED": "true"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {
-        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-production" }],
-        "consumers": [{ "queue": "hivemind-canonical-projection-production", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-production", "max_concurrency": 5, "retry_delay": 30 }]
+        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-production" }, { "binding": "ENTITY_PROFILE_QUEUE", "queue": "hivemind-entity-profile-projection-production" }],
+        "consumers": [{ "queue": "hivemind-canonical-projection-production", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-production", "max_concurrency": 5, "retry_delay": 30 }, { "queue": "hivemind-entity-profile-projection-production", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-entity-profile-projection-dlq-production", "max_concurrency": 5, "retry_delay": 30 }]
       },
-      "workflows": [{ "name": "hivemind-canonical-projection-workflow-production", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }]
+      "workflows": [{ "name": "hivemind-canonical-projection-workflow-production", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }, { "name": "hivemind-entity-profile-projection-workflow-production", "binding": "ENTITY_PROFILE_WORKFLOW", "class_name": "EntityProfileWorkflow" }]
     }
   }
 }

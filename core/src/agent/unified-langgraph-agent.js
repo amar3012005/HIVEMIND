@@ -48,6 +48,11 @@ const State = Annotation.Root({
   schemas: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
   sessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
   workflowSessionId: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  // A Tool Router session is valid only for the authenticated subject and the
+  // capability set it was created with. Keep that set in the graph checkpoint
+  // so a later provider choice cannot accidentally resume an incompatible
+  // session (for example, Outlook followed by Gmail).
+  sessionToolkits: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   connectionScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
   requestedToolkits: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   cycles: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
@@ -466,14 +471,27 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
       error: 'connected_search_toolkits_required',
       data: { instruction: 'Repeat search with the relevant app/toolkit names inferred from the user request.' },
     };
+    const boundToolkits = new Set((state.sessionToolkits || []).map(toolkit => String(toolkit).toLowerCase()));
+    // Checkpoint data created before this field existed deliberately does not
+    // reuse its session. Creating one fresh session is safe; crossing an
+    // unknown provider/session boundary is not.
+    const sessionCompatible = Boolean(state.sessionId)
+      && toolkits.length > 0
+      && toolkits.every(toolkit => boundToolkits.has(String(toolkit).toLowerCase()));
+    const reusableWorkflowSessionId = sessionCompatible ? state.workflowSessionId : null;
     const discovery = await composio.discoverSessionTools(ctx.orgId, {
       userId: ctx.userId, connectionScope, toolkits, useCases,
-      allowDisconnected: true, sessionId: state.sessionId || null, includeCustomToolkit: false,
+      allowDisconnected: true, sessionId: sessionCompatible ? state.sessionId : null, includeCustomToolkit: false,
       manageConnections: false, hydrateSchemas: false, candidateLimit: 12,
       callbackUrl: ctx.composioCallbackOrigin,
       searchPayload: {
         queries,
-        session: args.session || (state.workflowSessionId ? { id: state.workflowSessionId } : { generate_id: true }),
+        // A model-provided workflow session is also provider-scoped. Do not
+        // let a stale tool-call argument reintroduce a session after the
+        // graph has intentionally switched capability sets.
+        session: sessionCompatible
+          ? (args.session || (reusableWorkflowSessionId ? { id: reusableWorkflowSessionId } : { generate_id: true }))
+          : { generate_id: true },
         search_strategy: args.search_strategy || 'auto',
       },
     });
@@ -535,8 +553,9 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
       state: {
         primarySlugs,
         selectedSlugs,
-        sessionId: discovery.sessionId || state.sessionId,
-        workflowSessionId: workflowId(discovery) || state.workflowSessionId,
+        sessionId: discovery.sessionId || (sessionCompatible ? state.sessionId : null),
+        workflowSessionId: workflowId(discovery) || reusableWorkflowSessionId,
+        sessionToolkits: toolkits,
         connectionScope,
       },
       disconnected: disconnectedToolkits(discovery.toolkitConnectionStatuses || compact.toolkit_connection_statuses),
@@ -758,6 +777,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         status, steps: patch.steps || state.steps || [], composioSessionId: patch.sessionId || state.sessionId || null,
         scratch: { runtime: UNIFIED_META_HARNESS_VERSION, graph_thread_id: ctx.unifiedGraphThreadId, use_tools: useTools === true,
           workflow_session_id: patch.workflowSessionId || state.workflowSessionId || null, selected_tool_slugs: patch.selectedSlugs || state.selectedSlugs || [],
+          session_toolkits: patch.sessionToolkits || state.sessionToolkits || [],
           plan: (patch.plan || state.plan) ? {
             intent: (patch.plan || state.plan).intent,
             source: (patch.plan || state.plan).source,
@@ -808,6 +828,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       schemas: {},
       sessionId: null,
       workflowSessionId: null,
+      sessionToolkits: [],
       connectionScope: null,
       requestedToolkits: [],
       cycles: 0,

@@ -686,6 +686,48 @@ test('connected capability concepts are resolved to valid authenticated toolkit 
   assert.deepEqual(discovered, ['gmail']);
 });
 
+test('switching connected providers never reuses the prior provider session or workflow session', async () => {
+  const prisma = fakePrisma();
+  const discoveries = [];
+  let turn = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'Check the relevant connected records', useTools: true, prisma,
+    ctx: ctx(prisma, 'provider-session-switch'), checkpointer: new MemorySaver(),
+    modelStep: async () => {
+      turn += 1;
+      if (turn === 1) return { message: call('hivemind_connected_task', {
+        action: 'search', toolkits: ['outlook'], session: { id: 'model-outlook-workflow' },
+        queries: [{ use_case: 'Check the relevant Outlook messages' }],
+      }, 'provider-1') };
+      if (turn === 2) return { message: call('hivemind_connected_task', {
+        action: 'search', toolkits: ['gmail'], session: { id: 'stale-outlook-workflow' },
+        queries: [{ use_case: 'Check the relevant Gmail messages' }],
+      }, 'provider-2') };
+      return { message: { role: 'assistant', content: 'Provider discovery completed.' } };
+    },
+    composio: {
+      async listConnectedAccounts() {
+        return [{ toolkit: 'outlook', status: 'ACTIVE' }, { toolkit: 'gmail', status: 'ACTIVE' }];
+      },
+      async discoverSessionTools(_org, input) {
+        discoveries.push({ toolkits: input.toolkits, sessionId: input.sessionId, workflow: input.searchPayload.session });
+        const toolkit = input.toolkits[0];
+        return {
+          sessionId: toolkit === 'outlook' ? 'outlook-session' : 'gmail-session',
+          workflowSessionId: toolkit === 'outlook' ? 'outlook-workflow' : 'gmail-workflow',
+          primaryToolSlugs: [], relatedToolSlugs: [],
+          toolkitConnectionStatuses: { [toolkit]: 'connected' },
+        };
+      },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(discoveries, [
+    { toolkits: ['outlook'], sessionId: null, workflow: { generate_id: true } },
+    { toolkits: ['gmail'], sessionId: null, workflow: { generate_id: true } },
+  ]);
+});
+
 test('a named connected toolkit cannot seal from hivemind_meta without Composio discovery', async () => {
   const prisma = fakePrisma();
   const observed = [];

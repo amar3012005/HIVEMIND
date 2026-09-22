@@ -25,6 +25,7 @@ Choose one skill with `ROUTING.json`:
 - `cordis-harness-platform` for HIVE chat, HyperAgents, Cordis, Composio, and Harness.
 - `tara-voice-platform` for Tara voice.
 - `platform-release` for any local, Enigma, or production deployment.
+- `ops-gateway` when calling or diagnosing the native production deployment tools.
 
 ## Deploy through the Ops Gateway
 
@@ -32,11 +33,28 @@ The Ops Gateway is the preferred deployment interface. It is an already configur
 agents use its listed tools directly, without setting up a separate MCP server. At the start of a
 release, inspect the available tool descriptions and select the narrowest owner:
 
+**Remote MCP endpoint:** `https://core.singulancelabs.com/api/mcp`
+
+This is the production MCP host. The website, frontend, and generic API domains are not MCP
+endpoints. An agent whose HIVE-MIND remote MCP connection is authenticated with a master key or an
+API key carrying `ops:deploy` sees the Ops tools in its normal tool inventory. It must not install,
+spawn, or configure a local deployment bridge. A normal HIVE-MIND user key intentionally does not
+receive deploy capability.
+
 | Changed artifact | Use the corresponding Ops Gateway deployment tool |
 |---|---|
 | Da-vinci frontend / Cloudflare Worker | `deploy_cloudflare_frontend` |
 | HIVE Core, Control Plane, Employees, or a scoped container service | `deploy_core_services` |
 | Native Harness, Cordis plugin, or compiled Harness UI | `deploy_harness_runner` |
+
+The direct tool contract is:
+
+| Tool | Required arguments | Result |
+|---|---|---|
+| `deploy_cloudflare_frontend` | Da-vinci `sha`, optional `note` | Versioned Cloudflare frontend release and rollback identity |
+| `deploy_core_services` | parent HIVE-MIND `sha`, scoped `services`, optional `note` | Immutable Core/Control/Employees artifact and scoped recreate |
+| `deploy_harness_runner` | parent HIVE-MIND `sha`, immutable runner `image` digest, optional `note` | Runner-only recreate and prior image |
+| `get_release_status` | `instance_id` | Release state, evidence, and rollback data |
 
 Supply the exact pushed SHA, target `production`, affected service(s), and release note. The tool
 records the prior Worker version or image as the rollback identity and returns the deployed version
@@ -69,6 +87,17 @@ descriptions are the live contract.
 
 Do not deploy a frontend-only change through container tooling, and do not rebuild Core or Harness
 for an unrelated Worker deployment.
+
+### Copy-paste task opener
+
+```text
+Read AGENTS.md and .hivemind/README.md. Select the one relevant .hivemind skill.
+Create a clean codex/<task> worktree from origin/singulance-main. Implement and run the focused
+check. Commit and push the exact SHA. If this task needs production release, use the already-listed
+HIVE-MIND Ops Gateway MCP tool that owns the changed artifact; do not SSH-patch live containers or
+set up a local MCP server. Verify the affected public route and report the release instance and
+rollback identity.
+```
 
 ## Finish
 

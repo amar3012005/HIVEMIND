@@ -12835,7 +12835,15 @@ Write the persona now.`;
           const { buildInternalHeaders } = await import('./internal/internal-fetch.js');
           const upstream = await fetch(
             `${runtimeBase}/sessions/${encodeURIComponent(sid)}/stream?agent_id=${encodeURIComponent(aid)}`,
-            { headers: buildInternalHeaders({ userId: current.session.userId, orgId: current.session.orgId }) },
+            { headers: {
+              ...buildInternalHeaders({ userId: current.session.userId, orgId: current.session.orgId }),
+              // AgentScope selects its incremental event transport from the
+              // Accept header. Without this, a mixed-version runtime may
+              // answer with a buffered/session representation and the browser
+              // only appears to update after the run has finished.
+              Accept: 'text/event-stream',
+              'Cache-Control': 'no-cache',
+            } },
           );
           if (!upstream.ok || !upstream.body) {
             return jsonResponse(res, { error: `runtime stream ${upstream.status}` }, 502);
@@ -12846,6 +12854,10 @@ Write the persona now.`;
             Connection: 'keep-alive',
             'X-Accel-Buffering': 'no',
           });
+          // Commit the SSE headers before the first model event. This keeps
+          // the first acknowledgement/thinking frame independent of Node's
+          // normal response-header coalescing.
+          if (typeof res.flushHeaders === 'function') res.flushHeaders();
           const reader = upstream.body.getReader();
           const decoder = new TextDecoder();
           try {

@@ -25084,6 +25084,13 @@ exit \$RC
                     orchestratorV2Mode: continuationAdmission.orchestratorV2Mode || 'off',
                     compoundOrchestrator: continuationAdmission.compoundOrchestrator === true,
                     prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
+                    // A resumed unified save is the same canonical write, not
+                    // a reduced read-only chat context.  Preserve the ingest
+                    // boundary so a confirmed scope choice can persist the
+                    // memory and enqueue its normal entity enrichment.
+                    smartIngestRouter, buildRoutedIngestPayloads,
+                    ingestCanonicalPayload,
+                    accessContext: agentAccessCtx,
                     threadId: body?.thread_id || body?.conversation_id || stored.threadId || null,
                     composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                       ? String(req.headers.origin)

@@ -54,3 +54,12 @@ test('a targeted unified LangGraph scope choice is durable even when legacy dura
   assert.match(continuation, /const continuationPersistenceEnabled = continuationMode !== 'off' \|\| durableUnifiedContinuation/);
   assert.match(continuation, /if \(continuationPersistenceEnabled\)/);
 });
+
+test('a resumed unified LangGraph save retains the canonical ingestion boundary', () => {
+  const start = server.indexOf("if (['durable_agent', 'governed_langgraph', 'unified_langgraph'].includes(stored.resumeState?.kind))");
+  const end = server.indexOf('const { runCompoundOrchestrator }', start);
+  const section = server.slice(start, end);
+  assert.match(section, /smartIngestRouter, buildRoutedIngestPayloads/);
+  assert.match(section, /ingestCanonicalPayload/);
+  assert.match(section, /accessContext: agentAccessCtx/);
+});

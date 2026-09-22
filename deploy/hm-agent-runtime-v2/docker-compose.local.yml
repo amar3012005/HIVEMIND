@@ -85,7 +85,10 @@ services:
       # --- hm-core identity ---
       # Same master key the local stack uses, so the control plane's
       # X-API-Key + X-HM-User-Id headers authenticate here unchanged.
-      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      # Required: must match the local control plane's internal shared secret.
+      # Do not fall back to the old development key; that produces silent 401s
+      # from company-context/recall after a runtime recreation.
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:?Set HIVEMIND_MASTER_API_KEY to the control-plane shared secret}
       # The control plane is the Core API surface for bearer verification.
       HM_CORE_URL: ${HM_CORE_URL:-http://control-plane:3000}
       HM_CORE_VERIFY_PATH: ${HM_CORE_VERIFY_PATH:-/api/auth/verify}

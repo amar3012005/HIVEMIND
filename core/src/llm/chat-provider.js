@@ -4,7 +4,11 @@ const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://open
 import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayCompatUrl, gatewayProviderUrl, gatewayRequestHeaders, isGatewayUrl } from './cloudflare-gateway.js';
 import { recordAiUsage, resolveAiModelPolicy } from './ai-governance.js';
 
-export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
+// The planner is a short, structured routing step.  The production Gateway
+// probe showed GLM Flash Nitro had lower completion latency than the previous
+// Gemini Flash-Lite policy for this exact JSON-schema request shape.  Keep the
+// same model family as synthesis to avoid a slow provider hop before recall.
+export const DEFAULT_CHAT_PLANNER_MODEL = 'z-ai/glm-5.3-flash:nitro';
 // Keep the legacy HIVE surfaces on the same fast, streaming model contract as
 // the native Harness.  The Gateway-backed provider below is deliberately
 // shared; mobile chat must never silently fall back to an older direct route.

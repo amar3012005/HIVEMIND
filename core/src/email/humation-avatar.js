@@ -32,6 +32,15 @@ const LANE_BACKGROUNDS = Object.freeze({
 // are immutable, and mailbox image proxies otherwise keep the previous SVG.
 export const HUMATION_AVATAR_ASSET_VERSION = '2';
 
+// The small founding team shown in lifecycle email. These are deterministic
+// Humation identities rather than newly invented image assets, so every
+// mailbox receives the same canonical BRAIN / OS / VOICE characters.
+export const HIVEMIND_EMAIL_TEAM = Object.freeze([
+  Object.freeze({ id: 'hivemind-brain', name: 'BRAIN', roleArchetype: 'Strategist' }),
+  Object.freeze({ id: 'hivemind-os', name: 'OS', roleArchetype: 'Builder' }),
+  Object.freeze({ id: 'hivemind-voice', name: 'VOICE', roleArchetype: 'Communicator' }),
+]);
+
 function escapeAttribute(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -98,4 +107,17 @@ export function humationAvatarPublicUrl(employee = {}, baseUrl = '') {
   const seed = String(employee.id || employee.slug || employee.name || 'agent').slice(0, 160);
   const role = resolveHumationLane(employee.roleArchetype || employee.role);
   return `${origin}/v1/public/humation-avatar.svg?seed=${encodeURIComponent(seed)}&role=${encodeURIComponent(role)}&v=${HUMATION_AVATAR_ASSET_VERSION}`;
+}
+
+/**
+ * A conservative table layout for transactional email. Email clients do not
+ * consistently support flex, pseudo-elements, or SVG data URLs, so the team
+ * uses our public, cache-versioned avatar endpoint in regular img tags.
+ */
+export function renderHivemindEmailTeam({ caption = 'YOUR TEAM IS READY' } = {}) {
+  const people = HIVEMIND_EMAIL_TEAM.map((member) => {
+    const lane = humationLaneVisual(member.roleArchetype);
+    return `<td width="72" align="center" valign="top" style="width:72px;padding:0 4px"><div style="width:58px;height:58px;margin:0 auto 7px;border:1px solid ${lane.color};border-radius:50%;background:${lane.background};overflow:hidden"><img src="${humationAvatarPublicUrl(member)}" width="58" height="58" alt="${escapeAttribute(member.name)}" style="display:block;width:58px;height:58px;border:0" /></div><div style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;line-height:12px;font-weight:700;letter-spacing:1.4px;color:#666">${escapeAttribute(member.name)}</div></td>`;
+  }).join('');
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;margin:0 0 22px"><tr><td style="padding:14px 14px 13px;background:#f7f7f4;border:1px solid #e8e6df;border-radius:8px"><div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;line-height:12px;font-weight:700;letter-spacing:1.5px;color:#117dff">${escapeAttribute(caption)}</div><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>${people}</tr></table></td></tr></table>`;
 }

@@ -166,6 +166,8 @@ test('reminder copy remains typed lifecycle communication', () => {
   assert.equal(invite.type, 'lifecycle.invitation.reminder');
   assert.equal(signup.type, 'lifecycle.signup.reminder');
   assert.match(signup.href, /onboard=1/);
+  assert.match(invite.subject, /BRAIN, OS and VOICE/);
+  assert.match(signup.subject, /mission/i);
 });
 
 test('each activation reminder has a dedicated, escaped, responsive email rendering', () => {
@@ -184,6 +186,10 @@ test('each activation reminder has a dedicated, escaped, responsive email render
     assert.match(rendered.html, /SINGULANCE/);
     assert.match(rendered.html, /class="action"/);
     assert.match(rendered.html, /@media only screen and \(max-width:620px\)/);
+    assert.match(rendered.html, /YOUR TEAM IS READY/);
+    assert.match(rendered.html, /humation-avatar\.svg/);
+    assert.match(rendered.html, /BRAIN/);
+    assert.match(rendered.html, /VOICE/);
     assert.match(rendered.html, /Canary &lt;Company&gt;/);
     assert.doesNotMatch(rendered.html, /Canary <Company>/);
   }

@@ -98,6 +98,8 @@ describe('EnterpriseInvitationService', () => {
     assert.match(rendered.html, /HM-EXAMPLE/);
     assert.match(rendered.subject, /Example GmbH/);
     assert.match(rendered.html, /AI Operating System/);
+    assert.match(rendered.html, /BRAIN \/ OS \/ VOICE/);
+    assert.match(rendered.html, /humation-avatar\.svg/);
     assert.match(rendered.text, /invitation already applied/);
     assert.match(rendered.text, /20,000 shared workspace credits per month/);
     assert.doesNotMatch(rendered.text, /unlimited pilot usage/i);

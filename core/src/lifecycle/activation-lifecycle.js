@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { escapeHtml, lifecycleEmailShell } from '../email/templates/cartesia-lifecycle.js';
+import { renderHivemindEmailTeam } from '../email/humation-avatar.js';
 
 export const ACTIVATION_STAGES = Object.freeze({
   INVITED_PENDING_SIGNUP: 'invited_pending_signup',
@@ -211,18 +212,18 @@ export async function recordActivationReminder({ prisma, activationId, generatio
 
 export function activationReminderCopy(stage, companyName = 'your company') {
   if (stage === ACTIVATION_STAGES.INVITED_PENDING_SIGNUP) return {
-    subject: 'Your HIVEMIND invitation is waiting', heading: 'Your invitation is waiting.',
-    body: 'Your private HIVEMIND invitation is ready when you are. Start your secure workspace and continue the journey.',
+    subject: 'BRAIN, OS and VOICE are waiting for you', heading: 'Your team is at the console.',
+    body: 'BRAIN is ready to remember, OS is ready to coordinate, and VOICE is ready to represent your company. Accept your private invitation and give them a company to run.',
     cta: 'Accept your invitation', href: '/hivemind/invite', type: 'lifecycle.invitation.reminder',
   };
   if (stage === ACTIVATION_STAGES.SIGNED_IN_PENDING_COMPANY) return {
-    subject: 'It is time to awaken your AI company', heading: 'Your AI company is ready to awaken.',
-    body: 'Add your company context and your HyperAgents can prepare the first moves for you.',
+    subject: 'Your AI company is awake. Give it a mission.', heading: 'Your company is ready to move as one.',
+    body: 'Tell BRAIN what matters, let OS assemble the work, and give VOICE a point of view. A few company details are enough to begin.',
     cta: 'Awaken your HIVEMIND', href: '/hivemind/app/employees/mycompany?onboard=1', type: 'lifecycle.signup.reminder',
   };
   return {
-    subject: `Finish awakening ${companyName}`, heading: 'Your HyperAgents need your company context.',
-    body: 'Complete company onboarding to receive your Day 0 briefing and begin your lifecycle.',
+    subject: `${companyName} is one brief from moving as one`, heading: 'One final brief, then your team can begin.',
+    body: 'Finish company setup so your Humation team can turn the context you approve into a living company memory and its first coordinated moves.',
     cta: 'Continue company setup', href: '/hivemind/app/employees/mycompany?onboard=1', type: 'lifecycle.onboarding.reminder',
   };
 }
@@ -247,11 +248,11 @@ export function renderActivationReminderEmail({ stage, companyName = 'your compa
   const cta = escapeHtml(copy.cta || 'Continue');
   const safeDestination = escapeHtml(destination);
   const subject = copy.subject;
-  const text = `${copy.heading}\n\n${copy.body}\n\n${copy.cta}: ${destination}\n\n— The HIVEMIND team`;
+  const text = `${copy.heading}\n\nBRAIN remembers. OS coordinates. VOICE represents your company.\n\n${copy.body}\n\n${copy.cta}: ${destination}\n\n— The HIVEMIND team`;
   const html = lifecycleEmailShell({
     title: subject,
     preheader: copy.body,
-    body: `<tr><td class="section" style="background:#faf9f4"><div class="eyebrow">${lifecycleLabel}</div><h1 class="h1">${escapeHtml(copy.heading)}</h1><p class="copy">${escapeHtml(copy.body)}</p><div style="margin-top:24px;padding:14px 16px;border-left:3px solid #117dff;background:#fff"><div style="font:700 8px/12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;color:#117dff">YOUR WORKSPACE</div><div style="margin-top:6px;font-size:14px;line-height:20px;font-weight:700;color:#090909">${escapeHtml(company)}</div></div><a class="action" href="${safeDestination}" style="margin-top:24px">${cta} &rarr;</a><p style="margin:20px 0 0;color:#8f8f8f;font-size:12px;line-height:18px">This is a transactional onboarding reminder. It is sent only while this setup step remains unfinished.</p></td></tr>`,
+    body: `<tr><td class="section" style="background:#faf9f4"><div class="eyebrow">${lifecycleLabel}</div>${renderHivemindEmailTeam()}<h1 class="h1">${escapeHtml(copy.heading)}</h1><p class="copy">${escapeHtml(copy.body)}</p><div style="margin-top:24px;padding:14px 16px;border-left:3px solid #117dff;background:#fff"><div style="font:700 8px/12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:1.4px;color:#117dff">YOUR WORKSPACE</div><div style="margin-top:6px;font-size:14px;line-height:20px;font-weight:700;color:#090909">${escapeHtml(company)}</div></div><a class="action" href="${safeDestination}" style="margin-top:24px">${cta} &rarr;</a><p style="margin:20px 0 0;color:#8f8f8f;font-size:12px;line-height:18px">This is a transactional onboarding reminder. It is sent only while this setup step remains unfinished.</p></td></tr>`,
   });
   return { subject, text, html, cta: copy.cta, href: destination, templateVersion: 'activation-lifecycle-v1' };
 }

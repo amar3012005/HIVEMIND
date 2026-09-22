@@ -32,6 +32,7 @@ import { dirname, join } from 'node:path';
 import { fetchBearerFromNango } from '../connectors/mcp/nango-service.js';
 import { renderSingulanceTransactionalEmail } from './templates/singulance-transactional.js';
 import { renderHivemindWelcomeEmail } from './templates/hivemind-welcome.js';
+import { renderHivemindEmailTeam } from './humation-avatar.js';
 import { resolvePublicAppUrl } from '../public-frontend-url.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -286,6 +287,12 @@ export function renderTemplate(templateId, vars = {}) {
   const subject = fill(tpl.subject, ctx, false);
   const text = tpl.text ? fill(tpl.text, ctx, false) : '';
   const inner = tpl.html ? fill(tpl.html, ctx, true) : `<p>${escapeHtml(text)}</p>`;
+  // These are the actual first-contact paths before Day 0. Keep the canonical
+  // Humation team in the renderer so copy stays data-only in templates.json.
+  const lifecycleInvitation = new Set(['team_invite', 'enterprise_invitation', 'personal_invitation']);
+  const decoratedInner = lifecycleInvitation.has(templateId)
+    ? `${renderHivemindEmailTeam({ caption: 'BRAIN / OS / VOICE — READY WHEN YOU ARE' })}${inner}`
+    : inner;
   const preheader = tpl.preheader ? fill(tpl.preheader, ctx, true) : '';
   const html = tpl.layout === 'hivemind_cartesia_welcome'
     ? renderHivemindWelcomeEmail({
@@ -301,10 +308,10 @@ export function renderTemplate(templateId, vars = {}) {
       onboardingEndsAt: escapeHtml(ctx.onboardingEndsAt),
     })
     : tpl.layout === 'singulance_transactional'
-      ? renderSingulanceTransactionalEmail({ preheader, innerHtml: inner, year: escapeHtml(ctx.year) })
+      ? renderSingulanceTransactionalEmail({ preheader, innerHtml: decoratedInner, year: escapeHtml(ctx.year) })
       : tpl.layout === 'runtime_dark'
-        ? renderRuntimeDarkEmail(inner, preheader)
-        : wrapHtml(inner, preheader, ctx);
+        ? renderRuntimeDarkEmail(decoratedInner, preheader)
+        : wrapHtml(decoratedInner, preheader, ctx);
   return { subject, text, html };
 }
 

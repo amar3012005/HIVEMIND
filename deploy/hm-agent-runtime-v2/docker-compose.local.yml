@@ -78,6 +78,9 @@ services:
       AGENTSCOPE_ENABLE_SCHEDULER: "1"
       AGENTSCOPE_ENABLE_CHANNEL_WORKER: "1"
       AGENTSCOPE_ENABLE_HUBS: "0"
+      # Opt-in native AgentScope OpenTelemetry spans.
+      AGENTSCOPE_OTEL_ENABLED: ${AGENTSCOPE_OTEL_ENABLED:-0}
+      AGENTSCOPE_OTEL_ENDPOINT: ${AGENTSCOPE_OTEL_ENDPOINT:-}
       AGENTSCOPE_DOWNLOAD_SECRET: ${AGENTSCOPE_DOWNLOAD_SECRET:-local-agent-runtime-download-secret}
       # --- hm-core identity ---
       # Same master key the local stack uses, so the control plane's

@@ -192,9 +192,10 @@ rediscovered.
 
 | Gap | Detail |
 | --- | --- |
-| **Artifacts** | Nothing writes HTML/PDF/image/video into the workspace or registers it back into HIVE-MIND. |
+| **Artifacts** | `hivemind_record_artifact` verifies a non-empty workspace file and registers a durable HIVE-MIND pointer. Byte retention/R2 upload for runtime-produced files is still not wired. |
 | **Knowledge base** | `knowledge_base_manager` is not passed, so every `/knowledge_bases` route returns 503. |
 | **Hubs off** | `AGENTSCOPE_ENABLE_HUBS=0`; the MCP/Skill pages are disabled. |
+| **Tracing opt-in** | Set `AGENTSCOPE_OTEL_ENABLED=1` and an explicit `AGENTSCOPE_OTEL_ENDPOINT` to export native AgentScope reply/model/tool spans. It is disabled by default. |
 | **`api_key` is schema-required** | The gateway credential inherits `api_key` from `OpenAICredential`, so the form demands a value that is never transmitted. Operators paste a placeholder. Making it optional when the gateway is enabled is a known improvement. |
 | **Not committed** | Nothing here is in git yet. |
 

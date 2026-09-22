@@ -72,6 +72,8 @@ services:
       AGENTSCOPE_ENABLE_CHANNEL_WORKER: "1"
       # --- public hubs off until wanted ---
       AGENTSCOPE_ENABLE_HUBS: "0"
+      AGENTSCOPE_OTEL_ENABLED: ${AGENTSCOPE_OTEL_ENABLED:-0}
+      AGENTSCOPE_OTEL_ENDPOINT: ${AGENTSCOPE_OTEL_ENDPOINT:-}
       # --- download-token signing; override via .env in any shared environment ---
       AGENTSCOPE_DOWNLOAD_SECRET: ${AGENTSCOPE_DOWNLOAD_SECRET:-dev-only-insecure-download-secret}
       # --- Cloudflare AI Gateway (SAME gateway as hm-core) ---

@@ -198,7 +198,9 @@ async function decideReflection({ activity, userId, orgId, env, provider = null 
   if (!provider && !config) return { outcome: 'wait', source: 'unavailable', reason: 'decision_provider_unconfigured' };
   const decisionProvider = provider || createOpenRouterJevProvider({
     apiKey: config.apiKey, endpoint: config.endpoint, headers: config.headers,
-    model: config.model, timeoutMs: Math.max(500, Math.min(5000, Number(env.HIVEMIND_PROACTIVE_JEV_TIMEOUT_MS || 2500))),
+    // This runs off the interactive path. Five seconds accommodates a bounded
+    // six-hour activity projection while retaining a hard upper limit.
+    model: config.model, timeoutMs: Math.max(500, Math.min(5000, Number(env.HIVEMIND_PROACTIVE_JEV_TIMEOUT_MS || 5000))),
     siteName: 'HIVE-MIND Proactive Cognition',
   });
   try {

@@ -30,6 +30,9 @@ const State = Annotation.Root({
   receipts: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   steps: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   pendingTool: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  // Explicit user writes retain their prepared canonical payload until the
+  // in-graph typed plan authorizes the governed save transition.
+  pendingSaveDraft: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingConnection: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingMemoryScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingApproval: Annotation({ reducer: (_left, right) => right, default: () => null }),
@@ -48,6 +51,8 @@ const State = Annotation.Root({
   status: Annotation({ reducer: (_left, right) => right, default: () => 'received' }),
   eventSequence: Annotation({ reducer: (_left, right) => right, default: () => 0 }),
 });
+
+const MISSING_SAVE_RESPONSE = 'Tell me the specific fact, decision, or note you want saved, and where it belongs (personal, organization, team, or project).';
 
 const compactText = (value, limit = 1800) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 // Final assistant Markdown is a UI contract. Never normalize its whitespace:
@@ -709,20 +714,17 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       ...safeHistory(ctx.conversationHistory, Math.max(1, Math.min(6, Number(ctx.historyTurns) || 3))),
       { role: 'user', content: message },
     ];
-    const missingSaveResponse = 'Tell me the specific fact, decision, or note you want saved, and where it belongs (personal, organization, team, or project).';
     const patch = {
       runId,
       context: { locale, profile: compactText(profile, 1800), explicit_save: explicitSave },
       requestedToolkits,
       messages,
-      pendingTool: saveDraft ? {
-        id: `explicit-save-${runId}`,
-        name: 'hivemind_meta',
-        args: { operation: 'save', save: saveDraft },
-      } : null,
-      result: explicitSave && !saveDraft
-        ? outputShape({ ...freshTurnState, messages }, missingSaveResponse, 'needs_input')
-        : null,
+      // Explicit writes still enter the plan node. JEV decides the typed
+      // capability; when it selects hivemind_save, the graph compiles this
+      // prepared payload directly into the governed save, without a second
+      // model turn or an accidental recall fallback.
+      pendingSaveDraft: saveDraft,
+      result: null,
     };
     return transition(freshTurnState, 'running', patch, { reason_code: 'turn_admitted' });
   };
@@ -758,6 +760,25 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     emitDecision({ stage: 'capability', status: decision.status, selected: plan.intent,
       source: plan.source, authoritative: plan.authoritative, probability: plan.probability,
       margin: plan.margin, request_id: plan.request_id, run_id: state.runId });
+    if (state.context?.explicit_save === true) {
+      const saveDraft = state.pendingSaveDraft;
+      if (!saveDraft) {
+        return {
+          plan,
+          result: outputShape({ ...state, plan }, MISSING_SAVE_RESPONSE, 'needs_input'),
+        };
+      }
+      if (authoritative && plan.intent === 'hivemind_save') {
+        return {
+          plan,
+          pendingTool: {
+            id: `explicit-save-${state.runId}`,
+            name: 'hivemind_meta',
+            args: { operation: 'save', save: saveDraft },
+          },
+        };
+      }
+    }
     return { plan };
   };
 
@@ -932,6 +953,30 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const exposed = publicToolResult(receipt);
     const underlying = call.name === 'hivemind_connected_task' && call.args.action === 'execute' ? call.args.tool_slug : call.name;
     onEvent({ type: 'tool_result', name: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed', run_id: state.runId });
+    // Once JEV has selected an explicit memory save and Core returns its
+    // durable receipt, no synthesis pass may reinterpret the user write or
+    // issue a recall. Seal this governed state transition directly.
+    if (call.name === 'hivemind_meta' && call.args.operation === 'save'
+      && state.context?.explicit_save === true && receipt?.successful !== false) {
+      const receipts = [...state.receipts, {
+        tool: underlying, action: 'save', status: receipt?.status || null,
+        successful: true, data: exposed, error: null,
+      }];
+      const steps = [...state.steps, { kind: 'tool', slug: underlying, status: 'completed', summary: 'Memory saved' }];
+      const response = 'Saved this memory.';
+      onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
+      onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: true, run_id: state.runId });
+      onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
+      return {
+        pendingTool: null,
+        pendingSaveDraft: null,
+        callFingerprints: [...state.callFingerprints, fingerprint],
+        messages: [...state.messages, toolMessage(call, exposed), { role: 'assistant', content: response }],
+        receipts,
+        steps,
+        result: outputShape({ ...state, pendingTool: null, pendingSaveDraft: null, receipts, steps }, response),
+      };
+    }
     return {
       ...statePatch, pendingTool: null, callFingerprints: [...state.callFingerprints, fingerprint],
       messages: [...state.messages, toolMessage(call, exposed)],

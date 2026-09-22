@@ -37,6 +37,14 @@ function ctx(prisma, suffix, language = 'en') {
   return { orgId: ORG, userId: USER, prisma, language, threadId: `thread-${suffix}`, unifiedGraphThreadId: `unified-${suffix}`, model: 'test' };
 }
 
+function saveCapabilityDecision(input) {
+  assert.equal(input.stage, 'capability');
+  return {
+    status: 'selected', selected: 'hivemind_save', authoritative: true,
+    receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'save-capability-plan' },
+  };
+}
+
 test('one model-tool graph handles native recall and final synthesis with only hivemind_meta', async () => {
   const prisma = fakePrisma();
   const seenTools = [];
@@ -112,7 +120,7 @@ test('the in-graph plan node calls JEV once and reuses its typed decision for th
     && event.selected === 'direct_answer' && event.source === 'jev'));
 });
 
-test('an explicit durable-save request uses the prior verified turn without a planner tool decision', async () => {
+test('an explicit durable-save request crosses the JEV plan node before one governed write', async () => {
   const prisma = fakePrisma();
   const calls = [];
   let turn = 0;
@@ -122,7 +130,7 @@ test('an explicit durable-save request uses the prior verified turn without a pl
     _tracedDispatch: async (name, args) => {
       calls.push([name, args]);
       assert.equal(name, 'hivemind_save_memory');
-      assert.equal(args.title, 'Rama');
+      assert.match(args.title, /Rama/i);
       assert.match(args.content, /Prague anniversary invitation/);
       assert.equal(args.scope, undefined);
       return { memoryId: 'memory-rama' };
@@ -131,16 +139,14 @@ test('an explicit durable-save request uses the prior verified turn without a pl
   const result = await runUnifiedMetaAgent({
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
     checkpointer: new MemorySaver(), composio: {},
-    modelStep: async ({ messages }) => {
-      turn += 1;
-      assert.equal(turn, 1);
-      assert.match(messages[0].content, /explicitly requested a durable memory write/);
-      return { message: { role: 'assistant', content: 'I saved the dedicated memory about Rama.' } };
-    },
+    decisionStage: saveCapabilityDecision,
+    modelStep: async () => { turn += 1; throw new Error('authorized save must not invoke a second model turn'); },
   });
   assert.equal(result.status, 'completed');
   assert.equal(calls.length, 1);
-  assert.match(result.response, /saved the dedicated memory/i);
+  assert.equal(turn, 0);
+  assert.match(result.response, /saved (this|the) memory/i);
+  assert.equal(result.run.scratch.plan.intent, 'hivemind_save');
 });
 
 test('a referential save-all-as-one-memory continuation saves without recall or a model turn', async () => {
@@ -172,7 +178,7 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
   const modelStep = async () => { throw new Error('save-it continuation must not invoke model or recall'); };
   const initial = await runUnifiedMetaAgent({
     message: 'save all of it as one memory', useTools: false, prisma, ctx: runtimeCtx,
-    checkpointer, composio: {}, modelStep,
+    checkpointer, composio: {}, modelStep, decisionStage: saveCapabilityDecision,
   });
   assert.equal(initial.status, 'needs_input');
   assert.equal(initial.inputRequests[0].kind, 'memory_scope');
@@ -206,6 +212,7 @@ test('an explicit save without facts asks once before any tool or model call', a
   const result = await runUnifiedMetaAgent({
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: ctx(prisma, 'save-missing-payload'),
     checkpointer: new MemorySaver(), composio: {},
+    decisionStage: saveCapabilityDecision,
     modelStep: async () => { turns += 1; throw new Error('missing save content must not reach the model'); },
   });
   assert.equal(turns, 0);
@@ -243,7 +250,7 @@ test('a save without a stated destination interrupts once for scope and resumes 
   };
   const initial = await runUnifiedMetaAgent({
     message: 'Save a dedicated memory about Rama', useTools: false, prisma, ctx: runtimeCtx,
-    checkpointer, modelStep, composio: {},
+    checkpointer, modelStep, composio: {}, decisionStage: saveCapabilityDecision,
   });
   assert.equal(initial.status, 'needs_input');
   assert.equal(initial.inputRequests[0].kind, 'memory_scope');
@@ -281,7 +288,8 @@ test('scope continuation preserves the original canonical save payload and emits
   };
   const initial = await runUnifiedMetaAgent({
     message: 'Save this to Hivemind as one memory', useTools: false, prisma, ctx: runtimeCtx,
-    checkpointer, composio: {}, modelStep: async () => ({ message: { role: 'assistant', content: 'unused' } }),
+    checkpointer, composio: {}, decisionStage: saveCapabilityDecision,
+    modelStep: async () => { throw new Error('authorized save must not invoke a model turn'); },
   });
   assert.equal(initial.status, 'needs_input');
   const resumed = await runUnifiedMetaAgent({

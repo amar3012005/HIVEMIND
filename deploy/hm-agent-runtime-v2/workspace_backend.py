@@ -196,6 +196,7 @@ def build_workspace_manager(basedir: str) -> Any:
             isolation=isolation,
             base_image=SANDBOX_IMAGE,
             node_version=NODE_VERSION,
+            skill_paths=_skill_paths(),
             ttl=TTL,
         )
 

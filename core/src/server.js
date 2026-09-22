@@ -282,6 +282,15 @@ async function handleCanonicalProjectionStageCallback({ req, res, pathname }) {
         entity_ids: [...new Set(linkedEntities.map((link) => link.entityId))],
       };
     }
+    if (stage === 'complete') {
+      // Entity linking is intentionally detached from the memory write. The
+      // completion receipt is emitted after the Workflow's bounded settlement
+      // step, so it is the authoritative handoff for entity dossier admission.
+      const linkedEntities = await prisma.memoryEntityLink.findMany({
+        where: { memoryId }, select: { entityId: true },
+      });
+      receipt.entity_ids = [...new Set(linkedEntities.map((link) => link.entityId))];
+    }
     await finishProjectionStage({ prisma, attempt: begun.attempt, stage, receipt, failure: stage === 'failed' ? 'workflow_failed' : null });
     jsonResponse(res, { ok: true, receipt }); return true;
   } catch (error) {

@@ -111,12 +111,18 @@ export class CanonicalProjectionWorkflow extends WorkflowEntrypoint<RuntimeEnv, 
       await step.do('normalize and verify claims', STANDARD_RETRY, () => core(this.env, params, 'normalize'));
       const persisted: CoreResult = await step.do('persist canonical projection', STANDARD_RETRY, () => core(this.env, params, 'persist'));
       await step.do('reconcile projection receipts', { ...STANDARD_RETRY, retries: { limit: 8, delay: '30 seconds', backoff: 'exponential' } }, () => core(this.env, params, 'reconcile'));
+      // Entity links are deliberately materialized outside the write lock. Give
+      // the bounded linker a small window, then use Core's signed completion
+      // receipt as the sole source for post-canonical dossier admission.
+      await step.sleep('allow canonical entity links to settle', '5 seconds');
       const completed: CoreResult = await step.do('mark projection complete', STANDARD_RETRY, () => core(this.env, params, 'complete'));
       const projection = (persisted as any)?.receipt?.projection || (persisted as any)?.projection || {};
       const claims = Array.isArray(projection.claims) ? projection.claims : [];
       const linkedEntityIds = Array.isArray(projection.entity_ids) ? projection.entity_ids : [];
+      const completedEntityIds = Array.isArray((completed as any)?.receipt?.entity_ids) ? (completed as any).receipt.entity_ids : [];
       const entityIds = [...new Set([
         ...linkedEntityIds,
+        ...completedEntityIds,
         ...claims.flatMap((claim: any) => [claim?.subjectEntityId, claim?.objectEntityId]),
       ].filter((id: unknown) => typeof id === 'string' && validUuid(id)))];
       // New admissions preserve the actor identity. This makes the entity-profile

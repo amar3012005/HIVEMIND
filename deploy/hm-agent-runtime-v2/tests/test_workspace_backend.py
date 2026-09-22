@@ -103,6 +103,14 @@ class WorkspaceBackendTests(unittest.TestCase):
         self.assertEqual(backend.sanitize_workspace_id("already-safe_1.2"), "already-safe_1.2")
         self.assertEqual(backend.sanitize_workspace_id("///"), "workspace")
 
+    def test_skill_paths_include_leaf_skills_not_category_parents(self):
+        backend = self._load_backend(AGENTSCOPE_WORKSPACE_BACKEND="docker")
+        paths = backend._skill_paths()
+        self.assertTrue(paths)
+        self.assertTrue(all(Path(path, "SKILL.md").is_file() for path in paths))
+        self.assertIn(str(Path(backend.SKILLS_DIR, "source-verification")), paths)
+        self.assertNotIn(str(Path(backend.SKILLS_DIR, "business")), paths)
+
 
 if __name__ == "__main__":
     unittest.main()

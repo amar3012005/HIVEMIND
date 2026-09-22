@@ -106,20 +106,23 @@ def sanitize_workspace_id(value: str) -> str:
 
 
 def _skill_paths() -> list[str]:
-    """Every immediate subdirectory of SKILLS_DIR that holds a SKILL.md.
+    """Return every skill directory whose immediate child is ``SKILL.md``.
 
-    Returns the *category* directories (business/, market/, outreach/, …) rather
-    than each leaf: AgentScope copies a skill path recursively, so passing the
-    category keeps the catalog's grouping intact inside the workspace.
+    AgentScope validates each supplied path itself and skips a directory that
+    does not contain a directly-addressable ``SKILL.md``.  The repository also
+    has category folders (business/, market/, outreach/, ...), so passing those
+    parents would silently drop every nested skill.  Enumerate leaf skill
+    directories instead; their relative paths are preserved in the workspace.
     """
     if not os.path.isdir(SKILLS_DIR):
         _log.warning("skills dir %s does not exist; no skills will be seeded", SKILLS_DIR)
         return []
     paths = []
-    for entry in sorted(os.listdir(SKILLS_DIR)):
-        full = os.path.join(SKILLS_DIR, entry)
-        if os.path.isdir(full) and not entry.startswith("."):
-            paths.append(full)
+    for root, dirs, files in os.walk(SKILLS_DIR):
+        dirs[:] = sorted(directory for directory in dirs if not directory.startswith("."))
+        if "SKILL.md" in files:
+            paths.append(root)
+    paths.sort()
     return paths
 
 

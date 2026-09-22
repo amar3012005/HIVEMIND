@@ -1,10 +1,10 @@
 /**
- * Hybrid welcome email: accessible personalized HTML followed by exact 2x
- * captures of the production Cartesia React experience.
+ * Accessible, personalized welcome email.
  *
- * Email clients do not share a browser rendering engine. Screenshots are the
- * only dependable way to preserve the FE's precise typography, shadows,
- * gradients, logos, graph, and alternating layouts across Gmail and Outlook.
+ * Keep this template self-contained. Remote product-tour images are fragile in
+ * email clients: an unavailable image URL makes Gmail render the image alt
+ * text as visible, linked content. Product education belongs behind the CTA,
+ * where the web application can render it reliably.
  */
 
 import { emailBrandLockup } from './cartesia-lifecycle.js';
@@ -12,20 +12,6 @@ import { emailBrandLockup } from './cartesia-lifecycle.js';
 const BLUE = '#117dff';
 const BORDER = '#e7e4dd';
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
-
-const SECTIONS = [
-  ['hero', 'SOVEREIGN MEMORY ENGINE · EU. Run your institution as an AI company. Memories, Knowledge Base, and Web Intel with &lt;50ms recall. What was the deployment fix from last Tuesday?'],
-  ['memory-engine', 'Memory Engine 01. A memory that organizes itself. Semantic recall, evidence, contradiction resolution, and durable institutional memory.'],
-  ['connectors', 'Connectors 02. Connect once. Remember forever. More than 40 integrations feeding one unified company memory.'],
-  ['context-security', 'Context-savvy accuracy for the real world. Context-aware recall. Encryption that outlives the quantum threat.'],
-  ['memory-graph', 'Memory Graph 03. See your mind. Rewind it. Navigate facts, decisions, people, evidence, and time.'],
-  ['meeting-notes', 'AI Meeting Notes 04. Meetings become permanent knowledge with decisions, actions, and open questions.'],
-  ['hyper-agents', 'Hyper Agents 05. Digital employees that actually act using your company memory and connected tools.'],
-  ['tara', 'TARA and HIVEMIND 06. A voice that knows your business with live transcription, grounded reasoning, and speech.'],
-  ['mcp-server', 'MCP Server 07. Your editor with total recall across Claude, Cursor, VS Code, memory, web, code, and time travel.'],
-  ['sovereignty', 'Sovereignty 08. Memory stays inside your walls with GDPR-native Frankfurt hosting, BYOK, and self-hosting.'],
-  ['final-cta', 'Stop starting from zero. Connect your first app and let your organization’s intelligence compound.'],
-];
 
 function hiddenPreheader(value) {
   return value
@@ -59,15 +45,10 @@ function accountWelcome({ name, appUrl, year, orgName, accountType, welcomeKind,
   <tr><td style="padding:18px 52px 21px;border-top:1px solid ${BORDER};background:#fbfbf8;font:8px/14px ${MONO};letter-spacing:.7px;color:#8a8a8a">SINGULANCE · HIVEMIND · OPERATING SYSTEM<br><span style="color:#aaaaaa">YOUR COMPANY, IN MOTION · © ${year} SINGULANCE LABS.</span></td></tr>`;
 }
 
-function productTour(assetBaseUrl, appUrl) {
-  return SECTIONS.map(([file, alt], index) => `<tr><td style="padding:0;border-top:${index ? '0' : `1px solid ${BORDER}`};background:#fbfbf8;line-height:0"><a href="${appUrl}" style="display:block;text-decoration:none"><img src="${assetBaseUrl}/${file}@2x.png" width="760" alt="${alt}" style="display:block;width:100%;max-width:760px;height:auto;border:0;outline:none;text-decoration:none"></a></td></tr>`).join('');
-}
-
 export function renderHivemindWelcomeEmail({
   preheader = '',
   name = '',
   appUrl = '',
-  assetBaseUrl = 'https://next.singulancelabs.com/email/welcome-cartesia/v1',
   year = '',
   orgName = '',
   accountType = 'personal',
@@ -80,8 +61,5 @@ export function renderHivemindWelcomeEmail({
     @media only screen and (max-width:620px){.hm-frame{padding:0!important}.hm-shell{width:100%!important;max-width:100%!important;border-left:0!important;border-right:0!important}.hm-head{padding:20px 22px!important}.hm-welcome{padding:30px 22px 32px!important}.hm-welcome-title{font-size:25px!important;line-height:31px!important}.hm-footer{padding:15px 22px!important;font-size:8px!important;line-height:14px!important}}
   </style></head><body style="margin:0;padding:0;background:#f1f2ef;color:#0a0a0a;font-family:'Space Grotesk','Helvetica Neue',Arial,sans-serif">${hiddenPreheader(preheader)}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f2ef"><tr><td class="hm-frame" align="center" style="padding:28px 12px 40px"><table class="hm-shell" role="presentation" width="760" cellpadding="0" cellspacing="0" style="width:760px;max-width:760px;background:#ffffff;border:1px solid ${BORDER};overflow:hidden">
     ${accountWelcome({ name, appUrl, year, orgName, accountType, welcomeKind, hostingMode, onboardingEndsAt })}
-    <tr><td style="height:34px;background:#f1f3f4;border-top:1px solid ${BORDER};border-bottom:1px solid ${BORDER};font-size:1px;line-height:1px">&nbsp;</td></tr>
-    ${productTour(assetBaseUrl.replace(/\/$/, ''), appUrl)}
-    <tr><td class="hm-footer" align="left" style="padding:18px 34px 21px;border-top:1px solid ${BORDER};background:#fbfbf8;font:8px/14px ${MONO};letter-spacing:.8px;color:#8a8a8a">SINGULANCE · HIVEMIND · OPERATING SYSTEM<br><span style="color:#aaaaaa">YOUR COMPANY, IN MOTION · © ${year} SINGULANCE LABS.</span></td></tr>
   </table></td></tr></table></body></html>`;
 }

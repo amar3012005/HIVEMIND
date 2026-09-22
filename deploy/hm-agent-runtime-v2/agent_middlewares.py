@@ -44,12 +44,24 @@ owns OAuth; the agent never invents a connection.
 """
 
 
-def _seed_composio_skill(workdir: str) -> None:
+async def _seed_composio_skill(workdir: str, backend: Any = None) -> None:
+    """Seed the skill through the workspace backend, not the host filesystem.
+
+    Docker/E2B workspaces expose ``/workspace`` only inside the sandbox. The
+    old ``Path.write_text`` path therefore failed during the first middleware
+    turn and prevented AgentScope from producing any thinking/tool/answer
+    events. Local workspaces retain the simple filesystem fast path.
+    """
+    path = f"{workdir.rstrip('/')}/skills/composio-connected-workflows/SKILL.md"
+    if backend is not None and hasattr(backend, "file_exists"):
+        if not await backend.file_exists(path):
+            await backend.write_file(path, _COMPOSIO_SKILL.encode("utf-8"))
+        return
     dest = Path(workdir) / "skills" / "composio-connected-workflows"
     dest.mkdir(parents=True, exist_ok=True)
-    path = dest / "SKILL.md"
-    if not path.exists():
-        path.write_text(_COMPOSIO_SKILL, encoding="utf-8")
+    local_path = dest / "SKILL.md"
+    if not local_path.exists():
+        local_path.write_text(_COMPOSIO_SKILL, encoding="utf-8")
 
 
 async def hivemind_agent_middlewares(
@@ -72,9 +84,11 @@ async def hivemind_agent_middlewares(
             session_id,
         )
         return middlewares
+    backend = None
     try:
-        _seed_composio_skill(str(workdir))
-    except OSError as exc:
+        backend = workspace.get_backend() if workspace is not None and hasattr(workspace, "get_backend") else None
+        await _seed_composio_skill(str(workdir), backend)
+    except (OSError, RuntimeError) as exc:
         _log.warning("could not seed composio skill: %s", exc)
-    middlewares.insert(0, AgenticMemoryMiddleware(workdir=str(workdir)))
+    middlewares.insert(0, AgenticMemoryMiddleware(workdir=str(workdir), backend=backend))
     return middlewares

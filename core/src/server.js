@@ -55,6 +55,7 @@ import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
 import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
+import { HmUnderstandAdapter, createHmUnderstandShadowAnalyzer } from './knowledge/enterprise/hm-understand-adapter.js';
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
 import { CloudflareChatSessionClient } from './agent/v2/cloudflare-chat-session-client.js';
 import {
@@ -151,6 +152,11 @@ const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
 const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
+const hmUnderstandAdapter = new HmUnderstandAdapter();
+const hmUnderstandShadowAnalyzer = createHmUnderstandShadowAnalyzer({
+  flagClient: canonicalProjectionClient,
+  adapter: hmUnderstandAdapter,
+});
 const recallReliabilityClient = new CloudflareRecallReliabilityClient();
 const cloudflareChatSessionClient = new CloudflareChatSessionClient();
 const cloudflareMeetingLifecycleClient = new CloudflareMeetingLifecycleClient();

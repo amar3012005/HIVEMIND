@@ -6,6 +6,15 @@ Durable, feature-gated orchestration for Phase 0 canonical entity and claim proj
 
 `POST /start` requires the `CANONICAL_PROJECTION_ADMISSION_SECRET` bearer secret and `x-hivemind-user-id`. It evaluates Flagship flag `canonical_knowledge_foundation_v1` against the tenant/user pair. The environment kill switch `CANONICAL_KNOWLEDGE_ENABLED` defaults to `false`; missing bindings, errors, invalid identities, `off`, or unknown variations fail closed.
 
+`GET /hm-understand-enabled` evaluates the independent, default-off Flagship string flag
+`hm_understand_v1` for the exact organization/user pair. `shadow` runs local analysis and stores
+bounded metrics only. `assisted` may supply a conservative exact-span text projection to Core's
+existing evidence-backed extractor; Core still validates model quotes against the original source,
+and falls back to the full source whenever quality or coverage gates fail. Other values, invalid
+identities, missing bindings, and evaluation errors return `off`. This is a feature decision, not
+an alias for canonical-memory or entity-profile rollout. It uses the same authenticated Worker
+endpoint and does not add an environment-variable feature gate.
+
 Allowed variations are `shadow`, `write`, `read`, and `full`. The chosen value is latched into the identifier-only envelope before Queue admission. A deterministic Workflow ID, `claim-{memory_id}-v{processing_version}`, makes duplicate deliveries converge on one run.
 
 ## Core callbacks

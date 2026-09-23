@@ -21,6 +21,20 @@ export class CloudflareCanonicalProjectionClient {
       return MODES.has(mode) ? mode : 'off';
     } catch (error) { this.logger.warn?.(`[canonical-projection] Flagship evaluation failed closed: ${error.message}`); return 'off'; }
   }
+  async hmUnderstandModeFor({ orgId, userId }) {
+    const c = transportConfig(); if (!c || !orgId || !userId) return 'off';
+    try {
+      const response = await this.fetchImpl(`${c.baseUrl}/hm-understand-enabled?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, {
+        headers: { authorization: `Bearer ${c.secret}` }, signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) return 'off';
+      const body = await response.json();
+      return ['shadow', 'assisted'].includes(body?.mode) ? body.mode : 'off';
+    } catch (error) {
+      this.logger.warn?.(`[hm-understand] Flagship evaluation failed closed: ${error.message}`);
+      return 'off';
+    }
+  }
   async start({ memoryId, orgId, userId, processingVersion = 1, requiredProjection = 'write' }) {
     const c = config(); if (!c) return null;
     const response = await this.fetchImpl(`${c.baseUrl}/start`, {

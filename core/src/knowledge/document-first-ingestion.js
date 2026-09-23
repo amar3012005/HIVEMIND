@@ -25,6 +25,8 @@ import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 import { redactParsedDocument } from './content-secret-redaction.js';
 import { sanitizeKnowledgeJson } from './upload-contract.js';
 import { applyClaimPatchIfLive } from './claim-structuring-write.js';
+import { runHmUnderstandShadow } from './enterprise/hm-understand-shadow.js';
+import { projectHmUnderstandWindow } from './enterprise/hm-understand-assisted.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -1090,7 +1092,7 @@ function safePathSegment(name) {
 }
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
+  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, understandAnalyzer = null, llmCompletion = chatCompletionWithFallback, logger = console }) {
     this.db = db;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
@@ -1103,6 +1105,10 @@ export class DocumentFirstIngestionService {
     // tenant stores its Memory Box; it only provides the durable promotion
     // boundary shared by BullMQ and Workflow execution.
     this.canonicalProjector = canonicalProjector;
+    // Optional local-analysis hook. Shadow persists bounded metrics only; assisted
+    // mode may use exact-span candidates in-process, while Core remains authoritative.
+    this.understandAnalyzer = understandAnalyzer;
+    this.llmCompletion = llmCompletion;
     this.logger = createIngestDiagnosticLogger(logger);
     // Collapse simultaneous first uploads of the same bytes into one pipeline.
     // Database constraints protect rows across processes; this prevents callers
@@ -1876,7 +1882,9 @@ Output the JSON object and nothing else.`;
     // modelOverride lets the reliability layer ESCALATE a shortfall window to a
     // stronger model (P2) — distinct from re-sampling the same model at temp 0.
     const model = modelOverride || process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
-    const content = (window.content || '').slice(0, 6000);
+    const sourceContent = String(window.sourceContent || window.content || '').slice(0, 6000);
+    const proposedContent = String(window.extractionContent || window.content || '');
+    const content = (proposedContent.trim().length >= 40 ? proposedContent : (window.content || '')).slice(0, 6000);
     if (content.trim().length < 40) {
       // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
       return content.split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
@@ -1922,7 +1930,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // via KB_UNIFIED_FALLBACK_MODELS (comma-separated).
     const _fallbacks = (process.env.KB_UNIFIED_FALLBACK_MODELS
       || 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b').split(',').map((x) => x.trim()).filter(Boolean);
-    const parsed = await chatCompletionWithFallback({
+    const parsed = await this.llmCompletion({
       // Dense sections emit up to 8 facts × (180-700 char claim + 40-900 char
       // source_quote + entities). 1800 tokens overflowed → finish=length →
       // truncated JSON → whole-section fact loss (~28% of calls). Give ample
@@ -2010,7 +2018,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // segments. Importance is query-dependent and cannot be known at ingest time.
     // Env override honoured only if someone deliberately sets it ABOVE 0.
     const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0);
-    return normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
+    return normalizeUnifiedClaims(rawFacts, sourceContent, factCap, minImportance);
   }
 
   async _recoverTruncatedUnified(window, options, error, depth = 0) {
@@ -2174,7 +2182,10 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         return best;
       } catch (error) {
         if (error?.code === 'LLM_JSON_TRUNCATED') {
-          return this._recoverTruncatedUnified(window, { ...options, maxFacts }, error);
+          // If a compact local projection truncates, retry recovery against the
+          // complete original window. Evidence quotes and offsets remain source-based.
+          return this._recoverTruncatedUnified({ ...window, extractionContent: null, sourceContent: null },
+            { ...options, maxFacts }, error);
         }
         lastError = error;
         if (attempt === attempts) throw error;
@@ -3623,6 +3634,19 @@ Every item must include a non-empty content field and one or more valid support_
         });
       }
     }
+    // Hm-understand is a local pass over the exact parser segments,
+    // after Core establishes tenant scope and before memory promotion. It is
+    // deliberately skipped for BYOD/remote tenants: parsed content must remain
+    // inside the customer's memory boundary. Analysis failures never fail an
+    // otherwise valid ingestion. Shadow stores metrics only; assisted mode may
+    // compact the existing LLM call's prompt, but never promotes local candidates
+    // or changes the original evidence.
+    const hmUnderstandRun = await this._runHmUnderstandShadow({
+      userId, orgId, documentId: knowledgeDoc.id, sourceRevision: checksum, filename, segments,
+      parseMetadata: knowledgeDoc.parseMetadata && typeof knowledgeDoc.parseMetadata === 'object'
+        ? knowledgeDoc.parseMetadata : (parseResult.metadata || {}),
+    });
+    const hmUnderstandAnalysis = hmUnderstandRun?.analysis || null;
     emit('segmented', 45, { segments: segments.length });
     let _msEmbed = 0;
     let _evEmbedCov = null; // P1b/P3: evidence-embed coverage {total,embedded,failed,healed}
@@ -5591,6 +5615,9 @@ Every item must include a non-empty content field and one or more valid support_
         // up-to-12 facts overshot the cap (observed: 47 facts with DOC_CAP=30). `budget` is only
         // mutated between awaits (single-threaded), so Σ granted ≤ DOC_CAP — the cap is hard.
         const _tExtract = Date.now();
+        let _assistedSourceChars = 0;
+        let _assistedPromptChars = 0;
+        let _assistedWindows = 0;
         // TWO SEPARATE CONCERNS, previously ONE VARIABLE — this is the seam, not a tuning knob.
         // DOC_CAP bounded the OUTPUT (how many facts a document may produce) and simultaneously gated
         // the INPUT (`while (wi < len && uBudget > 0)`), so when earlier windows spent it the tail of
@@ -5612,6 +5639,22 @@ Every item must include a non-empty content field and one or more valid support_
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
           while (wi < uWindows.length) {   // <- no budget term: every window is read
             const w = { ...uWindows[wi++] };
+            if (hmUnderstandAnalysis) {
+              const projection = projectHmUnderstandWindow(w, hmUnderstandAnalysis);
+              if (projection) {
+                w.extractionContent = projection.extractionContent;
+                w.sourceContent = projection.sourceContent;
+                w.hmUnderstandProjection = {
+                  source_chars: projection.sourceChars,
+                  extraction_chars: projection.extractionChars,
+                  savings_ratio: projection.savingsRatio,
+                  selected_sentences: projection.selectedSentences,
+                };
+                _assistedSourceChars += projection.sourceChars;
+                _assistedPromptChars += projection.extractionChars;
+                _assistedWindows += 1;
+              }
+            }
             const grant = Math.max(MIN_FACTS_PER_WINDOW,
               Math.min(w.maxFacts || 8, Math.max(0, factBudget)));
             factBudget -= grant;
@@ -5657,7 +5700,8 @@ Every item must include a non-empty content field and one or more valid support_
         // reported it: a truncated document and a thin document produced identical logs.
         ingestDiagnostic.info(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
           + `fact_budget_left=${factBudget} fact_cap=${FACT_CAP} chars=${_docChars} `
-          + `candidates=${extractedCandidates.length}`);
+          + `candidates=${extractedCandidates.length} assisted_windows=${_assistedWindows} `
+          + `assisted_chars=${_assistedSourceChars}->${_assistedPromptChars}`);
         // INVARIANT, not an expected outcome. Reading no longer depends on any budget, so this can
         // only fire if a future change reintroduces a gate on the read loop. Kept deliberately: the
         // original defect was silent, and the whole point is that it can never be silent again.

@@ -7,6 +7,27 @@ type RecallFlagEnv = FlagEnv & {
   RECALL_PARALLEL_RELIABILITY_ENABLED?: string;
 };
 
+type HmUnderstandFlagEnv = Pick<Env, 'FLAGS' | 'ENVIRONMENT'>;
+
+/** A dedicated default-off decision; unrelated memory/profile flags must not invoke analysis. */
+export async function evaluateHmUnderstandMode(
+  env: HmUnderstandFlagEnv, orgId: string, userId: string,
+): Promise<'off' | 'shadow' | 'assisted'> {
+  if (!validUuid(orgId) || !validUuid(userId)) return 'off';
+  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
+  try {
+    const details = await env.FLAGS.getStringDetails(
+      'hm_understand_v1', 'off',
+      { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT },
+    );
+    return details.value === 'shadow' || details.value === 'assisted' ? details.value : 'off';
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'hm_understand_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return 'off';
+  }
+}
+
 export async function evaluateRecallReliability(env: RecallFlagEnv, orgId: string, userId: string): Promise<boolean> {
   if (String(env.RECALL_PARALLEL_RELIABILITY_ENABLED) !== 'true' || !validUuid(orgId) || !validUuid(userId)) return false;
   if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return false;

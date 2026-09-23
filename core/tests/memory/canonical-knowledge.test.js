@@ -41,6 +41,51 @@ test('Cloudflare admission is tenant/user scoped and Queue payload remains ident
   }
 });
 
+test('hm-understand uses its own default-off Flagship route without canonical-memory env gates', async () => {
+  const prior = {
+    enabled: process.env.CANONICAL_KNOWLEDGE_ENABLED,
+    kill: process.env.CANONICAL_KNOWLEDGE_KILL_SWITCH,
+    url: process.env.CANONICAL_PROJECTION_WORKFLOW_URL,
+    secret: process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET,
+  };
+  delete process.env.CANONICAL_KNOWLEDGE_ENABLED;
+  delete process.env.CANONICAL_KNOWLEDGE_KILL_SWITCH;
+  process.env.CANONICAL_PROJECTION_WORKFLOW_URL = 'https://projection.test';
+  process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = 'secret';
+  let seen;
+  const client = new CloudflareCanonicalProjectionClient({ fetchImpl: async (url, init) => {
+    seen = { url, init };
+    return new Response(JSON.stringify({ mode: 'shadow' }), { status: 200 });
+  } });
+  try {
+    assert.equal(await client.hmUnderstandModeFor({ orgId: 'org-1', userId: 'user-1' }), 'shadow');
+    assert.equal(seen.url, 'https://projection.test/hm-understand-enabled?org_id=org-1&user_id=user-1');
+    assert.equal(seen.init.headers.authorization, 'Bearer secret');
+  } finally {
+    if (prior.enabled === undefined) delete process.env.CANONICAL_KNOWLEDGE_ENABLED; else process.env.CANONICAL_KNOWLEDGE_ENABLED = prior.enabled;
+    if (prior.kill === undefined) delete process.env.CANONICAL_KNOWLEDGE_KILL_SWITCH; else process.env.CANONICAL_KNOWLEDGE_KILL_SWITCH = prior.kill;
+    if (prior.url === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_URL; else process.env.CANONICAL_PROJECTION_WORKFLOW_URL = prior.url;
+    if (prior.secret === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET; else process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = prior.secret;
+  }
+});
+
+test('hm-understand client accepts assisted variation from the same Cloudflare flag', async () => {
+  const prior = { url: process.env.CANONICAL_PROJECTION_WORKFLOW_URL,
+    secret: process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET };
+  process.env.CANONICAL_PROJECTION_WORKFLOW_URL = 'https://projection.test';
+  process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = 'secret';
+  const client = new CloudflareCanonicalProjectionClient({ fetchImpl: async () =>
+    new Response(JSON.stringify({ mode: 'assisted' }), { status: 200 }) });
+  try {
+    assert.equal(await client.hmUnderstandModeFor({ orgId: 'org-1', userId: 'user-1' }), 'assisted');
+  } finally {
+    if (prior.url === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_URL;
+    else process.env.CANONICAL_PROJECTION_WORKFLOW_URL = prior.url;
+    if (prior.secret === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET;
+    else process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = prior.secret;
+  }
+});
+
 test('Uwe canary resolves bounded title pronoun and local tomorrow', () => {
   const result = prepareCanonicalProjection({
     title: 'Uwe Egly teaching deep learning', content: 'He started teaching deep learning from tomorrow.',

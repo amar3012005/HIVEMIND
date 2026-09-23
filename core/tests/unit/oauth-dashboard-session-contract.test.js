@@ -10,6 +10,11 @@ const controlPlaneSource = fs.readFileSync(path.resolve(here, '../../src/control
 
 test('remote MCP OAuth accepts the control-plane browser session on the SINGULANCE domain', () => {
   assert.match(coreSource, /HIVEMIND_CONTROL_PLANE_SESSION_SECRET/);
+  assert.match(coreSource, /resolveDashboardSessionViaControlPlane/);
+  assert.match(coreSource, /\/auth\/session/);
+  assert.match(coreSource, /needsOAuthSession/);
+  assert.match(controlPlaneSource, /pathname === '\/auth\/session'/);
+  assert.match(controlPlaneSource, /'Set-Cookie': makeSessionCookie\(current\.sessionId\)/);
   assert.match(controlPlaneSource, /function defaultSessionCookieDomain/);
   assert.match(controlPlaneSource, /host\.endsWith\('\.singulancelabs\.com'\).*return '\.singulancelabs\.com'/);
 });

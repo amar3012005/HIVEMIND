@@ -5903,6 +5903,27 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, await buildBootstrapPayload(user, req, current.session.orgId));
   }
 
+  // Reissue the authenticated browser session without loading the full
+  // bootstrap payload (which may provision a session API key). Remote MCP
+  // OAuth uses this just before returning from the branded login surface so
+  // legacy host-only cookies are upgraded to the configured shared domain.
+  if (pathname === '/auth/session' && req.method === 'GET') {
+    const current = await getCurrentSession(req);
+    if (!current?.session?.userId) {
+      return jsonResponse(res, { authenticated: false }, 401);
+    }
+    return jsonResponse(res, {
+      authenticated: true,
+      user: {
+        id: current.session.userId,
+        email: current.session.email || null,
+      },
+      organization: current.session.orgId ? { id: current.session.orgId } : null,
+    }, 200, {
+      'Set-Cookie': makeSessionCookie(current.sessionId),
+    });
+  }
+
   // Welcome email — fired by the frontend once the user lands on Overview after
   // a successful login. Recipient is ALWAYS the session user (never client-
   // supplied), so this can't be abused to send mail to arbitrary addresses.

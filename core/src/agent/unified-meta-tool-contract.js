@@ -10,17 +10,27 @@ const recallProperties = {
   valid_at: { type: 'string' },
   transaction_at: { type: 'string' },
   sort: { type: 'string', enum: ['score', 'date_asc', 'date_desc'] },
+  entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12,
+    description: 'Optional canonical entity IDs returned by the preceding tenant-scoped entities operation. Core re-authorizes them during recall.' },
+};
+
+const entityProperties = {
+  query: { type: 'string', description: 'One exact or partial named person, organization, product, project, document, or topic from the request. Do not add generic query words.' },
+  entity_types: { type: 'array', items: { type: 'string' }, maxItems: 8, description: 'Optional canonical entity type filters, only when the request states the type.' },
+  limit: { type: 'integer', minimum: 1, maximum: 25, description: 'Maximum canonical matches to return.' },
+  scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Optional scope only when explicitly requested; omit otherwise.' },
 };
 
 export const HIVEMIND_META_TOOL = Object.freeze({
   type: 'function',
   function: {
     name: 'hivemind_meta',
-    description: 'Authenticated HIVE-MIND gateway. Use context for fuller organization/profile context, recall for memory or document evidence, save only for a stable explicit fact or decision worth retaining, and profiles for the authenticated profile. Tenant and user identity are supplied by Core.',
+    description: 'Authenticated HIVE-MIND gateway. Use entities for a fast tenant-authorized canonical entity match, recall for stored memory/document evidence, context for user and organization profile, save for a source-grounded durable memory, and profiles for the authenticated profile/directory. Entity lookup is not evidence of broader biographical claims: when the user asks for history, pass matched entity_ids to recall. Tenant and user identity are supplied by Core.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['operation'],
       properties: {
-        operation: { type: 'string', enum: ['context', 'recall', 'save', 'profiles'] },
+        operation: { type: 'string', enum: ['context', 'entities', 'recall', 'save', 'profiles'] },
+        entity: { type: 'object', additionalProperties: false, properties: entityProperties, required: ['query'] },
         recall: { type: 'object', additionalProperties: false, properties: recallProperties, required: ['query'] },
         save: {
           type: 'object', additionalProperties: false, required: ['title', 'content'],

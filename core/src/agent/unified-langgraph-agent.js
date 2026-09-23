@@ -16,6 +16,7 @@ import {
   unifiedMetaTools,
 } from './unified-meta-tool-contract.js';
 import { decideRuntimeStage, decisionGatewayToolNames } from './decision-gateway-service.js';
+import { normalizeSearchableFollowUps } from './chat-synthesis-prompt.js';
 
 export const UNIFIED_META_HARNESS_VERSION = 'langgraph-meta-loop-v2';
 const MAX_STEPS = 12;
@@ -225,7 +226,7 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
     direct_answer: 'Answer directly from the supplied context. Do not call a tool.',
     hivemind_context: 'Call the HIVE meta tool exactly once with operation="context" to retrieve the authenticated compact profile and organization context. Do not perform a write. Ground the final answer only in that receipt.',
     hivemind_memory_lookup: 'Use the HIVE meta tool for recall with a concrete non-empty query derived from the request. Do not call recall with an omitted query and do not write memory.',
-    hivemind_entity_lookup: 'Use the HIVE meta tool to resolve the requested canonical entity before making any broader claim. Do not infer a relationship absent from the receipt.',
+    hivemind_entity_lookup: 'Call hivemind_meta once with operation="entities" and entity.query containing only the exact named subject from the request. This is a fast tenant-authorized canonical lookup, not a profile or memory summary. Report the returned match or a healthy no-match plainly. If the user also asks for history/details, use the returned entity IDs in hivemind_meta operation="recall" entity_ids and ground broader claims only in that recall receipt. Never invent aliases or relationships.',
     hivemind_hyperagent_directory: 'Use the HIVE meta tool only for authenticated HyperAgent directory/assignment information.',
     hivemind_request: 'Use the typed HIVE meta operation that best matches the request. Keep its arguments grounded in the request and receipts.',
     hivemind_meta: 'Use one read-only HIVE meta operation with complete typed arguments. Never use a blank recall query.',
@@ -264,7 +265,7 @@ function resultSources(receipts = []) {
   const visit = value => {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) return value.forEach(visit);
-    const title = value.title || value.source_title || value.filename || value.document_title;
+    const title = value.title || value.source_title || value.filename || value.document_title || value.canonical_name || value.canonicalName || value.name;
     const id = value.id || value.memory_id || value.document_id || null;
     if (title && !seen.has(`${id || ''}:${title}`)) {
       seen.add(`${id || ''}:${title}`);
@@ -277,6 +278,27 @@ function resultSources(receipts = []) {
   };
   receipts.filter(row => row.successful !== false).forEach(row => visit(row.data));
   return output.slice(0, 12);
+}
+
+function groundedFollowUps(state, response, status) {
+  if (status !== 'completed' || !compactText(response, 1200)) return [];
+  const intent = String(state?.plan?.intent || '');
+  // A mutation acknowledgement is a terminal outcome, not an invitation to
+  // invent another task. Compound read+write requests are likewise complete
+  // only after their governed write receipt and should not expose stale read
+  // suggestions as if they were the next action.
+  if (['hivemind_save', 'hivemind_profile_update', 'composio_action'].includes(intent)
+    || (state?.receipts || []).some(row => row?.successful !== false
+      && ['save', 'profile_update'].includes(String(row?.action || '')))) return [];
+  const readable = (state?.receipts || []).some(row => row?.successful !== false
+    && (substantiveMetaReadReceipt(row) || row?.action === 'execute'));
+  if (!readable) return [];
+  const sources = resultSources(state.receipts);
+  return normalizeSearchableFollowUps([], {
+    context: response,
+    sourceTitles: sources.map(source => source.title),
+    language: state?.context?.locale || 'en',
+  });
 }
 
 function substantiveProviderReceipt(receipt, primarySlugs = []) {
@@ -295,7 +317,7 @@ function substantiveProviderReceipt(receipt, primarySlugs = []) {
 
 function substantiveMetaReadReceipt(receipt) {
   if (!receipt || receipt.successful === false || receipt.tool !== 'hivemind_meta') return false;
-  if (!['context', 'profiles', 'recall'].includes(String(receipt.action || ''))) return false;
+  if (!['context', 'entities', 'profiles', 'recall'].includes(String(receipt.action || ''))) return false;
   const data = receipt.data;
   if (data == null) return false;
   if (typeof data !== 'object') return String(data).trim().length > 0;
@@ -396,6 +418,7 @@ function recallArgs(input = {}, ctx = {}) {
     ...(input.valid_at ? { valid_at: input.valid_at } : {}),
     ...(input.transaction_at ? { known_at: input.transaction_at } : {}),
     ...(input.sort ? { sort: input.sort } : {}),
+    ...(Array.isArray(input.entity_ids) && input.entity_ids.length ? { entity_ids: input.entity_ids.slice(0, 12) } : {}),
     ...(ctx.scopeFilter ? { scope_filter: ctx.scopeFilter } : {}),
   };
 }
@@ -405,6 +428,26 @@ async function defaultMetaExecutor(args, ctx) {
   if (operation === 'context' || operation === 'profiles') {
     const profile = await getSharedProfileStore(ctx.prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null);
     return { successful: true, data: { profile_context: compactText(profile, operation === 'context' ? 12000 : 4000) } };
+  }
+  if (operation === 'entities') {
+    const query = compactText(args?.entity?.query, 240);
+    if (!query) return { successful: false, error: 'hivemind_entity_query_required' };
+    const entityTypes = Array.isArray(args.entity.entity_types)
+      ? args.entity.entity_types.map(value => compactText(value, 80)).filter(Boolean).slice(0, 8) : [];
+    const result = await executeGovernedCoreRead('hivemind_find_entities', {
+      query,
+      entity_types: entityTypes,
+      limit: Math.max(1, Math.min(25, Number(args.entity.limit) || 12)),
+      ...(args.entity.scope ? { scope: args.entity.scope } : {}),
+    }, ctx);
+    // Preserve healthy zero-match versus unavailable index as distinct
+    // governed outcomes; callers must not describe a degraded search as none.
+    if (result?.successful === false) return result;
+    const data = result?.data || {};
+    return { ...result, data: {
+      matches: Array.isArray(data.matches) ? data.matches.slice(0, 25) : [],
+      degradation: data.degradation || null,
+    } };
   }
   if (operation === 'recall') {
     if (!compactText(args?.recall?.query, 1200)) {
@@ -777,7 +820,7 @@ function outputShape(state, response, status = 'completed') {
     },
     steps: state.steps, sources, citations: sources, draftIds: state.pendingApproval ? [state.pendingApproval.id] : [],
     pendingActions: state.pendingApproval ? [{ id: state.pendingApproval.id }] : [], inputRequests: [], resumeState: null,
-    followUps: [], usage: state.usage,
+    followUps: groundedFollowUps(state, response, status), usage: state.usage,
   };
 }
 

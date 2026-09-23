@@ -35,7 +35,7 @@ test('unified graph retains the existing SSE and final response fields consumed 
   assert.deepEqual(events.filter(event => event.type === 'agent_state').map(event => event.state), ['running', 'sealed']);
 });
 
-test('legacy chat exposes only the Jev-selected gateway and defers to the current surface on failure', async () => {
+test('legacy chat exposes only the Jev-selected gateway and stays constrained when Jev cannot decide', async () => {
   const prisma = { pendingWrite: {} };
   const surfaces = [];
   const common = {
@@ -64,7 +64,7 @@ test('legacy chat exposes only the Jev-selected gateway and defers to the curren
 
   assert.deepEqual(surfaces, [
     ['hivemind_connected_task'],
-    ['hivemind_meta', 'hivemind_connected_task'],
+    [],
   ]);
 });
 

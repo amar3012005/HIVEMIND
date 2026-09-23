@@ -3978,6 +3978,13 @@ function sanitizeHtml(value) {
   ));
 }
 
+function oauthBrandLogoUrl() {
+  const dashboardBase = process.env.HIVEMIND_FRONTEND_BASE_URL
+    || process.env.HIVEMIND_DASHBOARD_URL
+    || 'https://next.singulancelabs.com';
+  return sanitizeHtml(`${dashboardBase.replace(/\/$/, '')}/images/singulance-orbit.png`);
+}
+
 // Public remote-MCP OAuth must have its own server-rendered authentication
 // surface. Sending an unauthenticated connector through the dashboard SPA
 // creates a redirect loop when the dashboard session cannot yet be consumed
@@ -3987,6 +3994,7 @@ function sanitizeHtml(value) {
 // configured identity provider instead.
 function renderOAuthAuthenticationHtml({ client, loginUrl, requestedScopes }) {
   const clientName = sanitizeHtml(client?.client_name || 'your app');
+  const brandLogoUrl = oauthBrandLogoUrl();
   const scopeSummary = requestedScopes
     .map((scope) => `<span class="scope">${sanitizeHtml(scope)}</span>`)
     .join('');
@@ -3994,19 +4002,20 @@ function renderOAuthAuthenticationHtml({ client, loginUrl, requestedScopes }) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Verify your HIVEMIND account · ${clientName}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root{color-scheme:light;--ink:#0a0a0a;--muted:#686868;--line:#e3e0db;--blue:#117dff;--wash:#faf9f4}
-  *{box-sizing:border-box} html,body{min-height:100%;margin:0} body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(1000px 580px at 50% -120px,#edf5ff 0%,rgba(237,245,255,0) 60%),var(--wash);color:var(--ink);display:grid;place-items:center;padding:24px}
-  .card{width:min(100%,470px);background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:24px;padding:34px 32px 28px;box-shadow:0 28px 80px -34px rgba(26,45,80,.3),0 1px 0 rgba(255,255,255,.9) inset;animation:enter .32s ease-out both}
-  @keyframes enter{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-  .brand{display:flex;align-items:center;justify-content:center;gap:10px;padding-bottom:22px;border-bottom:1px solid var(--line);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:800;letter-spacing:.16em;font-size:13px}.mark{width:24px;height:24px;border-radius:9px;background:linear-gradient(135deg,#0b86ff,#8cd6ff);display:grid;place-items:center;color:white;font-family:Georgia,serif;font-size:18px;line-height:1}
-  .eyebrow{margin:27px 0 8px;color:#717171;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase}.connect{display:flex;align-items:center;gap:12px;margin:17px 0 20px}.app{width:45px;height:45px;border-radius:13px;display:grid;place-items:center;background:#f4f2ed;border:1px solid var(--line);font-size:20px;font-weight:750;color:#4b4740}.arrow{color:#9b9b9b;font-size:20px}.hm{width:45px;height:45px;border-radius:13px;display:grid;place-items:center;background:#edf5ff;border:1px solid #cfe4ff;color:#117dff;font-weight:800;font-size:18px}
-  h1{font-size:29px;letter-spacing:-.045em;line-height:1.08;margin:0 0 12px;font-weight:750}.copy{color:var(--muted);font-size:15px;line-height:1.58;margin:0}.scopes{margin:23px 0;border:1px solid var(--line);border-radius:14px;padding:15px;background:#fcfbf9}.label{font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;letter-spacing:.11em;color:#898681;text-transform:uppercase;margin-bottom:10px}.scope-list{display:flex;flex-wrap:wrap;gap:7px}.scope{border:1px solid #dce7f5;background:#fff;border-radius:99px;padding:5px 9px;color:#3d556f;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
-  .continue{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px 18px;border:0;border-radius:12px;color:white;background:linear-gradient(180deg,#2b8bff,#117dff);font:700 15px/1 Inter,ui-sans-serif,system-ui;cursor:pointer;text-decoration:none;box-shadow:0 12px 22px -12px rgba(17,125,255,.72)}.continue:hover{background:linear-gradient(180deg,#2385ff,#0870e9)}.security{margin:17px 0 0;color:#999;font-size:12px;line-height:1.5;text-align:center}.security strong{color:#65615a}.foot{margin-top:24px;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#aaa;font-size:10px;letter-spacing:.08em;text-transform:uppercase}@media(max-width:460px){body{padding:16px}.card{padding:28px 22px 24px}h1{font-size:26px}}
+  :root{color-scheme:light;--ink:#0a0a0a;--muted:#737373;--line:#e3e0db;--blue:#117dff;--wash:#faf9f4}
+  *{box-sizing:border-box}html,body{min-height:100%;margin:0}body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(rgba(17,125,255,.11) 1px,transparent 1px) 0 0/22px 22px,radial-gradient(620px 620px at -10% -12%,rgba(17,125,255,.06),transparent 64%),radial-gradient(620px 620px at 110% 112%,rgba(17,125,255,.06),transparent 64%),var(--wash);color:var(--ink);display:grid;place-items:center;padding:24px}
+  .card{width:min(100%,448px);background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:16px;padding:32px;box-shadow:0 28px 80px -34px rgba(26,45,80,.28),0 1px 0 rgba(255,255,255,.92) inset;animation:enter .32s ease-out both}@keyframes enter{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .brand{display:flex;align-items:center;gap:12px;padding-bottom:24px;border-bottom:1px solid var(--line)}.brand img{width:56px;height:40px;object-fit:contain}.brand-name{font-family:"Space Grotesk",Inter,sans-serif;font-size:20px;font-weight:700;letter-spacing:-.03em}.brand-sub{margin-top:3px;color:#a3a3a3;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;letter-spacing:.16em;text-transform:uppercase}
+  .eyebrow{margin:28px 0 9px;color:var(--blue);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:700;letter-spacing:.18em;text-transform:uppercase}.connect{display:flex;align-items:center;gap:10px;margin:17px 0 21px}.app,.hm{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;border:1px solid var(--line)}.app{background:#f6f5f1;font-family:"Space Grotesk",Inter,sans-serif;font-size:18px;font-weight:700;color:#4b4740}.arrow{color:#a3a3a3;font-size:20px}.hm{background:#edf5ff;border-color:#cfe4ff}.hm img{width:30px;height:24px;object-fit:contain}
+  h1{font-family:"Space Grotesk",Inter,sans-serif;font-size:27px;letter-spacing:-.04em;line-height:1.12;margin:0 0 10px;font-weight:600}.copy{color:var(--muted);font-size:14px;line-height:1.58;margin:0}.scopes{margin:22px 0;border:1px solid var(--line);border-radius:10px;padding:14px;background:#fcfbf9}.label{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;letter-spacing:.14em;color:#a3a3a3;text-transform:uppercase;margin-bottom:10px}.scope-list{display:flex;flex-wrap:wrap;gap:7px}.scope{border:1px solid #dce7f5;background:#fff;border-radius:8px;padding:5px 8px;color:#3d556f;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}
+  .continue{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px 18px;border:0;border-radius:8px;color:white;background:#117dff;font:700 15px/1 Inter,ui-sans-serif,system-ui;cursor:pointer;text-decoration:none;box-shadow:0 12px 22px -12px rgba(17,125,255,.72)}.continue:hover{background:#0870e9}.security{margin:16px 0 0;color:#999;font-size:12px;line-height:1.5;text-align:center}.security strong{color:#65615a}.foot{margin-top:22px;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#aaa;font-size:9px;letter-spacing:.12em;text-transform:uppercase}@media(max-width:460px){body{padding:16px}.card{padding:27px 22px}h1{font-size:25px}}
 </style></head><body><main class="card">
-  <div class="brand"><span class="mark">✦</span><span>HIVEMIND</span></div>
+  <div class="brand"><img src="${brandLogoUrl}" alt="Singulance"><div><div class="brand-name">SINGULANCE</div><div class="brand-sub">HIVEMIND · MEMORY ENGINE</div></div></div>
   <div class="eyebrow">Secure connection</div>
-  <div class="connect"><div class="app">${clientName.slice(0, 1).toUpperCase()}</div><span class="arrow">→</span><div class="hm">✦</div></div>
+  <div class="connect"><div class="app">${clientName.slice(0, 1).toUpperCase()}</div><span class="arrow">→</span><div class="hm"><img src="${brandLogoUrl}" alt="HIVEMIND"></div></div>
   <h1>Verify your account</h1>
   <p class="copy"><strong>${clientName}</strong> needs your consent to connect to your HIVEMIND memory and tools.</p>
   <section class="scopes"><div class="label">Requested access</div><div class="scope-list">${scopeSummary}</div></section>
@@ -6031,6 +6040,7 @@ exit \$RC
       </div>
     `).join('');
 
+    const brandLogoUrl = oauthBrandLogoUrl();
     const consentHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect ${sanitizeHtml(client.client_name)} · HIVEMIND</title>
@@ -6038,27 +6048,26 @@ exit \$RC
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
   *{box-sizing:border-box}
-  :root{--blue:#117dff;--blue-press:#0066e0;--ink:#0a0a0a;--muted:#6b7280;--line:#e9e6e0;--bg:#f6f5f1}
+  :root{--blue:#117dff;--blue-press:#0066e0;--ink:#0a0a0a;--muted:#737373;--line:#e3e0db;--bg:#faf9f4}
   html,body{margin:0}
   body{font-family:'Inter',system-ui,-apple-system,sans-serif;color:var(--ink);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:24px;
-    background:radial-gradient(1200px 600px at 50% -10%,#eef4ff 0%,rgba(238,244,255,0) 55%),linear-gradient(180deg,#faf9f5 0%,#f2f0ea 100%)}
-  .card{position:relative;background:rgba(255,255,255,.86);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
-    border:1px solid rgba(255,255,255,.7);border-radius:24px;padding:34px 32px 28px;max-width:440px;width:100%;
-    box-shadow:0 1px 0 rgba(255,255,255,.6) inset,0 30px 80px -20px rgba(17,38,80,.22),0 10px 30px -15px rgba(17,38,80,.18);
+    background:radial-gradient(rgba(17,125,255,.11) 1px,transparent 1px) 0 0/22px 22px,radial-gradient(620px 620px at -10% -12%,rgba(17,125,255,.06),transparent 64%),radial-gradient(620px 620px at 110% 112%,rgba(17,125,255,.06),transparent 64%),var(--bg)}
+  .card{position:relative;background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:16px;padding:32px;max-width:448px;width:100%;
+    box-shadow:0 1px 0 rgba(255,255,255,.9) inset,0 28px 80px -34px rgba(26,45,80,.28);
     animation:rise .45s cubic-bezier(.2,.7,.2,1) both}
   @keyframes rise{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
-  .brand{display:flex;flex-direction:column;align-items:center;text-align:center;gap:.5rem;padding-bottom:1.1rem;margin-bottom:1.3rem;border-bottom:1px solid var(--line)}
-  .brand img{width:64px;height:64px;border-radius:16px;object-fit:cover;box-shadow:0 8px 20px -8px rgba(17,38,80,.35)}
-  .brand-title{font-family:'Space Grotesk';font-size:.72rem;font-weight:700;letter-spacing:.26em;color:#8a8578;text-transform:uppercase}
+  .brand{display:flex;align-items:center;text-align:left;gap:12px;padding-bottom:24px;margin-bottom:25px;border-bottom:1px solid var(--line)}
+  .brand img{width:56px;height:40px;object-fit:contain}
+  .brand-title{font-family:'Space Grotesk';font-size:1.25rem;font-weight:700;letter-spacing:-.03em;color:var(--ink)}.brand-sub{margin-top:3px;color:#a3a3a3;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:9px;letter-spacing:.16em;text-transform:uppercase}
   .header{display:flex;align-items:center;justify-content:center;gap:1rem;margin-bottom:1.3rem}
   .app-icon,.hm-icon{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;overflow:hidden}
   .app-icon{background:#f0eee8;border:1px solid var(--line);font-family:'Space Grotesk';font-weight:700;color:#5b5650;font-size:1.25rem}
-  .hm-icon{background:#fff;border:1px solid var(--line)}
-  .hm-icon img{width:46px;height:46px;border-radius:11px;object-fit:cover}
+  .hm-icon{background:#edf5ff;border:1px solid #cfe4ff}
+  .hm-icon img{width:32px;height:26px;object-fit:contain}
   .sync{display:flex;flex-direction:column;align-items:center;color:var(--blue);font-size:1.05rem;line-height:1}
   .sync .pulse{width:6px;height:6px;border-radius:50%;background:var(--blue);margin-top:5px;animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{0%,100%{opacity:.25}50%{opacity:1}}
-  h1{font-family:'Space Grotesk';font-size:1.45rem;font-weight:700;margin:0 0 .35rem;letter-spacing:-.01em}
+  h1{font-family:'Space Grotesk';font-size:1.55rem;font-weight:600;margin:0 0 .35rem;letter-spacing:-.035em}
   .sub{font-size:.92rem;color:var(--muted);line-height:1.55;margin:0 0 1.5rem}
   .label{font-size:.7rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#9aa1ad;margin-bottom:.7rem}
   .tiers{display:flex;flex-direction:column;gap:.6rem;margin-bottom:1.5rem}
@@ -6074,7 +6083,7 @@ exit \$RC
   .tier:has(input:checked) .dot{border-color:var(--blue)}
   .tier:has(input:checked) .dot::after{transform:scale(1)}
   .tier:has(input:checked) .t-title{color:var(--blue)}
-  .scopes{border:1px solid var(--line);border-radius:16px;padding:1rem;background:linear-gradient(180deg,#fcfbf9,#fff);margin-bottom:1.6rem}
+  .scopes{border:1px solid var(--line);border-radius:10px;padding:1rem;background:#fcfbf9;margin-bottom:1.6rem}
   .scope-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
   .scope-chip{display:flex;align-items:center;gap:.5rem;padding:.5rem .65rem;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.78rem;color:#3f4654;transition:opacity .18s}
   .scope-chip svg{flex:0 0 auto}
@@ -6083,7 +6092,7 @@ exit \$RC
   .scope-note{display:none;margin-top:.75rem;font-size:.75rem;color:#8a8578;line-height:1.45}
   form:has(.tier input[value="default"]:checked) .scope-note{display:block}
   .actions{display:flex;gap:.7rem}
-  button{flex:1;padding:.9rem 1rem;border:none;border-radius:13px;font-family:inherit;font-size:.95rem;font-weight:600;cursor:pointer;transition:transform .12s,box-shadow .18s,background .18s}
+  button{flex:1;padding:.9rem 1rem;border:none;border-radius:8px;font-family:inherit;font-size:.95rem;font-weight:600;cursor:pointer;transition:transform .12s,box-shadow .18s,background .18s}
   button:active{transform:translateY(1px)}
   .approve{color:#fff;background:linear-gradient(180deg,#2b8bff,var(--blue));box-shadow:0 10px 20px -8px rgba(17,125,255,.6)}
   .approve:hover{background:linear-gradient(180deg,#1f82ff,var(--blue-press))}
@@ -6094,13 +6103,13 @@ exit \$RC
 </style></head><body>
 <div class="card">
   <div class="brand">
-    <img src="/oauth/logo.png" alt="HIVEMIND">
-    <div class="brand-title">HIVEMIND</div>
+    <img src="${brandLogoUrl}" alt="Singulance">
+    <div><div class="brand-title">SINGULANCE</div><div class="brand-sub">HIVEMIND · MEMORY ENGINE</div></div>
   </div>
   <div class="header">
     <div class="app-icon">${sanitizeHtml(client.client_name[0])}</div>
     <div class="sync">⇌<span class="pulse"></span></div>
-    <div class="hm-icon"><img src="/oauth/logo.png" alt="HIVEMIND"></div>
+    <div class="hm-icon"><img src="${brandLogoUrl}" alt="HIVEMIND"></div>
   </div>
   <h1>Connect ${sanitizeHtml(client.client_name)}</h1>
   <p class="sub">Authorize <strong>${sanitizeHtml(client.client_name)}</strong> to securely access your HIVEMIND account details and tools.</p>

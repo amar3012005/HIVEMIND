@@ -107,6 +107,23 @@ services:
     restart: unless-stopped
     networks: [hivemind-network]
 
+  # Existing stateless bytes-to-text extraction tier. It stays internal-only;
+  # Core applies its narrow, measured format allowlist and falls back to Docling.
+  hm-extract:
+    build:
+      context: ../hm-extract
+      dockerfile: Dockerfile
+    image: hivemind/hm-extract:singulance-local
+    container_name: hivemind-hm-extract
+    environment:
+      UV_THREADPOOL_SIZE: 8
+      PORT: 8088
+    mem_limit: 4g
+    restart: unless-stopped
+    networks:
+      hivemind-network:
+        aliases: [hm-extract]
+
   # Independent local-only analysis service. Core owns authorization, entity
   # resolution, persistence, and the sole Flagship rollout decision.
   hm-understand-v1:
@@ -192,6 +209,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       DOCLING_URL: http://docling:5001
+      KB_EXTRACT_URL: http://hm-extract:8088
       # Endpoint wiring only; hm_understand_v1 Flagship remains the sole gate.
       HM_UNDERSTAND_URL: http://hm-understand-v1:8090
       NANGO_URL: http://nango:8080

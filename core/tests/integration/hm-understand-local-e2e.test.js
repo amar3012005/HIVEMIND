@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 const serviceUrl = process.env.HM_UNDERSTAND_URL;
 const parserUrl = process.env.DOCLING_URL;
+const extractUrl = process.env.KB_EXTRACT_URL;
 
 const assistedTestText = 'Project Atlas is an internal launch program. '
   + 'The board approved a EUR 12000 budget for Project Atlas on 22 September 2026. '
@@ -121,6 +122,55 @@ test('local PDF/CSV parsing flows through Core ingestion hook to hm-understand s
   assert.equal(persisted.includes('"persisted_content":false'), true);
 });
 
+test('local RTF parsing through hm-extract reaches hm-understand with evidence intact', {
+  skip: (!serviceUrl || !extractUrl) && 'set HM_UNDERSTAND_URL and KB_EXTRACT_URL for the local parser chain',
+}, async () => {
+  const [{ parseWithHmExtract }, { HmUnderstandAdapter, createHmUnderstandShadowAnalyzer },
+    { runHmUnderstandShadow }] = await Promise.all([
+    import('../../src/knowledge/enterprise/hm-extract-adapter.js'),
+    import('../../src/knowledge/enterprise/hm-understand-adapter.js'),
+    import('../../src/knowledge/enterprise/hm-understand-shadow.js'),
+  ]);
+  const sourceText = 'On 22 September 2026, Rama approved a EUR 12000 budget for Project Atlas.';
+  const parsed = await parseWithHmExtract(Buffer.from(String.raw`{\rtf1\ansi ${sourceText}}`), 'synthetic.rtf');
+  assert.equal(parsed.ok, true);
+  assert.match(parsed.text, /Rama/);
+  assert.match(parsed.text, /12000/);
+
+  const adapter = new HmUnderstandAdapter({ baseUrl: serviceUrl, timeoutMs: 30_000, logger: { warn() {} } });
+  let observed;
+  const shadowAnalyzer = createHmUnderstandShadowAnalyzer({
+    flagClient: { hmUnderstandModeFor: async () => 'shadow' }, adapter, logger: { warn() {} },
+  });
+  const analyzer = async (input) => {
+    observed = await shadowAnalyzer(input);
+    return observed;
+  };
+  const writes = [];
+  const run = await runHmUnderstandShadow({
+    analyzer,
+    db: { knowledgeDocument: { updateMany: async (query) => writes.push(query) } },
+    logger: { info() {}, warn() {} },
+    userId: 'synthetic-user', orgId: 'synthetic-org', documentId: 'synthetic-rtf',
+    sourceRevision: 'fixture-v1', filename: 'synthetic.rtf',
+    segments: [{ id: 'rtf-segment-1', content: parsed.text, startPage: 1, segmentIndex: 0,
+      metadata: { language: 'en', heading_path: ['Budget'] } }],
+  });
+
+  assert.equal(run.receipt.status, 'complete');
+  assert.equal(run.analysis, null, 'shadow mode must not return candidate text to persistence');
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].where, {
+    id: 'synthetic-rtf', userId: 'synthetic-user', orgId: 'synthetic-org',
+  });
+  const block = observed.result.blocks[0];
+  assert.ok(block.mentions.some((mention) => mention.text === 'Rama'));
+  assert.ok(block.candidates.some((candidate) => candidate.kind === 'decision'));
+  assert.ok(block.mentions.every((mention) => parsed.text.slice(mention.evidence.start, mention.evidence.end)
+    === mention.evidence.quote));
+  assert.equal(JSON.stringify(writes[0].data).includes('Rama'), false);
+});
+
 test('assisted prompt projection uses local exact evidence and keeps original offsets', {
   skip: !serviceUrl && 'set HM_UNDERSTAND_URL to run the local assisted projection integration',
 }, async () => {
@@ -139,4 +189,61 @@ test('assisted prompt projection uses local exact evidence and keeps original of
   assert.match(projection.extractionContent, /EUR 12000/);
   assert.equal(projection.extractionContent.includes('background paragraph'), false);
   assert.ok(projection.sourceChars > projection.extractionChars);
+});
+
+test('real gateway token comparison verifies compact input saves prompt tokens', {
+  skip: process.env.HM_UNDERSTAND_REAL_LLM_E2E !== 'true'
+    && 'set HM_UNDERSTAND_REAL_LLM_E2E=true to make two synthetic provider calls',
+}, async () => {
+  assert.ok(serviceUrl, 'HM_UNDERSTAND_URL must point to the local analyzer');
+  const [{ HmUnderstandAdapter }, { projectHmUnderstandWindow }, { DocumentFirstIngestionService },
+    { chatCompletionWithFallback }] = await Promise.all([
+    import('../../src/knowledge/enterprise/hm-understand-adapter.js'),
+    import('../../src/knowledge/enterprise/hm-understand-assisted.js'),
+    import('../../src/knowledge/document-first-ingestion.js'),
+    import('../../src/knowledge/enterprise/litellm-client.js'),
+  ]);
+  const analysis = await new HmUnderstandAdapter({ baseUrl: serviceUrl, timeoutMs: 30_000 })
+    .analyze({ source: { id: 'synthetic-token-eval', revision: 'v1' },
+      blocks: [{ id: 'block-1', text: assistedTestText, language: 'en' }] });
+  assert.equal(analysis.ok, true);
+  const projection = projectHmUnderstandWindow({ content: assistedTestText }, analysis.result);
+  assert.ok(projection, 'synthetic fixture must meet the guarded compact-input criteria');
+
+  const service = new DocumentFirstIngestionService({
+    db: null, smartIngestRouter: null, memoryGraphEngine: null, doclingAdapter: null, embeddingService: null,
+    // Fix one model and bypass model-policy DB lookup; the gateway still follows
+    // this local Core environment's configured Cloudflare route.
+    llmCompletion: (request) => chatCompletionWithFallback({
+      ...request, models: [request.models[0]], honorModelPolicy: false,
+    }),
+    logger: { info() {}, warn() {} },
+  });
+  const measure = async (content, extractionContent = null) => {
+    const usage = [];
+    const claims = await service._extractUnified({
+      content, sourceContent: assistedTestText, extractionContent,
+      onUsage: (receipt) => usage.push(receipt),
+    }, { maxFacts: 3 });
+    return { usage, claims };
+  };
+  const baseline = await measure(assistedTestText);
+  const compact = await measure(assistedTestText, projection.extractionContent);
+  assert.equal(baseline.usage.length, 1, 'baseline provider must report token usage');
+  assert.equal(compact.usage.length, 1, 'compact provider must report token usage');
+  assert.equal(compact.usage[0].model, baseline.usage[0].model, 'compare the same served model');
+  assert.ok(baseline.usage[0].prompt_tokens > 0);
+  assert.ok(compact.usage[0].prompt_tokens < baseline.usage[0].prompt_tokens,
+    `compact prompt tokens (${compact.usage[0].prompt_tokens}) must be below baseline (${baseline.usage[0].prompt_tokens})`);
+  assert.ok(compact.claims.every((claim) => assistedTestText.includes(claim.source_quote)),
+    'all compact-path output evidence must still cite the original source');
+  console.log(JSON.stringify({
+    model: compact.usage[0].model,
+    provider: compact.usage[0].provider,
+    baseline_prompt_tokens: baseline.usage[0].prompt_tokens,
+    compact_prompt_tokens: compact.usage[0].prompt_tokens,
+    observed_prompt_token_savings: baseline.usage[0].prompt_tokens - compact.usage[0].prompt_tokens,
+    output_claims: compact.claims.length,
+    content: 'synthetic fixture only',
+  }));
 });

@@ -104,6 +104,16 @@ def test_capitalization_fallback_avoids_sentence_initial_common_words():
     assert "Budget" not in candidates
 
 
+def test_currency_code_is_not_a_proper_name_candidate():
+    from app.extractors import extract_literals
+    text = "Rama approved a EUR 12000 budget for Project Atlas."
+    candidates = [item["text"] for item in extract_literals(text)
+                  if item["label"] == "proper_name_candidate"]
+    assert "Rama" not in candidates
+    assert "EUR" not in candidates
+    assert "Project Atlas" in candidates
+
+
 def test_hash_is_stable_for_same_source_content():
     import app.pipeline as pipeline
     pipeline.model_status = lambda: {"loaded": False}

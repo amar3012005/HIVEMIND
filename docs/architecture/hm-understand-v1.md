@@ -81,12 +81,13 @@ are persisted. No second refinement LLM call runs in either mode. Remote/BYOD or
 skipped to preserve data residency. An unavailable analyzer degrades without failing ingestion.
 
 The adapter, feature decision, bounded receipt, and ingestion seam are covered by focused Core unit
-tests. A disposable Core runner against the local Docling service and a separately tagged candidate
-`hm-understand` image passed a synthetic PDF+CSV parser → Core hook → analysis → shadow-receipt E2E;
-the DB was stubbed, so this is not an authenticated user
-upload or a real memory write. The shared local preview Core and original `hivemind-hm-understand`
-container were not replaced. Do not use the shared service's `/analyze` endpoint as evidence of a
-complete HIVE ingestion.
+tests. A disposable Core runner against the local Docling and `hm-extract` services passed both
+synthetic PDF+CSV and RTF parser → Core adapter/hook → analysis → shadow-receipt checks. The RTF
+case proves the configured `hm-extract` adapter can hand parsed content into the same analyzer;
+the PDF/CSV case proves the existing Docling path still works. These checks use a stub DB, so they
+are not authenticated user uploads or real memory writes. The shared local preview Core and original
+`hivemind-hm-understand` container were not replaced. Do not use either parser endpoint by itself as
+evidence of a complete HIVE ingestion.
 
 To test actual synthetic PDF and CSV parsing plus the changed Core hook without replacing that
 preview, build a separately tagged local Core image and run only the integration test in a
@@ -105,23 +106,40 @@ docker run --rm --network hivemind-network \
 
 This checks Docling file parsing, Core adapter, tenant-scoped receipt persistence contract, and
 service discovery. It deliberately uses a DB stub and does not claim to test an authenticated
-upload or real DB write; hm-extract is not currently present in the running local Compose stack.
+upload or real DB write. The separate RTF test uses `KB_EXTRACT_URL` and exercises the local
+`hm-extract` parser before calling the analyzer.
 
-For the `singulance-local` preview stack, `infra/docker-compose.hivemind-chat.yml` now defines
-the independent `hm-understand-v1` service, reuses the already-cached model volume read-only, and
-sets Core's internal `HM_UNDERSTAND_URL=http://hm-understand-v1:8090`. The service has no published
-host port. Start only the analyzer with the existing local secrets file (this does not recreate
-Core or any dependency):
+For the `singulance-local` preview stack, `infra/docker-compose.hivemind-chat.yml` defines the
+independent `hm-understand-v1` and `hm-extract` services, reuses the cached analyzer model volume
+read-only, and sets Core's internal `HM_UNDERSTAND_URL` and `KB_EXTRACT_URL` service addresses.
+Neither service publishes a host port. Start only these services with the existing local secrets
+file (this does not recreate Core or any dependency):
 
 ```bash
 docker compose -f infra/docker-compose.hivemind-chat.yml \
-  --env-file /path/to/infra/.env.hivemind-chat.local up -d --no-deps hm-understand-v1
+  --env-file /path/to/infra/.env.hivemind-chat.local up -d --no-deps hm-extract hm-understand-v1
 ```
 
-This endpoint is wiring, not an enable flag; the single tenant-scoped `hm_understand_v1` Flagship
-decision remains authoritative. Run the annotated smoke corpus with
+The candidate services are running and healthy locally, but the shared `hivemind-core` container
+still runs its prior immutable image; it has not loaded this branch's integration. Recreate Core
+only after a separately reviewed local Core artifact and rollback identity are ready. The analyzer
+URL is wiring, not an enable flag; the single tenant-scoped `hm_understand_v1` Flagship decision
+remains authoritative. Run the annotated smoke corpus with
 `uv run --project hm-understand --python 3.11 python hm-understand/eval/run.py`; its small scores
 are diagnostic examples, not representative quality estimates.
+
+The opt-in real-provider token comparison test is present, but no token-savings result is established:
+the default custom-provider route returned a Gateway 502, and the explicitly selected OpenRouter
+Gateway route exceeded Core's extraction budget before usage was returned. Do not claim token savings
+until a comparable baseline/assisted run produces provider usage receipts.
+
+The real-format golden corpus passed 19/19 focused parser/provenance checks against the running
+`hm-extract` service, including independent recall scores for PDF, PPTX, DOCX, and XLSX fixtures.
+The separate 70 MB CSV stress case caused the 4 GiB service container to be OOM-killed once while
+the shared Docker VM was under load; Docker restarted the service and the small-file golden suite
+passed when rerun separately. This is a resource-capacity failure, not a parser-correctness pass:
+do not claim large-file resilience on this local stack until the large fixture passes in a reserved
+memory environment and the service's memory admission policy is proven against that budget.
 
 ## Evaluation and rollout
 

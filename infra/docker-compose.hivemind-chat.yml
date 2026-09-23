@@ -107,6 +107,33 @@ services:
     restart: unless-stopped
     networks: [hivemind-network]
 
+  # Independent local-only analysis service. Core owns authorization, entity
+  # resolution, persistence, and the sole Flagship rollout decision.
+  hm-understand-v1:
+    build:
+      context: ../hm-understand
+      dockerfile: Dockerfile
+    image: hivemind/hm-understand:singulance-local
+    container_name: hivemind-hm-understand-v1
+    environment:
+      HF_HOME: /opt/models/huggingface
+      HM_UNDERSTAND_MODEL_ID: gliner-community/gliner_small-v2.5
+      HM_UNDERSTAND_MODEL_REVISION: f227d3cd637bd4e6757ae143935316d062393341
+    volumes:
+      - hm-understand-models:/opt/models:ro
+    mem_limit: 3g
+    cpus: 4
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    restart: unless-stopped
+    networks:
+      hivemind-network:
+        aliases: [hm-understand-v1]
+
   nango:
     <<: *env-file
     image: nangohq/nango-server:hosted
@@ -165,6 +192,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       DOCLING_URL: http://docling:5001
+      # Endpoint wiring only; hm_understand_v1 Flagship remains the sole gate.
+      HM_UNDERSTAND_URL: http://hm-understand-v1:8090
       NANGO_URL: http://nango:8080
       NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-https://nango-preview.singulancelabs.com}
       HIVEMIND_PLAYWRIGHT_CRAWL_URL: http://playwright:8932/v1/crawl
@@ -457,4 +486,7 @@ volumes:
     external: true
   hivemind-redis-data:
     name: hivemind-redis-data
+    external: true
+  hm-understand-models:
+    name: infra_hm-understand-models
     external: true

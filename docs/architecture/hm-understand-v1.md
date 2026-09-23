@@ -26,8 +26,8 @@ statements with evidence offsets. It has no tenant identity, database credential
 
 ## Local preview
 
-The local overlay attaches only `hm-understand` to the already-running `hivemind-network` and
-publishes port 8090 only on loopback:
+The standalone analyzer can be run independently on the existing Docker network and publishes
+port 8090 only on loopback:
 
 ```bash
 docker compose -f infra/compose.hm-understand.local.yml up -d --build
@@ -94,8 +94,8 @@ disposable container on `hivemind-network`:
 ```bash
 docker build --target development -f core/Dockerfile.dev -t hivemind/hm-core-understand-test:local .
 docker run --rm --network hivemind-network \
-  -e HM_UNDERSTAND_URL=http://hm-understand:8090 \
-  -e DOCLING_URL=http://docling:5001 \
+  -e HM_UNDERSTAND_URL=http://hm-understand-v1:8090 \
+  -e DOCLING_URL=http://hivemind-docling:5001 \
   -e 'DATABASE_URL=postgresql://hivemind:localtest@127.0.0.1:5432/test?schema=hivemind' \
   -e MNEME_AGENT_REGISTRY_FILE=/nonexistent \
   hivemind/hm-core-understand-test:local \
@@ -106,9 +106,19 @@ This checks Docling file parsing, Core adapter, tenant-scoped receipt persistenc
 service discovery. It deliberately uses a DB stub and does not claim to test an authenticated
 upload or real DB write; hm-extract is not currently present in the running local Compose stack.
 
-Local preview wiring sets `HM_UNDERSTAND_URL=http://hm-understand:8090` as an internal service
-address, not an enable flag. The Compose overlay attaches the standalone service to the existing
-`hivemind-network` and publishes only loopback port 8090. Run the annotated smoke corpus with
+For the `singulance-local` preview stack, `infra/docker-compose.hivemind-chat.yml` now defines
+the independent `hm-understand-v1` service, reuses the already-cached model volume read-only, and
+sets Core's internal `HM_UNDERSTAND_URL=http://hm-understand-v1:8090`. The service has no published
+host port. Start only the analyzer with the existing local secrets file (this does not recreate
+Core or any dependency):
+
+```bash
+docker compose -f infra/docker-compose.hivemind-chat.yml \
+  --env-file /path/to/infra/.env.hivemind-chat.local up -d --no-deps hm-understand-v1
+```
+
+This endpoint is wiring, not an enable flag; the single tenant-scoped `hm_understand_v1` Flagship
+decision remains authoritative. Run the annotated smoke corpus with
 `uv run --project hm-understand --python 3.11 python hm-understand/eval/run.py`; its small scores
 are diagnostic examples, not representative quality estimates.
 

@@ -511,6 +511,32 @@ test('a deferred JEV plan persists and renders its safe fallback diagnostic', as
   assert.deepEqual(decision.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
 });
 
+test('an uncertain plan cannot imply or initiate a memory save for a casual personal preference', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let receivedMessages = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'I love to watch Messi play.', useTools: false, prisma,
+    ctx: ctx(prisma, 'uncertain-messi-preference'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async () => ({
+      status: 'defer', selected: null, authoritative: false,
+      receipt: { source: 'fallback', reason: 'decision_probability_below_threshold', diagnostics: { choice: 'hivemind_save', probability: 0.58, margin: 0.08 } },
+    }),
+    modelStep: async ({ tools, messages }) => {
+      assert.deepEqual(tools, []);
+      receivedMessages = messages;
+      return { message: { role: 'assistant', content: 'Messi is fun to watch. What do you enjoy most about his game?' } };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.match(result.response, /what do you enjoy most/i);
+  const fallbackInstruction = receivedMessages.find(row => row.role === 'system' && row.content.includes('Selected executor intent: fallback_harness'))?.content || '';
+  assert.match(fallbackInstruction, /do not call tools.*offer to save.*choose a memory scope/i);
+  assert.match(fallbackInstruction, /respond naturally/i);
+  assert.equal(events.some(event => event.type === 'tool_start' && /hivemind_(?:meta|save_memory)/.test(event.name || '')), false);
+});
+
 test('a JEV multi-task plan completes HIVE retrieval before its dependent memory save', async () => {
   const prisma = fakePrisma();
   const operations = [];

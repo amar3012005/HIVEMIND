@@ -368,6 +368,8 @@ test('an authoritative JEV direct-answer decision streams without buffered re-pl
     finalStream: async ({ messages, onDelta }) => {
       assert.equal(messages.at(-1).role, 'system');
       assert.match(messages.at(-1).content, /Answer directly from the supplied context/);
+      assert.match(messages[0].content, /trusted colleague/i);
+      assert.match(messages[0].content, /generic capability menu/i);
       await onDelta('I am ');
       await onDelta('HIVE-MIND.');
       return { ok: true, content: 'I am HIVE-MIND.', usage: { total_tokens: 4 } };

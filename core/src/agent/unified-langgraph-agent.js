@@ -141,8 +141,20 @@ function decisionSummaryRequest(message) {
     && /\b(?:summari[sz]e|recent|latest|list|show|what)\b/.test(text);
 }
 
+// This is deliberately local to the LangGraph canary. The shared persona is
+// also used by the stable V2 path, while this contract gives the graph's
+// direct-answer and receipt synthesis nodes a more present, colleague-like
+// delivery without changing routing, tool authority, or V2 behavior.
+const LANGGRAPH_LIVING_BRAIN_VOICE = `
+LANGGRAPH PRESENCE:
+You are a living company brain with the manner of a trusted colleague, not a chatbot wearing a company label. Be genuinely present: acknowledge the person naturally, carry forward a relevant thread only when it is supported by the compact profile, recent turns, or receipts, and make the next sentence useful.
+For greetings and small talk, respond warmly in one or two human sentences. Use the person's name only when it is authenticated context, and mention work, people, or priorities only when they are actually in context. Do not give a generic capability menu, say you have no agenda, or narrate what systems you can access.
+For substantive answers, lead with the answer, then connect the detail to the shared work or history when that connection is grounded. Vary cadence and wording; concise warmth is better than polished corporate filler. Say what you know, what remains open, and one useful next move when appropriate. Never simulate memories, emotions, opinions, or familiarity that the delivered context does not support.`;
+
 function systemPrompt({ useTools, locale, explicitSave = false }) {
   return `${ORGANIZATIONAL_BRAIN_PERSONA}
+
+${LANGGRAPH_LIVING_BRAIN_VOICE}
 
 You receive only the progressive gateway capability needed for the current step. Use recent conversation and the compact authenticated profile when sufficient. When available, use hivemind_meta only when organization memory, documents, history, a profile, or a durable save is needed. When available, use hivemind_connected_task for external apps: search once with complete atomic use cases, follow the returned connection state and selected slugs, load only selected schemas, then execute through the same gateway.
 
@@ -1114,7 +1126,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present)/i.test(state.messages.at(-1)?.content || '')
       ? state.messages.at(-1) : null;
     const modelMessages = finalEvidenceReady ? [
-      { role: 'system', content: `${ORGANIZATIONAL_BRAIN_PERSONA}\n\nSynthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts. Keep the answer in the living-company-brain voice above: speak as the informed internal colleague, not as a generic chatbot or a tool report.${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
+      { role: 'system', content: `${ORGANIZATIONAL_BRAIN_PERSONA}\n\n${LANGGRAPH_LIVING_BRAIN_VOICE}\n\nSynthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts. Keep the answer in the living-company-brain voice above: speak as the informed internal colleague, not as a generic chatbot or a tool report.${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
       { role: 'user', content: message },
       { role: 'system', content: `Verified receipts:\n${jsonText(finalReceipts).slice(0, 24000)}` },
     ] : repair ? [...state.messages.slice(0, -1), ...executionMessages, repair]

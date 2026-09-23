@@ -349,6 +349,7 @@ test('the in-graph plan node calls JEV once and reuses its typed decision for th
   assert.deepEqual(seenTools, [[]]);
   assert.deepEqual(result.run.scratch.plan, {
     intent: 'direct_answer', source: 'jev', authoritative: true, probability: 0.98, margin: 0.94,
+    reason: null, diagnostics: null,
   });
   assert.ok(events.some(event => event.type === 'decision' && event.stage === 'capability'
     && event.selected === 'direct_answer' && event.source === 'jev'));
@@ -379,6 +380,29 @@ test('an authoritative JEV direct-answer decision streams without buffered re-pl
   assert.equal(result.response, 'I am HIVE-MIND.');
   assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['I am ', 'HIVE-MIND.']);
   assert.equal(result.run.scratch.plan.intent, 'direct_answer');
+});
+
+test('a deferred JEV plan persists and renders its safe fallback diagnostic', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about me?', useTools: false, prisma, ctx: ctx(prisma, 'fallback-diagnostic'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async () => ({
+      status: 'defer', selected: null, authoritative: false,
+      receipt: { source: 'fallback', reason: 'decision_probability_below_threshold', diagnostics: { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 } },
+    }),
+    modelStep: async ({ tools }) => {
+      assert.deepEqual(tools, []);
+      return { message: { role: 'assistant', content: 'I need a clearer route.' } };
+    },
+  });
+  assert.equal(result.run.scratch.plan.reason, 'decision_probability_below_threshold');
+  assert.deepEqual(result.run.scratch.plan.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
+  const decision = events.find(event => event.type === 'decision' && event.stage === 'capability');
+  assert.equal(decision.selected, null);
+  assert.equal(decision.reason, 'decision_probability_below_threshold');
+  assert.deepEqual(decision.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
 });
 
 test('a JEV multi-task plan completes HIVE retrieval before its dependent memory save', async () => {

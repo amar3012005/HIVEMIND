@@ -148,6 +148,28 @@ test('explicit operational app intent remains evidence for the initial JEV decis
   assert.equal(calls, 1);
 });
 
+test('profile identity intent gives JEV an explicit context versus memory boundary', async () => {
+  let captured;
+  const gateway = new DecisionGateway({ provider: {
+    async decideChoice({ state, options, instructions }) {
+      captured = { state, options, instructions };
+      return { choice: 'hivemind_context', probability: 0.99, margin: 0.98 };
+    },
+  } });
+  const result = await chooseCapability({
+    gateway,
+    turn: createDecisionTurnState('profile-context'),
+    userQuery: 'What do you know about me?',
+    context: { profile: 'Name: Aster Helius; organization: SINGULANCE.' },
+    fallback: async ({ reason }) => ({ source: 'fallback', choice: 'fallback_harness', reason }),
+  });
+  assert.equal(result.choice, 'hivemind_context');
+  assert.equal(captured.state.context.planning_hints.authenticated_profile_available, true);
+  assert.match(captured.options.find(option => option.id === 'hivemind_context').criteria, /what do you know about me/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /generic identity.profile question/i);
+  assert.match(captured.instructions, /hivemind_context/i);
+});
+
 test('explicit HIVE save intent remains evidence for the initial JEV decision', async () => {
   let calls = 0;
   const gateway = new DecisionGateway({ provider: { async decideChoice() { calls += 1; throw new Error('provider_unavailable'); } } });

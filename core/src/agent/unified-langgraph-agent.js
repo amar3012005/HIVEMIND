@@ -72,6 +72,20 @@ const compactText = (value, limit = 1800) => String(value ?? '').replace(/\s+/g,
 const markdownText = (value, limit = 24000) => String(value ?? '').trim().slice(0, limit);
 const jsonText = value => JSON.stringify(value ?? null);
 
+// Diagnostics explain why a typed decision did not become authoritative.
+// Persist only calibrated routing metadata, never provider bodies, credentials,
+// prompts, or raw conversation/tool payloads.
+function decisionDiagnosticSummary(receipt = null) {
+  const diagnostic = receipt?.diagnostics;
+  if (!diagnostic || typeof diagnostic !== 'object') return null;
+  const summary = {
+    ...(diagnostic.choice ? { choice: compactText(diagnostic.choice, 160) } : {}),
+    ...(Number.isFinite(Number(diagnostic.probability)) ? { probability: Number(diagnostic.probability) } : {}),
+    ...(Number.isFinite(Number(diagnostic.margin)) ? { margin: Number(diagnostic.margin) } : {}),
+  };
+  return Object.keys(summary).length ? summary : null;
+}
+
 function localized(locale, key, toolkit = '') {
   const language = String(locale || 'en').toLowerCase().split(/[-_]/)[0];
   const messages = {
@@ -709,6 +723,8 @@ function outputShape(state, response, status = 'completed') {
           authoritative: state.plan.authoritative,
           probability: state.plan.probability,
           margin: state.plan.margin,
+          reason: state.plan.reason || null,
+          diagnostics: state.plan.diagnostics || null,
         } : null,
         workflow_transition: state.workflowTransition ? {
           intent: state.workflowTransition.intent,
@@ -716,6 +732,7 @@ function outputShape(state, response, status = 'completed') {
           authoritative: state.workflowTransition.authoritative,
           probability: state.workflowTransition.probability,
           margin: state.workflowTransition.margin,
+          reason: state.workflowTransition.reason || null,
           receipt_count: state.workflowTransition.receipt_count,
         } : null,
         timings: state.timings,
@@ -906,6 +923,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
             authoritative: (patch.plan || state.plan).authoritative,
             probability: (patch.plan || state.plan).probability,
             margin: (patch.plan || state.plan).margin,
+            reason: (patch.plan || state.plan).reason || null,
+            diagnostics: (patch.plan || state.plan).diagnostics || null,
           } : null,
           workflow_transition: (patch.workflowTransition || state.workflowTransition) ? {
             intent: (patch.workflowTransition || state.workflowTransition).intent,
@@ -913,6 +932,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
             authoritative: (patch.workflowTransition || state.workflowTransition).authoritative,
             probability: (patch.workflowTransition || state.workflowTransition).probability,
             margin: (patch.workflowTransition || state.workflowTransition).margin,
+            reason: (patch.workflowTransition || state.workflowTransition).reason || null,
             receipt_count: (patch.workflowTransition || state.workflowTransition).receipt_count,
           } : null,
           timings: patch.timings || state.timings || {},
@@ -921,6 +941,32 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     }
     onEvent({ ...safeEventEnvelope({ event: appended.event, runId: state.runId, state: status, sequence }), type: 'agent_state', state: status });
     return { ...patch, status, eventSequence: sequence };
+  };
+
+  const recordDecision = async (state, detail) => {
+    const sequence = Number(state.eventSequence || 0) + 1;
+    const appended = await ledger.append({
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      runId: state.runId,
+      sequence,
+      type: 'decision',
+      payload: {
+        stage: detail.stage || null,
+        selected: detail.selected || null,
+        source: detail.source || 'fallback',
+        authoritative: detail.authoritative === true,
+        probability: Number.isFinite(Number(detail.probability)) ? Number(detail.probability) : null,
+        margin: Number.isFinite(Number(detail.margin)) ? Number(detail.margin) : null,
+        reason: detail.reason || null,
+        diagnostics: detail.diagnostics || null,
+      },
+    });
+    emitDecision({
+      ...safeEventEnvelope({ event: appended.event, runId: state.runId, sequence }),
+      ...detail,
+    });
+    return sequence;
   };
 
   const contextNode = async state => {
@@ -1056,10 +1102,17 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       margin: decision.receipt?.margin ?? null,
       request_id: decision.receipt?.requestId || null,
       reason: decision.receipt?.reason || decision.reason || null,
+      diagnostics: decisionDiagnosticSummary(decision.receipt),
     };
-    emitDecision({ stage: 'capability', status: decision.status, selected: plan.intent,
+    const eventSequence = await recordDecision(state, { stage: 'capability', status: decision.status,
+      // A non-authoritative fallback is not a selected user-facing plan.
+      // Leaving selected empty lets the existing mobile renderer show the
+      // durable diagnostic instead of falsely presenting fallback_harness as
+      // a legitimate choice.
+      selected: authoritative ? plan.intent : null,
       source: plan.source, authoritative: plan.authoritative, probability: plan.probability,
-      margin: plan.margin, request_id: plan.request_id, run_id: state.runId });
+      margin: plan.margin, reason: plan.reason, diagnostics: plan.diagnostics,
+      request_id: plan.request_id, run_id: state.runId });
     const timings = { ...state.timings, plan_completed_at_ms: Date.now() };
     // The initial JEV decision is the authorization boundary.  It selects the
     // save capability, but the final synthesis model owns construction of the
@@ -1073,10 +1126,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         return {
           plan,
           timings,
+          eventSequence,
           result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
         };
       }
-      return { plan, timings };
+      return { plan, timings, eventSequence };
     }
     // In decision-gateway-off environments retain the established typed save
     // admission behavior: a referential save without an answer is a missing
@@ -1086,10 +1140,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       return {
         plan,
         timings,
+        eventSequence,
         result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
       };
     }
-    return { plan, timings };
+    return { plan, timings, eventSequence };
   };
 
   const modelNode = async state => {
@@ -1408,10 +1463,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       reason: decision.receipt?.reason || decision.reason || null,
       receipt_count: state.receipts.length,
     };
-    emitDecision({ stage: 'workflow_transition', status: decision.status, selected: intent,
+    const eventSequence = await recordDecision(state, { stage: 'workflow_transition', status: decision.status,
+      selected: authoritative ? intent : null,
       source: workflowTransition.source, authoritative, probability: workflowTransition.probability,
-      margin: workflowTransition.margin, request_id: workflowTransition.request_id, run_id: state.runId });
-    return { workflowTransition, timings: { ...state.timings, workflow_transition_completed_at_ms: Date.now() } };
+      margin: workflowTransition.margin, reason: workflowTransition.reason,
+      diagnostics: decisionDiagnosticSummary(decision.receipt),
+      request_id: workflowTransition.request_id, run_id: state.runId });
+    return { workflowTransition, eventSequence, timings: { ...state.timings, workflow_transition_completed_at_ms: Date.now() } };
   };
 
   const connectionNode = async state => {

@@ -188,7 +188,12 @@ test('profile identity intent gives JEV an explicit context versus memory bounda
   assert.equal(captured.state.context.planning_hints.authenticated_profile_available, true);
   assert.match(captured.options.find(option => option.id === 'hivemind_context').criteria, /what do you know about me/i);
   assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /generic identity.profile question/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /entity-hop-0.*inside ordinary recall/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_entity_lookup').criteria, /fast, tenant-authorized canonical HIVE entity registry lookup/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /stable first-person or organization assertion/i);
+  assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /dependent outcomes/i);
   assert.match(captured.instructions, /hivemind_context/i);
+  assert.match(captured.instructions, /five recent turns/i);
 });
 
 test('explicit HIVE save intent remains evidence for the initial JEV decision', async () => {

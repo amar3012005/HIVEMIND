@@ -16,6 +16,15 @@ test('use_tools is only a capability latch over two stable meta tools', () => {
   assert.equal(JSON.stringify(unifiedMetaTools({ useTools: true })).includes('GMAIL_FETCH_EMAILS'), false);
 });
 
+test('the in-graph HIVE gateway exposes fast entity lookup and entity-anchored recall', () => {
+  const tool = unifiedMetaTools({ useTools: false })[0].function;
+  assert.ok(tool.parameters.properties.operation.enum.includes('entities'));
+  assert.equal(tool.parameters.properties.entity.required.includes('query'), true);
+  assert.equal(tool.parameters.properties.entity.properties.query.type, 'string');
+  assert.ok(tool.parameters.properties.recall.properties.entity_ids);
+  assert.match(tool.description, /fast tenant-authorized canonical entity match/i);
+});
+
 test('connected search projection preserves plans, connection state, and selected slugs without provider schemas', () => {
   const raw = { data: {
     session: { id: 'workflow-1' },

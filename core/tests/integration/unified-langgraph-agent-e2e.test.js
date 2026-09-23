@@ -143,6 +143,65 @@ test('a JEV context decision exposes the authenticated HIVE context executor bef
   assert.ok(events.some(event => event.type === 'answer_delta'));
 });
 
+test('JEV entity intent performs the fast governed canonical lookup before streaming', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let lookup = null;
+  const result = await runUnifiedMetaAgent({
+    message: 'Who is Rama?', useTools: false, prisma, ctx: {
+      ...ctx(prisma, 'entity-fast'),
+      _tracedDispatch: async (slug, args) => {
+        lookup = { slug, args };
+        return { matches: [{ id: 'entity-rama', canonicalName: 'Rama Santhoshi', aliases: ['Rama'] }], degradation: null };
+      },
+    }, checkpointer: new MemorySaver(), composio: {}, onEvent: event => events.push(event),
+    decisionStage: async input => ({ status: 'selected', selected: 'hivemind_entity_lookup', authoritative: true,
+      receipt: { source: 'jev', probability: 0.98, margin: 0.94, requestId: 'entity-plan' } }),
+    modelStep: async ({ tools }) => {
+      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+      return { message: call('hivemind_meta', { operation: 'entities', entity: { query: 'Rama' } }, 'entity-1') };
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Rama Santhoshi/);
+      await onDelta('I found Rama Santhoshi as the canonical match for Rama.');
+      return { ok: true, content: 'I found Rama Santhoshi as the canonical match for Rama.' };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(lookup, { slug: 'hivemind_find_entities', args: { query: 'Rama', entity_types: [], limit: 12 } });
+  assert.ok(events.some(event => event.type === 'answer_delta'));
+});
+
+test('LangGraph follow-up chips are source-grounded and omitted for mutations', async () => {
+  const prisma = fakePrisma();
+  const runRecall = async suffix => runUnifiedMetaAgent({
+    message: 'What do we know about the launch?', useTools: false, prisma, ctx: ctx(prisma, suffix), checkpointer: new MemorySaver(), composio: {},
+    decisionStage: async () => ({ status: 'selected', selected: 'hivemind_memory_lookup', authoritative: true,
+      receipt: { source: 'jev', probability: 0.99, margin: 0.95 } }),
+    modelStep: async () => ({ message: call('hivemind_meta', { operation: 'recall', recall: { query: 'launch' } }, `recall-${suffix}`) }),
+    metaExecutor: async () => ({ successful: true, data: { memories: [{ id: 'm-launch', title: 'Project Northstar launch decision', content: 'The team chose a staged launch.' }] } }),
+    finalStream: async ({ onDelta }) => {
+      await onDelta('The team chose a staged launch for Project Northstar.');
+      return { ok: true, content: 'The team chose a staged launch for Project Northstar.' };
+    },
+  });
+  const recalled = await runRecall('followup-read');
+  assert.deepEqual(recalled.followUps, ['What else does Project Northstar launch decision say about this topic?']);
+
+  const saved = await runUnifiedMetaAgent({
+    message: 'Remember that I prefer short updates.', useTools: false, prisma, ctx: ctx(prisma, 'followup-save'), checkpointer: new MemorySaver(), composio: {},
+    decisionStage: async input => input.stage === 'capability'
+      ? { status: 'selected', selected: 'hivemind_save', authoritative: true, receipt: { source: 'jev', probability: 0.99, margin: 0.95 } }
+      : { status: 'selected', selected: 'preference', authoritative: true, receipt: { source: 'jev', probability: 0.99, margin: 0.95 } },
+    modelStep: async () => ({ message: call('hivemind_meta', { operation: 'save', save: {
+      title: 'Aster prefers concise updates', content: 'Aster states a preference for short updates.', memory_type: 'preference',
+      tags: ['aster', 'communication-preference'], entities: ['Aster'], source_refs: ['conversation:current'], scope: 'personal',
+    } }, 'save-followup') }),
+    metaExecutor: async () => ({ successful: true, data: { saved: true, title: 'Aster prefers concise updates', scope: 'personal' } }),
+  });
+  assert.equal(saved.followUps.length, 0);
+});
+
 test('a multi-task receipt uses JEV to continue into one grounded memory save before sealing', async () => {
   const prisma = fakePrisma();
   const decisionStages = [];

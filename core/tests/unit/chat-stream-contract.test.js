@@ -67,3 +67,95 @@ test('legacy chat exposes only the Jev-selected gateway and defers to the curren
     ['hivemind_meta', 'hivemind_connected_task'],
   ]);
 });
+
+test('LangGraph pauses on JEV connected-read intent when tools are off, then resumes the same plan after approval', async () => {
+  const checkpointer = new MemorySaver();
+  const prisma = { pendingWrite: {} };
+  const surfaces = [];
+  const connectedCalls = [];
+  let planCalls = 0;
+  let modelCalls = 0;
+  const common = {
+    message: 'Check Gmail for my latest email', useTools: false, prisma, checkpointer,
+    ctx: { orgId: 'org', userId: 'user', threadId: 'tools-consent-approve', language: 'en', prisma },
+    decisionStage: async () => {
+      planCalls += 1;
+      return { status: 'selected', selected: 'composio_read', authoritative: true, receipt: { source: 'jev', probability: 0.97 } };
+    },
+    modelStep: async ({ tools }) => {
+      modelCalls += 1;
+      surfaces.push(tools.map(tool => tool.function.name));
+      if (modelCalls === 1) return { message: { role: 'assistant', content: null, tool_calls: [{
+        id: 'search', type: 'function', function: { name: 'hivemind_connected_task', arguments: JSON.stringify({ action: 'search', queries: ['latest email'], toolkits: ['gmail'] }) },
+      }] } };
+      if (modelCalls === 2) return { message: { role: 'assistant', content: null, tool_calls: [{
+        id: 'execute', type: 'function', function: { name: 'hivemind_connected_task', arguments: JSON.stringify({ action: 'execute', tool_slug: 'GMAIL_LIST_MESSAGES', arguments: { query: 'in:inbox', max_results: 1 } }) },
+      }] } };
+      throw new Error('unexpected_model_call');
+    },
+    connectedExecutor: async args => {
+      connectedCalls.push(args.action);
+      if (args.action === 'search') return {
+        successful: true, status: 'ok',
+        data: { results: [{ primary_tool_slugs: ['GMAIL_LIST_MESSAGES'] }] },
+        state: { sessionId: 'session-1', selectedSlugs: ['GMAIL_LIST_MESSAGES'], primarySlugs: ['GMAIL_LIST_MESSAGES'] },
+      };
+      return { successful: true, status: 'executed', data: { messages: [{ subject: 'Real latest email' }] } };
+    },
+    finalStream: async ({ onDelta }) => {
+      await onDelta('Your latest email is ...');
+      return { content: 'Your latest email is ...', usage: null };
+    },
+  };
+
+  const paused = await runUnifiedMetaAgent(common);
+  assert.equal(paused.status, 'needs_input');
+  assert.equal(paused.inputRequests[0].kind, 'enable_tools');
+  assert.match(paused.inputRequests[0].prompt, /Hivemind wants to use connected tools/);
+  assert.deepEqual(paused.inputRequests[0].options.map(option => option.id), ['approve_tools', 'decline_tools']);
+  assert.equal(paused.resumeState.kind, 'unified_langgraph');
+  assert.deepEqual(connectedCalls, [], 'no connector operation runs before approval');
+  assert.equal(modelCalls, 0, 'no chat-model tool syntax is emitted before consent');
+
+  const resumed = await runUnifiedMetaAgent({
+    ...common,
+    ctx: { ...common.ctx, unifiedGraphThreadId: paused.resumeState.graph_thread_id, unifiedRunId: paused.resumeState.run_id },
+    choice: { action: 'approve_tools', option_id: 'approve_tools', value: 'approve', run_id: paused.resumeState.run_id },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.response, 'Your latest email is ...');
+  assert.deepEqual(connectedCalls, ['search', 'execute']);
+  assert.deepEqual(surfaces, [['hivemind_connected_task'], ['hivemind_connected_task']]);
+  assert.equal(planCalls, 1, 'approval resumes the checkpoint without another JEV plan call');
+});
+
+test('declining LangGraph tool consent checks Hivemind only and returns a friendly streamed fallback', async () => {
+  const checkpointer = new MemorySaver();
+  const prisma = { pendingWrite: {} };
+  let metaArgs = null;
+  let modelCalls = 0;
+  let connectedCalls = 0;
+  const common = {
+    message: 'Check Gmail for my latest email', useTools: false, prisma, checkpointer,
+    ctx: { orgId: 'org', userId: 'user', threadId: 'tools-consent-decline', language: 'en', prisma },
+    decisionStage: async () => ({ status: 'selected', selected: 'composio_read', authoritative: true, receipt: { source: 'jev', probability: 0.97 } }),
+    modelStep: async () => { modelCalls += 1; throw new Error('decline fallback should use receipt synthesis'); },
+    connectedExecutor: async () => { connectedCalls += 1; throw new Error('connected app must remain disabled'); },
+    metaExecutor: async args => { metaArgs = args; return { successful: true, data: { memories: [] } }; },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages[0].content, /user declined connected tools/i);
+      await onDelta('I could not check Gmail without permission.');
+      return { content: 'I could not check Gmail without permission.', usage: null };
+    },
+  };
+  const paused = await runUnifiedMetaAgent(common);
+  const result = await runUnifiedMetaAgent({
+    ...common,
+    ctx: { ...common.ctx, unifiedGraphThreadId: paused.resumeState.graph_thread_id, unifiedRunId: paused.resumeState.run_id },
+    choice: { action: 'decline_tools', option_id: 'decline_tools', value: 'decline', run_id: paused.resumeState.run_id },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(metaArgs, { operation: 'recall', recall: { query: common.message, mode: 'quick', limit: 5 } });
+  assert.equal(modelCalls, 0);
+  assert.equal(connectedCalls, 0);
+});

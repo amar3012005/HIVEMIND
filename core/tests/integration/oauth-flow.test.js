@@ -88,8 +88,8 @@ test('OAuth authorization code + refresh + revoke flow works end-to-end', async 
     assert.equal(loginPageResp.status, 200);
     const loginPageHtml = await loginPageResp.text();
     assert.match(loginPageHtml, /Verify your account/);
-    assert.match(loginPageHtml, /\/oauth\/login\/zitadel\?/);
-    assert.doesNotMatch(loginPageHtml, /cli_return_to/);
+    assert.match(loginPageHtml, /\/hivemind\/login\?oauth_return_to=/);
+    assert.doesNotMatch(loginPageHtml, /\/oauth\/login\/zitadel\?/);
 
     const loginResp = await fetch(`${baseUrl}/oauth/login`, {
       method: 'POST',
@@ -231,8 +231,8 @@ test('OAuth token endpoint rejects invalid PKCE verifier and invalid consent sta
     assert.equal(loginPageResp.status, 200);
     const loginPageHtml = await loginPageResp.text();
     assert.match(loginPageHtml, /Verify your account/);
-    assert.match(loginPageHtml, /\/oauth\/login\/zitadel\?/);
-    assert.doesNotMatch(loginPageHtml, /cli_return_to/);
+    assert.match(loginPageHtml, /\/hivemind\/login\?oauth_return_to=/);
+    assert.doesNotMatch(loginPageHtml, /\/oauth\/login\/zitadel\?/);
 
     const loginResp = await fetch(`${baseUrl}/oauth/login`, {
       method: 'POST',

@@ -4073,6 +4073,44 @@ function setOAuthUnauthorized(res, {
 // dashboard cookie makes OAuth consent feel like part of the same
 // session, instead of forcing a second "Sign In to HiveMind" screen.
 const CP_SESSION_COOKIE_NAME = process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session';
+// The control plane is authoritative for browser sessions. Core normally
+// verifies its cookie locally for the fast path, but it must not make remote
+// MCP OAuth depend on both services having an identical session-signing
+// secret. A server-to-server bootstrap fallback lets the control plane verify
+// its own signed cookie after the normal dashboard login has completed.
+const CONTROL_PLANE_SESSION_BASE_URL = (
+  process.env.HIVEMIND_CP_URL
+  || process.env.HIVEMIND_CONTROL_PLANE_BASE_URL
+  || 'http://control-plane:3000'
+).replace(/\/$/, '');
+
+async function resolveDashboardSessionViaControlPlane(cpCookie) {
+  if (!cpCookie) return null;
+  try {
+    const response = await fetch(`${CONTROL_PLANE_SESSION_BASE_URL}/auth/session`, {
+      headers: {
+        Cookie: `${CP_SESSION_COOKIE_NAME}=${encodeURIComponent(cpCookie)}`,
+      },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (!payload?.authenticated || !payload?.user?.id) return null;
+    return {
+      userId: payload.user.id,
+      orgId: payload.organization?.id || null,
+      email: payload.user.email || null,
+      authProvider: 'dashboard_session',
+      // The current request authenticated through the control-plane, not a
+      // locally verifiable Core cookie. The caller mints hm_oauth_session so
+      // consent POSTs remain independent of the dashboard cookie afterward.
+      needsOAuthSession: true,
+    };
+  } catch (error) {
+    console.warn('[oauth] control-plane session verification unavailable:', error?.message || error);
+    return null;
+  }
+}
 
 async function resolveOAuthSession(req) {
   const cookies = parseCookies(req);
@@ -4100,6 +4138,13 @@ async function resolveOAuthSession(req) {
       const session = await oauthSessionStore.getSession(sid);
       if (session?.userId) return session;
     }
+
+    // The cookie can be valid even when a Core-only OAuth secret or a
+    // separate session-store configuration prevents the fast path above.
+    // Ask the session issuer to validate it instead of sending the browser
+    // back to login and creating a visible redirect loop.
+    const controlPlaneSession = await resolveDashboardSessionViaControlPlane(cpCookie);
+    if (controlPlaneSession) return controlPlaneSession;
   }
 
   return null;
@@ -5957,6 +6002,14 @@ exit \$RC
 
     const session = await resolveOAuthSession(req);
     if (session?.userId) {
+      if (session.needsOAuthSession) {
+        await createOAuthSession(res, {
+          userId: session.userId,
+          orgId: session.orgId || null,
+          email: session.email || null,
+          authProvider: session.authProvider || 'dashboard_session',
+        });
+      }
       const consentStateId = await oauthSessionStore.createAuthState({
         kind: 'oauth_consent',
         payload: {
@@ -6105,11 +6158,11 @@ exit \$RC
     // if a stale or host-only dashboard cookie cannot be read here, the two
     // services redirect to each other forever and the page visibly blinks.
     //
-    // Instead keep the authorization request at its issuer, show the branded
-    // MCP authentication surface, and use the OAuth-specific Zitadel callback
-    // to create hm_oauth_session before rendering consent. This is the same
-    // one-shot, server-owned handoff pattern used by the CLI flow, but never
-    // exposes an operator login or an external redirect target to the FE.
+    // Instead keep the authorization request at its issuer and show the
+    // branded MCP authentication surface. The default continuation is the
+    // normal HIVEMIND login, which can use any configured provider (Google,
+    // password, enterprise SSO, or Zitadel). After login, the control-plane
+    // validation fallback above mints hm_oauth_session before consent.
     const loginParams = new URLSearchParams({
       response_type: responseType,
       client_id: clientId,
@@ -6120,7 +6173,11 @@ exit \$RC
       code_challenge_method: codeChallengeMethod,
       resource,
     });
-    const loginUrl = `/oauth/login/zitadel?${loginParams.toString()}`;
+    const authorizationUrl = `${OAUTH_BASE_URL}/oauth/authorize?${loginParams.toString()}`;
+    const dashboardFeBase = process.env.HIVEMIND_FRONTEND_BASE_URL
+      || process.env.HIVEMIND_DASHBOARD_URL
+      || 'https://next.singulancelabs.com';
+    const loginUrl = `${dashboardFeBase}/hivemind/login?oauth_return_to=${encodeURIComponent(authorizationUrl)}`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.writeHead(200);
     res.end(renderOAuthAuthenticationHtml({

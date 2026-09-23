@@ -156,7 +156,7 @@ function safeHistory(history = [], limit = 3) {
 
 const PLAN_SYSTEM_CONTRACT = 'Select exactly one intent. The graph, not the decision model, owns authorization, schemas, execution, approvals, receipts, and final synthesis. Do not infer facts or side effects; use only the request, profile, recent turns, and completed governed receipts.';
 
-const MEMORY_CAPSULE_CONTRACT = 'Create a source-grounded memory capsule, not a shallow summary. Use a specific title header identifying the principal subject, event, or decision. Preserve material facts and uncertainty. Capture supported people, organizations, products, places, dates, times, identifiers, amounts, events, relationships, decisions, and source references. Include only details supported by the current request, prior-turn evidence, or governed tool receipts; never invent facts or relationships. Keep authentication codes, passwords, reset links, and sensitive credentials out of memory. Return title, content, tags, entities, dates, source_refs, and scope.';
+const MEMORY_CAPSULE_CONTRACT = 'Create one compact, source-grounded memory capsule—not a shallow summary. title: a specific searchable header naming the main subject, event, or decision; never “Saved memory”. content: self-contained material facts, uncertainty, and relationships. tags: stable topic/entity labels. entities: each supported person, organization, product, place, or identifier. dates: explicit dates/times only. source_refs: the prior-turn evidence or governed receipt that supports it. Include only supported facts; never invent relationships. Exclude OTPs, passwords, reset links, authentication alerts, and credentials. Return title, content, tags, entities, dates, source_refs, and scope.';
 
 function executorInstruction(intent, { preparedSave = null } = {}) {
   const contracts = {
@@ -764,6 +764,37 @@ function savedMemoryAcknowledgement(receipt, scope) {
   return `Added “${title}” to your ${scopeLabel} company brain. It is durable and searchable now; canonical indexing will connect its people, organizations, dates, and relationships in the background.`;
 }
 
+function acknowledgementChunks(text, maxChars = 64) {
+  const tokens = String(text || '').match(/\S+\s*/g) || [];
+  const chunks = [];
+  let chunk = '';
+  for (const token of tokens) {
+    if (chunk && chunk.length + token.length > maxChars) {
+      chunks.push(chunk);
+      chunk = '';
+    }
+    chunk += token;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks.length ? chunks : [String(text || '')];
+}
+
+// Durable receipts are final without another LLM inference, but must still be
+// visually progressive. Yield between small SSE deltas so the browser can
+// paint the acknowledgement as it arrives instead of receiving one buffered
+// message at turn completion.
+async function emitReceiptAnswer(onEvent, response, { grounded, runId }) {
+  onEvent({ type: 'answer_started', schema_version: 1, grounded, run_id: runId });
+  let firstDeltaAtMs = null;
+  for (const delta of acknowledgementChunks(response)) {
+    firstDeltaAtMs ||= Date.now();
+    onEvent({ type: 'answer_delta', schema_version: 1, delta, text: delta, grounded, run_id: runId });
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  onEvent({ type: 'answer_completed', schema_version: 1, grounded, run_id: runId });
+  return firstDeltaAtMs || Date.now();
+}
+
 // A scope choice is an authority decision, not a one-shot transport attempt.
 // Keep a stable operation id on the checkpoint so a recoverable Core timeout
 // can resume the exact canonical write without re-running discovery, planning,
@@ -1296,9 +1327,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       }];
       const steps = [...state.steps, { kind: 'tool', slug: underlying, status: 'completed', summary: 'Memory saved' }];
       const response = savedMemoryAcknowledgement(receipt, receipt?.data?.scope || call.args?.save?.scope || 'personal');
-      onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
-      onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: true, run_id: state.runId });
-      onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
+      const firstAnswerDeltaAtMs = await emitReceiptAnswer(onEvent, response, { grounded: true, runId: state.runId });
       return {
         pendingTool: null,
         pendingSaveDraft: null,
@@ -1306,9 +1335,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         messages: [...state.messages, toolMessage(call, exposed), { role: 'assistant', content: response }],
         receipts,
         steps,
-        timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() },
+        timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: firstAnswerDeltaAtMs, completion_at_ms: Date.now() },
         result: outputShape({ ...state, pendingTool: null, pendingSaveDraft: null, receipts, steps,
-          timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() } }, response),
+          timings: { ...executorTimings, receipt_at_ms: Date.now(), first_answer_delta_at_ms: firstAnswerDeltaAtMs, completion_at_ms: Date.now() } }, response),
       };
     }
     const receiptSummary = call.name === 'hivemind_meta' && call.args.operation === 'save'
@@ -1517,17 +1546,15 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       };
     }
     const response = savedMemoryAcknowledgement(receipt, saveArgs.scope);
-    onEvent({ type: 'answer_started', schema_version: 1, grounded: true, run_id: state.runId });
-    onEvent({ type: 'answer_delta', schema_version: 1, delta: response, text: response, grounded: true, run_id: state.runId });
-    onEvent({ type: 'answer_completed', schema_version: 1, grounded: true, run_id: state.runId });
+    const firstAnswerDeltaAtMs = await emitReceiptAnswer(onEvent, response, { grounded: true, runId: state.runId });
     return {
       pendingMemoryScope: null,
       messages: [...state.messages, { role: 'system', content: jsonText({ memory_save: 'completed', receipt: exposed }) }, { role: 'assistant', content: response }],
       receipts,
       steps,
-      timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() },
+      timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now(), first_answer_delta_at_ms: firstAnswerDeltaAtMs, completion_at_ms: Date.now() },
       result: outputShape({ ...state, pendingMemoryScope: null, receipts, steps,
-        timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now(), first_answer_delta_at_ms: Date.now(), completion_at_ms: Date.now() } }, response),
+        timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now(), first_answer_delta_at_ms: firstAnswerDeltaAtMs, completion_at_ms: Date.now() } }, response),
     };
   };
 

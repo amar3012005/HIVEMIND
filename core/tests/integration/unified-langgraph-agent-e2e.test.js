@@ -557,7 +557,9 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
   assert.equal(calls.length, 2);
   assert.match(resumed.response, /Added .* to your personal company brain/);
   assert.match(resumed.response, /canonical indexing will connect/i);
-  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), [resumed.response]);
+  const deltas = events.filter(event => event.type === 'answer_delta').map(event => event.delta);
+  assert.ok(deltas.length > 1);
+  assert.equal(deltas.join(''), resumed.response);
 });
 
 test('a referential save continuation tells the JEV plan about its prepared grounded draft', async () => {
@@ -748,7 +750,9 @@ test('scope continuation preserves the original canonical save payload and emits
   assert.equal(resumed.status, 'completed');
   assert.equal(calls.length, 2);
   assert.match(calls[1].content, /release decision was approved/i);
-  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), [resumed.response]);
+  const deltas = events.filter(event => event.type === 'answer_delta').map(event => event.delta);
+  assert.ok(deltas.length > 1);
+  assert.equal(deltas.join(''), resumed.response);
   assert.match(resumed.response, /company brain/i);
   assert.equal(resumed.steps?.at(-1)?.slug, 'hivemind_save_memory');
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEntityProfileTimeline, entityProfileMode } from '../../src/memory/entity-profile-projection.js';
+import { buildEntityProfileTimeline, entityProfileMode, loadEntityProfileRecallContext } from '../../src/memory/entity-profile-projection.js';
 import { validateEntityProfileDecision } from '../../src/memory/entity-profile-jev.js';
 import { entityProfileWorkflowInstanceId } from '../../src/memory/entity-profile-projection-attempts.js';
 
@@ -35,4 +35,39 @@ test('entity profile timeline preserves valid time separately from HIVE recorded
   assert.equal(timeline[0].valid_at.toISOString(), '2026-01-15T00:00:00.000Z');
   assert.equal(timeline[0].recorded_at.toISOString(), '2026-02-01T00:00:00.000Z');
   assert.deepEqual(timeline.map((event) => event.kind), ['fact', 'review_requested', 'review_resolved']);
+});
+
+test('recall profile context is limited to active facts backed by delivered memories', async () => {
+  const calls = [];
+  const prisma = {
+    canonicalEntity: {
+      findMany: async (args) => {
+        calls.push(args);
+        return [{ id: 'rama-id', canonicalName: 'Rama' }];
+      },
+    },
+    entityProfileFact: {
+      findMany: async (args) => {
+        calls.push(args);
+        return [{
+          id: 'fact-1', entityId: 'rama-id', factClass: 'relationship',
+          freshnessAt: new Date('2026-09-22T18:36:00Z'), createdAt: new Date('2026-09-22T18:37:00Z'),
+          value: { predicate: 'responsible_for' },
+          claim: { predicate: { name: 'responsible_for' }, objectEntity: { canonicalName: 'Singapore incorporation' } },
+          evidence: [{ memoryId: 'memory-1', exactQuote: 'Rama leads the Singapore incorporation.', sourceDigest: 'digest-1' }],
+        }];
+      },
+    },
+  };
+  const context = await loadEntityProfileRecallContext({
+    prisma, organizationId: 'org-1', entityNames: ['Rama'], authorizedMemoryIds: ['memory-1'],
+  });
+  assert.deepEqual(context, [{
+    entity_id: 'rama-id', entity_name: 'Rama', fact_id: 'fact-1', fact_class: 'relationship',
+    predicate: 'responsible_for', object: 'Singapore incorporation',
+    valid_at: new Date('2026-09-22T18:36:00Z'), recorded_at: new Date('2026-09-22T18:37:00Z'),
+    evidence: [{ memory_id: 'memory-1', exact_quote: 'Rama leads the Singapore incorporation.', source_digest: 'digest-1' }],
+  }]);
+  assert.equal(calls[1].where.status, 'active');
+  assert.deepEqual(calls[1].where.evidence.some.memoryId.in, ['memory-1']);
 });

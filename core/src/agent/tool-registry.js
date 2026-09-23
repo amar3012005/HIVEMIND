@@ -665,6 +665,7 @@ const TOOL_HANDLERS = {
       evidence: result.evidence,
       graph,
       live: result.live,
+      entityProfileContext: result.entity_profile_context,
       plan: effectivePlan,
       trace: result.trace,
       cutoffReason,

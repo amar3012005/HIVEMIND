@@ -41,6 +41,7 @@ import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { prepareUnifiedRecallCandidates } from './recall-evidence-dedup.js';
 import { filterEvidenceByMetadata } from '../knowledge/evidence-retrieval.js';
+import { loadEntityProfileRecallContext } from './entity-profile-projection.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -2917,6 +2918,26 @@ export class RecallRouter {
       topScore: deliverMemories[0]?.score,
     });
 
+    // A dossier can make an entity answer easier to compose, but it may never
+    // become a second retrieval authority.  Restrict profile facts to active
+    // projections backed by a memory already delivered through this request's
+    // tenant and scope checks.  Failure is deliberately non-fatal: recall is
+    // still complete from the underlying memories and evidence.
+    let entityProfileContext = [];
+    if (mergedCanonicalEntities.length && deliverMemories.length) {
+      try {
+        entityProfileContext = await loadEntityProfileRecallContext({
+          prisma: this.prisma,
+          organizationId: ctx.orgId,
+          entityNames: mergedCanonicalEntities,
+          authorizedMemoryIds: deliverMemories.map(recallMemoryRowId).filter(Boolean),
+          limit: 4,
+        });
+      } catch (error) {
+        console.warn('[recall-router] entity profile context unavailable:', error.message);
+      }
+    }
+
     return {
       memories: deliverMemories.map((memory) => serializeRecallMemory(memory, {
         includeFullContent: options.include_full_memory_content === true,
@@ -2926,6 +2947,7 @@ export class RecallRouter {
         : (options.structured_intent === true ? 15 : HOP2_DOC_LIMIT)).map(serializeRecallEvidence),
       ranked_candidates: rankedCandidates,
       relationships: relationshipEdges,
+      entity_profile_context: entityProfileContext,
       timeline,
       live: hop3.items,
       trace: {
@@ -2953,6 +2975,7 @@ export class RecallRouter {
         live_trigger:     hop3.reason,
         tiers_fired:      tiersFired,
         cutoff_reason:    cutoffReason,
+        entity_profile_context_count: entityProfileContext.length,
         ...(options.reliability_v1 === true ? { reliability: {
           status: [...Object.values(memoryLaneStates), ...Object.values(hop2.lane_states || {})]
             .some((lane) => ['failed', 'partial'].includes(lane?.status)) ? 'degraded' : 'complete',

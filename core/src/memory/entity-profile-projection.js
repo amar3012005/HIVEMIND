@@ -95,6 +95,82 @@ export async function getEntityProfileDossier({ prisma, organizationId, entityId
 }
 
 /**
+ * Build a small, evidence-bound profile supplement for entity-aware recall.
+ *
+ * Entity profiles are a read model, never a new evidence authority.  We only
+ * return approved facts whose backing memory is already present in the
+ * caller's authorized recall result.  That makes this safe for personal and
+ * project scoped memories: the recall router remains the sole ACL boundary.
+ * The answer layer receives structured facts, not model-written profile prose.
+ */
+export async function loadEntityProfileRecallContext({
+  prisma,
+  organizationId,
+  entityNames = [],
+  authorizedMemoryIds = [],
+  limit = 4,
+} = {}) {
+  const names = [...new Set((Array.isArray(entityNames) ? entityNames : [])
+    .map((name) => String(name || '').trim())
+    .filter(Boolean))].slice(0, 12);
+  const memoryIds = [...new Set((Array.isArray(authorizedMemoryIds) ? authorizedMemoryIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean))].slice(0, 50);
+  if (!prisma?.canonicalEntity?.findMany || !prisma?.entityProfileFact?.findMany
+      || !organizationId || !names.length || !memoryIds.length) return [];
+
+  const entities = await prisma.canonicalEntity.findMany({
+    where: {
+      organizationId,
+      OR: names.map((canonicalName) => ({ canonicalName: { equals: canonicalName, mode: 'insensitive' } })),
+    },
+    select: { id: true, canonicalName: true },
+    take: names.length,
+  });
+  if (!entities.length) return [];
+  const namesById = new Map(entities.map((entity) => [entity.id, entity.canonicalName]));
+  const facts = await prisma.entityProfileFact.findMany({
+    where: {
+      organizationId,
+      entityId: { in: entities.map((entity) => entity.id) },
+      // A pending review is useful in the dossier, but it is not trusted
+      // context for an answer until an authorized reviewer approves it.
+      status: 'active',
+      evidence: { some: { memoryId: { in: memoryIds } } },
+    },
+    include: {
+      claim: { include: { predicate: true, objectEntity: true } },
+      evidence: {
+        where: { memoryId: { in: memoryIds } },
+        select: { memoryId: true, exactQuote: true, sourceDigest: true },
+        take: 2,
+      },
+    },
+    orderBy: [{ freshnessAt: 'desc' }, { updatedAt: 'desc' }],
+    take: Math.min(Math.max(Number(limit) || 4, 1), 8),
+  });
+
+  return facts.map((fact) => ({
+    entity_id: fact.entityId,
+    entity_name: namesById.get(fact.entityId) || null,
+    fact_id: fact.id,
+    fact_class: fact.factClass,
+    predicate: fact.claim?.predicate?.name || fact.value?.predicate || null,
+    object: fact.claim?.objectEntity?.canonicalName
+      || fact.value?.object_entity_name
+      || fact.value?.object_literal
+      || null,
+    valid_at: fact.freshnessAt || null,
+    recorded_at: fact.createdAt || null,
+    evidence: (fact.evidence || []).map((evidence) => ({
+      memory_id: evidence.memoryId,
+      exact_quote: evidence.exactQuote || null,
+      source_digest: evidence.sourceDigest || null,
+    })),
+  })).filter((fact) => fact.evidence.length > 0);
+}
+
+/**
  * A bi-temporal, evidence-first view of an entity profile.
  * valid_at answers when the underlying claim was known to be true; recorded_at
  * answers when HIVE recorded the fact or human review. Neither field is model

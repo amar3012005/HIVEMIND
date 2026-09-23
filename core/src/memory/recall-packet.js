@@ -137,7 +137,7 @@ export { NO_GROUNDED_EVIDENCE };
 
 // ── Chat-lane evidence packet (moved from recall-router.js — V5 Phase 8: one
 // module owns the typed evidence contract; shapes unchanged, zero behavior change) ──
-export function buildEvidencePacket({ memories = [], evidence = [], graph = [], live = [], plan, trace, cutoffReason = null }) {
+export function buildEvidencePacket({ memories = [], evidence = [], graph = [], live = [], entityProfileContext = [], plan, trace, cutoffReason = null }) {
   const full = plan?.mode === 'full';
   const totalCap = full ? 12 : 8;
   const perDocCap = full ? 8 : 3;
@@ -193,6 +193,10 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
     sourceSections,
     graph_evidence: graph,
     graphEvidence: graph,
+    // These are compact pointers to already-cited memories, never synthetic
+    // profile prose. Consumers may use them to organize an answer around an
+    // entity while retaining the original memory citation.
+    entity_profile_context: entityProfileContext,
     conflicts,
     live_evidence: live,
     liveEvidence: live,
@@ -202,6 +206,7 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
       segments: sourceSections.length,
       graph_edges: graph.length,
       live_items: live.length,
+      entity_profile_facts: entityProfileContext.length,
     },
     coverage: {
       facts: Math.min(memories.length, 5),
@@ -209,6 +214,7 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
       source_sections: sourceSections.length,
       graph_edges: graph.length,
       live_items: live.length,
+      entity_profile_facts: entityProfileContext.length,
     },
     cutoff_reason: cutoffReason,
     trace,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRecallPacket, validateGroundedClaims, NO_GROUNDED_EVIDENCE } from '../../src/memory/recall-packet.js';
+import { buildRecallPacket, buildEvidencePacket, validateGroundedClaims, NO_GROUNDED_EVIDENCE } from '../../src/memory/recall-packet.js';
 
 test('claim validation removes duplicate semantic sentences and merges citations', () => {
   const result = validateGroundedClaims({ claims: [
@@ -29,6 +29,16 @@ test('RecallPacket assigns server-owned stable citation ids', () => {
     id: 'C2', memory_id: 'm1', segment_id: null, document_id: null, title: null, page: null, source_label: 'Workspace memory',
   });
   assert.equal(packet.coverage.source_sections, 2);
+});
+
+test('evidence packets retain derived entity profile context separately from facts', () => {
+  const packet = buildEvidencePacket({
+    memories: [{ id: 'm1', title: 'Rama incorporation' }],
+    entityProfileContext: [{ entity_name: 'Rama', predicate: 'responsible_for', evidence: [{ memory_id: 'm1' }] }],
+  });
+  assert.equal(packet.facts.length, 1);
+  assert.equal(packet.entity_profile_context[0].entity_name, 'Rama');
+  assert.equal(packet.coverage.entity_profile_facts, 1);
 });
 
 test('grounded claims require packet citation ids and enterprise defaults to no general knowledge', () => {

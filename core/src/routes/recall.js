@@ -382,6 +382,11 @@ export async function handleRecallRoute(ctx = {}) {
         cutoffReason,
         trace: bounded.trace,
       });
+      // Keep the bounded entity dossier context alongside its source memories.
+      // It is explicitly not folded into `facts`: callers can distinguish the
+      // immutable evidence record from this derived, approved projection.
+      packet.entity_profile_context = bounded.entity_profile_context || [];
+      packet.coverage.entity_profile_facts = packet.entity_profile_context.length;
       if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
       // PROJECT-SCOPE FILTER — this bounded branch returns EARLY, so it must
       // apply the same scope rules as the legacy path below. Without this,
@@ -393,6 +398,7 @@ export async function handleRecallRoute(ctx = {}) {
       const unifiedResults = await unifiedResultsFor({
         memories: _boundedScoped.memories,
         evidence: bounded.evidence || [],
+        entity_profile_context: bounded.entity_profile_context || [],
         rankedCandidates: bounded.ranked_candidates || [],
       });
       const routeLatencyMs = Date.now() - _recallT0;

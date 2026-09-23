@@ -270,7 +270,7 @@ export const CAPABILITY_OPTIONS = Object.freeze([
   { id: 'hivemind_request', criteria: 'Perform a typed HIVE system request whose exact governed operation is determined by the HIVE meta contract, such as a time-aware, comparison, project, or evidence request that is not covered by the more specific intents.' },
   { id: 'hivemind_meta', criteria: 'Use the general HIVE meta toolkit only when the request is a HIVE-native read but does not clearly fit context, memory lookup, entity lookup, HyperAgent directory, or a typed HIVE request. It is read-only.' },
   { id: 'hivemind_profile_update', criteria: 'Change the authenticated user\'s maintained profile field, for example their own name, role, company, language, location, or timezone. This is a governed write and must not be used to save a general memory.' },
-  { id: 'hivemind_save', criteria: 'Create one durable HIVE memory because the user explicitly asks to save, remember, retain, record, or file information that is already present in the request, recent turns, or completed governed receipts. The executor creates a source-grounded memory capsule and asks for a scope only if one was not stated. Do not select this when the same request first asks to retrieve, search, collect, read, verify, or pull information; that dependent read-plus-write request is multi_task.' },
+  { id: 'hivemind_save', criteria: 'Create one durable HIVE memory because the user explicitly asks to save, remember, retain, record, or file information that is already present in the request, recent turns, or completed governed receipts. Also select for a clear, stable first-person or organization assertion that is useful durable context, such as a lasting preference, personal working style, stated priority, or reusable procedure, even when it does not literally say “save”; do not select for a transient greeting, question, hypothetical, or unsupported inference. The executor creates a source-grounded memory capsule and asks for a scope only if one was not stated. Do not select this when the same request first asks to retrieve, search, collect, read, verify, or pull information; that dependent read-plus-write request is multi_task.' },
   { id: 'composio_read', criteria: 'Read information from a connected external application such as email, calendar, files, CRM, messaging, source control, or social media. The executor must first discover capability, then select a read tool, load its schema, compile arguments, execute, and return a receipt.' },
   { id: 'composio_action', criteria: 'Create, update, send, publish, delete, or otherwise change data in a connected external application. The executor discovers the capability and schema, compiles arguments, requests approval for any write, executes only after approval, and returns a receipt.' },
   { id: 'composio_search', criteria: 'Use a connected external application, but the request does not yet establish whether the eventual provider operation is a read or write, or which toolkit capability is needed. Discover first; do not guess a provider, recipient, or tool.' },
@@ -431,6 +431,34 @@ export const WORKFLOW_TRANSITION_OPTIONS = Object.freeze([
   { id: 'ask_user', criteria: 'A material target, scope, recipient, or business choice is missing and cannot be discovered from the request, prior turns, or governed receipts.' },
   { id: 'fallback_harness', criteria: 'The next safe workflow step is not supported by the supplied request and receipts. Keep the fallback explicit and do not execute a tool.' },
 ]);
+
+// A memory type is a retrieval/indexing property of a capsule, not a second
+// planner intent.  The graph has already admitted the save and constructed
+// the source-grounded payload; JEV only classifies that bounded payload before
+// its durable write.
+export const MEMORY_TYPE_OPTIONS = Object.freeze([
+  { id: 'fact', criteria: 'A supported objective statement, attribute, status, or event record. Use when it is not better described as a decision, preference, procedure, experience, or synthesis.' },
+  { id: 'decision', criteria: 'A deliberate choice, commitment, approval, rejection, resolution, or agreed direction made by a person or organization.' },
+  { id: 'preference', criteria: 'A stated enduring or reusable preference, interest, priority, taste, working style, or constraint of a person or organization. A self-statement such as liking a sport is a preference.' },
+  { id: 'procedure', criteria: 'Reusable steps, instructions, workflow, playbook, policy, or operating method that tells someone how work should be done.' },
+  { id: 'experience', criteria: 'A first-hand account, observation, interaction, or lived event attributed to a person or organization rather than an objective standalone fact.' },
+  { id: 'synthesis', criteria: 'A grounded consolidation, overview, or conclusion derived from multiple supplied sources or governed receipts, while preserving source references and uncertainty.' },
+  { id: 'fallback_harness', criteria: 'The capsule does not support one type with sufficient confidence. Keep the existing safe default and record the uncertainty.' },
+]);
+
+export async function chooseMemoryType({ gateway, turn, userQuery, context, observation = null, fallback, signal }) {
+  return gateway.choose({
+    turn,
+    stage: 'memory_type',
+    userQuery,
+    context,
+    observation,
+    options: MEMORY_TYPE_OPTIONS,
+    instructions: 'Choose exactly one canonical memory type for the proposed HIVE-MIND memory capsule. Use only the compact capsule, authenticated scope, language, recent-turn context, and governed source receipts supplied here. The classification applies across all user languages. Do not rewrite the capsule, infer unsupported facts, add entities, choose scope, or authorize a write. Prefer preference for a user or organization stating a stable like, dislike, priority, or working style; decision only for an explicit choice or commitment; procedure only for reusable instructions; experience only for an attributed first-hand account; synthesis only for a supported multi-source consolidation; otherwise fact.',
+    fallback,
+    signal,
+  });
+}
 
 export async function chooseWorkflowTransition({ gateway, turn, userQuery, context, observation = null, fallback, signal }) {
   return gateway.choose({

@@ -4,6 +4,7 @@ import {
   chooseComposioAction,
   chooseComposioArgumentReview,
   chooseWorkflowTransition,
+  chooseMemoryType,
   chooseHiveMetaOperation,
   chooseHiveRecallPolicy,
   createDecisionTurnState,
@@ -12,7 +13,7 @@ import {
 } from './decision-gateway.js';
 
 const VALID_MODES = new Set(['off', 'shadow', 'active']);
-const VALID_STAGES = new Set(['capability', 'composio_selection', 'composio_argument_review', 'workflow_transition', 'hivemind_meta_selection', 'hivemind_recall_filters']);
+const VALID_STAGES = new Set(['capability', 'composio_selection', 'composio_argument_review', 'workflow_transition', 'memory_type', 'hivemind_meta_selection', 'hivemind_recall_filters']);
 
 function modeFromEnv(env) {
   const mode = String(env.JEV_DECISION_GATEWAY_MODE || 'off').trim().toLowerCase();
@@ -139,13 +140,14 @@ export async function decideRuntimeStage(input = {}, {
   // A global 0.80 threshold is appropriate for initial admission but rejects
   // useful calibrated choices in this narrower multi-outcome stage.
   const workflowTransition = stage === 'workflow_transition';
+  const memoryType = stage === 'memory_type';
   const minProbability = finiteThreshold(
-    workflowTransition ? env.JEV_WORKFLOW_MIN_PROBABILITY : env.JEV_MIN_PROBABILITY,
-    workflowTransition ? 0.5 : 0.8,
+    workflowTransition ? env.JEV_WORKFLOW_MIN_PROBABILITY : (memoryType ? env.JEV_MEMORY_TYPE_MIN_PROBABILITY : env.JEV_MIN_PROBABILITY),
+    workflowTransition ? 0.5 : (memoryType ? 0.65 : 0.8),
   );
   const minMargin = finiteThreshold(
-    workflowTransition ? env.JEV_WORKFLOW_MIN_MARGIN : env.JEV_MIN_MARGIN,
-    workflowTransition ? 0.05 : 0.2,
+    workflowTransition ? env.JEV_WORKFLOW_MIN_MARGIN : (memoryType ? env.JEV_MEMORY_TYPE_MIN_MARGIN : env.JEV_MIN_MARGIN),
+    workflowTransition ? 0.05 : (memoryType ? 0.1 : 0.2),
   );
   const gateway = new DecisionGateway({
     provider: provider || createOpenRouterJevProvider({
@@ -192,6 +194,8 @@ export async function decideRuntimeStage(input = {}, {
     });
   } else if (stage === 'workflow_transition') {
     receipt = await chooseWorkflowTransition(common);
+  } else if (stage === 'memory_type') {
+    receipt = await chooseMemoryType(common);
   } else if (stage === 'hivemind_meta_selection') {
     receipt = await chooseHiveMetaOperation(common);
   } else {

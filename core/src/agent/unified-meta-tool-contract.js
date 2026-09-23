@@ -27,6 +27,7 @@ export const HIVEMIND_META_TOOL = Object.freeze({
           properties: {
             title: { type: 'string', description: 'Specific header naming the principal subject, event, or decision; never use a generic title such as Saved memory.' },
             content: { type: 'string', description: 'Source-grounded memory capsule with supported facts, uncertainty, details, and relationships only; never include credentials or authentication material.' },
+            memory_type: { type: 'string', enum: ['fact', 'decision', 'preference', 'procedure', 'experience', 'synthesis'], description: 'Optional proposed type. The LangGraph JEV memory-type node validates or replaces this from the grounded capsule before the durable write.' },
             source_type: { type: 'string', enum: ['text', 'conversation', 'documentation', 'decision'] },
             tags: { type: 'array', items: { type: 'string' }, maxItems: 50 },
             project: { type: 'string' }, scope: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },

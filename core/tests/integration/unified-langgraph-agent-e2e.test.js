@@ -157,6 +157,10 @@ test('a multi-task receipt uses JEV to continue into one grounded memory save be
         return { status: 'selected', selected: 'multi_task', authoritative: true,
           receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'multi-plan' } };
       }
+      if (input.stage === 'memory_type') {
+        return { status: 'selected', selected: 'fact', authoritative: true,
+          receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'multi-memory-type' } };
+      }
       assert.equal(input.stage, 'workflow_transition');
       assert.equal(input.context.workflow.phase, 'post_receipt');
       if (input.observation.completed_receipts.at(-1).action === 'recall') {
@@ -188,7 +192,7 @@ test('a multi-task receipt uses JEV to continue into one grounded memory save be
   });
   assert.equal(result.status, 'completed');
   assert.match(result.response, /Rama Santhoshi/);
-  assert.deepEqual(decisionStages, ['capability', 'workflow_transition', 'workflow_transition']);
+  assert.deepEqual(decisionStages, ['capability', 'workflow_transition', 'memory_type', 'workflow_transition']);
   assert.deepEqual(seenTools, [['hivemind_meta'], ['hivemind_meta'], []]);
   assert.ok(result.steps.some(step => step.summary === 'Memory saved'));
 });
@@ -211,6 +215,10 @@ test('a multi-task scope save returns to JEV and reaches the remaining governed 
     if (input.stage === 'capability') return {
       status: 'selected', selected: 'multi_task', authoritative: true,
       receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'plan' },
+    };
+    if (input.stage === 'memory_type') return {
+      status: 'selected', selected: 'fact', authoritative: true,
+      receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'memory-type' },
     };
     const action = input.observation.completed_receipts.at(-1).action;
     const selected = action === 'save' ? 'composio_action' : 'hivemind_save';
@@ -261,7 +269,7 @@ test('a multi-task scope save returns to JEV and reaches the remaining governed 
   });
   assert.equal(resumed.status, 'pending');
   assert.equal(prisma.drafts[0].toolName, 'MESSAGE_SEND');
-  assert.deepEqual(stages, ['capability', 'workflow_transition', 'workflow_transition']);
+  assert.deepEqual(stages, ['capability', 'workflow_transition', 'memory_type', 'workflow_transition']);
   assert.equal(turn, 3);
 });
 
@@ -279,6 +287,10 @@ test('a scoped compound write resumes its remaining action even when the initial
     if (input.stage === 'capability') return {
       status: 'defer', selected: null, authoritative: false,
       receipt: { source: 'fallback', reason: 'decision_state_exceeds_budget' },
+    };
+    if (input.stage === 'memory_type') return {
+      status: 'selected', selected: 'fact', authoritative: true,
+      receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'memory-type' },
     };
     return {
       status: 'selected', selected: 'composio_action', authoritative: true,
@@ -306,7 +318,7 @@ test('a scoped compound write resumes its remaining action even when the initial
   });
   assert.equal(resumed.status, 'pending');
   assert.equal(prisma.drafts[0].toolName, 'MESSAGE_SEND');
-  assert.deepEqual(stages, ['capability', 'workflow_transition']);
+  assert.deepEqual(stages, ['capability', 'memory_type', 'workflow_transition']);
 });
 
 test('a timed-out scoped compound save preserves its checkpoint and resumes the remaining action after one retry', async () => {
@@ -518,6 +530,50 @@ test('an explicit durable-save request crosses the JEV plan node before one gove
   assert.equal(result.run.scratch.plan.intent, 'hivemind_save');
 });
 
+test('a JEV-selected preference is classified from its grounded capsule before the durable save', async () => {
+  const prisma = fakePrisma();
+  const stages = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'I like playing football.', useTools: false, prisma, ctx: ctx(prisma, 'football-preference'),
+    checkpointer: new MemorySaver(), composio: {},
+    decisionStage: async input => {
+      stages.push(input.stage);
+      if (input.stage === 'capability') return {
+        status: 'selected', selected: 'hivemind_save', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'football-plan' },
+      };
+      assert.equal(input.stage, 'memory_type');
+      assert.match(input.observation.memory_capsule.content, /like playing football/i);
+      return {
+        status: 'selected', selected: 'preference', authoritative: true,
+        receipt: { source: 'jev', probability: 0.98, margin: 0.95, requestId: 'football-memory-type' },
+      };
+    },
+    modelStep: async ({ tools }) => {
+      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+      return { message: call('hivemind_meta', { operation: 'save', save: {
+        title: 'Aster Helius — football preference',
+        content: 'Aster Helius states that they like playing football.',
+        tags: ['person:aster-helius', 'interest:football'],
+        entities: ['Aster Helius', 'Football'],
+        source_refs: ['conversation:current-user-assertion'],
+        scope: 'personal',
+      } }, 'football-save') };
+    },
+    metaExecutor: async args => {
+      assert.equal(args.operation, 'save');
+      assert.equal(args.save.memory_type, 'preference');
+      assert.equal(args.save.scope, 'personal');
+      return { successful: true, data: {
+        saved: true, memory_id: 'football-preference-1', title: args.save.title, scope: args.save.scope,
+      } };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(stages, ['capability', 'memory_type']);
+  assert.match(result.response, /as a preference/i);
+});
+
 test('the canonical save boundary rejects a generic placeholder capsule', async () => {
   const prisma = fakePrisma();
   const calls = [];
@@ -639,6 +695,10 @@ test('a referential save continuation tells the JEV plan about its prepared grou
     checkpointer: new MemorySaver(), composio: {},
     decisionStage: async input => {
       seen.push(input);
+      if (input.stage === 'memory_type') return {
+        status: 'selected', selected: 'decision', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'referential-memory-type' },
+      };
       assert.equal(input.stage, 'capability');
       assert.equal(input.context.explicit_save_language, true);
       assert.deepEqual(input.context.pending_save, { available: true, source: 'conversation', has_explicit_scope: false });
@@ -651,7 +711,7 @@ test('a referential save continuation tells the JEV plan about its prepared grou
       return richSaveToolCall('referential-jev-rich-save');
     },
   });
-  assert.equal(seen.length, 1);
+  assert.equal(seen.length, 2);
   assert.equal(result.status, 'completed');
   assert.match(result.response, /organization company brain/i);
 });

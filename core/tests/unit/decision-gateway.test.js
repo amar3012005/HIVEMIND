@@ -6,6 +6,7 @@ import {
   chooseCapability,
   chooseComposioAction,
   chooseHiveRecallPolicy,
+  chooseMemoryType,
   createDecisionTurnState,
   createOpenRouterJevProvider,
   buildJevDecisionContext,
@@ -67,6 +68,20 @@ test('OpenRouter provider maps opaque option keys back to stable capability ids'
 test('a JEV context capability always exposes the governed HIVE context reader', () => {
   assert.deepEqual(decisionGatewayToolNames('hivemind_context'), ['hivemind_meta']);
   assert.deepEqual(decisionGatewayToolNames('direct_answer'), []);
+});
+
+test('JEV assigns preference from a grounded multilingual memory capsule', async () => {
+  const turn = createDecisionTurnState('memory-type-turn');
+  const result = await chooseMemoryType({
+    gateway: new DecisionGateway({ provider: choiceProvider([{ choice: 'preference', probability: 0.96, margin: 0.91 }]) }),
+    turn,
+    userQuery: 'Ich spiele gern Fußball.',
+    context: { locale: 'de', authenticated_scope: { user_id: 'user-1', org_id: 'org-1' } },
+    observation: { memory_capsule: { title: 'Amar — football preference', content: 'Amar states that he likes playing football.', entities: ['Amar'] } },
+    fallback: async ({ reason }) => ({ source: 'fallback', choice: 'fallback_harness', reason }),
+  });
+  assert.equal(result.choice, 'preference');
+  assert.equal(result.source, 'jev');
 });
 
 test('every Jev stage receives the bounded stage context contract', async () => {

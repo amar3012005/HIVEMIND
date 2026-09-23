@@ -183,6 +183,7 @@ function safeHistory(history = [], limit = 3) {
 const PLAN_SYSTEM_CONTRACT = 'Select exactly one intent. The graph, not the decision model, owns authorization, schemas, execution, approvals, receipts, and final synthesis. Do not infer facts or side effects; use only the request, profile, recent turns, and completed governed receipts.';
 
 const MEMORY_CAPSULE_CONTRACT = 'Create one compact, source-grounded memory capsule—not a shallow summary. title: a specific searchable header naming the main subject, event, or decision; never “Saved memory”. content: self-contained material facts, uncertainty, and relationships. tags: stable topic/entity labels. entities: each supported person, organization, product, place, or identifier. dates: explicit dates/times only. source_refs: the prior-turn evidence or governed receipt that supports it. Include only supported facts; never invent relationships. Exclude OTPs, passwords, reset links, authentication alerts, and credentials. Return title, content, tags, entities, dates, source_refs, and scope.';
+const MEMORY_TYPES = new Set(['fact', 'decision', 'preference', 'procedure', 'experience', 'synthesis']);
 
 function executorInstruction(intent, { preparedSave = null } = {}) {
   const contracts = {
@@ -194,7 +195,7 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
     hivemind_request: 'Use the typed HIVE meta operation that best matches the request. Keep its arguments grounded in the request and receipts.',
     hivemind_meta: 'Use one read-only HIVE meta operation with complete typed arguments. Never use a blank recall query.',
     hivemind_profile_update: 'Use the governed profile-update tool only for the authenticated user\'s explicit requested field change. Do not treat third-party facts as profile changes.',
-    hivemind_save: `${MEMORY_CAPSULE_CONTRACT} Call hivemind_meta once with operation="save" and the capsule in save. If scope is unstated, omit it so the governed scope checkpoint asks the user. Do not call recall as a substitute.`,
+    hivemind_save: `${MEMORY_CAPSULE_CONTRACT} Call hivemind_meta once with operation="save" and the capsule in save. You may propose memory_type, but the LangGraph JEV memory-type node classifies the finished capsule before the governed write. If scope is unstated, omit it so the governed scope checkpoint asks the user. Do not call recall as a substitute.`,
     composio_read: 'Use the generic connected-app subgraph: discover capability, select a read tool, load only its schema, compile complete typed arguments, execute, then answer from its receipt. Do not guess a provider-specific tool.',
     composio_action: 'Use the generic connected-app subgraph: discover capability, select tool, load schema, compile arguments, request approval for the write, execute after approval, then answer from its receipt. Never claim an action completed without that receipt.',
     composio_search: 'Use the generic connected-app discovery subgraph first. From discovery decide the actual capability, schema, arguments, approval if needed, execution, and receipt. Do not assume a specific application tool.',
@@ -403,6 +404,7 @@ async function defaultMetaExecutor(args, ctx) {
   const toolArgs = {
     title: save.title, content: save.content,
     tags: Array.isArray(save.tags) && save.tags.length >= 2 ? save.tags : ['hivemind', 'user-confirmed'],
+    memory_type: MEMORY_TYPES.has(String(save.memory_type || '').toLowerCase()) ? String(save.memory_type).toLowerCase() : 'fact',
     source_type: save.source_type || 'text',
     ...(Array.isArray(save.entities) ? { entities: save.entities } : {}),
     ...(Array.isArray(save.dates) ? { dates: save.dates } : {}),
@@ -782,7 +784,7 @@ function memoryScopeRequest(receipt, runId, preparedSave = null) {
   };
 }
 
-function savedMemoryAcknowledgement(receipt, scope) {
+function savedMemoryAcknowledgement(receipt, scope, memoryType = 'fact') {
   const data = receipt?.data || receipt || {};
   const title = compactText(data.title || 'this memory', 160);
   const scopeLabel = scope === 'project' ? 'selected project' : scope;
@@ -790,7 +792,8 @@ function savedMemoryAcknowledgement(receipt, scope) {
   // relationship enrichment is deliberately asynchronous in the canonical
   // ingestion pipeline, so acknowledge the durable save immediately without
   // pretending those derived links have already completed.
-  return `Added “${title}” to your ${scopeLabel} company brain. It is durable and searchable now; canonical indexing will connect its people, organizations, dates, and relationships in the background.`;
+  const type = MEMORY_TYPES.has(String(memoryType || '').toLowerCase()) ? String(memoryType).toLowerCase() : 'fact';
+  return `Added “${title}” as a ${type} to your ${scopeLabel} company brain. It is durable and searchable now; canonical indexing will connect its people, organizations, dates, and relationships in the background.`;
 }
 
 function acknowledgementChunks(text, maxChars = 64) {
@@ -969,6 +972,53 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     return sequence;
   };
 
+  // This is a bounded decision node inside the save path, never a second chat
+  // inference. The capsule itself remains the only content JEV classifies;
+  // JEV has no write tool, scope authority, or access to raw external data.
+  const classifyMemoryType = async (state, save) => {
+    let decision;
+    try {
+      decision = await decisionStage({
+        runtime: 'legacy', stage: 'memory_type', turn_id: state.runId,
+        user_query: message, actor_id: ctx.userId,
+        context: {
+          ...(state.context || {}),
+          current_phase: 'memory_type',
+          workflow: jevWorkflowContext(state, 'memory_type'),
+        },
+        observation: {
+          memory_capsule: {
+            title: compactText(save?.title, 240),
+            content: compactText(save?.content, 3200),
+            tags: Array.isArray(save?.tags) ? save.tags.slice(0, 24) : [],
+            entities: Array.isArray(save?.entities) ? save.entities.slice(0, 24) : [],
+            dates: Array.isArray(save?.dates) ? save.dates.slice(0, 12) : [],
+            source_refs: Array.isArray(save?.source_refs) ? save.source_refs.slice(0, 12) : [],
+            proposed_type: compactText(save?.memory_type, 40) || null,
+          },
+          completed_receipts: decisionReceiptSummaries(state.receipts),
+        },
+      }, { env: ctx.decisionEnv || process.env, provider: ctx.decisionProvider || null, signal: ctx._signal });
+    } catch (error) {
+      decision = { status: 'defer', selected: null, authoritative: false,
+        receipt: { source: 'fallback', reason: compactText(error?.message || error || 'memory_type_unavailable', 240) } };
+    }
+    const selected = String(decision.selected || '').toLowerCase();
+    const authoritative = decision.status === 'selected' && decision.authoritative === true && MEMORY_TYPES.has(selected);
+    const memoryType = authoritative ? selected : 'fact';
+    const eventSequence = await recordDecision(state, {
+      stage: 'memory_type', status: decision.status,
+      selected: authoritative ? memoryType : null,
+      source: decision.receipt?.source || 'fallback', authoritative,
+      probability: decision.receipt?.probability ?? null,
+      margin: decision.receipt?.margin ?? null,
+      reason: decision.receipt?.reason || decision.reason || null,
+      diagnostics: decisionDiagnosticSummary(decision.receipt),
+      request_id: decision.receipt?.requestId || null, run_id: state.runId,
+    });
+    return { memoryType, eventSequence };
+  };
+
   const contextNode = async state => {
     const runId = state.runId || ctx.unifiedRunId || crypto.randomUUID();
     await ensureRun(runId);
@@ -1121,15 +1171,25 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // merely identifies the evidence, while the tool-call context contains
     // the contract for a meaningful header, tags, entities, dates, and source
     // references.  An absent capsule remains an explicit user-input state.
+    if (plan.authoritative && plan.intent === 'hivemind_save'
+      && state.context?.explicit_save_language && !state.pendingSaveDraft) {
+      // A JEV choice grants access to the save executor, never permission to
+      // invent the subject of a bare imperative (for example, "save a memory
+      // about Rama"). A stable user assertion such as "I like football" does
+      // not enter this branch: it has no explicit save language and can be
+      // turned into a grounded capsule by the selected save executor.
+      return {
+        plan,
+        timings,
+        eventSequence,
+        result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
+      };
+    }
     if (plan.authoritative && plan.intent === 'hivemind_save') {
-      if (!state.pendingSaveDraft) {
-        return {
-          plan,
-          timings,
-          eventSequence,
-          result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
-        };
-      }
+      // The selected save executor receives the original user assertion and
+      // builds the complete capsule through its typed tool schema. A prepared
+      // draft helps terse continuations ("save this"), but it is not a
+      // prerequisite for a JEV-admitted stable preference, fact, or procedure.
       return { plan, timings, eventSequence };
     }
     // In decision-gateway-off environments retain the established typed save
@@ -1267,11 +1327,24 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   };
 
   const toolNode = async state => {
-    const call = state.pendingTool;
+    let call = state.pendingTool;
     const fingerprint = crypto.createHash('sha256').update(`${call.name}:${jsonText(call.args)}`).digest('hex');
     if (state.callFingerprints.includes(fingerprint)) {
       const receipt = { tool: call.name, successful: false, error: 'identical_tool_call_already_completed' };
       return { pendingTool: null, messages: [...state.messages, toolMessage(call, receipt)], receipts: [...state.receipts, receipt] };
+    }
+    if (call.name === 'hivemind_meta' && call.args?.operation === 'save' && call.args?.save) {
+      const classified = await classifyMemoryType(state, call.args.save);
+      // Do not mutate durable graph state in place. The enriched call is the
+      // single typed payload that continues into the scope checkpoint and the
+      // canonical write, so retries preserve the same assigned type.
+      call = {
+        ...call,
+        args: { ...call.args, save: { ...call.args.save, memory_type: classified.memoryType } },
+      };
+      state = { ...state, eventSequence: Math.max(Number(state.eventSequence || 0), classified.eventSequence) };
+      onEvent({ type: 'tool_progress', name: 'hivemind_save_memory', status: 'classified',
+        summary: `Memory type: ${classified.memoryType}`, run_id: state.runId });
     }
     onEvent({ type: 'tool_start', name: call.name, arguments: call.args, run_id: state.runId });
     const executorTimings = { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now() };
@@ -1393,7 +1466,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         successful: true, data: exposed, error: null,
       }];
       const steps = [...state.steps, { kind: 'tool', slug: underlying, status: 'completed', summary: 'Memory saved' }];
-      const response = savedMemoryAcknowledgement(receipt, receipt?.data?.scope || call.args?.save?.scope || 'personal');
+      const response = savedMemoryAcknowledgement(
+        receipt,
+        receipt?.data?.scope || call.args?.save?.scope || 'personal',
+        call.args?.save?.memory_type,
+      );
       const firstAnswerDeltaAtMs = await emitReceiptAnswer(onEvent, response, { grounded: true, runId: state.runId });
       return {
         pendingTool: null,
@@ -1615,7 +1692,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         timings: { ...state.timings, executor_started_at_ms: state.timings.executor_started_at_ms || Date.now(), receipt_at_ms: Date.now() },
       };
     }
-    const response = savedMemoryAcknowledgement(receipt, saveArgs.scope);
+    const response = savedMemoryAcknowledgement(receipt, saveArgs.scope, saveArgs.memory_type);
     const firstAnswerDeltaAtMs = await emitReceiptAnswer(onEvent, response, { grounded: true, runId: state.runId });
     return {
       pendingMemoryScope: null,

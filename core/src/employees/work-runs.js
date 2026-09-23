@@ -28,6 +28,7 @@ const MAX_EVENTS = 500;
 // HIVE tools, never as caller-controlled prompt baggage at WorkRun creation.
 const MAX_INITIAL_SCOPE_BYTES = 12_000;
 const RESERVED_SCOPE_KEYS = new Set(['completion_contract', 'runtime_binding', 'local_playbooks']);
+const EXECUTION_MODES = new Set(['direct', 'company_answer', 'operating_plan']);
 
 function scopeError(message) {
   return Object.assign(new Error(message), { code: 'WORKRUN_SCOPE_INVALID' });
@@ -41,6 +42,9 @@ export function normalizeInitialWorkRunScope(scope) {
   const candidate = Object.fromEntries(
     Object.entries(scope).filter(([key]) => !RESERVED_SCOPE_KEYS.has(key)),
   );
+  if (candidate.execution_mode != null && !EXECUTION_MODES.has(candidate.execution_mode)) {
+    throw scopeError('WorkRun execution_mode must be direct, company_answer, or operating_plan.');
+  }
   let serialized;
   try { serialized = JSON.stringify(candidate); }
   catch { throw scopeError('WorkRun scope must be JSON-serializable.'); }
@@ -49,6 +53,14 @@ export function normalizeInitialWorkRunScope(scope) {
     throw scopeError(`WorkRun scope exceeds the ${MAX_INITIAL_SCOPE_BYTES}-byte L0 context budget; pass record references and load details progressively.`);
   }
   return JSON.parse(serialized);
+}
+
+// Task state is a native AgentScope capability, but presenting it as an
+// operating plan is a product decision owned by the durable Core envelope.
+// The safe default is direct: callers must explicitly select an operating plan
+// rather than a casual turn accidentally acquiring one.
+export function isOperatingPlanScope(scope) {
+  return asObject(scope).execution_mode === 'operating_plan';
 }
 
 export function isTerminalWorkRun(status) {
@@ -101,7 +113,7 @@ export function validateWorkRunCompletion(run) {
 }
 
 /** Turn AgentScope events into a product vocabulary at one boundary. */
-export function normalizeAgentScopeEvent(event) {
+export function normalizeAgentScopeEvent(event, { executionMode = 'direct' } = {}) {
   if (!event || typeof event !== 'object') return null;
   const type = String(event.type || event.t || '').toUpperCase();
   const ts = Date.now();
@@ -131,6 +143,27 @@ export function normalizeAgentScopeEvent(event) {
       ? native({ t: 'agent.status', status: 'idle', reason, finished_reason: reason, ts })
       : native({ t: 'workrun.failed', reason, finished_reason: reason, error: 'The agent stopped before finishing. Work is saved.', ts });
   }
+  // AgentScope reports the selected model separately at MODEL_CALL_START and
+  // the authoritative accounting at MODEL_CALL_END. Keep both as ordered
+  // turn metadata so Rooms can show what the provider actually reported
+  // without guessing usage or cache values.
+  if (type === 'MODEL_CALL_START') return native({
+    t: 'turn.usage',
+    reply_id: event.reply_id || null,
+    usage: { model_name: event.model_name || event.model || null },
+    ts,
+  });
+  if (type === 'MODEL_CALL_END') return native({
+    t: 'turn.usage',
+    reply_id: event.reply_id || null,
+    usage: {
+      input_tokens: event.input_tokens,
+      output_tokens: event.output_tokens,
+      cache_input_tokens: event.cache_input_tokens,
+      cache_creation_input_tokens: event.cache_creation_input_tokens,
+    },
+    ts,
+  });
   if (type === 'TEXT_BLOCK_DELTA' || type === 'TEXT_BLOCK_END'
     || type === 'THINKING_BLOCK_DELTA' || type === 'THINKING_BLOCK_END') {
     return native({
@@ -142,8 +175,8 @@ export function normalizeAgentScopeEvent(event) {
     });
   }
   if (type === 'TOOL_CALL_START') {
-    return nativeTask(tool)
-      ? native({ t: 'plan.updated', family: 'task', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, input: event.input ?? event.arguments ?? event.args, ts })
+    return nativeTask(tool) && executionMode === 'operating_plan'
+      ? native({ t: 'plan.updated', family: 'task', execution_mode: executionMode, tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, input: event.input ?? event.arguments ?? event.args, ts })
       : native({ t: 'tool.started', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, input: event.input ?? event.arguments ?? event.args, ts });
   }
   // AgentScope carries tool arguments incrementally. Retain the chunks in
@@ -172,15 +205,16 @@ export function normalizeAgentScopeEvent(event) {
         ts,
       });
     }
-    return nativeTask(tool)
-      ? native({ t: 'plan.updated', family: 'task', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, ts })
+    return nativeTask(tool) && executionMode === 'operating_plan'
+      ? native({ t: 'plan.updated', family: 'task', execution_mode: executionMode, tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, ts })
       : native({ t: 'tool.completed', tool, tool_call_name: tool, tool_call_id: callId, call_id: callId, state: event.state || 'success', result: preview(event.output ?? event.result ?? event.content), output: event.output ?? event.result ?? event.content, metadata: event.metadata || {}, ts });
   }
   if (type === 'CUSTOM' && event.name === 'state_updated') {
+    if (executionMode !== 'operating_plan') return null;
     const tasks = event.value?.tasks_context?.tasks;
     if (!Array.isArray(tasks)) return null;
     return emit({
-      t: 'plan.updated', family: 'task',
+      t: 'plan.updated', family: 'task', execution_mode: executionMode,
       tasks: tasks.map((task) => ({
         id: task?.id || null, subject: task?.subject || '', description: task?.description || '',
         state: task?.state || null, blocked_by: Array.isArray(task?.blocked_by) ? task.blocked_by : [],
@@ -243,14 +277,16 @@ export async function transitionWorkRun(prisma, workRunId, to, patch = {}) {
 
 /** Apply one runtime event. Completion is explicit and handled by the caller. */
 export async function applyRuntimeEvent(prisma, workRunId, rawEvent) {
-  const event = normalizeAgentScopeEvent(rawEvent);
-  if (!event) return { applied: false, reason: 'not_ui_relevant' };
   const rows = await prisma.$queryRawUnsafe(
-    'SELECT id, status, events FROM "hivemind"."work_runs" WHERE id = $1::uuid', workRunId,
+    'SELECT id, status, events, scope FROM "hivemind"."work_runs" WHERE id = $1::uuid', workRunId,
   );
   const run = rows?.[0];
   if (!run) return { applied: false, reason: 'not_found' };
   if (isTerminalWorkRun(run.status)) return { applied: false, reason: 'terminal' };
+  const event = normalizeAgentScopeEvent(rawEvent, {
+    executionMode: isOperatingPlanScope(run.scope) ? 'operating_plan' : 'direct',
+  });
+  if (!event) return { applied: false, reason: 'not_ui_relevant' };
   if (event.t === 'tool.completed' && !event.tool && event.call_id && Array.isArray(run.events)) {
     event.tool = [...run.events].reverse().find(
       (prior) => prior?.t === 'tool.started' && prior.call_id === event.call_id,

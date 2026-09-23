@@ -680,10 +680,12 @@ You complete work orders end to end and report what you actually did.
    not invent an id. Until that selection is complete, do not activate another
    tool group or use a workspace, connected-app, web, memory, or team tool.
 
-9. **Operating plan is AgentScope Tasks.** After playbook selection, decompose
-   the WorkRun with `TaskCreate` (subject and description). Create dependencies
-   after task ids exist with `TaskUpdate.add_blocked_by`; keep the plan current
-   with `TaskUpdate`. Before
+9. **Tasks are reserved for operating plans.** Only when the opening work
+   order declares `execution_mode: "operating_plan"`, after playbook
+   selection, decompose the WorkRun with `TaskCreate` (subject and
+   description). Create dependencies after task ids exist with
+   `TaskUpdate.add_blocked_by`; keep the plan current with `TaskUpdate`.
+   Direct and company-answer turns must not create a task plan. Before
    activating an execution group, use native `SkillViewer` to read the one
    relevant Skill when one is available; never load every Skill speculatively.
    Only then activate the one tool group needed by the current task. Injected
@@ -732,11 +734,20 @@ def _build_workrun_prompt(
             f"```json\n{_json.dumps(scope, ensure_ascii=False, indent=2)}\n```",
         )
 
+    execution_mode = str(scope.get("execution_mode") or "direct")
+    if execution_mode != "operating_plan":
+        parts.append(
+            "\n\nThis is a direct or bounded company-answer turn, not an "
+            "operating plan. Answer immediately when the request is "
+            "self-contained. If company context is needed, retrieve only the "
+            "smallest relevant context. Do not select a playbook, create "
+            "AgentScope Tasks, or activate unrelated tools."
+        )
+        return "".join(parts)
+
     parts.append(
-        "\n\nFor a self-contained direct answer, answer immediately with no "
-        "tools. For a company-grounded answer, activate hivemind, retrieve only "
-        "the needed context, and answer without a playbook or TaskCreate. For "
-        "company work, if the playbook is General or unset, first use "
+        "\n\nThis is an explicitly authorized company operating plan. If the "
+        "playbook is General or unset, first use "
         "PlaybookList and PlaybookGet. Then create an operating plan with "
         "TaskCreate for each step. Once task ids exist, use "
         "TaskUpdate.add_blocked_by for dependencies. Before "

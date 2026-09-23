@@ -8,6 +8,7 @@ import {
   dispatchWorkRun,
   normalizeAgentScopeEvent,
   normalizeInitialWorkRunScope,
+  isOperatingPlanScope,
   recoverWorkRun,
   validateWorkRunCompletion,
   verifyAgentScopeRuntimeBuild,
@@ -27,16 +28,49 @@ test('initial WorkRun scope is compact and cannot carry HIVE control state into 
   );
 });
 
+test('only an explicit operating-plan scope enables native Task plan projection', () => {
+  assert.equal(isOperatingPlanScope({}), false);
+  assert.equal(isOperatingPlanScope({ execution_mode: 'company_answer' }), false);
+  assert.equal(isOperatingPlanScope({ execution_mode: 'operating_plan' }), true);
+  assert.throws(
+    () => normalizeInitialWorkRunScope({ execution_mode: 'guess_from_prompt' }),
+    /execution_mode/,
+  );
+  const raw = { type: 'TOOL_CALL_START', tool_call_name: 'TaskCreate', tool_call_id: 'task-1' };
+  assert.equal(normalizeAgentScopeEvent(raw).t, 'tool.started');
+  const plan = normalizeAgentScopeEvent(raw, { executionMode: 'operating_plan' });
+  assert.equal(plan.t, 'plan.updated');
+  assert.equal(plan.execution_mode, 'operating_plan');
+});
+
 test('AgentScope Task state is projected without creating another task authority', () => {
   const normalized = normalizeAgentScopeEvent({
     type: 'CUSTOM', name: 'state_updated', value: { tasks_context: { tasks: [{
       id: 'task-1', subject: 'Research', description: 'Find evidence', state: 'in_progress', blocked_by: [],
     }] } },
-  });
+  }, { executionMode: 'operating_plan' });
   assert.equal(normalized.t, 'plan.updated');
   assert.deepEqual(normalized.tasks, [{
     id: 'task-1', subject: 'Research', description: 'Find evidence', state: 'in_progress', blocked_by: [], owner: null,
   }]);
+});
+
+test('AgentScope model call usage remains provider-reported turn metadata', () => {
+  const model = normalizeAgentScopeEvent({
+    type: 'MODEL_CALL_START', reply_id: 'reply-usage', model_name: 'deepseek-v4',
+  });
+  const usage = normalizeAgentScopeEvent({
+    type: 'MODEL_CALL_END', reply_id: 'reply-usage', input_tokens: 58_087,
+    output_tokens: 940, cache_input_tokens: 16_812,
+    cache_creation_input_tokens: 0,
+  });
+  assert.deepEqual(model.usage, { model_name: 'deepseek-v4' });
+  assert.equal(model.t, 'turn.usage');
+  assert.deepEqual(usage.usage, {
+    input_tokens: 58_087, output_tokens: 940,
+    cache_input_tokens: 16_812, cache_creation_input_tokens: 0,
+  });
+  assert.equal(usage.reply_id, 'reply-usage');
 });
 
 test('an opted-in Core refuses a stale AgentScope runtime build before dispatch', async () => {

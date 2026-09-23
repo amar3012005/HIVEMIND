@@ -18,26 +18,34 @@ class WorkRunOperatingOsGoldenTests(unittest.TestCase):
     def test_all_golden_scenarios_are_present_in_the_native_opening_contract(self):
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         self.assertEqual(fixture["contract"], "hivemind.agentscope.workrun-operating-os-golden.v1")
-        prompt = _build_workrun_prompt(
-            goal="Create a governed company deliverable",
-            hyperagent_slug=None,
-            playbook_id=None,
-            playbook_version=None,
-            scope={"company_context": {"mode": "minimal"}},
-        )
-
         seen = set()
         for scenario in fixture["scenarios"]:
             with self.subTest(scenario=scenario["id"]):
                 seen.add(scenario["id"])
+                execution_mode = {
+                    "direct-answer": "direct",
+                    "grounded-company-answer": "company_answer",
+                    "company-work": "operating_plan",
+                }[scenario["id"]]
+                prompt = _build_workrun_prompt(
+                    goal="Create a governed company deliverable",
+                    hyperagent_slug=None,
+                    playbook_id=None,
+                    playbook_version=None,
+                    scope={"company_context": {"mode": "minimal"}, "execution_mode": execution_mode},
+                )
                 for required in scenario.get("required", []):
-                    self.assertIn(required, prompt)
-                scenario_prompt = prompt
-                if scenario["id"] == "company-work":
-                    scenario_prompt = prompt[prompt.index("For company work"):]
+                    if scenario["id"] == "direct-answer":
+                        self.assertIn("not an operating plan", prompt)
+                        self.assertIn("Answer immediately", prompt)
+                    elif scenario["id"] == "grounded-company-answer":
+                        self.assertIn("not an operating plan", prompt)
+                        self.assertIn("smallest relevant context", prompt)
+                    else:
+                        self.assertIn(required, prompt)
                 previous = -1
                 for required in scenario.get("required_sequence", []):
-                    current = scenario_prompt.index(required)
+                    current = prompt.index(required)
                     self.assertGreater(current, previous, required)
                     previous = current
 

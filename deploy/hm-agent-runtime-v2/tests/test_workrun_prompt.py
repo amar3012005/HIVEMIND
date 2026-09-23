@@ -24,16 +24,27 @@ class WorkRunPromptTests(unittest.TestCase):
             hyperagent_slug=None,
             playbook_id=None,
             playbook_version=None,
-            scope={},
+            scope={"execution_mode": "operating_plan"},
         )
-        self.assertIn("For a self-contained direct answer", prompt)
-        self.assertIn("company-grounded answer", prompt)
         self.assertIn("hivemind_complete_workrun", prompt)
-        self.assertIn("without a playbook or TaskCreate", prompt)
-        company_work = prompt[prompt.index("For \"company work\""):] if "For \"company work\"" in prompt else prompt[prompt.index("For company work"):]
-        self.assertLess(company_work.index("PlaybookList"), company_work.index("TaskCreate"))
-        self.assertLess(company_work.index("TaskCreate"), company_work.index("SkillViewer"))
-        self.assertLess(company_work.index("SkillViewer"), company_work.index("activate another tool group"))
+        self.assertIn("explicitly authorized company operating plan", prompt)
+        self.assertLess(prompt.index("PlaybookList"), prompt.index("TaskCreate"))
+        self.assertLess(prompt.index("TaskCreate"), prompt.index("SkillViewer"))
+        self.assertLess(prompt.index("SkillViewer"), prompt.index("activate another tool group"))
+
+    def test_direct_and_company_answer_turns_cannot_create_a_task_plan(self):
+        for scope in ({}, {"execution_mode": "company_answer"}):
+            with self.subTest(scope=scope):
+                prompt = _build_workrun_prompt(
+                    goal="Explain our current positioning",
+                    hyperagent_slug=None,
+                    playbook_id=None,
+                    playbook_version=None,
+                    scope=scope,
+                )
+                self.assertIn("not an operating plan", prompt)
+                self.assertIn("Do not select a playbook, create", prompt)
+                self.assertNotIn("PlaybookList and PlaybookGet. Then create", prompt)
 
     def test_read_only_team_roles_cannot_inherit_full_leader_access(self):
         templates = {template.type: template for template in _SUBAGENT_TEMPLATES}

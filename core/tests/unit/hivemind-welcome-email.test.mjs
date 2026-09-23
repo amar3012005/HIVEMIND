@@ -24,5 +24,6 @@ test('welcome renderer is self-contained and renders one footer', () => {
   assert.match(rendered.html, /humation-avatar\.svg\?seed=hivemind-brain/);
   assert.match(rendered.html, /humation-avatar\.svg\?seed=hivemind-os/);
   assert.match(rendered.html, /humation-avatar\.svg\?seed=hivemind-voice/);
-  assert.match(rendered.html, /width:72px;height:72px;max-width:none;margin:-8px 0 0 -12px/);
+  assert.match(rendered.html, /width:48px;height:48px;border:0/);
+  assert.doesNotMatch(rendered.html, /max-width:none;margin:-8px 0 0 -12px/);
 });

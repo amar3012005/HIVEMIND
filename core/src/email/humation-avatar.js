@@ -118,11 +118,12 @@ export function renderHivemindEmailTeam({ caption = 'YOUR TEAM IS READY', varian
   const faceStrip = variant === 'face-strip';
   const people = HIVEMIND_EMAIL_TEAM.map((member) => {
     const lane = humationLaneVisual(member.roleArchetype);
-    // The full Humation SVG includes a body. The email treatment deliberately
-    // enlarges it inside a clipped circle, leaving a face-first portrait rather
-    // than reusing a flattened screenshot or an unrelated illustration.
+    // Match AgentAvatar in the product navbar: render the complete square
+    // Humation SVG inside the circular lane frame. Do not manually zoom or
+    // translate the source—individual seeds have different head positions,
+    // which made the previous email crop cut faces off.
     const avatar = faceStrip
-      ? `<div style="width:48px;height:48px;margin:0 auto 6px;border:2px solid #ffffff;border-radius:50%;background:${lane.background};overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.12)"><img src="${humationAvatarPublicUrl(member)}" width="72" height="72" alt="${escapeAttribute(member.name)}" style="display:block;width:72px;height:72px;max-width:none;margin:-8px 0 0 -12px;border:0" /></div>`
+      ? `<div style="width:48px;height:48px;margin:0 auto 6px;border:2px solid #ffffff;border-radius:50%;background:${lane.background};overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.12)"><img src="${humationAvatarPublicUrl(member)}" width="48" height="48" alt="${escapeAttribute(member.name)}" style="display:block;width:48px;height:48px;border:0" /></div>`
       : `<div style="width:58px;height:58px;margin:0 auto 7px;border:1px solid ${lane.color};border-radius:50%;background:${lane.background};overflow:hidden"><img src="${humationAvatarPublicUrl(member)}" width="58" height="58" alt="${escapeAttribute(member.name)}" style="display:block;width:58px;height:58px;border:0" /></div>`;
     const width = faceStrip ? 60 : 72;
     const padding = faceStrip ? '0 2px' : '0 4px';

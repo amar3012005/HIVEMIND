@@ -43,6 +43,13 @@ const State = Annotation.Root({
   pendingConnection: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingMemoryScope: Annotation({ reducer: (_left, right) => right, default: () => null }),
   pendingApproval: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  // Connected-app access is granted only for this checkpointed turn.  It is
+  // separate from user-write approval, which remains required by the selected
+  // provider schema after a tool call has been prepared.
+  pendingToolsConsent: Annotation({ reducer: (_left, right) => right, default: () => null }),
+  toolsApproved: Annotation({ reducer: (_left, right) => right, default: () => false }),
+  toolsDeclined: Annotation({ reducer: (_left, right) => right, default: () => false }),
+  toolsDeclineFallbackDone: Annotation({ reducer: (_left, right) => right, default: () => false }),
   selectedSlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   primarySlugs: Annotation({ reducer: (_left, right) => right, default: () => [] }),
   schemas: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
@@ -65,6 +72,34 @@ const State = Annotation.Root({
 });
 
 const MISSING_SAVE_RESPONSE = 'Tell me the specific fact, decision, or note you want saved, and where it belongs (personal, organization, team, or project).';
+const CONNECTED_INTENTS = new Set(['composio_search', 'composio_read', 'composio_action']);
+const connectedIntent = intent => CONNECTED_INTENTS.has(String(intent || ''));
+const connectedToolsEnabled = (state, requested) => requested === true || state?.toolsApproved === true;
+
+function toolConsentRequest(locale = 'en', intent = null) {
+  const language = String(locale || 'en').toLowerCase().split(/[-_]/)[0];
+  const messages = {
+    en: 'Hivemind wants to use connected tools to complete this request. Approve to continue this same turn. This enables tools for this request only; external changes still need their own approval.',
+    de: 'Hivemind möchte verbundene Tools verwenden, um diese Anfrage abzuschließen. Genehmige, um in diesem Gespräch fortzufahren. Die Freigabe gilt nur für diese Anfrage; externe Änderungen benötigen weiterhin eine eigene Bestätigung.',
+    fr: 'Hivemind souhaite utiliser les outils connectés pour terminer cette demande. Approuvez pour continuer ce même échange. L’accès vaut uniquement pour cette demande ; les actions externes nécessitent toujours leur propre approbation.',
+    es: 'Hivemind quiere usar herramientas conectadas para completar esta solicitud. Aprueba para continuar este mismo turno. El acceso solo vale para esta solicitud; los cambios externos requieren su propia aprobación.',
+  };
+  const labels = {
+    en: ['Approve and continue', 'Disapprove — use Hivemind only'],
+    de: ['Genehmigen und fortfahren', 'Ablehnen — nur Hivemind verwenden'],
+    fr: ['Approuver et continuer', 'Refuser — utiliser Hivemind uniquement'],
+    es: ['Aprobar y continuar', 'Rechazar — usar solo Hivemind'],
+  }[language] || ['Approve and continue', 'Disapprove — use Hivemind only'];
+  return {
+    kind: 'enable_tools', field: 'use_tools', blocking: true,
+    intent: connectedIntent(intent) ? intent : null,
+    prompt: messages[language] || messages.en,
+    options: [
+      { id: 'approve_tools', value: 'approve', label: labels[0] },
+      { id: 'decline_tools', value: 'decline', label: labels[1] },
+    ],
+  };
+}
 
 const compactText = (value, limit = 1800) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 // Final assistant Markdown is a UI contract. Never normalize its whitespace:
@@ -1042,6 +1077,10 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       pendingConnection: null,
       pendingMemoryScope: null,
       pendingApproval: null,
+      pendingToolsConsent: null,
+      toolsApproved: false,
+      toolsDeclined: false,
+      toolsDeclineFallbackDone: false,
       selectedSlugs: [],
       primarySlugs: [],
       schemas: {},
@@ -1186,6 +1225,18 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
       };
     }
+    // JEV—not app-name heuristics or a second chat model—decides that a
+    // connected capability is needed. If the user-level tools latch is off,
+    // pause this same graph thread before exposing or executing any connector.
+    if (plan.authoritative && connectedIntent(plan.intent) && !connectedToolsEnabled(state, useTools)) {
+      const request = toolConsentRequest(ctx.language, plan.intent);
+      onEvent({ type: 'tool_progress', name: 'connected_apps', status: 'approval_required',
+        summary: 'Awaiting permission to use connected tools', run_id: state.runId });
+      return {
+        plan, timings, eventSequence, pendingToolsConsent: request,
+        steps: [...state.steps, { kind: 'tool_consent', slug: 'connected_apps', status: 'waiting', summary: 'Waiting for permission to use tools' }],
+      };
+    }
     if (plan.authoritative && plan.intent === 'hivemind_save') {
       // The selected save executor receives the original user assertion and
       // builds the complete capsule through its typed tool schema. A prepared
@@ -1217,21 +1268,25 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // obligations have receipts, rather than reopening the initial multi-task
     // surface.
     const selectedIntent = transitionIntent || state.plan?.intent;
-    const providerEvidenceReady = useTools && state.selectedSlugs.length > 0
+    const toolsEnabled = connectedToolsEnabled(state, useTools);
+    const providerEvidenceReady = toolsEnabled && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     // Native HIVE reads are already governed and projected before entering the
     // graph. For native-only turns we can stream their final synthesis just as
     // we do connected-app receipts, without streaming an unvalidated planner
     // response or allowing another tool decision mid-stream.
-    const metaReadEvidenceReady = !useTools && state.receipts.some(substantiveMetaReadReceipt);
-    const connectedReceiptMissing = useTools && state.requestedToolkits.length > 0 && !providerEvidenceReady;
+    const metaReadEvidenceReady = !toolsEnabled && state.receipts.some(substantiveMetaReadReceipt);
+    const consentFallbackReady = state.toolsDeclined && state.toolsDeclineFallbackDone;
+    const connectedReceiptMissing = toolsEnabled && state.requestedToolkits.length > 0 && !providerEvidenceReady;
     // A receipt in a compound turn is evidence for the post-receipt JEV
     // decision, not permission to synthesize early. Only an explicit
     // `synthesize` transition can complete the workflow after evidence.
-    const finalEvidenceReady = !continueWorkflow && !connectedReceiptMissing && (providerEvidenceReady || metaReadEvidenceReady);
+    const finalEvidenceReady = !continueWorkflow && !connectedReceiptMissing && (providerEvidenceReady || metaReadEvidenceReady || consentFallbackReady);
     const immediateStream = !continueWorkflow && isImmediateStreamIntent(state.plan);
     const canStreamFinal = (finalEvidenceReady || immediateStream) && streamFinal;
-    const finalReceipts = providerEvidenceReady
+    const finalReceipts = state.toolsDeclined
+      ? state.receipts
+      : providerEvidenceReady
       ? state.receipts.filter(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
       : state.receipts.filter(substantiveMetaReadReceipt);
     const executionMessages = [
@@ -1242,7 +1297,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present)/i.test(state.messages.at(-1)?.content || '')
       ? state.messages.at(-1) : null;
     const modelMessages = finalEvidenceReady ? [
-      { role: 'system', content: `${ORGANIZATIONAL_BRAIN_PERSONA}\n\n${LANGGRAPH_LIVING_BRAIN_VOICE}\n\nSynthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts. Keep the answer in the living-company-brain voice above: speak as the informed internal colleague, not as a generic chatbot or a tool report.${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
+      { role: 'system', content: `${ORGANIZATIONAL_BRAIN_PERSONA}\n\n${LANGGRAPH_LIVING_BRAIN_VOICE}\n\nSynthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts. Keep the answer in the living-company-brain voice above: speak as the informed internal colleague, not as a generic chatbot or a tool report.${state.toolsDeclined ? ' The user declined connected tools. Do not imply that an external app was searched. Use the Hivemind recall receipt if it contains relevant stored evidence; if it does not, say warmly and briefly that you could not check the live connected app without permission.' : ''}${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
       { role: 'user', content: message },
       { role: 'system', content: `Verified receipts:\n${jsonText(finalReceipts).slice(0, 24000)}` },
     ] : repair ? [...state.messages.slice(0, -1), ...executionMessages, repair]
@@ -1290,8 +1345,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // decision remains the explicit constrained fallback_harness path.
     const legacyGatewayOff = !state.plan?.authoritative && state.plan?.reason === 'decision_gateway_off';
     const tools = finalEvidenceReady ? []
-      : legacyGatewayOff ? unifiedMetaTools({ useTools })
-        : decisionToolSurface(selectedIntent || 'fallback_harness', useTools);
+      : state.toolsDeclined ? unifiedMetaTools({ useTools: false })
+        : legacyGatewayOff ? unifiedMetaTools({ useTools: toolsEnabled })
+          : decisionToolSurface(selectedIntent || 'fallback_harness', toolsEnabled);
     const turn = await callModel({
       messages: modelMessages, tools, model: ctx.model,
       apiKey: ctx._apiKey, signal: ctx._signal, state,
@@ -1301,8 +1357,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const messages = [...state.messages, { role: 'assistant', content: assistant.content || null, ...(assistant.tool_calls?.length ? { tool_calls: assistant.tool_calls } : {}) }];
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     if (calls.length) return { messages, pendingTool: parseUnifiedToolCall(calls[0]), cycles: state.cycles + 1, usage };
-    const connectedDiscoveryMissing = useTools && state.requestedToolkits.length > 0 && state.selectedSlugs.length === 0;
-    const connectedExecutionMissing = useTools && state.selectedSlugs.length > 0
+    const connectedDiscoveryMissing = toolsEnabled && state.requestedToolkits.length > 0 && state.selectedSlugs.length === 0;
+    const connectedExecutionMissing = toolsEnabled && state.selectedSlugs.length > 0
       && !state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     if ((connectedDiscoveryMissing || connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
       return {
@@ -1362,7 +1418,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         successful: false,
         error: 'tool_not_available',
         requested_tool: compactText(call.requestedName, 120),
-        available_tools: unifiedMetaTools({ useTools }).map(tool => tool.function.name),
+        available_tools: unifiedMetaTools({ useTools: connectedToolsEnabled(state, useTools) }).map(tool => tool.function.name),
         instruction: 'Choose one available gateway tool and continue the original request.',
       };
       onEvent({ type: 'tool_result', name: call.requestedName || call.name, status: 'error', summary: receipt.error, run_id: state.runId });
@@ -1555,7 +1611,71 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       margin: workflowTransition.margin, reason: workflowTransition.reason,
       diagnostics: decisionDiagnosticSummary(decision.receipt),
       request_id: workflowTransition.request_id, run_id: state.runId });
-    return { workflowTransition, eventSequence, timings: { ...state.timings, workflow_transition_completed_at_ms: Date.now() } };
+    const pendingToolsConsent = authoritative && connectedIntent(intent) && !connectedToolsEnabled(state, useTools)
+      ? toolConsentRequest(ctx.language, intent)
+      : null;
+    if (pendingToolsConsent) onEvent({ type: 'tool_progress', name: 'connected_apps', status: 'approval_required',
+      summary: 'Awaiting permission to use connected tools', run_id: state.runId });
+    return {
+      workflowTransition, eventSequence, pendingToolsConsent,
+      ...(pendingToolsConsent ? { steps: [...state.steps, { kind: 'tool_consent', slug: 'connected_apps', status: 'waiting', summary: 'Waiting for permission to use tools' }] } : {}),
+      timings: { ...state.timings, workflow_transition_completed_at_ms: Date.now() },
+    };
+  };
+
+  const toolsConsentNode = async state => {
+    // interrupt() is first: on resume LangGraph restarts this node from its
+    // beginning, so no side effect or capability grant can happen twice.
+    const request = state.pendingToolsConsent;
+    const answer = interrupt({ run_id: state.runId, ...request });
+    const selected = String(answer?.option_id || answer?.action || answer?.value || answer || '').toLowerCase();
+    if (['approve_tools', 'approve', 'enable', 'enable_tools'].includes(selected)) {
+      const steps = [...state.steps, { kind: 'tool_consent', slug: 'connected_apps', status: 'approved', summary: 'Tools enabled for this request' }];
+      onEvent({ type: 'tool_progress', name: 'connected_apps', status: 'approved',
+        summary: 'Tools enabled for this request; external writes remain separately approval-gated', run_id: state.runId });
+      return {
+        pendingToolsConsent: null, toolsApproved: true, toolsDeclined: false,
+        steps,
+        messages: [...state.messages, { role: 'system', content: 'The user approved connected tools for this request only. Continue the same selected JEV plan and original request. This does not approve external writes; honor the normal per-action approval node. Do not run the planner again.' }],
+      };
+    }
+    if (['decline_tools', 'decline', 'disapprove', 'reject', 'not_now'].includes(selected)) {
+      const steps = [...state.steps, { kind: 'tool_consent', slug: 'connected_apps', status: 'declined', summary: 'Using Hivemind-only fallback' }];
+      onEvent({ type: 'tool_progress', name: 'connected_apps', status: 'declined',
+        summary: 'Permission declined; checking Hivemind for related saved context', run_id: state.runId });
+      return {
+        pendingToolsConsent: null, toolsApproved: false, toolsDeclined: true, toolsDeclineFallbackDone: false,
+        steps,
+        messages: [...state.messages, { role: 'system', content: 'The user declined connected tools. Do not use or claim access to any external application. The graph will check Hivemind for related saved context; if it has no relevant evidence, explain that a live connected-app lookup needs permission.' }],
+      };
+    }
+    throw new Error('unified_tools_consent_choice_invalid');
+  };
+
+  const declinedToolsFallbackNode = async state => {
+    if (!state.toolsDeclined || state.toolsDeclineFallbackDone) return {};
+    const call = {
+      id: `consent-fallback-${state.runId}`,
+      name: 'hivemind_meta',
+      args: { operation: 'recall', recall: { query: compactText(message, 1200), mode: 'quick', limit: 5 } },
+    };
+    onEvent({ type: 'tool_start', name: 'hivemind_meta', arguments: call.args, run_id: state.runId });
+    let receipt;
+    try {
+      receipt = await runMeta(call.args, ctx, state);
+    } catch (error) {
+      receipt = { successful: false, error: compactText(error?.message || error || 'hivemind_recall_failed', 300) };
+    }
+    const exposed = publicToolResult(receipt);
+    onEvent({ type: 'tool_result', name: 'hivemind_meta', status: receipt?.successful === false ? 'error' : 'completed',
+      summary: receipt?.error || 'Checked saved Hivemind context', run_id: state.runId });
+    return {
+      toolsDeclineFallbackDone: true,
+      receipts: [...state.receipts, { tool: 'hivemind_meta', action: 'recall', successful: receipt?.successful !== false, data: exposed, error: receipt?.error || null }],
+      messages: [...state.messages, toolMessage(call, exposed)],
+      steps: [...state.steps, { kind: 'tool', slug: 'hivemind_meta', status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Checked saved Hivemind context' }],
+      timings: { ...state.timings, consent_fallback_completed_at_ms: Date.now() },
+    };
   };
 
   const connectionNode = async state => {
@@ -1716,9 +1836,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
 
   const routeModel = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
   const routeContext = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'classify_plan');
-  const routePlan = state => state.result ? 'seal' : (state.pendingTool ? 'tool' : 'model');
+  const routePlan = state => state.result ? 'seal' : (state.pendingToolsConsent ? 'tools_consent' : (state.pendingTool ? 'tool' : 'model'));
   const routeTool = state => state.result ? 'seal' : (state.pendingConnection ? 'connection' : (state.pendingMemoryScope ? 'memory_scope' : (state.pendingApproval ? 'approval' : 'workflow_transition')));
-  const routeWorkflowTransition = state => state.result ? 'seal' : 'model';
+  const routeWorkflowTransition = state => state.result ? 'seal' : (state.pendingToolsConsent ? 'tools_consent' : 'model');
+  const routeToolsConsent = state => state.toolsApproved ? 'model' : (state.toolsDeclined ? 'declined_tools_fallback' : 'seal');
+  const routeDeclinedToolsFallback = state => state.result ? 'seal' : 'model';
   const routeConnection = state => state.pendingConnection ? 'connection' : 'model';
   const routeMemoryScope = state => state.result ? 'seal'
     : state.pendingMemoryScope?.kind === 'memory_save_retry' ? 'memory_scope'
@@ -1738,16 +1860,20 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     .addNode('model', modelNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.2 } })
     .addNode('tool', toolNode, { retryPolicy: { maxAttempts: 2, initialInterval: 0.3 } })
     .addNode('workflow_transition', workflowTransitionNode, { retryPolicy: { maxAttempts: 1 } })
+    .addNode('tools_consent', toolsConsentNode)
+    .addNode('declined_tools_fallback', declinedToolsFallbackNode, { retryPolicy: { maxAttempts: 1 } })
     .addNode('connection', connectionNode)
     .addNode('memory_scope', memoryScopeNode)
     .addNode('approval', approvalNode)
     .addNode('seal', sealNode)
     .addEdge(START, 'admit_context')
     .addConditionalEdges('admit_context', routeContext, ['classify_plan', 'tool', 'seal'])
-    .addConditionalEdges('classify_plan', routePlan, ['model', 'tool', 'seal'])
+    .addConditionalEdges('classify_plan', routePlan, ['model', 'tool', 'tools_consent', 'seal'])
     .addConditionalEdges('model', routeModel, ['model', 'tool', 'seal'])
     .addConditionalEdges('tool', routeTool, ['workflow_transition', 'connection', 'memory_scope', 'approval', 'seal'])
-    .addConditionalEdges('workflow_transition', routeWorkflowTransition, ['model', 'seal'])
+    .addConditionalEdges('workflow_transition', routeWorkflowTransition, ['model', 'tools_consent', 'seal'])
+    .addConditionalEdges('tools_consent', routeToolsConsent, ['model', 'declined_tools_fallback', 'seal'])
+    .addEdge('declined_tools_fallback', 'model')
     .addConditionalEdges('connection', routeConnection, ['connection', 'model'])
     .addConditionalEdges('memory_scope', routeMemoryScope, ['memory_scope', 'workflow_transition', 'model', 'seal'])
     .addConditionalEdges('approval', routeApproval, ['workflow_transition', 'model', 'seal']).addEdge('seal', END)

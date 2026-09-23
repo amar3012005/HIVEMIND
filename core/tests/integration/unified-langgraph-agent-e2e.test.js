@@ -108,6 +108,41 @@ test('native HIVE recall streams its final answer from governed read receipts', 
   assert.equal(result.usage.at(-1).total_tokens, 9);
 });
 
+test('a JEV context decision exposes the authenticated HIVE context executor before streaming', async () => {
+  const prisma = fakePrisma();
+  const seenTools = [];
+  const events = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about me?', useTools: false, prisma, ctx: ctx(prisma, 'jev-context'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async input => {
+      assert.equal(input.stage, 'capability');
+      return {
+        status: 'selected', selected: 'hivemind_context', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.97, requestId: 'context-plan' },
+      };
+    },
+    modelStep: async ({ tools }) => {
+      seenTools.push(tools.map(tool => tool.function.name));
+      assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_meta']);
+      return { message: call('hivemind_meta', { operation: 'context' }, 'context-1') };
+    },
+    metaExecutor: async args => {
+      assert.equal(args.operation, 'context');
+      return { successful: true, data: { profile_context: 'Name: Aster Helius\nOrganization: SINGULANCE\nLocation: Hannover' } };
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Aster Helius/);
+      await onDelta('You are Aster Helius at SINGULANCE.');
+      return { ok: true, content: 'You are Aster Helius at SINGULANCE.' };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.response, 'You are Aster Helius at SINGULANCE.');
+  assert.deepEqual(seenTools, [['hivemind_meta']]);
+  assert.ok(events.some(event => event.type === 'answer_delta'));
+});
+
 test('a multi-task receipt uses JEV to continue into one grounded memory save before sealing', async () => {
   const prisma = fakePrisma();
   const decisionStages = [];

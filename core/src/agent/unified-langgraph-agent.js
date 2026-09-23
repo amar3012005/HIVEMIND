@@ -187,7 +187,7 @@ const MEMORY_CAPSULE_CONTRACT = 'Create one compact, source-grounded memory caps
 function executorInstruction(intent, { preparedSave = null } = {}) {
   const contracts = {
     direct_answer: 'Answer directly from the supplied context. Do not call a tool.',
-    hivemind_context: 'Use the HIVE meta tool only for authenticated context/profile. Do not perform a write.',
+    hivemind_context: 'Call the HIVE meta tool exactly once with operation="context" to retrieve the authenticated compact profile and organization context. Do not perform a write. Ground the final answer only in that receipt.',
     hivemind_memory_lookup: 'Use the HIVE meta tool for recall with a concrete non-empty query derived from the request. Do not call recall with an omitted query and do not write memory.',
     hivemind_entity_lookup: 'Use the HIVE meta tool to resolve the requested canonical entity before making any broader claim. Do not infer a relationship absent from the receipt.',
     hivemind_hyperagent_directory: 'Use the HIVE meta tool only for authenticated HyperAgent directory/assignment information.',

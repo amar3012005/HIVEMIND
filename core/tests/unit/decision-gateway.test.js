@@ -15,6 +15,7 @@ import {
 } from '../../src/agent/decision-gateway.js';
 import { runSelectedReadProof } from '../../src/agent/decision-gateway-reference.js';
 import { createDecisionRuntimeAdapter } from '../../src/agent/decision-gateway-adapters.js';
+import { decisionGatewayToolNames } from '../../src/agent/decision-gateway-service.js';
 
 function choiceProvider(sequence) {
   let index = 0;
@@ -61,6 +62,11 @@ test('OpenRouter provider maps opaque option keys back to stable capability ids'
   assert.ok(Math.abs(result.margin - 0.91) < 1e-9);
   assert.equal(requests[0].model, '~typesafe/jev-latest');
   assert.equal(requests[0].questions.decision.type, 'choice');
+});
+
+test('a JEV context capability always exposes the governed HIVE context reader', () => {
+  assert.deepEqual(decisionGatewayToolNames('hivemind_context'), ['hivemind_meta']);
+  assert.deepEqual(decisionGatewayToolNames('direct_answer'), []);
 });
 
 test('every Jev stage receives the bounded stage context contract', async () => {

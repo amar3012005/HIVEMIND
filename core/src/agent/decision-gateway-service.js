@@ -85,8 +85,11 @@ function fallbackReceipt(reason = 'current_selector') {
 }
 
 export function decisionGatewayToolNames(selection, { connected = true } = {}) {
-  if (selection === 'direct_answer' || selection === 'hivemind_context') return [];
-  if (['hivemind_meta', 'hivemind_memory_lookup', 'hivemind_entity_lookup', 'hivemind_hyperagent_directory', 'hivemind_request'].includes(selection)) return ['hivemind_meta'];
+  if (selection === 'direct_answer') return [];
+  // Context is an authenticated read, not a direct answer.  Keep this
+  // mapping beside every other HIVE read so a JEV decision never exposes an
+  // empty surface and leaves the synthesis model unable to obtain evidence.
+  if (['hivemind_context', 'hivemind_meta', 'hivemind_memory_lookup', 'hivemind_entity_lookup', 'hivemind_hyperagent_directory', 'hivemind_request'].includes(selection)) return ['hivemind_meta'];
   if (selection === 'hivemind_profile_update') return ['hivemind_update_profile'];
   // The unified graph exposes HIVEMIND through its one typed meta gateway;
   // operation="save" is constrained further by the selected executor prompt.

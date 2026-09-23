@@ -526,7 +526,7 @@ test('an explicit durable-save request crosses the JEV plan node before one gove
   assert.equal(result.status, 'completed');
   assert.equal(calls.length, 1);
   assert.equal(turn, 1);
-  assert.match(result.response, /Added .* company brain/i);
+  assert.match(result.response, /added .* company brain/i);
   assert.equal(result.run.scratch.plan.intent, 'hivemind_save');
 });
 
@@ -601,7 +601,7 @@ test('the canonical save boundary rejects a generic placeholder capsule', async 
   assert.equal(result.status, 'completed');
   assert.equal(modelTurns, 2);
   assert.equal(calls.length, 1);
-  assert.match(result.response, /Added .* company brain/i);
+  assert.match(result.response, /added .* company brain/i);
 });
 
 test('an inline save-this payload is admitted even when its evidence omits the word memory', async () => {
@@ -672,8 +672,8 @@ test('a referential save-all-as-one-memory continuation saves without recall or 
   });
   assert.equal(resumed.status, 'completed');
   assert.equal(calls.length, 2);
-  assert.match(resumed.response, /Added .* to your personal company brain/);
-  assert.match(resumed.response, /canonical indexing will connect/i);
+  assert.match(resumed.response, /added .* to your personal company brain/i);
+  assert.match(resumed.response, /I’ll connect the related/i);
   const deltas = events.filter(event => event.type === 'answer_delta').map(event => event.delta);
   assert.ok(deltas.length > 1);
   assert.equal(deltas.join(''), resumed.response);

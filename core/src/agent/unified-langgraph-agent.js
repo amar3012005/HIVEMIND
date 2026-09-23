@@ -793,7 +793,7 @@ function savedMemoryAcknowledgement(receipt, scope, memoryType = 'fact') {
   // ingestion pipeline, so acknowledge the durable save immediately without
   // pretending those derived links have already completed.
   const type = MEMORY_TYPES.has(String(memoryType || '').toLowerCase()) ? String(memoryType).toLowerCase() : 'fact';
-  return `Added “${title}” as a ${type} to your ${scopeLabel} company brain. It is durable and searchable now; canonical indexing will connect its people, organizations, dates, and relationships in the background.`;
+  return `I’ve added “${title}” as a ${type} to your ${scopeLabel} company brain. It’s safely stored and searchable now; I’ll connect the related people, organizations, dates, and relationships in the background.`;
 }
 
 function acknowledgementChunks(text, maxChars = 64) {
@@ -976,6 +976,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   // inference. The capsule itself remains the only content JEV classifies;
   // JEV has no write tool, scope authority, or access to raw external data.
   const classifyMemoryType = async (state, save) => {
+    const startedAtMs = Date.now();
     let decision;
     try {
       decision = await decisionStage({
@@ -1016,7 +1017,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       diagnostics: decisionDiagnosticSummary(decision.receipt),
       request_id: decision.receipt?.requestId || null, run_id: state.runId,
     });
-    return { memoryType, eventSequence };
+    return { memoryType, eventSequence, startedAtMs, completedAtMs: Date.now() };
   };
 
   const contextNode = async state => {
@@ -1342,7 +1343,15 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         ...call,
         args: { ...call.args, save: { ...call.args.save, memory_type: classified.memoryType } },
       };
-      state = { ...state, eventSequence: Math.max(Number(state.eventSequence || 0), classified.eventSequence) };
+      state = {
+        ...state,
+        eventSequence: Math.max(Number(state.eventSequence || 0), classified.eventSequence),
+        timings: {
+          ...state.timings,
+          memory_type_started_at_ms: classified.startedAtMs,
+          memory_type_completed_at_ms: classified.completedAtMs,
+        },
+      };
       onEvent({ type: 'tool_progress', name: 'hivemind_save_memory', status: 'classified',
         summary: `Memory type: ${classified.memoryType}`, run_id: state.runId });
     }

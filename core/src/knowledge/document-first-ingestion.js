@@ -1118,6 +1118,14 @@ export class DocumentFirstIngestionService {
     this.cancelledEntityDocuments = new Set();
   }
 
+  async _runHmUnderstandShadow({ userId, orgId, documentId, sourceRevision, filename, segments, parseMetadata = {} }) {
+    return runHmUnderstandShadow({
+      analyzer: this.understandAnalyzer, db: this.db, isRemoteOrg: orgIsRemote,
+      logger: this.logger, userId, orgId, documentId, sourceRevision,
+      filename, segments, parseMetadata,
+    });
+  }
+
   /** Entity extraction over segments (P1 #9).
    *  Callers may await the returned flight at a durable completion boundary.
    *  Parallel workers are bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */

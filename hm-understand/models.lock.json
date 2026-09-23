@@ -1,0 +1,14 @@
+{
+  "entity_model": {
+    "id": "gliner-community/gliner_small-v2.5",
+    "revision": "f227d3cd637bd4e6757ae143935316d062393341",
+    "license": "Apache-2.0",
+    "weights": "model.bf16.safetensors",
+    "sha256": "25a633c03236faa2f1560e107994a53672bee12293f9fa562023d9a07cc411b3"
+  },
+  "language_model": {
+    "id": "langid.py",
+    "revision": "1.1.6",
+    "license": "BSD-3-Clause"
+  }
+}

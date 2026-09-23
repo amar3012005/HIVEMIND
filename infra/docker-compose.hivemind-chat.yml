@@ -137,7 +137,10 @@ services:
       HM_UNDERSTAND_MODEL_ID: gliner-community/gliner_small-v2.5
       HM_UNDERSTAND_MODEL_REVISION: f227d3cd637bd4e6757ae143935316d062393341
     volumes:
-      - hm-understand-models:/opt/models:ro
+      # GLiNER's pinned snapshot is fetched lazily on first analysis and
+      # verified against models.lock.json; keep this writable named volume so
+      # the independent service can populate its own model cache.
+      - hm-understand-models:/opt/models
     mem_limit: 3g
     cpus: 4
     healthcheck:

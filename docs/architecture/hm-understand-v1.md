@@ -50,10 +50,11 @@ corpus completed in 1,166 ms (model already loaded); the corresponding short Eng
 is excluded.
 
 The initial annotated smoke corpus has only six short examples (English, German, Spanish, Hindi,
-and Telugu). After removing casing-only single-token guesses, the local CPU service measured
-9 TP / 2 FP / 7 FN (micro precision 0.8182, recall 0.5625, F1 0.6667); all 11 remaining
-evidence spans mapped exactly back to their submitted text. English was 4/4 recall, German 2/3,
-Spanish 3/3, and Hindi/Telugu 0/3 each. This explicitly demonstrates that this checkpoint is
+and Telugu). With the explicitly extracted October date included in the gold labels, the local CPU
+service measured 10 TP / 1 FP / 7 FN (micro precision 0.9091, recall 0.5882, F1 0.7143); all 11
+predicted evidence spans mapped exactly back to their submitted text. English and Spanish were
+5/5 and 3/3 respectively; German was 2/3, and Hindi/Telugu were 0/3 each. This explicitly
+demonstrates that this checkpoint is
 **not yet an all-language extractor**. Keep Hindi, Telugu, and any unbenchmarked language in a
 low-confidence/review or bounded-refinement path; do not claim universal quality or use this smoke
 score as a production estimate. A warmed two-block stream test emitted its first block at 676 ms
@@ -143,3 +144,7 @@ receipts must be keyed by tenant/source revision/content hash/pipeline version a
 user-visible memories. The only runtime feature decision is Cloudflare Flagship string flag
 `hm_understand_v1` (`off` by default; `shadow` for measurement; `assisted` for exact-span prompt
 compaction). No environment variable independently enables assisted processing or promotion.
+Core's unified extraction path records only provider-reported prompt/completion token totals per
+document diagnostic (`llm_usage_reports`, `llm_prompt_tokens`, `llm_completion_tokens`). Compare
+these across equivalent `shadow` and `assisted` fixture runs; character savings are not a substitute
+for token savings. Providers that omit usage are counted as having no usage report, not zero-cost.

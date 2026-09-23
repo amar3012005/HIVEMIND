@@ -217,7 +217,7 @@ const reasoningDisableRejected = new Set();
  * @param {boolean} [opts.json_mode=false] - Request JSON output
  * @returns {Promise<string|Object>} Parsed JSON object if json_mode, otherwise raw content string
  */
-export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, response_format = null, reject_truncated_json = false, feature = 'enterprise-extract', respectModelPolicy = true }) {
+export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, response_format = null, reject_truncated_json = false, feature = 'enterprise-extract', respectModelPolicy = true, onUsage = null }) {
   model = model || DEFAULT_MODEL;
   const useCase = /entity|relationship/i.test(feature) ? 'entity_linking' : 'ingestion_extraction';
   if (respectModelPolicy) {
@@ -363,6 +363,17 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 
   const json = await res.json();
   const usage = json.usage;
+  if (typeof onUsage === 'function') {
+    try {
+      onUsage({
+        prompt_tokens: Number(usage?.prompt_tokens || 0),
+        completion_tokens: Number(usage?.completion_tokens || 0),
+        total_tokens: Number(usage?.total_tokens || 0),
+        model: String(json.model || model).slice(0, 120),
+        provider: String(json.provider || route.provider || 'unknown').slice(0, 80),
+      });
+    } catch { /* telemetry observers must never fail extraction */ }
+  }
   // gpt-oss-* reasoning models put visible output in reasoning_content (Groq)
   // or content; coalesce both.
   const msg = json.choices?.[0]?.message || {};

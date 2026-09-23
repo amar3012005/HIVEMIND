@@ -1941,6 +1941,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       json_mode: true, reject_truncated_json: true,
       response_format: QWEN_UNIFIED_FACTS_RESPONSE_FORMAT,
       prefer_truncated_if_more_items: true, feature: 'kb-unified-extract',
+      onUsage: typeof window.onUsage === 'function' ? window.onUsage : undefined,
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
@@ -5618,6 +5619,9 @@ Every item must include a non-empty content field and one or more valid support_
         let _assistedSourceChars = 0;
         let _assistedPromptChars = 0;
         let _assistedWindows = 0;
+        let _llmUsageReports = 0;
+        let _llmPromptTokens = 0;
+        let _llmCompletionTokens = 0;
         // TWO SEPARATE CONCERNS, previously ONE VARIABLE — this is the seam, not a tuning knob.
         // DOC_CAP bounded the OUTPUT (how many facts a document may produce) and simultaneously gated
         // the INPUT (`while (wi < len && uBudget > 0)`), so when earlier windows spent it the tail of
@@ -5639,6 +5643,13 @@ Every item must include a non-empty content field and one or more valid support_
         const uWorkers = Array.from({ length: Math.min(uConc, uWindows.length) }, async () => {
           while (wi < uWindows.length) {   // <- no budget term: every window is read
             const w = { ...uWindows[wi++] };
+            // Capture provider-reported usage only. No source text, claims, or
+            // evidence are included in the per-document aggregate diagnostic.
+            w.onUsage = (usage = {}) => {
+              _llmUsageReports += 1;
+              _llmPromptTokens += Math.max(0, Number(usage.prompt_tokens) || 0);
+              _llmCompletionTokens += Math.max(0, Number(usage.completion_tokens) || 0);
+            };
             if (hmUnderstandAnalysis) {
               const projection = projectHmUnderstandWindow(w, hmUnderstandAnalysis);
               if (projection) {
@@ -5701,7 +5712,9 @@ Every item must include a non-empty content field and one or more valid support_
         ingestDiagnostic.info(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
           + `fact_budget_left=${factBudget} fact_cap=${FACT_CAP} chars=${_docChars} `
           + `candidates=${extractedCandidates.length} assisted_windows=${_assistedWindows} `
-          + `assisted_chars=${_assistedSourceChars}->${_assistedPromptChars}`);
+          + `assisted_chars=${_assistedSourceChars}->${_assistedPromptChars} `
+          + `llm_usage_reports=${_llmUsageReports} llm_prompt_tokens=${_llmPromptTokens} `
+          + `llm_completion_tokens=${_llmCompletionTokens}`);
         // INVARIANT, not an expected outcome. Reading no longer depends on any budget, so this can
         // only fire if a future change reintroduces a gate on the read loop. Kept deliberately: the
         // original defect was silent, and the whole point is that it can never be silent again.

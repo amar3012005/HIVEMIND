@@ -56,20 +56,24 @@ test('existing unified LLM call receives compact text but validates quotes again
     + 'Project Atlas status: approved after board review. This paragraph gives additional unselected context.';
   const extractionContent = 'Project Atlas status: approved after board review.';
   let llmRequest;
+  const observedUsage = [];
   const service = new DocumentFirstIngestionService({
     db: null, smartIngestRouter: null, memoryGraphEngine: null, doclingAdapter: null, embeddingService: null,
     llmCompletion: async (request) => {
       llmRequest = request;
+      request.onUsage?.({ prompt_tokens: 321, completion_tokens: 45, total_tokens: 366, model: 'fixture-model' });
       return { facts: [{ t: 'Project Atlas', f: 'Project Atlas status is approved.', memory_type: 'fact',
         source_quote: 'Project Atlas status: approved after board review.', subject: 'Project Atlas', entities: [] }] };
     },
     logger: { info() {}, warn() {} },
   });
-  const claims = await service._extractUnified({ content: sourceContent, extractionContent, sourceContent }, { maxFacts: 3 });
+  const claims = await service._extractUnified({ content: sourceContent, extractionContent, sourceContent,
+    onUsage: (usage) => observedUsage.push(usage) }, { maxFacts: 3 });
   const submittedText = llmRequest.messages.find((message) => message.role === 'user').content;
   assert.ok(submittedText.includes(extractionContent));
   assert.equal(submittedText.includes('Background information'), false);
   assert.equal(claims.length, 1);
   assert.equal(claims[0].source_start, sourceContent.indexOf(claims[0].source_quote));
   assert.equal(sourceContent.slice(claims[0].source_start, claims[0].source_end), claims[0].source_quote);
+  assert.deepEqual(observedUsage, [{ prompt_tokens: 321, completion_tokens: 45, total_tokens: 366, model: 'fixture-model' }]);
 });

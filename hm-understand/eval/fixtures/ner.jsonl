@@ -1,0 +1,6 @@
+{"id":"en-basic","language":"en","text":"Rama leads the Singapore incorporation for SINGULANCE, coordinating with Nora Klein.","gold":[["Rama","person"],["Singapore","location"],["SINGULANCE","organization"],["Nora Klein","person"]]}
+{"id":"de-basic","language":"de","text":"Nora Klein leitet die Finanzplanung in Berlin und arbeitet mit Projekt Atlas.","gold":[["Nora Klein","person"],["Berlin","location"],["Projekt Atlas","project"]]}
+{"id":"es-basic","language":"es","text":"María López dirige el proyecto Aurora en Madrid.","gold":[["María López","person"],["Aurora","project"],["Madrid","location"]]}
+{"id":"hi-basic","language":"hi","text":"राहुल शर्मा दिल्ली में परियोजना आरंभ का नेतृत्व करते हैं।","gold":[["राहुल शर्मा","person"],["दिल्ली","location"],["परियोजना आरंभ","project"]]}
+{"id":"te-basic","language":"te","text":"రామ సింగపూర్‌లో సంస్థ విస్తరణకు నాయకత్వం వహిస్తున్నారు.","gold":[["రామ","person"],["సింగపూర్‌లో","location"],["సంస్థ విస్తరణ","project"]]}
+{"id":"en-uncertain","language":"en","text":"Deployment may happen in October, subject to security review.","gold":[["October","date"]]}

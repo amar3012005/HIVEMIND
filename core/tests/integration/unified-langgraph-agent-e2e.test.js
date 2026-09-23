@@ -487,6 +487,29 @@ test('the canonical save boundary rejects a generic placeholder capsule', async 
   assert.match(result.response, /Added .* company brain/i);
 });
 
+test('an inline save-this payload is admitted even when its evidence omits the word memory', async () => {
+  const prisma = fakePrisma();
+  const calls = [];
+  const inline = 'save this Here is the latest important email: PR #707 security review is blocked because the Strix trial ended; billing or manual review is required.';
+  const result = await runUnifiedMetaAgent({
+    message: inline, useTools: false, prisma,
+    ctx: {
+      ...ctx(prisma, 'inline-save-evidence'),
+      _tracedDispatch: async (name, args) => {
+        calls.push([name, args]);
+        assert.equal(name, 'hivemind_save_memory');
+        assert.notEqual(args.title, 'Saved memory');
+        return { saved: true, id: 'inline-save', title: args.title, scope: 'personal' };
+      },
+    },
+    checkpointer: new MemorySaver(), composio: {},
+    decisionStage: saveCapabilityDecision,
+    modelStep: async () => richSaveToolCall('inline-rich-save'),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(calls.length, 1);
+});
+
 test('a referential save-all-as-one-memory continuation saves without recall or a model turn', async () => {
   const prisma = fakePrisma();
   const checkpointer = new MemorySaver();

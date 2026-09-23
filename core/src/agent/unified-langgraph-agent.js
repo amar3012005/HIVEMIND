@@ -85,7 +85,10 @@ function localized(locale, key, toolkit = '') {
 
 function explicitDurableSaveRequest(message) {
   const text = String(message || '').toLowerCase();
-  return /\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,120}\b(?:memory|hive[-\s]?mind)\b/.test(text);
+  return /\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,120}\b(?:memory|hive[-\s]?mind)\b/.test(text)
+    // Inline evidence is itself an explicit save payload even when the
+    // evidence does not repeat the words "memory" or "HIVE-MIND".
+    || /^\s*(?:please\s+)?(?:save|store|record|remember|retain|write)\s+(?:this|the following)\b[\s\S]{20,}/i.test(String(message || ''));
 }
 
 // A completed answer followed by a short imperative such as "save it" is a
@@ -114,7 +117,8 @@ function explicitlyRequestedMemoryScope(message) {
 function explicitSaveDraft(message, history = []) {
   const request = String(message || '').trim();
   if (!explicitDurableSaveRequest(request) && !contextualSaveContinuationRequest(request, history)) return null;
-  const inline = request.match(/\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,100}?\b(?:memory|hive[-\s]?mind)\b\s*[:\-]\s*(.+)$/i)?.[1];
+  const inline = request.match(/\b(?:save|store|record|remember|retain|write)\b[\s\S]{0,100}?\b(?:memory|hive[-\s]?mind)\b\s*[:\-]\s*(.+)$/i)?.[1]
+    || request.match(/^\s*(?:please\s+)?(?:save|store|record|remember|retain|write)\s+(?:this|the following)\s*[:\-]?\s*([\s\S]{20,})$/i)?.[1];
   const subject = request.match(/\babout\s+([^,.!?;]+)|\bremember\s+([^,.!?;]+)$/i);
   const namedSubject = compactText(subject?.[1] || subject?.[2] || '', 120);
   const prior = [...(Array.isArray(history) ? history : [])].reverse()

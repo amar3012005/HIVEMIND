@@ -1407,6 +1407,7 @@ async function _recallPersistedMemoriesImpl(store, {
                              // and merge extra candidates. null = env default.
   exact_source = false,
   canonical_entities = [],
+  canonical_entity_ids = [],
   alternate_lexical_query = null,
   semantic_recovery = false,
   include_injection_context = true,
@@ -1662,6 +1663,7 @@ async function _recallPersistedMemoriesImpl(store, {
       store,
       query: query_context,
       canonicalEntities: canonical_entities,
+      canonicalEntityIds: canonical_entity_ids,
       org_id,
         user_id,
         access_context,

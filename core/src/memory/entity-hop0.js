@@ -250,6 +250,7 @@ export async function resolveEntityRecallCandidates({
   store,
   query,
   canonicalEntities = [],
+  canonicalEntityIds = [],
   org_id,
   user_id,
   access_context = null,
@@ -266,14 +267,15 @@ export async function resolveEntityRecallCandidates({
   const t0 = Date.now();
   const empty = { candidates: [], matchedEntities: [], matchedQueryEntityCount: 0, latencyMs: 0, cutoff: false };
   const client = store?.client;
-  if (!client || !org_id || (!query && !canonicalEntities.length)) return empty;
+  if (!client || !org_id || (!query && !canonicalEntities.length && !canonicalEntityIds.length)) return empty;
 
   const work = (async () => {
     const hasPlannedEntities = Array.isArray(canonicalEntities) && canonicalEntities.some((entity) => String(entity || '').trim());
-    const skipCentralRegistry = orgIsRemote(org_id) && hasPlannedEntities;
+    const selectedIds = [...new Set((canonicalEntityIds || []).map(String).filter(Boolean))].slice(0, HOP0_MAX_ENTITIES);
+    const skipCentralRegistry = orgIsRemote(org_id) && hasPlannedEntities && !selectedIds.length;
     // 1. Registry fetch — org-scoped, indexed, bounded. Both registries in
     //    parallel; each fails independently to [].
-    const [entityRows, canonicalRows] = await Promise.all([
+    const [entityRows, canonicalRows, selectedCanonicalRows] = await Promise.all([
       !skipCentralRegistry && client.entity?.findMany
         ? client.entity.findMany({
             where: { orgId: org_id, isActive: true },
@@ -287,6 +289,13 @@ export async function resolveEntityRecallCandidates({
             where: { organizationId: org_id },
             select: { id: true, canonicalName: true, aliases: true },
             take: 200,
+          }).catch(() => [])
+        : [],
+      selectedIds.length && client.canonicalEntity?.findMany
+        ? client.canonicalEntity.findMany({
+            where: { organizationId: org_id, id: { in: selectedIds } },
+            select: { id: true, canonicalName: true, aliases: true },
+            take: HOP0_MAX_ENTITIES,
           }).catch(() => [])
         : [],
     ]);
@@ -318,7 +327,16 @@ export async function resolveEntityRecallCandidates({
       ...tenantTagRegistry,
       ...matchEntitiesLexical(entityRows, query),
     ].filter((entity, index, rows) => rows.findIndex((row) => row.slug === entity.slug) === index);
-    const linkRegistry = matchEntitiesLexical(canonicalRows, query);
+    const selectedRegistry = selectedCanonicalRows.map((entity) => ({
+      id: entity.id,
+      name: entity.canonicalName,
+      matchScore: SCORE_EXACT,
+      matchedTokens: hop0QueryTokens(entity.canonicalName),
+    }));
+    const linkRegistry = [...new Map([
+      ...matchEntitiesLexical(canonicalRows, query),
+      ...selectedRegistry,
+    ].map((entity) => [entity.id, entity])).values()].slice(0, HOP0_MAX_ENTITIES);
     if (!tagRegistry.length && !linkRegistry.length) return empty;
 
     // 2. Entity → memory ids.

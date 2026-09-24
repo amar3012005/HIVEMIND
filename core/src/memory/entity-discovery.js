@@ -129,6 +129,7 @@ export function rankEntityMatches(entities, query, limit = MAX_LIMIT) {
     .slice(0, Math.max(1, Math.min(Number(limit) || 12, MAX_LIMIT)))
     .map(({ entity, match }) => ({
       entity_id: entity.id,
+      entity_ids: entity.entityIds || [entity.id],
       canonical_name: entity.canonicalName,
       entity_type: entity.entityType,
       aliases: entity.aliases || [],
@@ -168,24 +169,36 @@ async function authorizedIndexedCanonicalRows({
   try {
     const rows = await prisma.$queryRawUnsafe(`
       WITH candidate_aliases AS MATERIALIZED (
-        SELECT alias.entity_id,
-               min(CASE
-                 WHEN alias.normalized_alias = $3 THEN CASE WHEN alias.is_canonical THEN 0 ELSE 1 END
-                 WHEN alias.normalized_alias LIKE $3 || '%' THEN CASE WHEN alias.is_canonical THEN 2 ELSE 3 END
-                 ELSE 5
-               END) AS match_rank,
-               max(public.similarity(alias.normalized_alias, $3)) AS similarity_score
-        FROM hivemind.canonical_entity_search_aliases alias
-        JOIN hivemind.canonical_entities entity ON entity.id = alias.entity_id
-        WHERE alias.organization_id = $1::uuid
-          AND (cardinality($4::text[]) = 0 OR lower(entity.entity_kind) = ANY($4::text[]))
-          AND (
-            alias.normalized_alias = $3
-            OR alias.normalized_alias LIKE $3 || '%'
-            OR alias.normalized_alias OPERATOR(public.%) $3
-          )
-        GROUP BY alias.entity_id
-        ORDER BY match_rank ASC, similarity_score DESC, alias.entity_id ASC
+        SELECT candidate.entity_id,
+               min(candidate.match_rank) AS match_rank,
+               max(candidate.similarity_score) AS similarity_score
+        FROM (
+          SELECT alias.entity_id,
+                 min(CASE
+                   WHEN alias.normalized_alias = $3 THEN CASE WHEN alias.is_canonical THEN 0 ELSE 1 END
+                   WHEN alias.normalized_alias LIKE $3 || '%' THEN CASE WHEN alias.is_canonical THEN 2 ELSE 3 END
+                   ELSE 5
+                 END) AS match_rank,
+                 max(public.similarity(alias.normalized_alias, $3)) AS similarity_score
+          FROM hivemind.canonical_entity_search_aliases alias
+          JOIN hivemind.canonical_entities entity ON entity.id = alias.entity_id
+          WHERE alias.organization_id = $1::uuid
+            AND (cardinality($4::text[]) = 0 OR lower(entity.entity_kind) = ANY($4::text[]))
+            AND (
+              alias.normalized_alias = $3
+              OR alias.normalized_alias LIKE $3 || '%'
+              OR alias.normalized_alias OPERATOR(public.%) $3
+            )
+          GROUP BY alias.entity_id
+          UNION ALL
+          SELECT entity.id AS entity_id, 0 AS match_rank, 1::real AS similarity_score
+          FROM hivemind.canonical_entities entity
+          WHERE entity.organization_id = $1::uuid
+            AND lower(trim(entity.primary_email)) = lower(trim($13))
+            AND (cardinality($4::text[]) = 0 OR lower(entity.entity_kind) = ANY($4::text[]))
+        ) candidate
+        GROUP BY candidate.entity_id
+        ORDER BY match_rank ASC, similarity_score DESC, candidate.entity_id ASC
         LIMIT $11
       ), visible_entity_stats AS (
         SELECT link.entity_id,
@@ -231,6 +244,7 @@ async function authorizedIndexedCanonicalRows({
              entity.canonical_name AS "canonicalName",
              entity.entity_kind AS "entityType",
              entity.aliases,
+             entity.primary_email AS "primaryEmail",
              stats.mention_count AS "mentionCount",
              coalesce(stats.last_seen_at, entity.updated_at) AS "lastSeenAt"
       FROM candidate_aliases candidate
@@ -254,8 +268,13 @@ async function authorizedIndexedCanonicalRows({
     accessContext?.crossProject === false,
     role !== 'guest',
     candidateLimit,
-    candidateLimit);
-    return rows.map((row) => ({ ...row, _canonical: true }));
+    candidateLimit,
+    String(query || ''));
+    return rows.map((row) => ({
+      ...row,
+      aliases: [...new Set([...(row.aliases || []), row.primaryEmail].filter(Boolean))],
+      _canonical: true,
+    }));
   } catch (error) {
     // During a rolling release Core may briefly precede this projection's
     // migration. Null means "retain the existing path", not "no matches".
@@ -337,13 +356,18 @@ function visibleMemoryWhere({ orgId, userId, accessContext = {}, projectId = nul
 function dedupeRows(rows = []) {
   const winners = new Map();
   for (const row of rows) {
-    // All registries describe the same user-facing identity. Entity kind is
-    // metadata, not part of identity: a tag-backed `entity:solvispia` and a
-    // canonical `product / SolvisPia` must collapse into one chooser result.
-    const key = entitySlug(row.canonicalName);
+    // Collapse only exact canonical-name duplicates or records with the same
+    // verified primary email. Similar/substring names are not identity proof.
+    const key = row._member
+      ? `member:${row.id}`
+      : (row.primaryEmail ? `email:${normalize(row.primaryEmail)}` : `name:${entitySlug(row.canonicalName)}`);
     const previous = winners.get(key);
     if (!previous) {
-      winners.set(key, { ...row });
+      winners.set(key, {
+        ...row,
+        entityIds: [...new Set([...(row.entityIds || []), row.id].filter(Boolean))],
+        canonicalEntityIds: [...new Set([...(row.canonicalEntityIds || []), ...(row._canonical && row.id ? [row.id] : [])])],
+      });
       continue;
     }
     const preferred = row._canonical && !previous._canonical ? row : previous;
@@ -351,7 +375,13 @@ function dedupeRows(rows = []) {
     winners.set(key, {
       ...secondary,
       ...preferred,
-      aliases: [...new Set([...(previous.aliases || []), ...(row.aliases || [])])],
+      aliases: [...new Set([
+        ...(previous.aliases || []), previous.canonicalName,
+        ...(row.aliases || []), row.canonicalName,
+        previous.primaryEmail, row.primaryEmail,
+      ].filter(Boolean))].filter((alias) => normalize(alias) !== normalize(preferred.canonicalName)),
+      entityIds: [...new Set([...(previous.entityIds || [previous.id]), ...(row.entityIds || [row.id])].filter(Boolean))],
+      canonicalEntityIds: [...new Set([...(previous.canonicalEntityIds || []), ...(row.canonicalEntityIds || []), ...(row._canonical && row.id ? [row.id] : [])])],
       mentionCount: Math.max(Number(previous.mentionCount || 0), Number(row.mentionCount || 0)),
       lastSeenAt: [previous.lastSeenAt, row.lastSeenAt].filter(Boolean).sort().at(-1) || null,
     });
@@ -369,7 +399,7 @@ async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, acc
       ...(ids.length ? { id: { in: ids } } : {}),
       ...(types.length ? { entityKind: { in: types } } : {}),
     },
-    select: { id: true, canonicalName: true, entityKind: true, aliases: true, updatedAt: true },
+    select: { id: true, canonicalName: true, normalizedName: true, entityKind: true, aliases: true, primaryEmail: true, updatedAt: true },
     orderBy: [{ updatedAt: 'desc' }, { canonicalName: 'asc' }, { id: 'asc' }],
     take: ids.length ? ids.length : MAX_CANDIDATES,
   });
@@ -422,7 +452,8 @@ async function authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, acc
       id: entity.id,
       canonicalName: entity.canonicalName,
       entityType: entity.entityKind,
-      aliases: entity.aliases || [],
+      aliases: [...new Set([...(entity.aliases || []), entity.primaryEmail].filter(Boolean))],
+      primaryEmail: entity.primaryEmail || null,
       mentionCount: stats.get(entity.id).mentionCount,
       lastSeenAt: stats.get(entity.id).lastSeenAt || entity.updatedAt,
       _canonical: true,
@@ -605,6 +636,74 @@ export async function findEntities({ prisma, memoryStore = null, orgId, userId, 
 }
 
 export async function resolveAuthorizedEntityIds({ prisma, memoryStore = null, orgId, userId, entityIds, accessContext = {}, projectId = null } = {}) {
-  const { rows, degraded } = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds });
-  return { entities: rows.map((entity) => ({ id: entity.id, canonicalName: entity.canonicalName })), degraded };
+  const ids = [...new Set((entityIds || []).map(String).filter(Boolean))].slice(0, MAX_LIMIT);
+  const selected = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: ids });
+  if (selected.degraded || !selected.rows.length || !prisma?.canonicalEntity?.findMany) {
+    return {
+      entities: selected.rows.map((entity) => ({
+        id: entity.id,
+        entityIds: entity.entityIds || [entity.id],
+        canonicalEntityIds: entity.canonicalEntityIds || [],
+        canonicalName: entity.canonicalName,
+        aliases: entity.aliases || [],
+      })),
+      degraded: selected.degraded,
+    };
+  }
+
+  // The chooser can return one representative for duplicate rows. Expand only
+  // exact-name duplicates or records sharing a verified primary email, then
+  // re-run the full authorized-memory intersection for every sibling ID.
+  const requestedNames = selected.rows.filter((entity) => !entity.primaryEmail).map((entity) => entity.canonicalName).filter(Boolean);
+  const requestedEmails = selected.rows.map((entity) => entity.primaryEmail).filter(Boolean);
+  const identityFilters = [
+    ...requestedNames.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+    ...requestedEmails.map((email) => ({ primaryEmail: email })),
+  ];
+  if (!identityFilters.length) return { entities: [], degraded: null };
+
+  try {
+    const siblings = await prisma.canonicalEntity.findMany({
+      where: { organizationId: orgId, OR: identityFilters },
+      select: { id: true, canonicalName: true, primaryEmail: true },
+      take: MAX_LIMIT,
+    });
+    const siblingIds = [...new Set([
+      ...ids,
+      ...siblings.filter((candidate) => selected.rows.some((source) => {
+        const sameEmail = source.primaryEmail && candidate.primaryEmail
+          && normalize(source.primaryEmail) === normalize(candidate.primaryEmail);
+        const sameUnverifiedNameOnly = !source.primaryEmail && !candidate.primaryEmail
+          && normalize(source.canonicalName) === normalize(candidate.canonicalName);
+        return sameEmail || sameUnverifiedNameOnly;
+      })).map((entity) => entity.id),
+    ])].slice(0, MAX_LIMIT);
+    const authorized = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, entityIds: siblingIds });
+    if (authorized.degraded) return { entities: [], degraded: authorized.degraded };
+    const rows = dedupeRows(authorized.rows);
+    return {
+      entities: rows.map((entity) => ({
+        id: entity.id,
+        entityIds: entity.entityIds || [entity.id],
+        canonicalEntityIds: entity.canonicalEntityIds || [],
+        canonicalName: entity.canonicalName,
+        aliases: entity.aliases || [],
+        primaryEmail: entity.primaryEmail || null,
+      })),
+      degraded: null,
+    };
+  } catch {
+    // The original ID was already authorized. Expansion is additive and may
+    // fail without turning a valid selected entity into an error.
+    return {
+      entities: selected.rows.map((entity) => ({
+        id: entity.id,
+        entityIds: entity.entityIds || [entity.id],
+        canonicalEntityIds: entity.canonicalEntityIds || [],
+        canonicalName: entity.canonicalName,
+        aliases: entity.aliases || [],
+      })),
+      degraded: null,
+    };
+  }
 }

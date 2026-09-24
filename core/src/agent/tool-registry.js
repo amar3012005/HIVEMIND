@@ -538,6 +538,7 @@ const TOOL_HANDLERS = {
     const strictAnswerType = strictAnswerTypes.has(requestedAnswerType) ? requestedAnswerType : null;
     let selectedEntities = Array.isArray(args.entities) ? args.entities : [];
     let selectedEntityNames = [];
+    let selectedEntityGroups = [];
     if (Array.isArray(args.entity_ids) && args.entity_ids.length) {
       const selected = await resolveAuthorizedEntityIds({
         prisma: ctx.prisma,
@@ -551,7 +552,12 @@ const TOOL_HANDLERS = {
       if (selected.degraded) {
         return { memories: [], evidence: [], relationships: [], degradation: { status: 'DEGRADED', reason: selected.degraded } };
       }
-      selectedEntityNames = selected.entities.map((entity) => entity.canonicalName);
+      selectedEntityNames = selected.entities.map((entity) => entity.canonicalName).filter(Boolean);
+      selectedEntityGroups = selected.entities.map((entity) => ({
+        entity_ids: entity.entityIds || [entity.id],
+        canonical_entity_ids: entity.canonicalEntityIds || [],
+        names: [...new Set([entity.canonicalName, ...(entity.aliases || [])].filter(Boolean))],
+      }));
       selectedEntities = [...new Set([...selectedEntities, ...selectedEntityNames])];
     }
     // The planner's answer_type is a retrieval contract, not merely a ranking
@@ -603,6 +609,7 @@ const TOOL_HANDLERS = {
       // Entity IDs come from the tenant-scoped chooser. Keep them as a strict
       // selection boundary instead of letting query extraction widen `must`.
       selected_entity_names: selectedEntityNames,
+      selected_entity_groups: selectedEntityGroups,
       include_full_memory_content: args._include_full_memory_content === true,
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,

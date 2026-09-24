@@ -5,7 +5,7 @@ export const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'hivemind_find_entities',
-      description: 'Read-only tenant-scoped entity chooser. Use only when a named subject is partial or ambiguous (for example "Uwe") before recall, or when recall lacks an exact entity anchor. Do not call as a preflight for every recall. Pass selected entity_id values to hivemind_recall.entity_ids.',
+      description: 'Read-only tenant-scoped entity chooser. Use only when a named subject is partial or ambiguous (for example "Uwe") before recall, or when recall lacks an exact entity anchor. Do not call as a preflight for every recall. Each result may include entity_ids: verified same-name or shared-primary-email canonical duplicates. Pass the complete entity_ids array for the chosen result to hivemind_recall.entity_ids; do not merge similar names based only on substring.',
       parameters: {
         type: 'object',
         properties: {
@@ -45,7 +45,7 @@ export const TOOL_SCHEMAS = [
           query_original: { type: 'string', description: 'Original-language query for multilingual vector and lexical retrieval.' },
           query_canonical_en: { type: 'string', description: 'English-canonical lexical formulation; exact names and identifiers remain unchanged.' },
           entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entities selected by the structured router.' },
-          entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Entity ids selected from hivemind_find_entities. The server re-authorizes and resolves them before compiling retrieval.' },
+          entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Entity IDs from one chosen hivemind_find_entities result (prefer its entity_ids array). The server re-authorizes every ID and expands only exact canonical-name duplicates or records sharing the same verified primary email.' },
           mode: { type: 'string', enum: ['fact', 'explain', 'full', 'quick', 'panorama', 'insight'], default: 'fact' },
           limit: { type: 'integer', default: 10, minimum: 1, maximum: 50 },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },

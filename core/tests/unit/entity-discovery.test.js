@@ -22,7 +22,8 @@ test('entity finder gives exact aliases priority over prefix matches', () => {
 
 test('entity finder caps output and exposes only safe discovery fields', () => {
   const match = rankEntityMatches(ENTITIES, 'Bross', 1)[0];
-  assert.deepEqual(Object.keys(match).sort(), ['aliases', 'canonical_name', 'entity_id', 'entity_type', 'last_seen_at', 'match', 'mention_count']);
+  assert.deepEqual(Object.keys(match).sort(), ['aliases', 'canonical_name', 'entity_id', 'entity_ids', 'entity_type', 'last_seen_at', 'match', 'mention_count']);
+  assert.deepEqual(match.entity_ids, ['1']);
 });
 
 test('entity finder tolerates bounded spelling mistakes', () => {
@@ -55,6 +56,100 @@ test('entity finder merges canonical, legacy and tag identities by normalized na
   assert.equal(result.matches.length, 1);
   assert.equal(result.matches[0].entity_id, 'canonical-solvispia');
   assert.deepEqual(result.matches[0].aliases.sort(), ['Pia', 'Solvis Pia']);
+});
+
+test('duplicate canonical IDs remain one chooser identity with all verified IDs', async () => {
+  const canonicalRows = [
+    { id: 'rama-a', canonicalName: 'Rama Santhoshi', normalizedName: 'rama santhoshi', entityKind: 'person', aliases: ['Rama'], primaryEmail: 'rama@example.test', updatedAt: '2026-09-12T00:00:00Z' },
+    { id: 'rama-b', canonicalName: 'Rama Santhoshi', normalizedName: 'rama santhoshi', entityKind: 'person', aliases: ['Rama'], primaryEmail: 'rama@example.test', updatedAt: '2026-09-11T00:00:00Z' },
+  ];
+  const prisma = {
+    entity: { findMany: async () => [] },
+    canonicalEntity: { findMany: async ({ where }) => {
+      assert.equal(where.organizationId, 'org-a');
+      return canonicalRows.filter((row) => !where.id || where.id.in.includes(row.id));
+    } },
+    memoryEntityLink: { findMany: async ({ where }) => canonicalRows
+      .filter((row) => !where.entityId?.in || where.entityId.in.includes(row.id))
+      .map((row) => ({ entityId: row.id, memoryId: `memory-${row.id}` })) },
+    memory: { findMany: async () => [] },
+  };
+  const memoryStore = {
+    listMemories: async () => ({ memories: canonicalRows.map((row) => ({
+      id: `memory-${row.id}`, scope: 'organization', org_id: 'org-a', created_at: row.updatedAt,
+    })) }),
+  };
+  const found = await findEntities({ prisma, memoryStore, orgId: 'org-a', userId: 'user-a', query: 'Rama Santhoshi', accessContext: { orgRole: 'owner' } });
+  assert.equal(found.matches.length, 1);
+  assert.deepEqual(found.matches[0].entity_ids.sort(), ['rama-a', 'rama-b']);
+  assert.ok(found.matches[0].aliases.includes('Rama'));
+
+  const selected = await resolveAuthorizedEntityIds({
+    prisma, memoryStore, orgId: 'org-a', userId: 'user-a', entityIds: ['rama-a'], accessContext: { orgRole: 'owner' },
+  });
+  assert.equal(selected.entities.length, 1);
+  assert.deepEqual(selected.entities[0].entityIds.sort(), ['rama-a', 'rama-b']);
+  assert.deepEqual(selected.entities[0].canonicalEntityIds.sort(), ['rama-a', 'rama-b']);
+});
+
+test('different names are linked only by exact verified primary email, never substring', async () => {
+  const canonicalRows = [
+    { id: 'rama-short', canonicalName: 'Rama', normalizedName: 'rama', entityKind: 'person', aliases: [], primaryEmail: 'rama@example.test', updatedAt: '2026-09-12T00:00:00Z' },
+    { id: 'rama-full', canonicalName: 'Rama Santhoshi', normalizedName: 'rama santhoshi', entityKind: 'person', aliases: ['Chennarapu Ramasantoshi'], primaryEmail: 'rama@example.test', updatedAt: '2026-09-11T00:00:00Z' },
+    { id: 'other-rama', canonicalName: 'Rama Sharma', normalizedName: 'rama sharma', entityKind: 'person', aliases: [], primaryEmail: 'other@example.test', updatedAt: '2026-09-10T00:00:00Z' },
+  ];
+  const prisma = {
+    entity: { findMany: async () => [] },
+    canonicalEntity: { findMany: async ({ where }) => canonicalRows.filter((row) => {
+      if (where.id) return where.id.in.includes(row.id);
+      if (where.OR) return where.OR.some((filter) => filter.primaryEmail
+        ? row.primaryEmail === filter.primaryEmail
+        : row.canonicalName.toLocaleLowerCase() === filter.canonicalName.equals.toLocaleLowerCase());
+      return true;
+    }) },
+    memoryEntityLink: { findMany: async ({ where }) => canonicalRows
+      .filter((row) => where.entityId.in.includes(row.id))
+      .map((row) => ({ entityId: row.id, memoryId: `memory-${row.id}` })) },
+    memory: { findMany: async () => [] },
+  };
+  const memoryStore = { listMemories: async () => ({ memories: canonicalRows.map((row) => ({
+    id: `memory-${row.id}`, org_id: 'org-a', scope: 'organization', created_at: row.updatedAt,
+  })) }) };
+  const selected = await resolveAuthorizedEntityIds({
+    prisma, memoryStore, orgId: 'org-a', userId: 'user-a', entityIds: ['rama-short'], accessContext: { orgRole: 'owner' },
+  });
+  assert.equal(selected.entities.length, 1);
+  assert.deepEqual(selected.entities[0].entityIds.sort(), ['rama-full', 'rama-short']);
+  assert.ok(selected.entities[0].aliases.includes('Chennarapu Ramasantoshi'));
+});
+
+test('indexed tenant entity lookup accepts exact primary-email aliases and returns authorized canonical ID', async () => {
+  const calls = [];
+  const prisma = {
+    $queryRawUnsafe: async (sql, ...params) => {
+      calls.push({ sql, params });
+      return [{
+        id: 'rama-email-id', canonicalName: 'Rama Santhoshi', entityType: 'person',
+        aliases: ['Rama'], primaryEmail: 'rama@example.test', mentionCount: 2,
+        lastSeenAt: '2026-09-12T00:00:00Z',
+      }];
+    },
+    entity: { findMany: async () => [] },
+    canonicalEntity: { findMany: async () => [] },
+    memoryEntityLink: { findMany: async () => [] },
+    memory: { findMany: async () => [] },
+  };
+  const result = await findEntities({
+    prisma,
+    memoryStore: { listMemories: async () => ({ memories: [] }) },
+    orgId: 'org-a', userId: 'user-a', query: 'rama@example.test',
+    accessContext: { orgRole: 'owner' }, recallQualityMode: 'on',
+  });
+  assert.equal(result.matches[0].entity_id, 'rama-email-id');
+  assert.ok(result.matches[0].aliases.includes('rama@example.test'));
+  assert.match(calls[0].sql, /lower\(trim\(entity\.primary_email\)\)/);
+  assert.deepEqual(calls[0].params.slice(0, 2), ['org-a', 'user-a']);
+  assert.equal(calls[0].params[12], 'rama@example.test');
 });
 
 test('entity finder includes active workspace members as person identities', async () => {
@@ -93,7 +188,7 @@ test('agent-backed memories expose only authorized entity tags and revalidate is
   assert.deepEqual(found.matches.map((match) => match.entity_id), ['tag:uwe-berger', 'tag:uwe-bross']);
 
   const selected = await resolveAuthorizedEntityIds({ ...scope, entityIds: ['tag:uwe-berger'] });
-  assert.deepEqual(selected.entities, [{ id: 'tag:uwe-berger', canonicalName: 'Uwe Berger' }]);
+  assert.deepEqual(selected.entities, [{ id: 'tag:uwe-berger', entityIds: ['tag:uwe-berger'], canonicalEntityIds: [], canonicalName: 'Uwe Berger', aliases: [], primaryEmail: null }]);
 });
 
 test('canonical entity resolution never expands an explicit selection to all tenant tags', async () => {
@@ -115,7 +210,7 @@ test('canonical entity resolution never expands an explicit selection to all ten
   const selected = await resolveAuthorizedEntityIds({
     prisma, memoryStore, orgId: 'org', userId: 'user', entityIds: ['canonical-uwe'], accessContext: {},
   });
-  assert.deepEqual(selected.entities, [{ id: 'canonical-uwe', canonicalName: 'Uwe Berger' }]);
+  assert.deepEqual(selected.entities, [{ id: 'canonical-uwe', entityIds: ['canonical-uwe'], canonicalEntityIds: [], canonicalName: 'Uwe Berger', aliases: [], primaryEmail: null }]);
 });
 
 test('entity finder keeps omitted scope global and passes an explicit scope as a hard inventory boundary', async () => {

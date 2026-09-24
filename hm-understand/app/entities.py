@@ -4,6 +4,8 @@ import os
 import json
 import hashlib
 import logging
+import math
+import time
 from threading import Lock
 from pathlib import Path
 
@@ -14,12 +16,32 @@ _lock = Lock()
 _model_error: str | None = None
 _model_attempted = False
 _model_loading = False
+_model_retry_after = 0.0
+_model_load_failures = 0
 _model_loaded_tensors = 0
 _model_checkpoint_tensors = 0
+MODEL_RETRY_BASE_SECONDS = 30
+MODEL_RETRY_MAX_SECONDS = 300
 MODEL_ID = os.getenv("HM_UNDERSTAND_MODEL_ID", "urchade/gliner_multi-v2.1")
 MODEL_REVISION = os.getenv("HM_UNDERSTAND_MODEL_REVISION", "443d26d654e0324125a96bebd8e796c14ff2efe6")
 _model_cpu_threads = 0
 logger = logging.getLogger(__name__)
+
+
+def _model_retry_ready(now: float | None = None) -> bool:
+    if not _model_attempted:
+        return True
+    return (time.monotonic() if now is None else now) >= _model_retry_after
+
+
+def _record_model_load_failure(error: Exception, now: float | None = None) -> int:
+    global _model_attempted, _model_error, _model_load_failures, _model_retry_after
+    _model_attempted = True
+    _model_load_failures += 1
+    delay = min(MODEL_RETRY_MAX_SECONDS, MODEL_RETRY_BASE_SECONDS * (2 ** min(_model_load_failures - 1, 4)))
+    _model_retry_after = (time.monotonic() if now is None else now) + delay
+    _model_error = f"{type(error).__name__}: {error}"[:300]
+    return delay
 
 
 def configure_cpu_threads(torch_module, requested: str | int | None = None) -> int:
@@ -48,15 +70,16 @@ def checkpoint_sha256(path: Path) -> str:
 
 
 def load_model():
-    global _model, _model_error, _model_attempted, _model_loading, _model_loaded_tensors, _model_checkpoint_tensors, _model_cpu_threads
+    global _model, _model_error, _model_attempted, _model_loading, _model_retry_after
+    global _model_load_failures, _model_loaded_tensors, _model_checkpoint_tensors, _model_cpu_threads
     if _model is not None:
         return _model
-    if _model_attempted:
+    if not _model_retry_ready():
         return None
     with _lock:
         if _model is not None:
             return _model
-        if _model_attempted:
+        if not _model_retry_ready():
             return None
         _model_attempted = True
         _model_loading = True
@@ -141,8 +164,11 @@ def load_model():
             model.eval()
             _model = model
             _model_error = None
+            _model_retry_after = 0.0
+            _model_load_failures = 0
         except Exception as error:  # service remains useful for deterministic extractors
-            _model_error = f"{type(error).__name__}: {error}"[:300]
+            delay = _record_model_load_failure(error)
+            logger.warning("Pinned entity model load failed; retrying in %ss: %s", delay, _model_error)
         finally:
             _model_loading = False
     return _model
@@ -153,7 +179,9 @@ def model_status(*, load: bool = True) -> dict:
         load_model()
     return {"id": MODEL_ID, "revision": MODEL_REVISION, "loaded": _model is not None and _model_error is None,
             "loaded_tensors": _model_loaded_tensors, "checkpoint_tensors": _model_checkpoint_tensors,
-            "loading": _model_loading, "cpu_threads": _model_cpu_threads, "error": _model_error}
+            "loading": _model_loading, "cpu_threads": _model_cpu_threads,
+            "retry_after_seconds": max(0, math.ceil(_model_retry_after - time.monotonic())),
+            "error": _model_error}
 
 
 def extract_entities(text: str, labels: list[str]) -> list[dict]:

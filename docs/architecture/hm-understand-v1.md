@@ -14,6 +14,9 @@ evidence offsets. It has no tenant identity, database credentials, or write path
 - `POST /v1/analyze/stream` returns per-block progress and a final whole-request result. Consumers
   must require the final event and `complete=true` before treating a document analysis as complete.
 - `/health` measures process health. `/ready` reports whether the pinned GLiNER model loaded.
+- A failed model download/load keeps deterministic extraction available and retries with bounded
+  exponential backoff (30s, 60s, 120s, 240s, then capped at 300s); a transient first-load failure
+  does not poison the process until restart.
 - A language label is a best-effort routing signal, not proof of extraction quality. langid scores
   are log-likelihood rankings, not calibrated probabilities. Each block returns
   `quality.refinement_required` plus bounded reason codes when the local model is unavailable,
@@ -167,16 +170,16 @@ Gateway route exceeded Core's extraction budget before usage was returned. Do no
 until a comparable baseline/assisted run produces provider usage receipts.
 
 Current verification (2026-09-24): the local-branch hm-extract golden, atomicity,
-offset/backpressure, and admission suite passes 36/36; hm-understand passes 20/20; Core's focused
-adapter/evidence set passes 18/18, with two optional Docling/provider integration checks skipped
-because those endpoints were not available to the host test runner. The live RTF chain passes: a
-synthetic RTF is parsed by the running hm-extract service; Core's evidence helper persists the
-validated exact segments to a stub DB; the real pinned multilingual GLiNER service analyzes those
-same segments. The model returned grounded date, person, money, and project mentions plus a decision
-candidate, with quotes and document offsets matching parser evidence. The Core RTF canary completed
-in about 0.85 seconds warm; analyzer readiness reported all 224/224 pinned model tensors loaded.
-This proves the local parser→evidence→real-model contract, not authenticated upload, real PostgreSQL
-writes, or production throughput.
+offset/backpressure, and admission suite passes 36/36; hm-understand passes 22/22; Core's focused
+adapter/evidence set passes 23/23. Three live parser/analyzer integration tests pass against the
+branch's host-run services and a stub Core database. A synthetic RTF is parsed by hm-extract; Core's
+evidence helper persists the validated exact segments; the pinned multilingual GLiNER model analyzes
+those same segments. It returned grounded date, person, money, and project mentions plus a
+review-required decision candidate, with quotes and document offsets matching parser evidence. The
+first model load from the local cache took about 12.4 seconds and loaded 224/224 pinned tensors; the
+warmed Core RTF canary completed in about 0.56 seconds. This proves the local
+parser→evidence→real-model contract, not authenticated upload, real PostgreSQL writes, container
+startup, or production throughput.
 
 The shared local Core container still uses its prior immutable image and was not recreated. The
 candidate model was exercised as a host-local process because Docker Desktop had 58 containers

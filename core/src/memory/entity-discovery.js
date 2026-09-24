@@ -174,7 +174,7 @@ async function authorizedIndexedCanonicalRows({
                  WHEN alias.normalized_alias LIKE $3 || '%' THEN CASE WHEN alias.is_canonical THEN 2 ELSE 3 END
                  ELSE 5
                END) AS match_rank,
-               max(similarity(alias.normalized_alias, $3)) AS similarity_score
+               max(public.similarity(alias.normalized_alias, $3)) AS similarity_score
         FROM hivemind.canonical_entity_search_aliases alias
         JOIN hivemind.canonical_entities entity ON entity.id = alias.entity_id
         WHERE alias.organization_id = $1::uuid

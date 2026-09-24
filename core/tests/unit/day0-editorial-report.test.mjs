@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildDayZeroOnboardingReport, renderDayZeroOnboardingEmail } from '../../src/email/templates/day0-company-onboarding.js';
+import { buildDayZeroOnboardingReport, DAY_ZERO_EDITORIAL_REPORT_VERSION, renderDayZeroOnboardingEmail } from '../../src/email/templates/day0-company-onboarding.js';
 import { renderDayZeroPortraitV8 } from '../../src/email/templates/day0-portrait-v8.js';
+import { renderDayZeroEditorialReport } from '../../src/email/templates/day0-editorial-report.js';
 import { renderDayZeroOnboardingPdf } from '../../src/email/day0-company-report-pdf.js';
 
 const company = {
@@ -71,6 +72,38 @@ test('Day 0 attachment retains onboarding material beyond the old dashboard-card
   assert.match(html, /Research item 12/);
   assert.match(html, /Onboarding document 16/);
   assert.match(html, /First move 12/);
+});
+
+test('the editorial report is a five-page, SINGULANCE-branded Day 0 brief with contrast and real tenant context', () => {
+  const report = buildDayZeroOnboardingReport(company, {
+    appUrl: 'https://next.example.test/company',
+    logoUrl: 'https://singulancelabs.com/images/singulance-orbit.png',
+    version: DAY_ZERO_EDITORIAL_REPORT_VERSION,
+  });
+  const html = renderDayZeroEditorialReport(report, { screenshotDataUri: 'data:image/png;base64,AAAA' });
+  const email = renderDayZeroOnboardingEmail(company, { appUrl: 'https://next.example.test/company' });
+
+  assert.equal((html.match(/<section class="page /g) || []).length, 5);
+  assert.doesNotMatch(html, /<\/section>,<section/);
+  assert.match(html, /@page\{size:A4 portrait;margin:0\}/);
+  assert.match(html, /SINGULANCE/);
+  assert.equal((html.match(/src="https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png"/g) || []).length, 5);
+  assert.equal((html.match(/aria-label="Singulance"/g) || []).length, 5);
+  assert.match(html, /aria-label="Singulance"/);
+  assert.match(html, /#117dff/);
+  assert.match(html, /#ffffff|#fff/);
+  assert.match(html, /\.night\{background:#101820/);
+  assert.match(html, /01 \/ 05/);
+  assert.match(html, /04 \/ YOUR COMPANY, IN MOTION/);
+  assert.match(html, /Canary Company/);
+  assert.match(html, /Make accountable company intelligence available/);
+  assert.match(html, /Regulated European teams/);
+  assert.match(html, /Map the first customer segment/);
+  assert.match(html, /Omar/);
+  assert.match(html, /data:image\/png;base64,AAAA/);
+  assert.match(html, /OPEN POINTS FOR YOUR JUDGEMENT/);
+  assert.match(email.html, /DAY 0 · THE RISE OF AWAKENING/);
+  assert.doesNotMatch(email.html, /FIRST OPERATING MODEL · READY FOR REVIEW/);
 });
 
 test('Day 0 PDF asks Chromium for native repeated branding outside the content flow', async () => {

@@ -7,6 +7,7 @@ import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEm
 // A version bump makes the new print-safe visual artifact eligible for one
 // controlled lifecycle reissue while preserving the original delivery receipt.
 export const DAY_ZERO_REPORT_VERSION = 'day-0-v11';
+export const DAY_ZERO_ONEPAGE_REPORT_VERSION = 'day-0-v12-onepage';
 
 function clean(value, limit = 360) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -43,7 +44,7 @@ const ROLE_ONE_LINERS = Object.freeze({
 });
 
 /** One deterministic view-model shared by email and report-deck renderers. */
-export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, publicApiUrl, embedEmailAvatars = false } = {}) {
+export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, publicApiUrl, embedEmailAvatars = false, version = DAY_ZERO_REPORT_VERSION } = {}) {
   const profile = company.profile && typeof company.profile === 'object' ? company.profile : {};
   const name = clean(company.company || profile.company_name || 'Your company', 110);
   const website = safeUrl(company.website || profile.website || '');
@@ -106,7 +107,7 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
     || null;
 
   return {
-    version: DAY_ZERO_REPORT_VERSION,
+    version,
     companyName: name,
     website,
     websiteHost: hostname(website),

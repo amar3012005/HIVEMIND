@@ -1,8 +1,10 @@
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
-import { DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../email/templates/day0-company-onboarding.js';
+import { DAY_ZERO_ONEPAGE_REPORT_VERSION, DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../email/templates/day0-company-onboarding.js';
 import { renderDayZeroPortraitV8 } from '../email/templates/day0-portrait-v8.js';
+import { renderDayZeroOnePageEditorial } from '../email/templates/day0-onepage-editorial.js';
 import { buildDayZeroOnboardingReport } from '../email/templates/day0-company-onboarding.js';
+import { isDayZeroOnePageReportEnabled } from './day0-lifecycle-flag.js';
 import { resolvePublicAppUrl } from '../public-frontend-url.js';
 import { createHash } from 'node:crypto';
 
@@ -39,6 +41,7 @@ export async function startDayZeroOnboardingReport({
   hqRoomId,
   userId,
   allowVersionedReissue = false,
+  isOnePageRendererEnabled = isDayZeroOnePageReportEnabled,
   renderPdf = renderDayZeroOnboardingPdf,
   sendEmail = sendRenderedSystemEmail,
 } = {}) {
@@ -55,8 +58,7 @@ export async function startDayZeroOnboardingReport({
   if (userId && String(row.user_id) !== String(userId)) throw new Error('day0_report_owner_mismatch');
 
   const prior = company.day0_report_email || {};
-  const reissue = Boolean(allowVersionedReissue && prior.status === 'sent' && prior.version !== DAY_ZERO_REPORT_VERSION);
-  if (prior.status === 'sent' && !reissue) return { ok: true, accepted: false, status: 'sent', version: prior.version || null };
+  if (prior.status === 'sent' && !allowVersionedReissue) return { ok: true, accepted: false, status: 'sent', version: prior.version || null };
   if (isActiveSendingLease(prior)) return { ok: true, accepted: false, status: 'sending', version: prior.version || null };
   // Every entry point (including dashboard/worker retries) must wait for the
   // capture state persisted by onboarding before claiming a report delivery.
@@ -65,11 +67,18 @@ export async function startDayZeroOnboardingReport({
     return { ok: true, accepted: false, status: 'waiting_for_preview', reason: 'website_preview_not_ready' };
   }
 
+  const onePageEnabled = await isOnePageRendererEnabled({ orgId, userId: userId || row.user_id });
+  const reportTemplate = onePageEnabled ? 'onepage-editorial' : 'portrait-v8';
+  const reportVersion = onePageEnabled ? DAY_ZERO_ONEPAGE_REPORT_VERSION : DAY_ZERO_REPORT_VERSION;
+  const reissue = Boolean(allowVersionedReissue && prior.status === 'sent' && prior.version !== reportVersion);
+  if (prior.status === 'sent' && !reissue) return { ok: true, accepted: false, status: 'sent', version: prior.version || null };
+
   const claimedAt = new Date().toISOString();
   const claimState = {
-    version: DAY_ZERO_REPORT_VERSION,
+    version: reportVersion,
     status: 'sending',
     claimed_at: claimedAt,
+    report_template: reportTemplate,
     ...(reissue ? { reissued_from: previousReceipt(prior) } : {}),
   };
   const claimed = await prisma.$queryRawUnsafe(
@@ -89,7 +98,7 @@ export async function startDayZeroOnboardingReport({
           )
         )
       RETURNING id`,
-    JSON.stringify(claimState), row.id, orgId, reissue, DAY_ZERO_REPORT_VERSION,
+    JSON.stringify(claimState), row.id, orgId, reissue, reportVersion,
   );
   if (!claimed?.length) return { ok: true, accepted: false, status: 'sending' };
 
@@ -119,7 +128,7 @@ export async function startDayZeroOnboardingReport({
       // lifecycle email silently point a user at the Production frontend.
       const appBase = resolvePublicAppUrl();
       const appUrl = appBase.endsWith('/employees/mycompany') ? appBase : `${appBase}/employees/mycompany`;
-      const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl });
+      const rendered = renderDayZeroOnboardingEmail(dashboardCompany, { appUrl, version: reportVersion });
       // v8 portrait report: real typography + the actual website screenshot
       // captured during onboarding (read from the shared data volume).
       let screenshotDataUri = '';
@@ -138,9 +147,15 @@ export async function startDayZeroOnboardingReport({
           if (buf.length && buf.length < 3_000_000) screenshotDataUri = `data:${contentType};base64,${buf.toString('base64')}`;
         }
       } catch (shotErr) { console.warn('[day0] screenshot embed skipped:', shotErr.message); }
-      const v8Report = buildDayZeroOnboardingReport(dashboardCompany, { appUrl });
-      const print = { report: v8Report, html: renderDayZeroPortraitV8(v8Report, { screenshotDataUri, orgId }) };
-      const pdf = await renderPdf(print.html);
+      const report = buildDayZeroOnboardingReport(dashboardCompany, { appUrl, version: reportVersion });
+      const renderHtml = onePageEnabled ? renderDayZeroOnePageEditorial : renderDayZeroPortraitV8;
+      const print = { report, html: renderHtml(report, { screenshotDataUri, orgId }) };
+      const pdfOptions = onePageEnabled ? {
+        displayHeaderFooter: false,
+        preferCssPageSize: true,
+        margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
+      } : undefined;
+      const pdf = await renderPdf(print.html, pdfOptions);
       const pdfSha256 = createHash('sha256').update(pdf).digest('hex');
       const delivery = await sendEmail({
         templateId: 'day0_company_onboarding',
@@ -154,9 +169,9 @@ export async function startDayZeroOnboardingReport({
           title: reissue ? `Your ${dashboardCompany.company} Day-0 report has been refreshed` : `Your ${dashboardCompany.company} Day-0 report is in your inbox`,
           body: reissue ? 'Your refreshed onboarding report is ready.' : 'Your onboarding report and new AI HyperAgents are ready.',
           resourceType: 'hyper_company',
-          resourceId: `${row.id}:day0:${DAY_ZERO_REPORT_VERSION}`,
+          resourceId: `${row.id}:day0:${reportVersion}`,
           href: appUrl,
-          data: { lifecycle_day: 0, lifecycle_version: DAY_ZERO_REPORT_VERSION, reissue, company: dashboardCompany.company },
+          data: { lifecycle_day: 0, lifecycle_version: reportVersion, report_template: reportTemplate, reissue, company: dashboardCompany.company },
         },
       });
       if (!delivery.ok) throw new Error(`day0_report_delivery_${delivery.reason || 'failed'}`);
@@ -168,7 +183,7 @@ export async function startDayZeroOnboardingReport({
         JSON.stringify({ ...claimState, status: 'sent', sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null, report_url: appUrl, pdf_sha256: pdfSha256, pdf_bytes: pdf.length }),
         row.id, orgId,
       );
-      return { ok: true, status: 'sent', version: DAY_ZERO_REPORT_VERSION, reissue, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted' };
+      return { ok: true, status: 'sent', version: reportVersion, report_template: reportTemplate, reissue, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted' };
     } catch (error) {
       await prisma.$executeRawUnsafe(
         `UPDATE "hivemind"."hyper_rooms"

@@ -2312,3 +2312,40 @@ git diff --check: passed (line-ending warnings only)
 - Next: merge this pushed branch through a clean permanent `singulance-local`
   integration worktree, rebuild only the affected local services, then run the
   post-rebuild A3 native reset-tools acceptance.
+
+## 2026-09-24 UTC — hm-extract evidence handoff and hm-understand retry candidate
+
+- State: Committed; local integration not accepted.
+- Owner: Codex.
+- Worktree: `/Users/amar/HIVE-MIND-hm-understand-singulance-local`.
+- Branch: `codex/hm-understand-singulance-local`.
+- Tested/pushed implementation SHA: `567e47de7911b8f9bb37a7949d741ad743936c15`.
+- Scope: preserve validated hm-extract segments as canonical parser evidence,
+  hand those exact segments to local hm-understand, retain Core ownership of
+  authorization and writes, and retry transient pinned-model load failures with
+  bounded backoff instead of permanently disabling model loading.
+- Verification commands and outputs:
+  - From `core/`: `node --test --test-concurrency=1 tests/unit/hm-extract-adapter.test.js tests/unit/hm-understand-adapter.test.js tests/unit/document-hm-extract-segments.test.js tests/unit/document-hm-understand-shadow.test.js tests/unit/hm-understand-assisted.test.js`
+    -> 23 passed, 0 failed.
+  - From `hm-extract/`: `UV_THREADPOOL_SIZE=4 HM_EXTRACT_URL=http://127.0.0.1:8198 node --test --test-concurrency=1 test/golden.test.js test/atomicity.test.js test/admission.test.js test/extract-response.test.js test/segments-offsets.test.js`
+    -> 36 passed, 0 failed.
+  - From `/Users/amar/HIVE-MIND-hm-understand-preview-local/hm-understand/`: `.venv/bin/python -m pytest -q tests`
+    -> 22 passed; one preexisting Starlette deprecation warning.
+  - Host-local parser/analyzer E2E against hm-extract on `127.0.0.1:8198`,
+    hm-understand on `127.0.0.1:8091`, and a stub Core database -> 3 passed,
+    0 failed. RTF parser evidence offsets and model quotes matched exactly.
+  - `python -m compileall -q app tests` and `git diff --check` -> passed.
+- Limits: this is not proof of authenticated upload, real PostgreSQL writes,
+  candidate container startup, or production throughput. Model quality remains
+  diagnostic only; no language is promoted to bypass refinement. No token
+  savings have been established. Shared Core and Docker services were not
+  replaced.
+- Accepted release: none. Permanent `/Users/amar/HIVE-MIND-local-main` remains
+  dirty in unrelated `core/prisma/schema.prisma` and
+  `core/tests/unit/hyper-turn-event-resilience.test.js`, and is 67 commits
+  ahead of `origin/singulance-local`; protocol forbids integration/rebuild until
+  the worktree is made safe without disturbing those changes and production
+  truth is merged. No production action occurred.
+- Next: reconcile the integration-worktree blocker, then validate the merged
+  branch and run only the affected local services plus authenticated upload and
+  recall canaries before marking the feature accepted.

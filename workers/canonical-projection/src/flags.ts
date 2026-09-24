@@ -11,6 +11,22 @@ type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
 type GovernedRoomFlagEnv = FlagEnv & { HYPER_GOVERNED_ROOM_FLAG?: string };
 type EntityDiscoveryFlagEnv = FlagEnv & { ENTITY_DISCOVERY_FLAG?: string };
 type EntityProfileFlagEnv = FlagEnv & { ENTITY_PROFILE_PROJECTION_FLAG?: string };
+type RecallQualityMode = 'off' | 'shadow' | 'on';
+
+export async function evaluateRecallQualityMode(env: FlagEnv, orgId: string, userId: string): Promise<RecallQualityMode> {
+  if (!validUuid(orgId) || !validUuid(userId)) return 'off';
+  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
+  try {
+    const details = await env.FLAGS.getStringDetails('recall_quality_v1', 'off', {
+      targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT,
+    });
+    return details.value === 'shadow' || details.value === 'on' ? details.value : 'off';
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'recall_quality_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return 'off';
+  }
+}
 
 export async function evaluateEntityProfileMode(env: EntityProfileFlagEnv, orgId: string, userId: string): Promise<'off' | 'shadow' | 'dynamic_auto' | 'review_only'> {
   if (!validUuid(orgId)) return 'off';
@@ -18,7 +34,7 @@ export async function evaluateEntityProfileMode(env: EntityProfileFlagEnv, orgId
   try {
     const details = await env.FLAGS.getStringDetails(
       env.ENTITY_PROFILE_PROJECTION_FLAG || 'entity_profile_projection_v1', 'off',
-      { targetingKey: `${orgId}:${userId || 'workflow'}`, org_id: orgId, user_id: userId || null, environment: env.ENVIRONMENT },
+      { targetingKey: `${orgId}:${userId || 'workflow'}`, org_id: orgId, user_id: userId || '', environment: env.ENVIRONMENT },
     );
     return ['shadow', 'dynamic_auto', 'review_only'].includes(details.value) ? details.value as 'shadow' | 'dynamic_auto' | 'review_only' : 'off';
   } catch (error) {

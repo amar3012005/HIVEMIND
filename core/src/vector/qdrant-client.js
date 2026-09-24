@@ -25,6 +25,7 @@ import {
   markVectorSynced,
 } from './managed-vector-ledger.js';
 import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
+import { recallSparseVector } from './recall-sparse.js';
 
 // Per-org Qdrant base: the customer's Qdrant (via tunnel) for a self-host-hybrid org, else central.
 const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
@@ -32,6 +33,7 @@ const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
 const COLLECTION_NAME = 'HIVEMIND_PERSONAL';
+const RECALL_SPARSE_NAME = 'memory_sparse_v1';
 const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
 // P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
 // benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
@@ -69,7 +71,23 @@ function filterMatchValue(filter, key) {
 
 export function buildHybridSearchFilter(filters = {}) {
   const must = [];
-  if (filters.user_id) must.push({ key: 'user_id', match: { value: filters.user_id } });
+  if (filters.quality_v1 && filters.org_id && filters.user_id) {
+    const access = [
+      { key: 'user_id', match: { value: filters.user_id } },
+      { key: 'scope', match: { value: 'organization' } },
+    ];
+    const projectIds = Array.isArray(filters.authorized_project_ids) ? filters.authorized_project_ids.filter(Boolean) : [];
+    const teamIds = Array.isArray(filters.authorized_team_ids) ? filters.authorized_team_ids.filter(Boolean) : [];
+    if (projectIds.length) access.push({ must: [
+      { key: 'scope', match: { value: 'project' } },
+      { key: 'project_ids', match: { any: projectIds } },
+    ] });
+    if (teamIds.length) access.push({ must: [
+      { key: 'scope', match: { value: 'team' } },
+      { key: 'team_id', match: { any: teamIds } },
+    ] });
+    must.push({ should: access });
+  } else if (filters.user_id) must.push({ key: 'user_id', match: { value: filters.user_id } });
   if (filters.org_id) must.push({ key: 'org_id', match: { value: filters.org_id } });
   if (filters.project) must.push({ key: 'project', match: { value: filters.project } });
   if (Array.isArray(filters.project_ids) && filters.project_ids.length > 0) {
@@ -159,6 +177,7 @@ export class QdrantClient {
     // (observed 26–60s, growing as calls alternated tenants). A Set makes it
     // once-per-collection-per-process, moving schema setup off the query path.
     this.collectionReady = new Set();
+    this.recallQualityReady = new Set();
     this._litellmReady = null;
   }
 
@@ -201,6 +220,84 @@ export class QdrantClient {
       console.error('Failed to ensure Qdrant collection:', error.message);
       return false;
     }
+  }
+
+  async ensureRecallQualityCollection(orgId) {
+    if (memoryBackend(orgId) !== 'central') return null;
+    const collection = await routeCollection({ orgId });
+    if (this.recallQualityReady.has(collection)) return collection;
+    if (!await this.ensureCollection(collection)) return null;
+    const configuration = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}`, { headers });
+    if (!configuration.ok) return null;
+    const info = (await configuration.json())?.result || {};
+    if (!info.config?.params?.sparse_vectors?.[RECALL_SPARSE_NAME]) {
+      const created = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/vectors/${RECALL_SPARSE_NAME}?wait=true`, {
+        method: 'PUT', headers, body: JSON.stringify({ sparse: { modifier: 'idf' } }),
+      });
+      if (!created.ok) return null; // Older Qdrant versions retain the current recall path.
+    }
+    await getQdrantCollections(qbase(), API_KEY).ensureRecallQualityIndexes(collection);
+    this.recallQualityReady.add(collection);
+    return collection;
+  }
+
+  async updateRecallSparseVectors(orgId, memories) {
+    const collection = await this.ensureRecallQualityCollection(orgId);
+    if (!collection) return false;
+    const points = (memories || []).map((memory) => ({
+      id: memory.id,
+      vector: { [RECALL_SPARSE_NAME]: recallSparseVector(`${memory.title || ''} ${memory.content || ''}`) },
+    })).filter((point) => point.id && point.vector[RECALL_SPARSE_NAME].indices.length);
+    if (!points.length) return true;
+    const byId = new Map((memories || []).map((memory) => [memory.id, memory]));
+    const operations = [{ update_vectors: { points } }, ...points.map((point) => {
+      const memory = byId.get(point.id);
+      return { set_payload: { points: [point.id], payload: {
+        project_id: memory.project_id || null,
+        project_ids: [...new Set([memory.project_id, ...(memory.project_ids || [])].filter(Boolean))],
+        team_id: memory.primary_team_id || null,
+        scope: memory.scope || 'personal',
+      } } };
+    })];
+    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/batch?wait=true`, {
+      method: 'POST', headers, body: JSON.stringify({ operations }),
+    });
+    const body = await response.json().catch(() => ({}));
+    return response.ok && body.status !== 'error' && Array.isArray(body.result)
+      && body.result.every((result) => result?.status === 'completed' || result?.status === 'acknowledged');
+  }
+
+  async searchRecallHybrid(query, filters = {}) {
+    const orgId = filters.org_id;
+    if (!orgId || memoryBackend(orgId) !== 'central') return [];
+    const sparse = recallSparseVector(query);
+    if (!sparse.indices.length) return [];
+    const collection = await routeCollection({ orgId });
+    // Collection schema/index setup is background-only. Never block a chat
+    // request on Qdrant's wait:true index build or a schema migration.
+    if (!this.recallQualityReady.has(collection)) return [];
+    const baseFilter = enforceTenantFilter(buildHybridSearchFilter(filters), currentOrg());
+    const filter = {
+      ...baseFilter,
+      must: [...(baseFilter.must || []), { key: 'layer', match: { value: 'memory' } }],
+      must_not: [...(baseFilter.must_not || []), { key: 'tags', match: { value: 'promoted-from-segment' } }],
+    };
+    const dense = filters.vector || await this.generateEmbedding(query);
+    if (!isValidEmbeddingVector(dense)) return [];
+    const limit = Math.min(Math.max(Number(filters.limit) || 10, 1), 150);
+    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/query`, {
+      method: 'POST', headers,
+      body: JSON.stringify({
+        prefetch: [
+          { query: dense, filter, limit },
+          { query: sparse, using: RECALL_SPARSE_NAME, filter, limit },
+        ],
+        query: { fusion: 'rrf' }, limit, with_payload: true,
+      }),
+      signal: currentStageSignal() || undefined,
+    });
+    if (!response.ok) return [];
+    return (await response.json())?.result?.points || [];
   }
 
   /**
@@ -338,8 +435,10 @@ export class QdrantClient {
         user_id: memory.user_id,
         org_id: memory.org_id,
         project: memory.project,
-        project_ids: Array.isArray(memory.project_ids) ? memory.project_ids : [],
+        project_ids: [...new Set([memory.project_id, ...(Array.isArray(memory.project_ids) ? memory.project_ids : [])].filter(Boolean))],
+        project_id: memory.project_id || null,
         team_id: memory.primary_team_id || null,
+        scope: memory.scope || 'personal',
         memory_type: memory.memory_type,
         tags: memory.tags || [],
         // ITEM 5 — PAYLOAD IS AN INDEX, NOT A SECOND COPY OF THE TEXT. This carried the FULL

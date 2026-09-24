@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from '../src/flags';
+import { evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability, evaluateRecallQualityMode } from '../src/flags';
 
 const org = '22222222-2222-4222-8222-222222222222';
 const user = '33333333-3333-4333-8333-333333333333';
@@ -34,6 +34,22 @@ describe('recall reliability gate', () => {
     expect(await evaluateRecallReliability(enabled, org, user)).toBe(true);
     expect(await evaluateRecallReliability({ ...enabled, RECALL_PARALLEL_RELIABILITY_ENABLED: 'false' }, org, user)).toBe(false);
     expect(await evaluateRecallReliability(enabled, org, 'invalid')).toBe(false);
+  });
+});
+
+describe('recall quality gate', () => {
+  it('accepts only shadow/on for the exact tenant user and fails closed', async () => {
+    const getStringDetails = vi.fn(async () => ({ value: 'shadow' }));
+    const env = { ENVIRONMENT: 'production', FLAGS: { getStringDetails } } as unknown as Parameters<typeof evaluateRecallQualityMode>[0];
+    expect(await evaluateRecallQualityMode(env, org, user)).toBe('shadow');
+    expect(getStringDetails).toHaveBeenCalledWith('recall_quality_v1', 'off', {
+      targetingKey: `${org}:${user}`, org_id: org, user_id: user, environment: 'production',
+    });
+    getStringDetails.mockResolvedValueOnce({ value: 'on' });
+    expect(await evaluateRecallQualityMode(env, org, user)).toBe('on');
+    getStringDetails.mockResolvedValueOnce({ value: 'unknown' });
+    expect(await evaluateRecallQualityMode(env, org, user)).toBe('off');
+    expect(await evaluateRecallQualityMode(env, org, 'invalid')).toBe('off');
   });
 });
 

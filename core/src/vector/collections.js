@@ -170,6 +170,12 @@ const MEMORIES_PAYLOAD_INDEXES = [
   }
 ];
 
+const RECALL_QUALITY_PAYLOAD_INDEXES = [
+  { field_name: 'project_ids', field_schema: 'keyword' },
+  { field_name: 'team_id', field_schema: 'keyword' },
+  { field_name: 'scope', field_schema: 'keyword' },
+];
+
 // Org-container HNSW/quant contract — MUST match the bge-m3 1024 migration
 // (UWE_BERGER, CEYDA_SARIOGLU, AMAR_SAI, SEBASTIAN_GARN, HIVEMIND_PERSONAL).
 // m=32/ef_construct=256, int8 always-RAM quant, on_disk vectors + payload.
@@ -473,6 +479,10 @@ export class QdrantCollections {
     }
 
     await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
+  }
+
+  async ensureRecallQualityIndexes(collectionName) {
+    await this.createPayloadIndexes(collectionName, RECALL_QUALITY_PAYLOAD_INDEXES);
   }
 
   /**

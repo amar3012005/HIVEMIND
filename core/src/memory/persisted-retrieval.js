@@ -679,6 +679,7 @@ async function vectorCandidatesForRecall(store, {
   user_id,
   org_id,
   project,
+  project_id = null,
   source_platforms = [],
   tags = [],
   max_memories,
@@ -692,6 +693,7 @@ async function vectorCandidatesForRecall(store, {
   access_context = null,
   scope_filter = null,
   timing = null,
+  recall_quality_mode = 'off',
 }) {
   const qdrantClient = getQdrantClient();
   if (memoryBackend(org_id) === 'central') {
@@ -708,8 +710,13 @@ async function vectorCandidatesForRecall(store, {
   // the LIVE matchesHardScope scope-filtering in src/search/hybrid.js and the
   // ThreeTierRetrieval path (server.js → three-tier-retrieval.js → ResultReranker).
   const vectorLaneStartedAt = timing ? Date.now() : 0;
-  const results = await qdrantClient.hybridSearch(query_context, {
-    vector: query_vector,
+  const qualityEnabled = (recall_quality_mode === 'shadow' || recall_quality_mode === 'on')
+    && memoryBackend(org_id) === 'central' && !!access_context;
+  const sharedVector = qualityEnabled && !query_vector
+    ? await qdrantClient.generateEmbedding(query_context)
+    : query_vector;
+  const baselinePromise = qdrantClient.hybridSearch(query_context, {
+    vector: sharedVector,
     user_id,
     org_id,
     // NOTE: do NOT pass `project` as a Qdrant pre-filter. Project-scoped memories
@@ -734,6 +741,42 @@ async function vectorCandidatesForRecall(store, {
     collectionName: undefined,
     timing,
   });
+  // Shadow computes candidate overlap without affecting the delivered set.
+  // On unions extra authorized candidates with the existing lane. Both paths
+  // hydrate from Postgres and run the same Core access check below.
+  const qualityPromise = qualityEnabled
+    ? (async () => {
+        const common = {
+          vector: sharedVector, user_id, org_id, quality_v1: true,
+          authorized_project_ids: access_context.projectIds || [],
+          authorized_team_ids: access_context.teamIds || [],
+          tags, is_latest, valid_at: validAt, known_at: knownAt,
+          limit: candidatePoolSize, score_threshold: scoreThreshold,
+          hnsw_ef: hnswEf,
+        };
+        const search = async (filters) => {
+          const fused = await qdrantClient.searchRecallHybrid(query_context, filters);
+          return fused.length ? fused : qdrantClient.hybridSearch(query_context, filters);
+        };
+        const searches = [search(common)];
+        if (project_id && (access_context.projectIds || []).includes(project_id)) {
+          searches.push(search({
+            ...common, project_ids: [project_id],
+          }));
+        }
+        const settled = await Promise.allSettled(searches);
+        return settled.flatMap((entry) => entry.status === 'fulfilled' ? entry.value || [] : []);
+      })().catch(() => [])
+    : Promise.resolve([]);
+  const [baseline, quality] = await Promise.all([baselinePromise, qualityPromise]);
+  if (qualityEnabled) {
+    const baselineIds = new Set((baseline || []).map((hit) => hit.payload?.memory_id || hit.id));
+    console.info('[recall-quality]', JSON.stringify({ mode: recall_quality_mode,
+      org_id, baseline_candidates: baselineIds.size, extra_candidates: quality.filter((hit) => !baselineIds.has(hit.payload?.memory_id || hit.id)).length }));
+  }
+  const results = recall_quality_mode === 'on'
+    ? [...new Map([...(baseline || []), ...quality].map((hit) => [hit.payload?.memory_id || hit.id, hit])).values()]
+    : baseline;
   if (timing) timing.vector_lane_ms = (timing.vector_lane_ms || 0) + (Date.now() - vectorLaneStartedAt);
 
   // Batch-hydrate every candidate id in ONE findMany. Previously this fanned out
@@ -1328,6 +1371,7 @@ async function _recallPersistedMemoriesImpl(store, {
   user_id,
   org_id,
   project,
+  project_id = null,
   source_platforms = [],
   tags = [],
   preferred_project = null,
@@ -1374,6 +1418,7 @@ async function _recallPersistedMemoriesImpl(store, {
   trace_stages = false,
   timing = null,
   reliability_v1 = false,
+  recall_quality_mode = 'off',
 }) {
   const laneStates = reliability_v1 ? {
     memory_lexical: { status: 'pending', candidates: 0 },
@@ -1535,6 +1580,7 @@ async function _recallPersistedMemoriesImpl(store, {
     user_id,
     org_id,
     project,
+    project_id,
     source_platforms,
     tags: _effectiveTags,
     max_memories,
@@ -1548,6 +1594,7 @@ async function _recallPersistedMemoriesImpl(store, {
     access_context,
     scope_filter,
     timing,
+    recall_quality_mode,
   })
     // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
     .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));

@@ -70,6 +70,7 @@ import { admitEntityProfileAttempt, completeEntityProfileAttempt, failEntityProf
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
 import { admitProjectionAttempt, beginProjectionStage, finishCoreFallback, finishProjectionStage, projectionAttemptStatus, releaseProjectionStage, selectCoreFallback } from './memory/canonical-projection-attempts.js';
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
+import { CloudflareRecallQualityClient } from './memory/cloudflare-recall-quality-client.js';
 import { CloudflareChatSessionClient, nativeOrchestratorFor } from './agent/v2/cloudflare-chat-session-client.js';
 import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
 import { reconcileProgressiveApproval } from './agent/progressive-approval-events.js';
@@ -156,6 +157,7 @@ const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
 const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
 const recallReliabilityClient = new CloudflareRecallReliabilityClient();
+const recallQualityClient = new CloudflareRecallQualityClient();
 const cloudflareChatSessionClient = new CloudflareChatSessionClient();
 const canonicalProjectionNonceFallback = new Map();
 
@@ -22671,6 +22673,7 @@ exit \$RC
               qdrantClient,
               getMemoryTypeBoost,
               recallReliabilityClient,
+              recallQualityClient,
             });
           }
           break;
@@ -25521,6 +25524,7 @@ exit \$RC
                 const recallReliabilityV1 = await recallReliabilityClient
                   .enabledFor({ orgId, userId })
                   .catch(() => false);
+                const recallQualityMode = await recallQualityClient.modeFor({ orgId, userId });
                 // Additive durable execution envelope. The selected mode is
                 // evaluated once and latched on the turn. Flag/Worker/schema
                 // failures fail closed to the unchanged Chat V2 path.
@@ -25694,6 +25698,7 @@ exit \$RC
                       ctx: {
                         userId, orgId,
                         recallReliabilityV1,
+                        recallQualityMode,
                         nativeMetaMode,
                         decisionEnv: unifiedDecisionEnv,
                         unifiedDag: chatAdmission.unifiedDag,
@@ -25792,6 +25797,7 @@ exit \$RC
                   ctx: {
                     userId, orgId,
                     recallReliabilityV1,
+                    recallQualityMode,
                     nativeMetaMode,
                     decisionEnv: unifiedDecisionEnv,
                     unifiedDag: chatAdmission.unifiedDag,
@@ -27296,9 +27302,12 @@ if (shouldStartHttpServer()) {
       _reconBusy = true;
       try {
         _reconTicks += 1;
-        const { reconcileEmbeddingsOnce } = await import('./memory/embed-reconciler.js');
+        const { reconcileEmbeddingsOnce, reconcileQualityVectorsOnce } = await import('./memory/embed-reconciler.js');
         const fullSweep = _reconTicks % 20 === 0; // ~hourly full sweep at 3min cadence
         const memoryVectorStats = await reconcileEmbeddingsOnce({ prisma, qdrantClient, fullSweep, sinceHours: 72 });
+        // The Flagship client decides per authenticated memory owner. With the
+        // rule off, this cursor scan makes no vector writes or recall changes.
+        await reconcileQualityVectorsOnce({ prisma, qdrantClient, qualityClient: recallQualityClient });
         // P0.2 — the SEGMENT lane. The pass above guards memories only; an evidence
         // segment whose ingest-time heal also failed had nothing left to retry it,
         // so it stayed in Postgres with vectorStored=false — permanently

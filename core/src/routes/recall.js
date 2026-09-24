@@ -135,6 +135,7 @@ export async function handleRecallRoute(ctx = {}) {
     qdrantClient,
     recallRuntime: injectedRecallRuntime = null,
     recallReliabilityClient = null,
+    recallQualityClient = null,
   } = ctx;
 
   const _recallT0 = Date.now();
@@ -255,6 +256,9 @@ export async function handleRecallRoute(ctx = {}) {
     const recallReliabilityV1 = recallReliabilityClient
       ? await recallReliabilityClient.enabledFor({ orgId, userId })
       : false;
+    const recallQualityMode = recallQualityClient
+      ? await recallQualityClient.modeFor({ orgId, userId })
+      : 'off';
 
     // Explicit quick/fact/explain/full modes use the bounded, source-grounded
     // parallel service. Unspecified and legacy modes retain the established
@@ -307,7 +311,9 @@ export async function handleRecallRoute(ctx = {}) {
           // An explicit public API limit is caller intent. Forward it to the
           // unified retrieval service instead of silently falling back to the
           // org's synthesis delivery window (commonly five).
-          limit: normalizeRecallLimit(body.max_memories ?? body.limit),
+          limit: normalizeRecallLimit(body.max_memories ?? body.limit,
+            recallQualityMode === 'on' && recallPlan.mode === 'full' ? 25
+              : recallQualityMode === 'on' && recallPlan.mode === 'explain' ? 20 : 15),
           // A valid-time snapshot must search historical revisions too. If
           // retrieval is restricted to `is_latest`, the post-filter cannot
           // recover the version that was valid at the requested instant.
@@ -316,6 +322,7 @@ export async function handleRecallRoute(ctx = {}) {
             || body.include_superseded === true,
           trace_stages: body.debug_timing === true,
           reliability_v1: recallReliabilityV1,
+          recall_quality_mode: recallQualityMode,
         }, {
           userId,
           orgId,
@@ -467,6 +474,7 @@ export async function handleRecallRoute(ctx = {}) {
       preference_boost: body.preference_boost,
       include_superseded: Boolean(body.valid_at) || body.include_superseded === true,
       access_context: recallAccessCtx,
+      recall_quality_mode: recallQualityMode,
       ...(recallProjectId ? { project_id: recallProjectId, project_ids: [recallProjectId] } : {}),
       scope_filter: body.scope_filter || null,
       entity_filter_mode: body.entity_filter_mode || null,

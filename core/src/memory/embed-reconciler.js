@@ -125,3 +125,112 @@ export async function reconcileEmbeddingsOnce({
   }
   return stats;
 }
+
+// Incremental full-history repair for targeted recall-quality users. The cursor
+// advances only after the checked page has been handled, so a restart or Qdrant
+// failure replays safely. The old reconciler remains the only path when every
+// Flagship evaluation is off.
+export async function reconcileQualityVectorsOnce({
+  prisma, qdrantClient, qualityClient, logger = console,
+  pageSize = 256, maxRowsPerOrg = 4096, maxEmbedsPerCycle = 400,
+}) {
+  const stats = { checked: 0, dense_repaired: 0, sparse_synced: 0, failed: 0 };
+  if (!prisma || !qdrantClient || !qualityClient) return stats;
+  const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+  if (!qUrl) return stats;
+  const qKey = process.env.QDRANT_API_KEY || '';
+  const orgs = await prisma.$queryRawUnsafe(`
+    SELECT DISTINCT m.org_id::text AS org, c.updated_at
+    FROM hivemind.memories m
+    LEFT JOIN hivemind.recall_quality_reconciliation_cursor c ON c.org_id=m.org_id
+    WHERE m.org_id IS NOT NULL AND m.deleted_at IS NULL AND m.is_latest=true
+    ORDER BY c.updated_at ASC NULLS FIRST LIMIT 2`);
+  let embedBudget = maxEmbedsPerCycle;
+  for (const { org } of orgs) {
+    if (embedBudget <= 0) break;
+    if (isMnemeOrg(org) || orgIsRemote(org)) continue;
+    const cursorRows = await prisma.$queryRawUnsafe(
+      `SELECT created_at_cursor, memory_id_cursor::text FROM hivemind.recall_quality_reconciliation_cursor WHERE org_id=$1::uuid`, org);
+    const cursor = cursorRows[0] || {};
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT m.id::text, m.user_id::text, m.org_id::text, m.content, m.title, m.memory_type,
+              m.project, m.project_id::text, m.scope, m.primary_team_id::text, m.created_at, m.tags,
+              COALESCE(m.created_at, '1970-01-01'::timestamptz) AS cursor_created_at,
+              COALESCE((SELECT array_agg(mp.project_id::text) FROM hivemind.memory_projects mp WHERE mp.memory_id=m.id), '{}') AS project_ids
+       FROM hivemind.memories m
+       WHERE m.org_id=$1::uuid AND m.deleted_at IS NULL AND m.is_latest=true
+         AND ($2::timestamptz IS NULL OR (COALESCE(m.created_at, '1970-01-01'::timestamptz), m.id) < ($2::timestamptz, $3::uuid))
+       ORDER BY COALESCE(m.created_at, '1970-01-01'::timestamptz) DESC, m.id DESC LIMIT $4`,
+      org, cursor.created_at_cursor || null, cursor.memory_id_cursor || null, maxRowsPerOrg);
+    if (!rows.length && cursor.created_at_cursor) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE hivemind.recall_quality_reconciliation_cursor SET created_at_cursor=NULL, memory_id_cursor=NULL, updated_at=now() WHERE org_id=$1::uuid`, org);
+      continue;
+    }
+    const collection = await collectionForOrg(org);
+    const modes = new Map();
+    let lastProcessed = null;
+    let paused = false;
+    for (let offset = 0; offset < rows.length; offset += pageSize) {
+      const page = rows.slice(offset, offset + pageSize);
+      const targeted = [];
+      const unseenUsers = [...new Set(page.map((row) => row.user_id))].filter((id) => !modes.has(id));
+      const evaluated = await Promise.all(unseenUsers.map((userId) =>
+        qualityClient.modeFor({ orgId: org, userId }).catch(() => 'off')));
+      unseenUsers.forEach((id, index) => modes.set(id, evaluated[index]));
+      for (const row of page) {
+        if (modes.get(row.user_id) !== 'off') targeted.push(row);
+      }
+      if (!targeted.length) { lastProcessed = page.at(-1); continue; }
+      const present = await presentIds(collection, targeted.map((row) => row.id), { qUrl, qKey });
+      if (present === null) { paused = true; stats.failed++; break; }
+      stats.checked += targeted.length;
+      const missing = targeted.filter((row) => !present.has(row.id));
+      if (missing.length > embedBudget) { paused = true; break; }
+      const ready = targeted.filter((row) => present.has(row.id));
+      for (const row of missing) {
+        embedBudget--;
+        const shape = {
+          id: row.id, user_id: row.user_id, org_id: org, content: row.content,
+          title: row.title, memory_type: row.memory_type, project: row.project,
+          project_id: row.project_id, project_ids: row.project_ids || [],
+          primary_team_id: row.primary_team_id, scope: row.scope,
+          created_at: row.created_at?.toISOString?.() || row.created_at,
+          tags: row.tags || [], is_latest: true,
+        };
+        if (await runWithOrg(org, () => embedWithRetry(qdrantClient, shape, logger))) {
+          ready.push(row);
+          stats.dense_repaired++;
+        } else stats.failed++;
+      }
+      await backfillSyncedVectors(ready, collection, { prisma });
+      const synced = await prisma.$queryRawUnsafe(
+        `SELECT s.memory_id::text AS id FROM hivemind.recall_sparse_sync s
+         LEFT JOIN hivemind.vector_embeddings v ON v.memory_id=s.memory_id
+         WHERE s.memory_id = ANY($1::uuid[]) AND (v.last_sync_attempt IS NULL OR s.updated_at >= v.last_sync_attempt)`,
+        ready.map((row) => row.id));
+      const syncedIds = new Set(synced.map((row) => row.id));
+      const pending = ready.filter((row) => !syncedIds.has(row.id));
+      if (pending.length) {
+        const success = await runWithOrg(org, () => qdrantClient.updateRecallSparseVectors(org, pending));
+        if (success) {
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO hivemind.recall_sparse_sync (memory_id) SELECT unnest($1::uuid[]) ON CONFLICT (memory_id) DO UPDATE SET updated_at=now()`,
+            pending.map((row) => row.id));
+          stats.sparse_synced += pending.length;
+        } else stats.failed++;
+      }
+      lastProcessed = page.at(-1);
+    }
+    if (lastProcessed) {
+      const complete = !paused && rows.length < maxRowsPerOrg;
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.recall_quality_reconciliation_cursor (org_id, created_at_cursor, memory_id_cursor)
+         VALUES ($1::uuid, $2::timestamptz, $3::uuid)
+         ON CONFLICT (org_id) DO UPDATE SET created_at_cursor=$2::timestamptz, memory_id_cursor=$3::uuid, updated_at=now()`,
+        org, complete ? null : lastProcessed.cursor_created_at, complete ? null : lastProcessed.id);
+    }
+  }
+  if (stats.checked || stats.failed) logger.info('[recall-quality-reconcile]', stats);
+  return stats;
+}

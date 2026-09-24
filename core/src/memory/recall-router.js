@@ -1154,6 +1154,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     trace_stages: options.trace_stages === true,
     timing: options.timing || null,
     reliability_v1: options.reliability_v1 === true,
+    recall_quality_mode: options.recall_quality_mode || 'off',
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
@@ -2004,6 +2005,13 @@ export class RecallRouter {
     const startedAt = Date.now();
     const stageTiming = options.trace_stages === true ? {} : null;
     let recallPlan = resolveRecallPlan(options);
+    // The quality variant gives multi-source answers a larger evidence window.
+    // A caller's explicit limit always wins, and the existing fact budget is
+    // unchanged. The final ranker and Core access checks remain authoritative.
+    if (options.recall_quality_mode === 'on' && options.limit == null && recallPlan.operation !== 'timeline') {
+      recallPlan = { ...recallPlan, max_memories: recallPlan.mode === 'full' ? 25
+        : recallPlan.mode === 'explain' ? 20 : recallPlan.max_memories };
+    }
     // Chat arrives with a structured planner that is responsible for declaring
     // a source read. Do not turn an entity-only question such as "Solvis" into
     // an arbitrary Solvis-named PDF: that makes a broad answer look

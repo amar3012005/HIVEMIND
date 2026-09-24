@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { evaluateEntityDiscoveryCanary, evaluateEntityProfileMode, evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from './flags';
+import { evaluateEntityDiscoveryCanary, evaluateEntityProfileMode, evaluateGovernedRoomCanary, evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability, evaluateRecallQualityMode } from './flags';
 import { signCoreRequest } from './security';
 import {
   type ProjectionParams,
@@ -179,7 +179,7 @@ export class EntityProfileWorkflow extends WorkflowEntrypoint<RuntimeEnv, Entity
         if ([400, 401, 403, 404, 409, 422].includes(response.status)) throw new NonRetryableError(message);
         throw new Error(message);
       }
-      return response.json();
+      return response.json<any>();
     };
     return step.do('project evidence-backed entity dossier', STANDARD_RETRY, execute);
   }
@@ -216,6 +216,11 @@ export default {
       const orgId = url.searchParams.get('org_id') || '';
       const userId = url.searchParams.get('user_id') || '';
       return Response.json({ enabled: await evaluateRecallReliability(env, orgId, userId), org_id: orgId, user_id: userId });
+    }
+    if (url.pathname === '/recall-quality-mode' && request.method === 'GET') {
+      const orgId = url.searchParams.get('org_id') || '';
+      const userId = url.searchParams.get('user_id') || '';
+      return Response.json({ mode: await evaluateRecallQualityMode(env, orgId, userId) });
     }
     if (url.pathname === '/hyper-planner-mode' && request.method === 'GET') {
       const orgId = url.searchParams.get('org_id') || '';

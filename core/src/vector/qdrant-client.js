@@ -34,8 +34,7 @@ const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
 const COLLECTION_NAME = 'HIVEMIND_PERSONAL';
 const RECALL_SPARSE_NAME = 'memory_sparse_v1';
-const RECALL_BM25_NAME = 'memory_bm25_v1';
-const BM25_OPTIONS = Object.freeze({ tokenizer: 'multilingual', ascii_folding: true });
+const RECALL_SPARSE_COLLECTION_SUFFIX = '__recall_sparse_v1';
 const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
 // P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
 // benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
@@ -60,6 +59,35 @@ const headers = {
 
 function resolveCollectionName(collectionName) {
   return collectionName || COLLECTION_NAME;
+}
+
+export function recallSparseCollectionName(collectionName) {
+  return `${resolveCollectionName(collectionName)}${RECALL_SPARSE_COLLECTION_SUFFIX}`;
+}
+
+// Qdrant's dense cosine scores and sparse dot-product scores are not directly
+// comparable. Fuse by rank, then normalize the fused score so downstream
+// candidate handling keeps the same bounded 0..1 score contract.
+export function fuseRecallRanks(lanes, limit = 10, k = 60) {
+  const byId = new Map();
+  for (const lane of lanes || []) {
+    for (let index = 0; index < (lane || []).length; index++) {
+      const point = lane[index];
+      const id = point?.payload?.memory_id || point?.id;
+      if (!id) continue;
+      const current = byId.get(String(id)) || { point, score: 0 };
+      current.score += 1 / (k + index + 1);
+      // Prefer the payload-bearing copy if only one lane returned it.
+      if (!current.point?.payload && point?.payload) current.point = point;
+      byId.set(String(id), current);
+    }
+  }
+  const ranked = [...byId.values()].sort((left, right) => right.score - left.score);
+  const ceiling = ranked[0]?.score || 1;
+  return ranked.slice(0, Math.max(1, Number(limit) || 10)).map(({ point, score }) => ({
+    ...point,
+    score: score / ceiling,
+  }));
 }
 
 // Pull a payload value out of a Qdrant filter's `must` clause (used to derive
@@ -179,8 +207,11 @@ export class QdrantClient {
     // (observed 26–60s, growing as calls alternated tenants). A Set makes it
     // once-per-collection-per-process, moving schema setup off the query path.
     this.collectionReady = new Set();
-    this.recallQualityReady = new Set();
-    this.recallBm25Ready = new Set();
+    // Base collection -> additive sparse sidecar. Existing production memory
+    // collections use Qdrant's unnamed dense-vector schema, which cannot gain a
+    // sparse field in place. A sidecar keeps the base collection and rollback
+    // path untouched while allowing raw-query lexical retrieval on Qdrant 1.12.
+    this.recallQualityReady = new Map();
     this._litellmReady = null;
   }
 
@@ -227,78 +258,74 @@ export class QdrantClient {
 
   async ensureRecallQualityCollection(orgId) {
     if (memoryBackend(orgId) !== 'central') return null;
-    const collection = await routeCollection({ orgId });
-    if (this.recallQualityReady.has(collection)) return collection;
-    if (!await this.ensureCollection(collection)) return null;
-    const configuration = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}`, { headers });
-    if (!configuration.ok) return null;
-    const info = (await configuration.json())?.result || {};
-    let bm25Available = Boolean(info.config?.params?.sparse_vectors?.[RECALL_BM25_NAME]);
-    for (const vectorName of [RECALL_SPARSE_NAME, RECALL_BM25_NAME]) {
-      if (!info.config?.params?.sparse_vectors?.[vectorName]) {
-        const created = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/vectors/${vectorName}?wait=true`, {
-          method: 'PUT', headers, body: JSON.stringify({ sparse: { modifier: 'idf' } }),
-        });
-        if (!created.ok && vectorName === RECALL_SPARSE_NAME) return null;
-        if (created.ok && vectorName === RECALL_BM25_NAME) bm25Available = true;
-        // Native BM25 was introduced after sparse vectors. Older Qdrant
-        // installations retain the deterministic sparse lane unchanged.
-      }
-    }
-    await getQdrantCollections(qbase(), API_KEY).ensureRecallQualityIndexes(collection);
-    this.recallQualityReady.add(collection);
-    if (bm25Available) this.recallBm25Ready.add(collection);
-    return collection;
+    const baseCollection = await routeCollection({ orgId });
+    const cached = this.recallQualityReady.get(baseCollection);
+    if (cached) return cached;
+    if (!await this.ensureCollection(baseCollection)) return null;
+
+    const sparseCollection = recallSparseCollectionName(baseCollection);
+    const existing = await fetch(`${qbase()}/collections/${encodeURIComponent(sparseCollection)}`, { headers });
+    if (existing.status === 404) {
+      const created = await fetch(`${qbase()}/collections/${encodeURIComponent(sparseCollection)}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          sparse_vectors: { [RECALL_SPARSE_NAME]: {} },
+          on_disk_payload: true,
+          shard_number: 1,
+          replication_factor: 1,
+          write_consistency_factor: 1,
+        }),
+      });
+      if (!created.ok) return null;
+    } else if (!existing.ok) return null;
+
+    const collections = getQdrantCollections(qbase(), API_KEY);
+    await collections.ensureMemoriesCollectionIndexes(sparseCollection);
+    await collections.ensureRecallQualityIndexes(sparseCollection);
+    const ready = { baseCollection, sparseCollection };
+    this.recallQualityReady.set(baseCollection, ready);
+    return ready;
   }
 
   async updateRecallSparseVectors(orgId, memories) {
-    const collection = await this.ensureRecallQualityCollection(orgId);
-    if (!collection) return false;
+    const collections = await this.ensureRecallQualityCollection(orgId);
+    if (!collections) return false;
     const points = (memories || []).map((memory) => ({
       id: memory.id,
       vector: { [RECALL_SPARSE_NAME]: recallSparseVector(`${memory.title || ''} ${memory.content || ''}`) },
+      payload: {
+        memory_id: memory.id,
+        user_id: memory.user_id || memory.userId,
+        org_id: memory.org_id || memory.orgId || orgId,
+        project: memory.project || null,
+        project_id: memory.project_id || memory.projectId || null,
+        project_ids: [...new Set([memory.project_id || memory.projectId, ...(memory.project_ids || memory.projectIds || [])].filter(Boolean))],
+        team_id: memory.primary_team_id || memory.primaryTeamId || null,
+        scope: memory.scope || 'personal',
+        memory_type: memory.memory_type || memory.memoryType || null,
+        tags: Array.isArray(memory.tags) ? memory.tags : [],
+        layer: 'memory',
+        is_latest: memory.is_latest !== false && memory.isLatest !== false,
+        created_at: memory.created_at || memory.createdAt || null,
+        valid_from: memory.valid_from || memory.validFrom || null,
+        valid_to: memory.valid_to || memory.validTo || null,
+      },
     })).filter((point) => point.id && point.vector[RECALL_SPARSE_NAME].indices.length);
     if (!points.length) return true;
-    const byId = new Map((memories || []).map((memory) => [memory.id, memory]));
-    const operations = [{ update_vectors: { points } }, ...points.map((point) => {
-      const memory = byId.get(point.id);
-      return { set_payload: { points: [point.id], payload: {
-        project_id: memory.project_id || null,
-        project_ids: [...new Set([memory.project_id, ...(memory.project_ids || [])].filter(Boolean))],
-        team_id: memory.primary_team_id || null,
-        scope: memory.scope || 'personal',
-      } } };
-    })];
-    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/batch?wait=true`, {
-      method: 'POST', headers, body: JSON.stringify({ operations }),
-    });
-    const body = await response.json().catch(() => ({}));
-    return response.ok && body.status !== 'error' && Array.isArray(body.result)
-      && body.result.every((result) => result?.status === 'completed' || result?.status === 'acknowledged');
-  }
-
-  async updateRecallBm25Vectors(orgId, memories) {
-    const collection = await this.ensureRecallQualityCollection(orgId);
-    if (!collection) return false;
-    const points = (memories || []).map((memory) => ({
-      id: memory.id,
-      vector: {
-        [RECALL_BM25_NAME]: {
-          text: `${memory.title || ''} ${memory.content || ''}`.trim(),
-          model: 'qdrant/bm25',
-          options: BM25_OPTIONS,
-        },
-      },
-    })).filter((point) => point.id && point.vector[RECALL_BM25_NAME].text);
-    if (!points.length) return true;
-    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/vectors?wait=true`, {
+    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collections.sparseCollection)}/points?wait=true`, {
       method: 'PUT', headers, body: JSON.stringify({ points }),
     });
     const body = await response.json().catch(() => ({}));
-    const success = response.ok && body.status !== 'error'
+    return response.ok && body.status !== 'error'
       && (body.result?.status === 'completed' || body.result?.status === 'acknowledged');
-    if (success) this.recallBm25Ready.add(collection);
-    return success;
+  }
+
+  async updateRecallBm25Vectors(orgId, memories) {
+    // Production Qdrant 1.12 has no native text-inference/BM25 vector input.
+    // The deterministic sparse sidecar supplies the lexical lane without an
+    // LLM or server upgrade. Keep this method as a forward-compatible no-op.
+    return false;
   }
 
   async searchRecallHybrid(query, filters = {}) {
@@ -309,7 +336,8 @@ export class QdrantClient {
     const collection = await routeCollection({ orgId });
     // Collection schema/index setup is background-only. Never block a chat
     // request on Qdrant's wait:true index build or a schema migration.
-    if (!this.recallQualityReady.has(collection)) return [];
+    const qualityCollections = this.recallQualityReady.get(collection);
+    if (!qualityCollections) return [];
     const baseFilter = enforceTenantFilter(buildHybridSearchFilter(filters), currentOrg());
     const filter = {
       ...baseFilter,
@@ -319,37 +347,22 @@ export class QdrantClient {
     const dense = filters.vector || await this.generateEmbedding(query);
     if (!isValidEmbeddingVector(dense)) return [];
     const limit = Math.min(Math.max(Number(filters.limit) || 10, 1), 150);
-    const prefetch = [
-      { query: dense, filter, limit },
-      { query: sparse, using: RECALL_SPARSE_NAME, filter, limit },
-    ];
-    if (this.recallBm25Ready.has(collection)) {
-      const tenantIdf = collection === COLLECTION_NAME
-        ? { idf: { corpus: { must: [{ key: 'org_id', match: { value: orgId } }] } } }
-        : undefined;
-      prefetch.push({
-        query: { text: query, model: 'qdrant/bm25', options: BM25_OPTIONS },
-        using: RECALL_BM25_NAME,
-        filter,
-        ...(tenantIdf ? { params: tenantIdf } : {}),
-        limit,
-      });
-    }
-    const request = (lanes) => fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/query`, {
+    const request = (targetCollection, body) => fetch(`${qbase()}/collections/${encodeURIComponent(targetCollection)}/points/query`, {
       method: 'POST', headers,
-      body: JSON.stringify({
-        prefetch: lanes,
-        query: { fusion: 'rrf' }, limit, with_payload: true,
-      }),
+      body: JSON.stringify({ ...body, filter, limit, with_payload: true }),
       signal: currentStageSignal() || undefined,
     });
-    let response = await request(prefetch);
-    // Qdrant <1.19 does not understand tenant-scoped IDF. Never retry BM25
-    // without that corpus on a shared collection; fall back to the established
-    // dense + deterministic sparse lanes instead.
-    if (!response.ok && prefetch.length > 2) response = await request(prefetch.slice(0, 2));
-    if (!response.ok) return [];
-    return (await response.json())?.result?.points || [];
+    const [denseResponse, sparseResponse] = await Promise.all([
+      request(qualityCollections.baseCollection, { query: dense }),
+      request(qualityCollections.sparseCollection, { query: sparse, using: RECALL_SPARSE_NAME }),
+    ]);
+    const readPoints = async (response) => response.ok
+      ? (await response.json().catch(() => ({})))?.result?.points || []
+      : [];
+    const [densePoints, sparsePoints] = await Promise.all([
+      readPoints(denseResponse), readPoints(sparseResponse),
+    ]);
+    return fuseRecallRanks([densePoints, sparsePoints], limit);
   }
 
   /**

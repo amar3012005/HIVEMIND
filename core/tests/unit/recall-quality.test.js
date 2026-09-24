@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CloudflareRecallQualityClient } from '../../src/memory/cloudflare-recall-quality-client.js';
-import { buildHybridSearchFilter } from '../../src/vector/qdrant-client.js';
+import {
+  buildHybridSearchFilter,
+  fuseRecallRanks,
+  recallSparseCollectionName,
+} from '../../src/vector/qdrant-client.js';
 import { recallSparseVector } from '../../src/vector/recall-sparse.js';
 
 test('Flagship failure and invalid mode preserve legacy recall', async () => {
@@ -48,4 +52,27 @@ test('sparse lexical projection is deterministic and unicode aware', () => {
   assert.equal(first.indices.length, 5);
   assert.deepEqual([...first.indices].sort((a, b) => a - b), first.indices);
   assert.ok(recallSparseVector('München München').values.some((value) => value > 1));
+});
+
+test('recall sparse sidecar naming is deterministic and leaves the dense collection untouched', () => {
+  assert.equal(
+    recallSparseCollectionName('org_00000000-0000-4000-8000-000000000123'),
+    'org_00000000-0000-4000-8000-000000000123__recall_sparse_v1',
+  );
+});
+
+test('cross-collection RRF rewards agreement and preserves payloads', () => {
+  const dense = [
+    { id: 'semantic-only', score: 0.98, payload: { memory_id: 'semantic-only' } },
+    { id: 'shared', score: 0.70, payload: { memory_id: 'shared', content: 'grounded' } },
+  ];
+  const sparse = [
+    { id: 'shared', score: 22, payload: { memory_id: 'shared', content: 'grounded' } },
+    { id: 'lexical-only', score: 18, payload: { memory_id: 'lexical-only' } },
+  ];
+  const fused = fuseRecallRanks([dense, sparse], 3);
+  assert.deepEqual(fused.map((point) => point.id), ['shared', 'semantic-only', 'lexical-only']);
+  assert.equal(fused[0].score, 1);
+  assert.equal(fused[0].payload.content, 'grounded');
+  assert.ok(fused.every((point) => point.score > 0 && point.score <= 1));
 });

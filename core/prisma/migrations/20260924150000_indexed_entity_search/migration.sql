@@ -53,11 +53,17 @@ BEGIN
   SELECT NEW.id,
          NEW.organization_id,
          candidate.alias,
-         hivemind.normalize_entity_search_alias(candidate.alias),
+         candidate.normalized_alias,
          false,
          now()
-  FROM unnest(coalesce(NEW.aliases, ARRAY[]::text[])) AS candidate(alias)
-  WHERE hivemind.normalize_entity_search_alias(candidate.alias) <> ''
+  FROM (
+    SELECT DISTINCT ON (hivemind.normalize_entity_search_alias(raw.alias))
+           raw.alias,
+           hivemind.normalize_entity_search_alias(raw.alias) AS normalized_alias
+    FROM unnest(coalesce(NEW.aliases, ARRAY[]::text[])) AS raw(alias)
+    WHERE hivemind.normalize_entity_search_alias(raw.alias) <> ''
+    ORDER BY hivemind.normalize_entity_search_alias(raw.alias), raw.alias
+  ) AS candidate
   ON CONFLICT (entity_id, normalized_alias) DO UPDATE
     SET alias = EXCLUDED.alias,
         organization_id = EXCLUDED.organization_id,
@@ -90,11 +96,17 @@ INSERT INTO hivemind.canonical_entity_search_aliases
 SELECT entity.id,
        entity.organization_id,
        candidate.alias,
-       hivemind.normalize_entity_search_alias(candidate.alias),
+       candidate.normalized_alias,
        false
 FROM hivemind.canonical_entities entity
-CROSS JOIN LATERAL unnest(coalesce(entity.aliases, ARRAY[]::text[])) AS candidate(alias)
-WHERE hivemind.normalize_entity_search_alias(candidate.alias) <> ''
+CROSS JOIN LATERAL (
+  SELECT DISTINCT ON (hivemind.normalize_entity_search_alias(raw.alias))
+         raw.alias,
+         hivemind.normalize_entity_search_alias(raw.alias) AS normalized_alias
+  FROM unnest(coalesce(entity.aliases, ARRAY[]::text[])) AS raw(alias)
+  WHERE hivemind.normalize_entity_search_alias(raw.alias) <> ''
+  ORDER BY hivemind.normalize_entity_search_alias(raw.alias), raw.alias
+) AS candidate
 ON CONFLICT (entity_id, normalized_alias) DO UPDATE
   SET alias = EXCLUDED.alias,
       organization_id = EXCLUDED.organization_id,

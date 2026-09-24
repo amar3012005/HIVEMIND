@@ -9,7 +9,7 @@ from app.entities import MODEL_ID, MODEL_REVISION, extract_entities, model_statu
 from app.extractors import extract_candidates, extract_literals, parse_dates
 from app.language import detect_language
 
-PIPELINE_VERSION = "hm-understand/0.1.0"
+PIPELINE_VERSION = "hm-understand/0.2.0"
 # These languages have only a small labeled smoke fixture, not production-grade
 # validation. The set is a lower bound for routing; it is not a quality claim.
 # No language has enough reviewed evaluation evidence to waive refinement yet.
@@ -112,10 +112,11 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
 
         candidates = []
         if request.include_candidates:
-            for row in extract_candidates(text):
+            for row in extract_candidates(text, language=language.get("primary")):
                 source_start, source_end = _source_range(block, row["start"], row["end"])
                 candidates.append(Candidate(
-                    kind=row["kind"], text=row["text"], signals=row["signals"], needs_review=True,
+                    kind=row["kind"], text=row["text"], signals=row["signals"],
+                    qualifiers=row.get("qualifiers", []), needs_review=True,
                     evidence=EvidenceRef(source_id=request.source.id, source_revision=request.source.revision,
                                          block_id=block.id, quote=text[row["start"]:row["end"]],
                                          start=row["start"], end=row["end"],

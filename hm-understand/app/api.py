@@ -10,7 +10,7 @@ from app.contracts import AnalyzeRequest, AnalyzeResponse
 from app.entities import MODEL_ID, MODEL_REVISION, model_status
 from app.pipeline import PIPELINE_VERSION, analyze, canonical_hash
 
-app = FastAPI(title="HIVE-MIND Understand", version="0.1.0")
+app = FastAPI(title="HIVE-MIND Understand", version="0.2.0")
 _semaphore = asyncio.Semaphore(2)
 
 

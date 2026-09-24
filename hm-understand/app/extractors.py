@@ -24,6 +24,38 @@ SIGNALS: list[tuple[str, re.Pattern, str]] = [
     ("uncertain", re.compile(r"\b(not|never|no longer|didn't|doesn't|nicht|kein|keine|niemals|no|nunca|ya no)\b", re.I), "negation"),
 ]
 
+QUALIFIER_PATTERNS: dict[str, dict[str, re.Pattern]] = {
+    "en": {
+        "negated": re.compile(r"\b(?:not|never|no longer|didn't|doesn't|don't|won't|can't|cannot|isn't|aren't|wasn't|weren't)\b|\bno\s+(?:decision|approval|budget|agreement|commitment|action)\b", re.I),
+        "conditional": re.compile(r"\b(?:may|might|could|would|if|unless|possibly|perhaps|planned|proposed|pending)\b|\bsubject to\b", re.I),
+        "reported": re.compile(r"\b(?:said|stated|reported|told|claimed|alleged)\b|\baccording to\b", re.I),
+    },
+    "de": {
+        "negated": re.compile(r"\b(?:nicht|niemals|nie|kein(?:e|en|er|es)?|nicht mehr)\b", re.I),
+        "conditional": re.compile(r"\b(?:vielleicht|möglicherweise|könnte|könnten|würde|würden|geplant|vorgeschlagen|ausstehend|falls|sofern)\b|\bvorbehaltlich\b", re.I),
+        "reported": re.compile(r"\b(?:sagte|teilte mit|berichtete|behauptete)\b|\blaut\b", re.I),
+    },
+    "es": {
+        "negated": re.compile(r"\b(?:nunca|jamás|no|ya no)\b", re.I),
+        "conditional": re.compile(r"\b(?:podría|podrían|quizá|quizás|tal vez|posiblemente|planeado|pendiente|sujeto a|si|salvo que)\b", re.I),
+        "reported": re.compile(r"\b(?:dijo|afirmó|informó|reportó|alegó)\b|\bsegún\b", re.I),
+    },
+}
+
+
+def extract_candidate_qualifiers(sentence: str, language: str | None = None) -> list[str]:
+    """Return conservative discourse cues; these are review signals, not truth labels."""
+    primary = str(language or "").lower().split("-")[0]
+    patterns = QUALIFIER_PATTERNS.get(primary)
+    if patterns is None:
+        # For unclassified/mixed blocks, retain only unambiguous common cues.
+        patterns = {
+            "negated": re.compile(r"\b(?:never|not|nicht|nunca|jamás|no longer|ya no)\b", re.I),
+            "conditional": re.compile(r"\b(?:might|could|would|maybe|perhaps|planned|pending|podría|quizás|vielleicht|geplant)\b|\b(?:subject to|sujeto a|vorbehaltlich)\b", re.I),
+            "reported": re.compile(r"\b(?:according to|según|laut)\b", re.I),
+        }
+    return [name for name, pattern in patterns.items() if pattern.search(sentence)]
+
 
 def extract_literals(text: str) -> list[dict]:
     output = []
@@ -62,12 +94,16 @@ def sentence_spans(text: str):
             yield start, end
 
 
-def extract_candidates(text: str) -> list[dict]:
+def extract_candidates(text: str, language: str | None = None) -> list[dict]:
     result = []
     for start, end in sentence_spans(text):
         sentence = text[start:end]
         signals = [reason for _, pattern, reason in SIGNALS if pattern.search(sentence)]
         kinds = [kind for kind, pattern, _ in SIGNALS if pattern.search(sentence)]
+        qualifiers = extract_candidate_qualifiers(sentence, language)
+        signals.extend(qualifier for qualifier in qualifiers if qualifier not in signals)
+        if qualifiers:
+            kinds.append("uncertain")
         if not signals:
             if len(sentence.split()) < 5 or not any(ch.isalpha() for ch in sentence):
                 continue
@@ -75,8 +111,11 @@ def extract_candidates(text: str) -> list[dict]:
             kinds = ["fact"]
         # Uncertainty and negation override affirmative-looking classifications.
         kind = "uncertain" if "uncertain" in kinds else next((k for k in kinds if k != "uncertain"), "fact")
+        if qualifiers:
+            kind = "uncertain"
         result.append({"kind": kind, "text": sentence, "start": start, "end": end,
-                       "signals": list(dict.fromkeys(signals)), "needs_review": True})
+                       "signals": list(dict.fromkeys(signals)), "qualifiers": qualifiers,
+                       "needs_review": True})
     return result
 
 

@@ -96,6 +96,7 @@ class Candidate(BaseModel):
     text: str
     evidence: EvidenceRef
     signals: list[str] = Field(default_factory=list)
+    qualifiers: list[Literal["negated", "conditional", "reported"]] = Field(default_factory=list)
     needs_review: bool = True
 
 

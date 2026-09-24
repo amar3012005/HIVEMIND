@@ -1,6 +1,6 @@
 [project]
 name = "hm-understand"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-linked multilingual extraction service for HIVE-MIND"
 requires-python = ">=3.11,<3.13"
 dependencies = [

@@ -12,7 +12,7 @@ test('shadow analysis writes only bounded tenant-scoped metrics and never candid
       complete: true, content_hash: 'hash', pipeline_version: 'v1', model_versions: { entity: 'm@r' },
       totals: { blocks: 1, mentions: 1, candidates: 1 },
       blocks: [{ language: { primary: 'en' }, mentions: [{ text: 'private name', label: 'person' }],
-        candidates: [{ kind: 'decision', text: 'private decision' }] }],
+        candidates: [{ kind: 'decision', text: 'private decision', qualifiers: ['reported'] }] }],
     } };
   };
   const db = { knowledgeDocument: { updateMany: async (input) => { saved = input; return { count: 1 }; } } };
@@ -27,6 +27,7 @@ test('shadow analysis writes only bounded tenant-scoped metrics and never candid
   assert.deepEqual(saved.where, { id: 'doc-local-test', userId: 'user-local-test', orgId: 'org-local-test' });
   assert.equal(saved.data.parseMetadata.parser, 'fixture');
   assert.equal(saved.data.parseMetadata.hm_understand_shadow.entity_label_counts.person, 1);
+  assert.equal(saved.data.parseMetadata.hm_understand_shadow.candidate_qualifier_counts.reported, 1);
   assert.equal(JSON.stringify(saved).includes('private name'), false);
   assert.equal(JSON.stringify(saved).includes('private decision'), false);
 });

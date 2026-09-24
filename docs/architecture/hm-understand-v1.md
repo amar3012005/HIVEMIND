@@ -1,4 +1,4 @@
-# hm-understand v1
+# hm-understand v1 contract / pipeline 0.2.0
 
 `hm-understand` is a stateless text-analysis service. Existing HIVE parsers and connectors own
 bytes-to-text conversion and semantic evidence segmentation, preserving page, slide, sheet, row,
@@ -28,8 +28,13 @@ evidence offsets. It has no tenant identity, database credentials, or write path
   converts block-local code-point offsets before returning document-global ranges. Core verifies
   quotes against the parser segment before using them.
 - Entity mentions are not canonical identities. Core resolves identities under tenant authorization.
-- Candidates are review-required proposals. Negation, conditionals, and reported speech are kept
-  visible as uncertainty signals. The service never writes memories, entity links, claims, or vectors.
+- Candidates are review-required proposals. Negation, conditionals, and reported speech are emitted
+  as explicit `qualifiers` (`negated`, `conditional`, `reported`) alongside raw `signals`; they force
+  candidate kind `uncertain`. Initial qualifier patterns are language-specific for English, German,
+  and Spanish, with a conservative common-cue fallback. They are hints—not calibrated truth labels—and
+  every candidate remains review-required. Core's assisted projection rejects any qualified candidate
+  even if an older or alternate analyzer mistakenly labels its kind as certain. The service never
+  writes memories, entity links, claims, or vectors.
 
 ## Local preview
 
@@ -84,6 +89,10 @@ full original window. The local service never promotes claims, resolves identiti
 or replaces evidence. Its analysis is ephemeral within that ingestion request; only bounded counts
 are persisted. No second refinement LLM call runs in either mode. Remote/BYOD organizations are
 skipped to preserve data residency. An unavailable analyzer degrades without failing ingestion.
+
+The analysis contract version is additive: schema version remains `1`, while pipeline/service version
+is `0.2.0` to distinguish qualifier-aware extraction from previous receipts. Shadow receipts aggregate
+qualifier counts only; no candidate text or evidence quote is persisted.
 
 The adapter, feature decision, bounded receipt, and ingestion seam are covered by focused Core unit
 tests. A disposable Core runner passed the RTF parser → exact hm-extract segment persistence helper

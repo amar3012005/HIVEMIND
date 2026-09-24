@@ -17,6 +17,8 @@ def test_candidate_evidence_offsets_and_uncertainty(monkeypatch):
     assert any(item.text == "€12,000" and item.label == "money" for item in block.mentions)
     assert any(item.kind == "uncertain" and "negation" in item.signals for item in block.candidates)
     assert any(item.kind == "uncertain" and "uncertainty_or_condition" in item.signals for item in block.candidates)
+    assert any(item.kind == "uncertain" and "negated" in item.qualifiers for item in block.candidates)
+    assert any(item.kind == "uncertain" and "conditional" in item.qualifiers for item in block.candidates)
     for item in [*block.mentions, *block.candidates]:
         quote = item.evidence.quote
         assert text[item.evidence.start:item.evidence.end] == quote
@@ -174,6 +176,25 @@ def test_spanish_condition_is_not_promoted_as_a_fact_candidate():
     assert len(candidates) == 1
     assert candidates[0]["kind"] == "uncertain"
     assert "uncertainty_or_condition" in candidates[0]["signals"]
+    assert "conditional" in candidates[0]["qualifiers"]
+
+
+def test_candidate_qualifiers_preserve_negation_condition_and_reported_speech():
+    from app.extractors import extract_candidates
+
+    cases = [
+        ("Rama did not approve the launch budget.", "en", "negated"),
+        ("Rama may approve the launch budget.", "en", "conditional"),
+        ("Rama said the team approved the launch budget.", "en", "reported"),
+        ("Rama hat das Budget nicht genehmigt.", "de", "negated"),
+        ("Según Rama, el equipo aprobó el presupuesto.", "es", "reported"),
+    ]
+    for text, language, qualifier in cases:
+        candidates = extract_candidates(text, language=language)
+        assert len(candidates) == 1, text
+        assert candidates[0]["kind"] == "uncertain", text
+        assert qualifier in candidates[0]["qualifiers"], text
+        assert candidates[0]["needs_review"] is True
 
 
 def test_capitalization_fallback_avoids_sentence_initial_common_words():

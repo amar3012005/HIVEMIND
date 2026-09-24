@@ -41,7 +41,8 @@ export function projectHmUnderstandWindow(window, analysis, { minSavingsRatio = 
       && GROUNDED_ENTITY_LABELS.has(String(mention.label || '').toLowerCase())
       && typeof mention.text === 'string' && mention.text.trim());
     for (const candidate of block.candidates || []) {
-      if (candidate?.kind === 'uncertain') continue;
+      if (candidate?.kind === 'uncertain'
+          || (Array.isArray(candidate?.qualifiers) && candidate.qualifiers.length > 0)) continue;
       const quote = String(candidate?.evidence?.quote || '');
       const normalizedQuote = normalizedWhitespace(quote);
       if (quote.length < 16 || !normalizedQuote || !sourceContent.includes(quote)) continue;

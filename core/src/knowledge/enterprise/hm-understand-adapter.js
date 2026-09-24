@@ -126,6 +126,7 @@ export function hmUnderstandShadowReceipt(result, { sourceRevision = null } = {}
   const analysis = result.result;
   const labels = {};
   const candidateKinds = {};
+  const candidateQualifiers = {};
   const refinementReasons = {};
   let refinementBlocks = 0;
   const languages = {};
@@ -139,6 +140,10 @@ export function hmUnderstandShadowReceipt(result, { sourceRevision = null } = {}
     for (const candidate of block.candidates || []) {
       const kind = String(candidate.kind || 'unknown').slice(0, 32);
       candidateKinds[kind] = (candidateKinds[kind] || 0) + 1;
+      for (const qualifier of Array.isArray(candidate.qualifiers) ? candidate.qualifiers : []) {
+        const boundedQualifier = String(qualifier || 'unknown').slice(0, 24);
+        candidateQualifiers[boundedQualifier] = (candidateQualifiers[boundedQualifier] || 0) + 1;
+      }
     }
     if (block.quality?.refinement_required === true) refinementBlocks += 1;
     for (const reason of Array.isArray(block.quality?.refinement_reasons) ? block.quality.refinement_reasons : []) {
@@ -156,6 +161,7 @@ export function hmUnderstandShadowReceipt(result, { sourceRevision = null } = {}
     language_blocks: languages,
     entity_label_counts: labels,
     candidate_kind_counts: candidateKinds,
+    candidate_qualifier_counts: candidateQualifiers,
     refinement_required_blocks: refinementBlocks,
     refinement_reason_counts: refinementReasons,
     refinement: analysis.refinement_receipt && typeof analysis.refinement_receipt === 'object'

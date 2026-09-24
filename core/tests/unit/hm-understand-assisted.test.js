@@ -41,6 +41,16 @@ test('assisted projection falls back when any heuristic fact-bearing sentence is
   assert.equal(projectHmUnderstandWindow({ content }, analysis), null);
 });
 
+test('assisted projection rejects candidates marked as negated, conditional, or reported', () => {
+  const content = 'Project Atlas status: approved. The board approved a 12000 EUR budget for Project Atlas.';
+  const analysis = { complete: true, blocks: [{ language: { primary: 'en' }, quality: { refinement_required: false },
+    mentions: [{ text: 'Project Atlas', label: 'project', extractor: 'gliner' }],
+    candidates: [candidate('Project Atlas status: approved.'),
+      { ...candidate('The board approved a 12000 EUR budget for Project Atlas.'), qualifiers: ['reported'] }],
+  }] };
+  assert.equal(projectHmUnderstandWindow({ content }, analysis), null);
+});
+
 test('assisted projection fails open to full source for uncertain or unvalidated analysis', () => {
   const content = 'Project Atlas status: approved. The board approved a 12000 EUR budget for Project Atlas. '
     + 'This paragraph explains background without naming a project or reporting a measurable fact.';

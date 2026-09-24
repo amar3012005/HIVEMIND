@@ -197,6 +197,26 @@ test('canonical link registry (MemoryEntityLink) contributes candidates', async 
   assert.deepEqual(new Set(r.candidates.map((c) => c.memory.id)), new Set(['m1', 'mL']));
 });
 
+test('explicit tenant-authorized canonical IDs surface linked memories even when query omits the alias', async () => {
+  const mems = new Map([['mLinked', makeMemory('mLinked', { tags: [] })]]);
+  const store = makeStore({
+    entities: [],
+    memoryIds: [],
+    memories: mems,
+    canonical: [{ id: 'ce-rama-duplicate', canonicalName: 'Rama Santhoshi', aliases: ['Rama'] }],
+    links: [{ memoryId: 'mLinked', entityId: 'ce-rama-duplicate' }],
+  });
+  const result = await resolveEntityRecallCandidates({
+    store,
+    query: 'incorporation memory',
+    canonicalEntityIds: ['ce-rama-duplicate'],
+    org_id: 'org-1',
+    user_id: 'user-1',
+  });
+  assert.deepEqual(result.candidates.map((candidate) => candidate.memory.id), ['mLinked']);
+  assert.equal(store.calls.entityWhere?.orgId, 'org-1');
+});
+
 test('deadline returns empty lane without blocking recall', async () => {
   const store = makeStore();
   store.client.entity.findMany = () => new Promise(() => {}); // hangs forever

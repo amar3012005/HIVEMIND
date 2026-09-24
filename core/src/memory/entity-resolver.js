@@ -44,6 +44,12 @@ function emailDomain(email) {
   return email.slice(at + 1).toLowerCase().trim();
 }
 
+function normalizeEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  const normalized = email.trim().toLowerCase();
+  return normalized || null;
+}
+
 function jaccard(a, b) {
   if (!a || !b) return 0;
   const sa = new Set(String(a).toLowerCase().split(/\s+/).filter(Boolean));
@@ -80,9 +86,13 @@ export class EntityResolver {
   }
 
   async findByEmail({ organizationId, email }) {
-    if (!email) return null;
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail) return null;
     return this.prisma.canonicalEntity.findFirst({
-      where: { organizationId, primaryEmail: String(email).toLowerCase() },
+      where: { organizationId, primaryEmail: normalizedEmail },
+      // Historical duplicate rows can share an email. Reuse the oldest row so
+      // future ingests converge deterministically without rewriting history.
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
   }
 
@@ -230,6 +240,7 @@ export class EntityResolver {
         }
       }
       const normalizedName = _normKey || String(_canonName).toLowerCase();
+      const normalizedEmail = normalizeEmail(cand.email);
       // The read-before-create guard above cannot prevent two API replicas (or
       // two concurrent promotion windows) from observing absence together.
       // A deterministic, database-unique identity key is the authoritative
@@ -247,8 +258,8 @@ export class EntityResolver {
             normalizedName,
             identityKey,
             entityKind: kind,
-            aliases: cand.name ? [cand.name] : [],
-            primaryEmail: cand.email ? String(cand.email).toLowerCase() : null,
+            aliases: [...new Set([cand.name, normalizedEmail].filter(Boolean))],
+            primaryEmail: normalizedEmail,
             emailDomains: domain ? [domain] : [],
             externalRefs,
             metadata: cand.metadata || {},
@@ -294,14 +305,20 @@ export class EntityResolver {
   async _enrichEntity(entityId, { name, email, domain, externalRefs }) {
     const e = await this.prisma.canonicalEntity.findUnique({ where: { id: entityId } });
     if (!e) return;
-    const newAliases = name && !e.aliases.includes(name) ? [...e.aliases, name] : e.aliases;
-    const newDomains = domain && !e.emailDomains.includes(domain) ? [...e.emailDomains, domain] : e.emailDomains;
+    const normalizedEmail = normalizeEmail(email);
+    const newAliases = [...new Set([
+      ...(e.aliases || []),
+      name,
+      normalizedEmail,
+    ].filter(Boolean))];
+    const existingDomains = e.emailDomains || [];
+    const newDomains = domain && !existingDomains.includes(domain) ? [...existingDomains, domain] : existingDomains;
     const mergedRefs = { ...(e.externalRefs || {}), ...externalRefs };
     const updates = {};
-    if (newAliases.length !== e.aliases.length) updates.aliases = newAliases;
-    if (newDomains.length !== e.emailDomains.length) updates.emailDomains = newDomains;
+    if (newAliases.length !== (e.aliases || []).length) updates.aliases = newAliases;
+    if (newDomains.length !== existingDomains.length) updates.emailDomains = newDomains;
     if (JSON.stringify(mergedRefs) !== JSON.stringify(e.externalRefs)) updates.externalRefs = mergedRefs;
-    if (!e.primaryEmail && email) updates.primaryEmail = String(email).toLowerCase();
+    if (!e.primaryEmail && normalizedEmail) updates.primaryEmail = normalizedEmail;
     if (Object.keys(updates).length > 0) {
       updates.updatedAt = new Date();
       await this.prisma.canonicalEntity.update({ where: { id: entityId }, data: updates });

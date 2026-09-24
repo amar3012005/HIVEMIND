@@ -41,6 +41,8 @@ import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { prepareUnifiedRecallCandidates } from './recall-evidence-dedup.js';
 import { filterEvidenceByMetadata } from '../knowledge/evidence-retrieval.js';
+import { filterMemoriesByEntities, loadSelectedEntityLinkMatches } from './selected-entity-filter.js';
+export { filterMemoriesByEntities } from './selected-entity-filter.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -155,49 +157,6 @@ function memoryIsKnownAt(memory, at) {
     || memory?.created_at || memory?.createdAt || stored?.created_at || stored?.createdAt;
   const knownMs = known ? new Date(known).getTime() : Number.NEGATIVE_INFINITY;
   return !Number.isFinite(knownMs) || knownMs <= boundary;
-}
-
-function entitySlug(value) {
-  return normalizeSourceLabel(value).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
-}
-
-export function filterMemoriesByEntities(memories = [], entities = [], {
-  mode = 'must',
-  strictEntitySelection = false,
-} = {}) {
-  const wanted = [...new Set((entities || []).map((entity) => normalizeSourceLabel(entity)).filter(Boolean))];
-  if (!wanted.length || mode === 'off' || mode === 'should') return [...memories];
-  return memories.filter((memory) => {
-    const stored = memory?.memory || {};
-    const rawTags = [...(memory?.tags || stored?.tags || [])].map((tag) => String(tag || ''));
-    const tags = rawTags.map((tag) => normalizeSourceLabel(tag));
-    const entityTags = new Set(rawTags
-      .filter((tag) => tag.toLocaleLowerCase().startsWith('entity:'))
-      .map((tag) => entitySlug(tag.slice('entity:'.length)))
-      .filter(Boolean));
-    const metadata = memory?.source_metadata || memory?.sourceMetadata || stored?.source_metadata || {};
-    const metadataEntities = [
-      ...(Array.isArray(metadata.entities) ? metadata.entities : []),
-      ...(Array.isArray(memory?.entities) ? memory.entities : []),
-      memory?.claimSubject, memory?.claim_subject,
-    ].map(normalizeSourceLabel).filter(Boolean);
-    const searchable = [memory?.title, stored?.title, memory?.content, stored?.content]
-      .map((value) => typeof value === 'string' ? value : '')
-      .join(' ').normalize('NFKC').toLocaleLowerCase();
-    const matches = wanted.map((entity) => {
-      const slug = entitySlug(entity);
-      const exactIdentity = tags.includes(`entity:${entity}`)
-        || entityTags.has(slug)
-        || metadataEntities.some((candidate) => candidate === entity || entitySlug(candidate) === slug);
-      if (exactIdentity || strictEntitySelection) return exactIdentity;
-      // Free-text recall retains historical compatibility for rows ingested
-      // before entity links existed. An ID issued by the entity chooser does
-      // not: a textual mention is not proof that this row is about that entity.
-      return metadataEntities.some((candidate) => candidate.includes(entity) || entity.includes(candidate))
-        || searchable.includes(entity);
-    });
-    return mode === 'any' ? matches.some(Boolean) : matches.every(Boolean);
-  });
 }
 
 function memoryMatchesSourceContract(memory, { title = null, kind = null } = {}) {
@@ -1124,6 +1083,8 @@ async function hop1Memory({ store, query, options, ctx }) {
     include_superseded: options.include_superseded === true,
     exact_source: !!(options.source_document_id || options.source_title),
     canonical_entities: options.canonical_entities || [],
+    canonical_entity_ids: (options.selected_entity_groups || [])
+      .flatMap((group) => group?.canonical_entity_ids || []).slice(0, 12),
     alternate_lexical_query: options.alternate_lexical_query || null,
     scope_filter: options.scope_filter || null,
     structured_intent: options.structured_intent === true,
@@ -2059,6 +2020,14 @@ export class RecallRouter {
       ? options.selected_entity_names
       : [])
       .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
+    const selectedEntityGroups = (Array.isArray(options.selected_entity_groups) ? options.selected_entity_groups : [])
+      .slice(0, 12)
+      .map((group) => ({
+        entity_ids: [...new Set((group?.entity_ids || group?.entityIds || []).map(String).filter(Boolean))].slice(0, 12),
+        canonical_entity_ids: [...new Set((group?.canonical_entity_ids || []).map(String).filter(Boolean))].slice(0, 12),
+        names: [...new Set((group?.names || []).map((name) => String(name || '').trim()).filter(Boolean))].slice(0, 20),
+      }))
+      .filter((group) => group.entity_ids.length || group.names.length);
     const plannedEntities = [
       ...(Array.isArray(recallPlan.entities) ? recallPlan.entities : []),
       ...(Array.isArray(options.named_entities) ? options.named_entities : []),
@@ -2099,7 +2068,7 @@ export class RecallRouter {
     // and relevance-first; relying on it alone can omit a valid exact match
     // before the predicate ever runs, especially for agent-backed tenants.
     const strictFilteredInventory = (recallPlan.entity_filter_mode === 'must'
-        && mergedCanonicalEntities.length > 0)
+        && (mergedCanonicalEntities.length > 0 || selectedEntityGroups.length > 0))
       || (Array.isArray(options.tags) && options.tags.length > 0);
     options = {
       ...options,
@@ -2121,7 +2090,8 @@ export class RecallRouter {
         || Boolean(recallPlan.time.valid_at)
         || options.include_superseded === true,
       canonical_entities: mergedCanonicalEntities,
-      strict_entity_selection: selectedEntityNames.length > 0,
+      selected_entity_groups: selectedEntityGroups,
+      strict_entity_selection: selectedEntityNames.length > 0 || selectedEntityGroups.length > 0,
       alternate_lexical_query: options.alternate_lexical_query || exactEntityLexicalQuery,
       query_vector: queryVector,
       limit: (temporalInventory || strictFilteredInventory)
@@ -2427,12 +2397,18 @@ export class RecallRouter {
           error.code = 'TEMPORAL_INVENTORY_UNAVAILABLE';
           throw error;
         }
+        const authorizedInventory = listedSets.flatMap((listed) => listed?.memories || []);
+        const inventoryEntityLinks = selectedEntityGroups.length
+          ? await loadSelectedEntityLinkMatches(this.prisma, selectedEntityGroups, authorizedInventory)
+          : new Map();
         let inventory = filterMemoriesByEntities(
-          listedSets.flatMap((listed) => listed?.memories || []),
+          authorizedInventory,
           recallPlan.entities,
           {
             mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode,
             strictEntitySelection: options.strict_entity_selection === true,
+            entityGroups: selectedEntityGroups,
+            entityLinkGroupMatches: inventoryEntityLinks,
           },
         );
         inventory = [...new Map(inventory.map((memory) => [recallMemoryRowId(memory), memory])).values()];
@@ -2568,9 +2544,14 @@ export class RecallRouter {
     // Entity predicates are authorization-like retrieval constraints, not
     // ranking hints. Apply the same exact all/any semantics used by evidence
     // metadata before either lane enters unified delivery.
+    const recalledEntityLinks = selectedEntityGroups.length
+      ? await loadSelectedEntityLinkMatches(this.prisma, selectedEntityGroups, memories)
+      : new Map();
     memories = filterMemoriesByEntities(memories, recallPlan.entities, {
       mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode,
       strictEntitySelection: options.strict_entity_selection === true,
+      entityGroups: selectedEntityGroups,
+      entityLinkGroupMatches: recalledEntityLinks,
     });
     if (Array.isArray(options.tags) && options.tags.length) {
       memories = memories.filter((memory) => memoryMatchesTags(memory, options.tags));

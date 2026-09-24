@@ -15,7 +15,7 @@ const recallProperties = {
   entity_filter_mode: { type: 'string', enum: ['must', 'should', 'off'],
     description: 'Use should for a named subject that should guide retrieval without excluding relevant alias/untagged memories. Use must only when the user explicitly restricts results to that entity. Omit when no entity anchor is supplied.' },
   entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12,
-    description: 'Optional canonical entity IDs only when a preceding tenant-scoped entities lookup is needed to disambiguate identity or the user explicitly requests a canonical-entity restriction. Core re-authorizes them during recall.' },
+    description: 'Optional canonical entity IDs from one selected tenant-scoped entity result. When using the chooser, pass its complete entity_ids array, not only the representative entity_id. Core re-authorizes every ID; expansion uses a shared verified primary email, or an exact same name only when neither record has a primary email.' },
 };
 
 const entityProperties = {

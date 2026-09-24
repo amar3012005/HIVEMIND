@@ -65,6 +65,37 @@ test('OpenRouter provider maps opaque option keys back to stable capability ids'
   assert.equal(requests[0].questions.decision.type, 'choice');
 });
 
+test('capability plan instructions are not truncated and carry recent-turn context', async () => {
+  let request;
+  const provider = createOpenRouterJevProvider({ apiKey: 'test-key', fetchImpl: async (_url, init) => {
+    request = JSON.parse(init.body);
+    return new Response(JSON.stringify({ answers: { decision: {
+      type: 'choice', choice: 'option_2',
+      probabilities: { option_0: 0.08, option_1: 0.13, option_2: 0.71, option_3: 0.08 },
+    } } }), { status: 200 });
+  } });
+  const gateway = new DecisionGateway({ provider, minProbability: 0.65, minMargin: 0.2,
+    choiceThresholds: { hivemind_memory_lookup: { minProbability: 0.65, minMargin: 0.2 } } });
+  const result = await chooseCapability({
+    gateway, turn: createDecisionTurnState('plan-context-contract'),
+    userQuery: 'What were my latest decisions?',
+    context: {
+      profile: 'Authenticated profile summary.', system_policy: 'Use evidence, never invent.',
+      recent_turns: Array.from({ length: 5 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `turn-${index + 1}` })),
+    },
+    fallback: async () => ({ choice: 'fallback_harness' }),
+  });
+  assert.equal(result.choice, 'hivemind_memory_lookup');
+  const instructions = request.questions.decision.instructions;
+  assert.ok(instructions.length < 1000, 'provider instruction limit must not truncate the plan contract');
+  assert.match(instructions, /last five turns/i);
+  assert.match(instructions, /Receipts are authoritative/i);
+  assert.match(instructions, /fallback_harness/i);
+  assert.equal(request.state.context.recent_turns.length, 5);
+  assert.equal(request.state.context.authenticated_context.profile, 'Authenticated profile summary.');
+  assert.equal(request.state.context.system_policy, 'Use evidence, never invent.');
+});
+
 test('a JEV context capability always exposes the governed HIVE context reader', () => {
   assert.deepEqual(decisionGatewayToolNames('hivemind_context'), ['hivemind_meta']);
   assert.deepEqual(decisionGatewayToolNames('direct_answer'), []);
@@ -194,8 +225,8 @@ test('profile identity intent gives JEV an explicit context versus memory bounda
   assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /recurring interests and durable likes/i);
   assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /dependent outcomes/i);
   assert.match(captured.instructions, /hivemind_context/i);
-  assert.match(captured.instructions, /five recent turns/i);
-  assert.match(captured.instructions, /first-person durable preference/i);
+  assert.match(captured.instructions, /last five turns/i);
+  assert.match(captured.instructions, /durable first-person preference/i);
 });
 
 test('explicit HIVE save intent remains evidence for the initial JEV decision', async () => {

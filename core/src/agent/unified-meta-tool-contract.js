@@ -10,8 +10,12 @@ const recallProperties = {
   valid_at: { type: 'string' },
   transaction_at: { type: 'string' },
   sort: { type: 'string', enum: ['score', 'date_asc', 'date_desc'] },
+  entities: { type: 'array', items: { type: 'string' }, maxItems: 12,
+    description: 'Optional exact named subjects from the user question, passed directly to recall as entity relevance anchors. For an ordinary named-person or organization query, include the name and use entity_filter_mode="should"; do not run a separate entities operation first.' },
+  entity_filter_mode: { type: 'string', enum: ['must', 'should', 'off'],
+    description: 'Use should for a named subject that should guide retrieval without excluding relevant alias/untagged memories. Use must only when the user explicitly restricts results to that entity. Omit when no entity anchor is supplied.' },
   entity_ids: { type: 'array', items: { type: 'string' }, maxItems: 12,
-    description: 'Optional canonical entity IDs returned by the preceding tenant-scoped entities operation. Core re-authorizes them during recall.' },
+    description: 'Optional canonical entity IDs only when a preceding tenant-scoped entities lookup is needed to disambiguate identity or the user explicitly requests a canonical-entity restriction. Core re-authorizes them during recall.' },
 };
 
 const entityProperties = {
@@ -25,7 +29,7 @@ export const HIVEMIND_META_TOOL = Object.freeze({
   type: 'function',
   function: {
     name: 'hivemind_meta',
-    description: 'Authenticated HIVE-MIND gateway. Use entities for a fast tenant-authorized canonical entity match, recall for stored memory/document evidence, context for user and organization profile, save for a source-grounded durable memory, and profiles for the authenticated profile/directory. Entity lookup is not evidence of broader biographical claims: when the user asks for history, pass matched entity_ids to recall. Tenant and user identity are supplied by Core.',
+    description: 'Authenticated HIVE-MIND gateway. Use entities only when the requested answer is canonical identity/alias resolution. Use recall for stored memory/document evidence; for a named person or organization, send the full question plus entities:[name] and entity_filter_mode:"should" directly in the recall operation—do not preflight entity search. Use context for compact profile data, save for source-grounded durable memory, and profiles for the authenticated profile/directory. Tenant and user identity are supplied by Core.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['operation'],
       properties: {

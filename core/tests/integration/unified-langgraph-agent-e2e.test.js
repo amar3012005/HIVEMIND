@@ -488,21 +488,184 @@ test('an authoritative JEV direct-answer decision streams without buffered re-pl
   assert.equal(result.run.scratch.plan.intent, 'direct_answer');
 });
 
-test('a deferred JEV plan persists and renders its safe fallback diagnostic', async () => {
+test('a selected memory lookup cannot synthesize before a real recall receipt', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let modelTurns = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about Rama?', useTools: false, prisma, ctx: ctx(prisma, 'required-recall'),
+    checkpointer: new MemorySaver(), composio: {}, onEvent: event => events.push(event),
+    decisionStage: async input => input.stage === 'capability'
+      ? { status: 'selected', selected: 'hivemind_memory_lookup', authoritative: true,
+        receipt: { source: 'jev', probability: 0.84, margin: 0.51, requestId: 'rama-lookup-plan' } }
+      : { status: 'selected', selected: 'synthesize', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.98, requestId: 'rama-lookup-synthesis' } },
+    modelStep: async ({ tools, messages }) => {
+      modelTurns += 1;
+      assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta']);
+      if (modelTurns === 1) return { message: { role: 'assistant', content: 'There is nothing saved about Rama.' } };
+      assert.match(messages.at(-1).content, /requires a successful recall receipt/i);
+      return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'What do you know about Rama?', mode: 'fact', limit: 8 } }, 'required-rama-recall') };
+    },
+    metaExecutor: async () => ({ successful: true, data: { memories: [{ id: 'rama-1', title: 'Rama Santhoshi', content: 'A saved correspondence record identifies Rama Santhoshi.' }] } }),
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Rama Santhoshi/);
+      await onDelta('I found one saved record naming Rama Santhoshi.');
+      return { ok: true, content: 'I found one saved record naming Rama Santhoshi.' };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(modelTurns, 2);
+  assert.equal(result.run.scratch.plan.intent, 'hivemind_memory_lookup');
+  assert.equal(events.filter(event => event.type === 'tool_start' && event.name === 'hivemind_meta').length, 1);
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), ['I found one saved record naming Rama Santhoshi.']);
+});
+
+test('named-subject memory lookup sends query and entity hint in one recall call', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let dispatch;
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about Rama?', useTools: false, prisma,
+    ctx: { ...ctx(prisma, 'direct-entity-recall'), _tracedDispatch: async (slug, args) => {
+      dispatch = { slug, args };
+      return { memories: [{ id: 'rama-memory', title: 'Rama Santhoshi correspondence', content: 'Saved memories include personal correspondence and a Prague anniversary event.' }] };
+    } },
+    checkpointer: new MemorySaver(), composio: {}, onEvent: event => events.push(event),
+    decisionStage: async () => ({ status: 'selected', selected: 'hivemind_memory_lookup', authoritative: true,
+      receipt: { source: 'jev', probability: 0.94, margin: 0.77, requestId: 'direct-entity-recall-plan' } }),
+    modelStep: async ({ tools }) => {
+      assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta']);
+      return { message: call('hivemind_meta', { operation: 'recall', recall: {
+        query: 'What do you know about Rama?', entities: ['Rama'], entity_filter_mode: 'should', mode: 'fact', limit: 8,
+      } }, 'direct-entity-recall-call') };
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Prague anniversary event/);
+      await onDelta('I found saved notes about Rama Santhoshi, including personal correspondence and the Prague anniversary event.');
+      return { ok: true, content: 'I found saved notes about Rama Santhoshi, including personal correspondence and the Prague anniversary event.' };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(dispatch, { slug: 'hivemind_recall', args: {
+    query: 'What do you know about Rama?', mode: 'fact', limit: 8,
+    entities: ['Rama'], entity_filter_mode: 'should',
+  } });
+  assert.equal(events.filter(event => event.type === 'tool_start' && event.name === 'hivemind_meta').length, 1);
+});
+
+test('memory follow-up resolves “this topic” from recent chat and recalls without entity lookup', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let dispatch;
+  const history = [
+    { role: 'user', content: 'What do you know about Rama? Use saved HIVE-MIND memories only.' },
+    { role: 'assistant', content: 'The saved notes mention Rama Santhoshi, personal correspondence, and the Prague anniversary invitation.' },
+    { role: 'user', content: 'What else does Rama say about this topic?' },
+    { role: 'assistant', content: 'I found a saved note titled “Emails from Rama (Amar relationship)” with messages about the Prague visit and poem exchange.' },
+  ];
+  const result = await runUnifiedMetaAgent({
+    message: 'What else does Rama say about this topic?', useTools: false, prisma,
+    ctx: { ...ctx(prisma, 'rama-followup-recall'), conversationHistory: history,
+      _tracedDispatch: async (slug, args) => {
+        dispatch = { slug, args };
+        return { memories: [{ id: 'rama-topic-1', title: 'Emails from Rama (Amar relationship)', content: 'Rama replied to the poem exchange and discussed the Prague visit.' }] };
+      } },
+    checkpointer: new MemorySaver(), composio: {}, onEvent: event => events.push(event),
+    decisionStage: async () => ({ status: 'selected', selected: 'hivemind_memory_lookup', authoritative: true,
+      receipt: { source: 'jev', probability: 0.94, margin: 0.77, requestId: 'rama-followup-plan' } }),
+    modelStep: async ({ tools, messages }) => {
+      assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta']);
+      assert.ok(messages.some(row => row.role === 'user' && row.content.includes('What do you know about Rama?')));
+      assert.ok(messages.some(row => row.role === 'assistant' && row.content.includes('Prague anniversary invitation')));
+      assert.match(messages.at(-1).content, /resolve references.*“this topic”/i);
+      return { message: call('hivemind_meta', { operation: 'recall', recall: {
+        query: 'What else does Rama Santhoshi say about the Prague visit and poem exchange?',
+        entities: ['Rama'], entity_filter_mode: 'should', mode: 'explain', limit: 8,
+      } }, 'rama-topic-followup-recall') };
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Rama replied to the poem exchange/);
+      await onDelta('The saved correspondence says Rama replied to your poem and discussed the Prague visit.');
+      return { ok: true, content: 'The saved correspondence says Rama replied to your poem and discussed the Prague visit.' };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(dispatch, { slug: 'hivemind_recall', args: {
+    query: 'What else does Rama Santhoshi say about the Prague visit and poem exchange?',
+    mode: 'explain', limit: 8, entities: ['Rama'], entity_filter_mode: 'should',
+  } });
+  assert.equal(events.filter(event => event.type === 'tool_start' && event.name === 'hivemind_meta').length, 1);
+});
+
+test('a failed HIVE recall is surfaced as unavailable, never as an empty memory result', async () => {
   const prisma = fakePrisma();
   const events = [];
   const result = await runUnifiedMetaAgent({
-    message: 'What do you know about me?', useTools: false, prisma, ctx: ctx(prisma, 'fallback-diagnostic'), checkpointer: new MemorySaver(), composio: {},
+    message: 'What do you know about SINGULANCE?', useTools: false, prisma, ctx: ctx(prisma, 'failed-company-recall'),
+    checkpointer: new MemorySaver(), composio: {}, onEvent: event => events.push(event),
+    decisionStage: async () => ({ status: 'selected', selected: 'hivemind_memory_lookup', authoritative: true,
+      receipt: { source: 'jev', probability: 0.92, margin: 0.71, requestId: 'company-recall-plan' } }),
+    modelStep: async () => ({ message: call('hivemind_meta', {
+      operation: 'recall', recall: { query: 'What do you know about SINGULANCE?', mode: 'fact', limit: 8 },
+    }, 'company-recall-call') }),
+    metaExecutor: async () => ({ successful: false, error: 'core_temporarily_unavailable' }),
+    finalStream: async () => { throw new Error('must_not_synthesize_failed_recall'); },
+  });
+  assert.equal(result.status, 'error');
+  assert.match(result.response, /couldn’t complete the HIVE-MIND recall/i);
+  assert.doesNotMatch(result.response, /nothing is (?:saved|on file)|no memories/i);
+  assert.ok(result.steps.some(step => step.slug === 'hivemind_meta' && step.status === 'error'));
+  assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'hivemind_meta' && event.status === 'error'));
+  assert.ok(events.some(event => event.type === 'answer_delta' && event.grounded === false));
+});
+
+test('a deferred JEV plan re-plans natively, recalls Rama, and streams from the receipt', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let modelTurns = 0;
+  let fallbackTools;
+  const stages = [];
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about Rama?', useTools: false, prisma, ctx: ctx(prisma, 'fallback-recall'), checkpointer: new MemorySaver(), composio: {},
     onEvent: event => events.push(event),
-    decisionStage: async () => ({
-      status: 'defer', selected: null, authoritative: false,
-      receipt: { source: 'fallback', reason: 'decision_probability_below_threshold', diagnostics: { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 } },
-    }),
-    modelStep: async ({ tools }) => {
-      assert.deepEqual(tools, []);
-      return { message: { role: 'assistant', content: 'I need a clearer route.' } };
+    decisionStage: async input => {
+      stages.push(input.stage);
+      if (input.stage === 'capability') return {
+        status: 'defer', selected: null, authoritative: false,
+        receipt: { source: 'fallback', reason: 'decision_probability_below_threshold', diagnostics: { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 } },
+      };
+      return { status: 'selected', selected: 'synthesize', authoritative: true,
+        receipt: { source: 'jev', probability: 0.99, margin: 0.98, requestId: 'fallback-recall-synthesis' } };
+    },
+    modelStep: async ({ tools, messages }) => {
+      modelTurns += 1;
+      fallbackTools = tools;
+      assert.match(messages.find(row => row.role === 'system' && row.content.includes('Selected executor intent: fallback_harness'))?.content || '', /LangGraph-native tool planner/i);
+      assert.match(messages.find(row => row.role === 'user')?.content || '', /what do you know about Rama/i);
+      return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'What do you know about Rama?', mode: 'fact', limit: 8 } }, 'fallback-rama-recall') };
+    },
+    metaExecutor: async args => {
+      assert.equal(args.operation, 'recall');
+      assert.equal(args.recall.query, 'What do you know about Rama?');
+      return { successful: true, data: { memories: [{ id: 'rama-memory-1', title: 'Rama Santhoshi — personal correspondence', content: 'Saved evidence identifies Rama Santhoshi and records correspondence and a Prague anniversary invitation.' }] } };
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Rama Santhoshi/);
+      await onDelta('I found saved notes about Rama Santhoshi, ');
+      await onDelta('including personal correspondence and a Prague anniversary invitation.');
+      return { ok: true, content: 'I found saved notes about Rama Santhoshi, including personal correspondence and a Prague anniversary invitation.' };
     },
   });
+  assert.equal(result.status, 'completed');
+  assert.equal(modelTurns, 1);
+  assert.deepEqual(fallbackTools.map(row => row.function.name), ['hivemind_meta']);
+  assert.deepEqual(stages, ['capability']);
+  assert.deepEqual(events.filter(event => event.type === 'answer_delta').map(event => event.delta), [
+    'I found saved notes about Rama Santhoshi, ',
+    'including personal correspondence and a Prague anniversary invitation.',
+  ]);
+  assert.equal(result.run.scratch.plan.intent, 'fallback_harness');
   assert.equal(result.run.scratch.plan.reason, 'decision_probability_below_threshold');
   assert.deepEqual(result.run.scratch.plan.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
   const decision = events.find(event => event.type === 'decision' && event.stage === 'capability');
@@ -511,7 +674,7 @@ test('a deferred JEV plan persists and renders its safe fallback diagnostic', as
   assert.deepEqual(decision.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
 });
 
-test('an unknown authoritative JEV intent is rejected before tool exposure and persisted as a plan error', async () => {
+test('an unknown authoritative JEV intent is rejected and handed to the native fallback planner', async () => {
   const prisma = fakePrisma();
   const events = [];
   let finalTools;
@@ -528,7 +691,7 @@ test('an unknown authoritative JEV intent is rejected before tool exposure and p
       return { message: { role: 'assistant', content: 'I can answer from the safe context available.' } };
     },
   });
-  assert.deepEqual(finalTools, []);
+  assert.deepEqual(finalTools.map(row => row.function.name), ['hivemind_meta', 'hivemind_connected_task']);
   assert.equal(result.run.scratch.plan.intent, 'fallback_harness');
   assert.equal(result.run.scratch.plan.authoritative, false);
   assert.equal(result.run.scratch.plan.reason, 'decision_intent_invalid');
@@ -548,7 +711,7 @@ test('an uncertain plan cannot imply or initiate a memory save for a casual pers
       receipt: { source: 'fallback', reason: 'decision_probability_below_threshold', diagnostics: { choice: 'hivemind_save', probability: 0.58, margin: 0.08 } },
     }),
     modelStep: async ({ tools, messages }) => {
-      assert.deepEqual(tools, []);
+      assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta']);
       receivedMessages = messages;
       return { message: { role: 'assistant', content: 'Messi is fun to watch. What do you enjoy most about his game?' } };
     },
@@ -556,8 +719,8 @@ test('an uncertain plan cannot imply or initiate a memory save for a casual pers
   assert.equal(result.status, 'completed');
   assert.match(result.response, /what do you enjoy most/i);
   const fallbackInstruction = receivedMessages.find(row => row.role === 'system' && row.content.includes('Selected executor intent: fallback_harness'))?.content || '';
-  assert.match(fallbackInstruction, /do not call tools.*offer to save.*choose a memory scope/i);
-  assert.match(fallbackInstruction, /respond naturally/i);
+  assert.match(fallbackInstruction, /LangGraph-native tool planner/i);
+  assert.match(fallbackInstruction, /named person.*operation="recall"/i);
   assert.equal(events.some(event => event.type === 'tool_start' && /hivemind_(?:meta|save_memory)/.test(event.name || '')), false);
 });
 

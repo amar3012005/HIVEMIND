@@ -72,7 +72,7 @@ test('capability mapping returns only the schema family for the next model step'
   assert.deepEqual(decisionGatewayToolNames('web_research'), ['hivemind_web_search']);
   assert.equal(decisionGatewayToolNames('multi_task'), undefined);
   assert.deepEqual(decisionGatewayToolNames('composio_search', { connected: false }), []);
-  assert.deepEqual(decisionGatewayToolNames('fallback_harness'), []);
+  assert.equal(decisionGatewayToolNames('fallback_harness'), undefined);
 });
 
 test('capability taxonomy gives Jev a distinct governed meaning for every plan choice', () => {
@@ -82,8 +82,8 @@ test('capability taxonomy gives Jev a distinct governed meaning for every plan c
     assert.ok(option.id);
     assert.ok(option.criteria.length >= 80, `${option.id} must have an operational description`);
   }
-  assert.match(options.find(option => option.id === 'hivemind_save').criteria, /scope|capsule/i);
-  assert.match(options.find(option => option.id === 'fallback_harness').criteria, /not permission to silently/i);
+  assert.match(options.find(option => option.id === 'hivemind_save').criteria, /grounded durable memory/i);
+  assert.match(options.find(option => option.id === 'fallback_harness').criteria, /LangGraph-native planner continues/i);
 });
 
 test('every declared JEV intent has an intentional LangGraph executor surface', () => {
@@ -103,7 +103,7 @@ test('every declared JEV intent has an intentional LangGraph executor surface', 
     web_research: ['hivemind_web_search'],
     multi_task: undefined,
     workflow_plan: undefined,
-    fallback_harness: [],
+    fallback_harness: undefined,
   };
   assert.deepEqual(CAPABILITY_OPTIONS.map(option => option.id).sort(), Object.keys(expected).sort());
   for (const [intent, tools] of Object.entries(expected)) {

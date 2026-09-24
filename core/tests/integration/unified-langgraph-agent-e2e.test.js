@@ -172,7 +172,7 @@ test('JEV entity intent performs the fast governed canonical lookup before strea
   assert.ok(events.some(event => event.type === 'answer_delta'));
 });
 
-test('LangGraph follow-up chips are source-grounded and omitted for mutations', async () => {
+test('LangGraph follow-up chips use read evidence and acknowledge successful memory saves', async () => {
   const prisma = fakePrisma();
   const runRecall = async suffix => runUnifiedMetaAgent({
     message: 'What do we know about the launch?', useTools: false, prisma, ctx: ctx(prisma, suffix), checkpointer: new MemorySaver(), composio: {},
@@ -199,7 +199,7 @@ test('LangGraph follow-up chips are source-grounded and omitted for mutations', 
     } }, 'save-followup') }),
     metaExecutor: async () => ({ successful: true, data: { saved: true, title: 'Aster prefers concise updates', scope: 'personal' } }),
   });
-  assert.equal(saved.followUps.length, 0);
+  assert.deepEqual(saved.followUps, ['What else do you know about this?']);
 });
 
 test('a multi-task receipt uses JEV to continue into one grounded memory save before sealing', async () => {

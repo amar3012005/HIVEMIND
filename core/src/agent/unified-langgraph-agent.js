@@ -283,13 +283,21 @@ function resultSources(receipts = []) {
 function groundedFollowUps(state, response, status) {
   if (status !== 'completed' || !compactText(response, 1200)) return [];
   const intent = String(state?.plan?.intent || '');
-  // A mutation acknowledgement is a terminal outcome, not an invitation to
-  // invent another task. Compound read+write requests are likewise complete
-  // only after their governed write receipt and should not expose stale read
-  // suggestions as if they were the next action.
-  if (['hivemind_save', 'hivemind_profile_update', 'composio_action'].includes(intent)
-    || (state?.receipts || []).some(row => row?.successful !== false
-      && ['save', 'profile_update'].includes(String(row?.action || '')))) return [];
+  const saved = (state?.receipts || []).some(row => row?.successful === true && row?.action === 'save');
+  // A confirmed memory write can offer one natural continuation grounded in
+  // the just-completed save. This is not another write and does not imply that
+  // anything else has been stored. Keep external actions and profile changes
+  // terminal rather than suggesting an unrequested side effect.
+  if (saved && (intent === 'hivemind_save' || intent === 'multi_task')) {
+    const language = String(state?.context?.locale || 'en').slice(0, 2).toLowerCase();
+    const followUp = ({
+      de: 'Was weißt du noch darüber?',
+      es: '¿Qué más sabes sobre esto?',
+      fr: 'Que sais-tu d’autre à ce sujet ?',
+    })[language] || 'What else do you know about this?';
+    return [followUp];
+  }
+  if (['hivemind_profile_update', 'composio_action'].includes(intent)) return [];
   const readable = (state?.receipts || []).some(row => row?.successful !== false
     && (substantiveMetaReadReceipt(row) || row?.action === 'execute'));
   if (!readable) return [];

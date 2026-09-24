@@ -2349,3 +2349,35 @@ git diff --check: passed (line-ending warnings only)
 - Next: reconcile the integration-worktree blocker, then validate the merged
   branch and run only the affected local services plus authenticated upload and
   recall canaries before marking the feature accepted.
+
+## 2026-09-24 UTC — refreshed local integration and readiness re-audit
+
+- State: Candidate remains unintegrated; no shared services changed.
+- Branch/worktree: `codex/hm-understand-singulance-local` at pushed
+  `1cd45839923a018c37d191b8f946b6d5355c49de`.
+- Refreshed remote refs from `origin`: `singulance-main=ad2012a8d`,
+  `singulance-local=b4c600de1`. `git rev-list --left-right --count
+  origin/singulance-main...origin/singulance-local` returned `779 287`;
+  current local integration is substantially divergent from production. Fetch
+  also reported it could not access the `frontend/Da-vinci` submodule at the
+  production commit.
+- The permanent integration worktree remains `singulance-local` with 67
+  unpushed commits and unrelated modifications in `core/prisma/schema.prisma`
+  and `core/tests/unit/hyper-turn-event-resilience.test.js`. Neither path is
+  changed by this candidate; the dirty worktree still must not be merged in or
+  rebuilt over.
+- Current local hm-understand health returned HTTP 200, but `/ready` timed out
+  after six seconds. Its capabilities endpoint identifies
+  `gliner-community/gliner_small-v2.5`, while this candidate pins
+  `urchade/gliner_multi-v2.1`; it is not the candidate artifact. Docker Engine
+  returned version `29.1.5` after delay, but a subsequent image-inspection
+  request remained pending and was interrupted. No build or container mutation
+  was attempted.
+- Fresh candidate verification from `hm-understand/`:
+  `.venv/bin/python -m pytest -q tests/test_api.py tests/test_model_retry.py`
+  (using the existing preview venv) -> 4 passed, one preexisting Starlette
+  deprecation warning.
+- Next: make the permanent integration checkout clean without discarding its
+  two user edits; reconcile current production and missing frontend submodule;
+  then build a uniquely tagged candidate image and run isolated health,
+  readiness, parser-to-analyzer, authenticated upload, and recall checks.

@@ -166,16 +166,17 @@ the default custom-provider route returned a Gateway 502, and the explicitly sel
 Gateway route exceeded Core's extraction budget before usage was returned. Do not claim token savings
 until a comparable baseline/assisted run produces provider usage receipts.
 
-Current verification (2026-09-24): hm-extract's focused parser/offset/backpressure/admission suite
-passes 20/20; hm-understand passes 20/20; Core's focused adapter/evidence suite passes 15/15. The
-live RTF chain also passes: a synthetic RTF is parsed by the running hm-extract service; Core's
-evidence helper persists the validated exact segments to a stub DB; the real pinned multilingual
-GLiNER service then analyzes those same segments. The model returned four grounded mentions
-(date, person, money, project) and one decision candidate, with quotes and document offsets matching
-the parser evidence. Warm analysis took about 0.5 seconds for this 73-character example. The
-integration canary passed with the analyzer readiness endpoint reporting all 224/224 pinned model
-tensors loaded. This proves the local parser→evidence→real-model contract, not authenticated upload,
-real PostgreSQL writes, or production throughput.
+Current verification (2026-09-24): the local-branch hm-extract golden, atomicity,
+offset/backpressure, and admission suite passes 36/36; hm-understand passes 20/20; Core's focused
+adapter/evidence set passes 18/18, with two optional Docling/provider integration checks skipped
+because those endpoints were not available to the host test runner. The live RTF chain passes: a
+synthetic RTF is parsed by the running hm-extract service; Core's evidence helper persists the
+validated exact segments to a stub DB; the real pinned multilingual GLiNER service analyzes those
+same segments. The model returned grounded date, person, money, and project mentions plus a decision
+candidate, with quotes and document offsets matching parser evidence. The Core RTF canary completed
+in about 0.85 seconds warm; analyzer readiness reported all 224/224 pinned model tensors loaded.
+This proves the local parser→evidence→real-model contract, not authenticated upload, real PostgreSQL
+writes, or production throughput.
 
 The shared local Core container still uses its prior immutable image and was not recreated. The
 candidate model was exercised as a host-local process because Docker Desktop had 58 containers

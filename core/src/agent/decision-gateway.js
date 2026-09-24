@@ -288,20 +288,20 @@ export class DecisionGateway {
 export const CAPABILITY_OPTIONS = Object.freeze([
   { id: 'direct_answer', criteria: 'Answer from this turn and supplied context alone. Use only when no lookup, retrieval, external app, research, or state change is needed; profile and memory questions are not direct answers.' },
   { id: 'hivemind_context', criteria: 'Read only the authenticated principal’s compact profile or org metadata (name, role, location, maintained profile fields). Use for “what is my profile?” or an explicit org-profile question. Do not use for open-ended “what do you know about [person/org]?”, history, projects, decisions, or preferences; those require memory recall.' },
-  { id: 'hivemind_memory_lookup', criteria: 'Retrieve saved HIVE memories and evidence. Use for open-ended questions about a named person or organization, preferences, past work, decisions, events, documents, or “what do we know about X?”. Preserve the subject in a concrete recall query. Do not substitute the compact profile for this history search.' },
+  { id: 'hivemind_memory_lookup', criteria: 'Retrieve saved HIVE-MIND only. Use for open-ended questions like “what do we know about X?”, what is remembered/on file, past work, decisions, preferences, or history. Preserve subject and follow-up topic. Never use for fresh connected-app data (Gmail, calendar, CRM, files); a named live source is mandatory.' },
   { id: 'hivemind_entity_lookup', criteria: 'Resolve an exact named entity in the authorized HIVE registry when existence, canonical identity, or aliases are the requested answer. For biography or history, use recall; ordinary recall already performs entity matching.' },
   { id: 'hivemind_hyperagent_directory', criteria: 'Read the authenticated organization’s HyperAgent directory: agent identity, role, assignment, ownership, or availability. Do not use for general company history or connected apps.' },
   { id: 'hivemind_request', criteria: 'Perform a supported typed HIVE operation not covered by profile/context, memory recall, entity lookup, or HyperAgent directory (for example a time-aware or project/evidence request). Follow the operation contract.' },
   { id: 'hivemind_meta', criteria: 'Use a read-only HIVE meta operation for a HIVE-native question that does not fit a more specific HIVE intent. Never choose it for external-app facts or writes.' },
   { id: 'hivemind_profile_update', criteria: 'Change the authenticated user’s own maintained profile only when they explicitly request a profile-field change. Do not use to save general memories or edit another person’s profile.' },
   { id: 'hivemind_save', criteria: 'Save a grounded durable memory when explicitly asked, or retain a clear lasting first-person/organization fact, preference, decision, or procedure. Do not save transient chat, questions, or guesses. If retrieval is also requested first, choose multi_task.' },
-  { id: 'composio_read', criteria: 'Read fresh data from a connected external app (email, calendar, files, CRM, messaging, source control, etc.). Discover the capability, load its selected schema, execute the read, and use its receipt.' },
+  { id: 'composio_read', criteria: 'Fulfill one concrete read from a connected external app (for example, find the latest email in Gmail, read a calendar event, or search a connected repository). This remains composio_read even though the graph internally discovers the capability, loads its schema, and executes it. Require the successful execution receipt before answering. A named source such as “from Gmail” cannot be replaced with HIVE memory.' },
   { id: 'composio_action', criteria: 'Create or change data in a connected external app (send, update, publish, delete, etc.). Discover and validate the tool, then require the graph’s approval before any write executes.' },
-  { id: 'composio_search', criteria: 'Discover a connected-app capability when the user clearly names an app/source but the required operation or matching tool is not yet clear. Search first; do not guess or execute a write.' },
+  { id: 'composio_search', criteria: 'Discover what connected-app capabilities/tools are available when that discovery itself is the requested outcome, or the user names an app but gives no concrete operation. Do not select this merely because every connected read/action internally begins with tool discovery; concrete reads are composio_read and writes are composio_action.' },
   { id: 'web_research', criteria: 'Search or verify current public-web information when requested or necessary. Keep public-web evidence distinct from private HIVE and connected-app data.' },
-  { id: 'multi_task', criteria: 'Choose when the request asks for multiple distinct outcomes or dependent steps, such as retrieve/read/research then save, send, update, or compare. Complete prerequisites first and retain a receipt for each outcome.' },
+  { id: 'multi_task', criteria: 'Choose only when the user asks for multiple user outcomes or dependent deliverables, such as search/read/research and then separately save, send, update, or compare. Do not count internal connected-tool discovery, schema loading, execution, or synthesis as extra user outcomes. When a named connected source is one prerequisite, preserve it as the mandatory source for that step.' },
   { id: 'workflow_plan', criteria: 'Design or explain a workflow without carrying it out. Return ordered, actionable steps; do not claim retrieval or side effects.' },
-  { id: 'fallback_harness', criteria: 'A safety state for an unavailable or genuinely ambiguous JEV decision, not a user task. The LangGraph-native planner continues with governed tools and receipts; authorization and write approval still apply.' },
+  { id: 'fallback_harness', criteria: 'A nonterminal safety state when JEV is unavailable, uncertain, invalid, or contradicts a clear source/outcome constraint. Continue the original request with the LangGraph-native planner and governed tool schemas; never synthesize an unsupported substitute answer or silently change a named live source to HIVE memory. Authorization, consent, and write approval remain graph-enforced.' },
 ]);
 
 /** Explicit HIVE save commands are syntax, not a probabilistic routing task. */
@@ -321,6 +321,12 @@ export async function chooseCapability({ gateway, turn, userQuery, context, obse
     planning_hints: {
       app_mentions: [...new Set(appMentions.map(value => String(value).toLowerCase()))],
       operational_app_intent: operationalAppIntent === true,
+      connected_source_intent: context?.connected_source_intent?.required === true ? {
+        toolkits: [...new Set((context.connected_source_intent.toolkits || []).map(value => String(value).toLowerCase()))],
+        operation: String(context.connected_source_intent.operation || ''),
+        origin: String(context.connected_source_intent.origin || ''),
+        request_text: boundedString(context.connected_source_intent.request_text, 700),
+      } : null,
       explicit_memory_save_language: hasExplicitHivemindSaveIntent(userQuery)
         || context?.explicit_save_language === true,
       prepared_memory_save: context?.pending_save?.available === true,
@@ -328,7 +334,7 @@ export async function chooseCapability({ gateway, turn, userQuery, context, obse
     },
   };
   return gateway.choose({ turn, stage: 'capability', userQuery, context: planningContext, observation, options: CAPABILITY_OPTIONS,
-    instructions: 'Choose one intent for the user’s requested outcome, using the current request, policy, authenticated profile, five recent turns, and receipts. Prefer multi_task when there are multiple outcomes. Separate profile/context from stored history; separate HIVE from connected apps and public web. A clear durable personal or organization statement may be hivemind_save; questions and transient reactions are not. Never infer data or authorize side effects. The graph enforces access and approvals. Receipts prove completed work. Choose fallback_harness only when the decision service is unavailable or the request remains genuinely ambiguous.',
+    instructions: 'Choose one intent using the request, policy, authenticated profile, five recent turns, and completed receipts. Separate profile/context from stored history. Priority: an explicit connected source is mandatory; never substitute HIVE or web. Concrete app reads are composio_read even though graph discovery/schema/execution follows; composio_action is external write; composio_search only when capability discovery itself is requested or operation is unclear. multi_task only for multiple user outcomes (e.g. read then save), not connector internals. Explicit save -> hivemind_save; retrieve then save -> multi_task. If uncertain or conflicting with a clear source/outcome, choose fallback_harness; it is nonterminal and LangGraph continues the original task. Clear lasting personal/organization facts may be hivemind_save; questions/transient reactions are not. Never infer facts or authorize side effects; the graph enforces consent/approval. Receipts prove completed work.',
     fallback, signal });
 }
 

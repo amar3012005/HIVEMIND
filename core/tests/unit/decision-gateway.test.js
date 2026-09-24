@@ -218,16 +218,21 @@ test('profile identity intent gives JEV an explicit context versus memory bounda
   assert.equal(result.choice, 'hivemind_context');
   assert.equal(captured.state.context.planning_hints.authenticated_profile_available, true);
   assert.match(captured.options.find(option => option.id === 'hivemind_context').criteria, /authenticated principal’s compact profile/i);
-  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /open-ended questions about a named person or organization/i);
   assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /what do we know about X/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /fresh connected-app data \(Gmail.*named live source is mandatory/i);
   assert.match(captured.options.find(option => option.id === 'hivemind_entity_lookup').criteria, /exact named entity/i);
   assert.match(captured.options.find(option => option.id === 'hivemind_entity_lookup').criteria, /authorized HIVE registry/i);
   assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /lasting first-person\/organization fact/i);
   assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /preference, decision, or procedure/i);
-  assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /multiple distinct outcomes or dependent steps/i);
+  assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /multiple user outcomes/i);
+  assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /Do not count internal connected-tool discovery, schema loading, execution, or synthesis as extra user outcomes/i);
+  assert.match(captured.options.find(option => option.id === 'composio_read').criteria, /remains composio_read even though the graph internally discovers the capability/i);
+  assert.match(captured.options.find(option => option.id === 'composio_search').criteria, /discovery itself is the requested outcome/i);
   assert.match(captured.instructions, /profile\/context/i);
   assert.match(captured.instructions, /five recent turns/i);
-  assert.match(captured.instructions, /durable personal or organization statement/i);
+  assert.match(captured.instructions, /an explicit connected source is mandatory/i);
+  assert.match(captured.instructions, /fallback_harness; it is nonterminal and LangGraph continues/i);
+  assert.match(captured.instructions, /lasting personal\/organization facts/i);
 });
 
 test('explicit HIVE save intent remains evidence for the initial JEV decision', async () => {

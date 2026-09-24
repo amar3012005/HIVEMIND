@@ -65,10 +65,30 @@ test('legacy chat exposes the Jev-selected gateway and native typed tools when J
     decisionStage: async () => ({ status: 'defer', selected: null, authoritative: false, receipt: { source: 'fallback' } }),
   });
 
-  assert.deepEqual(surfaces, [
-    ['hivemind_connected_task'],
-    ['hivemind_meta', 'hivemind_connected_task'],
-  ]);
+  assert.deepEqual(surfaces[0], ['hivemind_connected_task']);
+  assert.ok(surfaces.slice(1, -1).every(surface => surface.length === 1 && surface[0] === 'hivemind_connected_task'),
+    'an explicit connected-source request cannot be repaired by switching to HIVE');
+  assert.deepEqual(surfaces.at(-1), ['hivemind_meta', 'hivemind_connected_task']);
+});
+
+test('a connected-app name in an explanatory question does not trigger the live-source gate', async () => {
+  const prisma = { pendingWrite: {} };
+  let planInput;
+  const result = await runUnifiedMetaAgent({
+    message: 'What does Gmail do?', useTools: true, prisma,
+    ctx: { orgId: 'org', userId: 'user', threadId: 'gmail-explainer', language: 'en', prisma },
+    checkpointer: new MemorySaver(),
+    composio: { async listConnectedAccounts() { return [{ toolkit: 'gmail', status: 'ACTIVE' }]; } },
+    decisionStage: async input => {
+      planInput = input;
+      return { status: 'selected', selected: 'direct_answer', authoritative: true, receipt: { source: 'jev', probability: 0.98, margin: 0.9 } };
+    },
+    modelStep: async () => ({ message: { role: 'assistant', content: 'Gmail is Google’s email service.' } }),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(planInput.operational_app_intent, false);
+  assert.deepEqual(planInput.app_mentions, []);
+  assert.equal(planInput.context.connected_source_intent, null);
 });
 
 test('LangGraph pauses on JEV connected-read intent when tools are off, then resumes the same plan after approval', async () => {
@@ -130,6 +150,103 @@ test('LangGraph pauses on JEV connected-read intent when tools are off, then res
   assert.deepEqual(connectedCalls, ['search', 'execute']);
   assert.deepEqual(surfaces, [['hivemind_connected_task'], ['hivemind_connected_task']]);
   assert.equal(planCalls, 1, 'approval resumes the checkpoint without another JEV plan call');
+});
+
+test('a connected-source follow-up survives a conflicting JEV memory route and resumes the same graph', async () => {
+  const checkpointer = new MemorySaver();
+  const prisma = { pendingWrite: {} };
+  const surfaces = [];
+  const connectedCalls = [];
+  const events = [];
+  let planCalls = 0;
+  let modelCalls = 0;
+  const common = {
+    message: 'search again', useTools: false, prisma, checkpointer,
+    ctx: {
+      orgId: 'org', userId: 'user', threadId: 'gmail-followup-source-constraint', language: 'en', prisma,
+      conversationHistory: [
+        { role: 'user', content: 'Get more information about Rama from Gmail' },
+        { role: 'assistant', content: 'I only have the older saved-memory summary, not a fresh Gmail result.' },
+      ],
+    },
+    onEvent: event => events.push(event),
+    decisionStage: async input => {
+      planCalls += 1;
+      assert.equal(input.stage, 'capability');
+      assert.deepEqual(input.app_mentions, ['gmail']);
+      assert.equal(input.operational_app_intent, true);
+      assert.deepEqual(input.context.connected_source_intent, {
+        required: true, toolkits: ['gmail'], operation: 'composio_read',
+        request_text: 'Get more information about Rama from Gmail', origin: 'recent_source_followup',
+      });
+      return { status: 'selected', selected: 'hivemind_memory_lookup', authoritative: true,
+        receipt: { source: 'jev', probability: 0.94, margin: 0.72, requestId: 'wrong-memory-route',
+          diagnostics: { choice: 'hivemind_memory_lookup', probability: 0.94, margin: 0.72 } } };
+    },
+    modelStep: async ({ tools, messages }) => {
+      modelCalls += 1;
+      surfaces.push(tools.map(tool => tool.function.name));
+      const executor = messages.find(row => row.role === 'system' && row.content.includes('Selected executor intent:'))?.content || '';
+      assert.match(executor, /MANDATORY CONNECTED-SOURCE TASK/i);
+      assert.match(executor, /Use gmail as the live source/i);
+      assert.match(executor, /Get more information about Rama from Gmail/i);
+      assert.match(executor, /Do not answer from HIVE memory\/profile or web instead/i);
+      if (modelCalls === 1) {
+        assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_connected_task']);
+        return { message: { role: 'assistant', content: null, tool_calls: [{
+          id: 'gmail-search', type: 'function', function: { name: 'hivemind_connected_task', arguments: JSON.stringify({
+            action: 'search', toolkits: ['gmail'], queries: [{ use_case: 'Search Gmail for emails from Rama Santhoshi; return the latest matching messages with sender, subject, date, and snippet.' }],
+          }) },
+        }] } };
+      }
+      if (modelCalls === 2) {
+        assert.deepEqual(tools.map(tool => tool.function.name), ['hivemind_connected_task']);
+        return { message: { role: 'assistant', content: null, tool_calls: [{
+          id: 'gmail-execute', type: 'function', function: { name: 'hivemind_connected_task', arguments: JSON.stringify({
+            action: 'execute', tool_slug: 'GMAIL_LIST_MESSAGES', arguments: { query: 'from:ramasantoshi1206@gmail.com', max_results: 10 },
+          }) },
+        }] } };
+      }
+      throw new Error('the source-constrained task must not call HIVE or ask for another plan');
+    },
+    connectedExecutor: async args => {
+      connectedCalls.push(args.action);
+      if (args.action === 'search') return {
+        successful: true, status: 'ok', data: { results: [{ primary_tool_slugs: ['GMAIL_LIST_MESSAGES'] }] },
+        state: { sessionId: 'gmail-source-session', selectedSlugs: ['GMAIL_LIST_MESSAGES'], primarySlugs: ['GMAIL_LIST_MESSAGES'] },
+      };
+      return { successful: true, status: 'executed', data: { messages: [{ from: 'Rama Santhoshi', subject: 'Missing You', date: '2026-09-03' }] } };
+    },
+    metaExecutor: async () => { throw new Error('HIVE recall must not substitute for the requested Gmail source'); },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /Missing You/);
+      await onDelta('I checked Gmail again and found Rama’s “Missing You” email from September 3, 2026.');
+      return { content: 'I checked Gmail again and found Rama’s “Missing You” email from September 3, 2026.', usage: null };
+    },
+  };
+
+  const paused = await runUnifiedMetaAgent(common);
+  assert.equal(paused.status, 'needs_input');
+  assert.deepEqual(paused.inputRequests[0].toolkits, ['gmail']);
+  assert.equal(paused.inputRequests[0].kind, 'enable_tools');
+  assert.deepEqual(connectedCalls, []);
+  assert.equal(modelCalls, 0);
+  const planEvent = events.find(event => event.type === 'decision' && event.stage === 'capability');
+  assert.equal(planEvent.selected, null);
+  assert.equal(planEvent.reason, 'explicit_connected_source_intent_conflict');
+  assert.deepEqual(planEvent.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.94, margin: 0.72 });
+
+  const resumed = await runUnifiedMetaAgent({
+    ...common,
+    ctx: { ...common.ctx, unifiedGraphThreadId: paused.resumeState.graph_thread_id, unifiedRunId: paused.resumeState.run_id },
+    choice: { action: 'approve_tools', option_id: 'approve_tools', value: 'approve', run_id: paused.resumeState.run_id },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.match(resumed.response, /checked Gmail again/i);
+  assert.deepEqual(connectedCalls, ['search', 'execute']);
+  assert.deepEqual(surfaces, [['hivemind_connected_task'], ['hivemind_connected_task']]);
+  assert.equal(planCalls, 1, 'the same checkpoint resumes without a second JEV plan call');
+  assert.ok(!resumed.steps.some(step => step.slug === 'hivemind_meta'));
 });
 
 test('declining LangGraph tool consent checks Hivemind only and returns a friendly streamed fallback', async () => {

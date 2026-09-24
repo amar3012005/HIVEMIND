@@ -511,6 +511,30 @@ test('a deferred JEV plan persists and renders its safe fallback diagnostic', as
   assert.deepEqual(decision.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
 });
 
+test('an unknown authoritative JEV intent is rejected before tool exposure and persisted as a plan error', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let finalTools;
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about me?', useTools: true, prisma,
+    ctx: ctx(prisma, 'unknown-jev-intent'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async () => ({
+      status: 'selected', selected: 'unknown_write_everything', authoritative: true,
+      receipt: { source: 'jev', probability: 0.99, margin: 0.98 },
+    }),
+    modelStep: async ({ tools }) => {
+      finalTools = tools;
+      return { message: { role: 'assistant', content: 'I can answer from the safe context available.' } };
+    },
+  });
+  assert.deepEqual(finalTools, []);
+  assert.equal(result.run.scratch.plan.intent, 'fallback_harness');
+  assert.equal(result.run.scratch.plan.authoritative, false);
+  assert.equal(result.run.scratch.plan.reason, 'decision_intent_invalid');
+  assert.equal(events.some(event => event.type === 'tool_start'), false);
+});
+
 test('an uncertain plan cannot imply or initiate a memory save for a casual personal preference', async () => {
   const prisma = fakePrisma();
   const events = [];

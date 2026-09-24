@@ -38,7 +38,7 @@ test('configured decision JEV provider forwards its configured Cloudflare creden
   assert.equal(config.headers['cf-aig-byok-alias'], 'default');
   assert.match(config.endpoint, /custom-decision-jev\/api\/v1\/systemone$/);
 });
-import { CAPABILITY_OPTIONS } from '../../src/agent/decision-gateway.js';
+import { CAPABILITY_OPTIONS, buildJevDecisionContext } from '../../src/agent/decision-gateway.js';
 
 function provider(choice = 'option_0', probabilities = { option_0: 0.96, option_1: 0.04 }) {
   return {
@@ -86,6 +86,43 @@ test('capability taxonomy gives Jev a distinct governed meaning for every plan c
   assert.match(options.find(option => option.id === 'fallback_harness').criteria, /not permission to silently/i);
 });
 
+test('every declared JEV intent has an intentional LangGraph executor surface', () => {
+  const expected = {
+    direct_answer: [],
+    hivemind_context: ['hivemind_meta'],
+    hivemind_memory_lookup: ['hivemind_meta'],
+    hivemind_entity_lookup: ['hivemind_meta'],
+    hivemind_hyperagent_directory: ['hivemind_meta'],
+    hivemind_request: ['hivemind_meta'],
+    hivemind_meta: ['hivemind_meta'],
+    hivemind_profile_update: ['hivemind_update_profile'],
+    hivemind_save: ['hivemind_meta'],
+    composio_read: ['hivemind_connected_task'],
+    composio_action: ['hivemind_connected_task'],
+    composio_search: ['hivemind_connected_task'],
+    web_research: ['hivemind_web_search'],
+    multi_task: undefined,
+    workflow_plan: undefined,
+    fallback_harness: [],
+  };
+  assert.deepEqual(CAPABILITY_OPTIONS.map(option => option.id).sort(), Object.keys(expected).sort());
+  for (const [intent, tools] of Object.entries(expected)) {
+    assert.deepEqual(decisionGatewayToolNames(intent), tools, `${intent} must not become a dead-end route`);
+  }
+});
+
+test('JEV context carries compact save-continuation hints without exposing the prepared memory content', () => {
+  const context = buildJevDecisionContext('capability', {
+    explicit_save_language: true,
+    pending_save: { available: true, source: 'conversation', has_explicit_scope: false, content: 'private raw memory text' },
+  });
+  assert.deepEqual(context.planning_hints, {
+    explicit_save_language: true,
+    pending_save: { available: true, source: 'conversation', has_explicit_scope: false },
+  });
+  assert.equal(JSON.stringify(context).includes('private raw memory text'), false);
+});
+
 test('shadow mode records a confident decision but is not authoritative', async () => {
   const result = await decideRuntimeStage({ stage: 'capability', user_query: 'hello', actor_id: 'user-1' }, {
     env: { JEV_DECISION_GATEWAY_MODE: 'shadow', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' }, provider: provider(),
@@ -119,7 +156,7 @@ test('capability plan accepts a decisive internal read below the write threshold
   assert.equal(result.authoritative, true);
 });
 
-test('capability plan keeps memory writes at the conservative confidence threshold', async () => {
+test('capability plan admits a decisive HIVE save into its separately governed scope/write path', async () => {
   const result = await decideRuntimeStage({
     stage: 'capability', user_query: 'I love watching Messi play.', actor_id: 'user-1',
   }, {
@@ -128,9 +165,37 @@ test('capability plan keeps memory writes at the conservative confidence thresho
       return { choice: 'hivemind_save', probability: 0.71, margin: 0.5 };
     } },
   });
+  assert.equal(result.status, 'selected');
+  assert.equal(result.selected, 'hivemind_save');
+  assert.equal(result.authoritative, true);
+});
+
+test('capability plan still rejects an ambiguous implicit HIVE save', async () => {
+  const result = await decideRuntimeStage({
+    stage: 'capability', user_query: 'I love watching Messi play.', actor_id: 'user-1',
+  }, {
+    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },
+    provider: { async decideChoice() {
+      return { choice: 'hivemind_save', probability: 0.58, margin: 0.08 };
+    } },
+  });
   assert.equal(result.status, 'defer');
   assert.equal(result.authoritative, false);
   assert.equal(result.receipt.reason, 'decision_probability_below_threshold');
+});
+
+test('low-risk connected read is admitted on a decisive choice while connected writes remain conservative', async () => {
+  const env = { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' };
+  const read = await decideRuntimeStage({ stage: 'capability', user_query: 'Find the latest email.', actor_id: 'user-1' }, {
+    env,
+    provider: { async decideChoice() { return { choice: 'composio_read', probability: 0.68, margin: 0.24 }; } },
+  });
+  assert.equal(read.status, 'selected');
+  const action = await decideRuntimeStage({ stage: 'capability', user_query: 'Send the email.', actor_id: 'user-1' }, {
+    env,
+    provider: { async decideChoice() { return { choice: 'composio_action', probability: 0.68, margin: 0.24 }; } },
+  });
+  assert.equal(action.status, 'defer');
 });
 
 test('active mode reviews schema-bound connected-app arguments after selection', async () => {

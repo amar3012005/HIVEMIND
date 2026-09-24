@@ -58,7 +58,20 @@ export function buildJevDecisionContext(stage, context = null) {
     // source-grounded draft from the preceding assistant turn.  Without this
     // bounded signal, JEV correctly sees an underspecified request and may
     // select fallback_harness even though a governed save is ready.
-    planning_hints: boundedProjection(source.planning_hints || {}, { maxChars: 1200, maxDepth: 3, maxItems: 12 }),
+    planning_hints: boundedProjection({
+      ...(isObject(source.planning_hints) ? source.planning_hints : {}),
+      ...(typeof source.explicit_save_language === 'boolean'
+        ? { explicit_save_language: source.explicit_save_language } : {}),
+      ...(isObject(source.pending_save) ? {
+        pending_save: {
+          available: source.pending_save.available === true,
+          ...(source.pending_save.available === true ? {
+            source: clip(source.pending_save.source, 80) || 'conversation',
+            has_explicit_scope: source.pending_save.has_explicit_scope === true,
+          } : {}),
+        },
+      } : {}),
+    }, { maxChars: 1200, maxDepth: 3, maxItems: 12 }),
     workflow: boundedProjection({
       intent: source.current_intent || workflow.intent || null,
       phase: source.current_phase || workflow.phase || null,

@@ -504,7 +504,7 @@ test('a selected memory lookup cannot synthesize before a real recall receipt', 
       modelTurns += 1;
       assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta']);
       if (modelTurns === 1) return { message: { role: 'assistant', content: 'There is nothing saved about Rama.' } };
-      assert.match(messages.at(-1).content, /requires a successful recall receipt/i);
+      assert.match(messages.at(-1).content, /requires a successful HIVE-MIND recall receipt/i);
       return { message: call('hivemind_meta', { operation: 'recall', recall: { query: 'What do you know about Rama?', mode: 'fact', limit: 8 } }, 'required-rama-recall') };
     },
     metaExecutor: async () => ({ successful: true, data: { memories: [{ id: 'rama-1', title: 'Rama Santhoshi', content: 'A saved correspondence record identifies Rama Santhoshi.' }] } }),
@@ -674,6 +674,70 @@ test('a deferred JEV plan re-plans natively, recalls Rama, and streams from the 
   assert.deepEqual(decision.diagnostics, { choice: 'hivemind_memory_lookup', probability: 0.46, margin: 0.03 });
 });
 
+test('a low-confidence history query cannot finish with an ungrounded native direct answer', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let modelTurns = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'What do u know about Singulance?', useTools: false, prisma,
+    ctx: ctx(prisma, 'fallback-singulance-recall'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async () => ({ status: 'defer', selected: null, authoritative: false,
+      receipt: { source: 'fallback', reason: 'decision_probability_below_threshold', diagnostics: { choice: 'hivemind_memory_lookup', probability: 0.44, margin: 0.02 } } }),
+    modelStep: async ({ messages, tools }) => {
+      modelTurns += 1;
+      assert.deepEqual(tools.map(row => row.function.name), ['hivemind_meta']);
+      if (modelTurns === 1) {
+        return { message: { role: 'assistant', content: 'Singulance is based in Hannover and focuses on regulated AI.' } };
+      }
+      assert.match(messages.at(-1).content, /successful HIVE-MIND recall receipt/i);
+      return { message: call('hivemind_meta', { operation: 'recall', recall: {
+        query: 'What do u know about Singulance?', entities: ['Singulance'], entity_filter_mode: 'should', mode: 'fact', limit: 8,
+      } }, 'fallback-singulance-recall-call') };
+    },
+    metaExecutor: async args => {
+      assert.equal(args.operation, 'recall');
+      assert.equal(args.recall.query, 'What do u know about Singulance?');
+      return { successful: true, data: { memories: [{ id: 'singulance-memory-1', title: 'SINGULANCE company profile', content: 'SINGULANCE is a GDPR-native AI operating layer for regulated European organizations, headquartered in Hannover.' }] } };
+    },
+    finalStream: async ({ messages, onDelta }) => {
+      assert.match(messages.at(-1).content, /SINGULANCE is a GDPR-native AI operating layer/);
+      await onDelta('I found a saved company note: SINGULANCE is a GDPR-native AI operating layer ');
+      await onDelta('for regulated European organizations, headquartered in Hannover.');
+      return { ok: true, content: 'I found a saved company note: SINGULANCE is a GDPR-native AI operating layer for regulated European organizations, headquartered in Hannover.' };
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(modelTurns, 2);
+  assert.match(result.response, /saved company note/i);
+  assert.doesNotMatch(result.response, /focuses on regulated AI/);
+  assert.ok(events.some(event => event.type === 'tool_result' && event.name === 'hivemind_meta' && event.status === 'completed'));
+  assert.equal(events.filter(event => event.type === 'answer_delta').length, 2);
+  assert.equal(events.find(event => event.type === 'decision' && event.stage === 'capability').selected, null);
+});
+
+test('a fallback history answer fails closed when the native planner repeatedly ignores recall', async () => {
+  const prisma = fakePrisma();
+  const events = [];
+  let modelTurns = 0;
+  const result = await runUnifiedMetaAgent({
+    message: 'What do you know about Singulance?', useTools: false, prisma,
+    ctx: ctx(prisma, 'fallback-recall-fail-closed'), checkpointer: new MemorySaver(), composio: {},
+    onEvent: event => events.push(event),
+    decisionStage: async () => ({ status: 'defer', selected: null, authoritative: false,
+      receipt: { source: 'fallback', reason: 'decision_probability_below_threshold' } }),
+    modelStep: async () => {
+      modelTurns += 1;
+      return { message: { role: 'assistant', content: 'Unsupported company history that must not be shown.' } };
+    },
+  });
+  assert.equal(result.status, 'error');
+  assert.equal(modelTurns, 4);
+  assert.match(result.response, /couldn't complete the HIVE-MIND recall/i);
+  assert.doesNotMatch(result.response, /Unsupported company history/);
+  assert.equal(events.some(event => event.type === 'answer_delta'), false);
+});
+
 test('an unknown authoritative JEV intent is rejected and handed to the native fallback planner', async () => {
   const prisma = fakePrisma();
   const events = [];
@@ -720,7 +784,7 @@ test('an uncertain plan cannot imply or initiate a memory save for a casual pers
   assert.match(result.response, /what do you enjoy most/i);
   const fallbackInstruction = receivedMessages.find(row => row.role === 'system' && row.content.includes('Selected executor intent: fallback_harness'))?.content || '';
   assert.match(fallbackInstruction, /LangGraph-native tool planner/i);
-  assert.match(fallbackInstruction, /named person.*operation="recall"/i);
+  assert.match(fallbackInstruction, /questions asking what HIVE-MIND knows.*operation="recall"/i);
   assert.equal(events.some(event => event.type === 'tool_start' && /hivemind_(?:meta|save_memory)/.test(event.name || '')), false);
 });
 

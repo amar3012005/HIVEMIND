@@ -192,6 +192,26 @@ function decisionSummaryRequest(message) {
     && /\b(?:summari[sz]e|recent|latest|list|show|what)\b/.test(text);
 }
 
+// JEV uncertainty must not lower the evidence bar for requests that plainly
+// ask what HIVE-MIND remembers. This is a generic fallback safety boundary,
+// not a second intent router: the LangGraph-native tool planner still chooses
+// the operation, while this predicate only requires a recall receipt before
+// the graph accepts a final answer. Keep it limited to memory/history wording
+// so greetings and ordinary general-knowledge questions remain direct.
+function fallbackRequiresMemoryRecall(message) {
+  const text = String(message || '').normalize('NFKC').toLowerCase().replace(/[’‘]/g, "'");
+  return [
+    /\b(?:what|who|when|where|which|how)\s+(?:do|does|did|have|has|had|is|are|was|were)?\s*(?:you|u|we|i|our|my|the company)?\s*(?:know|remember|have on file|have saved|record|say|said|decide|decided|work|worked|discuss|discussed)\b/,
+    /\b(?:what do we know|what do you know|what do u know|what do i know|what is on file|what have we saved|what have i been working on|what have we been working on)\b/,
+    /\bwhat else\b[\s\S]{0,180}\b(?:say|says|said|mention|mentions|mentioned|decide|decided|remember|record|topic)\b/,
+    /\b(?:latest|recent|last)\s+(?:recorded\s+)?(?:decision|decisions|work|project|projects|discussion|meeting|memory|memories)\b/,
+    /\b(?:saved|stored|hive[-\s]?mind)\s+(?:memory|memories|records|history)\b/,
+    /\b(?:was weißt du|was wissen wir|was habe ich|was haben wir)\b[\s\S]{0,100}\b(?:über|gespeichert|besprochen|entschieden|gearbeitet)\b/,
+    /\b(?:qué sabes|qué sabemos|qué he estado|qué hemos estado)\b[\s\S]{0,100}\b(?:sobre|guardado|decidido|trabajado)\b/,
+    /\b(?:que sais-tu|que savons-nous|qu'ai-je fait|qu'avons-nous fait)\b[\s\S]{0,100}\b(?:sur|enregistré|décidé|travaillé)\b/,
+  ].some(pattern => pattern.test(text));
+}
+
 // This is deliberately local to the LangGraph canary. The shared persona is
 // also used by the stable V2 path, while this contract gives the graph's
 // direct-answer and receipt synthesis nodes a more present, colleague-like
@@ -239,7 +259,7 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
     web_research: 'Use governed web research for current public information. Cite the retrieved evidence and distinguish it from internal HIVE memory.',
     multi_task: 'Preserve every requested outcome as one governed workflow. First identify prerequisites, then execute reads/research before any write that depends on their result. For example, if the user asks to retrieve, search, read, or collect information and save/send/update it, first obtain the governed source receipt, then create the source-grounded payload from that receipt, request any required scope or approval, and execute the write. Do not stop after the first outcome; do not save a placeholder, prior answer, or invented summary before the requested evidence exists. Every read, write, approval, and final claim must have its own receipt.',
     workflow_plan: 'Return an actionable, bounded workflow plan. Do not execute side effects or claim external results.',
-    fallback_harness: 'JEV could not confidently select one route. Continue this same turn with the LangGraph-native tool planner: use the original request, authenticated profile, recent turns, completed receipts, and the available governed tool schemas to choose the smallest correct next operation. For questions about what HIVE-MIND knows about a named person, organization, decision, or past work, make one direct hivemind_meta operation="recall" call with the complete question as recall.query and the exact named subject in recall.entities with entity_filter_mode="should"; do not preflight operation="entities", answer from profile alone, or ask who/what the named subject is before trying recall. If recall returns no evidence, say so without inventing facts. Never repeat an operation already proven by a successful receipt. Preserve the user\'s requested outcome; all writes still require explicit intent, valid scope, and the normal graph checkpoint, and all connected-app authorization/approval gates remain in force. If no available tool is relevant, answer warmly from supported context and be clear about what evidence is missing.',
+    fallback_harness: 'JEV could not confidently select one route. Continue this same turn with the LangGraph-native tool planner: use the original request, authenticated profile, recent turns, completed receipts, and the available governed tool schemas to choose the smallest correct next operation. Treat questions asking what HIVE-MIND knows or remembers, what is on file, what was decided/said/worked on, the latest recorded history, and contextual “what else” follow-ups as retrieval requests: call hivemind_meta operation="recall" once with the complete question as recall.query. Preserve any named subject in recall.entities with entity_filter_mode="should"; entity_ids are not required. Do not preflight operation="entities", answer a history question from profile alone, or ask the user to repeat context already present in recent turns. A history answer is not allowed until the graph has a successful recall receipt; if recall returns no evidence, say so without inventing facts. Never repeat an operation already proven by a successful receipt. Preserve the user\'s requested outcome; all writes still require explicit intent, valid scope, and the normal graph checkpoint, and all connected-app authorization/approval gates remain in force. If no available tool is relevant, answer warmly from supported context and be clear about what evidence is missing.',
   };
   const prepared = preparedSave ? `\n\nPrepared prior-turn evidence for this save (use only what is supported; improve the generic title and extract supported entities/dates/source references):\n${jsonText(preparedSave).slice(0, 10000)}` : '';
   return `Selected executor intent: ${intent || 'fallback_harness'}.\n${contracts[intent] || contracts.fallback_harness}${prepared}`;
@@ -1335,7 +1355,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const transitionIntent = state.workflowTransition?.intent || null;
     const requiredMetaOperation = state.plan?.authoritative === true
-      ? REQUIRED_META_READS[state.plan.intent] || null : null;
+      ? REQUIRED_META_READS[state.plan.intent] || null
+      : (fallbackRequiresMemoryRecall(message) ? 'recall' : null);
     const requiredMetaReadMissing = requiredMetaOperation
       ? !hasMetaOperationReceipt(state.receipts, requiredMetaOperation) : false;
     const continueWorkflow = transitionIntent && transitionIntent !== 'synthesize' && !requiredMetaReadMissing;
@@ -1374,7 +1395,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       { role: 'system', content: executorInstruction(selectedIntent, { preparedSave: state.pendingSaveDraft }) },
     ];
     const repair = state.messages.at(-1)?.role === 'system'
-      && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present|HIVE-MIND intent requires a successful .* receipt)/i.test(state.messages.at(-1)?.content || '')
+      && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present|(?:HIVE-MIND intent|this request) requires a successful HIVE-MIND .* receipt)/i.test(state.messages.at(-1)?.content || '')
       ? state.messages.at(-1) : null;
     const modelMessages = finalEvidenceReady ? [
       { role: 'system', content: `${ORGANIZATIONAL_BRAIN_PERSONA}\n\n${LANGGRAPH_LIVING_BRAIN_VOICE}\n\nSynthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts. Keep the answer in the living-company-brain voice above: speak as the informed internal colleague, not as a generic chatbot or a tool report.${state.toolsDeclined ? ' The user declined connected tools. Do not imply that an external app was searched. Use the Hivemind recall receipt if it contains relevant stored evidence; if it does not, say warmly and briefly that you could not check the live connected app without permission.' : ''}${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
@@ -1446,7 +1467,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         messages: [...messages, { role: 'system', content: connectedDiscoveryMissing
           ? `The original request names connected toolkit(s) (${state.requestedToolkits.join(', ')}), but no connected-app discovery receipt exists. Call hivemind_connected_task with action search now. Do not answer from hivemind_meta or claim that external access is unavailable.`
           : requiredMetaReadMissing
-          ? `The selected HIVE-MIND intent requires a successful ${requiredMetaOperation} receipt before answering. No ${requiredMetaOperation} receipt exists yet. Call hivemind_meta with operation="${requiredMetaOperation}" now; for recall, pass a concrete non-empty query that preserves the named subject and the user's question. Do not answer from profile or guess.`
+          ? `This request requires a successful HIVE-MIND ${requiredMetaOperation} receipt before answering. No ${requiredMetaOperation} receipt exists yet. Continue the LangGraph-native tool plan by calling hivemind_meta with operation="${requiredMetaOperation}" now; for recall, pass the complete original question as a concrete non-empty recall.query and include any exact named subject in recall.entities with entity_filter_mode="should". Do not answer from profile alone, ask for optional entity IDs, or guess.`
           : state.selectedSlugs.length
           ? `Do not ask permission for a read or describe what you could do. Continue the connected workflow now: load schemas for the selected slugs (${state.selectedSlugs.join(', ')}), execute the required read, then answer from its receipt.`
           : 'Your proposed answer did not present the successful receipt evidence. Continue with the available gateway tools, then answer the original request directly from the receipts.' }],

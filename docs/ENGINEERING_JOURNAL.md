@@ -2440,3 +2440,41 @@ git diff --check: passed (line-ending warnings only)
   in the permanent integration checkout without disturbing its dirty user files;
   then build a uniquely tagged image and run authenticated upload-to-recall
   acceptance against the merged local stack.
+
+## 2026-09-24 UTC — isolated candidate container and live-stack wiring audit
+
+- State: Candidate runtime smoke passed; authenticated shared-stack acceptance
+  is still not run.
+- Candidate branch/worktree: `codex/hm-understand-singulance-local`,
+  `/Users/amar/HIVE-MIND-hm-understand-singulance-local`, pushed through
+  journal SHA `eeebbf56225366bf95816972381e2e4deae30b3f`.
+- Verification:
+  - `pytest -q hm-understand/tests` using the compatible local Python 3.11 venv
+    -> 23 passed, one preexisting Starlette deprecation warning.
+  - A disposable, uniquely named container on `hivemind-network` bind-mounted
+    this branch's `hm-understand/app` over the cached dependency image; `/health`
+    returned 200 at pipeline `0.2.0` and `/v1/capabilities` returned the pinned
+    GLiNER ID/revision with `loaded=false`. The container was stopped and
+    removed. This verified application startup, not inference or image rebuild.
+- Resource boundary: Docker reported only 563,344 kB `MemAvailable` in its
+  7.65 GiB VM. No model inference was started in that VM to avoid repeating the
+  known cold-load OOM condition. Existing model behavior remains covered by
+  host-local tests/canaries recorded above.
+- Live-stack audit: `hivemind-core` is still the prior immutable image
+  `hivemind/hm-hyper-contract-api:stt-byok-bebf3469d2ad`; its runtime environment
+  has `ENABLE_DOCUMENT_FIRST_INGEST=true` but neither `KB_EXTRACT_URL` nor
+  `HM_UNDERSTAND_URL`. Its Docker Compose source is
+  `/Users/amar/HIVE-MIND-singulance-chat-local/infra/docker-compose.hivemind-chat.yml`,
+  a separate dirty checkout with unrelated Core, schema, frontend, and compose
+  edits. The designated permanent integration worktree also remains dirty in
+  unrelated schema/test files. Neither checkout was modified or rebuilt.
+- Decision: do not claim the local app is using the candidate pipeline yet. The
+  branch's own compose contract wires both parser and analyzer, but the running
+  shared Core predates that wiring and must only be replaced from the clean
+  permanent integration worktree after production/local history reconciliation.
+- Accepted release: none. No shared service, persistent data, or production
+  state was changed.
+- Next: continue integration readiness work without editing dirty shared
+  checkouts; obtain a clean permanent integration state, merge current
+  `origin/singulance-main` before this session branch, then run authenticated
+  upload-to-recall canaries against only the local stack.

@@ -18,6 +18,7 @@ import {
 import { decideRuntimeStage, decisionGatewayToolNames } from './decision-gateway-service.js';
 import { CAPABILITY_OPTIONS } from './decision-gateway.js';
 import { normalizeSearchableFollowUps } from './chat-synthesis-prompt.js';
+import { destinationAppsForEnableTools } from './chat-enable-tools-gate.js';
 
 export const UNIFIED_META_HARNESS_VERSION = 'langgraph-meta-loop-v2';
 const MAX_STEPS = 12;
@@ -78,7 +79,7 @@ const CONNECTED_INTENTS = new Set(['composio_search', 'composio_read', 'composio
 const connectedIntent = intent => CONNECTED_INTENTS.has(String(intent || ''));
 const connectedToolsEnabled = (state, requested) => requested === true || state?.toolsApproved === true;
 
-function toolConsentRequest(locale = 'en', intent = null) {
+function toolConsentRequest(locale = 'en', intent = null, toolkits = []) {
   const language = String(locale || 'en').toLowerCase().split(/[-_]/)[0];
   const messages = {
     en: 'Hivemind wants to use connected tools to complete this request. Approve to continue this same turn. This enables tools for this request only; external changes still need their own approval.',
@@ -92,10 +93,12 @@ function toolConsentRequest(locale = 'en', intent = null) {
     fr: ['Approuver et continuer', 'Refuser — utiliser Hivemind uniquement'],
     es: ['Aprobar y continuar', 'Rechazar — usar solo Hivemind'],
   }[language] || ['Approve and continue', 'Disapprove — use Hivemind only'];
+  const sourceLabel = [...new Set((toolkits || []).map(value => String(value || '').trim()).filter(Boolean))].join(', ');
   return {
     kind: 'enable_tools', field: 'use_tools', blocking: true,
     intent: connectedIntent(intent) ? intent : null,
-    prompt: messages[language] || messages.en,
+    ...(sourceLabel ? { toolkits: [...new Set((toolkits || []).map(value => String(value || '').trim()).filter(Boolean))] } : {}),
+    prompt: `${messages[language] || messages.en}${sourceLabel ? ` Requested source: ${sourceLabel}.` : ''}`,
     options: [
       { id: 'approve_tools', value: 'approve', label: labels[0] },
       { id: 'decline_tools', value: 'decline', label: labels[1] },
@@ -237,12 +240,12 @@ function safeHistory(history = [], limit = 3) {
     .slice(-limit * 2).map(row => ({ role: row.role, content: compactText(row.content, 1400) }));
 }
 
-const PLAN_SYSTEM_CONTRACT = 'Select exactly one intent. The graph, not the decision model, owns authorization, schemas, execution, approvals, receipts, and final synthesis. Do not infer facts or side effects; use only the request, profile, recent turns, and completed governed receipts.';
+const PLAN_SYSTEM_CONTRACT = 'Select exactly one intent for the user’s requested outcome. The graph, not the decision model, owns authorization, schemas, execution, approvals, receipts, and final synthesis. Do not infer facts or side effects; use only the request, profile, recent turns, and completed governed receipts. Routing precedence: (1) when the user explicitly asks to read, search, or act in a named connected app, that app is the required evidence/action source; never substitute HIVE memory, profile context, or web results. A concrete read is composio_read even though its executor must first discover a tool and load its schema; composio_search is only for an app mention with no clear operation; composio_action is for an explicitly requested external write. (2) Choose multi_task only when the user asks for multiple outcomes, not for the internal discovery/schema/execute steps of one connected-app task. (3) Use hivemind_memory_lookup only for saved HIVE memories, not live Gmail/other connected-app facts. (4) fallback_harness is a nonterminal native continuation when JEV is unavailable, uncertain, or conflicts with a clear source constraint; it must continue the original task in this graph.';
 
 const MEMORY_CAPSULE_CONTRACT = 'Create one compact, source-grounded memory capsule—not a shallow summary. title: a specific searchable header naming the main subject, event, or decision; never “Saved memory”. content: self-contained material facts, uncertainty, and relationships. tags: stable topic/entity labels. entities: each supported person, organization, product, place, or identifier. dates: explicit dates/times only. source_refs: the prior-turn evidence or governed receipt that supports it. Include only supported facts; never invent relationships. Exclude OTPs, passwords, reset links, authentication alerts, and credentials. Return title, content, tags, entities, dates, source_refs, and scope.';
 const MEMORY_TYPES = new Set(['fact', 'decision', 'preference', 'procedure', 'experience', 'synthesis']);
 
-function executorInstruction(intent, { preparedSave = null } = {}) {
+function executorInstruction(intent, { preparedSave = null, connectedSourceIntent = null, connectedSourceRequired = false } = {}) {
   const contracts = {
     direct_answer: 'Answer directly from the supplied context. Do not call a tool.',
     hivemind_context: 'Call the HIVE meta tool exactly once with operation="context" to retrieve the authenticated compact profile and organization context. Do not perform a write. Ground the final answer only in that receipt.',
@@ -262,7 +265,10 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
     fallback_harness: 'JEV could not confidently select one route. Continue this same turn with the LangGraph-native tool planner: use the original request, authenticated profile, recent turns, completed receipts, and the available governed tool schemas to choose the smallest correct next operation. Treat questions asking what HIVE-MIND knows or remembers, what is on file, what was decided/said/worked on, the latest recorded history, and contextual “what else” follow-ups as retrieval requests: call hivemind_meta operation="recall" once with the complete question as recall.query. Preserve any named subject in recall.entities with entity_filter_mode="should"; entity_ids are not required. Do not preflight operation="entities", answer a history question from profile alone, or ask the user to repeat context already present in recent turns. A history answer is not allowed until the graph has a successful recall receipt; if recall returns no evidence, say so without inventing facts. Never repeat an operation already proven by a successful receipt. Preserve the user\'s requested outcome; all writes still require explicit intent, valid scope, and the normal graph checkpoint, and all connected-app authorization/approval gates remain in force. If no available tool is relevant, answer warmly from supported context and be clear about what evidence is missing.',
   };
   const prepared = preparedSave ? `\n\nPrepared prior-turn evidence for this save (use only what is supported; improve the generic title and extract supported entities/dates/source references):\n${jsonText(preparedSave).slice(0, 10000)}` : '';
-  return `Selected executor intent: ${intent || 'fallback_harness'}.\n${contracts[intent] || contracts.fallback_harness}${prepared}`;
+  const sourceConstraint = connectedSourceRequired && connectedSourceIntent
+    ? `\n\nMANDATORY CONNECTED-SOURCE TASK: Use ${connectedSourceIntent.toolkits.join(', ')} as the live source. The source request is: “${compactText(connectedSourceIntent.request_text, 700)}”. This is a ${connectedSourceIntent.operation === 'composio_action' ? 'write/action' : 'read'} request. Do not answer from HIVE memory/profile or web instead. Complete the connected-app search → selected schema → execution → successful receipt sequence before synthesis. A discovery or schema receipt alone is not task completion. Preserve any additional outcomes in the original request after this source step.`
+    : '';
+  return `Selected executor intent: ${intent || 'fallback_harness'}.\n${contracts[intent] || contracts.fallback_harness}${sourceConstraint}${prepared}`;
 }
 
 function toolkitMentions(message, accounts = []) {
@@ -273,6 +279,42 @@ function toolkitMentions(message, accounts = []) {
       const alias = toolkit.replace(/[-_]+/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
       return alias && (` ${request} `).includes(` ${alias} `);
     });
+}
+
+function connectedOperation(message) {
+  const text = String(message || '').toLowerCase();
+  if (/\b(?:send|reply|forward|draft|create|update|edit|delete|remove|archive|label|publish|post|schedule)\b/.test(text)) return 'composio_action';
+  if (/\b(?:email|emails|message|messages|inbox|thread|threads|file|files|document|documents|event|events|calendar|contact|contacts|issue|issues|pull request|repository|repo)\b/.test(text)
+    || /\b(?:latest|recent|last|unread|search|find|check|look\s*(?:up|for)?|get|fetch|read|retrieve|pull|show|open|list|scan|say|contain|include|mention)\b/.test(text)
+    || /\b(?:from|in|on)\s+(?:gmail|outlook|google\s+drive|drive|slack|github)\b/.test(text)) return 'composio_read';
+  return 'composio_search';
+}
+
+function isOperationalConnectedRequest(message, toolkits) {
+  if (!toolkits.length) return false;
+  const text = String(message || '').trim();
+  if (!text) return false;
+  const explanatoryOnly = /\b(?:what\s+(?:is|are|does|do)|how\s+(?:does|do|is|are)|explain|describe|documentation|features?|capabilities?|integrates?)\b/i.test(text)
+    && !/\b(?:latest|recent|last|unread|inbox|email|emails|messages?|files?|documents?|events?|calendar|contacts?|issues?|pull\s+requests?)\b/i.test(text)
+    && !/\b(?:search|find|check|look\s*(?:up|for)?|get|fetch|read|retrieve|pull|show|open|list|send|reply|draft|create|update|delete)\b/i.test(text);
+  return !explanatoryOnly && connectedOperation(text) !== 'composio_search';
+}
+
+function connectedSourceIntentForTurn(message, history = []) {
+  const directApps = destinationAppsForEnableTools(message);
+  if (isOperationalConnectedRequest(message, directApps)) {
+    return { required: true, toolkits: directApps, operation: connectedOperation(message), request_text: compactText(message, 700), origin: 'current_request' };
+  }
+  // Short retries refer to the immediately preceding user source task only.
+  // Do not let an older app mention silently constrain an unrelated new turn.
+  const followUp = /^(?:please\s+)?(?:search|look|check|try|run|do)\s+again[.!?]*$|^(?:continue|try\s+that\s+again|look\s+again)[.!?]*$/i.test(compactText(message, 180));
+  if (!followUp) return null;
+  const priorUser = [...(Array.isArray(history) ? history : [])].reverse().find(row => row?.role === 'user' && row?.content);
+  if (!priorUser) return null;
+  const priorText = String(priorUser.content);
+  const apps = destinationAppsForEnableTools(priorText);
+  if (!isOperationalConnectedRequest(priorText, apps)) return null;
+  return { required: true, toolkits: apps, operation: connectedOperation(priorText), request_text: compactText(priorText, 700), origin: 'recent_source_followup' };
 }
 
 function publicToolResult(value) {
@@ -1188,14 +1230,23 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     };
     let profile = '';
     try { profile = await getSharedProfileStore(prisma).buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null); } catch {}
-    let requestedToolkits = [];
+    let connectedSourceIntent = connectedSourceIntentForTurn(message, ctx.conversationHistory);
+    let requestedToolkits = connectedSourceIntent?.toolkits || [];
     if (useTools && typeof composio?.listConnectedAccounts === 'function') {
       const preferredScope = ctx.composioConnectionScope || ctx.connectionScope || 'user';
       const [userAccounts, orgAccounts] = await Promise.all([
         composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: preferredScope }).catch(() => []),
         preferredScope === 'org' ? Promise.resolve([]) : composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' }).catch(() => []),
       ]);
-      requestedToolkits = toolkitMentions(message, [...userAccounts, ...orgAccounts]);
+      const accountMentions = toolkitMentions(message, [...userAccounts, ...orgAccounts]);
+      if (isOperationalConnectedRequest(message, accountMentions)) {
+        requestedToolkits = [...new Set([...requestedToolkits, ...accountMentions])];
+      }
+      // Preserve legacy implicit toolkit detection, but only make it a hard
+      // source obligation for an operational request rather than an app mention.
+      if (!connectedSourceIntent && isOperationalConnectedRequest(message, accountMentions)) {
+        connectedSourceIntent = { required: true, toolkits: accountMentions, operation: connectedOperation(message), request_text: compactText(message, 700), origin: 'current_request' };
+      }
     }
     const locale = ctx.language || 'en';
     // The direct request and the short follow-up form both feed the same
@@ -1206,7 +1257,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const saveDraft = explicitSave ? explicitSaveDraft(message, ctx.conversationHistory) : null;
     const messages = [
       { role: 'system', content: systemPrompt({ useTools, locale }) },
-      ...(requestedToolkits.length ? [{ role: 'system', content: `The request explicitly names authenticated connected-app toolkit(s): ${requestedToolkits.join(', ')}. External app facts cannot be answered by hivemind_meta. Start or continue hivemind_connected_task search, then follow its connection, schema, and execution receipts before answering.` }] : []),
+      ...(connectedSourceIntent ? [{ role: 'system', content: `Connected-source constraint (${connectedSourceIntent.origin}): the user requires ${connectedSourceIntent.toolkits.join(', ')} for this live task: “${connectedSourceIntent.request_text}”. HIVE memory/profile cannot substitute for this source. Use the connected-app gateway and require an execution receipt before claiming completion.` }] : []),
       ...(profile ? [{ role: 'system', content: `Authenticated compact profile:\n${compactText(profile, 1800)}` }] : []),
       // The plan receives a stable five-turn window. Tool-specific guidance is
       // deliberately withheld until the selected executor node below.
@@ -1221,6 +1272,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         system_policy: PLAN_SYSTEM_CONTRACT,
         recent_turns: safeHistory(ctx.conversationHistory, 5),
         explicit_save_language: explicitSave,
+        connected_source_intent: connectedSourceIntent,
         // Keep the full capsule out of JEV, but tell the plan node that this
         // turn has a grounded, graph-prepared save payload from the current
         // message or preceding assistant evidence.  This lets JEV classify a
@@ -1273,15 +1325,27 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     }
     const selectedIntent = String(decision.selected || '');
     const knownIntent = CAPABILITY_OPTIONS.some(option => option.id === selectedIntent);
-    const authoritative = decision.status === 'selected' && decision.authoritative === true && knownIntent;
+    const jevAuthoritative = decision.status === 'selected' && decision.authoritative === true && knownIntent;
+    const connectedSourceIntent = state.context?.connected_source_intent || null;
+    const sourceOperation = connectedSourceIntent?.operation;
+    const sourceRouteCompatible = !connectedSourceIntent?.required
+      || selectedIntent === 'multi_task'
+      || (sourceOperation === 'composio_read' && ['composio_read', 'composio_search'].includes(selectedIntent))
+      || (sourceOperation === 'composio_action' && selectedIntent === 'composio_action')
+      || (sourceOperation === 'composio_search' && selectedIntent === 'composio_search');
+    const sourceConflict = jevAuthoritative && !sourceRouteCompatible;
+    const authoritative = jevAuthoritative && !sourceConflict;
     const plan = {
       intent: authoritative ? selectedIntent : 'fallback_harness',
       authoritative,
+      ...(selectedIntent ? { jev_intent: selectedIntent } : {}),
       source: authoritative ? (decision.receipt?.source || 'fallback') : 'fallback',
       probability: decision.receipt?.probability ?? null,
       margin: decision.receipt?.margin ?? null,
       request_id: decision.receipt?.requestId || null,
-      reason: decision.selected && !knownIntent
+      reason: sourceConflict
+        ? 'explicit_connected_source_intent_conflict'
+        : decision.selected && !knownIntent
         ? 'decision_intent_invalid'
         : (decision.receipt?.reason || decision.reason || null),
       diagnostics: decisionDiagnosticSummary(decision.receipt),
@@ -1317,11 +1381,13 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
         result: outputShape({ ...state, plan, timings }, MISSING_SAVE_RESPONSE, 'needs_input'),
       };
     }
-    // JEV—not app-name heuristics or a second chat model—decides that a
-    // connected capability is needed. If the user-level tools latch is off,
-    // pause this same graph thread before exposing or executing any connector.
-    if (plan.authoritative && connectedIntent(plan.intent) && !connectedToolsEnabled(state, useTools)) {
-      const request = toolConsentRequest(ctx.language, plan.intent);
+    // Explicit live-source requests are a graph-level evidence constraint.
+    // They survive JEV uncertainty or a contradictory route, and consent is
+    // still required before the connector is exposed or executed.
+    const connectedSourceRequired = Boolean(connectedSourceIntent?.required);
+    if ((connectedSourceRequired || (plan.authoritative && connectedIntent(plan.intent)))
+      && !connectedToolsEnabled(state, useTools)) {
+      const request = toolConsentRequest(ctx.language, plan.intent, connectedSourceIntent?.toolkits || []);
       onEvent({ type: 'tool_progress', name: 'connected_apps', status: 'approval_required',
         summary: 'Awaiting permission to use connected tools', run_id: state.runId });
       return {
@@ -1369,6 +1435,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // receipt. The turn-local plan remains authoritative for that obligation.
     const selectedIntent = requiredMetaReadMissing ? state.plan.intent : transitionIntent || state.plan?.intent;
     const toolsEnabled = connectedToolsEnabled(state, useTools);
+    const connectedSourceIntent = state.context?.connected_source_intent || null;
+    const connectedSourceRequired = Boolean(connectedSourceIntent?.required);
     const providerEvidenceReady = toolsEnabled && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
     // Native HIVE reads are already governed and projected before entering the
@@ -1392,7 +1460,11 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       : state.receipts.filter(substantiveMetaReadReceipt);
     const executionMessages = [
       ...(continueWorkflow ? [{ role: 'system', content: `The bounded JEV workflow transition selected ${selectedIntent}. This is the next required outcome of the original request. Completed governed receipts are authoritative evidence; do not repeat their retrieval or synthesize early.` }] : []),
-      { role: 'system', content: executorInstruction(selectedIntent, { preparedSave: state.pendingSaveDraft }) },
+      { role: 'system', content: executorInstruction(selectedIntent, {
+        preparedSave: state.pendingSaveDraft,
+        connectedSourceIntent,
+        connectedSourceRequired: connectedSourceRequired && !providerEvidenceReady,
+      }) },
     ];
     const repair = state.messages.at(-1)?.role === 'system'
       && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present|(?:HIVE-MIND intent|this request) requires a successful HIVE-MIND .* receipt)/i.test(state.messages.at(-1)?.content || '')
@@ -1448,6 +1520,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const legacyGatewayOff = !state.plan?.authoritative && state.plan?.reason === 'decision_gateway_off';
     const tools = finalEvidenceReady ? []
       : state.toolsDeclined ? unifiedMetaTools({ useTools: false })
+        : connectedSourceRequired && toolsEnabled && !providerEvidenceReady
+          ? unifiedMetaTools({ useTools: true }).filter(tool => tool.function.name === 'hivemind_connected_task')
         : legacyGatewayOff ? unifiedMetaTools({ useTools: toolsEnabled })
           : decisionToolSurface(selectedIntent || 'fallback_harness', toolsEnabled);
     const turn = await callModel({

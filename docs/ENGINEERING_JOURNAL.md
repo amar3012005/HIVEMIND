@@ -2396,3 +2396,47 @@ git diff --check: passed (line-ending warnings only)
 - Decision: do not attempt the production-to-local integration in this task
   worktree. It needs an operator-led conflict reconciliation in the designated
   permanent integration checkout while preserving its unrelated dirty edits.
+
+## 2026-09-24 UTC — qualifier-aware local analysis candidate
+
+- State: Committed and pushed candidate; not integrated into shared local
+  containers.
+- Branch/worktree: `codex/hm-understand-singulance-local`,
+  `/Users/amar/HIVE-MIND-hm-understand-singulance-local`.
+- Code SHA: `cda233aecb5b293b5af7e9ca74866053f4fe226e`.
+- Change: hm-understand emits explicit `negated`, `conditional`, and `reported`
+  qualifiers with each review-required candidate; language-specific cues cover
+  English, German, and Spanish, with a conservative common-cue fallback.
+  Qualified statements become `uncertain`. Core's assisted projection rejects
+  any candidate with qualifiers even if its kind is incorrectly marked certain.
+  Shadow storage records qualifier counts only, never the text/evidence.
+  Pipeline/service version advanced to `0.2.0` while request schema stays v1.
+- Verification:
+  - From `hm-understand/`,
+    `/Users/amar/HIVE-MIND-hm-understand-preview-local/hm-understand/.venv/bin/python -m pytest -q tests`
+    -> 23 passed, one preexisting Starlette deprecation warning.
+  - `uv lock --check --offline --project hm-understand` -> resolved 57 packages;
+    lockfile is consistent.
+  - From repository root, create a temporary dependency link with
+    `ln -s /Users/amar/HIVE-MIND-hm-understand-preview-local/core/node_modules core/node_modules`,
+    run from `core/`:
+    `node --test --test-concurrency=1 tests/unit/hm-extract-adapter.test.js tests/unit/hm-understand-adapter.test.js tests/unit/document-hm-extract-segments.test.js tests/unit/document-hm-understand-shadow.test.js tests/unit/hm-understand-assisted.test.js`
+    -> `# tests 24`, `# pass 24`, `# fail 0`; remove only that link afterward
+    with `unlink core/node_modules`. The sibling's `package-lock.json` hash
+    exactly matched this worktree.
+  - With hm-extract host service at `127.0.0.1:8198` and hm-understand at
+    `127.0.0.1:8091`, from `core/` run:
+    `HF_HOME=/Users/amar/.cache/huggingface HF_HUB_OFFLINE=1 HM_UNDERSTAND_URL=http://127.0.0.1:8091 KB_EXTRACT_URL=http://127.0.0.1:8198 node --test --test-concurrency=1 --test-name-pattern='live hm-extract segments|local RTF parsing|unvalidated multilingual model' tests/integration/hm-understand-local-e2e.test.js`
+    -> `# tests 3`, `# pass 3`, `# fail 0`, 10.7 seconds. It uses a stub Core
+    DB, not an authenticated user upload or persistent production database.
+  - From repository root:
+    `/Users/amar/HIVE-MIND-hm-understand-preview-local/hm-understand/.venv/bin/python -m compileall -q hm-understand/app hm-understand/tests`
+    and `git diff --check` -> exit 0.
+- Acceptance limits: the full six-format/language benchmark and measured LLM
+  token savings remain incomplete. No language is promoted to skip refinement.
+  No Docker image build/recreation, shared-stack change, migration, merge, or
+  production action occurred. Accepted release: none.
+- Next: resolve the production/local history and frontend-submodule conflicts
+  in the permanent integration checkout without disturbing its dirty user files;
+  then build a uniquely tagged image and run authenticated upload-to-recall
+  acceptance against the merged local stack.

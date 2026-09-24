@@ -16,8 +16,8 @@ _model_attempted = False
 _model_loading = False
 _model_loaded_tensors = 0
 _model_checkpoint_tensors = 0
-MODEL_ID = os.getenv("HM_UNDERSTAND_MODEL_ID", "gliner-community/gliner_small-v2.5")
-MODEL_REVISION = os.getenv("HM_UNDERSTAND_MODEL_REVISION", "f227d3cd637bd4e6757ae143935316d062393341")
+MODEL_ID = os.getenv("HM_UNDERSTAND_MODEL_ID", "urchade/gliner_multi-v2.1")
+MODEL_REVISION = os.getenv("HM_UNDERSTAND_MODEL_REVISION", "443d26d654e0324125a96bebd8e796c14ff2efe6")
 _model_cpu_threads = 0
 logger = logging.getLogger(__name__)
 
@@ -67,17 +67,27 @@ def load_model():
             from transformers import AutoTokenizer
             import torch
             _model_cpu_threads = configure_cpu_threads(torch)
-            local_path = snapshot_download(
-                repo_id=MODEL_ID,
-                revision=MODEL_REVISION,
-                allow_patterns=["model.bf16.safetensors", "gliner_config.json", "config.json", "tokenizer.json",
-                                "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json", "spm.model"],
-            )
             manifest_path = Path(__file__).resolve().parents[1] / "models.lock.json"
             with manifest_path.open("r", encoding="utf-8") as manifest_file:
                 manifest = json.load(manifest_file)
-            checkpoint_path = Path(local_path) / "model.bf16.safetensors"
-            expected_digest = manifest["entity_model"]["sha256"]
+            model_manifest = manifest["entity_model"]
+            if MODEL_ID != model_manifest["id"] or MODEL_REVISION != model_manifest["revision"]:
+                raise ValueError("configured entity model does not match pinned models.lock.json")
+            local_path = snapshot_download(
+                repo_id=MODEL_ID,
+                revision=MODEL_REVISION,
+                allow_patterns=[model_manifest["weights"], "gliner_config.json", "config.json"],
+            )
+            tokenizer_manifest = model_manifest.get("tokenizer") or {}
+            tokenizer_path = local_path
+            if tokenizer_manifest.get("id"):
+                tokenizer_path = snapshot_download(
+                    repo_id=tokenizer_manifest["id"],
+                    revision=tokenizer_manifest["revision"],
+                    allow_patterns=tokenizer_manifest["files"],
+                )
+            checkpoint_path = Path(local_path) / model_manifest["weights"]
+            expected_digest = model_manifest["sha256"]
             if checkpoint_sha256(checkpoint_path) != expected_digest:
                 raise ValueError("pinned GLiNER checkpoint SHA256 does not match models.lock.json")
             # GLiNER's hub mixin materializes the entire safetensors checkpoint
@@ -87,9 +97,23 @@ def load_model():
             config_path = Path(local_path) / "gliner_config.json"
             with config_path.open("r", encoding="utf-8") as config_file:
                 config = GLiNERConfig(**json.load(config_file))
-            tokenizer = AutoTokenizer.from_pretrained(local_path, cache_dir=os.getenv("HF_HOME"))
-            model = GLiNER(config, tokenizer=tokenizer, encoder_from_pretrained=False,
-                           cache_dir=os.getenv("HF_HOME"))
+            # GLiNER requires tokenizer word_ids(), which is only available on
+            # the fast tokenizer implementation. The pinned SentencePiece
+            # tokenizer may warn about byte fallback; multilingual quality is
+            # verified against the labeled language corpus below.
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, cache_dir=os.getenv("HF_HOME"))
+            inference_dtype = getattr(torch, model_manifest.get("inference_dtype", "float32"), None)
+            if inference_dtype is None:
+                raise ValueError("unsupported inference dtype in models.lock.json")
+            # Construct on meta to avoid allocating throwaway random weights,
+            # then allocate exactly once at the selected inference dtype. The
+            # checkpoint itself remains pinned and SHA256-verified in original
+            # float32 form; tensors are copied one at a time below.
+            with torch.device("meta"):
+                model = GLiNER(config, tokenizer=tokenizer, encoder_from_pretrained=False,
+                               cache_dir=os.getenv("HF_HOME"))
+            model = model.to_empty(device="cpu")
+            model.model.to(dtype=inference_dtype)
             if (config.class_token_index == -1 or config.vocab_size == -1) and not config.labels_encoder:
                 model.resize_token_embeddings(add_tokens=["[FLERT]", config.ent_token, config.sep_token])
             targets = model.model.state_dict(keep_vars=True)

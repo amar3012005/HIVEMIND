@@ -134,8 +134,10 @@ services:
     container_name: hivemind-hm-understand-v1
     environment:
       HF_HOME: /opt/models/huggingface
-      HM_UNDERSTAND_MODEL_ID: gliner-community/gliner_small-v2.5
-      HM_UNDERSTAND_MODEL_REVISION: f227d3cd637bd4e6757ae143935316d062393341
+      HF_HUB_DOWNLOAD_TIMEOUT: "120"
+      HF_HUB_ETAG_TIMEOUT: "30"
+      HM_UNDERSTAND_MODEL_ID: urchade/gliner_multi-v2.1
+      HM_UNDERSTAND_MODEL_REVISION: 443d26d654e0324125a96bebd8e796c14ff2efe6
     volumes:
       # GLiNER's pinned snapshot is fetched lazily on first analysis and
       # verified against models.lock.json; keep this writable named volume so
@@ -144,11 +146,11 @@ services:
     mem_limit: 3g
     cpus: 4
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/ready"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 180s
+      start_period: 300s
     restart: unless-stopped
     networks:
       hivemind-network:

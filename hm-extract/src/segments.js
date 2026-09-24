@@ -46,6 +46,18 @@ function pageAt(pageMarks, off) {
   return page;
 }
 
+/** Resolve only exact source spans; a short-prefix match can cite another
+ * repeated paragraph/slide and must never be presented as an exact locator. */
+export function findExactSegmentSpan(sourceText, segmentText, cursor = 0) {
+  const source = String(sourceText || '');
+  const segment = String(segmentText || '');
+  if (!segment) return null;
+  let start = source.indexOf(segment, Math.max(0, Number(cursor) || 0));
+  if (start < 0) start = source.indexOf(segment);
+  if (start < 0) return null;
+  return { start, end: start + segment.length };
+}
+
 export function buildSegments(cleanText, pageMarks, opts = {}) {
   const targetSize = Number(opts.targetSize || 700);
   const overlapSize = Number(opts.overlapSize ?? 120);
@@ -56,8 +68,8 @@ export function buildSegments(cleanText, pageMarks, opts = {}) {
     minSize: 200,
     overlapSize,
   }) || [])
-    .map((c) => (c && c.text ? { text: c.text.trim(), kind: c.kind } : null))
-    .filter((c) => c && c.text.length >= 20);
+    .map((c) => (c && c.text ? c : null))
+    .filter((c) => c && c.text.trim().length >= 20);
 
   if (!rawChunks.length) return [];
 
@@ -65,7 +77,7 @@ export function buildSegments(cleanText, pageMarks, opts = {}) {
   let cursor = 0;
   const hstack = [];
 
-  rawChunks.forEach(({ text, kind }, idx) => {
+  rawChunks.forEach(({ text, kind, startOffset: chunkStart, endOffset: chunkEnd }, idx) => {
     const contentHash = crypto.createHash('sha256').update(text).digest('hex');
     const hm = text.match(/^(#{1,6})\s+(.+)$/m);
     let heading = hm ? hm[2].slice(0, 500) : null;
@@ -114,15 +126,16 @@ export function buildSegments(cleanText, pageMarks, opts = {}) {
     }
     const headingPath = hstack.map((h) => h.title);
 
-    const anchor = text.slice(0, 60);
-    let found = anchor.length >= 12 ? cleanText.indexOf(anchor, cursor) : -1;
-    if (found < 0 && anchor.length >= 12) found = cleanText.indexOf(anchor);
-    if (found < 0) found = cleanText.indexOf(text.slice(0, 24), cursor);
-    const startOffset = found >= 0 ? found : null;
-    const endOffset = startOffset != null ? startOffset + text.length : null;
-    if (found >= 0) cursor = found + Math.max(1, text.length - 250);
+    const sourceRangeMatches = Number.isInteger(chunkStart) && Number.isInteger(chunkEnd)
+      && chunkStart >= 0 && chunkEnd >= chunkStart
+      && cleanText.slice(chunkStart, chunkEnd) === text;
+    const span = sourceRangeMatches ? { start: chunkStart, end: chunkEnd }
+      : findExactSegmentSpan(cleanText, text, cursor);
+    const startOffset = span?.start ?? null;
+    const endOffset = span?.end ?? null;
+    if (startOffset != null) cursor = startOffset + Math.max(1, text.length - 250);
     const startPage = pageAt(pageMarks, startOffset);
-    const endPage = pageAt(pageMarks, endOffset);
+    const endPage = pageAt(pageMarks, endOffset == null ? null : Math.max(startOffset ?? 0, endOffset - 1));
 
     const lines2 = text.split('\n').map((l) => l.trim()).filter(Boolean);
     const pipeRows = lines2.filter((l) => l.startsWith('|') && l.endsWith('|')).length;

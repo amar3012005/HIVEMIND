@@ -39,24 +39,41 @@ export class HmUnderstandAdapter {
     const results = [];
     for (const current of batches) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      let timeoutExpired = false;
+      let timer;
       try {
-        const response = await this.fetch(`${this.baseUrl}/v1/analyze`, {
-          method: 'POST',
-          headers: { accept: 'application/json', 'content-type': 'application/json' },
-          body: JSON.stringify({
-            schema_version: '1', source, blocks: current, entity_types: entityTypes, include_candidates: includeCandidates,
-          }),
-          signal: controller.signal,
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            timeoutExpired = true;
+            controller.abort();
+            const error = new Error('hm-understand request exceeded its timeout');
+            error.code = 'HM_UNDERSTAND_TIMEOUT';
+            reject(error);
+          }, this.timeoutMs);
         });
-        const body = await response.json().catch(() => null);
+        const request = (async () => {
+          const response = await this.fetch(`${this.baseUrl}/v1/analyze`, {
+            method: 'POST',
+            headers: { accept: 'application/json', 'content-type': 'application/json' },
+            body: JSON.stringify({
+              schema_version: '1', source, blocks: current, entity_types: entityTypes, include_candidates: includeCandidates,
+            }),
+            signal: controller.signal,
+          });
+          const body = await response.json().catch(() => null);
+          return { response, body };
+        })();
+        const { response, body } = await Promise.race([request, timeout]);
         if (!response.ok || !body || body.schema_version !== '1' || !Array.isArray(body.blocks)) {
           return { ok: false, code: 'HM_UNDERSTAND_BAD_RESPONSE', retryable: response.status >= 500 };
         }
         results.push(body);
       } catch (error) {
         this.logger?.warn?.(`[hm-understand] analysis request failed: ${error?.message || 'unknown error'}`);
-        return { ok: false, code: error?.name === 'AbortError' ? 'HM_UNDERSTAND_TIMEOUT' : 'HM_UNDERSTAND_REQUEST_FAILED', retryable: true };
+        return { ok: false,
+          code: timeoutExpired || error?.name === 'AbortError' || error?.code === 'HM_UNDERSTAND_TIMEOUT'
+            ? 'HM_UNDERSTAND_TIMEOUT' : 'HM_UNDERSTAND_REQUEST_FAILED',
+          retryable: true };
       } finally {
         clearTimeout(timer);
       }
@@ -83,6 +100,8 @@ export function hmUnderstandBlocksFromSegments(segments = []) {
     .map((segment, index) => ({
       id: String(segment.id || `segment-${index + 1}`),
       text: segment.content,
+      source_start: Number.isInteger(segment.startOffset) ? segment.startOffset : null,
+      source_end: Number.isInteger(segment.endOffset) ? segment.endOffset : null,
       locator: {
         page: Number.isInteger(segment.startPage) ? segment.startPage : null,
         heading_path: Array.isArray(segment.metadata?.heading_path) ? segment.metadata.heading_path : [],

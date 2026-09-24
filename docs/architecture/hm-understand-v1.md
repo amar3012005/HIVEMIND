@@ -1,9 +1,11 @@
 # hm-understand v1
 
 `hm-understand` is a stateless text-analysis service. Existing HIVE parsers and connectors own
-bytes-to-text conversion and preserve page, slide, sheet, row, message, and heading provenance.
-The service receives those text blocks and returns entity mentions, exact literals, and candidate
-statements with evidence offsets. It has no tenant identity, database credentials, or write path.
+bytes-to-text conversion and semantic evidence segmentation, preserving page, slide, sheet, row,
+message, and heading provenance. Core passes those exact parser segments (not a second, competing
+chunking of the full parse) as bounded text blocks with source-global offsets. The service returns
+entity mentions, exact literals, and candidate statements with block-local and source-global
+evidence offsets. It has no tenant identity, database credentials, or write path.
 
 ## Contract and ownership
 
@@ -19,7 +21,9 @@ statements with evidence offsets. It has no tenant identity, database credential
   anchor, or a statement is uncertain/negated. This is only a conservative routing hint; it is
   not a calibrated bypass decision and does not promote data.
 - Every mention and candidate includes the verbatim quote and Python code-point offsets into the
-  exact submitted block. Core converts offsets if needed and verifies quotes before persistence.
+  exact submitted block. Parser/Core source offsets use JavaScript UTF-16 code units; the service
+  converts block-local code-point offsets before returning document-global ranges. Core verifies
+  quotes against the parser segment before using them.
 - Entity mentions are not canonical identities. Core resolves identities under tenant authorization.
 - Candidates are review-required proposals. Negation, conditionals, and reported speech are kept
   visible as uncertainty signals. The service never writes memories, entity links, claims, or vectors.
@@ -36,11 +40,13 @@ curl -fsS http://127.0.0.1:8090/ready
 curl -fsS http://127.0.0.1:8090/v1/capabilities
 ```
 
-The first analysis downloads the pinned `gliner-community/gliner_small-v2.5` checkpoint
-(`f227d3cd637bd4e6757ae143935316d062393341`, BF16 weights) into the named model
-volume. Scores are raw model scores, not calibrated probabilities; use them for ranking, not
-automatic identity merges. Do not expose this unauthenticated service beyond the local machine or
-trusted internal network.
+The first analysis downloads the pinned multilingual `urchade/gliner_multi-v2.1` checkpoint
+(`443d26d654e0324125a96bebd8e796c14ff2efe6`, SHA-256
+`2100142f31627531497850659dcb3821c99d5e71c08a8e01a98e4b11ef32a199`, BF16 weights) and pinned
+`microsoft/mdeberta-v3-base` tokenizer (`a0484667b22365f84929a935b5e50a51f71f159d`) into the
+named model volume. Scores are raw model scores, not calibrated probabilities; use them for
+ranking, not automatic identity merges. Do not expose this unauthenticated service beyond the
+local machine or trusted internal network.
 
 The Docker image caps Torch intra-op threads at two and inter-op at one. The container runtime
 reported ten CPUs while limited to two CPU shares; leaving Torch's default at ten caused severe
@@ -49,18 +55,14 @@ corpus completed in 1,166 ms (model already loaded); the corresponding short Eng
 390 ms. These are one-machine synthetic timings, not throughput guarantees. Model download/startup
 is excluded.
 
-The initial annotated smoke corpus has only six short examples (English, German, Spanish, Hindi,
-and Telugu). With the explicitly extracted October date included in the gold labels, the local CPU
-service measured 10 TP / 1 FP / 7 FN (micro precision 0.9091, recall 0.5882, F1 0.7143); all 11
-predicted evidence spans mapped exactly back to their submitted text. English and Spanish were
-5/5 and 3/3 respectively; German was 2/3, and Hindi/Telugu were 0/3 each. This explicitly
-demonstrates that this checkpoint is
-**not yet an all-language extractor**. Keep Hindi, Telugu, and any unbenchmarked language in a
-low-confidence/review or bounded-refinement path; do not claim universal quality or use this smoke
-score as a production estimate. A warmed two-block stream test emitted its first block at 676 ms
-and the second/final at 1,048 ms in an earlier image; on the current image the same check emitted
-the first block at 811 ms and second/final at 1,040 ms. Both are warm CPU measurements; cold model
-load is separate.
+The current annotated smoke corpus has only six short examples (English, German, Spanish, Hindi,
+and Telugu). The current local CPU candidate measured 11 TP / 1 FP / 6 FN (micro precision
+0.9167, recall 0.6471, F1 0.7586); all 12 predicted evidence spans mapped exactly back to their
+submitted text. English and Spanish were 5/5 and 3/3 respectively; German had 3 TP / 1 FP, and
+Hindi/Telugu were 0/3 each. This tiny fixture is diagnostic, not a production quality estimate or
+proof of multilingual coverage. No language is currently promoted to skip refinement; all remain
+conservatively refinement-required. A prior warmed CPU stream smoke emitted blocks progressively,
+but those timings do not establish production throughput. Cold model load is separate.
 
 The Core adapter in `core/src/knowledge/enterprise/hm-understand-adapter.js` converts authorized
 evidence segments into this contract and batches large documents without dropping blocks. The
@@ -81,13 +83,45 @@ are persisted. No second refinement LLM call runs in either mode. Remote/BYOD or
 skipped to preserve data residency. An unavailable analyzer degrades without failing ingestion.
 
 The adapter, feature decision, bounded receipt, and ingestion seam are covered by focused Core unit
-tests. A disposable Core runner against the local Docling and `hm-extract` services passed both
-synthetic PDF+CSV and RTF parser → Core adapter/hook → analysis → shadow-receipt checks. The RTF
-case proves the configured `hm-extract` adapter can hand parsed content into the same analyzer;
-the PDF/CSV case proves the existing Docling path still works. These checks use a stub DB, so they
-are not authenticated user uploads or real memory writes. The shared local preview Core and original
-`hivemind-hm-understand` container were not replaced. Do not use either parser endpoint by itself as
-evidence of a complete HIVE ingestion.
+tests. A disposable Core runner passed the RTF parser → exact hm-extract segment persistence helper
+→ analyzer evidence-offset check. This uses a stub DB, not authenticated user uploads or real memory
+writes. The earlier PDF/CSV Docling canary failed while fetching from the local parser after 92
+seconds; it did not establish a Docling pass or an hm-extract failure. The shared local preview Core
+and original `hivemind-hm-understand` container were not replaced. Do not use a parser endpoint by
+itself as evidence of complete HIVE ingestion.
+
+### Parser and evidence-segment ownership
+
+`hm-extract` should be used at full scale only for formats where it preserves or improves the
+provenance contract and passes the full upload-to-recall golden suite. Its current Core upload
+allowlist is intentionally `pptx,doc,docm,odt,rtf,epub`; it is not a universal format router.
+Structured CSV/XLSX paths preserve cell/row semantics, the DOCX seam preserves Mammoth heading
+structure, and the PDF tier preserves page evidence with fast-PDF/vision. Replacing these routes
+without equivalent locator fidelity would make downstream evidence less trustworthy even if text
+parsing were faster.
+
+For allowed hm-extract formats, Core now accepts validated parser `segments` and reuses them as
+canonical evidence segments when every quote maps exactly to the returned parse text. Invalid or
+missing spans fall back to Core's existing chunker. Core requires explicit, ordered source offsets;
+it never guesses the occurrence of repeated text with `indexOf`. Those same persisted segments feed
+hm-understand, whose returned local and document-global offsets are checked against their source.
+This removes duplicate chunking and keeps parser locators attached end-to-end. Expansion of the
+format allowlist should be evidence-driven per format: compare latency, peak RSS, truncation,
+semantic boundaries, locator recall, exact quote mapping, and downstream retrieval—not parse speed
+alone. Large-file memory admission also needs a separate stress canary; a prior 70 MB CSV run OOMed
+the 4 GiB local service container under Docker VM pressure.
+
+The parser response now honors socket backpressure and batches segment JSON in bounded 64 KiB
+writes. The internal Core adapter negotiates `application/vnd.hm-extract.v2+json`, which sends the
+full text once instead of duplicating it as both `markdown` and `text`; legacy clients retain the
+original response aliases. A 21 MB / 125,000-row CSV slow-reader canary returned 25,001 segments,
+with exact source offsets and all rows preserved. A 74 MB CSV canary was OOM-killed before
+completion in the shared local Docker VM, so that size is **not** considered supported through the
+hm-extract/anydoc route. The default admission gate now rejects a single estimated request larger
+than its configured memory budget before multer buffers or parsing begins. Core's existing
+`csv-direct` route remains the correct production path for large CSVs unless a separately sized
+streaming parser canary proves otherwise. Do not loosen that gate to make the oversized canary
+appear green.
 
 To test actual synthetic PDF and CSV parsing plus the changed Core hook without replacing that
 preview, build a separately tagged local Core image and run only the integration test in a
@@ -105,14 +139,14 @@ docker run --rm --network hivemind-network \
 ```
 
 This checks Docling file parsing, Core adapter, tenant-scoped receipt persistence contract, and
-service discovery. It deliberately uses a DB stub and does not claim to test an authenticated
-upload or real DB write. The separate RTF test uses `KB_EXTRACT_URL` and exercises the local
-`hm-extract` parser before calling the analyzer.
+service discovery when the local Docling endpoint is available. It deliberately uses a DB stub and
+does not claim to test an authenticated upload or real DB write. The separate RTF test uses
+`KB_EXTRACT_URL` and exercises the local `hm-extract` parser before calling the analyzer.
 
 For the `singulance-local` preview stack, `infra/docker-compose.hivemind-chat.yml` defines the
-independent `hm-understand-v1` and `hm-extract` services, reuses the cached analyzer model volume
-read-only, and sets Core's internal `HM_UNDERSTAND_URL` and `KB_EXTRACT_URL` service addresses.
-Neither service publishes a host port. Start only these services with the existing local secrets
+independent `hm-understand-v1` and `hm-extract` services and Core's internal `HM_UNDERSTAND_URL`
+and `KB_EXTRACT_URL` service addresses. The analyzer has a writable named model-cache volume;
+neither service publishes a host port. Start only these services with the existing local secrets
 file (this does not recreate Core or any dependency):
 
 ```bash
@@ -120,11 +154,10 @@ docker compose -f infra/docker-compose.hivemind-chat.yml \
   --env-file /path/to/infra/.env.hivemind-chat.local up -d --no-deps hm-extract hm-understand-v1
 ```
 
-The candidate services are running and healthy locally, but the shared `hivemind-core` container
-still runs its prior immutable image; it has not loaded this branch's integration. Recreate Core
-only after a separately reviewed local Core artifact and rollback identity are ready. The analyzer
-URL is wiring, not an enable flag; the single tenant-scoped `hm_understand_v1` Flagship decision
-remains authoritative. Run the annotated smoke corpus with
+The shared `hivemind-core` container still runs its prior immutable image; it has not loaded this
+branch's integration. Recreate Core only after a separately reviewed local Core artifact and
+rollback identity are ready. The analyzer URL is wiring, not an enable flag; the single
+tenant-scoped `hm_understand_v1` Flagship decision remains authoritative. Run the annotated smoke corpus with
 `uv run --project hm-understand --python 3.11 python hm-understand/eval/run.py`; its small scores
 are diagnostic examples, not representative quality estimates.
 
@@ -133,13 +166,26 @@ the default custom-provider route returned a Gateway 502, and the explicitly sel
 Gateway route exceeded Core's extraction budget before usage was returned. Do not claim token savings
 until a comparable baseline/assisted run produces provider usage receipts.
 
-The real-format golden corpus passed 19/19 focused parser/provenance checks against the running
-`hm-extract` service, including independent recall scores for PDF, PPTX, DOCX, and XLSX fixtures.
-The separate 70 MB CSV stress case caused the 4 GiB service container to be OOM-killed once while
-the shared Docker VM was under load; Docker restarted the service and the small-file golden suite
-passed when rerun separately. This is a resource-capacity failure, not a parser-correctness pass:
-do not claim large-file resilience on this local stack until the large fixture passes in a reserved
-memory environment and the service's memory admission policy is proven against that budget.
+Current verification (2026-09-24): hm-extract's focused parser/offset/backpressure/admission suite
+passes 20/20; hm-understand passes 20/20; Core's focused adapter/evidence suite passes 15/15. The
+live RTF chain also passes: a synthetic RTF is parsed by the running hm-extract service; Core's
+evidence helper persists the validated exact segments to a stub DB; the real pinned multilingual
+GLiNER service then analyzes those same segments. The model returned four grounded mentions
+(date, person, money, project) and one decision candidate, with quotes and document offsets matching
+the parser evidence. Warm analysis took about 0.5 seconds for this 73-character example. The
+integration canary passed with the analyzer readiness endpoint reporting all 224/224 pinned model
+tensors loaded. This proves the local parser→evidence→real-model contract, not authenticated upload,
+real PostgreSQL writes, or production throughput.
+
+The shared local Core container still uses its prior immutable image and was not recreated. The
+candidate model was exercised as a host-local process because Docker Desktop had 58 containers
+using about 6.3 GiB of its 7.65 GiB VM; previous attempts to cold-load this model inside that crowded
+VM were OOM-killed. Host-local inference proves model behavior but does not prove candidate Docker
+image startup, model-cache warmup, or container memory sizing. Those remain explicit local-stack
+gates. No language is promoted to bypass refinement: even the successful English example is marked
+`language_outside_smoke_set`, and model scores are uncalibrated. Keep results as evidence-backed
+candidates, not auto-written memories or identity merges. Keep large CSVs on Core's structured path
+until a separately sized full-content canary passes.
 
 ## Evaluation and rollout
 

@@ -76,10 +76,28 @@ test('constructed table: no chunk ever contains a mid-row line', async () => {
   assert.equal(midRow, 0, 'a table row was split mid-line across a chunk boundary');
 });
 
-test('real 70MB CSV: exhaustive row integrity (not sampled)', async () => {
+test('real 70MB CSV: reject over-budget input before parsing; exhaustively verify only in a sized canary', async (t) => {
   await waitForIdle();
   const csvPath = path.join(EVAL_DIR, 'web-corpus', 'nyc_data.csv');
   if (!fs.existsSync(csvPath)) { console.log('  (skipped: large CSV fixture not present)'); return; }
+
+  const health = await (await fetch(`${BASE}/health`)).json();
+  const fileBytes = fs.statSync(csvPath).size;
+  const estimatedBytes = (fileBytes + 1024) * Number(health.memory_blowup_factor || 20);
+  if (estimatedBytes > Number(health.max_inflight_memory || 0)) {
+    const form = new FormData();
+    form.append('file', new Blob([fs.readFileSync(csvPath)]), 'nyc_data.csv');
+    form.append('filename', 'nyc_data.csv');
+    const response = await fetch(`${BASE}/extract`, { method: 'POST', body: form });
+    const rejected = await response.json();
+    assert.equal(response.status, 429, 'an oversized request must be rejected before multer/parsing');
+    assert.equal(rejected.code, 'busy');
+    return;
+  }
+  if (process.env.HM_EXTRACT_LARGE_FILE_CANARY !== 'true') {
+    t.skip('set HM_EXTRACT_LARGE_FILE_CANARY=true only on a container sized for this measured workload');
+    return;
+  }
 
   const { status, body } = await extract(csvPath, 'nyc_data.csv');
   assert.equal(status, 200);
@@ -216,7 +234,7 @@ test('in_flight never goes negative across early-return error paths (regression)
   assert.equal(health.in_flight, 0, 'in_flight should settle back to 0 once both requests finish');
 });
 
-test('memory-budget admission control: concurrent large files get 429, a lone large file does not', async () => {
+test('memory-budget admission control rejects oversized single files and concurrent overloads', async (t) => {
   const health = await waitForIdle();
   const maxMemory = health.max_inflight_memory;
   const blowup = health.memory_blowup_factor;
@@ -235,13 +253,25 @@ test('memory-budget admission control: concurrent large files get 429, a lone la
   // gate — no need to fire a burst large enough to itself become a load
   // test (that was this test's own first version, and it OOM-killed the
   // very container it was trying to protect).
-  const copies = Math.max(2, Math.ceil(maxMemory / (buf.length * blowup)) + 1);
   const fire = () => {
     const form = new FormData();
     form.append('file', new Blob([buf]), 'nyc_data.csv');
     form.append('filename', 'nyc_data.csv');
     return fetch(`${BASE}/extract`, { method: 'POST', body: form });
   };
+  const estimatedSingle = (buf.length + 1024) * blowup;
+  if (estimatedSingle > maxMemory) {
+    const response = await fire();
+    const body = await response.json();
+    assert.equal(response.status, 429);
+    assert.equal(body.code, 'busy');
+    return;
+  }
+  if (process.env.HM_EXTRACT_LARGE_FILE_CANARY !== 'true') {
+    t.skip('concurrent large-file parsing requires an explicitly sized canary container');
+    return;
+  }
+  const copies = Math.max(2, Math.ceil(maxMemory / (buf.length * blowup)) + 1);
   const responses = await Promise.all(Array.from({ length: copies }, fire));
   const statuses = responses.map((r) => r.status);
   assert.ok(statuses.includes(429), `expected at least one 429 under concurrent large-file load, got: ${statuses}`);

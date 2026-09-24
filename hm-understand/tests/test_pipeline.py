@@ -23,6 +23,56 @@ def test_candidate_evidence_offsets_and_uncertainty(monkeypatch):
         assert item.evidence.locator.page == 2
 
 
+def test_evidence_offsets_map_from_parser_block_to_original_source(monkeypatch):
+    monkeypatch.setattr("app.pipeline.model_status", lambda: {"loaded": False})
+    monkeypatch.setattr("app.pipeline.extract_entities", lambda text, labels: [
+        {"text": "Rama", "label": "person", "score": 0.9, "start": 0, "end": 4, "extractor": "gliner"},
+    ])
+    request = AnalyzeRequest.model_validate({
+        "source": {"id": "doc-offsets", "revision": "r1"},
+        "blocks": [{"id": "segment-9", "text": "Rama approved the budget.",
+                    "source_start": 400, "source_end": 425, "language": "en"}],
+    })
+    result = analyze(request)
+    evidence = next(item.evidence for item in result.blocks[0].mentions if item.text == "Rama")
+    assert evidence.start == 0
+    assert evidence.end == 4
+    assert evidence.source_start == 400
+    assert evidence.source_end == 404
+
+
+def test_global_offsets_convert_python_codepoints_to_javascript_utf16(monkeypatch):
+    text = "😀 Rama approved the plan."
+    rama_start = text.index("Rama")
+    utf16_length = len(text.encode("utf-16-le")) // 2
+    monkeypatch.setattr("app.pipeline.model_status", lambda: {"loaded": False})
+    monkeypatch.setattr("app.pipeline.extract_entities", lambda value, labels: [
+        {"text": "Rama", "label": "person", "score": 0.9,
+         "start": rama_start, "end": rama_start + len("Rama"), "extractor": "gliner"},
+    ])
+    request = AnalyzeRequest.model_validate({
+        "source": {"id": "doc-utf16", "revision": "r1"},
+        "blocks": [{"id": "segment-utf16", "text": text, "source_start": 100,
+                    "source_end": 100 + utf16_length}],
+    })
+
+    evidence = next(item.evidence for item in analyze(request).blocks[0].mentions if item.text == "Rama")
+    assert evidence.start == rama_start
+    assert evidence.end == rama_start + 4
+    assert evidence.source_start == 103
+    assert evidence.source_end == 107
+
+
+def test_parser_source_range_must_be_complete_and_ordered():
+    import pytest
+
+    with pytest.raises(ValueError, match="provided together"):
+        AnalyzeRequest.model_validate({
+            "source": {"id": "doc-offsets", "revision": "r1"},
+            "blocks": [{"id": "segment-1", "text": "evidence", "source_start": 4}],
+        })
+
+
 def test_short_input_is_not_falsely_assigned_language(monkeypatch):
     monkeypatch.setattr("app.pipeline.model_status", lambda: {"loaded": False})
     monkeypatch.setattr("app.pipeline.extract_entities", lambda text, labels: [])
@@ -53,7 +103,7 @@ def test_refinement_signal_marks_unvalidated_language_and_uncertainty(monkeypatc
                for item in [*block.mentions, *block.candidates])
 
 
-def test_evaluated_language_with_clear_statement_does_not_require_refinement(monkeypatch):
+def test_clear_statement_requires_refinement_until_language_is_promoted(monkeypatch):
     monkeypatch.setattr("app.pipeline.model_status", lambda: {"loaded": True, "loaded_tensors": 1,
                                                                  "checkpoint_tensors": 1})
     monkeypatch.setattr("app.pipeline.extract_entities", lambda text, labels: [
@@ -65,8 +115,8 @@ def test_evaluated_language_with_clear_statement_does_not_require_refinement(mon
                     "language": "en"}],
     })
     block = analyze(request).blocks[0]
-    assert block.quality["refinement_required"] is False
-    assert block.quality["refinement_reasons"] == []
+    assert block.quality["refinement_required"] is True
+    assert "language_outside_smoke_set" in block.quality["refinement_reasons"]
 
 
 def test_candidate_without_model_entity_is_refinement_required(monkeypatch):
@@ -81,6 +131,40 @@ def test_candidate_without_model_entity_is_refinement_required(monkeypatch):
     block = analyze(request).blocks[0]
     assert block.quality["refinement_required"] is True
     assert "candidate_without_model_entity_anchor" in block.quality["refinement_reasons"]
+
+
+def test_language_without_approved_corpus_cannot_bypass_refinement(monkeypatch):
+    monkeypatch.setattr("app.pipeline.model_status", lambda: {"loaded": True, "loaded_tensors": 1,
+                                                                 "checkpoint_tensors": 1})
+    monkeypatch.setattr("app.pipeline.extract_entities", lambda text, labels: [
+        {"text": "Nora Klein", "label": "person", "score": 0.9, "start": 0, "end": 10, "extractor": "gliner"},
+    ])
+    request = AnalyzeRequest.model_validate({
+        "source": {"id": "doc-de", "revision": "r1"},
+        "blocks": [{"id": "p1", "text": "Nora Klein leitet die Finanzplanung in Berlin.", "language": "de"}],
+    })
+    block = analyze(request).blocks[0]
+    assert block.quality["refinement_required"] is True
+    assert "language_outside_smoke_set" in block.quality["refinement_reasons"]
+
+
+def test_model_inference_failure_keeps_literal_evidence_and_marks_partial(monkeypatch):
+    monkeypatch.setattr("app.pipeline.model_status", lambda: {"loaded": True, "loaded_tensors": 1,
+                                                                 "checkpoint_tensors": 1})
+    monkeypatch.setattr("app.pipeline.extract_entities", lambda text, labels: (_ for _ in ()).throw(RuntimeError("fixture")))
+    text = "Rama approved budget FIN-042 for €12,000."
+    request = AnalyzeRequest.model_validate({
+        "source": {"id": "doc-model-error", "revision": "r1"},
+        "blocks": [{"id": "p1", "text": text, "language": "en"}],
+    })
+    response = analyze(request)
+    block = response.blocks[0]
+    assert response.complete is False
+    assert block.quality["status"] == "partial_model_inference_failed"
+    assert "local_entity_model_inference_failed" in block.quality["refinement_reasons"]
+    assert any(mention.text == "FIN-042" for mention in block.mentions)
+    assert all(text[item.evidence.start:item.evidence.end] == item.evidence.quote
+               for item in block.mentions)
 
 
 def test_spanish_condition_is_not_promoted_as_a_fact_candidate():

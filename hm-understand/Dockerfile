@@ -3,8 +3,10 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/opt/models/huggingface \
-    HM_UNDERSTAND_MODEL_REVISION=f227d3cd637bd4e6757ae143935316d062393341 \
-    HM_UNDERSTAND_MODEL_ID=gliner-community/gliner_small-v2.5
+    HF_HUB_DOWNLOAD_TIMEOUT=120 \
+    HF_HUB_ETAG_TIMEOUT=30 \
+    HM_UNDERSTAND_MODEL_REVISION=443d26d654e0324125a96bebd8e796c14ff2efe6 \
+    HM_UNDERSTAND_MODEL_ID=urchade/gliner_multi-v2.1
 
 WORKDIR /srv/hm-understand
 RUN apt-get update && apt-get install -y --no-install-recommends curl libgomp1 \

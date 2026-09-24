@@ -11,6 +11,61 @@ const assistedTestText = 'Project Atlas is an internal launch program. '
   + 'This background paragraph explains the wider operating context without adding a decision or a number. '
   + 'The company stores source documents separately so citations remain available.';
 
+test('live hm-extract segments persist in Core and reach the hm-understand contract unchanged', {
+  skip: !extractUrl && 'set KB_EXTRACT_URL to run the local parser-to-analyzer contract canary',
+}, async () => {
+  const [{ parseWithHmExtract }, { DocumentFirstIngestionService },
+    { HmUnderstandAdapter, hmUnderstandBlocksFromSegments }] = await Promise.all([
+    import('../../src/knowledge/enterprise/hm-extract-adapter.js'),
+    import('../../src/knowledge/document-first-ingestion.js'),
+    import('../../src/knowledge/enterprise/hm-understand-adapter.js'),
+  ]);
+  const source = 'On 22 September 2026, Rama approved a EUR 12000 budget for Project Atlas.';
+  const parsed = await parseWithHmExtract(Buffer.from(String.raw`{\rtf1\ansi ${source}}`), 'contract.rtf', {
+    baseUrl: extractUrl,
+  });
+  assert.equal(parsed.ok, true, JSON.stringify(parsed));
+  assert.ok(parsed.sourceSegments.length > 0);
+  for (const segment of parsed.sourceSegments) {
+    assert.equal(parsed.text.slice(segment.startOffset, segment.endOffset), segment.content);
+  }
+
+  const evidenceRows = [];
+  const ingestion = Object.create(DocumentFirstIngestionService.prototype);
+  ingestion.db = { knowledgeSegment: { create: async ({ data }) => {
+    const row = { ...data, id: `local-evidence-${evidenceRows.length + 1}` };
+    evidenceRows.push(row);
+    return row;
+  } } };
+  ingestion.logger = { warn() {} };
+  const persisted = await ingestion._createSegments({
+    documentId: 'local-contract-doc', userId: 'local-contract-user', orgId: 'local-contract-org',
+    parseResult: { success: true, text: parsed.text, metadata: { hmExtractSegments: parsed.sourceSegments } },
+    docScope: { sourceId: 'local-contract-source', scope: 'organization' },
+  });
+  assert.equal(persisted.length, parsed.sourceSegments.length);
+  assert.equal(evidenceRows.length, parsed.sourceSegments.length);
+  assert.ok(persisted.every((segment) => parsed.text.slice(segment.startOffset, segment.endOffset) === segment.content));
+
+  let received;
+  const analyzer = new HmUnderstandAdapter({
+    baseUrl: 'http://hm-understand.contract',
+    fetchImpl: async (_url, options) => {
+      received = JSON.parse(options.body);
+      return new Response(JSON.stringify({ schema_version: '1', complete: true,
+        blocks: received.blocks.map((block) => ({ block_id: block.id, mentions: [], candidates: [] })) }),
+      { status: 200 });
+    },
+  });
+  const analyzed = await analyzer.analyze({
+    source: { id: 'local-contract-doc', revision: 'fixture-v1' },
+    blocks: hmUnderstandBlocksFromSegments(persisted),
+  });
+  assert.equal(analyzed.ok, true);
+  assert.deepEqual(received.blocks.map((block) => block.text), persisted.map((segment) => segment.content));
+  assert.ok(received.blocks.every((block) => parsed.text.slice(block.source_start, block.source_end) === block.text));
+});
+
 function syntheticPdf(text) {
   const escaped = text.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)');
   const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET\n`;
@@ -125,9 +180,11 @@ test('local PDF/CSV parsing flows through Core ingestion hook to hm-understand s
 test('local RTF parsing through hm-extract reaches hm-understand with evidence intact', {
   skip: (!serviceUrl || !extractUrl) && 'set HM_UNDERSTAND_URL and KB_EXTRACT_URL for the local parser chain',
 }, async () => {
-  const [{ parseWithHmExtract }, { HmUnderstandAdapter, createHmUnderstandShadowAnalyzer },
+  const [{ parseWithHmExtract }, { DocumentFirstIngestionService },
+    { HmUnderstandAdapter, createHmUnderstandShadowAnalyzer },
     { runHmUnderstandShadow }] = await Promise.all([
     import('../../src/knowledge/enterprise/hm-extract-adapter.js'),
+    import('../../src/knowledge/document-first-ingestion.js'),
     import('../../src/knowledge/enterprise/hm-understand-adapter.js'),
     import('../../src/knowledge/enterprise/hm-understand-shadow.js'),
   ]);
@@ -136,6 +193,26 @@ test('local RTF parsing through hm-extract reaches hm-understand with evidence i
   assert.equal(parsed.ok, true);
   assert.match(parsed.text, /Rama/);
   assert.match(parsed.text, /12000/);
+  assert.ok(parsed.sourceSegments?.length > 0, 'hm-extract should return its canonical atomic evidence segments');
+
+  const persisted = [];
+  const ingestion = new DocumentFirstIngestionService({
+    db: { knowledgeSegment: { create: async ({ data }) => {
+      const row = { ...data, id: `rtf-segment-${persisted.length + 1}` };
+      persisted.push(row);
+      return row;
+    } } },
+    smartIngestRouter: null, memoryGraphEngine: null, doclingAdapter: null, embeddingService: null,
+    logger: { info() {}, warn() {} },
+  });
+  const coreSegments = await ingestion._createSegments({
+    documentId: 'synthetic-rtf', userId: 'synthetic-user', orgId: 'synthetic-org',
+    parseResult: { success: true, text: parsed.text, metadata: { hmExtractSegments: parsed.sourceSegments } },
+    docScope: { sourceId: 'rtf-source', scope: 'organization' },
+  });
+  assert.equal(coreSegments.length, parsed.sourceSegments.length);
+  assert.ok(coreSegments.every((segment) => Number.isInteger(segment.startOffset)
+    && parsed.text.slice(segment.startOffset, segment.endOffset) === segment.content));
 
   const adapter = new HmUnderstandAdapter({ baseUrl: serviceUrl, timeoutMs: 30_000, logger: { warn() {} } });
   let observed;
@@ -153,8 +230,8 @@ test('local RTF parsing through hm-extract reaches hm-understand with evidence i
     logger: { info() {}, warn() {} },
     userId: 'synthetic-user', orgId: 'synthetic-org', documentId: 'synthetic-rtf',
     sourceRevision: 'fixture-v1', filename: 'synthetic.rtf',
-    segments: [{ id: 'rtf-segment-1', content: parsed.text, startPage: 1, segmentIndex: 0,
-      metadata: { language: 'en', heading_path: ['Budget'] } }],
+    segments: coreSegments.map((segment) => ({ ...segment,
+      metadata: { ...segment.metadata, language: 'en' } })),
   });
 
   assert.equal(run.receipt.status, 'complete');
@@ -166,12 +243,17 @@ test('local RTF parsing through hm-extract reaches hm-understand with evidence i
   const block = observed.result.blocks[0];
   assert.ok(block.mentions.some((mention) => mention.text === 'Rama'));
   assert.ok(block.candidates.some((candidate) => candidate.kind === 'decision'));
-  assert.ok(block.mentions.every((mention) => parsed.text.slice(mention.evidence.start, mention.evidence.end)
-    === mention.evidence.quote));
+  for (const mention of block.mentions) {
+    const segment = coreSegments.find((item) => item.id === mention.evidence.block_id);
+    assert.ok(segment, `missing parsed segment for ${mention.text}: ${mention.evidence.block_id}`);
+    assert.equal(segment.content.slice(mention.evidence.start, mention.evidence.end), mention.evidence.quote);
+    assert.equal(mention.evidence.source_start, segment.startOffset + mention.evidence.start,
+      `global evidence coordinate mismatch for ${mention.text}`);
+  }
   assert.equal(JSON.stringify(writes[0].data).includes('Rama'), false);
 });
 
-test('assisted prompt projection uses local exact evidence and keeps original offsets', {
+test('unvalidated multilingual model fails closed from assisted prompt projection', {
   skip: !serviceUrl && 'set HM_UNDERSTAND_URL to run the local assisted projection integration',
 }, async () => {
   const [{ HmUnderstandAdapter }, { projectHmUnderstandWindow }] = await Promise.all([
@@ -182,19 +264,16 @@ test('assisted prompt projection uses local exact evidence and keeps original of
     .analyze({ source: { id: 'assisted-smoke', revision: 'v1' },
       blocks: [{ id: 'block-1', text: assistedTestText, language: 'en' }] });
   assert.equal(result.ok, true);
+  assert.ok(result.result.blocks.some((block) => block.quality?.refinement_required === true),
+    'unbenchmarked languages must remain refinement-required');
   const projection = projectHmUnderstandWindow({ content: assistedTestText }, result.result);
-  assert.ok(projection, 'fixture must meet the conservative assisted-mode gate');
-  assert.ok(projection.savingsRatio >= 0.15);
-  assert.match(projection.extractionContent, /Project Atlas/);
-  assert.match(projection.extractionContent, /EUR 12000/);
-  assert.equal(projection.extractionContent.includes('background paragraph'), false);
-  assert.ok(projection.sourceChars > projection.extractionChars);
+  assert.equal(projection, null, 'unvalidated model output must not compact the authoritative prompt');
 });
 
 test('real gateway token comparison verifies compact input saves prompt tokens', {
   skip: process.env.HM_UNDERSTAND_REAL_LLM_E2E !== 'true'
     && 'set HM_UNDERSTAND_REAL_LLM_E2E=true to make two synthetic provider calls',
-}, async () => {
+}, async (t) => {
   assert.ok(serviceUrl, 'HM_UNDERSTAND_URL must point to the local analyzer');
   const [{ HmUnderstandAdapter }, { projectHmUnderstandWindow }, { DocumentFirstIngestionService },
     { chatCompletionWithFallback }] = await Promise.all([
@@ -208,7 +287,10 @@ test('real gateway token comparison verifies compact input saves prompt tokens',
       blocks: [{ id: 'block-1', text: assistedTestText, language: 'en' }] });
   assert.equal(analysis.ok, true);
   const projection = projectHmUnderstandWindow({ content: assistedTestText }, analysis.result);
-  assert.ok(projection, 'synthetic fixture must meet the guarded compact-input criteria');
+  if (!projection) {
+    t.skip('model language is not yet quality-validated for assisted prompt compaction');
+    return;
+  }
 
   const service = new DocumentFirstIngestionService({
     db: null, smartIngestRouter: null, memoryGraphEngine: null, doclingAdapter: null, embeddingService: null,

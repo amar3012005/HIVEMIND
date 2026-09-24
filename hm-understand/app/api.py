@@ -21,8 +21,14 @@ def health():
 
 @app.get("/ready")
 def ready():
-    status = model_status()
-    return {"ok": status["loaded"], "model": status}
+    # Readiness probes must be observational. Loading the multi-gigabyte model
+    # from a health check can create hidden cold-start work and OOM loops.
+    # The first authorized /analyze call owns lazy loading; /ready only reports
+    # whether that load has completed successfully.
+    status = model_status(load=False)
+    if not status["loaded"]:
+        raise HTTPException(status_code=503, detail={"ok": False, "model": status})
+    return {"ok": True, "model": status}
 
 
 @app.get("/v1/capabilities")

@@ -1,10 +1,16 @@
 {
   "entity_model": {
-    "id": "gliner-community/gliner_small-v2.5",
-    "revision": "f227d3cd637bd4e6757ae143935316d062393341",
+    "id": "urchade/gliner_multi-v2.1",
+    "revision": "443d26d654e0324125a96bebd8e796c14ff2efe6",
     "license": "Apache-2.0",
-    "weights": "model.bf16.safetensors",
-    "sha256": "25a633c03236faa2f1560e107994a53672bee12293f9fa562023d9a07cc411b3"
+    "weights": "model.safetensors",
+    "sha256": "2100142f31627531497850659dcb3821c99d5e71c08a8e01a98e4b11ef32a199",
+    "inference_dtype": "bfloat16",
+    "tokenizer": {
+      "id": "microsoft/mdeberta-v3-base",
+      "revision": "a0484667b22365f84929a935b5e50a51f71f159d",
+      "files": ["config.json", "spm.model", "tokenizer_config.json"]
+    }
   },
   "language_model": {
     "id": "langid.py",

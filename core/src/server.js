@@ -2314,7 +2314,8 @@ if (process.env.DOCLING_URL) {
               return {
                 text: _hmx.text, markdown: _hmx.markdown, json: null,
                 tables: [], pages: null, confidence: null, error: null,
-                hybridChunks: [], chunkerError: null, engine: _hmx.tier,
+                hybridChunks: [], hmExtractSegments: _hmx.sourceSegments || [],
+                chunkerError: null, engine: _hmx.tier,
               };
             }
             console.warn(`[docling-adapter] hm-extract declined ${filename} (${_hmx.error || 'no text'}) — trying docling`);

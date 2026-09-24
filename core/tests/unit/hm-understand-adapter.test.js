@@ -25,14 +25,36 @@ test('adapter fails closed on malformed or unavailable service results', async (
   assert.equal((await malformed.analyze({ source: { id: 'doc', revision: '1' }, blocks: [{ id: 'b', text: 'evidence' }] })).code, 'HM_UNDERSTAND_BAD_RESPONSE');
 });
 
+test('adapter enforces a hard timeout and aborts a stalled service request', async () => {
+  let requestSignal;
+  const client = new HmUnderstandAdapter({
+    baseUrl: 'http://hm-understand', timeoutMs: 1_000, logger: { warn() {} },
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      requestSignal = options.signal;
+      options.signal.addEventListener('abort', () => {
+        const error = new Error('request aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
+    }),
+  });
+
+  const result = await client.analyze({ source: { id: 'doc', revision: '1' }, blocks: [{ id: 'b', text: 'evidence' }] });
+  assert.deepEqual(result, { ok: false, code: 'HM_UNDERSTAND_TIMEOUT', retryable: true });
+  assert.equal(requestSignal.aborted, true);
+});
+
 test('parser segment locations survive the adapter mapping', () => {
   const blocks = hmUnderstandBlocksFromSegments([{
-    id: 'segment-a', content: 'Original evidence', startPage: 4, segmentType: 'paragraph', segmentIndex: 3,
+    id: 'segment-a', content: 'Original evidence', startPage: 4, startOffset: 120, endOffset: 137,
+    segmentType: 'paragraph', segmentIndex: 3,
     metadata: { heading_path: ['Finance', 'Budget'], language: 'de' },
   }]);
   assert.deepEqual(blocks[0].locator, { page: 4, heading_path: ['Finance', 'Budget'], sheet: null, row: null, cell: null });
   assert.equal(blocks[0].language, 'de');
   assert.equal(blocks[0].metadata.segment_index, 3);
+  assert.equal(blocks[0].source_start, 120);
+  assert.equal(blocks[0].source_end, 137);
 });
 
 test('adapter batches large documents without dropping parser blocks', async () => {

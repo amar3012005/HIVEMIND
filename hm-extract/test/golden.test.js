@@ -73,14 +73,12 @@ test('segment invariants hold on every scored, successful file', async () => {
     let prevOffset = -1;
     for (const seg of body.segments) {
       assert.ok(seg.content.length > 0, `${name} segment ${seg.segmentIndex} is empty`);
-      if (seg.startOffset != null) {
-        assert.ok(seg.startOffset >= prevOffset - 500, `${name} segment ${seg.segmentIndex} offset went backwards unexpectedly`);
-        prevOffset = seg.startOffset;
-        // content must be a verbatim substring of the returned markdown at that offset region
-        const region = body.markdown.slice(seg.startOffset, seg.startOffset + 20);
-        assert.ok(seg.content.startsWith(region.slice(0, Math.min(20, seg.content.length))) || body.markdown.includes(seg.content.slice(0, 20)),
-          `${name} segment ${seg.segmentIndex} content not traceable to markdown`);
-      }
+      assert.ok(Number.isInteger(seg.startOffset) && Number.isInteger(seg.endOffset),
+        `${name} segment ${seg.segmentIndex} has no exact source offsets`);
+      assert.ok(seg.startOffset >= prevOffset - 500, `${name} segment ${seg.segmentIndex} offset went backwards unexpectedly`);
+      assert.equal(body.markdown.slice(seg.startOffset, seg.endOffset), seg.content,
+        `${name} segment ${seg.segmentIndex} is not an exact source slice`);
+      prevOffset = seg.startOffset;
       assert.ok(!/^\w/.test(seg.content) || seg.content.length > 1, `${name} segment ${seg.segmentIndex} looks mid-word-split`);
     }
   }

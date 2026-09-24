@@ -9,21 +9,19 @@
  * 7-row compatibility matrix landing inside one segment reached the
  * extractor as pipe-delimited text and came back with 3 rows dropped."
  *
- * Deliberately NOT built by modifying chunker.js's ported chunkText — that
- * function is a verbatim port and stays that way so prose chunking is
- * byte-identical to core's current behavior. This module is a PRE-PASS:
+ * The legacy chunkText API remains unchanged. This module is a structural
+ * pass that partitions prose/tables/lists, then uses the offset-aware
+ * chunker for prose and source-line boundaries for tables/lists:
  * partition the document into (prose | table | list) spans, chunk each
  * span with the strategy suited to it, concatenate the resulting chunk
- * TEXTS in order. Everything downstream (heading detection, offset
- * anchoring, page lookup, segment_type classification in segments.js)
- * is unchanged — it already operates on a list of chunk texts, not on
- * how those texts were produced.
+ * ranges in order. Original source offsets travel with each chunk, so
+ * downstream evidence locators do not need to rediscover offsets by text.
  *
  * Does NOT need caching, embeddings, or any LLM call — purely structural,
  * so it stays inside a stateless, dependency-light service.
  */
 
-import { chunkText } from './chunker.js';
+import { chunkTextWithOffsets } from './chunker.js';
 
 const TABLE_ROW_RE = /^\|.*\|\s*$/;
 const LIST_ITEM_RE = /^\s*([-*+]|\d+\.)\s+\S/;
@@ -38,8 +36,6 @@ function partition(text) {
   const lines = text.split('\n');
   const spans = [];
   let i = 0;
-  let cursor = 0; // char offset of the start of lines[i]
-
   const lineStarts = [];
   {
     let off = 0;
@@ -86,34 +82,27 @@ function partition(text) {
  * Chunk a table span by WHOLE ROWS only, never mid-row.
  *
  * Deliberately does NOT repeat the header/separator row at the top of every
- * chunk after the first. A first version did, for readability — but every
- * segment's offset is found by locating its own text as a literal,
- * forward-only substring of the source (see document-first-ingestion.js's
- * anchor scheme, ported into segments.js). The header text exists exactly
- * ONCE in the real document; repeating it made a later chunk's prefix
- * resolve back to that single earlier occurrence, which is BEFORE the
- * scanning cursor, and the invariant test caught it immediately: "offset
- * went backwards unexpectedly". Correctness of citations/paging outranks
- * a table fragment being self-describing — the header context loss on a
- * mid-table fragment is accepted as a known limitation, not solved here.
+ * chunk after the first. Repeating source rows would fabricate evidence
+ * ranges; consumers can use the original source offsets to inspect nearby
+ * header context when needed.
  */
-function chunkTableRows(rowLines, targetSize, maxSize) {
+function chunkAtomicLines(rows, targetSize, maxSize) {
   const chunks = [];
   let current = [];
   let currentLen = 0;
 
   const flush = () => {
-    if (current.length) chunks.push(current.join('\n'));
+    if (current.length) chunks.push({ startOffset: current[0].startOffset, endOffset: current[current.length - 1].endOffset });
     current = [];
     currentLen = 0;
   };
 
-  for (const row of rowLines) {
-    if (currentLen + row.length > maxSize && current.length) {
+  for (const row of rows) {
+    if (currentLen + row.text.length > maxSize && current.length) {
       flush();
     }
     current.push(row);
-    currentLen += row.length + 1;
+    currentLen += row.text.length + 1;
     if (currentLen >= targetSize && currentLen > maxSize * 0.6) {
       // soft target reached at a safe size — still only cut BETWEEN rows
       flush();
@@ -123,36 +112,21 @@ function chunkTableRows(rowLines, targetSize, maxSize) {
   return chunks;
 }
 
-/**
- * Chunk a list span by WHOLE ITEMS only, never mid-item.
- */
-function chunkListItems(itemLines, targetSize, maxSize) {
-  const chunks = [];
-  let current = [];
-  let currentLen = 0;
-  for (const item of itemLines) {
-    if (currentLen + item.length > maxSize && current.length) {
-      chunks.push(current.join('\n'));
-      current = [];
-      currentLen = 0;
-    }
-    current.push(item);
-    currentLen += item.length + 1;
-    if (currentLen >= targetSize) {
-      chunks.push(current.join('\n'));
-      current = [];
-      currentLen = 0;
-    }
+/** Obtain non-empty source lines with exact offsets. */
+function sourceLines(text, startOffset, endOffset) {
+  const lines = [];
+  let cursor = startOffset;
+  for (const line of text.slice(startOffset, endOffset).split('\n')) {
+    if (line.length) lines.push({ text: line, startOffset: cursor, endOffset: cursor + line.length });
+    cursor += line.length + 1;
   }
-  if (current.length) chunks.push(current.join('\n'));
-  return chunks;
+  return lines;
 }
 
 /**
  * Atomicity-aware replacement for a single `chunkText(cleanText, opts)`
- * call. Returns the same shape chunkText returns — an array of
- * `{ text, index }` — so segments.js needs no change beyond calling this
- * instead of chunkText directly.
+ * call. Returns `{ text, index, startOffset, endOffset, kind }` entries;
+ * offsets refer to the original source text, not a synthesized chunk.
  */
 export function chunkTextAtomic(text, opts = {}) {
   const targetSize = opts.targetSize ?? 700;
@@ -177,23 +151,39 @@ export function chunkTextAtomic(text, opts = {}) {
   for (const span of spans) {
     const spanText = text.slice(span.startOffset, span.endOffset);
     if (span.kind === 'table') {
-      const rowLines = spanText.split('\n').filter((l) => l.length > 0);
-      const chunks = chunkTableRows(rowLines, targetSize, maxSize);
-      for (const c of chunks) if (c.trim().length >= Math.min(minSize, 20)) outChunks.push({ text: c, kind: 'table' });
+      const rows = sourceLines(text, span.startOffset, span.endOffset);
+      const chunks = chunkAtomicLines(rows, targetSize, maxSize);
+      for (const range of chunks) {
+        const content = text.slice(range.startOffset, range.endOffset);
+        if (content.trim().length >= Math.min(minSize, 20)) outChunks.push({ ...range, text: content, kind: 'table' });
+      }
     } else if (span.kind === 'list') {
-      const itemLines = spanText.split('\n').filter((l) => l.length > 0);
-      const chunks = chunkListItems(itemLines, targetSize, maxSize);
-      for (const c of chunks) if (c.trim().length >= Math.min(minSize, 20)) outChunks.push({ text: c, kind: 'list' });
+      const items = sourceLines(text, span.startOffset, span.endOffset);
+      const chunks = chunkAtomicLines(items, targetSize, maxSize);
+      for (const range of chunks) {
+        const content = text.slice(range.startOffset, range.endOffset);
+        if (content.trim().length >= Math.min(minSize, 20)) outChunks.push({ ...range, text: content, kind: 'list' });
+      }
     } else {
-      // Prose: the UNCHANGED verbatim chunker, exactly as core runs it.
+      // Keep the legacy chunkText API unchanged; hm-extract uses its source-aware counterpart.
       if (spanText.trim().length < minSize) {
-        if (spanText.trim().length > 0) outChunks.push({ text: spanText.trim(), kind: 'prose' });
+        const content = spanText.trim();
+        if (content.length > 0) {
+          const leading = spanText.indexOf(content);
+          outChunks.push({ text: content, startOffset: span.startOffset + leading,
+            endOffset: span.startOffset + leading + content.length, kind: 'prose' });
+        }
         continue;
       }
-      const proseChunks = chunkText(spanText, { targetSize, maxSize, minSize, overlapSize }) || [];
-      for (const c of proseChunks) if (c.text && c.text.trim()) outChunks.push({ text: c.text.trim(), kind: 'prose' });
+      const proseChunks = chunkTextWithOffsets(spanText, { targetSize, maxSize, minSize, overlapSize }) || [];
+      for (const c of proseChunks) if (c.text && c.text.trim()) outChunks.push({
+        text: c.text,
+        startOffset: span.startOffset + c.start,
+        endOffset: span.startOffset + c.end,
+        kind: 'prose',
+      });
     }
   }
 
-  return outChunks.map((c, index) => ({ text: c.text, index, kind: c.kind }));
+  return outChunks.map((c, index) => ({ ...c, index }));
 }

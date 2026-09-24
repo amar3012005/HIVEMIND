@@ -4571,6 +4571,7 @@ Every item must include a non-empty content field and one or more valid support_
                 confidence: doclingResult.confidence,
                 pages: doclingResult.pages?.length,
                 hybridChunks: Array.isArray(doclingResult.hybridChunks) ? doclingResult.hybridChunks : [],
+                hmExtractSegments: Array.isArray(doclingResult.hmExtractSegments) ? doclingResult.hmExtractSegments : [],
                 chunkerError: doclingResult.chunkerError || null,
                 parseError: doclingResult.error || null,
               }
@@ -4710,6 +4711,99 @@ Every item must include a non-empty content field and one or more valid support_
       return [];
     }
     if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
+
+    // hm-extract has already performed its structure-aware, atomic chunking.
+    // Reuse those exact chunks as the canonical evidence segments rather than
+    // re-chunking its text and then analyzing a different segmentation. Every
+    // chunk must map exactly back to the parser's sanitized text; if any does
+    // not, fall through to the established Core segmenter instead of silently
+    // storing a broken citation coordinate.
+    const hmExtractSegments = parseResult?.metadata?.hmExtractSegments;
+    if (Array.isArray(hmExtractSegments) && hmExtractSegments.length > 0 && parseResult?.text) {
+      const sourceText = String(parseResult.text);
+      const sourceRows = [];
+      let previousStartOffset = -1;
+      let previousSegmentIndex = -1;
+      let sourceSegmentsValid = true;
+      for (const [index, parsed] of hmExtractSegments.entries()) {
+        const content = typeof parsed?.content === 'string' ? parsed.content : '';
+        if (!content.trim()) continue;
+        if (sanitizeSegmentText(content) !== content) {
+          sourceSegmentsValid = false;
+          break;
+        }
+        const startOffset = Number.isInteger(parsed.startOffset) ? parsed.startOffset : null;
+        const endOffset = Number.isInteger(parsed.endOffset) ? parsed.endOffset : null;
+        const segmentIndex = Number.isInteger(parsed.segmentIndex) ? parsed.segmentIndex : index;
+        // Do not infer a location with indexOf(): repeated sentences are common
+        // in decks, contracts, and page headers, and matching text alone cannot
+        // identify which occurrence is the evidence. hm-extract's exact-span
+        // contract is required; older/malformed responses use Core's segmenter.
+        if (startOffset == null || startOffset < 0 || startOffset < previousStartOffset
+            || endOffset == null || endOffset > sourceText.length
+            || endOffset !== startOffset + content.length
+            || !Number.isInteger(segmentIndex) || segmentIndex <= previousSegmentIndex
+            || sourceText.slice(startOffset, endOffset) !== content) {
+          sourceSegmentsValid = false;
+          break;
+        }
+        previousStartOffset = startOffset;
+        previousSegmentIndex = segmentIndex;
+        sourceRows.push({ parsed, index, content, startOffset, endOffset });
+      }
+      if (sourceSegmentsValid && sourceRows.length > 0) {
+        const segments = [];
+        let previousSegmentId = null;
+        for (const { parsed, index, content, startOffset, endOffset } of sourceRows) {
+          const segmentIndex = Number.isInteger(parsed.segmentIndex) ? parsed.segmentIndex : index;
+          const allowedTypes = new Set(['paragraph', 'table', 'list', 'heading', 'figure']);
+          const segmentType = allowedTypes.has(parsed.segmentType) ? parsed.segmentType : 'paragraph';
+          const metadata = parsed.metadata && typeof parsed.metadata === 'object' && !Array.isArray(parsed.metadata)
+            ? parsed.metadata : {};
+          const headingPath = Array.isArray(metadata.heading_path) ? metadata.heading_path : [];
+          const startPage = Number.isInteger(parsed.startPage) && parsed.startPage > 0 ? parsed.startPage : null;
+          const endPage = Number.isInteger(parsed.endPage) && parsed.endPage > 0 ? parsed.endPage : startPage;
+          const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+          const base = {
+            documentId, userId, orgId, segmentType, content: sanitizeSegmentText(content), contentHash,
+            segmentIndex, previousSegmentId,
+            depth: Number.isInteger(parsed.depth) ? parsed.depth : headingPath.length,
+            startOffset, endOffset, startPage, endPage,
+            wordCount: Number.isInteger(parsed.wordCount) ? parsed.wordCount : content.split(/\s+/).filter(Boolean).length,
+            metadata: buildEvidenceMetadata({
+              existing: { ...metadata, source: 'hm_extract', page: startPage,
+                segment_type: segmentType, heading_path: headingPath },
+              documentId, sourceId: docScope.sourceId || documentId,
+              sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document',
+              segmentIndex, segmentType, userId, orgId, scope: docScope.scope,
+              projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId,
+              startPage, endPage, headingPath, documentDate: docScope.documentDate,
+              knownAt: docScope.knownAt, language: docScope.language, contentHash,
+              sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform,
+            }),
+          };
+          if (remote) {
+            const segment = { id: crypto.randomUUID(), ...base, createdAt: new Date().toISOString() };
+            segments.push(segment);
+            previousSegmentId = segment.id;
+          } else {
+            try {
+              const segment = await this.db.knowledgeSegment.create({ data: base });
+              segments.push(segment);
+              previousSegmentId = segment.id;
+            } catch (error) {
+              ingestDiagnostic.warn(`[segments] hm-extract segment insert failed: ${error.message}`);
+            }
+          }
+        }
+        if (segments.length) {
+          if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[segments] reused ${segments.length} exact hm-extract evidence segments for doc ${documentId}`);
+          return segments;
+        }
+      } else {
+        ingestDiagnostic.warn(`[segments] hm-extract source segments failed exact-span validation for doc ${documentId}; using Core chunker`);
+      }
+    }
 
     // SEMANTIC SEGMENTS (default; reversible via KB_SEMANTIC_SEGMENTS=false). Docling's HybridChunker
     // text can start/end MID-WORD (token-window artifacts: "...doc" | "ents to share…"), poisoning the

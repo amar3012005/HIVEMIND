@@ -16,6 +16,8 @@ import { injectPptxSlideMarkers } from './pptx-provenance.js';
 import { buildSegments, sanitizeDocument, computeStructuralDensity } from './segments.js';
 import { collapseLetterSpacing } from './collapse-letter-spacing.js';
 import { mapConvertError, tooLargeError } from './errors.js';
+import { writeExtractResponse } from './extract-response.js';
+import { canAdmitMemoryEstimate } from './admission.js';
 
 const PORT = Number(process.env.PORT || 8088);
 const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 100);
@@ -46,49 +48,6 @@ const MEMORY_BLOWUP_FACTOR = Number(process.env.MEMORY_BLOWUP_FACTOR || 20);
 // handling — leaves ~1.2GB of budget. Set MAX_INFLIGHT_MEMORY_BYTES
 // explicitly to match your actual container's --memory limit.
 const MAX_INFLIGHT_MEMORY_BYTES = Number(process.env.MAX_INFLIGHT_MEMORY_BYTES || (1200 * 1024 * 1024));
-
-/**
- * Stream the /extract response instead of res.json(bigObject).
- *
- * res.json() calls JSON.stringify() on the WHOLE response object first,
- * materializing one contiguous string before a single byte is sent. For a
- * large document that string alone was ~280MB (measured: 70MB/94,984-row
- * CSV) — on top of the buffer, markdown, and segments array already in
- * memory, that pushed container RSS to ~1.6GB and OOM-killed it once under
- * load (see README's "Memory sizing" note). `markdown` and `text` are
- * identical content (see errors.js's contract, HM_EXTRACT_SPEC.md:80-81
- * requires both), so stringify-then-concat was ALSO paying to serialize the
- * same ~83MB string twice into that one buffer.
- *
- * This writes each field as its own chunk directly to the socket. Peak
- * additional memory becomes "one field's JSON.stringify at a time"
- * (~83MB for the biggest single field) instead of "the entire response
- * as one string" (~280MB) — cut the single largest allocation in the
- * request path without changing the wire format at all; a client reading
- * the full response sees byte-identical JSON either way.
- */
-function writeExtractResponse(res, {
-  engine, format, chars, markdown, text, pageMarks, segments, structuralDensity, timings,
-}) {
-  res.status(200);
-  res.set('Content-Type', 'application/json');
-  res.write('{"ok":true');
-  res.write(`,"engine":${JSON.stringify(engine)}`);
-  res.write(`,"format":${JSON.stringify(format)}`);
-  res.write(`,"chars":${chars}`);
-  res.write(`,"markdown":${JSON.stringify(markdown)}`);
-  res.write(`,"text":${JSON.stringify(text)}`);
-  res.write(`,"page_marks":${JSON.stringify(pageMarks)}`);
-  res.write(',"segments":[');
-  for (let i = 0; i < segments.length; i += 1) {
-    if (i > 0) res.write(',');
-    res.write(JSON.stringify(segments[i]));
-  }
-  res.write(']');
-  res.write(`,"structural_density":${JSON.stringify(structuralDensity)}`);
-  res.write(`,"timings":${JSON.stringify(timings)}`);
-  res.end('}');
-}
 
 const SUPPORTED_FORMATS = [
   'doc', 'docx', 'docm', 'ppt', 'pps', 'pot', 'pptx', 'pptm', 'ppsx', 'ppsm',
@@ -151,8 +110,11 @@ app.post('/extract', (req, res, next) => {
   // `req._reservedMemoryEstimate`, on every exit path.
   const estimatedUploadBytes = Number(req.headers['content-length'] || 0);
   const estimatedMemory = estimatedUploadBytes * MEMORY_BLOWUP_FACTOR;
-  if (estimatedUploadBytes > 0 && inFlightMemoryEstimate > 0
-      && inFlightMemoryEstimate + estimatedMemory > MAX_INFLIGHT_MEMORY_BYTES) {
+  if (estimatedUploadBytes > 0 && !canAdmitMemoryEstimate({
+    estimatedBytes: estimatedMemory,
+    inFlightBytes: inFlightMemoryEstimate,
+    maxBytes: MAX_INFLIGHT_MEMORY_BYTES,
+  })) {
     res.set('Retry-After', '2');
     return res.status(429).json({
       ok: false, code: 'busy',
@@ -225,7 +187,7 @@ app.post('/extract', (req, res, next) => {
     // other format still goes through anydoc's Rust conversion exactly as
     // before; this branch changes NOTHING about that path.
     const markdown = isTextPassthrough ? buf.toString('utf-8') : await toMarkdownBytes(buf, detected);
-    const parseMs = Date.now() - tParseStart;
+    const parseMs = isTextPassthrough ? 0 : Date.now() - tParseStart;
 
     if (timedOut) return; // response already sent by the timeout handler
 
@@ -262,7 +224,7 @@ app.post('/extract', (req, res, next) => {
       atomic_ratio: structuralDensity.atomic_segment_ratio, ok: true,
     }));
 
-    writeExtractResponse(res, {
+    await writeExtractResponse(res, {
       engine: isTextPassthrough ? 'passthrough' : 'anydoc',
       format: detected,
       chars: cleanText.length,
@@ -272,10 +234,12 @@ app.post('/extract', (req, res, next) => {
       segments,
       structuralDensity,
       timings: { parse_ms: parseMs, chunk_ms: chunkMs, total_ms: Date.now() - t0 },
-    });
+    }, { compact: String(req.get('accept') || '').includes('application/vnd.hm-extract.v2+json') });
   } catch (err) {
     clearTimeout(timer);
     if (timedOut) { /* already responded */ }
+    else if (res.destroyed || res.writableEnded) { /* client disconnected mid-stream */ }
+    else if (res.headersSent) res.destroy(err);
     else {
       const body = mapConvertError(err);
       console.log(JSON.stringify({

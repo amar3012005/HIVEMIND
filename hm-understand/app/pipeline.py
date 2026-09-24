@@ -12,7 +12,23 @@ from app.language import detect_language
 PIPELINE_VERSION = "hm-understand/0.1.0"
 # These languages have only a small labeled smoke fixture, not production-grade
 # validation. The set is a lower bound for routing; it is not a quality claim.
-SMOKE_TESTED_LANGUAGES = {"en", "de", "es"}
+# No language has enough reviewed evaluation evidence to waive refinement yet.
+# Promote languages deliberately only after reviewing corpus quality metrics.
+SMOKE_TESTED_LANGUAGES: set[str] = set()
+
+
+def _utf16_length(text: str) -> int:
+    """Return JavaScript-compatible UTF-16 code-unit length for Core offsets."""
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _source_range(block, start: int, end: int) -> tuple[int | None, int | None]:
+    if block.source_start is None:
+        return None, None
+    # Parser/Core source offsets use JavaScript string indexes (UTF-16 code
+    # units); analyzer-local evidence offsets use Python code points.
+    return (block.source_start + _utf16_length(block.text[:start]),
+            block.source_start + _utf16_length(block.text[:end]))
 
 
 def canonical_hash(request: AnalyzeRequest) -> str:
@@ -49,8 +65,17 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         language = detect_language(text, block.language)
         model_entities = []
         raw_model_entity_count = 0
+        model_inference_failed = False
         for window_start, window_end in _windows(text):
-            window_entities = extract_entities(text[window_start:window_end], request.entity_types)
+            try:
+                window_entities = extract_entities(text[window_start:window_end], request.entity_types)
+            except Exception:
+                # Preserve deterministic extractors and exact evidence if a
+                # local-model inference fails for one language or passage.
+                # Core will see an incomplete result and keep its refinement
+                # path; one bad model call must not discard parser output.
+                model_inference_failed = True
+                break
             raw_model_entity_count += len(window_entities)
             for row in window_entities:
                 if row.get("start", -1) >= 0 and row.get("end", -1) > row.get("start", -1):
@@ -73,10 +98,14 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             quote = text[start:end]
             if not quote or row.get("text") != quote:
                 continue
+            source_start, source_end = _source_range(block, start, end)
             mentions.append(Mention(
                 text=quote, label=row["label"], score=row.get("score"),
                 evidence=EvidenceRef(source_id=request.source.id, source_revision=request.source.revision,
-                                     block_id=block.id, quote=quote, start=start, end=end, locator=block.locator),
+                                     block_id=block.id, quote=quote, start=start, end=end,
+                                     source_start=source_start,
+                                     source_end=source_end,
+                                     locator=block.locator),
                 extractor=row["extractor"],
                 uncertainty_reason="rule_candidate_requires_review" if row["extractor"].startswith("rule:") else None,
             ))
@@ -84,17 +113,23 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         candidates = []
         if request.include_candidates:
             for row in extract_candidates(text):
+                source_start, source_end = _source_range(block, row["start"], row["end"])
                 candidates.append(Candidate(
                     kind=row["kind"], text=row["text"], signals=row["signals"], needs_review=True,
                     evidence=EvidenceRef(source_id=request.source.id, source_revision=request.source.revision,
                                          block_id=block.id, quote=text[row["start"]:row["end"]],
-                                         start=row["start"], end=row["end"], locator=block.locator),
+                                         start=row["start"], end=row["end"],
+                                         source_start=source_start,
+                                         source_end=source_end,
+                                         locator=block.locator),
                 ))
         literal_dates = parse_dates(text, request.source.timezone)
         model_info = model_status()
         refinement_reasons = []
         if not model_info["loaded"]:
             refinement_reasons.append("local_entity_model_unavailable")
+        if model_inference_failed:
+            refinement_reasons.append("local_entity_model_inference_failed")
         primary_language = language.get("primary", "und")
         if primary_language == "und":
             refinement_reasons.append("language_unclassified")
@@ -123,7 +158,8 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
                 # and is not a calibrated probability or a promise of coverage.
                 "refinement_required": bool(refinement_reasons),
                 "refinement_reasons": refinement_reasons,
-                "status": "processed" if model_info["loaded"] else "partial_model_unavailable",
+                "status": ("partial_model_unavailable" if not model_info["loaded"] else
+                           "partial_model_inference_failed" if model_inference_failed else "processed"),
             },
             processing_ms=max(0, int((time.monotonic() - block_started) * 1000)),
         ))

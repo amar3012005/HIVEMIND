@@ -17,14 +17,10 @@
  * description disabled by default, still slow, still real docling) and
  * legacy doc/docm/odt/rtf/epub. xlsx/csv/docx/pdf are deliberately excluded.
  *
- * Same shape as core/src/knowledge/normalize.js's seam tier
- * ({ok, tier, markdown, text, meta}) — this IS a sibling tier, inserted right
- * before the Tier 2 docling call in server.js's doclingAdapter.parseBuffer,
- * and on any failure the caller falls through to docling exactly like the
- * seam tier does. Only replaces the PARSE step — hm-extract's own atomic
- * chunking/structural_density are NOT used here; the existing, already-tuned
- * chunker/semantic-reslice pipeline keeps doing its job on the returned
- * markdown/text, same as the plain-text and seam tiers.
+ * Same shape as core/src/knowledge/normalize.js's seam tier, with one additive
+ * field: validated source segments. Core can persist and analyze those exact
+ * parser segments without running a competing second chunker. If segments are
+ * absent or fail validation, the existing chunker remains the fallback.
  *
  * REACHABILITY NOTE: the real upload contract admits the same proven narrow
  * set: pptx plus doc/docm/odt/rtf/epub. Formats merely advertised by anydoc
@@ -91,8 +87,8 @@ export function isHmExtractEnabled(ext) {
  * @param {string} filename
  * @returns {Promise<{ok: boolean, tier?: string, markdown?: string|null, text?: string, meta?: object, error?: string}>}
  */
-export async function parseWithHmExtract(fileBuffer, filename) {
-  if (!KB_EXTRACT_URL) return { ok: false, error: 'KB_EXTRACT_URL not set' };
+export async function parseWithHmExtract(fileBuffer, filename, { baseUrl = KB_EXTRACT_URL, fetchImpl = globalThis.fetch } = {}) {
+  if (!baseUrl) return { ok: false, error: 'KB_EXTRACT_URL not set' };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), KB_EXTRACT_TIMEOUT_MS);
@@ -101,8 +97,9 @@ export async function parseWithHmExtract(fileBuffer, filename) {
     form.append('file', new Blob([fileBuffer]), filename);
     form.append('filename', filename);
 
-    const res = await fetch(`${KB_EXTRACT_URL}/extract`, {
+    const res = await fetchImpl(`${String(baseUrl).replace(/\/+$/, '')}/extract`, {
       method: 'POST',
+      headers: { accept: 'application/vnd.hm-extract.v2+json' },
       body: form,
       signal: controller.signal,
     });
@@ -117,15 +114,36 @@ export async function parseWithHmExtract(fileBuffer, filename) {
     recordSuccess();
     const cleanText = body.text || body.markdown || '';
     const markedText = injectSeparatedPageMarks(cleanText, body.page_marks);
+    const sourceSegments = (Array.isArray(body.segments) ? body.segments : [])
+      .filter((segment) => segment && typeof segment.content === 'string' && segment.content.trim())
+      .map((segment, index) => ({
+        segmentIndex: Number.isInteger(segment.segmentIndex) ? segment.segmentIndex : index,
+        segmentType: typeof segment.segmentType === 'string' ? segment.segmentType : 'paragraph',
+        content: segment.content,
+        contentHash: typeof segment.contentHash === 'string' ? segment.contentHash : null,
+        depth: Number.isInteger(segment.depth) ? segment.depth : 0,
+        startOffset: Number.isInteger(segment.startOffset) ? segment.startOffset : null,
+        endOffset: Number.isInteger(segment.endOffset) ? segment.endOffset : null,
+        startPage: Number.isInteger(segment.startPage) ? segment.startPage : null,
+        endPage: Number.isInteger(segment.endPage) ? segment.endPage : null,
+        wordCount: Number.isInteger(segment.wordCount) ? segment.wordCount : segment.content.split(/\s+/).filter(Boolean).length,
+        metadata: segment.metadata && typeof segment.metadata === 'object' && !Array.isArray(segment.metadata)
+          ? segment.metadata : {},
+      }));
+    // Hm-extract offsets refer to its exact sanitized source text. Avoid adding
+    // page-marker characters to that coordinate system when parser segments
+    // already carry authoritative page metadata.
+    const parserSegmentsAvailable = sourceSegments.length > 0;
     const pageCount = new Set((Array.isArray(body.page_marks) ? body.page_marks : [])
       .map((mark) => Number(mark?.page)).filter((page) => page > 0)).size;
     return {
       ok: true,
       tier: `hm-extract:${body.format}`,
-      markdown: markedText || null,
-      text: markedText,
+      markdown: (parserSegmentsAvailable ? cleanText : markedText) || null,
+      text: parserSegmentsAvailable ? cleanText : markedText,
+      sourceSegments,
       meta: {
-        segments: Array.isArray(body.segments) ? body.segments.length : 0,
+        segments: sourceSegments.length,
         pages: pageCount || null,
         structural_density: body.structural_density || null,
       },

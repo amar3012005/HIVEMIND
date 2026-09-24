@@ -18,9 +18,23 @@ class Locator(BaseModel):
 class TextBlock(BaseModel):
     id: str = Field(min_length=1, max_length=256)
     text: str = Field(min_length=1, max_length=100_000)
+    source_start: int | None = Field(default=None, ge=0)
+    source_end: int | None = Field(default=None, ge=0)
     locator: Locator = Field(default_factory=Locator)
     language: str | None = Field(default=None, max_length=16)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_source_range(self):
+        if (self.source_start is None) != (self.source_end is None):
+            raise ValueError("source_start and source_end must be provided together")
+        if self.source_start is not None and self.source_end < self.source_start:
+            raise ValueError("source_end must be greater than or equal to source_start")
+        if self.source_start is not None:
+            utf16_length = len(self.text.encode("utf-16-le", errors="surrogatepass")) // 2
+            if self.source_end - self.source_start != utf16_length:
+                raise ValueError("source range length must match the block's UTF-16 code-unit length")
+        return self
 
 
 class Source(BaseModel):
@@ -63,6 +77,8 @@ class EvidenceRef(BaseModel):
     quote: str
     start: int
     end: int
+    source_start: int | None = None
+    source_end: int | None = None
     locator: Locator
 
 

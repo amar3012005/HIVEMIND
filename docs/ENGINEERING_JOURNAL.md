@@ -2478,3 +2478,25 @@ git diff --check: passed (line-ending warnings only)
   checkouts; obtain a clean permanent integration state, merge current
   `origin/singulance-main` before this session branch, then run authenticated
   upload-to-recall canaries against only the local stack.
+
+## 2026-09-24 UTC — refreshed real-model parser-to-analysis canary
+
+- State: Host-local parser → exact evidence → pinned-model analysis canary
+  passed; candidate remains unintegrated in the shared local Core.
+- Branch/worktree: `codex/hm-understand-singulance-local` at prior pushed code
+  SHA `cda233aecb5b293b5af7e9ca74866053f4fe226e` (journal-only commits do not
+  change the code under test).
+- Verification: start hm-extract from `hm-extract/` with
+  `UV_THREADPOOL_SIZE=8 PORT=8198 node src/server.js`; start hm-understand from
+  `hm-understand/` with pinned model ID/revision, `HF_HOME=/Users/amar/.cache/huggingface`,
+  `HF_HUB_OFFLINE=1`, and the local Python 3.11 venv; then from `core/` run:
+  `HF_HUB_OFFLINE=1 HF_HOME=/Users/amar/.cache/huggingface HM_UNDERSTAND_URL=http://127.0.0.1:8091 KB_EXTRACT_URL=http://127.0.0.1:8198 node --test --test-concurrency=1 --test-name-pattern='live hm-extract segments|local RTF parsing|unvalidated multilingual model' tests/integration/hm-understand-local-e2e.test.js`
+  -> 3 passed, 0 failed, 10.1 seconds. Logs show two successful live
+  `/v1/analyze` requests. The RTF fixture found grounded `Rama` and a decision
+  candidate; every checked quote mapped to its parser block and document-global
+  offset. Shadow persisted only bounded metadata. The Core DB was a test stub;
+  this is not authenticated upload or durable recall proof.
+- Cleanup: both host-run services were stopped; temporary `core/node_modules`
+  dependency link was removed; feature worktree is clean after journal commit.
+- Next: continue toward local acceptance; shared integration still requires a
+  clean designated integration worktree and production-history reconciliation.

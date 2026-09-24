@@ -138,6 +138,132 @@ export function rankEntityMatches(entities, query, limit = MAX_LIMIT) {
     }));
 }
 
+// Candidate generation for canonical entities must remain index-driven. The
+// alias projection is synchronized by a database trigger, so this path covers
+// every canonical-entity writer. Authorization is applied inside the same
+// query before an entity can be returned.
+async function authorizedIndexedCanonicalRows({
+  prisma,
+  orgId,
+  userId,
+  accessContext = {},
+  projectId = null,
+  scopeFilter = null,
+  entityTypes = [],
+  query,
+  limit = MAX_LIMIT,
+}) {
+  if (typeof prisma?.$queryRawUnsafe !== 'function') return null;
+  const normalizedQuery = entitySlug(query);
+  if (!normalizedQuery) return [];
+
+  const role = String(accessContext?.orgRole || '').toLowerCase();
+  const projectIds = projectId
+    ? [String(projectId)]
+    : [...new Set((accessContext?.projectIds || []).map(String).filter(Boolean))];
+  const teamIds = [...new Set((accessContext?.teamIds || []).map(String).filter(Boolean))];
+  const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
+  const candidateLimit = Math.max(25, Math.min(Number(limit) * 8 || 100, 250));
+
+  try {
+    const rows = await prisma.$queryRawUnsafe(`
+      WITH candidate_aliases AS MATERIALIZED (
+        SELECT alias.entity_id,
+               min(CASE
+                 WHEN alias.normalized_alias = $3 THEN CASE WHEN alias.is_canonical THEN 0 ELSE 1 END
+                 WHEN alias.normalized_alias LIKE $3 || '%' THEN CASE WHEN alias.is_canonical THEN 2 ELSE 3 END
+                 ELSE 5
+               END) AS match_rank,
+               max(similarity(alias.normalized_alias, $3)) AS similarity_score
+        FROM hivemind.canonical_entity_search_aliases alias
+        JOIN hivemind.canonical_entities entity ON entity.id = alias.entity_id
+        WHERE alias.organization_id = $1::uuid
+          AND (cardinality($4::text[]) = 0 OR lower(entity.entity_kind) = ANY($4::text[]))
+          AND (
+            alias.normalized_alias = $3
+            OR alias.normalized_alias LIKE $3 || '%'
+            OR alias.normalized_alias % $3
+          )
+        GROUP BY alias.entity_id
+        ORDER BY match_rank ASC, similarity_score DESC, alias.entity_id ASC
+        LIMIT $11
+      ), visible_entity_stats AS (
+        SELECT link.entity_id,
+               count(DISTINCT memory.id)::int AS mention_count,
+               max(memory.created_at) AS last_seen_at
+        FROM candidate_aliases candidate
+        JOIN hivemind.memory_entity_links link ON link.entity_id = candidate.entity_id
+        JOIN hivemind.memories memory ON memory.id = link.memory_id
+        WHERE memory.org_id = $1::uuid
+          AND memory.deleted_at IS NULL
+          AND coalesce(memory.is_latest, true) = true
+          AND NOT (
+            ($9::boolean OR NOT $10::boolean)
+            AND 'scope:cross-project' = ANY(coalesce(memory.tags, ARRAY[]::text[]))
+          )
+          AND (
+            (memory.scope::text = 'personal' AND memory.user_id = $2::uuid)
+            OR (memory.scope::text = 'organization' AND $10::boolean)
+            OR (memory.scope::text = 'team' AND memory.primary_team_id = ANY($6::uuid[]))
+            OR (
+              memory.scope::text = 'project'
+              AND (
+                memory.project_id = ANY($5::uuid[])
+                OR EXISTS (
+                  SELECT 1 FROM hivemind.memory_projects mp
+                  WHERE mp.memory_id = memory.id AND mp.project_id = ANY($5::uuid[])
+                )
+              )
+            )
+          )
+          AND ($7::text IS NULL OR memory.scope::text = $7)
+          AND (
+            $8::uuid IS NULL
+            OR memory.project_id = $8::uuid
+            OR EXISTS (
+              SELECT 1 FROM hivemind.memory_projects selected_mp
+              WHERE selected_mp.memory_id = memory.id AND selected_mp.project_id = $8::uuid
+            )
+          )
+        GROUP BY link.entity_id
+      )
+      SELECT entity.id,
+             entity.canonical_name AS "canonicalName",
+             entity.entity_kind AS "entityType",
+             entity.aliases,
+             stats.mention_count AS "mentionCount",
+             coalesce(stats.last_seen_at, entity.updated_at) AS "lastSeenAt"
+      FROM candidate_aliases candidate
+      JOIN hivemind.canonical_entities entity ON entity.id = candidate.entity_id
+      JOIN visible_entity_stats stats ON stats.entity_id = entity.id
+      ORDER BY candidate.match_rank ASC,
+               candidate.similarity_score DESC,
+               stats.mention_count DESC,
+               stats.last_seen_at DESC,
+               entity.id ASC
+      LIMIT $12
+    `,
+    orgId,
+    userId,
+    normalizedQuery,
+    types,
+    projectIds,
+    teamIds,
+    scopeFilter,
+    projectId,
+    accessContext?.crossProject === false,
+    role !== 'guest',
+    candidateLimit,
+    candidateLimit);
+    return rows.map((row) => ({ ...row, _canonical: true }));
+  } catch (error) {
+    // During a rolling release Core may briefly precede this projection's
+    // migration. Null means "retain the existing path", not "no matches".
+    console.warn('[entity-discovery] indexed canonical lookup unavailable:', error.message);
+    return null;
+  }
+}
+
 function visibilityWhere({ orgId, userId, accessContext = {}, projectId = null, scopeFilter = null }) {
   const role = String(accessContext?.orgRole || '').toLowerCase();
   const privileged = role === 'owner' || role === 'admin';
@@ -377,7 +503,7 @@ async function authorizedMemberRows({ prisma, orgId, memberIds = [], entityTypes
     });
 }
 
-async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds, entityTypes }) {
+async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds, entityTypes, query = null, indexedCanonical = false, limit = MAX_LIMIT }) {
   if (!prisma) return { rows: [], degraded: 'entity_index_unavailable' };
   try {
     const types = [...new Set((entityTypes || []).map(normalize).filter(Boolean))];
@@ -386,6 +512,19 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
     const memberIds = ids.filter((id) => id.startsWith('member:')).map((id) => id.slice('member:'.length)).filter(Boolean);
     const registryIds = ids.filter((id) => !id.startsWith('tag:') && !id.startsWith('member:'));
     const onlyNonRegistryIds = ids.length > 0 && registryIds.length === 0;
+    const indexedRows = indexedCanonical && !ids.length && query
+      ? await authorizedIndexedCanonicalRows({
+          prisma,
+          orgId,
+          userId,
+          accessContext,
+          projectId,
+          scopeFilter,
+          entityTypes: types,
+          query,
+          limit,
+        })
+      : null;
     // Each registry is an optional projection of the same tenant-authorized
     // inventory. A stale legacy table or a transient canonical query must not
     // turn a healthy tag/member discovery path into a 503 for the entire UI.
@@ -407,7 +546,9 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
       legacy,
       onlyNonRegistryIds
         ? Promise.resolve([])
-        : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds: registryIds, entityTypes: types }),
+        : indexedRows !== null
+          ? Promise.resolve(indexedRows)
+          : authorizedCanonicalRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityIds: registryIds, entityTypes: types }),
       // Discovery without an ID may enumerate tag-backed entities. Resolution
       // of a canonical/legacy ID must not: passing an empty tag-slug list used
       // to append every tenant tag as an additional selected entity, silently
@@ -429,13 +570,38 @@ async function authorizedEntityRows({ prisma, memoryStore, orgId, userId, access
   }
 }
 
-export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = MAX_LIMIT, accessContext = {}, projectId = null, scope = null } = {}) {
+export async function findEntities({ prisma, memoryStore = null, orgId, userId, query, entityTypes = [], limit = MAX_LIMIT, accessContext = {}, projectId = null, scope = null, recallQualityMode = 'off' } = {}) {
   if (!String(query || '').trim()) return { matches: [], degraded: null };
   const { scopeFilter, error } = normalizeEntityScope(scope);
   if (error) return { matches: [], degraded: null, error };
-  const { rows, degraded } = await authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityTypes });
+  const mode = ['shadow', 'on'].includes(recallQualityMode) ? recallQualityMode : 'off';
+  const baselinePromise = authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityTypes, query, limit });
+  if (mode === 'off') {
+    const { rows, degraded } = await baselinePromise;
+    if (degraded) return { matches: [], degraded };
+    return { matches: rankEntityMatches(rows, query, limit), degraded: null, strategy: 'bounded_inventory' };
+  }
+
+  const indexedPromise = authorizedEntityRows({ prisma, memoryStore, orgId, userId, accessContext, projectId, scopeFilter, entityTypes, query, limit, indexedCanonical: true });
+  const [baseline, indexed] = await Promise.all([baselinePromise, indexedPromise]);
+  if (mode === 'shadow') {
+    const baselineMatches = baseline.degraded ? [] : rankEntityMatches(baseline.rows, query, limit);
+    const indexedMatches = indexed.degraded ? [] : rankEntityMatches(indexed.rows, query, limit);
+    console.info('[entity-discovery-shadow]', JSON.stringify({
+      org_id: orgId,
+      query_length: String(query).length,
+      baseline_ids: baselineMatches.map((match) => match.entity_id),
+      indexed_ids: indexedMatches.map((match) => match.entity_id),
+    }));
+    if (baseline.degraded) return { matches: [], degraded: baseline.degraded };
+    return { matches: baselineMatches, degraded: null, strategy: 'bounded_inventory', shadow_strategy: 'indexed_alias' };
+  }
+
+  const selected = indexed.degraded ? baseline : indexed;
+  const strategy = indexed.degraded ? 'bounded_inventory_fallback' : 'indexed_alias';
+  const { rows, degraded } = selected;
   if (degraded) return { matches: [], degraded };
-  return { matches: rankEntityMatches(rows, query, limit), degraded: null };
+  return { matches: rankEntityMatches(rows, query, limit), degraded: null, strategy };
 }
 
 export async function resolveAuthorizedEntityIds({ prisma, memoryStore = null, orgId, userId, entityIds, accessContext = {}, projectId = null } = {}) {

@@ -34,6 +34,8 @@ const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
 const COLLECTION_NAME = 'HIVEMIND_PERSONAL';
 const RECALL_SPARSE_NAME = 'memory_sparse_v1';
+const RECALL_BM25_NAME = 'memory_bm25_v1';
+const BM25_OPTIONS = Object.freeze({ tokenizer: 'multilingual', ascii_folding: true });
 const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
 // P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
 // benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
@@ -178,6 +180,7 @@ export class QdrantClient {
     // once-per-collection-per-process, moving schema setup off the query path.
     this.collectionReady = new Set();
     this.recallQualityReady = new Set();
+    this.recallBm25Ready = new Set();
     this._litellmReady = null;
   }
 
@@ -230,14 +233,21 @@ export class QdrantClient {
     const configuration = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}`, { headers });
     if (!configuration.ok) return null;
     const info = (await configuration.json())?.result || {};
-    if (!info.config?.params?.sparse_vectors?.[RECALL_SPARSE_NAME]) {
-      const created = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/vectors/${RECALL_SPARSE_NAME}?wait=true`, {
-        method: 'PUT', headers, body: JSON.stringify({ sparse: { modifier: 'idf' } }),
-      });
-      if (!created.ok) return null; // Older Qdrant versions retain the current recall path.
+    let bm25Available = Boolean(info.config?.params?.sparse_vectors?.[RECALL_BM25_NAME]);
+    for (const vectorName of [RECALL_SPARSE_NAME, RECALL_BM25_NAME]) {
+      if (!info.config?.params?.sparse_vectors?.[vectorName]) {
+        const created = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/vectors/${vectorName}?wait=true`, {
+          method: 'PUT', headers, body: JSON.stringify({ sparse: { modifier: 'idf' } }),
+        });
+        if (!created.ok && vectorName === RECALL_SPARSE_NAME) return null;
+        if (created.ok && vectorName === RECALL_BM25_NAME) bm25Available = true;
+        // Native BM25 was introduced after sparse vectors. Older Qdrant
+        // installations retain the deterministic sparse lane unchanged.
+      }
     }
     await getQdrantCollections(qbase(), API_KEY).ensureRecallQualityIndexes(collection);
     this.recallQualityReady.add(collection);
+    if (bm25Available) this.recallBm25Ready.add(collection);
     return collection;
   }
 
@@ -267,6 +277,30 @@ export class QdrantClient {
       && body.result.every((result) => result?.status === 'completed' || result?.status === 'acknowledged');
   }
 
+  async updateRecallBm25Vectors(orgId, memories) {
+    const collection = await this.ensureRecallQualityCollection(orgId);
+    if (!collection) return false;
+    const points = (memories || []).map((memory) => ({
+      id: memory.id,
+      vector: {
+        [RECALL_BM25_NAME]: {
+          text: `${memory.title || ''} ${memory.content || ''}`.trim(),
+          model: 'qdrant/bm25',
+          options: BM25_OPTIONS,
+        },
+      },
+    })).filter((point) => point.id && point.vector[RECALL_BM25_NAME].text);
+    if (!points.length) return true;
+    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/vectors?wait=true`, {
+      method: 'PUT', headers, body: JSON.stringify({ points }),
+    });
+    const body = await response.json().catch(() => ({}));
+    const success = response.ok && body.status !== 'error'
+      && (body.result?.status === 'completed' || body.result?.status === 'acknowledged');
+    if (success) this.recallBm25Ready.add(collection);
+    return success;
+  }
+
   async searchRecallHybrid(query, filters = {}) {
     const orgId = filters.org_id;
     if (!orgId || memoryBackend(orgId) !== 'central') return [];
@@ -285,17 +319,35 @@ export class QdrantClient {
     const dense = filters.vector || await this.generateEmbedding(query);
     if (!isValidEmbeddingVector(dense)) return [];
     const limit = Math.min(Math.max(Number(filters.limit) || 10, 1), 150);
-    const response = await fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/query`, {
+    const prefetch = [
+      { query: dense, filter, limit },
+      { query: sparse, using: RECALL_SPARSE_NAME, filter, limit },
+    ];
+    if (this.recallBm25Ready.has(collection)) {
+      const tenantIdf = collection === COLLECTION_NAME
+        ? { idf: { corpus: { must: [{ key: 'org_id', match: { value: orgId } }] } } }
+        : undefined;
+      prefetch.push({
+        query: { text: query, model: 'qdrant/bm25', options: BM25_OPTIONS },
+        using: RECALL_BM25_NAME,
+        filter,
+        ...(tenantIdf ? { params: tenantIdf } : {}),
+        limit,
+      });
+    }
+    const request = (lanes) => fetch(`${qbase()}/collections/${encodeURIComponent(collection)}/points/query`, {
       method: 'POST', headers,
       body: JSON.stringify({
-        prefetch: [
-          { query: dense, filter, limit },
-          { query: sparse, using: RECALL_SPARSE_NAME, filter, limit },
-        ],
+        prefetch: lanes,
         query: { fusion: 'rrf' }, limit, with_payload: true,
       }),
       signal: currentStageSignal() || undefined,
     });
+    let response = await request(prefetch);
+    // Qdrant <1.19 does not understand tenant-scoped IDF. Never retry BM25
+    // without that corpus on a shared collection; fall back to the established
+    // dense + deterministic sparse lanes instead.
+    if (!response.ok && prefetch.length > 2) response = await request(prefetch.slice(0, 2));
     if (!response.ok) return [];
     return (await response.json())?.result?.points || [];
   }

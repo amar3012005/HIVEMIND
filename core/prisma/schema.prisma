@@ -4431,6 +4431,7 @@ model CanonicalEntity {
   objectClaims  CanonicalClaim[] @relation("CanonicalClaimObject")
   profileFacts  EntityProfileFact[]
   identityLinks UserEntityIdentityLink[] @relation("EntityUserIdentityLinks")
+  searchAliases CanonicalEntitySearchAlias[]
 
   @@index([organizationId, entityKind])
   @@unique([organizationId, identityKey], map: "canonical_entities_org_identity_key")
@@ -4439,6 +4440,26 @@ model CanonicalEntity {
   @@index([emailDomains], type: Gin)
   @@index([primaryEmail])
   @@map("canonical_entities")
+}
+
+/// Search projection for canonical names and aliases. A database trigger keeps
+/// this table synchronized so every entity writer gets the same indexed lookup
+/// behavior without remembering a second application write.
+model CanonicalEntitySearchAlias {
+  entityId        String   @map("entity_id") @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  alias           String
+  normalizedAlias String   @map("normalized_alias")
+  isCanonical     Boolean  @default(false) @map("is_canonical")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  entity CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@id([entityId, normalizedAlias])
+  @@index([organizationId, normalizedAlias], map: "canonical_entity_alias_org_normalized_idx")
+  @@index([organizationId, entityId], map: "canonical_entity_alias_org_entity_idx")
+  @@map("canonical_entity_search_aliases")
 }
 
 model MemoryEntityLink {

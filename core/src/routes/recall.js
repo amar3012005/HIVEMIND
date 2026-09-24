@@ -417,6 +417,7 @@ export async function handleRecallRoute(ctx = {}) {
           rerank_passes: Number(bounded.trace?.rerank_passes) || 0,
           ranking_mode: bounded.trace?.hybrid_ranking_mode || null,
           reliability_v1: recallReliabilityV1,
+          recall_quality_mode: recallQualityMode,
           status: bounded.trace?.reliability?.status || 'legacy',
           lane_states: bounded.trace?.reliability?.lanes || null,
         },
@@ -765,7 +766,12 @@ export async function handleRecallRoute(ctx = {}) {
       console.warn('[recall] tier hydration tap failed:', hydrateErr.message);
     }
 
-    try { if (result && typeof result === 'object' && !Array.isArray(result)) result.timing_ms = Date.now() - _recallT0; } catch {}
+    try {
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        result.timing_ms = Date.now() - _recallT0;
+        result.recall_quality_mode = recallQualityMode;
+      }
+    } catch {}
     return jsonResponse(res, result);
   } catch (error) {
     console.error('Auto recall failed:', error);

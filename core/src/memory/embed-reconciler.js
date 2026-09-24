@@ -134,7 +134,7 @@ export async function reconcileQualityVectorsOnce({
   prisma, qdrantClient, qualityClient, logger = console,
   pageSize = 256, maxRowsPerOrg = 4096, maxEmbedsPerCycle = 400,
 }) {
-  const stats = { checked: 0, dense_repaired: 0, sparse_synced: 0, failed: 0 };
+  const stats = { checked: 0, dense_repaired: 0, sparse_synced: 0, bm25_synced: 0, failed: 0 };
   if (!prisma || !qdrantClient || !qualityClient) return stats;
   const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
   if (!qUrl) return stats;
@@ -219,6 +219,26 @@ export async function reconcileQualityVectorsOnce({
             pending.map((row) => row.id));
           stats.sparse_synced += pending.length;
         } else stats.failed++;
+      }
+      const bm25Synced = await prisma.$queryRawUnsafe(
+        `SELECT s.memory_id::text AS id FROM hivemind.recall_bm25_sync s
+         LEFT JOIN hivemind.vector_embeddings v ON v.memory_id=s.memory_id
+         WHERE s.memory_id = ANY($1::uuid[]) AND (v.last_sync_attempt IS NULL OR s.updated_at >= v.last_sync_attempt)`,
+        ready.map((row) => row.id));
+      const bm25SyncedIds = new Set(bm25Synced.map((row) => row.id));
+      const bm25Pending = ready.filter((row) => !bm25SyncedIds.has(row.id));
+      if (bm25Pending.length) {
+        const success = await runWithOrg(org, () => qdrantClient.updateRecallBm25Vectors(org, bm25Pending));
+        if (success) {
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO hivemind.recall_bm25_sync (memory_id) SELECT unnest($1::uuid[]) ON CONFLICT (memory_id) DO UPDATE SET updated_at=now()`,
+            bm25Pending.map((row) => row.id));
+          stats.bm25_synced += bm25Pending.length;
+        } else {
+          // Native BM25 is optional. Unsupported Qdrant versions keep the
+          // deterministic sparse lane; do not stall the reconciliation cursor.
+          logger.info('[recall-quality-reconcile] native BM25 unavailable; deterministic sparse lane retained');
+        }
       }
       lastProcessed = page.at(-1);
     }

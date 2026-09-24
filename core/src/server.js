@@ -11187,6 +11187,7 @@ exit \$RC
             accessContext: await buildAccessContext(userId, orgId).catch(() => null),
             projectId: url.searchParams.get('project_id') || null,
             scope: url.searchParams.get('scope') || null,
+            recallQualityMode: await recallQualityClient.modeFor({ orgId, userId }),
           });
           if (result.error === 'invalid_scope') {
             return jsonResponse(res, { error: 'scope must be personal, project, team, or organization' }, 400);
@@ -11194,7 +11195,11 @@ exit \$RC
           if (result.degraded) {
             return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: result.degraded } }, 503);
           }
-          return jsonResponse(res, { matches: result.matches, degradation: null });
+          return jsonResponse(res, {
+            matches: result.matches,
+            degradation: null,
+            strategy: result.strategy || 'bounded_inventory',
+          });
         } catch (error) {
           console.warn('[entity-discovery] request failed:', error.message);
           return jsonResponse(res, { matches: [], degradation: { status: 'DEGRADED', reason: 'entity_index_unavailable' } }, 503);
@@ -21090,7 +21095,20 @@ exit \$RC
 
               // Tenant+user Flagship admission is evaluated once and latched for
               // every memory produced by this request. Any evaluation failure is off.
-              const admittedCanonicalMode = await canonicalProjectionClient.modeFor({ orgId, userId });
+              const [admittedCanonicalMode, admittedRecallQualityMode] = await Promise.all([
+                canonicalProjectionClient.modeFor({ orgId, userId }),
+                recallQualityClient.modeFor({ orgId, userId }),
+              ]);
+              const queueRecallQualityVectors = (memory) => {
+                if (admittedRecallQualityMode === 'off' || !memory?.id) return;
+                (async () => {
+                  const sparse = await qdrantClient.updateRecallSparseVectors(orgId, [memory]);
+                  const bm25 = await qdrantClient.updateRecallBm25Vectors(orgId, [memory]);
+                  if (!sparse && !bm25) {
+                    console.warn('[recall-quality] immediate vector projection failed; durable reconciler will retry');
+                  }
+                })().catch(() => {});
+              };
 
               // Determine sync vs async mode
               const syncMode = url.searchParams.get('sync') === 'true' || body.sync === true;
@@ -21205,6 +21223,7 @@ exit \$RC
                         await qdrantClient.storeMemory(memory, {
                           collectionName: 'HIVEMIND_PERSONAL'
                         });
+                        queueRecallQualityVectors(memory);
                         invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                         invalidateAggregateCache({ userId, orgId, project: null });
 
@@ -21300,6 +21319,7 @@ exit \$RC
                 await qdrantClient.storeMemory(memory, {
                   collectionName: 'HIVEMIND_PERSONAL'
                 });
+                queueRecallQualityVectors(memory);
                 invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                 invalidateAggregateCache({ userId, orgId, project: null });
                 await pageindexHook?.onMemoryIngested(memory, {

@@ -503,6 +503,7 @@ const TOOL_HANDLERS = {
       limit: args.limit || 25,
       accessContext: ctx.accessContext || {},
       projectId: ctx.projectId || null,
+      recallQualityMode: ctx.recallQualityMode || 'off',
     });
     if (result.error) return { error: result.error };
     return result.degraded

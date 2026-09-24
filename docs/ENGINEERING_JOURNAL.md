@@ -2381,3 +2381,18 @@ git diff --check: passed (line-ending warnings only)
   two user edits; reconcile current production and missing frontend submodule;
   then build a uniquely tagged candidate image and run isolated health,
   readiness, parser-to-analyzer, authenticated upload, and recall checks.
+
+### Non-mutating integration conflict probe
+
+- `git merge-tree --write-tree origin/singulance-main origin/singulance-local`
+  exited 1 and returned merge tree `34993a13ef0ac7cbea508cbc0c374b46e2997a7f`;
+  this wrote no branch, index, or worktree state.
+- The probe found conflicts in `AGENTS.md`, `HANDOFF.md`, `core/prisma/schema.prisma`,
+  Core server/control-plane/harness/entity-discovery files, Employees model and
+  API files, `infra/docker-compose.hetzner.yml`, `services/hm-playwright`, the
+  visual-intelligence Worker, and `docs/ENGINEERING_JOURNAL.md`, among others.
+  It also could not merge the `frontend/Da-vinci` submodule because it is not
+  checked out and the production submodule commit was unavailable.
+- Decision: do not attempt the production-to-local integration in this task
+  worktree. It needs an operator-led conflict reconciliation in the designated
+  permanent integration checkout while preserving its unrelated dirty edits.

@@ -182,7 +182,7 @@ async function authorizedIndexedCanonicalRows({
           AND (
             alias.normalized_alias = $3
             OR alias.normalized_alias LIKE $3 || '%'
-            OR alias.normalized_alias % $3
+            OR alias.normalized_alias OPERATOR(public.%) $3
           )
         GROUP BY alias.entity_id
         ORDER BY match_rank ASC, similarity_score DESC, alias.entity_id ASC

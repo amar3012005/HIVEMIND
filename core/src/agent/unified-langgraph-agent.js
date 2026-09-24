@@ -16,6 +16,7 @@ import {
   unifiedMetaTools,
 } from './unified-meta-tool-contract.js';
 import { decideRuntimeStage, decisionGatewayToolNames } from './decision-gateway-service.js';
+import { CAPABILITY_OPTIONS } from './decision-gateway.js';
 import { normalizeSearchableFollowUps } from './chat-synthesis-prompt.js';
 
 export const UNIFIED_META_HARNESS_VERSION = 'langgraph-meta-loop-v2';
@@ -1234,18 +1235,22 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       decision = { status: 'defer', selected: null, authoritative: false,
         receipt: { source: 'fallback', reason: compactText(error?.message || error || 'decision_gateway_unavailable', 240) } };
     }
-    const authoritative = decision.status === 'selected' && decision.authoritative === true;
+    const selectedIntent = String(decision.selected || '');
+    const knownIntent = CAPABILITY_OPTIONS.some(option => option.id === selectedIntent);
+    const authoritative = decision.status === 'selected' && decision.authoritative === true && knownIntent;
     const plan = {
-      intent: authoritative ? String(decision.selected || 'fallback_harness') : 'fallback_harness',
+      intent: authoritative ? selectedIntent : 'fallback_harness',
       authoritative,
-      source: decision.receipt?.source || 'fallback',
+      source: authoritative ? (decision.receipt?.source || 'fallback') : 'fallback',
       probability: decision.receipt?.probability ?? null,
       margin: decision.receipt?.margin ?? null,
       request_id: decision.receipt?.requestId || null,
-      reason: decision.receipt?.reason || decision.reason || null,
+      reason: decision.selected && !knownIntent
+        ? 'decision_intent_invalid'
+        : (decision.receipt?.reason || decision.reason || null),
       diagnostics: decisionDiagnosticSummary(decision.receipt),
     };
-    const eventSequence = await recordDecision(state, { stage: 'capability', status: decision.status,
+    const eventSequence = await recordDecision(state, { stage: 'capability', status: authoritative ? decision.status : 'defer',
       // A non-authoritative fallback is not a selected user-facing plan.
       // Leaving selected empty lets the existing mobile renderer show the
       // durable diagnostic instead of falsely presenting fallback_harness as

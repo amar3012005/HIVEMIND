@@ -16,10 +16,18 @@ const VALID_MODES = new Set(['off', 'shadow', 'active']);
 const VALID_STAGES = new Set(['capability', 'composio_selection', 'composio_argument_review', 'workflow_transition', 'memory_type', 'hivemind_meta_selection', 'hivemind_recall_filters']);
 const LOW_RISK_CAPABILITY_READS = Object.freeze([
   'direct_answer', 'hivemind_context', 'hivemind_memory_lookup', 'hivemind_entity_lookup',
-  'hivemind_hyperagent_directory', 'hivemind_meta',
+  'hivemind_hyperagent_directory', 'hivemind_request', 'hivemind_meta',
+  'composio_read', 'composio_search', 'web_research', 'workflow_plan',
 ]);
 const LOW_RISK_CAPABILITY_MIN_PROBABILITY = 0.65;
 const LOW_RISK_CAPABILITY_MIN_MARGIN = 0.2;
+// HIVE saves are durable writes, but they do not execute an external side
+// effect. The selected executor still validates the capsule and the graph
+// still checkpoints for scope; this lower admission gate lets clear implicit
+// user assertions (for example, a stated lasting preference) reach that
+// governed save path without weakening profile or connected-app writes.
+const HIVE_SAVE_CAPABILITY_MIN_PROBABILITY = 0.65;
+const HIVE_SAVE_CAPABILITY_MIN_MARGIN = 0.1;
 
 function modeFromEnv(env) {
   const mode = String(env.JEV_DECISION_GATEWAY_MODE || 'off').trim().toLowerCase();
@@ -151,7 +159,10 @@ export async function decideRuntimeStage(input = {}, {
     ? Object.fromEntries(LOW_RISK_CAPABILITY_READS.map(choice => [choice, {
       minProbability: LOW_RISK_CAPABILITY_MIN_PROBABILITY,
       minMargin: LOW_RISK_CAPABILITY_MIN_MARGIN,
-    }]))
+    }]).concat([['hivemind_save', {
+      minProbability: HIVE_SAVE_CAPABILITY_MIN_PROBABILITY,
+      minMargin: HIVE_SAVE_CAPABILITY_MIN_MARGIN,
+    }]]))
     : {};
   const minProbability = finiteThreshold(
     workflowTransition ? env.JEV_WORKFLOW_MIN_PROBABILITY : (memoryType ? env.JEV_MEMORY_TYPE_MIN_PROBABILITY : env.JEV_MIN_PROBABILITY),

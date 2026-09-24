@@ -14,6 +14,12 @@ import {
 
 const VALID_MODES = new Set(['off', 'shadow', 'active']);
 const VALID_STAGES = new Set(['capability', 'composio_selection', 'composio_argument_review', 'workflow_transition', 'memory_type', 'hivemind_meta_selection', 'hivemind_recall_filters']);
+const LOW_RISK_CAPABILITY_READS = Object.freeze([
+  'direct_answer', 'hivemind_context', 'hivemind_memory_lookup', 'hivemind_entity_lookup',
+  'hivemind_hyperagent_directory', 'hivemind_meta',
+]);
+const LOW_RISK_CAPABILITY_MIN_PROBABILITY = 0.65;
+const LOW_RISK_CAPABILITY_MIN_MARGIN = 0.2;
 
 function modeFromEnv(env) {
   const mode = String(env.JEV_DECISION_GATEWAY_MODE || 'off').trim().toLowerCase();
@@ -141,6 +147,12 @@ export async function decideRuntimeStage(input = {}, {
   // useful calibrated choices in this narrower multi-outcome stage.
   const workflowTransition = stage === 'workflow_transition';
   const memoryType = stage === 'memory_type';
+  const capabilityReadThresholds = stage === 'capability'
+    ? Object.fromEntries(LOW_RISK_CAPABILITY_READS.map(choice => [choice, {
+      minProbability: LOW_RISK_CAPABILITY_MIN_PROBABILITY,
+      minMargin: LOW_RISK_CAPABILITY_MIN_MARGIN,
+    }]))
+    : {};
   const minProbability = finiteThreshold(
     workflowTransition ? env.JEV_WORKFLOW_MIN_PROBABILITY : (memoryType ? env.JEV_MEMORY_TYPE_MIN_PROBABILITY : env.JEV_MIN_PROBABILITY),
     workflowTransition ? 0.5 : (memoryType ? 0.65 : 0.8),
@@ -159,6 +171,7 @@ export async function decideRuntimeStage(input = {}, {
     }),
     minProbability,
     minMargin,
+    choiceThresholds: capabilityReadThresholds,
   });
   const turn = createDecisionTurnState(input.turn_id ?? null);
   const fallback = async ({ reason }) => fallbackReceipt(reason);

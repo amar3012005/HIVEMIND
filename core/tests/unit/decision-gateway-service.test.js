@@ -105,6 +105,34 @@ test('active mode returns one accepted capability selection', async () => {
   assert.equal(result.authoritative, true);
 });
 
+test('capability plan accepts a decisive internal read below the write threshold', async () => {
+  const result = await decideRuntimeStage({
+    stage: 'capability', user_query: 'What were the latest decisions?', actor_id: 'user-1',
+  }, {
+    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },
+    provider: { async decideChoice() {
+      return { choice: 'hivemind_memory_lookup', probability: 0.71, margin: 0.5 };
+    } },
+  });
+  assert.equal(result.status, 'selected');
+  assert.equal(result.selected, 'hivemind_memory_lookup');
+  assert.equal(result.authoritative, true);
+});
+
+test('capability plan keeps memory writes at the conservative confidence threshold', async () => {
+  const result = await decideRuntimeStage({
+    stage: 'capability', user_query: 'I love watching Messi play.', actor_id: 'user-1',
+  }, {
+    env: { JEV_DECISION_GATEWAY_MODE: 'active', JEV_DECISION_GATEWAY_USER_IDS: 'user-1' },
+    provider: { async decideChoice() {
+      return { choice: 'hivemind_save', probability: 0.71, margin: 0.5 };
+    } },
+  });
+  assert.equal(result.status, 'defer');
+  assert.equal(result.authoritative, false);
+  assert.equal(result.receipt.reason, 'decision_probability_below_threshold');
+});
+
 test('active mode reviews schema-bound connected-app arguments after selection', async () => {
   const result = await decideRuntimeStage({
     stage: 'composio_argument_review',

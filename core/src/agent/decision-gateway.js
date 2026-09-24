@@ -221,11 +221,12 @@ async function useFallback({ turn, fallback, reason, stage, input, diagnostics =
 }
 
 export class DecisionGateway {
-  constructor({ provider, minProbability = 0.8, minMargin = 0.2 } = {}) {
+  constructor({ provider, minProbability = 0.8, minMargin = 0.2, choiceThresholds = {} } = {}) {
     if (!provider || typeof provider.decideChoice !== 'function') throw new TypeError('decision_provider_required');
     this.provider = provider;
     this.minProbability = minProbability;
     this.minMargin = minMargin;
+    this.choiceThresholds = isObject(choiceThresholds) ? choiceThresholds : {};
   }
 
   async choose({ turn, stage, userQuery, context = null, observation = null, options, instructions, validate, fallback, signal }) {
@@ -243,10 +244,20 @@ export class DecisionGateway {
     if (turn.disabled) return useFallback({ turn, fallback, reason: turn.fallbackReason || 'decision_gateway_disabled_for_turn', stage, input });
     try {
       const result = await this.provider.decideChoice({ state: { stage, ...input }, options, instructions, signal });
-      if (!Number.isFinite(result.probability) || result.probability < this.minProbability) {
+      // Confidence is intent-sensitive. A clear, bounded internal read may
+      // have a lower absolute probability in a large taxonomy while still
+      // having a decisive margin. Writes and multi-step plans keep the
+      // conservative stage threshold unless explicitly configured.
+      const selectedThresholds = isObject(this.choiceThresholds[result.choice])
+        ? this.choiceThresholds[result.choice] : {};
+      const minProbability = Number.isFinite(selectedThresholds.minProbability)
+        ? selectedThresholds.minProbability : this.minProbability;
+      const minMargin = Number.isFinite(selectedThresholds.minMargin)
+        ? selectedThresholds.minMargin : this.minMargin;
+      if (!Number.isFinite(result.probability) || result.probability < minProbability) {
         return useFallback({ turn, fallback, reason: 'decision_probability_below_threshold', stage, input, diagnostics: result });
       }
-      if (!Number.isFinite(result.margin) || result.margin < this.minMargin) {
+      if (!Number.isFinite(result.margin) || result.margin < minMargin) {
         return useFallback({ turn, fallback, reason: 'decision_margin_below_threshold', stage, input, diagnostics: result });
       }
       const validation = typeof validate === 'function' ? await validate(result.choice, { input, result }) : true;
@@ -304,7 +315,7 @@ export async function chooseCapability({ gateway, turn, userQuery, context, obse
     },
   };
   return gateway.choose({ turn, stage: 'capability', userQuery, context: planningContext, observation, options: CAPABILITY_OPTIONS,
-    instructions: 'Choose exactly one initial intent family. Use the request, compact system policy, authenticated profile, five recent turns, and bounded completed receipts as evidence. A question asking who the authenticated user is or what is known about them belongs to hivemind_context when the compact profile supports the answer; hivemind_memory_lookup is only for explicitly saved, remembered, historical, prior-work, or recorded information. Route a clear first-person durable preference or recurring interest (including in non-English languages) to hivemind_save even without an explicit save verb; the graph will ask for scope only if a governed save actually requires it. Do not turn a mere personal statement into a scope question unless the save path is selected and reached. Never infer an app, recipient, tool, identifier, credential, fact, relationship, or external side effect. A request that asks to retrieve/search/read/collect information and then save, send, update, compare, summarize into a memory, or otherwise act on it is multi_task, even when both outcomes use HIVE-MIND. Do not collapse that request into hivemind_save or a single provider operation. Connected-app choices authorize generic discovery only, not execution. Completed receipts are authoritative: do not repeat them, and follow still-unsatisfied requested outcomes. Select fallback_harness only when no intent is safely supported; it must remain explicit and constrained.',
+    instructions: 'Choose exactly one intent using the current request, system policy, authenticated profile, last five turns, and completed receipts. Distinguish profile questions (hivemind_context) from explicit saved/history/past-work questions (hivemind_memory_lookup). A clear durable first-person preference or fact, in any language and without “save”, is hivemind_save; fleeting reactions and questions are not. Retrieve/read then save or act is multi_task, including HIVE-only steps. Never infer facts, recipients, tools, or side effects. Connected intents begin discovery only; graph policy governs approval and execution. Receipts are authoritative: continue only unmet outcomes. Choose fallback_harness only if no intent is supported or the evidence is genuinely ambiguous.',
     fallback, signal });
 }
 

@@ -77,6 +77,7 @@ test('Day 0 attachment retains onboarding material beyond the old dashboard-card
 test('the editorial report is a five-page, SINGULANCE-branded Day 0 brief with contrast and real tenant context', () => {
   const report = buildDayZeroOnboardingReport(company, {
     appUrl: 'https://next.example.test/company',
+    logoUrl: 'https://singulancelabs.com/images/singulance-orbit.png',
     version: DAY_ZERO_EDITORIAL_REPORT_VERSION,
   });
   const html = renderDayZeroEditorialReport(report, { screenshotDataUri: 'data:image/png;base64,AAAA' });
@@ -86,6 +87,8 @@ test('the editorial report is a five-page, SINGULANCE-branded Day 0 brief with c
   assert.doesNotMatch(html, /<\/section>,<section/);
   assert.match(html, /@page\{size:A4 portrait;margin:0\}/);
   assert.match(html, /SINGULANCE/);
+  assert.equal((html.match(/src="https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png"/g) || []).length, 5);
+  assert.equal((html.match(/aria-label="Singulance"/g) || []).length, 5);
   assert.match(html, /aria-label="Singulance"/);
   assert.match(html, /#117dff/);
   assert.match(html, /#ffffff|#fff/);

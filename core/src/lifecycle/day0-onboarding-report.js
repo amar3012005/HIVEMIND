@@ -1,10 +1,10 @@
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
-import { DAY_ZERO_ONEPAGE_REPORT_VERSION, DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../email/templates/day0-company-onboarding.js';
+import { DAY_ZERO_EDITORIAL_REPORT_VERSION, DAY_ZERO_REPORT_VERSION, renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from '../email/templates/day0-company-onboarding.js';
 import { renderDayZeroPortraitV8 } from '../email/templates/day0-portrait-v8.js';
-import { renderDayZeroOnePageEditorial } from '../email/templates/day0-onepage-editorial.js';
+import { renderDayZeroEditorialReport } from '../email/templates/day0-editorial-report.js';
 import { buildDayZeroOnboardingReport } from '../email/templates/day0-company-onboarding.js';
-import { isDayZeroOnePageReportEnabled } from './day0-lifecycle-flag.js';
+import { isDayZeroEditorialReportEnabled } from './day0-lifecycle-flag.js';
 import { resolvePublicAppUrl } from '../public-frontend-url.js';
 import { createHash } from 'node:crypto';
 
@@ -41,7 +41,7 @@ export async function startDayZeroOnboardingReport({
   hqRoomId,
   userId,
   allowVersionedReissue = false,
-  isOnePageRendererEnabled = isDayZeroOnePageReportEnabled,
+  isEditorialRendererEnabled = isDayZeroEditorialReportEnabled,
   renderPdf = renderDayZeroOnboardingPdf,
   sendEmail = sendRenderedSystemEmail,
 } = {}) {
@@ -67,9 +67,9 @@ export async function startDayZeroOnboardingReport({
     return { ok: true, accepted: false, status: 'waiting_for_preview', reason: 'website_preview_not_ready' };
   }
 
-  const onePageEnabled = await isOnePageRendererEnabled({ orgId, userId: userId || row.user_id });
-  const reportTemplate = onePageEnabled ? 'onepage-editorial' : 'portrait-v8';
-  const reportVersion = onePageEnabled ? DAY_ZERO_ONEPAGE_REPORT_VERSION : DAY_ZERO_REPORT_VERSION;
+  const editorialEnabled = await isEditorialRendererEnabled({ orgId, userId: userId || row.user_id });
+  const reportTemplate = editorialEnabled ? 'multipage-editorial' : 'portrait-v8';
+  const reportVersion = editorialEnabled ? DAY_ZERO_EDITORIAL_REPORT_VERSION : DAY_ZERO_REPORT_VERSION;
   const reissue = Boolean(allowVersionedReissue && prior.status === 'sent' && prior.version !== reportVersion);
   if (prior.status === 'sent' && !reissue) return { ok: true, accepted: false, status: 'sent', version: prior.version || null };
 
@@ -148,9 +148,9 @@ export async function startDayZeroOnboardingReport({
         }
       } catch (shotErr) { console.warn('[day0] screenshot embed skipped:', shotErr.message); }
       const report = buildDayZeroOnboardingReport(dashboardCompany, { appUrl, version: reportVersion });
-      const renderHtml = onePageEnabled ? renderDayZeroOnePageEditorial : renderDayZeroPortraitV8;
+      const renderHtml = editorialEnabled ? renderDayZeroEditorialReport : renderDayZeroPortraitV8;
       const print = { report, html: renderHtml(report, { screenshotDataUri, orgId }) };
-      const pdfOptions = onePageEnabled ? {
+      const pdfOptions = editorialEnabled ? {
         displayHeaderFooter: false,
         preferCssPageSize: true,
         margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },

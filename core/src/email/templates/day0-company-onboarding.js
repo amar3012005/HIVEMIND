@@ -7,7 +7,7 @@ import { CARTESIA, brandLockup, browserChrome, deckPage, escapeHtml, lifecycleEm
 // A version bump makes the new print-safe visual artifact eligible for one
 // controlled lifecycle reissue while preserving the original delivery receipt.
 export const DAY_ZERO_REPORT_VERSION = 'day-0-v11';
-export const DAY_ZERO_ONEPAGE_REPORT_VERSION = 'day-0-v12-onepage';
+export const DAY_ZERO_EDITORIAL_REPORT_VERSION = 'day-0-v12-editorial';
 
 function clean(value, limit = 360) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);

@@ -4,7 +4,7 @@ import { resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
 // fully activated.  The dedicated edge endpoint remains stable so callers do
 // not need to know rollout-provider details.
 export const DAY0_LIFECYCLE_FLAG_KEY = 'pre_onboarding_lifecycle_v1';
-export const DAY0_REPORT_ONEPAGE_FLAG_KEY = 'day0_report_editorial_v1';
+export const DAY0_REPORT_EDITORIAL_FLAG_KEY = 'day0_report_editorial_v1';
 
 // Flagship is the sole Day-0 rollout authority. The edge evaluates the flag
 // against the authenticated org/user supplied by Core and fails closed.
@@ -47,7 +47,7 @@ export async function isDayZeroLifecycleEnabled({
  * The report layout has its own tenant-scoped Flagship decision. A missing,
  * malformed, or unavailable receipt preserves the current PDF renderer.
  */
-export async function isDayZeroOnePageReportEnabled({
+export async function isDayZeroEditorialReportEnabled({
   orgId,
   userId,
   env = process.env,
@@ -74,8 +74,8 @@ export async function isDayZeroOnePageReportEnabled({
     const payload = await response.json();
     return payload?.key === DAY0_LIFECYCLE_FLAG_KEY
       && payload?.source === 'cloudflare-flagship'
-      && payload?.report_flag_key === DAY0_REPORT_ONEPAGE_FLAG_KEY
-      && payload?.report_onepage_enabled === true;
+      && payload?.report_flag_key === DAY0_REPORT_EDITORIAL_FLAG_KEY
+      && payload?.report_editorial_enabled === true;
   } catch {
     return false;
   } finally {

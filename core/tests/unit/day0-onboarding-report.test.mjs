@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DAY_ZERO_ONEPAGE_REPORT_VERSION, DAY_ZERO_REPORT_VERSION } from '../../src/email/templates/day0-company-onboarding.js';
+import { DAY_ZERO_EDITORIAL_REPORT_VERSION, DAY_ZERO_REPORT_VERSION } from '../../src/email/templates/day0-company-onboarding.js';
 import { startDayZeroOnboardingReport } from '../../src/lifecycle/day0-onboarding-report.js';
 
 const ORG_ID = '11111111-1111-4111-8111-111111111111';
@@ -80,7 +80,7 @@ test('Day 0 does not resend the current renderer version', async () => {
   assert.equal(prisma.writes.length, 0);
 });
 
-test('Day 0 uses the tenant-flagged one-page PDF for a versioned reissue without changing the email', async () => {
+test('Day 0 uses the tenant-flagged multi-page editorial PDF for a versioned reissue without changing the email', async () => {
   const prisma = fakePrisma({
     company: 'Canary Co',
     website: 'https://canary.example',
@@ -97,7 +97,7 @@ test('Day 0 uses the tenant-flagged one-page PDF for a versioned reissue without
     hqRoomId: ROOM_ID,
     userId: USER_ID,
     allowVersionedReissue: true,
-    isOnePageRendererEnabled: async (target) => target.orgId === ORG_ID && target.userId === USER_ID,
+    isEditorialRendererEnabled: async (target) => target.orgId === ORG_ID && target.userId === USER_ID,
     renderPdf: async (html, options) => {
       pdfHtml = html;
       pdfOptions = options;
@@ -110,8 +110,8 @@ test('Day 0 uses the tenant-flagged one-page PDF for a versioned reissue without
   });
 
   const completed = await started.completion;
-  assert.equal(completed.version, DAY_ZERO_ONEPAGE_REPORT_VERSION);
-  assert.equal(completed.report_template, 'onepage-editorial');
+  assert.equal(completed.version, DAY_ZERO_EDITORIAL_REPORT_VERSION);
+  assert.equal(completed.report_template, 'multipage-editorial');
   assert.match(pdfHtml, /Day 0 · Canary Co/);
   assert.match(pdfHtml, /SINGULANCE/);
   assert.deepEqual(pdfOptions, {
@@ -121,9 +121,9 @@ test('Day 0 uses the tenant-flagged one-page PDF for a versioned reissue without
   });
   assert.match(email.rendered.html, /DAY 0 · THE RISE OF AWAKENING/);
   assert.doesNotMatch(email.rendered.html, /FIRST OPERATING MODEL · READY FOR REVIEW/);
-  assert.equal(email.notification.data.report_template, 'onepage-editorial');
-  assert.equal(prisma.writes[0].report_template, 'onepage-editorial');
-  assert.equal(prisma.writes.at(-1).version, DAY_ZERO_ONEPAGE_REPORT_VERSION);
+  assert.equal(email.notification.data.report_template, 'multipage-editorial');
+  assert.equal(prisma.writes[0].report_template, 'multipage-editorial');
+  assert.equal(prisma.writes.at(-1).version, DAY_ZERO_EDITORIAL_REPORT_VERSION);
 });
 
 test('Day 0 reissue falls back to the current PDF if the rollout flag is off', async () => {
@@ -140,7 +140,7 @@ test('Day 0 reissue falls back to the current PDF if the rollout flag is off', a
     orgId: ORG_ID,
     hqRoomId: ROOM_ID,
     allowVersionedReissue: true,
-    isOnePageRendererEnabled: async () => false,
+    isEditorialRendererEnabled: async () => false,
     renderPdf: async (html) => { pdfHtml = html; return Buffer.from('%PDF'); },
     sendEmail: async () => ({ ok: true, provider: 'cloudflare', deliveryStatus: 'accepted' }),
   });

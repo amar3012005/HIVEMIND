@@ -88,8 +88,8 @@ test('capability plan instructions are not truncated and carry recent-turn conte
   assert.equal(result.choice, 'hivemind_memory_lookup');
   const instructions = request.questions.decision.instructions;
   assert.ok(instructions.length < 1000, 'provider instruction limit must not truncate the plan contract');
-  assert.match(instructions, /last five turns/i);
-  assert.match(instructions, /Receipts are authoritative/i);
+  assert.match(instructions, /five recent turns/i);
+  assert.match(instructions, /Receipts prove completed work/i);
   assert.match(instructions, /fallback_harness/i);
   assert.equal(request.state.context.recent_turns.length, 5);
   assert.equal(request.state.context.authenticated_context.profile, 'Authenticated profile summary.');
@@ -217,16 +217,17 @@ test('profile identity intent gives JEV an explicit context versus memory bounda
   });
   assert.equal(result.choice, 'hivemind_context');
   assert.equal(captured.state.context.planning_hints.authenticated_profile_available, true);
-  assert.match(captured.options.find(option => option.id === 'hivemind_context').criteria, /what do you know about me/i);
-  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /generic identity.profile question/i);
-  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /entity-hop-0.*inside ordinary recall/i);
-  assert.match(captured.options.find(option => option.id === 'hivemind_entity_lookup').criteria, /fast, tenant-authorized canonical HIVE entity registry lookup/i);
-  assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /first-person or organization assertion/i);
-  assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /recurring interests and durable likes/i);
-  assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /dependent outcomes/i);
-  assert.match(captured.instructions, /hivemind_context/i);
-  assert.match(captured.instructions, /last five turns/i);
-  assert.match(captured.instructions, /durable first-person preference/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_context').criteria, /authenticated principal’s compact profile/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /open-ended questions about a named person or organization/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_memory_lookup').criteria, /what do we know about X/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_entity_lookup').criteria, /exact named entity/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_entity_lookup').criteria, /authorized HIVE registry/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /lasting first-person\/organization fact/i);
+  assert.match(captured.options.find(option => option.id === 'hivemind_save').criteria, /preference, decision, or procedure/i);
+  assert.match(captured.options.find(option => option.id === 'multi_task').criteria, /multiple distinct outcomes or dependent steps/i);
+  assert.match(captured.instructions, /profile\/context/i);
+  assert.match(captured.instructions, /five recent turns/i);
+  assert.match(captured.instructions, /durable personal or organization statement/i);
 });
 
 test('explicit HIVE save intent remains evidence for the initial JEV decision', async () => {

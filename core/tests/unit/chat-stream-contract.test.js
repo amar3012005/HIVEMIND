@@ -35,7 +35,7 @@ test('unified graph retains the existing SSE and final response fields consumed 
   assert.deepEqual(events.filter(event => event.type === 'agent_state').map(event => event.state), ['running', 'sealed']);
 });
 
-test('legacy chat exposes only the Jev-selected gateway and stays constrained when Jev cannot decide', async () => {
+test('legacy chat exposes the Jev-selected gateway and native typed tools when Jev defers', async () => {
   const prisma = { pendingWrite: {} };
   const surfaces = [];
   const common = {
@@ -43,8 +43,11 @@ test('legacy chat exposes only the Jev-selected gateway and stays constrained wh
     prisma,
     checkpointer: new MemorySaver(),
     composio: { async listConnectedAccounts() { return []; } },
-    modelStep: async ({ tools }) => {
+    modelStep: async ({ tools, messages }) => {
       surfaces.push(tools.map(tool => tool.function.name));
+      if (messages.some(row => row.role === 'system' && row.content.includes('Selected executor intent: fallback_harness'))) {
+        assert.match(messages.find(row => row.role === 'system' && row.content.includes('Selected executor intent: fallback_harness')).content, /LangGraph-native tool planner/i);
+      }
       return { message: { role: 'assistant', content: 'Done.' } };
     },
   };
@@ -64,7 +67,7 @@ test('legacy chat exposes only the Jev-selected gateway and stays constrained wh
 
   assert.deepEqual(surfaces, [
     ['hivemind_connected_task'],
-    [],
+    ['hivemind_meta', 'hivemind_connected_task'],
   ]);
 });
 

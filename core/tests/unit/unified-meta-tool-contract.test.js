@@ -21,8 +21,11 @@ test('the in-graph HIVE gateway exposes fast entity lookup and entity-anchored r
   assert.ok(tool.parameters.properties.operation.enum.includes('entities'));
   assert.equal(tool.parameters.properties.entity.required.includes('query'), true);
   assert.equal(tool.parameters.properties.entity.properties.query.type, 'string');
+  assert.ok(tool.parameters.properties.recall.properties.entities);
+  assert.ok(tool.parameters.properties.recall.properties.entity_filter_mode.enum.includes('should'));
   assert.ok(tool.parameters.properties.recall.properties.entity_ids);
-  assert.match(tool.description, /fast tenant-authorized canonical entity match/i);
+  assert.match(tool.description, /send the full question plus entities:\[name\].*directly in the recall operation/i);
+  assert.match(tool.description, /entities only when the requested answer is canonical identity\/alias resolution/i);
 });
 
 test('connected search projection preserves plans, connection state, and selected slugs without provider schemas', () => {

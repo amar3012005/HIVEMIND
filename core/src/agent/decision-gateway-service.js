@@ -114,9 +114,11 @@ export function decisionGatewayToolNames(selection, { connected = true } = {}) {
   // Multi-domain requests stay on the native surface. Subsequent JEV stages
   // constrain each provider-backed operation after evidence is available.
   if (selection === 'multi_task' || selection === 'workflow_plan') return undefined;
-  // A failed/uncertain decision is recorded as fallback_harness, but it must
-  // not silently regain the entire native tool surface and re-plan itself.
-  if (selection === 'fallback_harness') return [];
+  // The safety fallback is a native LangGraph planning pass, not a terminal
+  // answer. Expose the same governed tools as the normal native loop; tool
+  // execution, tenant scope, connector consent, and write approval remain
+  // enforced by the graph and executors.
+  if (selection === 'fallback_harness') return undefined;
   return [];
 }
 

@@ -226,7 +226,7 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
   const contracts = {
     direct_answer: 'Answer directly from the supplied context. Do not call a tool.',
     hivemind_context: 'Call the HIVE meta tool exactly once with operation="context" to retrieve the authenticated compact profile and organization context. Do not perform a write. Ground the final answer only in that receipt.',
-    hivemind_memory_lookup: 'Use the HIVE meta tool for recall with a concrete non-empty query derived from the request. Do not call recall with an omitted query and do not write memory.',
+    hivemind_memory_lookup: 'Call hivemind_meta with operation="recall" and preserve the complete user question as recall.query. Resolve references such as “this topic”, “that decision”, “what else”, pronouns, and “the same person” from the recent user/assistant turns and prior receipts; carry the resolved subject/topic into recall.query rather than asking the user to repeat available context. If the request or resolved history names a person or organization, pass that exact name in recall.entities and set entity_filter_mode="should" so entity-aware hybrid retrieval runs in one call without excluding aliases or legacy untagged memories. entity_ids are optional: do not request or look them up for ordinary memory recall. Do not call the separate entities operation first unless the user specifically asks for canonical identity/alias resolution. When a broad recall can safely answer, retrieve first and ask a clarifying question only if materially different interpretations remain after reviewing the results. Do not answer until a successful recall receipt exists; do not write memory.',
     hivemind_entity_lookup: 'Call hivemind_meta once with operation="entities" and entity.query containing only the exact named subject from the request. This is a fast tenant-authorized canonical lookup, not a profile or memory summary. Report the returned match or a healthy no-match plainly. If the user also asks for history/details, use the returned entity IDs in hivemind_meta operation="recall" entity_ids and ground broader claims only in that recall receipt. Never invent aliases or relationships.',
     hivemind_hyperagent_directory: 'Use the HIVE meta tool only for authenticated HyperAgent directory/assignment information.',
     hivemind_request: 'Use the typed HIVE meta operation that best matches the request. Keep its arguments grounded in the request and receipts.',
@@ -239,7 +239,7 @@ function executorInstruction(intent, { preparedSave = null } = {}) {
     web_research: 'Use governed web research for current public information. Cite the retrieved evidence and distinguish it from internal HIVE memory.',
     multi_task: 'Preserve every requested outcome as one governed workflow. First identify prerequisites, then execute reads/research before any write that depends on their result. For example, if the user asks to retrieve, search, read, or collect information and save/send/update it, first obtain the governed source receipt, then create the source-grounded payload from that receipt, request any required scope or approval, and execute the write. Do not stop after the first outcome; do not save a placeholder, prior answer, or invented summary before the requested evidence exists. Every read, write, approval, and final claim must have its own receipt.',
     workflow_plan: 'Return an actionable, bounded workflow plan. Do not execute side effects or claim external results.',
-    fallback_harness: 'The decision is unavailable or uncertain. Do not call tools, claim an action was completed, imply a write is pending, offer to save something, or ask the user to choose a memory scope. If the user only shared a statement or preference, respond naturally and warmly without turning it into a save prompt. If the request clearly asks for an action but its destination or meaning is genuinely ambiguous, say plainly that no action was taken and ask only the smallest clarification needed about that requested action.',
+    fallback_harness: 'JEV could not confidently select one route. Continue this same turn with the LangGraph-native tool planner: use the original request, authenticated profile, recent turns, completed receipts, and the available governed tool schemas to choose the smallest correct next operation. For questions about what HIVE-MIND knows about a named person, organization, decision, or past work, make one direct hivemind_meta operation="recall" call with the complete question as recall.query and the exact named subject in recall.entities with entity_filter_mode="should"; do not preflight operation="entities", answer from profile alone, or ask who/what the named subject is before trying recall. If recall returns no evidence, say so without inventing facts. Never repeat an operation already proven by a successful receipt. Preserve the user\'s requested outcome; all writes still require explicit intent, valid scope, and the normal graph checkpoint, and all connected-app authorization/approval gates remain in force. If no available tool is relevant, answer warmly from supported context and be clear about what evidence is missing.',
   };
   const prepared = preparedSave ? `\n\nPrepared prior-turn evidence for this save (use only what is supported; improve the generic title and extract supported entities/dates/source references):\n${jsonText(preparedSave).slice(0, 10000)}` : '';
   return `Selected executor intent: ${intent || 'fallback_harness'}.\n${contracts[intent] || contracts.fallback_harness}${prepared}`;
@@ -333,6 +333,20 @@ function substantiveMetaReadReceipt(receipt) {
   return Object.keys(data).length > 0;
 }
 
+const REQUIRED_META_READS = Object.freeze({
+  hivemind_context: 'context',
+  hivemind_memory_lookup: 'recall',
+  hivemind_entity_lookup: 'entities',
+  hivemind_hyperagent_directory: 'profiles',
+});
+
+function hasMetaOperationReceipt(receipts, operation) {
+  return (receipts || []).some(receipt => receipt?.tool === 'hivemind_meta'
+    && String(receipt.action || '') === operation
+    && receipt.successful !== false
+    && receipt.data != null);
+}
+
 function workflowEvidenceReady(state) {
   return state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs))
     || state.receipts.some(substantiveMetaReadReceipt);
@@ -354,7 +368,7 @@ function invalidFinal(text, receipts) {
 // and can therefore use the receipt-safe final stream immediately.
 function isImmediateStreamIntent(plan) {
   if (plan?.authoritative !== true) return false;
-  return ['direct_answer', 'workflow_plan', 'fallback_harness'].includes(String(plan.intent || ''));
+  return ['direct_answer', 'workflow_plan'].includes(String(plan.intent || ''));
 }
 
 async function defaultModelStep({ messages, tools, model, apiKey, signal }) {
@@ -427,6 +441,8 @@ function recallArgs(input = {}, ctx = {}) {
     ...(input.valid_at ? { valid_at: input.valid_at } : {}),
     ...(input.transaction_at ? { known_at: input.transaction_at } : {}),
     ...(input.sort ? { sort: input.sort } : {}),
+    ...(Array.isArray(input.entities) && input.entities.length ? { entities: input.entities.slice(0, 12) } : {}),
+    ...(input.entity_filter_mode ? { entity_filter_mode: input.entity_filter_mode } : {}),
     ...(Array.isArray(input.entity_ids) && input.entity_ids.length ? { entity_ids: input.entity_ids.slice(0, 12) } : {}),
     ...(ctx.scopeFilter ? { scope_filter: ctx.scopeFilter } : {}),
   };
@@ -1318,12 +1334,19 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
   const modelNode = async state => {
     if (state.cycles >= MAX_STEPS) return { result: outputShape(state, 'I could not safely complete this request within the bounded execution steps.', 'error') };
     const transitionIntent = state.workflowTransition?.intent || null;
-    const continueWorkflow = transitionIntent && transitionIntent !== 'synthesize';
+    const requiredMetaOperation = state.plan?.authoritative === true
+      ? REQUIRED_META_READS[state.plan.intent] || null : null;
+    const requiredMetaReadMissing = requiredMetaOperation
+      ? !hasMetaOperationReceipt(state.receipts, requiredMetaOperation) : false;
+    const continueWorkflow = transitionIntent && transitionIntent !== 'synthesize' && !requiredMetaReadMissing;
     // `synthesize` is itself an authoritative terminal transition. Preserve
     // it here so the tool surface is closed after JEV has confirmed that all
     // obligations have receipts, rather than reopening the initial multi-task
     // surface.
-    const selectedIntent = transitionIntent || state.plan?.intent;
+    // Do not let a premature/incorrect transition close the tool surface
+    // before a read selected by the original JEV plan has produced its typed
+    // receipt. The turn-local plan remains authoritative for that obligation.
+    const selectedIntent = requiredMetaReadMissing ? state.plan.intent : transitionIntent || state.plan?.intent;
     const toolsEnabled = connectedToolsEnabled(state, useTools);
     const providerEvidenceReady = toolsEnabled && state.selectedSlugs.length > 0
       && state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
@@ -1331,7 +1354,8 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // graph. For native-only turns we can stream their final synthesis just as
     // we do connected-app receipts, without streaming an unvalidated planner
     // response or allowing another tool decision mid-stream.
-    const metaReadEvidenceReady = !toolsEnabled && state.receipts.some(substantiveMetaReadReceipt);
+    const metaReadEvidenceReady = !toolsEnabled && state.receipts.some(receipt => substantiveMetaReadReceipt(receipt)
+      && (!requiredMetaOperation || String(receipt.action || '') === requiredMetaOperation));
     const consentFallbackReady = state.toolsDeclined && state.toolsDeclineFallbackDone;
     const connectedReceiptMissing = toolsEnabled && state.requestedToolkits.length > 0 && !providerEvidenceReady;
     // A receipt in a compound turn is evidence for the post-receipt JEV
@@ -1350,7 +1374,7 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
       { role: 'system', content: executorInstruction(selectedIntent, { preparedSave: state.pendingSaveDraft }) },
     ];
     const repair = state.messages.at(-1)?.role === 'system'
-      && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present)/i.test(state.messages.at(-1)?.content || '')
+      && /(?:no connected-app discovery receipt exists|continue the connected workflow now|proposed answer did not present|HIVE-MIND intent requires a successful .* receipt)/i.test(state.messages.at(-1)?.content || '')
       ? state.messages.at(-1) : null;
     const modelMessages = finalEvidenceReady ? [
       { role: 'system', content: `${ORGANIZATIONAL_BRAIN_PERSONA}\n\n${LANGGRAPH_LIVING_BRAIN_VOICE}\n\nSynthesize the final answer from verified governed receipts only. Answer the original request directly in ${ctx.language || 'the user language'} using clear Markdown. Preserve exact names, dates, counts, and uncertainty. Never emit tool syntax or claim facts absent from the receipts. Keep the answer in the living-company-brain voice above: speak as the informed internal colleague, not as a generic chatbot or a tool report.${state.toolsDeclined ? ' The user declined connected tools. Do not imply that an external app was searched. Use the Hivemind recall receipt if it contains relevant stored evidence; if it does not, say warmly and briefly that you could not check the live connected app without permission.' : ''}${decisionSummaryRequest(message) ? ' A decision is an explicit choice, approval, commitment, or recorded decision. Do not label an email, calendar event, relationship, or inferred outcome as a decision unless the receipt explicitly supports that classification. Omit unrelated context unless the user requested it.' : ''}` },
@@ -1397,8 +1421,9 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     // call; later Composio selection is a separate bounded decision over the
     // dynamically discovered provider tools.
     // Non-canary deployments can leave the decision gateway disabled. Preserve
-    // their established typed graph loop, while an active-but-unavailable JEV
-    // decision remains the explicit constrained fallback_harness path.
+    // their established typed graph loop. If active JEV is unavailable or
+    // uncertain, fallback_harness deliberately uses that same native loop;
+    // it is not a terminal final-answer synthesis with tools removed.
     const legacyGatewayOff = !state.plan?.authoritative && state.plan?.reason === 'decision_gateway_off';
     const tools = finalEvidenceReady ? []
       : state.toolsDeclined ? unifiedMetaTools({ useTools: false })
@@ -1416,15 +1441,21 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const connectedDiscoveryMissing = toolsEnabled && state.requestedToolkits.length > 0 && state.selectedSlugs.length === 0;
     const connectedExecutionMissing = toolsEnabled && state.selectedSlugs.length > 0
       && !state.receipts.some(receipt => substantiveProviderReceipt(receipt, state.primarySlugs));
-    if ((connectedDiscoveryMissing || connectedExecutionMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
+    if ((connectedDiscoveryMissing || connectedExecutionMissing || requiredMetaReadMissing || invalidFinal(assistant.content, state.receipts)) && state.repairs < 3) {
       return {
         messages: [...messages, { role: 'system', content: connectedDiscoveryMissing
           ? `The original request names connected toolkit(s) (${state.requestedToolkits.join(', ')}), but no connected-app discovery receipt exists. Call hivemind_connected_task with action search now. Do not answer from hivemind_meta or claim that external access is unavailable.`
+          : requiredMetaReadMissing
+          ? `The selected HIVE-MIND intent requires a successful ${requiredMetaOperation} receipt before answering. No ${requiredMetaOperation} receipt exists yet. Call hivemind_meta with operation="${requiredMetaOperation}" now; for recall, pass a concrete non-empty query that preserves the named subject and the user's question. Do not answer from profile or guess.`
           : state.selectedSlugs.length
           ? `Do not ask permission for a read or describe what you could do. Continue the connected workflow now: load schemas for the selected slugs (${state.selectedSlugs.join(', ')}), execute the required read, then answer from its receipt.`
           : 'Your proposed answer did not present the successful receipt evidence. Continue with the available gateway tools, then answer the original request directly from the receipts.' }],
         pendingTool: null, cycles: state.cycles + 1, repairs: state.repairs + 1, usage,
       };
+    }
+    if (requiredMetaReadMissing) {
+      return { messages, pendingTool: null, usage,
+        result: outputShape({ ...state, messages, usage }, `I couldn't complete the HIVE-MIND ${requiredMetaOperation} lookup, so I don't want to present an unverified answer. Please try again in a moment.`, 'error') };
     }
     if (connectedDiscoveryMissing || connectedExecutionMissing) {
       return { messages, pendingTool: null, usage, result: outputShape({ ...state, messages, usage }, 'I could not safely complete the connected task because no provider result was produced.', 'error') };
@@ -1570,6 +1601,31 @@ export function createUnifiedMetaAgentGraph({ checkpointer, ctx, message, useToo
     const exposed = publicToolResult(receipt);
     const underlying = call.name === 'hivemind_connected_task' && call.args.action === 'execute' ? call.args.tool_slug : call.name;
     onEvent({ type: 'tool_result', name: underlying, status: receipt?.successful === false ? 'error' : 'completed', summary: receipt?.error || 'Completed', run_id: state.runId });
+    if (call.name === 'hivemind_meta' && receipt?.successful === false
+      && ['context', 'entities', 'profiles', 'recall'].includes(String(call.args?.operation || ''))) {
+      // A failed HIVE read is not evidence of an empty result. Stop this read
+      // path with an explicit failure receipt instead of letting synthesis
+      // convert an outage/timeout into “nothing is on file”.
+      const response = call.args.operation === 'recall'
+        ? 'I couldn’t complete the HIVE-MIND recall, so I can’t tell whether there are saved notes about that yet. Please try again in a moment.'
+        : 'I couldn’t complete that HIVE-MIND lookup, so I don’t want to give you an unverified answer. Please try again in a moment.';
+      const receipts = [...state.receipts, {
+        tool: underlying, action: call.args.operation, successful: false,
+        data: exposed, error: receipt.error || 'hivemind_read_failed',
+      }];
+      const messages = [...state.messages, toolMessage(call, exposed), { role: 'assistant', content: response }];
+      const steps = [...state.steps, { kind: 'tool', slug: underlying, status: 'error', summary: receipt.error || 'HIVE-MIND lookup failed' }];
+      const firstAnswerDeltaAtMs = await emitReceiptAnswer(onEvent, response, { grounded: false, runId: state.runId });
+      return {
+        pendingTool: null,
+        callFingerprints: [...state.callFingerprints, fingerprint],
+        messages,
+        receipts,
+        steps,
+        timings: { ...executorTimings, first_answer_delta_at_ms: firstAnswerDeltaAtMs, completion_at_ms: Date.now() },
+        result: outputShape({ ...state, messages, receipts, steps, timings: executorTimings }, response, 'error'),
+      };
+    }
     // A standalone save is terminal once its durable receipt exists.  A save
     // inside a multi-task turn is only one completed obligation: retain its
     // receipt and return through the bounded JEV transition node so it can

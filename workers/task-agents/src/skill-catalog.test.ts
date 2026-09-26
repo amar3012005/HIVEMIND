@@ -13,6 +13,8 @@ test("native meta and connected gateways stay available across tool groups", () 
     assert.ok(names.includes("hivemind_meta"));
     assert.ok(names.includes("hivemind_connected_task"));
   }
+  assert.ok(!toolsForGroups(["connected_apps"]).includes("composio_discover_reads"));
+  assert.ok(!toolsForGroups(["connected_apps"]).includes("composio_read"));
 });
 
 test("publishes the four toolkit skills", () => {

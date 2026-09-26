@@ -3,10 +3,11 @@ import test from "node:test";
 import { parallelSearch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, saveCompanyMemory } from "./gateway.ts";
 import { toolsForGroups } from "./tool-groups.ts";
 
-test("company catalog exposes working memory and profile routes", () => {
+test("company catalog exposes native memory gateway", () => {
   const names = toolsForGroups(["company"]);
-  assert.ok(names.includes("hivemind_recall"));
-  assert.ok(names.includes("get_user_profile"));
+  assert.ok(names.includes("hivemind_meta"));
+  assert.ok(!names.includes("hivemind_recall"));
+  assert.ok(!names.includes("get_user_profile"));
   assert.ok(!names.includes("hivemind_get_memory"));
 });
 

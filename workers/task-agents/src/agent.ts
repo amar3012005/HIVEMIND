@@ -768,15 +768,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       });
       const verdict = result.status === "completed"
         ? parseGovernanceVerdict(result.summary)
-        : { verdict: "unavailable" as const, note: `Review unavailable (${result.status}: ${String(result.error || "no detail").slice(0, 200)}); report delivered without model review.` };
-      const detail = verdict.verdict === "unavailable" && result.status === "completed"
-        ? ` (summary: ${String(result.summary || "empty").slice(0, 180)})`
-        : "";
-      this.note("governance", `${verdict.verdict}: ${verdict.note}${detail}`);
+        : { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
+      this.note("governance", `${verdict.verdict}: ${verdict.note}`);
       return verdict;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
-      const verdict = { verdict: "unavailable" as const, note: `Review unavailable (${detail}); report delivered without model review.` };
+    } catch {
+      const verdict = { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
       this.note("governance", `${verdict.verdict}: ${verdict.note}`);
       return verdict;
     }

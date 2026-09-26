@@ -31,5 +31,30 @@
       "binding": "TASK_LIFECYCLE",
       "class_name": "TaskLifecycleWorkflow"
     }
-  ]
+  ],
+  "env": {
+    "preview": {
+      "ai": { "binding": "AI" },
+      "browser": { "binding": "BROWSER" },
+      "worker_loaders": [{ "binding": "LOADER" }],
+      "vars": {
+        "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com",
+        "HIVEMIND_CORE_URL": "https://core.singulancelabs.com",
+        "AI_GATEWAY_ID": "hivemind-prod",
+        "CLOUDFLARE_ACCOUNT_ID": "0dc6b9186b5a9b8985613b10c1c59f4f",
+        "AI_GATEWAY_MODEL": "@cf/zai-org/glm-5.3-flash"
+      },
+      "durable_objects": {
+        "bindings": [{ "name": "HivemindTaskAgent", "class_name": "HivemindTaskAgent" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HivemindTaskAgent"] }],
+      "workflows": [
+        {
+          "name": "hivemind-task-lifecycle-preview",
+          "binding": "TASK_LIFECYCLE",
+          "class_name": "TaskLifecycleWorkflow"
+        }
+      ]
+    }
+  }
 }

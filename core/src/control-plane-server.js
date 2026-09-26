@@ -158,7 +158,7 @@ import {
 } from './hyper/web-search-citations.js';
 import { discoverGovernedSessionReads, executeGovernedResearchTool,
   executeGovernedSessionRead, issueGovernedReadGrant,
-  resolveGovernedReadGrant } from './connectors/composio/runtime-adapter.js';
+  resolveGovernedReadGrant, issueGovernedToolGrant, resolveGovernedToolGrant } from './connectors/composio/runtime-adapter.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
@@ -10916,7 +10916,7 @@ Write the persona now.`;
       return jsonResponse(res, { error: 'Resource not found' }, 404);
     }
     try {
-      const discovered = await discoverGovernedSessionReads(orgId, { toolkits: [toolkit], useCases: [useCase] });
+      const discovered = await discoverGovernedSessionReads(orgId, { toolkits: [toolkit], useCases: [useCase], userId });
       const tools = (discovered.tools || []).map((tool) => {
         const grant = issueGovernedReadGrant({
           orgId, userId, toolkit: tool.toolkit || toolkit,
@@ -10959,6 +10959,89 @@ Write the persona now.`;
       }));
     } catch (error) {
       const denied = /(?:read_denied|grant_(?:denied|expired|invalid|scope_denied))/.test(String(error.message));
+      return jsonResponse(res, { error: error.message }, denied ? 403 : 502);
+    }
+  }
+
+  if (pathname === '/v1/hyper/room-ticket' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!prisma || !process.env.HIVEMIND_MASTER_API_KEY) return jsonResponse(res, { error: 'Room ticket unavailable' }, 503);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(current.session.orgId || '');
+    const userId = String(current.session.userId || '');
+    const agentName = String(body.agent_name || '');
+    const prefix = `session-${orgId}-`;
+    const roomId = agentName.startsWith(prefix) ? agentName.slice(prefix.length) : '';
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)
+        || !/^[0-9a-f-]{36}$/i.test(roomId)
+        || !await getActiveOrganizationMembership(prisma, { userId, orgId })) {
+      return jsonResponse(res, { error: 'Room not found' }, 404);
+    }
+    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, userId, archivedAt: null }, select: { id: true } });
+    if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+    const expiresAt = Date.now() + 120_000;
+    const encoded = Buffer.from(JSON.stringify({ v: 1, orgId, userId, agentName, expiresAt })).toString('base64url');
+    const signature = crypto.createHmac('sha256', process.env.HIVEMIND_MASTER_API_KEY).update(encoded).digest('base64url');
+    return jsonResponse(res, { ticket: `${encoded}.${signature}`, expiresAt });
+  }
+
+  if (pathname === '/internal/hyper/connected-task' && req.method === 'POST') {
+    const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim();
+    if (!process.env.HIVEMIND_MASTER_API_KEY || callerKey !== process.env.HIVEMIND_MASTER_API_KEY) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const body = await parseBody(req).catch(() => ({}));
+    const orgId = String(body.org_id || ''); const userId = String(body.user_id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)
+        || !await getActiveOrganizationMembership(prisma, { userId, orgId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    const action = String(body.action || '');
+    const toolkit = String(body.toolkit || '').trim().toLowerCase();
+    try {
+      if (action === 'connection_status' || action === 'wait_connection') {
+        const accounts = await composioService.listConnectedAccounts(orgId, { userId });
+        return jsonResponse(res, { action, connections: accounts.filter((row) => !toolkit || row.toolkit === toolkit).map((row) => ({ toolkit: row.toolkit, status: row.status, updatedAt: row.updatedAt })) });
+      }
+      if (action === 'search') {
+        const useCase = String(body.use_case || '').trim().slice(0, 1200);
+        if (!/^[a-z0-9_-]{1,80}$/.test(toolkit) || !useCase) return jsonResponse(res, { error: 'valid toolkit and use_case required' }, 400);
+        const knownFields = String(body.known_fields || '').trim().slice(0, 1200);
+        const found = await composioService.discoverSessionTools(orgId, {
+          toolkits: [toolkit], useCases: [useCase], userId, allowDisconnected: true,
+          ...(knownFields ? { searchPayload: { session: { generate_id: true }, queries: [{ use_case: useCase, known_fields: knownFields }] } } : {}),
+        });
+        const tools = (found.tools || []).map((entry) => {
+          const slug = String(entry?._composio?.slug || '');
+          if (!slug) return null;
+          const grant = issueGovernedToolGrant({ orgId, userId, toolkit, sessionId: found.sessionId, toolSlug: slug });
+          return { toolSlug: slug, description: entry.function?.description || '', inputSchema: entry.function?.parameters || {}, ...grant };
+        }).filter(Boolean);
+        const connectionGrant = issueGovernedToolGrant({ orgId, userId, toolkit, sessionId: found.sessionId, toolSlug: '__connection__' });
+        return jsonResponse(res, { action, tools, connectionGrantId: connectionGrant.grantId, connectionStatus: found.toolkitConnectionStatuses?.[toolkit] || null, recommendedPlanSteps: found.recommendedPlanSteps || [], searchedLogId: found.searchedLogId, schemaLogId: found.schemaLogId });
+      }
+      const slug = action === 'manage_connection' ? '__connection__' : String(body.tool_slug || '');
+      const grant = resolveGovernedToolGrant({ grantId: String(body.grant_id || ''), orgId, userId, toolSlug: slug });
+      if (action === 'schemas') {
+        if (grant.effect === 'connection') return jsonResponse(res, { error: 'tool grant required' }, 403);
+        const schemas = await composioService.getSessionToolSchemas(grant.sessionId, [slug]);
+        return jsonResponse(res, { action, toolSlug: slug, schema: schemas[slug] || null });
+      }
+      if (action === 'manage_connection') {
+        const result = await composioService.manageSessionConnections(grant.sessionId, [grant.toolkit]);
+        return jsonResponse(res, { action, ...result });
+      }
+      if (action === 'execute' || action === 'execute_write') {
+        if (grant.effect !== (action === 'execute' ? 'read' : 'write')) return jsonResponse(res, { error: 'tool effect mismatch' }, 403);
+        const result = await composioService.executeSessionTool(grant.sessionId, slug, body.arguments && typeof body.arguments === 'object' ? body.arguments : {});
+        if (!result?.successful) return jsonResponse(res, { error: result?.error || 'connected task failed' }, 502);
+        return jsonResponse(res, { action, successful: true, effect: grant.effect, data: result.data, receipt: { provider: 'composio', toolSlug: slug, sessionLogId: result.session_log_id || null } });
+      }
+      return jsonResponse(res, { error: 'unsupported connected task action' }, 400);
+    } catch (error) {
+      const denied = /grant_|subject mismatch|denied/i.test(String(error.message));
       return jsonResponse(res, { error: error.message }, denied ? 403 : 502);
     }
   }

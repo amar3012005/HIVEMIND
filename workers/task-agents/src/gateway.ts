@@ -88,7 +88,7 @@ export async function mapsPlaces(env: GatewayEnv, textQuery: string): Promise<{ 
   return { places };
 }
 
-export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: string, title: string, content: string): Promise<unknown> {
+export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: string, title: string, content: string, options: { scope?: "personal" | "organization" | "project"; project?: string; idempotencyKey?: string } = {}): Promise<unknown> {
   const base = (env.HIVEMIND_CORE_URL || env.HIVEMIND_CONTROL_URL)?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
   if (!base || !key) return { error: "hivemind_meta_unconfigured", tool: "save_memory" };
@@ -99,6 +99,7 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
       "content-type": "application/json",
       "x-hm-user-id": userId,
       "x-hm-org-id": orgId,
+      ...(options.idempotencyKey ? { "x-idempotency-key": options.idempotencyKey } : {}),
     },
     body: JSON.stringify({
       title: title.slice(0, 180),
@@ -107,6 +108,8 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
       memory_type: "decision",
       user_id: userId,
       org_id: orgId,
+      ...(options.scope ? { scope: options.scope } : {}),
+      ...(options.project ? { project: options.project } : {}),
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -115,7 +118,7 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
     const message = payload && typeof payload === "object" && "error" in payload ? String(payload.error) : response.statusText;
     return { error: message, status: response.status };
   }
-  return { ok: true, payload };
+  return { ok: response.status !== 202, status: response.status === 202 ? "pending" : "completed", payload, ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}) };
 }
 
 export async function recallCompany(env: GatewayEnv, orgId: string, userId: string, query: string): Promise<unknown> {
@@ -161,6 +164,81 @@ export async function readCompanyProfile(env: GatewayEnv, orgId: string, userId:
   });
   const payload: unknown = await response.json().catch(() => ({ error: "invalid_profile_response" }));
   return response.ok ? payload : { error: "profile_read_failed", status: response.status };
+}
+
+export async function readCompactProfile(env: GatewayEnv, orgId: string, userId: string): Promise<{ context: string } | { error: string; status?: number }> {
+  const base = env.HIVEMIND_CORE_URL?.replace(/\/$/, "");
+  const key = env.HIVEMIND_MASTER_API_KEY;
+  if (!base || !key) return { error: "hivemind_profile_unconfigured" };
+  const response = await fetch(`${base}/api/profiles/context`, {
+    headers: { authorization: `Bearer ${key}`, "x-hm-user-id": userId, "x-hm-org-id": orgId },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok || !payload || typeof payload !== "object" || !("context" in payload) || typeof payload.context !== "string") {
+    return { error: "profile_context_unavailable", status: response.status };
+  }
+  return { context: payload.context.slice(0, 1200) };
+}
+
+async function coreMetaRequest(env: GatewayEnv, orgId: string, userId: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
+  const base = env.HIVEMIND_CORE_URL?.replace(/\/$/, "");
+  const key = env.HIVEMIND_MASTER_API_KEY;
+  if (!base || !key) return { error: "hivemind_meta_unconfigured" };
+  const response = await fetch(`${base}${path}`, {
+    method: body ? "POST" : "GET",
+    headers: {
+      authorization: `Bearer ${key}`, "x-hm-user-id": userId, "x-hm-org-id": orgId,
+      ...(body ? { "content-type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const payload: unknown = await response.json().catch(() => ({ error: "invalid_meta_response" }));
+  if (!response.ok) return { error: "hivemind_meta_failed", status: response.status, payload };
+  return payload;
+}
+
+export async function readMetaEntities(env: GatewayEnv, orgId: string, userId: string, query: string, limit = 10): Promise<unknown> {
+  const params = new URLSearchParams({ q: query, limit: String(Math.max(1, Math.min(limit, 25))) });
+  const result = await coreMetaRequest(env, orgId, userId, `/api/entities?${params}`);
+  if (!result || typeof result !== "object" || !("items" in result) || !Array.isArray(result.items)) return result;
+  return { items: result.items.slice(0, limit).map((item) => {
+    const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    return { id: row.id, name: row.canonicalName, kind: row.entityKind, aliases: row.aliases };
+  }), total: "total" in result ? result.total : undefined };
+}
+
+export async function readMetaRecall(env: GatewayEnv, orgId: string, userId: string, input: {
+  query: string; limit?: number; mode?: string; scopeFilter?: string; validAt?: string; transactionAt?: string;
+  project?: string; tags?: string[]; sourcePlatforms?: string[]; filename?: string; mediaKind?: string;
+  entities?: string[]; sort?: string; includeSuperseded?: boolean;
+}): Promise<unknown> {
+  const limit = Math.max(1, Math.min(input.limit ?? 5, 20));
+  const result = await coreMetaRequest(env, orgId, userId, "/api/recall", {
+    query_context: input.query, max_memories: limit, mode: input.mode || "auto",
+    ...(input.scopeFilter ? { scope_filter: input.scopeFilter } : {}),
+    ...(input.validAt ? { valid_at: input.validAt } : {}),
+    ...(input.transactionAt ? { transaction_at: input.transactionAt } : {}),
+    ...(input.project ? { project: input.project } : {}),
+    ...(input.tags?.length ? { tags: input.tags } : {}),
+    ...(input.sourcePlatforms?.length ? { source_platforms: input.sourcePlatforms } : {}),
+    ...(input.filename ? { filename: input.filename } : {}),
+    ...(input.mediaKind ? { media_kind: input.mediaKind } : {}),
+    ...(input.entities?.length ? { entities: input.entities } : {}),
+    ...(input.sort ? { sort: input.sort } : {}),
+    ...(input.includeSuperseded ? { include_superseded: true } : {}),
+  });
+  if (!result || typeof result !== "object" || !("memories" in result) || !Array.isArray(result.memories)) return result;
+  const memories = result.memories.slice(0, limit).map((row) => {
+    const memory = row && typeof row === "object" ? row as Record<string, unknown> : {};
+    return { id: memory.id, title: memory.title, content: typeof memory.content === "string" ? memory.content.slice(0, 1200) : "", source: memory.source, citation: memory.citation, createdAt: memory.created_at, validAt: memory.valid_at };
+  });
+  return { ok: true, count: memories.length, scoped: true, memories };
+}
+
+export async function readMetaSaveStatus(env: GatewayEnv, orgId: string, userId: string, key: string): Promise<unknown> {
+  return coreMetaRequest(env, orgId, userId, `/api/memories/save-status?idempotency_key=${encodeURIComponent(key)}`);
 }
 
 export async function parallelSearch(env: GatewayEnv, query: string): Promise<unknown> {

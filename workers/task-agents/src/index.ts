@@ -2,6 +2,7 @@ import { getAgentByName, routeAgentRequest } from "agents";
 import { HivemindTaskAgent } from "./agent";
 import { TaskLifecycleWorkflow } from "./workflow";
 import { CompanyGovernor } from "./governor";
+import { verifyRoomTicket } from "./room-ticket";
 
 export { HivemindTaskAgent, TaskLifecycleWorkflow, CompanyGovernor };
 
@@ -9,15 +10,22 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/agents/")) {
-      return (await routeAgentRequest(request, env)) || new Response("Not found", { status: 404 });
+      const agentName = decodeURIComponent(url.pathname.split("/").at(-1) || "");
+      const ticket = await verifyRoomTicket(url.searchParams.get("ticket") || "", env.HIVEMIND_MASTER_API_KEY || "", agentName);
+      if (!ticket) return new Response("unauthorized", { status: 401 });
+      const headers = new Headers(request.headers);
+      headers.set("x-hm-ticket-user-id", ticket.userId);
+      headers.set("x-hm-ticket-org-id", ticket.orgId);
+      return (await routeAgentRequest(new Request(request, { headers }), env)) || new Response("Not found", { status: 404 });
     }
     if (url.pathname.startsWith("/v1/company/") && url.pathname.endsWith("/artifacts")) {
       const orgId = url.pathname.slice("/v1/company/".length, -"/artifacts".length);
       if (request.method === "POST") return saveCompanyArtifact(request, orgId, env);
-      if (request.method === "GET") return companyArtifacts(orgId, env);
+      if (request.method === "GET") return routeAuthorized(request, env) ? companyArtifacts(orgId, env) : new Response("unauthorized", { status: 401 });
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/runs/")) {
       const rest = url.pathname.slice("/v1/runs/".length);
+      if (!routeAuthorized(request, env)) return new Response("unauthorized", { status: 401 });
       if (rest.endsWith("/events")) return runEvents(rest.slice(0, -"/events".length), request, env);
       return runTrace(rest, env);
     }

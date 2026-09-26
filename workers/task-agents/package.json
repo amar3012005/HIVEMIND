@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/capability.test.ts src/skill-catalog.test.ts src/completion.test.ts src/profile.test.ts src/gateway.test.ts src/operating-plan.test.ts src/governor.test.ts src/draft-stream.test.ts"
+    "test": "node --experimental-strip-types --test src/capability.test.ts src/skill-catalog.test.ts src/completion.test.ts src/profile.test.ts src/gateway.test.ts src/operating-plan.test.ts src/governor.test.ts src/draft-stream.test.ts src/room-ticket.test.ts"
   },
   "dependencies": {
     "@cloudflare/think": "0.19.0",

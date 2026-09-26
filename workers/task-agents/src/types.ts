@@ -72,6 +72,7 @@ export interface TaskAgentState {
   workflowId: string;
   companyContextLoaded?: boolean;
   companyContextRequired?: boolean;
+  profileBrief?: string;
   awaiting: "" | "input" | "memory";
   operatingPlan?: OperatingPlan | null;
 }

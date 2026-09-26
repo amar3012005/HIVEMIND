@@ -1,8 +1,8 @@
 export const TOOL_GROUPS = {
-  company: ["hivemind_recall", "get_user_profile", "load_company_packet"],
+  company: ["hivemind_meta", "hivemind_recall", "get_user_profile", "load_company_packet"],
   web_research: ["parallel_search", "maps_search"],
   browser: ["browser_markdown", "browser_extract", "browser_links", "browser_capture"],
-  connected_apps: ["composio_discover_reads", "composio_read"],
+  connected_apps: ["hivemind_connected_task", "composio_discover_reads", "composio_read"],
   records: ["save_local_companies", "load_artifact"],
 } as const;
 

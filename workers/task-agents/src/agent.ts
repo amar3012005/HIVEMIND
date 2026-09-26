@@ -13,7 +13,6 @@ import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdi
 import { partialToolText } from "./draft-stream";
 import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
-import type { ContextConfig } from "agents/context";
 import { companyFacts } from "./profile";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
@@ -47,10 +46,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   getSystemPrompt(): string {
     return HYPERAGENT_INSTRUCTION;
-  }
-
-  configureContext(): ContextConfig[] {
-    return [{ label: "hyperagent-persona", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
   }
 
   async day1Research(orgId: string, userId: string, supplied: { company?: string; website?: string; market?: string } = {}): Promise<{ status: string; text: string; error: string; company: string }> {
@@ -333,11 +328,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content);
   }
 
-  async applyGroups(groups: readonly string[], prospect = false, action = false): Promise<string[]> {
-    const tools = prospect
-      ? ["hivemind_recall", "parallel_search", "browser_markdown"]
-      : toolsForGroups(groups);
-    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: true });
+  async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
+    const tools = toolsForGroups(groups);
+    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
     this.note("reset_tools", groups.join(", "));
     return tools;
   }
@@ -771,7 +764,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       const facts = profile && typeof profile === "object" && "facts" in profile && Array.isArray(profile.facts)
         ? profile.facts.filter((fact): fact is { key: string; value: string } =>
           !!fact && typeof fact === "object" && typeof fact.key === "string" && typeof fact.value === "string"
-          && /^(company|product|mission|icp|industry|market)/i.test(fact.key))
+          && /^(company|product|mission|icp|industry|market|user|person|role|preference)/i.test(fact.key))
           .slice(0, 20).map((fact) => ({ key: fact.key.slice(0, 100), value: fact.value.slice(0, 300) }))
         : [];
       this.note("get_user_profile", `${facts.length} company profile facts loaded`);

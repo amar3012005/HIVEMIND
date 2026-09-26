@@ -1,12 +1,14 @@
 export const HIVEMIND_META_SKILL = `---
 name: hivemind-meta
-description: Load before any company-memory question. Recall and read the sealed tenant's HIVEMIND brain. Do not search Gmail, LinkedIn, or the web for facts already stored there.
+description: Load when a task needs user or organization facts, a prior decision, or company memory. Read only the sealed tenant's HIVEMIND brain.
 ---
 
 Call these tools with the information need, not with an organization id. The runtime binds org and user from the sealed task envelope.
 
-- hivemind_recall: first retrieval for company facts, products, mission, and stored memories.
-- get_user_profile: company name, mission, role, and ICP for the sealed user.
+- get_user_profile: read authenticated user and organization profile facts. Use for identity, role, preferences, mission, and company background.
+- hivemind_recall: retrieve memories using a focused query that preserves named people, projects, and documents verbatim. A returned count covers this scoped result only; never describe it as a complete inventory.
+
+Use the compact profile already in the task prompt when sufficient. Call a tool for missing internal facts. Distinguish an empty receipt from an unavailable tool. External research still needs independent sources.
 
 Writes, deletes, and profile updates are not in this catalog.
 `;

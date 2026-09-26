@@ -130,10 +130,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async onMessage(_connection: unknown, message: unknown): Promise<void> {
     const text = typeof message === "string" ? message : "";
-    let parsed: { type?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown } | null = null;
+    let parsed: { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown } | null = null;
     try {
-      parsed = JSON.parse(text) as { type?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown };
+      parsed = JSON.parse(text) as { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown };
     } catch {
+      return;
+    }
+    const connection = _connection as { send(data: string): void };
+    if (parsed?.type === "artifact-list") {
+      const artifacts = (await this.listCompanyArtifacts()).map(({ body, ...metadata }) => metadata);
+      connection.send(JSON.stringify({ type: "artifact-list-result", artifacts }));
+      return;
+    }
+    if (parsed?.type === "artifact-get") {
+      const id = typeof parsed.id === "string" ? parsed.id : "";
+      const artifact = /^[0-9a-f-]{36}$/i.test(id) ? (await this.listCompanyArtifacts()).find((item) => item.id === id) : null;
+      connection.send(JSON.stringify({ type: "artifact-get-result", artifact: artifact ?? null }));
       return;
     }
     if (parsed?.type === "human-answer" || (parsed?.type === "room-start" && this.state.awaiting === "input")) {

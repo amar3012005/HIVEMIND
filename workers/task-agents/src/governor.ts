@@ -3,6 +3,7 @@ import { Think } from "@cloudflare/think";
 export class CompanyGovernor extends Think<Env> {
   override includeMcpTools = false;
   override workspaceBash = false;
+  override storeMessages = true;
 
   getModel(): string { return "@cf/zai-org/glm-5.3-flash"; }
 
@@ -12,7 +13,7 @@ export class CompanyGovernor extends Think<Env> {
 
   getTools() { return {}; }
 
-  beforeTurn() { return { activeTools: [], maxSteps: 1, maxOutputTokens: 300 }; }
+  beforeTurn() { return { activeTools: [], maxSteps: 2, maxOutputTokens: 300 }; }
 
   protected override getAgentToolSummary(runId: string, output: unknown): string {
     const replies = this.messages.filter((message) => message.role === "assistant")

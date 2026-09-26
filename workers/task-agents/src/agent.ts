@@ -475,8 +475,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
         const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
         if (!browser?.quickAction) throw new Error("browser_binding_missing");
-        const response = await browser.quickAction("screenshot", { url: target.href, screenshotOptions: { fullPage: true } });
-        if (!response.ok) throw new Error(`capture_failed_${response.status}`);
+        const response = await browser.quickAction("screenshot", {
+          url: target.href,
+          screenshotOptions: { fullPage: true },
+          scrollPage: true,
+          gotoOptions: { waitUntil: "load", timeout: 45000 },
+          waitForTimeout: 2000,
+          actionTimeout: 60000,
+        });
+        if (!response.ok) throw new Error(`capture_failed_${response.status}: ${(await response.text()).slice(0, 300)}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
         if (bytes.length < 8 || bytes.length > 2000000 || ![137, 80, 78, 71].every((byte, index) => bytes[index] === byte)) throw new Error("capture_invalid_or_too_large");
         let body = "";

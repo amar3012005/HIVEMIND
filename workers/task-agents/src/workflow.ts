@@ -72,6 +72,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     await durable.do("enable-tools", async () => {
       const groups = plan.groups.length > 0 ? [...plan.groups] : ["company", "web_research", "browser", "records"];
+      if (!groups.includes("company")) groups.push("company");
       if (/\bprospects?\b/i.test(asked) && !groups.includes("web_research")) groups.push("web_research");
       await this.agent.applyGroups(groups);
       await this.agent.note("operating-plan", plan.plan.slice(0, 2000));

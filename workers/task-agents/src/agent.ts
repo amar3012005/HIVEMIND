@@ -262,8 +262,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   beforeTurn(): { activeTools: string[]; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
     const granted = this.state.toolGroups?.length ? toolsForGroups(this.state.toolGroups) : this.state.tools;
+    const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => name !== "reset_tools"), "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), "activate_skill", "read_skill_resource", "think_final_answer"],
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { chat_template_kwargs: { enable_thinking: false } } },
     };

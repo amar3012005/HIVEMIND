@@ -1,5 +1,7 @@
 const GENERIC_DELIVERED_EVENT = 'notification.welcome_signup_delivered';
 const GENERIC_FAILED_EVENT = 'notification.welcome_signup_failed';
+const ICARUS_DELIVERED_EVENT = 'notification.icarus_developer_connected_delivered';
+const ICARUS_FAILED_EVENT = 'notification.icarus_developer_connected_failed';
 
 export function welcomeProfileForWorkspace(workspace = null, { returning = false } = {}) {
   const enterprise = String(workspace?.accountType || '').startsWith('enterprise_');
@@ -61,9 +63,11 @@ export function createSignupWelcomeDispatcher({ prisma, sendEmail, logger = cons
     }
   }
 
-  async function deliver(user, { source = 'workspace_activation', workspace = null } = {}) {
+  async function deliver(user, { source = 'workspace_activation', workspace = null, kind = null } = {}) {
     if (!user?.id || !user?.email) return { ok: false, skipped: true, error: 'no_user_email' };
-    const profile = workspace
+    const profile = kind === 'icarus_developer'
+      ? { templateId: 'icarus_developer_connected', deliveredEvent: ICARUS_DELIVERED_EVENT, failedEvent: ICARUS_FAILED_EVENT }
+      : workspace
       ? welcomeProfileForWorkspace(workspace)
       : { templateId: 'welcome_signup', deliveredEvent: GENERIC_DELIVERED_EVENT, failedEvent: GENERIC_FAILED_EVENT };
     const receiptKey = `${user.id}:${workspace?.id || 'account'}:${profile.templateId}`;

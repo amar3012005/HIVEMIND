@@ -39,9 +39,21 @@ test('return destinations require an exact origin and hivemind path', () => {
 test('email login defaults fail closed instead of silently selecting account creation', async () => {
   const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../../src/auth/email-identity-service.js', import.meta.url), 'utf8'));
   assert.match(source, /intent\s*=\s*'login'/);
-  assert.match(source, /const INTENTS = new Set\(\['login', 'register'\]\)/);
+  assert.match(source, /const INTENTS = new Set\(\['login', 'register', 'developer'\]\)/);
   assert.match(source, /MAX_STARTS_PER_EMAIL/);
   assert.match(source, /requestFingerprintHash/);
+});
+
+test('ICARUS developer auth stays organization-free and never starts platform activation', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8'));
+  assert.match(source, /name: 'icarus-developer'/);
+  assert.match(source, /orgId: null/);
+  assert.match(source, /scopes: \['memory:read', 'memory:write', 'mcp'\]/);
+  assert.match(source, /provider: 'icarus'/);
+  assert.match(source, /!isDeveloperOnlyUser\(existingUser\)/);
+  assert.match(source, /!membership\.org && !developerMode/);
+  assert.match(source, /!org && !authState\.developerMode/);
+  assert.match(source, /kind: 'icarus_developer'/);
 });
 
 test('resend rotates the credential and restores a full verification window', async () => {

@@ -27,3 +27,10 @@ test("rejects prospect URLs absent from tool evidence", () => {
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: [] }).reason, "prospect_sources_missing");
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).complete, true);
 });
+
+test("does not save market research progress as a finished report", () => {
+  const progress = "Where I stopped: competitors were found, but classification and recommendations are not completed in this run.";
+  assert.equal(companyWorkComplete({ report: progress, recalled: true, marketResearch: true }).reason, "market_report_incomplete");
+  const report = "Direct competitors include Parloa (https://www.parloa.com/de/) and Cognigy (https://www.cognigy.com/de/). Adjacent platforms include BOTfriends (https://botfriends.de/). Recommendations: compare live German calls and data residency with TARA.";
+  assert.equal(companyWorkComplete({ report, recalled: true, marketResearch: true }).complete, true);
+});

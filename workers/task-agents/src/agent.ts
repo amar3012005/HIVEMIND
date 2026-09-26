@@ -256,7 +256,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
-    this.setState({ ...this.state, envelope, role, tools: [...tools], catalogStage: "global", selectedGlobals: [] });
+    this.setState({ ...this.state, envelope, role, tools: [...tools], catalogStage: "global", selectedGlobals: [], companyContextLoaded: false });
   }
 
   setOperatingPlan(runId: string, summary: string, titles: string[]): void {
@@ -577,6 +577,20 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return (this.state.sources ?? []).map((source) => source.url);
   }
 
+  hasCompanyContext(): boolean {
+    return this.state.companyContextLoaded === true;
+  }
+
+  async recallTaskContext(orgId: string, userId: string, query: string): Promise<unknown> {
+    const result = await recallCompany(this.gatewayEnv(), orgId, userId, query);
+    if (result && typeof result === "object" && "ok" in result && result.ok === true) {
+      const count = "count" in result ? Number(result.count) || 0 : 0;
+      this.setState({ ...this.state, companyContextLoaded: true });
+      this.note("hivemind_recall", `${count} company memories recalled`);
+    }
+    return result;
+  }
+
   async snapshot(): Promise<{ events: TraceEvent[]; places: LocalCompany[]; transcript: string }> {
     let transcript = "";
     try {
@@ -606,7 +620,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   note(step: string, detail: string): void {
-    const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, 8000) }].slice(-40);
+    const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) }].slice(-100);
     this.setState({ ...this.state, events });
     this.broadcast(JSON.stringify(events[events.length - 1]));
   }

@@ -77,7 +77,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           body: reply,
         });
         await this.agent.note("completion", verdict.complete ? "complete" : verdict.reason);
-        await this.agent.note("report", reply.slice(0, 8000));
+        await this.agent.note("report", reply);
         return { runId: work.runId, orgId: work.orgId, complete: verdict.complete, reason: verdict.reason, report: reply };
       });
     }
@@ -91,17 +91,33 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
     });
 
+    const companyContext = await durable.do("recall-company-context", async () =>
+      this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)));
+    if (!companyContext || typeof companyContext !== "object" || !("ok" in companyContext) || companyContext.ok !== true) {
+      const reply = "Company memory is unavailable. I cannot finish company research until it is reachable.";
+      await durable.do("context-unavailable", async () => {
+        await this.agent.note("report", reply);
+        await this.agent.note("completion", "company_context_unavailable");
+      });
+      return { runId: work.runId, orgId: work.orgId, complete: false, reason: "company_context_unavailable", report: reply };
+    }
+
     let guidance = "";
     let written = { report: "" };
     const isProspect = /\bprospects?\b/i.test(asked);
+    const marketResearch = /\b(competitor|market research)\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. ${guidance}Continue this same job. Do not reload the playbook catalog. Use update_plan_task when starting, finishing, or blocking a task so the operator sees real progress. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report.`,
+        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Use update_plan_task when starting, finishing, or blocking a task so the operator sees real progress. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
       if (!result.needsInput) {
         written = result;
+        if (marketResearch && !companyWorkComplete({ report: result.report, recalled: true, marketResearch }).complete) {
+          guidance += "The previous output was only progress, not the requested deliverable. Continue reading official vendor sites and finish the market map. Cite at least three official URLs, distinguish direct competitors from adjacent platforms, and give concrete recommendations. Do not ask whether to continue or summarize unfinished work. ";
+          continue;
+        }
         if (!isProspect || companyWorkComplete({ report: result.report, recalled: true, prospectSources: await this.agent.sourceUrls(), companyWebsite: work.website }).reason !== "prospect_sources_missing") break;
         guidance += "No verified external source supports the proposed prospect list. Search buyer accounts in the requested location with parallel_search, inspect each accepted account when needed, and cite only URLs returned by those tools. Do not claim a source was checked if it was not. ";
         continue;
@@ -128,7 +144,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     const prospectSources = isProspect ? await this.agent.sourceUrls() : undefined;
-    const finalVerdict = companyWorkComplete({ report: written.report, recalled: (await this.agent.trace()).some((item: { step: string }) => item.step === "hivemind_recall"), prospectSources, companyWebsite: work.website });
+    const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website, marketResearch });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
       const reply = reason === "prospect_sources_missing" ? "I could not verify the prospect list against external sources. I have not saved it. Please retry the research." : `I could not complete this work: ${reason}.`;
@@ -137,15 +153,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     const prepared = await durable.do("complete", async () => {
-      const recalled = (await this.agent.trace()).some((item: { step: string }) => item.step === "hivemind_recall");
-      const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website });
+      const recalled = this.agent.hasCompanyContext();
+      const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website, marketResearch });
       await this.agent.saveCompanyArtifact({
         kind: "report",
         title: asked.slice(0, 80) || "Report",
         contentType: "text/markdown",
         body: written.report,
       });
-      await this.agent.note("report", written.report.slice(0, 8000));
+      await this.agent.note("report", written.report);
       this.agent.rememberSources(written.report);
       const title = `${work.company}: ${asked.slice(0, 120)}`;
       const preview = written.report.slice(0, 700);

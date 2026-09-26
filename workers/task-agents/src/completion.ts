@@ -3,6 +3,7 @@ export interface CompletionInput {
   recalled: boolean;
   prospectSources?: string[];
   companyWebsite?: string;
+  marketResearch?: boolean;
 }
 
 export interface CompletionResult {
@@ -19,6 +20,13 @@ export function companyWorkComplete(input: CompletionInput): CompletionResult {
   const report = input.report.trim();
   if (report.length < 40) return { complete: false, reason: "report_missing" };
   if (!input.recalled) return { complete: false, reason: "company_context_missing" };
+  if (input.marketResearch) {
+    const urls = [...report.matchAll(/https?:\/\/[^\s<>)\]]+/g)];
+    if (urls.length < 3 || !/direct/i.test(report) || !/adjacent/i.test(report) || !/recommend/i.test(report)
+      || /where I stopped|not completed in this run|want me to continue/i.test(report)) {
+      return { complete: false, reason: "market_report_incomplete" };
+    }
+  }
   if (input.prospectSources) {
     const hosts = new Set(input.prospectSources.map(hostname).filter(Boolean));
     const companyHost = hostname(input.companyWebsite || "");

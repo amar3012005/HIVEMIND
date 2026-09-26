@@ -70,6 +70,7 @@ export interface TaskAgentState {
   catalogStage: "global" | "local" | "action";
   selectedGlobals: string[];
   workflowId: string;
+  companyContextLoaded?: boolean;
   awaiting: "" | "input" | "memory";
   operatingPlan?: OperatingPlan | null;
 }

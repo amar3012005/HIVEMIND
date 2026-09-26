@@ -83,6 +83,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.applyGroups(plan.groups, true);
         this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
+        if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
       });
       const result = await step.prompt("action-execute", {
         prompt: `Current operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The authenticated profile brief is already injected. First share_progress with your immediate next action in your own words. Use hivemind_meta for missing internal evidence and hivemind_connected_task for connected-app status or work. For status-only requests, call connection_status and stop after its receipt; do not search or read app content. Both native gateways are available now; load a detailed skill only when needed. Do not claim either gateway is absent without attempting its call. Use relevant facts from receipts and activate relevant action skills from the catalog. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Share progress again when a receipt changes your next step. Use granted tools and finish requested output. Return finished answer in report; set needsInput only for a genuinely missing required choice.`,
@@ -117,6 +118,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.applyGroups(groups);
       this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
+      if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
     });
 
     const companyContext = await durable.do("recall-company-context", async () =>

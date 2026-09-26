@@ -92,7 +92,7 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
   const base = (env.HIVEMIND_CORE_URL || env.HIVEMIND_CONTROL_URL)?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
   if (!base || !key) return { error: "hivemind_meta_unconfigured", tool: "save_memory" };
-  const response = await fetch(`${base}/api/memories`, {
+  const response = await fetch(`${base}/api/memories?sync=true`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${key}`,
@@ -111,7 +111,7 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
       ...(options.scope ? { scope: options.scope } : {}),
       ...(options.project ? { project: options.project } : {}),
     }),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(60_000),
   });
   const payload: unknown = await response.json().catch(() => ({ error: "invalid_memory_response" }));
   if (!response.ok) {

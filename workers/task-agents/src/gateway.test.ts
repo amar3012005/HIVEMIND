@@ -73,7 +73,8 @@ test("compact profile and scoped meta reads use authenticated Core identity", as
 
 test("memory save carries scope and idempotency and does not call pending saved", async () => {
   const original = globalThis.fetch;
-  globalThis.fetch = async (_input, init) => {
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), "https://core.example/api/memories?sync=true");
     const headers = init?.headers as Record<string, string>;
     assert.equal(headers["x-idempotency-key"], "save-1");
     assert.deepEqual(JSON.parse(String(init?.body)).scope, "personal");
@@ -81,6 +82,16 @@ test("memory save carries scope and idempotency and does not call pending saved"
   };
   try {
     assert.deepEqual(await saveCompanyMemory({ HIVEMIND_CORE_URL: "https://core.example", HIVEMIND_MASTER_API_KEY: "test" }, "org-1", "user-1", "Title", "Content", { scope: "personal", idempotencyKey: "save-1" }), { ok: false, status: "pending", payload: { status: "executing" }, idempotencyKey: "save-1" });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("memory save reports completion only after synchronous Core receipt", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ success: true, id: "memory-1" }, { status: 201 });
+  try {
+    assert.deepEqual(await saveCompanyMemory({ HIVEMIND_CORE_URL: "https://core.example", HIVEMIND_MASTER_API_KEY: "test" }, "org-1", "user-1", "Operator name: Amar", "Operator's preferred name is Amar.", { scope: "personal", idempotencyKey: "save-2" }), { ok: true, status: "completed", payload: { success: true, id: "memory-1" }, idempotencyKey: "save-2" });
   } finally {
     globalThis.fetch = original;
   }

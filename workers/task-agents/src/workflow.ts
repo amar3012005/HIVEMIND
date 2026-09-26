@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { companyWorkComplete, directReplyComplete } from "./completion";
+import { companyWorkComplete, directReplyComplete, requestsMemorySave } from "./completion";
 import { missingPlanTaskIds } from "./operating-plan";
 import type { TaskEnvelope } from "./types";
 
@@ -212,7 +212,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       for (const id of written.completedTaskIds) this.agent.updateOperatingTask(id, "completed");
       await this.agent.note("report", written.report);
       this.agent.rememberSources(written.report);
-      if (!/\b(save|store|remember)\b.{0,30}\b(memory|hivemind)\b/i.test(asked)) {
+      if (!requestsMemorySave(asked)) {
         await this.agent.note("completion", "deliverable_ready");
         return { title: "", content: "", report: written.report, verdict };
       }

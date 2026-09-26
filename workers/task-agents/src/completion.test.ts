@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { companyWorkComplete, directReplyComplete } from "./completion.ts";
+import { companyWorkComplete, directReplyComplete, requestsMemorySave } from "./completion.ts";
+
+test("memory approval follows explicit positive intent", () => {
+  assert.equal(requestsMemorySave("Save this to company memory."), true);
+  assert.equal(requestsMemorySave("Do not launch or save company memory."), false);
+  assert.equal(requestsMemorySave("Don't save it to HIVEMIND memory."), false);
+});
 
 const judgment = "Competitors supported by a page. None of the local companies sell the same offer. Novo AI is machine monitoring. Gaps: phones were not on the Maps record.";
 

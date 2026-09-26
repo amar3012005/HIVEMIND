@@ -318,7 +318,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async applyGroups(groups: readonly string[], prospect = false, action = false): Promise<string[]> {
     const tools = prospect
-      ? ["hivemind_recall", "hivemind_get_memory", "parallel_search", "browser_markdown"]
+      ? ["hivemind_recall", "parallel_search", "browser_markdown"]
       : toolsForGroups(groups);
     this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage });
     this.note("reset_tools", groups.join(", "));
@@ -471,7 +471,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       inputSchema: z.object({}),
       execute: async (): Promise<unknown> => {
         const identity = this.assertTool("get_user_profile");
-        return postMeta(this.gatewayEnv(), "get_user_profile", { org_id: identity.orgId, user_id: identity.userId });
+        return readCompanyProfile(this.gatewayEnv(), identity.orgId, identity.userId);
       },
     });
     const discover = tool({

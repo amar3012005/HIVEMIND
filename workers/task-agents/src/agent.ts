@@ -406,7 +406,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)) && (name !== "browser_capture" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -467,7 +467,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const capture = tool({
-      description: "Capture a public HTTPS webpage with Cloudflare Browser Run and save the PNG as an artifact in this turn.",
+      description: "Capture a full-page screenshot of a public HTTPS webpage with the native Cloudflare Browser Run binding and save its PNG artifact. Use directly for public pages; no connected-app search or grant is needed.",
       inputSchema: z.object({ url: z.url(), title: z.string().min(3).max(120).optional() }),
       execute: async ({ url, title }): Promise<{ id: string; title: string; contentType: string }> => {
         this.assertTool("browser_capture");

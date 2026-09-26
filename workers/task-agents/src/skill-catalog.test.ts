@@ -12,6 +12,7 @@ test("native meta and connected gateways stay available across tool groups", () 
     const names = toolsForGroups(groups);
     assert.ok(names.includes("hivemind_meta"));
     assert.ok(names.includes("hivemind_connected_task"));
+    assert.ok(names.includes("browser_capture"));
   }
   assert.ok(!toolsForGroups(["connected_apps"]).includes("composio_discover_reads"));
   assert.ok(!toolsForGroups(["connected_apps"]).includes("composio_read"));

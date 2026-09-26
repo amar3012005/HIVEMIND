@@ -672,6 +672,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return this.state.companyContextLoaded === true;
   }
 
+  hasArtifactThisTurn(kind: string): boolean {
+    const events = this.state.events ?? [];
+    let start = -1;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index]?.step === "user") { start = index; break; }
+    }
+    return events.slice(start + 1).some((event) => {
+      if (event.step !== "artifact") return false;
+      try { return (JSON.parse(event.detail) as { kind?: string }).kind === kind; } catch { return false; }
+    });
+  }
+
   async recallTaskContext(orgId: string, userId: string, query: string): Promise<unknown> {
     const result = await recallCompany(this.gatewayEnv(), orgId, userId, query);
     if (result && typeof result === "object" && "ok" in result && result.ok === true) {

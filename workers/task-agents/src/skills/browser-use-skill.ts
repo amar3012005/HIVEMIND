@@ -10,6 +10,7 @@ Think exposes these tools when the Browser Run binding is present:
 - browser_links: list links.
 - browser_scrape: read elements by CSS selector.
 - browser_execute: run CDP only when the quick actions cannot see the content.
+- browser_capture: capture a public HTTPS page with Browser Run and save the PNG as an artifact in this turn.
 
 Pass the sealed task's evidence URL. Do not browse an unrelated site, and do not type credentials into a page.
 `;

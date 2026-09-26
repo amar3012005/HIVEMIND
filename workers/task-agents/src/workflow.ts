@@ -106,9 +106,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           const saved = await this.agent.saveCompanyArtifact({ kind: "report", title: reportTitle(reply, "Generated report"), contentType: "text/markdown", body: reply });
           if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
         }
-        await this.agent.note("report", reply);
-        await this.agent.note("completion", verdict.complete ? "complete" : verdict.reason);
-        return { runId: work.runId, orgId: work.orgId, complete: verdict.complete, reason: verdict.reason, report: reply };
+        const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactThisTurn("image");
+        const output = imageMissing ? "I could not save the requested screenshot artifact." : reply;
+        const complete = verdict.complete && !imageMissing;
+        if (complete) for (let index = 0; index < plan.tasks.length; index += 1) this.agent.updateOperatingTask(index + 1, "completed");
+        await this.agent.note("report", output);
+        await this.agent.note("completion", complete ? "complete" : imageMissing ? "artifact_missing" : verdict.reason);
+        return { runId: work.runId, orgId: work.orgId, complete, reason: complete ? "action_complete" : imageMissing ? "artifact_missing" : verdict.reason, report: output };
       });
     }
 

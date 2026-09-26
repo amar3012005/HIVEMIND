@@ -92,8 +92,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
       });
+      const actionContext = await durable.do("recall-action-context", async () =>
+        this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)).catch(() => ({ error: "company_context_unavailable" })));
       const result = await step.prompt("action-execute", {
-        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks or require company memory. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
+        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. HIVEMIND context preflight: ${JSON.stringify(actionContext).slice(0, 3000)}. Use relevant company facts when applicable; do not invent facts when context is unavailable. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
@@ -198,6 +200,17 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const reply = reason === "prospect_sources_missing" ? "I could not verify the prospect list against external sources. I have not saved it. Please retry the research." : `I could not complete this work: ${reason}.`;
       await durable.do("incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", reason); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason, report: reply };
+    }
+
+    const review = await durable.do("govern-report", async () => this.agent.reviewCompanyReport({
+      task: asked,
+      plan: plan.tasks,
+      report: written.report,
+      companyContext,
+      sources: await this.agent.sourceUrls(),
+    }));
+    if (review.verdict === "caution" && review.note) {
+      written.report += `\n\n## Review note\n${review.note}`;
     }
 
     const prepared = await durable.do("complete", async () => {

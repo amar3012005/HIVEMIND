@@ -1,4 +1,4 @@
-import { Think } from "@cloudflare/think";
+import { Think, type ChunkContext, type ToolCallContext, type ToolCallDecision } from "@cloudflare/think";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { tool, type ToolSet } from "ai";
@@ -8,6 +8,9 @@ import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { companyWorkComplete } from "./completion";
+import { CompanyGovernor } from "./governor";
+import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
+import { partialToolText } from "./draft-stream";
 import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import type { ContextConfig } from "agents/context";
@@ -27,6 +30,7 @@ export function reportTitle(body: string, fallback: string): string {
 
 export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   initialState: TaskAgentState = EMPTY;
+  private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   override includeMcpTools = false;
   override workspaceBash = false;
   override storeMessages = true;
@@ -320,13 +324,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const tools = prospect
       ? ["hivemind_recall", "parallel_search", "browser_markdown"]
       : toolsForGroups(groups);
-    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage });
+    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
     this.note("reset_tools", groups.join(", "));
     return tools;
   }
 
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
-    this.setState({ ...this.state, envelope, role, tools: [...tools], catalogStage: "global", selectedGlobals: [], companyContextLoaded: false });
+    this.draftCalls.clear();
+    this.setState({ ...this.state, envelope, role, tools: [...tools], catalogStage: "global", selectedGlobals: [], companyContextLoaded: false, companyContextRequired: false });
     await this.context.refreshSystemPrompt();
   }
 
@@ -363,6 +368,36 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
     };
+  }
+
+  beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    if (this.state.companyContextRequired && !this.state.companyContextLoaded
+      && /^(browser_|parallel_search$|maps_search$|composio_)/.test(ctx.toolName)) {
+      return { action: "block", reason: "Load HIVEMIND company context before external tools." };
+    }
+  }
+
+  async onChunk({ chunk }: ChunkContext): Promise<void> {
+    if (chunk.type === "tool-input-start") {
+      const field = chunk.toolName.startsWith("think_final_answer") ? "report" : chunk.toolName === "share_progress" ? "message" : null;
+      if (field) this.draftCalls.set(chunk.id, { field, raw: "", text: "" });
+      return;
+    }
+    if (chunk.type === "tool-input-end") {
+      this.draftCalls.delete(chunk.id);
+      return;
+    }
+    if (chunk.type !== "tool-input-delta") return;
+    const draft = this.draftCalls.get(chunk.id);
+    if (!draft) return;
+    draft.raw += chunk.delta;
+    if (draft.raw.length > 50000) { this.draftCalls.delete(chunk.id); return; }
+    const next = await partialToolText(draft.raw, draft.field);
+    if (!next || next === draft.text) return;
+    const reset = !next.startsWith(draft.text);
+    const delta = reset ? next : next.slice(draft.text.length);
+    draft.text = next;
+    this.broadcast(JSON.stringify({ type: draft.field === "report" ? "report-draft" : "progress-draft", delta, reset }));
   }
 
   getTools(): ToolSet {
@@ -694,13 +729,50 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async recallTaskContext(orgId: string, userId: string, query: string): Promise<unknown> {
-    const result = await recallCompany(this.gatewayEnv(), orgId, userId, query);
+    const [result, profile] = await Promise.all([
+      recallCompany(this.gatewayEnv(), orgId, userId, query),
+      readCompanyProfile(this.gatewayEnv(), orgId, userId).catch(() => null),
+    ]);
     if (result && typeof result === "object" && "ok" in result && result.ok === true) {
       const count = "count" in result ? Number(result.count) || 0 : 0;
       this.setState({ ...this.state, companyContextLoaded: true });
       this.note("hivemind_recall", `${count} company memories recalled`);
+      const facts = profile && typeof profile === "object" && "facts" in profile && Array.isArray(profile.facts)
+        ? profile.facts.filter((fact): fact is { key: string; value: string } =>
+          !!fact && typeof fact === "object" && typeof fact.key === "string" && typeof fact.value === "string"
+          && /^(company|product|mission|icp|industry|market)/i.test(fact.key))
+          .slice(0, 20).map((fact) => ({ key: fact.key.slice(0, 100), value: fact.value.slice(0, 300) }))
+        : [];
+      this.note("get_user_profile", `${facts.length} company profile facts loaded`);
+      return { ...result, profileFacts: facts };
     }
     return result;
+  }
+
+  async reviewCompanyReport(input: { task: string; plan: string[]; report: string; companyContext: unknown; sources: string[] }): Promise<GovernanceVerdict> {
+    const workflowId = this.state.workflowId || this.state.envelope?.runId || crypto.randomUUID();
+    try {
+      const result = await this.runAgentTool(CompanyGovernor, {
+        runId: `govern-${workflowId}`,
+        input: {
+          task: input.task.slice(0, 2000),
+          plan: input.plan,
+          report: input.report.slice(0, 30000),
+          companyContext: input.companyContext,
+          sourceReceipts: input.sources.slice(0, 30),
+        },
+        display: { name: "Company review" },
+      });
+      const verdict = result.status === "completed"
+        ? parseGovernanceVerdict(result.summary)
+        : { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
+      this.note("governance", `${verdict.verdict}: ${verdict.note}`);
+      return verdict;
+    } catch {
+      const verdict = { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
+      this.note("governance", `${verdict.verdict}: ${verdict.note}`);
+      return verdict;
+    }
   }
 
   async snapshot(): Promise<{ events: TraceEvent[]; places: LocalCompany[]; transcript: string }> {

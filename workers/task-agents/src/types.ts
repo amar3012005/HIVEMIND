@@ -71,6 +71,7 @@ export interface TaskAgentState {
   selectedGlobals: string[];
   workflowId: string;
   companyContextLoaded?: boolean;
+  companyContextRequired?: boolean;
   awaiting: "" | "input" | "memory";
   operatingPlan?: OperatingPlan | null;
 }

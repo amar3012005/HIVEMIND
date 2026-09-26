@@ -1,8 +1,9 @@
 import { getAgentByName, routeAgentRequest } from "agents";
 import { HivemindTaskAgent } from "./agent";
 import { TaskLifecycleWorkflow } from "./workflow";
+import { CompanyGovernor } from "./governor";
 
-export { HivemindTaskAgent, TaskLifecycleWorkflow };
+export { HivemindTaskAgent, TaskLifecycleWorkflow, CompanyGovernor };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

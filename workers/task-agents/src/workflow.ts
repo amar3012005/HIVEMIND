@@ -13,7 +13,7 @@ export interface CompanyWork extends TaskEnvelope {
 }
 
 const planSchema = z.object({
-  mode: z.enum(["direct", "company"]),
+  mode: z.enum(["direct", "action", "company"]),
   decision: z.string().default(""),
   plan: z.string().default(""),
   tasks: z.array(z.string().min(4).max(160)).max(6).default([]),
@@ -60,7 +60,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const asked = work.task || "Map competitors and the local market.";
     const plan = await step.prompt("operating-plan", {
-      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nIf this is not real company work, set mode to direct, leave groups and tasks empty, and put the message you would say in reply. If it is company work, set mode to company. Call playbook_list for global names only, then playbook_list_local for the fields you chose, then playbook_get for the one local task. Return the decision, a short operator-visible plan summary, 3 to 6 concrete tasks in execution order, and only the tool families that method needs. Do not present private chain of thought as tasks.`,
+      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nChoose direct for a small answer needing no tools. Choose action for a bounded tool or artifact task that does not need company operating context; do not load playbooks or require company memory. Choose company only when company facts, market, records, or an operating method are necessary; then call playbook_list for global names, playbook_list_local for chosen fields, and playbook_get for one local task. Return decision, concise operator-visible plan, up to six concrete tasks, and only needed tool families. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",
     });
@@ -77,6 +77,37 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         });
         await this.agent.note("completion", verdict.complete ? "complete" : verdict.reason);
         await this.agent.note("report", reply);
+        return { runId: work.runId, orgId: work.orgId, complete: verdict.complete, reason: verdict.reason, report: reply };
+      });
+    }
+
+    if (plan.mode === "action") {
+      await durable.do("enable-action-tools", async () => {
+        const groups = [...plan.groups];
+        if (/\b(screenshot|capture|webpage|website)\b/i.test(asked) && !groups.includes("browser")) groups.push("browser");
+        await this.agent.applyGroups(groups, false, true);
+        this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
+        await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
+      });
+      const result = await step.prompt("action-execute", {
+        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Activate only relevant action skills from the catalog. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks or require company memory. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
+        output: reportSchema,
+        timeout: "30 minutes",
+      });
+      if (result.needsInput) {
+        await this.agent.note("report", result.question || "I need one detail to finish this task.");
+        await this.agent.note("completion", "input_required");
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "input_required", report: result.question };
+      }
+      const reply = result.report.trim();
+      return durable.do("complete-action", async () => {
+        const verdict = directReplyComplete(reply);
+        if (/\b(report|document|artifact|pdf)\b/i.test(asked) && !/\b(screenshot|capture)\b/i.test(asked) && verdict.complete) {
+          const saved = await this.agent.saveCompanyArtifact({ kind: "report", title: reportTitle(reply, "Generated report"), contentType: "text/markdown", body: reply });
+          if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
+        }
+        await this.agent.note("report", reply);
+        await this.agent.note("completion", verdict.complete ? "complete" : verdict.reason);
         return { runId: work.runId, orgId: work.orgId, complete: verdict.complete, reason: verdict.reason, report: reply };
       });
     }
@@ -156,12 +187,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const prepared = await durable.do("complete", async () => {
       const recalled = this.agent.hasCompanyContext();
       const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website, marketResearch });
-      await this.agent.saveCompanyArtifact({
+      const saved = await this.agent.saveCompanyArtifact({
         kind: "report",
         title: reportTitle(written.report, `${work.company} report`),
         contentType: "text/markdown",
         body: written.report,
       });
+      if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
       await this.agent.note("report", written.report);
       this.agent.rememberSources(written.report);
       const title = `${work.company}: ${asked.slice(0, 120)}`;

@@ -226,12 +226,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       kind: input.kind,
       title: input.title.slice(0, 200),
       contentType: input.contentType.slice(0, 120),
-      body: (input.body ?? "").slice(0, input.contentType === "application/pdf" ? 2800000 : 100000),
+      body: (input.body ?? "").slice(0, input.contentType === "application/pdf" || input.contentType.startsWith("image/") ? 2800000 : 100000),
       storageLocation: input.storageLocation ?? "",
       createdAt: new Date().toISOString(),
     };
     this.sql`INSERT INTO company_artifacts (id, kind, title, content_type, body, storage_location, created_at) VALUES (${row.id}, ${row.kind}, ${row.title}, ${row.contentType}, ${row.body}, ${row.storageLocation}, ${row.createdAt})`;
-    this.note("artifact", `${row.kind} ${row.title}`);
+    this.note("artifact", JSON.stringify({ id: row.id, kind: row.kind, title: row.title, contentType: row.contentType }));
     return row;
   }
 
@@ -317,11 +317,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content);
   }
 
-  async applyGroups(groups: readonly string[], prospect = false): Promise<string[]> {
+  async applyGroups(groups: readonly string[], prospect = false, action = false): Promise<string[]> {
     const tools = prospect
       ? ["hivemind_recall", "hivemind_get_memory", "parallel_search", "browser_markdown"]
       : toolsForGroups(groups);
-    this.setState({ ...this.state, toolGroups: [...groups], tools });
+    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage });
     this.note("reset_tools", groups.join(", "));
     return tools;
   }
@@ -351,8 +351,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async getSkills(): Promise<SkillSource[]> {
-    const stage = this.state.catalogStage ?? "action";
-    return stage === "action" ? [await toolkitSkillSource()] : [];
+    return [await toolkitSkillSource()];
   }
 
   beforeTurn(): { activeTools: string[]; maxSteps: number; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
@@ -367,6 +366,25 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   getTools(): ToolSet {
+    const capture = tool({
+      description: "Capture a public HTTPS webpage with Cloudflare Browser Run and save the PNG as an artifact in this turn.",
+      inputSchema: z.object({ url: z.url(), title: z.string().min(3).max(120).optional() }),
+      execute: async ({ url, title }): Promise<{ id: string; title: string; contentType: string }> => {
+        this.assertTool("browser_capture");
+        const target = new URL(url);
+        if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+        const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
+        if (!browser?.quickAction) throw new Error("browser_binding_missing");
+        const response = await browser.quickAction("screenshot", { url: target.href, screenshotOptions: { fullPage: true } });
+        if (!response.ok) throw new Error(`capture_failed_${response.status}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.length < 8 || bytes.length > 2000000 || ![137, 80, 78, 71].every((byte, index) => bytes[index] === byte)) throw new Error("capture_invalid_or_too_large");
+        let body = "";
+        for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
+        const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.png$/i, "")}.png`, contentType: "image/png", body });
+        return { id: artifact.id, title: artifact.title, contentType: artifact.contentType };
+      },
+    });
     const updatePlanTask = tool({
       description: "Update one task in the operator-visible operating plan when work starts, finishes, or becomes blocked.",
       inputSchema: z.object({ id: z.number().int().min(1).max(6), status: z.enum(["active", "completed", "blocked"]) }),
@@ -635,6 +653,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       reset_tools: reset,
       update_plan_task: updatePlanTask,
       save_local_companies: savePlaces,
+      browser_capture: capture,
       ...(this.gatewayEnv().BROWSER
         ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never })
         : {}),

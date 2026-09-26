@@ -10,6 +10,7 @@ export interface TaskEnvelope {
   phase: string;
   inputRefs: string[];
   outputSchemaId: string;
+  task?: string;
 }
 
 export interface ToolGrant {

@@ -45,7 +45,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     } catch (error) {
       await this.agent.markAwaiting("");
       await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");
-      await this.agent.note("report", "I could not finish this work. Please retry in a new room.");
+      await this.agent.note("report", "I could not finish this run. You can continue in this room.");
       throw error;
     }
   }
@@ -62,7 +62,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const asked = work.task || "Map competitors and the local market.";
     const plan = await step.prompt("operating-plan", {
-      prompt: `Authenticated organization brief: ${work.company}; website: ${work.website}; location: ${work.market}. Operator request: ${asked}\n\nUse the system prompt and action skill catalog to choose direct, action, or company work. Choose only tool families needed for this request. For company work, load relevant playbooks progressively. Return a concise operator-visible plan and up to six tasks that can finish this turn. Do not present private chain of thought as tasks.`,
+      prompt: `Authenticated organization brief: ${work.company}; website: ${work.website}; profile location (not externally verified): ${work.market}. Operator request: ${asked}\n\nUse the system prompt and action skill catalog to choose direct, action, or company work. Direct is only for a small reply with no new deliverable or tool-dependent facts. Action handles bounded noncompany work. Creating or evaluating company positioning, strategy, research, decisions, plans, or reports is company work, even when the requested output is short. Choose only tool families needed for this request. For company work, load relevant playbooks progressively. Return a concise operator-visible plan and up to six tasks that can finish this turn. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",
     });
@@ -85,11 +85,17 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
         if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
       });
-      const result = await step.prompt("action-execute", {
-        prompt: `Current operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The authenticated profile brief is already injected. First share_progress with your immediate next action in your own words. Use hivemind_meta for missing internal evidence. For a public webpage screenshot, call native browser_capture; it saves a full-page PNG artifact without connected-app discovery or grant. Use hivemind_connected_task for connected-app status or account-specific work. For status-only requests, call connection_status and stop after its receipt; do not search or read app content. Load a detailed skill only when needed. Use relevant facts from receipts and activate relevant action skills from the catalog. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Share progress again when a receipt changes your next step. Update plan tasks as their results arrive. Use granted tools and finish requested output. Return finished answer in report; set needsInput only for a genuinely missing required choice.`,
-        output: reportSchema,
-        timeout: "30 minutes",
-      });
+      let result: z.infer<typeof reportSchema> = reportSchema.parse({});
+      let actionGuidance = "";
+      for (let round = 0; round < 3; round += 1) {
+        result = await step.prompt(round === 0 ? "action-execute" : `action-continue-${round}`, {
+          prompt: `Current operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The authenticated profile brief is already injected. ${actionGuidance}${round === 0 ? "First share_progress with your immediate next action in your own words." : "Share a new progress update only if a receipt changes your next step."} Use hivemind_meta for missing internal evidence. For a public webpage screenshot, call native browser_capture; it saves a full-page PNG artifact without connected-app discovery or grant. Use hivemind_connected_task for connected-app status or account-specific work. For status-only requests, call connection_status and stop after its receipt; do not search or read app content. Load a detailed skill only when needed. Use relevant facts from receipts and activate relevant action skills from the catalog. If the next step needs another tool family, open it with reset_tools. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Update plan tasks as their results arrive. Finish requested output. Return finished answer in report with completedTaskIds for tasks supported by the answer or receipts; set needsInput only for a genuinely missing required choice.`,
+          output: reportSchema,
+          timeout: "30 minutes",
+        });
+        if (result.needsInput || !missingPlanTaskIds(plan.tasks.length, result.completedTaskIds).length) break;
+        actionGuidance = `Previous response left planned tasks ${missingPlanTaskIds(plan.tasks.length, result.completedTaskIds).join(", ")} unaccounted for. Continue unfinished work, or explain a concrete blocker. Preserve completed results and return all completed task ids. `;
+      }
       if (result.needsInput) {
         await this.agent.note("report", result.question || "I need one detail to finish this task.");
         await this.agent.note("completion", "input_required");
@@ -98,17 +104,19 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const reply = result.report.trim();
       return durable.do("complete-action", async () => {
         const verdict = directReplyComplete(reply);
-        if (requestsArtifact(asked) && !/\b(screenshot|capture)\b/i.test(asked) && verdict.complete) {
+        const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactThisTurn("image");
+        const output = imageMissing ? "I could not save the requested screenshot artifact." : reply;
+        const missingTasks = missingPlanTaskIds(plan.tasks.length, result.completedTaskIds);
+        const complete = verdict.complete && !imageMissing && !missingTasks.length;
+        if (complete && requestsArtifact(asked) && !/\b(screenshot|capture)\b/i.test(asked)) {
           const saved = await this.agent.saveCompanyArtifact({ kind: "report", title: reportTitle(reply, "Generated report"), contentType: "text/markdown", body: reply });
           if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
         }
-        const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactThisTurn("image");
-        const output = imageMissing ? "I could not save the requested screenshot artifact." : reply;
-        const complete = verdict.complete && !imageMissing;
-        if (complete) for (let index = 0; index < plan.tasks.length; index += 1) this.agent.updateOperatingTask(index + 1, "completed", true);
+        if (complete) for (const id of result.completedTaskIds) this.agent.updateOperatingTask(id, "completed", true);
         await this.agent.note("report", output);
-        await this.agent.note("completion", complete ? "complete" : imageMissing ? "artifact_missing" : verdict.reason);
-        return { runId: work.runId, orgId: work.orgId, complete, reason: complete ? "action_complete" : imageMissing ? "artifact_missing" : verdict.reason, report: output };
+        const reason = imageMissing ? "artifact_missing" : missingTasks.length ? "plan_incomplete" : verdict.reason;
+        await this.agent.note("completion", complete ? "complete" : reason);
+        return { runId: work.runId, orgId: work.orgId, complete, reason: complete ? "action_complete" : reason, report: output };
       });
     }
 
@@ -123,7 +131,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const companyContext = await durable.do("recall-company-context", async () =>
       this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)));
-    if (!companyContext || typeof companyContext !== "object" || !("ok" in companyContext) || companyContext.ok !== true) {
+    const recallSucceeded = Boolean(companyContext && typeof companyContext === "object" && "ok" in companyContext && companyContext.ok === true);
+    if (!recallSucceeded && !this.agent.hasCompanyContext()) {
       const reply = "Company memory is unavailable. I cannot finish company research until it is reachable.";
       await durable.do("context-unavailable", async () => {
         await this.agent.note("report", reply);
@@ -135,10 +144,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     let guidance = "";
     let written = { report: "", completedTaskIds: [] as number[] };
     const isProspect = /\bprospects?\b/i.test(asked);
-    const marketResearch = /\b(competitor|market research)\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory recall succeeded: ${JSON.stringify(companyContext).slice(0, 5000)}. Do not claim company memory is unavailable when this receipt succeeded. ${guidance}Continue this same job. Do not reload the playbook catalog. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task when starting, finishing, or blocking a task. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. Treat numeric targets without baselines as proposals, not established facts. If one missing fact blocks the job, set needsInput true with one short question and 2 to 5 options. Otherwise set needsInput false and put the final result in report. Start report with a descriptive Markdown H1 title, then short sections and linked citations.`,
+        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. Profile location (not externally verified): ${work.market}. ${recallSucceeded ? `Company memory recall succeeded: ${JSON.stringify(companyContext).slice(0, 5000)}. Use only relevant, scoped items; a retrieved snippet is not proof that its claims were independently verified.` : "Company memory recall failed. Use the authenticated compact profile already injected, verify other evidence, and do not claim memory facts you could not retrieve."} ${guidance}Continue this same job. Do not reload the playbook catalog. Use injected profile and relevant recall first. Fetch external evidence only when a material claim needs verification; do not routinely capture the website. If profile and memory conflict, name the conflict and leave the fact unresolved. Missing recall is not proof that the company's offer, revenue, or customers do not exist. Do not label dates, metrics, headquarters, or regulatory claims verified without a supporting primary source receipt. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task when starting, finishing, or blocking a task. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. Treat numeric targets without baselines as proposals, not established facts. If one missing fact blocks the job, set needsInput true with one short question and 2 to 5 options. Otherwise set needsInput false and put the final result in report. Start report with a descriptive Markdown H1 title, then short sections and linked citations.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
@@ -147,10 +155,6 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         const missingPlanIds = missingPlanTaskIds(plan.tasks.length, result.completedTaskIds);
         if (missingPlanIds.length) {
           guidance += `The report did not account for planned tasks ${missingPlanIds.join(", ")}. Complete each remaining task with visible output or evidence, then return every completed task id. Do not present an unfinished plan as final. `;
-          continue;
-        }
-        if (marketResearch && !companyWorkComplete({ report: result.report, recalled: true, marketResearch }).complete) {
-          guidance += "The previous output was only progress, not the requested deliverable. Continue reading official vendor sites and finish the market map. Cite at least three official URLs, distinguish direct competitors from adjacent platforms, and give concrete recommendations. Do not ask whether to continue or summarize unfinished work. ";
           continue;
         }
         if (!isProspect || companyWorkComplete({ report: result.report, recalled: true, prospectSources: await this.agent.sourceUrls(), companyWebsite: work.website }).reason !== "prospect_sources_missing") break;
@@ -185,7 +189,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await durable.do("plan-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "plan_incomplete"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "plan_incomplete", report: reply };
     }
-    const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website, marketResearch });
+    const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
       const reply = reason === "prospect_sources_missing" ? "I could not verify the prospect list against external sources. I have not saved it. Please retry the research." : `I could not complete this work: ${reason}.`;
@@ -206,7 +210,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const prepared = await durable.do("complete", async () => {
       const recalled = this.agent.hasCompanyContext();
-      const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website, marketResearch });
+      const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website });
       const saved = await this.agent.saveCompanyArtifact({
         kind: "report",
         title: reportTitle(written.report, `${work.company} report`),

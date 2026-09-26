@@ -6,6 +6,9 @@ test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsMemorySave("Save this to company memory."), true);
   assert.equal(requestsMemorySave("Do not launch or save company memory."), false);
   assert.equal(requestsMemorySave("Don't save it to HIVEMIND memory."), false);
+  assert.equal(requestsMemorySave("Draft only; do not publish or save memory."), false);
+  assert.equal(requestsMemorySave("Save my name as Amar."), true);
+  assert.equal(requestsMemorySave("Save it as a PDF report."), false);
 });
 
 test("artifact saving requires a positive creation request", () => {
@@ -49,9 +52,7 @@ test("rejects prospect URLs absent from tool evidence", () => {
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).complete, true);
 });
 
-test("does not save market research progress as a finished report", () => {
-  const progress = "Where I stopped: competitors were found, but classification and recommendations are not completed in this run.";
-  assert.equal(companyWorkComplete({ report: progress, recalled: true, marketResearch: true }).reason, "market_report_incomplete");
-  const report = "Direct competitors include Parloa (https://www.parloa.com/de/) and Cognigy (https://www.cognigy.com/de/). Adjacent platforms include BOTfriends (https://botfriends.de/). Recommendations: compare live German calls and data residency with TARA.";
-  assert.equal(companyWorkComplete({ report, recalled: true, marketResearch: true }).complete, true);
+test("company completion does not depend on report length or prescribed vocabulary", () => {
+  assert.equal(companyWorkComplete({ report: "Decision: run a pilot.", recalled: true }).complete, true);
+  assert.equal(companyWorkComplete({ report: "  ", recalled: true }).reason, "report_missing");
 });

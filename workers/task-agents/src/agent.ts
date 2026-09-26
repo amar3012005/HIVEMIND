@@ -8,7 +8,7 @@ import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
-import { companyWorkComplete } from "./completion";
+import { companyWorkComplete, requestsMemorySave } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { partialToolText } from "./draft-stream";
@@ -108,7 +108,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const turned = await this.testPrompt(prompt);
     const text = turned.text || `Places saved: ${JSON.stringify(this.state.places)}`;
     const recalled = (this.state.events ?? []).some((event) => event.step === "hivemind_recall");
-    const verdict = companyWorkComplete({ report: text, recalled, marketResearch: true });
+    const verdict = companyWorkComplete({ report: text, recalled });
     this.note("completion", verdict.complete ? "complete" : verdict.reason);
     this.note("day1", text.slice(0, 8000));
     return { status: verdict.complete ? "ok" : "incomplete", text, error: verdict.complete ? turned.error : verdict.reason, company };
@@ -406,7 +406,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)) && (name !== "browser_capture" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || !catalogTools.has(name)) && (name !== "browser_capture" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -414,6 +414,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    if (ctx.toolName === "hivemind_meta" && (ctx.input as { operation?: string })?.operation === "save"
+      && !requestsMemorySave(this.state.envelope?.task ?? "")) {
+      return { action: "block", reason: "Operator did not request a memory save in this turn." };
+    }
     if (this.state.companyContextRequired && !this.state.companyContextLoaded
       && /^(browser_|parallel_search$|maps_search$|composio_|hivemind_connected_task$)/.test(ctx.toolName)) {
       return { action: "block", reason: "Load HIVEMIND company context before external tools." };
@@ -596,7 +600,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         content: z.string().max(8000).optional(),
         idempotencyKey: z.string().max(200).optional(),
       }),
-      needsApproval: async ({ operation }) => operation === "save",
+      needsApproval: async ({ operation }) => operation === "save" && requestsMemorySave(this.state.envelope?.task ?? ""),
       execute: async (input): Promise<unknown> => {
         const identity = this.assertTool("hivemind_meta");
         this.note("hivemind_meta", input.operation);
@@ -629,6 +633,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           if (!input.idempotencyKey?.trim()) return { error: "idempotency_key_required" };
           return readMetaSaveStatus(this.gatewayEnv(), identity.orgId, identity.userId, input.idempotencyKey);
         }
+        if (!requestsMemorySave(this.state.envelope?.task ?? "")) return { error: "memory_save_not_requested" };
         if (!input.title?.trim() || !input.content?.trim() || !input.scope) return { error: "title_content_and_scope_required" };
         if (input.scope === "project" && !input.project) return { error: "project_required" };
         const source = `${this.state.envelope?.runId}:${input.scope}:${input.project || ""}:${input.title}:${input.content}`;
@@ -727,14 +732,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const reset = tool({
-      description: "Enable tool families for the rest of this run. Pass only the families the playbook needs.",
+      description: "Open needed tool families during an action or company run. Use when the next step needs a family not already active.",
       inputSchema: z.object({
         groups: z.array(z.enum(["company", "web_research", "browser", "connected_apps", "records"])).max(5),
       }),
       execute: async ({ groups }): Promise<{ tools: string[] }> => {
         this.assertTool("reset_tools");
         const tools = toolsForGroups(groups);
-        this.setState({ ...this.state, toolGroups: [...groups], tools, companyContextRequired: true });
+        this.setState({ ...this.state, toolGroups: [...groups], tools });
         this.note("reset_tools", groups.join(", "));
         return { tools };
       },

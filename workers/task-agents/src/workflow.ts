@@ -3,6 +3,7 @@ import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
 import { companyWorkComplete, directReplyComplete } from "./completion";
+import { missingPlanTaskIds } from "./operating-plan";
 import type { TaskEnvelope } from "./types";
 
 export interface CompanyWork extends TaskEnvelope {
@@ -26,6 +27,7 @@ const reportSchema = z.object({
   question: z.string().default(""),
   options: z.array(z.string()).max(5).default([]),
   report: z.string().default(""),
+  completedTaskIds: z.array(z.number().int().min(1).max(6)).max(6).default([]),
 });
 
 export interface CompanyWorkResult {
@@ -90,7 +92,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
       });
       const result = await step.prompt("action-execute", {
-        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Activate only relevant action skills from the catalog. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks or require company memory. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
+        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks or require company memory. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
@@ -125,7 +127,6 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
     });
 
-    await this.agent.note("operating-plan", "I’m recalling the company context, then I’ll work through the plan.");
     const companyContext = await durable.do("recall-company-context", async () =>
       this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)));
     if (!companyContext || typeof companyContext !== "object" || !("ok" in companyContext) || companyContext.ok !== true) {
@@ -138,18 +139,22 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     let guidance = "";
-    let written = { report: "" };
+    let written = { report: "", completedTaskIds: [] as number[] };
     const isProspect = /\bprospects?\b/i.test(asked);
     const marketResearch = /\b(competitor|market research)\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
-      await this.agent.note("operating-plan", round === 0 ? "I have the company context. I’m checking evidence and writing the result." : "I’m resolving a gap in the result before I finish.");
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Use update_plan_task when starting, finishing, or blocking a task so the operator sees real progress. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report. Format finished report with Markdown headings, short paragraphs, and linked citations so it reads cleanly in chat.`,
+        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task when starting, finishing, or blocking a task. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. If one missing fact blocks the job, set needsInput true with one short question and 2 to 5 options. Otherwise set needsInput false and put the final result in report. Format report with Markdown headings, short paragraphs, and linked citations.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
       if (!result.needsInput) {
         written = result;
+        const missingPlanIds = missingPlanTaskIds(plan.tasks.length, result.completedTaskIds);
+        if (missingPlanIds.length) {
+          guidance += `The report did not account for planned tasks ${missingPlanIds.join(", ")}. Complete each remaining task with visible output or evidence, then return every completed task id. Do not present an unfinished plan as final. `;
+          continue;
+        }
         if (marketResearch && !companyWorkComplete({ report: result.report, recalled: true, marketResearch }).complete) {
           guidance += "The previous output was only progress, not the requested deliverable. Continue reading official vendor sites and finish the market map. Cite at least three official URLs, distinguish direct competitors from adjacent platforms, and give concrete recommendations. Do not ask whether to continue or summarize unfinished work. ";
           continue;
@@ -173,13 +178,19 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.markAwaiting("");
       });
       if (!answer) {
-        written = { report: result.question || "I still need a choice to continue." };
+        written = { report: result.question || "I still need a choice to continue.", completedTaskIds: result.completedTaskIds };
         break;
       }
       guidance += `The operator chose: ${answer}. `;
     }
 
     const prospectSources = isProspect ? await this.agent.sourceUrls() : undefined;
+    const missingPlanIds = missingPlanTaskIds(plan.tasks.length, written.completedTaskIds);
+    if (missingPlanIds.length) {
+      const reply = `I could not finish planned tasks ${missingPlanIds.join(", ")}. I have kept the plan open.`;
+      await durable.do("plan-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "plan_incomplete"); });
+      return { runId: work.runId, orgId: work.orgId, complete: false, reason: "plan_incomplete", report: reply };
+    }
     const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website, marketResearch });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
@@ -198,14 +209,21 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         body: written.report,
       });
       if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
+      for (const id of written.completedTaskIds) this.agent.updateOperatingTask(id, "completed");
       await this.agent.note("report", written.report);
       this.agent.rememberSources(written.report);
+      if (!/\b(save|store|remember)\b.{0,30}\b(memory|hivemind)\b/i.test(asked)) {
+        await this.agent.note("completion", "deliverable_ready");
+        return { title: "", content: "", report: written.report, verdict };
+      }
       const title = `${work.company}: ${asked.slice(0, 120)}`;
       const preview = written.report.slice(0, 700);
       await this.agent.note("approval", `Save this to company memory?\n${title}\n${preview}`);
       this.agent.markAwaiting("memory");
       return { title, content: written.report.slice(0, 4000), report: written.report, verdict };
     });
+
+    if (!prepared.title) return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report };
 
     let approved = false;
     try {

@@ -198,7 +198,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const task = typeof parsed.task === "string" ? parsed.task.slice(0, 2000) : "";
     this.setState({ ...this.state, operatingPlan: null });
     if (task) this.note("user", task);
-    this.note("operating-plan", "I’ll check the request and decide what context this work needs.");
     const supplied = {
       company: typeof parsed.company === "string" ? parsed.company.slice(0, 200) : "",
       website: typeof parsed.website === "string" ? parsed.website.slice(0, 300) : "",
@@ -358,7 +357,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -366,6 +365,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   getTools(): ToolSet {
+    const progress = tool({
+      description: "Share a brief first-person work update with the operator when choosing a next step or changing approach. State actual evidence or uncertainty. Do not reveal private reasoning, repeat earlier updates, or claim an unverified result.",
+      inputSchema: z.object({ message: z.string().min(12).max(400) }),
+      execute: async ({ message }): Promise<{ shared: true }> => {
+        this.note("progress", message);
+        return { shared: true };
+      },
+    });
     const capture = tool({
       description: "Capture a public HTTPS webpage with Cloudflare Browser Run and save the PNG as an artifact in this turn.",
       inputSchema: z.object({ url: z.url(), title: z.string().min(3).max(120).optional() }),
@@ -652,6 +659,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       refine_local_playbook: refine,
       reset_tools: reset,
       update_plan_task: updatePlanTask,
+      share_progress: progress,
       save_local_companies: savePlaces,
       browser_capture: capture,
       ...(this.gatewayEnv().BROWSER

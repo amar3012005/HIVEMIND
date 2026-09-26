@@ -396,31 +396,33 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {
     if (chunk.type === "text-delta") {
-      if (!chunk.text || this.textDraft.length > 4000) return;
+      const text = chunk.text;
+      if (!text || this.textDraft.length > 4000) return;
       if (!this.textDraft) this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
-      this.textDraft += chunk.text;
-      this.broadcast(JSON.stringify({ type: "progress-draft", delta: chunk.text }));
+      this.textDraft += text;
+      this.broadcast(JSON.stringify({ type: "progress-draft", delta: text }));
       return;
     }
+    const callId = "id" in chunk ? String(chunk.id) : "";
     if (chunk.type === "tool-input-start") {
       this.textDraft = "";
       const field = chunk.toolName.startsWith("think_final_answer") ? "report" : chunk.toolName === "share_progress" ? "message" : null;
       if (field) {
-        this.draftCalls.set(chunk.id, { field, raw: "", text: "" });
+        this.draftCalls.set(callId, { field, raw: "", text: "" });
         if (field === "report") this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
         this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
       }
       return;
     }
-    if (chunk.type === "tool-input-end") {
-      this.draftCalls.delete(chunk.id);
+    if (chunk.type === "tool-call") {
+      this.draftCalls.delete(callId);
       return;
     }
     if (chunk.type !== "tool-input-delta") return;
-    const draft = this.draftCalls.get(chunk.id);
+    const draft = this.draftCalls.get(callId);
     if (!draft) return;
     draft.raw += chunk.delta;
-    if (draft.raw.length > 50000) { this.draftCalls.delete(chunk.id); return; }
+    if (draft.raw.length > 50000) { this.draftCalls.delete(callId); return; }
     const next = await partialToolText(draft.raw, draft.field);
     if (!next || next === draft.text) return;
     const reset = !next.startsWith(draft.text);

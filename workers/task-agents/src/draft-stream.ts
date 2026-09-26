@@ -4,7 +4,7 @@ export async function partialToolText(raw: string, field: "report" | "message"):
   const parsed = await parsePartialJson(raw);
   const value = parsed.value;
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  return record && typeof record[field] === "string"
-    ? record[field]
-    : "";
+  if (!record) return "";
+  const text = field === "report" ? record.report ?? record.reply : record.message;
+  return typeof text === "string" ? text : "";
 }

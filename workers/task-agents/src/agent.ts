@@ -235,6 +235,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     this.setState({ ...this.state, operatingPlan: null });
     if (task) this.note("user", task);
+    this.note("workrun", "Loading authenticated context");
     const supplied = {
       company: typeof parsed.company === "string" ? parsed.company.slice(0, 200) : "",
       website: typeof parsed.website === "string" ? parsed.website.slice(0, 300) : "",

@@ -357,7 +357,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.draftCalls.clear();
     const profile = await readCompactProfile(this.gatewayEnv(), envelope.orgId, envelope.userId).catch(() => ({ error: "profile_context_unavailable" }));
     const profileBrief = "context" in profile ? profile.context : "Authenticated HIVEMIND profile unavailable. Do not infer user or organization facts.";
-    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, "hivemind_meta"])], profileBrief, catalogStage: "global", selectedGlobals: [], companyContextLoaded: false, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, "hivemind_meta"])], profileBrief, catalogStage: "global", selectedGlobals: [], companyContextLoaded: "context" in profile && Boolean(profile.context.trim()), companyContextRequired: false });
     await this.context.refreshSystemPrompt();
   }
 
@@ -402,7 +402,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
     if (this.state.companyContextRequired && !this.state.companyContextLoaded
-      && /^(browser_|parallel_search$|maps_search$|composio_)/.test(ctx.toolName)) {
+      && /^(browser_|parallel_search$|maps_search$|composio_|hivemind_connected_task$)/.test(ctx.toolName)) {
       return { action: "block", reason: "Load HIVEMIND company context before external tools." };
     }
   }
@@ -582,17 +582,24 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.note("hivemind_meta", input.operation);
         if (input.operation === "context") {
           const profile = await readCompanyProfile(this.gatewayEnv(), identity.orgId, identity.userId);
+          if (profile && typeof profile === "object" && !("error" in profile)) this.setState({ ...this.state, companyContextLoaded: true });
           return profile && typeof profile === "object" && "context" in profile && typeof profile.context === "string"
             ? { status: "ready", context: profile.context.slice(0, 12000) } : profile;
         }
-        if (input.operation === "profiles") return readCompanyProfile(this.gatewayEnv(), identity.orgId, identity.userId);
+        if (input.operation === "profiles") {
+          const profile = await readCompanyProfile(this.gatewayEnv(), identity.orgId, identity.userId);
+          if (profile && typeof profile === "object" && !("error" in profile)) this.setState({ ...this.state, companyContextLoaded: true });
+          return profile;
+        }
         if (input.operation === "entities") {
           if (!input.query?.trim()) return { error: "query_required" };
           return readMetaEntities(this.gatewayEnv(), identity.orgId, identity.userId, input.query, input.limit);
         }
         if (input.operation === "recall") {
           if (!input.query?.trim()) return { error: "query_required" };
-          return readMetaRecall(this.gatewayEnv(), identity.orgId, identity.userId, { ...input, query: input.query });
+          const result = await readMetaRecall(this.gatewayEnv(), identity.orgId, identity.userId, { ...input, query: input.query });
+          if (result && typeof result === "object" && !("error" in result)) this.setState({ ...this.state, companyContextLoaded: true });
+          return result;
         }
         if (input.operation === "save_status") {
           if (!input.idempotencyKey?.trim()) return { error: "idempotency_key_required" };

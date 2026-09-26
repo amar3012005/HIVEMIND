@@ -9,3 +9,7 @@ export function missingPlanTaskIds(taskCount: number, completedTaskIds: readonly
   const completed = new Set(completedTaskIds);
   return Array.from({ length: taskCount }, (_, index) => index + 1).filter((id) => !completed.has(id));
 }
+
+export function currentTurnTasks(tasks: readonly string[]): string[] {
+  return tasks.filter((task) => !/^\s*(?:on|after|upon|once)\s+(?:operator\s+)?approval\b/i.test(task));
+}

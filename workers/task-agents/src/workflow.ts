@@ -3,7 +3,7 @@ import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
 import { companyWorkComplete, directReplyComplete, requestsMemorySave } from "./completion";
-import { missingPlanTaskIds } from "./operating-plan";
+import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import type { TaskEnvelope } from "./types";
 
 export interface CompanyWork extends TaskEnvelope {
@@ -62,10 +62,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const asked = work.task || "Map competitors and the local market.";
     const plan = await step.prompt("operating-plan", {
-      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nChoose direct for a small answer needing no tools. Choose action for a bounded tool or artifact task that does not need company operating context; do not load playbooks or require company memory. Choose company only when company facts, market, records, or an operating method are necessary; then call playbook_list for global names, playbook_list_local for chosen fields, and playbook_get for one local task. Return decision, concise operator-visible plan, up to six concrete tasks, and only needed tool families. Do not present private chain of thought as tasks.`,
+      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nChoose direct for a small answer needing no tools. Choose action for a bounded tool or artifact task that does not need company operating context; do not load playbooks or require company memory. Choose company only when company facts, market, records, or an operating method are necessary; then call playbook_list for global names, playbook_list_local for chosen fields, and playbook_get for one local task. Return decision, concise operator-visible plan, up to six concrete tasks, and only needed tool families. Plan only work that can finish in this turn; leave future actions requiring operator approval out of tasks. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",
     });
+    plan.tasks = currentTurnTasks(plan.tasks);
 
     if (plan.mode === "direct") {
       const reply = plan.reply.trim() || plan.decision.trim();
@@ -144,7 +145,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const marketResearch = /\b(competitor|market research)\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task when starting, finishing, or blocking a task. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. If one missing fact blocks the job, set needsInput true with one short question and 2 to 5 options. Otherwise set needsInput false and put the final result in report. Format report with Markdown headings, short paragraphs, and linked citations.`,
+        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task when starting, finishing, or blocking a task. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. If one missing fact blocks the job, set needsInput true with one short question and 2 to 5 options. Otherwise set needsInput false and put the final result in report. Start report with a descriptive Markdown H1 title, then short sections and linked citations.`,
         output: reportSchema,
         timeout: "30 minutes",
       });

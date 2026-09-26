@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 const MODES = new Set(['off', 'shadow', 'primary', 'email_only']);
-const INTENTS = new Set(['login', 'register']);
+const INTENTS = new Set(['login', 'register', 'developer']);
 const EXPIRY_MS = 10 * 60 * 1000;
 const RESEND_MS = 30 * 1000;
 const START_WINDOW_MS = 10 * 60 * 1000;

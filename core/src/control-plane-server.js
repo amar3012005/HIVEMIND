@@ -1733,6 +1733,25 @@ function emailSignupAdmission(ticket) {
   return verify('personal') || verify('enterprise');
 }
 
+function isIcarusDeveloperCliUrl(value, req) {
+  try {
+    const target = new URL(String(value || ''));
+    const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    return target.origin === `${proto}://${host}`
+      && target.pathname === '/auth/cli/start'
+      && target.searchParams.get('client') === 'icarus'
+      && target.searchParams.get('mode') === 'developer';
+  } catch {
+    return false;
+  }
+}
+
+function emailAuthReturnTo(candidate, req) {
+  if (isIcarusDeveloperCliUrl(candidate, req)) return new URL(candidate).toString();
+  return safeReturnTo(candidate, emailPostLoginRedirect, emailAllowedOrigins);
+}
+
 function emailRequestFingerprint(req) {
   return String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || '').trim().slice(0, 128) || null;
 }
@@ -1827,9 +1846,32 @@ async function platformUserExists({ sub, email }) {
   if (!prisma) return false;
   const user = await prisma.user.findFirst({
     where: { OR: [{ zitadelUserId: sub }, ...(email ? [{ email }] : [])] },
-    select: { id: true },
+    select: {
+      id: true,
+      organizations: { take: 1, select: { orgId: true } },
+      identities: { where: { provider: 'icarus' }, take: 1, select: { id: true } },
+    },
   });
-  return Boolean(user);
+  return Boolean(user && !isDeveloperOnlyUser(user));
+}
+
+function isDeveloperOnlyUser(user) {
+  return Boolean(user?.identities?.length && !user?.organizations?.length);
+}
+
+async function markIcarusDeveloperIdentity(user) {
+  await prisma.userIdentity.upsert({
+    where: { provider_providerSubject: { provider: 'icarus', providerSubject: user.id } },
+    update: { normalizedEmail: user.email, verifiedAt: new Date() },
+    create: {
+      userId: user.id,
+      provider: 'icarus',
+      providerSubject: user.id,
+      normalizedEmail: user.email,
+      verifiedAt: new Date(),
+      isPrimary: false,
+    },
+  });
 }
 
 function normalizePlatformOperator(value) {
@@ -3300,6 +3342,38 @@ async function getOrCreateSessionKey(userId, orgId) {
     return result.rawKey || null;
   } catch (err) {
     console.warn('[bootstrap] Failed to get/create session key:', err.message);
+    return null;
+  }
+}
+
+/** Developer identity key for ICARUS. Deliberately has no organization. */
+async function getOrCreateIcarusDeveloperKey(userId) {
+  try {
+    const existing = await prisma.apiKey.findFirst({
+      where: { userId, orgId: null, name: 'icarus-developer', revokedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existing) {
+      try {
+        const meta = JSON.parse(existing.description || '{}');
+        if (meta.rawKey) return meta.rawKey;
+      } catch {}
+      await prisma.apiKey.update({ where: { id: existing.id }, data: { revokedAt: new Date() } }).catch(() => {});
+    }
+    const result = await createPersistedApiKey(prisma, {
+      userId,
+      orgId: null,
+      name: 'icarus-developer',
+      description: JSON.stringify({ client: 'icarus', mode: 'developer' }),
+      scopes: ['memory:read', 'memory:write', 'mcp'],
+    });
+    await prisma.apiKey.update({
+      where: { id: result.record.id },
+      data: { description: JSON.stringify({ rawKey: result.rawKey, client: 'icarus', mode: 'developer' }) },
+    });
+    return result.rawKey;
+  } catch (error) {
+    console.warn('[icarus-auth] Failed to create developer key:', error.message);
     return null;
   }
 }
@@ -5029,17 +5103,28 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseBody(req);
       const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req);
-      const returnTo = safeReturnTo(body?.return_to, emailPostLoginRedirect, emailAllowedOrigins);
-      const intent = body?.intent === 'register' ? 'register' : 'login';
+      const returnTo = emailAuthReturnTo(body?.return_to, req);
+      const developerMode = body?.intent === 'developer' && isIcarusDeveloperCliUrl(returnTo, req);
+      const intent = developerMode ? 'developer' : (body?.intent === 'register' ? 'register' : 'login');
       const email = normalizeEmail(body?.email);
       const signupTicket = intent === 'register' ? String(body?.signup_ticket || '').trim() : null;
       const admission = intent === 'register' ? emailSignupAdmission(signupTicket) : null;
-      const existingUser = email ? await prisma.user.findUnique({ where: { email }, select: { id: true, deletedAt: true } }) : null;
+      const existingUser = email ? await prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          deletedAt: true,
+          organizations: { take: 1, select: { orgId: true } },
+          identities: { where: { provider: 'icarus' }, take: 1, select: { id: true } },
+        },
+      }) : null;
       let started = { accepted: false };
       // Never send a code that can create an account without the same signed
       // admission Google uses. Generic responses preserve account privacy.
-      const admitted = intent === 'login'
-        ? Boolean(existingUser && !existingUser.deletedAt)
+      const admitted = intent === 'developer'
+        ? true
+        : intent === 'login'
+        ? Boolean(existingUser && !existingUser.deletedAt && !isDeveloperOnlyUser(existingUser))
         : Boolean(admission);
       if (turnstileOk && admitted && emailDeliveryConfigured()) started = await emailIdentity.start({
         email, intent, returnTo, mode, signupTicket: admission ? signupTicket : null,
@@ -5082,7 +5167,7 @@ const server = http.createServer(async (req, res) => {
         const admission = verified.challenge.intent === 'register'
           ? emailSignupAdmission(emailIdentity.signupTicket(verified.challenge))
           : null;
-        if (!admission) return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
+        if (!admission && verified.challenge.intent !== 'developer') return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
         user = await upsertVerifiedEmailUser(verified.email);
         createdAccount = true;
       } else {
@@ -5096,10 +5181,12 @@ const server = http.createServer(async (req, res) => {
       const membership = await resolveSessionOrg(user.id);
       if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
-      if (createdAccount) queueSignupAdminNotification(user, 'email_signup');
+      const developerMode = verified.challenge.intent === 'developer';
+      if (developerMode) await markIcarusDeveloperIdentity(user);
+      if (createdAccount && !developerMode) queueSignupAdminNotification(user, 'email_signup');
       // A newly authenticated person without an organization has reached the
       // next activation stage. Generation invalidates any queued invite mail.
-      if (!membership.org) {
+      if (!membership.org && !developerMode) {
         await startSignupActivation({
           prisma, email: user.email, userId: user.id,
           metadata: { activation_source: 'email_signup' },
@@ -5113,8 +5200,10 @@ const server = http.createServer(async (req, res) => {
           scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] signup scheduling failed:', error.message));
         }
       }
-      const redirectTo = safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
-      return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
+      const redirectTo = developerMode
+        ? emailAuthReturnTo(verified.challenge.returnTo, req)
+        : safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
+      return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org && !developerMode }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
     } catch (error) {
       console.error('[email-auth] verification failed', { error: error.message });
       return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
@@ -5202,6 +5291,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Google OAuth not configured' }, 503);
     }
     const returnToValue = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+    const developerMode = isIcarusDeveloperCliUrl(returnToValue, req);
     const admission = signupAdmissionFromRequest(url);
     const workspaceInvite = await workspaceInviteAdmissionFromRequest(url);
     if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
@@ -5209,6 +5299,7 @@ const server = http.createServer(async (req, res) => {
     const state = await sessionStore.createAuthState({
       returnTo: returnToValue,
       provider: 'google',
+      developerMode,
       signupAdmission: admission,
       workspaceInviteToken: workspaceInvite?.token || null,
     });
@@ -5314,7 +5405,7 @@ const server = http.createServer(async (req, res) => {
       const workspaceInviteAccepted = authState.workspaceInviteToken
         ? await workspaceInviteMatchesAuthenticatedEmail(authState.workspaceInviteToken, userInfo.email)
         : false;
-      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted) {
+      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted && !authState.developerMode) {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel({
@@ -5325,8 +5416,9 @@ const server = http.createServer(async (req, res) => {
         picture: userInfo.picture,
         locale: userInfo.locale,
       });
+      if (authState.developerMode) await markIcarusDeveloperIdentity(user);
       console.log(`[google-auth] User upserted - id: ${user.id}, email: ${user.email}`);
-      if (!existingPlatformUser) queueSignupAdminNotification(user, 'google_signup');
+      if (!existingPlatformUser && !authState.developerMode) queueSignupAdminNotification(user, 'google_signup');
 
       const { org } = await resolveCurrentOrg(user.id);
       console.log(`[google-auth] Organization resolved - orgId: ${org?.id || 'none'}`);
@@ -5336,7 +5428,7 @@ const server = http.createServer(async (req, res) => {
         email: user.email,
         orgId: org?.id || null,
       });
-      if (!org) {
+      if (!org && !authState.developerMode) {
         await startSignupActivation({
           prisma, email: user.email, userId: user.id,
           metadata: { activation_source: 'google_signup' },
@@ -5396,6 +5488,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/auth/cli/start' && req.method === 'GET') {
     const callback = url.searchParams.get('callback') || '';
     const state = url.searchParams.get('state') || '';
+    const icarusDeveloperMode = url.searchParams.get('client') === 'icarus' && url.searchParams.get('mode') === 'developer';
     if (!callback || !state) {
       return jsonResponse(res, { error: 'callback and state required' }, 400);
     }
@@ -5432,14 +5525,16 @@ const server = http.createServer(async (req, res) => {
 
     const userId = current.session.userId;
     const { org } = await resolveCurrentOrg(userId);
-    if (!org) {
+    if (!org && !icarusDeveloperMode) {
       // Edge case: legit user with no org yet — finish onboarding first,
       // then come back. We pass the same URL via return_to.
       const selfPath = req.url;
       return redirect(res, `${CONFIG.postLoginRedirect || '/'}?cli_pending=1&return_to=${encodeURIComponent(selfPath)}`);
     }
 
-    const apiKey = await getOrCreateSessionKey(userId, org.id);
+    const apiKey = icarusDeveloperMode
+      ? await getOrCreateIcarusDeveloperKey(userId)
+      : await getOrCreateSessionKey(userId, org.id);
     if (!apiKey) {
       return jsonResponse(res, { error: 'failed to mint API key' }, 500);
     }
@@ -5464,7 +5559,7 @@ const server = http.createServer(async (req, res) => {
       cbUrl.searchParams.set('token', apiKey);
       cbUrl.searchParams.set('user_email', user?.email || '');
       cbUrl.searchParams.set('user_id', userId);
-      cbUrl.searchParams.set('org_id', org.id);
+      if (org?.id) cbUrl.searchParams.set('org_id', org.id);
       return redirect(res, cbUrl.toString());
     }
 
@@ -5477,11 +5572,13 @@ const server = http.createServer(async (req, res) => {
       state,
       userId,
       userEmail: user?.email || null,
-      orgId: org.id,
+      orgId: icarusDeveloperMode ? null : org.id,
+      client: icarusDeveloperMode ? 'icarus' : 'hivemind-cli',
       expiresAt: Date.now() + 60_000,
     });
 
-    const feVerifiedUrl = `${defaultFrontendBaseUrl}/hivemind/cli-verified?code=${encodeURIComponent(exchangeCode)}&email=${encodeURIComponent(user?.email || '')}`;
+    const modeParam = icarusDeveloperMode ? '&mode=icarus' : '';
+    const feVerifiedUrl = `${defaultFrontendBaseUrl}/hivemind/cli-verified?code=${encodeURIComponent(exchangeCode)}&email=${encodeURIComponent(user?.email || '')}${modeParam}`;
     return redirect(res, feVerifiedUrl);
   }
 
@@ -5505,6 +5602,15 @@ const server = http.createServer(async (req, res) => {
     if (stored.expiresAt && Date.now() > stored.expiresAt) {
       return jsonResponse(res, { error: 'code expired' }, 400);
     }
+    if (stored.client === 'icarus') {
+      setImmediate(async () => {
+        const user = await prisma.user.findUnique({
+          where: { id: stored.userId },
+          select: { id: true, email: true, displayName: true },
+        }).catch(() => null);
+        if (user) await signupWelcome.deliver(user, { source: 'icarus_cli_exchange', kind: 'icarus_developer' });
+      });
+    }
     return jsonResponse(res, {
       callback: stored.callback,
       state: stored.state,
@@ -5512,6 +5618,7 @@ const server = http.createServer(async (req, res) => {
       user_email: stored.userEmail,
       user_id: stored.userId,
       org_id: stored.orgId,
+      client: stored.client,
     });
   }
 

@@ -27,3 +27,11 @@ test('welcome renderer is self-contained and renders one footer', () => {
   assert.match(rendered.html, /width:48px;height:48px;border:0/);
   assert.doesNotMatch(rendered.html, /max-width:none;margin:-8px 0 0 -12px/);
 });
+
+test('ICARUS developer welcome clearly separates developer identity from platform tenancy', () => {
+  const rendered = renderTemplate('icarus_developer_connected', { name: 'Maya' });
+  assert.match(rendered.subject, /ICARUS is connected/);
+  assert.match(rendered.text, /no HIVEMIND workspace, personal plan, or enterprise account was created/i);
+  assert.match(rendered.html, /ICARUS · DEVELOPER MODE/);
+  assert.match(rendered.html, /Best of luck building/);
+});

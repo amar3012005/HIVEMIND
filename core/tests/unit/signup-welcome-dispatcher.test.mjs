@@ -70,3 +70,15 @@ test('workspace activation selects a personal or enterprise welcome and deduplic
   assert.equal(h.events[0].organizationId, 'org-personal');
   assert.equal(h.events[1].organizationId, 'org-enterprise');
 });
+
+test('ICARUS developer welcome is distinct from platform signup and deduplicates without an organization', async () => {
+  const h = harness();
+  const user = { id: 'user-1', email: 'dev@example.com', displayName: 'Dev Builder' };
+  const first = await h.dispatcher.deliver(user, { source: 'icarus_cli_exchange', kind: 'icarus_developer' });
+  const duplicate = await h.dispatcher.deliver(user, { source: 'icarus_cli_exchange', kind: 'icarus_developer' });
+  assert.equal(first.template, 'icarus_developer_connected');
+  assert.equal(duplicate.deduped, true);
+  assert.equal(h.sends(), 1);
+  assert.equal(h.events[0].eventType, 'notification.icarus_developer_connected_delivered');
+  assert.equal(h.events[0].organizationId, null);
+});

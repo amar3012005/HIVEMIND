@@ -15,17 +15,17 @@ export interface CompanyWork extends TaskEnvelope {
 
 const planSchema = z.object({
   mode: z.enum(["direct", "company"]),
-  decision: z.string(),
-  plan: z.string(),
-  reply: z.string(),
-  groups: z.array(z.enum(["company", "web_research", "browser", "connected_apps", "records"])),
+  decision: z.string().default(""),
+  plan: z.string().default(""),
+  reply: z.string().default(""),
+  groups: z.array(z.enum(["company", "web_research", "browser", "connected_apps", "records"])).default([]),
 });
 
 const reportSchema = z.object({
-  needsInput: z.boolean(),
-  question: z.string(),
-  options: z.array(z.string()).max(5),
-  report: z.string(),
+  needsInput: z.boolean().default(false),
+  question: z.string().default(""),
+  options: z.array(z.string()).max(5).default([]),
+  report: z.string().default(""),
 });
 
 export interface CompanyWorkResult {
@@ -38,6 +38,17 @@ export interface CompanyWorkResult {
 
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
   async run(event: AgentWorkflowEvent<CompanyWork>, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
+    try {
+      return await this.runWork(event, step);
+    } catch (error) {
+      await this.agent.markAwaiting("");
+      await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");
+      await this.agent.note("report", "I could not finish this work. Please retry in a new room.");
+      throw error;
+    }
+  }
+
+  private async runWork(event: AgentWorkflowEvent<CompanyWork>, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
     const durable = step as ThinkWorkflowStep & {
       do<T>(name: string, callback: () => Promise<T>): Promise<T>;
     };
@@ -74,8 +85,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const groups = plan.groups.length > 0 ? [...plan.groups] : ["company", "web_research", "browser", "records"];
       if (!groups.includes("company")) groups.push("company");
       if (/\bprospects?\b/i.test(asked) && !groups.includes("web_research")) groups.push("web_research");
-      await this.agent.applyGroups(groups);
-      await this.agent.note("operating-plan", plan.plan.slice(0, 2000));
+      await this.agent.applyGroups(groups, /\bprospects?\b/i.test(asked));
+      await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
     });
 
     let guidance = "";
@@ -83,13 +94,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const isProspect = /\bprospects?\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision}. Plan: ${plan.plan}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. ${guidance}Continue this same job. Do not reload the playbook catalog. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report.`,
+        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. ${guidance}Continue this same job. Do not reload the playbook catalog. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
       if (!result.needsInput) {
         written = result;
-        if (!isProspect || companyWorkComplete({ report: result.report, recalled: true, prospectSources: this.agent.sourceUrls(), companyWebsite: work.website }).reason !== "prospect_sources_missing") break;
+        if (!isProspect || companyWorkComplete({ report: result.report, recalled: true, prospectSources: await this.agent.sourceUrls(), companyWebsite: work.website }).reason !== "prospect_sources_missing") break;
         guidance += "No verified external source supports the proposed prospect list. Search buyer accounts in the requested location with parallel_search, inspect each accepted account when needed, and cite only URLs returned by those tools. Do not claim a source was checked if it was not. ";
         continue;
       }
@@ -114,8 +125,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       guidance += `The operator chose: ${answer}. `;
     }
 
-    const prospectSources = isProspect ? this.agent.sourceUrls() : undefined;
-    const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.trace().some((item: { step: string }) => item.step === "hivemind_recall"), prospectSources, companyWebsite: work.website });
+    const prospectSources = isProspect ? await this.agent.sourceUrls() : undefined;
+    const finalVerdict = companyWorkComplete({ report: written.report, recalled: (await this.agent.trace()).some((item: { step: string }) => item.step === "hivemind_recall"), prospectSources, companyWebsite: work.website });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
       const reply = reason === "prospect_sources_missing" ? "I could not verify the prospect list against external sources. I have not saved it. Please retry the research." : `I could not complete this work: ${reason}.`;

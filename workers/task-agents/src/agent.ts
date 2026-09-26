@@ -244,8 +244,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content);
   }
 
-  async applyGroups(groups: readonly string[]): Promise<string[]> {
-    const tools = toolsForGroups(groups);
+  async applyGroups(groups: readonly string[], prospect = false): Promise<string[]> {
+    const tools = prospect
+      ? ["hivemind_recall", "hivemind_get_memory", "parallel_search", "browser_markdown"]
+      : toolsForGroups(groups);
     this.setState({ ...this.state, toolGroups: [...groups], tools });
     this.note("reset_tools", groups.join(", "));
     return tools;
@@ -260,11 +262,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return stage === "action" ? [await toolkitSkillSource()] : [];
   }
 
-  beforeTurn(): { activeTools: string[]; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
-    const granted = this.state.toolGroups?.length ? toolsForGroups(this.state.toolGroups) : this.state.tools;
+  beforeTurn(): { activeTools: string[]; maxSteps: number; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
+    const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
       activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), "activate_skill", "read_skill_resource", "think_final_answer"],
+      maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { chat_template_kwargs: { enable_thinking: false } } },
     };

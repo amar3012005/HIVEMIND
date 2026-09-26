@@ -207,19 +207,24 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       website: typeof parsed.website === "string" ? parsed.website.slice(0, 300) : "",
       market: typeof parsed.market === "string" ? parsed.market.slice(0, 200) : "",
     };
-    const profile = await readCompanyProfile(this.gatewayEnv(), orgId, userId);
-    const facts = companyFacts(profile, supplied);
-    await this.startCompanyWork({
-      runId: named,
-      orgId,
-      userId,
-      taskType: "room_task",
-      phase: "room",
-      inputRefs: facts.website ? [facts.website] : [],
-      outputSchemaId: "room_report_v1",
-      ...facts,
-      task,
-    });
+    try {
+      const profile = await readCompanyProfile(this.gatewayEnv(), orgId, userId).catch(() => null);
+      const facts = companyFacts(profile, supplied);
+      await this.startCompanyWork({
+        runId: named,
+        orgId,
+        userId,
+        taskType: "room_task",
+        phase: "room",
+        inputRefs: facts.website ? [facts.website] : [],
+        outputSchemaId: "room_report_v1",
+        ...facts,
+        task,
+      });
+    } catch (error) {
+      this.note("report", `I could not start this turn: ${error instanceof Error ? error.message : "unknown error"}.`);
+      this.note("completion", "start_failed");
+    }
   }
 
   async saveCompanyArtifact(input: { kind: string; title: string; contentType: string; body?: string; storageLocation?: string }): Promise<StoredArtifact> {
@@ -336,20 +341,23 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   setOperatingPlan(runId: string, summary: string, titles: string[]): void {
+    const operatingPlan = {
+      runId,
+      summary: summary.slice(0, 2000),
+      tasks: titles.slice(0, 6).map((title, index) => ({ id: index + 1, title: title.slice(0, 160), status: "pending" as const })),
+    };
     this.setState({
       ...this.state,
-      operatingPlan: {
-        runId,
-        summary: summary.slice(0, 2000),
-        tasks: titles.slice(0, 6).map((title, index) => ({ id: index + 1, title: title.slice(0, 160), status: "pending" as const })),
-      },
+      operatingPlan,
     });
+    this.note("operating-plan-state", JSON.stringify(operatingPlan));
   }
 
   updateOperatingTask(id: number, status: "active" | "completed" | "blocked", verified = false): { updated: boolean; awaitingReport?: boolean } {
     const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status, verified);
     if (!plan) return { updated: false };
     this.setState({ ...this.state, operatingPlan: plan });
+    this.note("operating-plan-state", JSON.stringify(plan));
     const awaitingReport = status === "completed" && plan.tasks.find((task) => task.id === id)?.status !== "completed";
     this.note("task_updated", `${id}: ${awaitingReport ? "active" : status}`);
     return awaitingReport ? { updated: true, awaitingReport: true } : { updated: true };

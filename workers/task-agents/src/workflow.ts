@@ -62,7 +62,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const asked = work.task || "Map competitors and the local market.";
     const plan = await step.prompt("operating-plan", {
-      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nChoose direct for a small answer needing no tools. Choose action for a bounded tool or artifact task that does not need company operating context; do not load playbooks or require company memory. Choose company only when company facts, market, records, or an operating method are necessary; then call playbook_list for global names, playbook_list_local for chosen fields, and playbook_get for one local task. Return decision, concise operator-visible plan, up to six concrete tasks, and only needed tool families. Plan only work that can finish in this turn; leave future actions requiring operator approval out of tasks. Do not present private chain of thought as tasks.`,
+      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nChoose direct for a small answer needing no tools. Choose action for a bounded tool or artifact task that does not need a company operating method. Questions about what is stored or available in HIVEMIND are action requests: enable the company tool family, recall relevant memories and inspect the profile, then answer from receipts without a playbook. Do not claim that a scoped recall is a complete inventory. Choose company only when producing research, strategy, prospecting, or another company deliverable; then call playbook_list for global names, playbook_list_local for chosen fields, and playbook_get for one local task. Return decision, concise operator-visible plan, up to six concrete tasks, and only needed tool families. Plan only work that can finish in this turn; leave future actions requiring operator approval out of tasks. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",
     });
@@ -88,13 +88,16 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await durable.do("enable-action-tools", async () => {
         const groups = [...plan.groups];
         if (/\b(screenshot|capture|webpage|website)\b/i.test(asked) && !groups.includes("browser")) groups.push("browser");
+        if (/\bHIVEMIND\b/i.test(asked) && !groups.includes("company")) groups.push("company");
         await this.agent.applyGroups(groups, false, true);
         this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
       });
       const actionContext = await durable.do("recall-action-context", async () =>
         this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)).catch(() => ({ error: "company_context_unavailable" })));
-      if (!actionContext || typeof actionContext !== "object" || !("ok" in actionContext) || actionContext.ok !== true) {
+      const needsExternalContext = plan.groups.some((group) => ["web_research", "browser", "connected_apps"].includes(group))
+        || /\b(screenshot|capture|webpage|website)\b/i.test(asked);
+      if (needsExternalContext && (!actionContext || typeof actionContext !== "object" || !("ok" in actionContext) || actionContext.ok !== true)) {
         const reply = "HIVEMIND company context is unavailable. I could not start external action tools.";
         await durable.do("action-context-unavailable", async () => {
           await this.agent.note("report", reply);
@@ -103,7 +106,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: "company_context_unavailable", report: reply };
       }
       const result = await step.prompt("action-execute", {
-        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. HIVEMIND context preflight: ${JSON.stringify(actionContext).slice(0, 3000)}. Use relevant company facts when applicable; do not invent facts when context is unavailable. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
+        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. HIVEMIND context preflight: ${JSON.stringify(actionContext).slice(0, 3000)}. For HIVEMIND inventory questions, inspect accessible memory recall and profile with the granted internal tools, distinguish records from general capabilities, and say when a complete inventory is unavailable. Use relevant company facts when applicable; do not invent facts when context is unavailable. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
         output: reportSchema,
         timeout: "30 minutes",
       });

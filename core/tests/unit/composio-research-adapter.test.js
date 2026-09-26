@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { discoverGovernedSessionReads, executeGovernedResearchTool, executeGovernedSessionRead,
   governedResearchCapability, isGovernedReadTool, issueGovernedReadGrant,
-  resolveGovernedReadGrant } from '../../src/connectors/composio/runtime-adapter.js';
+  resolveGovernedReadGrant, issueGovernedToolGrant, resolveGovernedToolGrant } from '../../src/connectors/composio/runtime-adapter.js';
 
 test('Parallel research surface is fixed and unknown capabilities fail closed', () => {
   assert.equal(governedResearchCapability('parallel_findall').tool, 'PARALLEL_FIND_ALL');
@@ -21,17 +21,30 @@ test('shadow mode cannot execute a Composio provider call', async () => {
 });
 
 test('session discovery keeps compact reads and removes write tools', async () => {
+  let discoveredUser;
   const discovered = await discoverGovernedSessionReads('org-1', {
-    toolkits: ['gmail'], useCases: ['find messages about invoices'],
-  }, { discoverSessionTools: async () => ({ sessionId: 'session-1', searchedLogId: 'search-log', tools: [
+    toolkits: ['gmail'], useCases: ['find messages about invoices'], userId: 'user-1',
+  }, { discoverSessionTools: async (_orgId, options) => { discoveredUser = options.userId; return { sessionId: 'session-1', searchedLogId: 'search-log', tools: [
     { function: { name: 'composio_gmail_fetch_emails', description: 'Fetch matching emails', parameters: { type: 'object', properties: { query: { type: 'string' } } } }, _composio: { slug: 'GMAIL_FETCH_EMAILS', toolkit: 'gmail' } },
     { function: { name: 'composio_gmail_send_email', description: 'Send an email', parameters: {} }, _composio: { slug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail' } },
-  ] }) });
+  ] }; } });
+  assert.equal(discoveredUser, 'user-1');
   assert.equal(discovered.tools.length, 1);
   assert.equal(discovered.tools[0].toolSlug, 'GMAIL_FETCH_EMAILS');
   assert.equal(isGovernedReadTool({ slug: 'GMAIL_SEND_EMAIL' }), false);
   assert.equal(isGovernedReadTool({ slug: 'SLACK_LIKE_MESSAGE' }), false);
   assert.equal(isGovernedReadTool({ slug: 'VENDOR_UNCLASSIFIED_ACTION' }), false);
+});
+
+test('connected-task grants distinguish reads from writes and bind user scope', () => {
+  const base = { orgId: 'org-1', userId: 'user-1', toolkit: 'gmail', sessionId: 'session-1' };
+  const read = issueGovernedToolGrant({ ...base, toolSlug: 'GMAIL_FETCH_EMAILS' }, { now: 1_000, secret: 'test' });
+  const write = issueGovernedToolGrant({ ...base, toolSlug: 'GMAIL_SEND_EMAIL' }, { now: 1_000, secret: 'test' });
+  assert.equal(read.effect, 'read');
+  assert.equal(write.effect, 'write');
+  assert.equal(resolveGovernedToolGrant({ grantId: write.grantId, orgId: 'org-1', userId: 'user-1', toolSlug: 'GMAIL_SEND_EMAIL' }, { now: 2_000, secret: 'test' }).effect, 'write');
+  assert.throws(() => resolveGovernedToolGrant({ grantId: write.grantId, orgId: 'org-1', userId: 'user-2', toolSlug: 'GMAIL_SEND_EMAIL' }, { now: 2_000, secret: 'test' }), /scope_denied/);
+  assert.throws(() => resolveGovernedToolGrant({ grantId: write.grantId, orgId: 'org-1', userId: 'user-1', toolSlug: 'GMAIL_FETCH_EMAILS' }, { now: 2_000, secret: 'test' }), /scope_denied/);
 });
 
 test('read grants bind opaque session authority to one tenant and expire closed', () => {

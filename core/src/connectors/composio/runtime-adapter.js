@@ -81,11 +81,43 @@ export function resolveGovernedReadGrant(
   return { ...grant };
 }
 
+/** Short-lived tenant-bound grant for a tool-router session. Write grants still
+ * require the caller's separate human approval gate before execution. */
+export function issueGovernedToolGrant({ orgId, userId, toolkit, sessionId, toolSlug }, { now = Date.now(), secret } = {}) {
+  if (![orgId, userId, toolkit, sessionId, toolSlug].every((value) => String(value || '').trim())) {
+    throw new Error('governed_tool_grant_denied');
+  }
+  const effect = toolSlug === '__connection__' ? 'connection' : isGovernedReadTool({ slug: toolSlug }) ? 'read' : 'write';
+  const grant = { orgId, userId, toolkit, sessionId, toolSlug, effect, expiresAt: now + GOVERNED_READ_GRANT_TTL_MS };
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', governedGrantKey(secret), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(grant), 'utf8'), cipher.final()]);
+  return { grantId: `v2.${iv.toString('base64url')}.${encrypted.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}`, effect, expiresAt: grant.expiresAt };
+}
+
+export function resolveGovernedToolGrant({ grantId, orgId, userId, toolSlug }, { now = Date.now(), secret } = {}) {
+  let grant;
+  try {
+    const [version, ivRaw, encryptedRaw, tagRaw] = String(grantId || '').split('.');
+    if (version !== 'v2' || !ivRaw || !encryptedRaw || !tagRaw) throw new Error('invalid grant');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', governedGrantKey(secret), Buffer.from(ivRaw, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'));
+    grant = JSON.parse(Buffer.concat([decipher.update(Buffer.from(encryptedRaw, 'base64url')), decipher.final()]).toString('utf8'));
+  } catch {
+    throw new Error('governed_tool_grant_invalid');
+  }
+  if (Number(grant.expiresAt) <= now) throw new Error('governed_tool_grant_expired');
+  if (grant.orgId !== orgId || grant.userId !== userId || grant.toolSlug !== toolSlug) {
+    throw new Error('governed_tool_grant_scope_denied');
+  }
+  return grant;
+}
+
 /** Reuse the same tenant-scoped COMPOSIO_SEARCH_TOOLS + schema path as
  * use_tools:true chat, but return only conservative read capabilities. */
-export async function discoverGovernedSessionReads(orgId, { toolkits, useCases } = {}, deps = {}) {
+export async function discoverGovernedSessionReads(orgId, { toolkits, useCases, userId } = {}, deps = {}) {
   const discover = deps.discoverSessionTools || discoverSessionTools;
-  const result = await discover(orgId, { toolkits, useCases });
+  const result = await discover(orgId, { toolkits, useCases, userId });
   const tools = (result.tools || []).filter(isGovernedReadTool).map((tool) => ({
     name: tool.function?.name,
     description: tool.function?.description || '',

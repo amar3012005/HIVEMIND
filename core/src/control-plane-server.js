@@ -10978,7 +10978,7 @@ Write the persona now.`;
         || !await getActiveOrganizationMembership(prisma, { userId, orgId })) {
       return jsonResponse(res, { error: 'Room not found' }, 404);
     }
-    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, userId, archivedAt: null }, select: { id: true } });
+    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, archivedAt: null }, select: { id: true } });
     if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
     const expiresAt = Date.now() + 120_000;
     const encoded = Buffer.from(JSON.stringify({ v: 1, orgId, userId, agentName, expiresAt })).toString('base64url');

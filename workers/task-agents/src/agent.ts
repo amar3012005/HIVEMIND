@@ -200,6 +200,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const orgId = match[1];
     const task = typeof parsed.task === "string" ? parsed.task.slice(0, 2000) : "";
+    if (this.state.operatingPlan?.tasks.length) {
+      const latestTurn = [...(this.state.events ?? [])].reverse();
+      const lastUser = latestTurn.findIndex((event) => event.step === "user");
+      if (!latestTurn.slice(0, lastUser < 0 ? latestTurn.length : lastUser).some((event) => event.step === "operating-plan-state")) {
+        this.note("operating-plan-state", JSON.stringify(this.state.operatingPlan));
+      }
+    }
     this.setState({ ...this.state, operatingPlan: null });
     if (task) this.note("user", task);
     const supplied = {
@@ -819,7 +826,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       const last = [...(this.state.events ?? [])].reverse().find((event) => event.step === "progress" || event.step === "user");
       if (last?.step === "progress" && last.detail === detail) return;
     }
-    const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) }].slice(-100);
+    const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) }].slice(-300);
     this.setState({ ...this.state, events });
     this.broadcast(JSON.stringify(events[events.length - 1]));
   }

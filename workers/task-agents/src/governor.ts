@@ -13,12 +13,14 @@ export class CompanyGovernor extends Think<Env> {
 
   getTools() { return {}; }
 
-  beforeTurn() { return { activeTools: [], maxSteps: 2, maxOutputTokens: 300 }; }
+  beforeTurn() {
+    return { activeTools: [], maxSteps: 2, maxOutputTokens: 1024, providerOptions: { "workers-ai": { reasoning_effort: "low" } } };
+  }
 
   protected override getAgentToolSummary(runId: string, output: unknown): string {
     const replies = this.messages.filter((message) => message.role === "assistant")
       .flatMap((message) => message.parts)
       .flatMap((part) => part.type === "text" && part.text.trim() ? [part.text] : []);
-    return replies.at(-1) || super.getAgentToolSummary(runId, output);
+    return replies.at(-1) || `[parts:${this.messages.filter((message) => message.role === "assistant").flatMap((message) => message.parts).map((part) => part.type).join(",")}]`;
   }
 }

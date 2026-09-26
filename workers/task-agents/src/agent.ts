@@ -380,7 +380,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async onChunk({ chunk }: ChunkContext): Promise<void> {
     if (chunk.type === "tool-input-start") {
       const field = chunk.toolName.startsWith("think_final_answer") ? "report" : chunk.toolName === "share_progress" ? "message" : null;
-      if (field) this.draftCalls.set(chunk.id, { field, raw: "", text: "" });
+      if (field) {
+        this.draftCalls.set(chunk.id, { field, raw: "", text: "" });
+        this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
+      }
       return;
     }
     if (chunk.type === "tool-input-end") {
@@ -768,8 +771,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         : { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
       this.note("governance", `${verdict.verdict}: ${verdict.note}`);
       return verdict;
-    } catch {
-      const verdict = { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
+      const verdict = { verdict: "unavailable" as const, note: `Review unavailable (${detail}); report delivered without model review.` };
       this.note("governance", `${verdict.verdict}: ${verdict.note}`);
       return verdict;
     }

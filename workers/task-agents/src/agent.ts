@@ -31,6 +31,7 @@ export function reportTitle(body: string, fallback: string): string {
 export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   initialState: TaskAgentState = EMPTY;
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
+  private textDraft = "";
   override includeMcpTools = false;
   override workspaceBash = false;
   override storeMessages = true;
@@ -375,6 +376,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   beforeTurn(): { activeTools: string[]; maxSteps: number; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
+    this.textDraft = "";
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
@@ -393,10 +395,19 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {
+    if (chunk.type === "text-delta") {
+      if (!chunk.text || this.textDraft.length > 4000) return;
+      if (!this.textDraft) this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
+      this.textDraft += chunk.text;
+      this.broadcast(JSON.stringify({ type: "progress-draft", delta: chunk.text }));
+      return;
+    }
     if (chunk.type === "tool-input-start") {
+      this.textDraft = "";
       const field = chunk.toolName.startsWith("think_final_answer") ? "report" : chunk.toolName === "share_progress" ? "message" : null;
       if (field) {
         this.draftCalls.set(chunk.id, { field, raw: "", text: "" });
+        if (field === "report") this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
         this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
       }
       return;
@@ -828,7 +839,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) }].slice(-300);
     this.setState({ ...this.state, events });
-    this.broadcast(JSON.stringify(events[events.length - 1]));
   }
 
   async checkToolkit(name: string, orgId: string, userId: string, input: { query?: string; url?: string } = {}): Promise<unknown> {

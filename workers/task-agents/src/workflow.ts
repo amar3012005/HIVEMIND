@@ -94,7 +94,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
       });
       const actionContext = await durable.do("recall-action-context", async () =>
-        this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)).catch(() => ({ error: "company_context_unavailable" })));
+        this.agent.recallTaskContext(work.orgId, work.userId, asked.slice(0, 1200)).catch(() => ({ error: "company_context_unavailable" })));
       const needsExternalContext = plan.groups.some((group) => ["web_research", "browser", "connected_apps"].includes(group))
         || /\b(screenshot|capture|webpage|website)\b/i.test(asked);
       if (needsExternalContext && (!actionContext || typeof actionContext !== "object" || !("ok" in actionContext) || actionContext.ok !== true)) {
@@ -106,7 +106,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: "company_context_unavailable", report: reply };
       }
       const result = await step.prompt("action-execute", {
-        prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. HIVEMIND context preflight: ${JSON.stringify(actionContext).slice(0, 3000)}. For HIVEMIND inventory questions, inspect accessible memory recall and profile with the granted internal tools, distinguish records from general capabilities, and say when a complete inventory is unavailable. Use relevant company facts when applicable; do not invent facts when context is unavailable. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
+        prompt: `Current operator request: ${asked}. Answer this request, not an earlier turn. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. HIVEMIND context preflight for this request: ${JSON.stringify(actionContext).slice(0, 3000)}. For HIVEMIND inventory questions, inspect accessible memory recall and profile with the granted internal tools, distinguish records from general capabilities, and say when a complete inventory is unavailable. If asked about personal information, report only personal facts actually present in the current scoped receipts; do not repeat a prior company-memory count as the answer. Use relevant company facts when applicable; do not invent facts when context is unavailable. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
         output: reportSchema,
         timeout: "30 minutes",
       });

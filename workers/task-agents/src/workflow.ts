@@ -1,9 +1,8 @@
 import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflows";
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
-import { HivemindTaskAgent } from "./agent";
+import { HivemindTaskAgent, reportTitle } from "./agent";
 import { companyWorkComplete, directReplyComplete } from "./completion";
-import { HYPERAGENT_INSTRUCTION } from "./employee";
 import type { TaskEnvelope } from "./types";
 
 export interface CompanyWork extends TaskEnvelope {
@@ -61,7 +60,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const asked = work.task || "Map competitors and the local market.";
     const plan = await step.prompt("operating-plan", {
-      prompt: `${HYPERAGENT_INSTRUCTION}\n\nCompany ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nIf this is not real company work, set mode to direct, leave groups and tasks empty, and put the message you would say in reply. If it is company work, set mode to company. Call playbook_list for global names only, then playbook_list_local for the fields you chose, then playbook_get for the one local task. Return the decision, a short operator-visible plan summary, 3 to 6 concrete tasks in execution order, and only the tool families that method needs. Do not present private chain of thought as tasks.`,
+      prompt: `Company ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nIf this is not real company work, set mode to direct, leave groups and tasks empty, and put the message you would say in reply. If it is company work, set mode to company. Call playbook_list for global names only, then playbook_list_local for the fields you chose, then playbook_get for the one local task. Return the decision, a short operator-visible plan summary, 3 to 6 concrete tasks in execution order, and only the tool families that method needs. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",
     });
@@ -91,6 +90,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
     });
 
+    await this.agent.note("operating-plan", "I’m recalling the company context, then I’ll work through the plan.");
     const companyContext = await durable.do("recall-company-context", async () =>
       this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)));
     if (!companyContext || typeof companyContext !== "object" || !("ok" in companyContext) || companyContext.ok !== true) {
@@ -107,8 +107,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const isProspect = /\bprospects?\b/i.test(asked);
     const marketResearch = /\b(competitor|market research)\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
+      await this.agent.note("operating-plan", round === 0 ? "I have the company context. I’m checking evidence and writing the result." : "I’m resolving a gap in the result before I finish.");
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Use update_plan_task when starting, finishing, or blocking a task so the operator sees real progress. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report. Format finished report with Markdown headings, short paragraphs, and linked citations so it reads cleanly in chat.`,
+        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. Company memory: ${JSON.stringify(companyContext).slice(0, 5000)}. ${guidance}Continue this same job. Do not reload the playbook catalog. Use update_plan_task when starting, finishing, or blocking a task so the operator sees real progress. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report. Format finished report with Markdown headings, short paragraphs, and linked citations so it reads cleanly in chat.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
@@ -157,7 +158,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website, marketResearch });
       await this.agent.saveCompanyArtifact({
         kind: "report",
-        title: asked.slice(0, 80) || "Report",
+        title: reportTitle(written.report, `${work.company} report`),
         contentType: "text/markdown",
         body: written.report,
       });

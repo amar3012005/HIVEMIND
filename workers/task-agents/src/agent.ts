@@ -9,7 +9,8 @@ import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readComp
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { companyWorkComplete } from "./completion";
 import { updatePlanTask } from "./operating-plan";
-import { personaPrompt } from "./personas";
+import { HYPERAGENT_INSTRUCTION } from "./employee";
+import type { ContextConfig } from "agents/context";
 import { companyFacts } from "./profile";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
@@ -17,6 +18,12 @@ import { toolsForGroups } from "./tool-groups";
 import type { LocalCompany, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
 
 const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "", operatingPlan: null };
+
+export function reportTitle(body: string, fallback: string): string {
+  const heading = body.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  const candidate = heading || fallback;
+  return candidate.replace(/\s+report\s*\.pdf$/i, " report").replace(/\.pdf$/i, "").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "Company report";
+}
 
 export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   initialState: TaskAgentState = EMPTY;
@@ -34,11 +41,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   getSystemPrompt(): string {
-    const envelope = this.state.envelope;
-    const contract = envelope
-      ? `Task contract: ${envelope.taskType} for phase ${envelope.phase}. Output schema ${envelope.outputSchemaId}. Inputs: ${envelope.inputRefs.join(", ") || "none"}. For a company operating task, choose playbooks first. A local playbook names every skill and tool family for that task. Activate a skill only when the current step names it. A multi-step task that is not company work may activate a skill directly.`
-      : "No task contract is bound. A multi-step task may activate one skill from the catalog. A company operating task starts with playbook_list.";
-    return [personaPrompt(this.state.role), contract].join("\n\n");
+    return HYPERAGENT_INSTRUCTION;
+  }
+
+  configureContext(): ContextConfig[] {
+    return [{ label: "hyperagent-persona", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
   }
 
   async day1Research(orgId: string, userId: string, supplied: { company?: string; website?: string; market?: string } = {}): Promise<{ status: string; text: string; error: string; company: string }> {
@@ -191,6 +198,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const task = typeof parsed.task === "string" ? parsed.task.slice(0, 2000) : "";
     this.setState({ ...this.state, operatingPlan: null });
     if (task) this.note("user", task);
+    this.note("operating-plan", "I’ll check the request and decide what context this work needs.");
     const supplied = {
       company: typeof parsed.company === "string" ? parsed.company.slice(0, 200) : "",
       website: typeof parsed.website === "string" ? parsed.website.slice(0, 300) : "",
@@ -257,8 +265,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async createPdfArtifact(id: string): Promise<StoredArtifact> {
     const source = await this.getCompanyArtifact(id);
     if (!source || source.contentType !== "text/markdown") throw new Error("markdown_report_required");
+    const reportName = reportTitle(source.body, source.title);
+    if (source.title !== reportName) this.sql`UPDATE company_artifacts SET title = ${reportName} WHERE id = ${id}`;
+    const title = `${reportName}.pdf`;
     const existing = this.sql`SELECT id FROM company_artifacts WHERE storage_location = ${`pdf-of:${id}`} LIMIT 1`[0];
-    if (existing) return (await this.getCompanyArtifact(String(existing.id)))!;
+    if (existing) {
+      this.sql`UPDATE company_artifacts SET title = ${title} WHERE id = ${String(existing.id)}`;
+      return (await this.getCompanyArtifact(String(existing.id)))!;
+    }
     const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
     if (!browser?.quickAction) throw new Error("browser_binding_missing");
     const markdown = new MarkdownIt({ html: false, linkify: true });
@@ -270,7 +284,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (bytes.length < 5 || new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-" || bytes.length > 2000000) throw new Error("pdf_invalid_or_too_large");
     let body = "";
     for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
-    return this.saveCompanyArtifact({ kind: "pdf", title: `${source.title.replace(/\.pdf$/i, "")}.pdf`, contentType: "application/pdf", body, storageLocation: `pdf-of:${id}` });
+    return this.saveCompanyArtifact({ kind: "pdf", title, contentType: "application/pdf", body, storageLocation: `pdf-of:${id}` });
   }
 
   resolvePlaybook(id: string): string | null {
@@ -314,6 +328,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
     this.setState({ ...this.state, envelope, role, tools: [...tools], catalogStage: "global", selectedGlobals: [], companyContextLoaded: false });
+    await this.context.refreshSystemPrompt();
   }
 
   setOperatingPlan(runId: string, summary: string, titles: string[]): void {
@@ -347,7 +362,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
-      providerOptions: { "workers-ai": { chat_template_kwargs: { enable_thinking: false } } },
+      providerOptions: { "workers-ai": { reasoning_effort: "low" } },
     };
   }
 
@@ -722,7 +737,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const result = await ai.run("@cf/zai-org/glm-5.3-flash", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 1400,
-      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: "low",
     });
     const choice = result && typeof result === "object" && "choices" in result
       ? (result as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content

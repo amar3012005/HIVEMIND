@@ -17,6 +17,7 @@ const planSchema = z.object({
   mode: z.enum(["direct", "company"]),
   decision: z.string().default(""),
   plan: z.string().default(""),
+  tasks: z.array(z.string().min(4).max(160)).max(6).default([]),
   reply: z.string().default(""),
   groups: z.array(z.enum(["company", "web_research", "browser", "connected_apps", "records"])).default([]),
 });
@@ -60,7 +61,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     const asked = work.task || "Map competitors and the local market.";
     const plan = await step.prompt("operating-plan", {
-      prompt: `${HYPERAGENT_INSTRUCTION}\n\nCompany ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nIf this is not real company work, set mode to direct, leave groups empty, and put the message you would say in reply. If it is company work, set mode to company. Call playbook_list for global names only, then playbook_list_local for the fields you chose, then playbook_get for the one local task. Return the decision, the plan, and only the tool families that method needs.`,
+      prompt: `${HYPERAGENT_INSTRUCTION}\n\nCompany ${work.company}. Website ${work.website}. City ${work.market}. The operator said: ${asked}\n\nIf this is not real company work, set mode to direct, leave groups and tasks empty, and put the message you would say in reply. If it is company work, set mode to company. Call playbook_list for global names only, then playbook_list_local for the fields you chose, then playbook_get for the one local task. Return the decision, a short operator-visible plan summary, 3 to 6 concrete tasks in execution order, and only the tool families that method needs. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",
     });
@@ -86,6 +87,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       if (!groups.includes("company")) groups.push("company");
       if (/\bprospects?\b/i.test(asked) && !groups.includes("web_research")) groups.push("web_research");
       await this.agent.applyGroups(groups, /\bprospects?\b/i.test(asked));
+      this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
     });
 
@@ -94,7 +96,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const isProspect = /\bprospects?\b/i.test(asked);
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. ${guidance}Continue this same job. Do not reload the playbook catalog. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report.`,
+        prompt: `${HYPERAGENT_INSTRUCTION}\n\nDecision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The operator asked: ${asked} Company ${work.company}. City ${work.market}. ${guidance}Continue this same job. Do not reload the playbook catalog. Use update_plan_task when starting, finishing, or blocking a task so the operator sees real progress. If one missing fact blocks the job, set needsInput true, put one short question in question, and put 2 to 5 choices in options. Leave report empty. If you can finish, set needsInput false and put the result in report.`,
         output: reportSchema,
         timeout: "30 minutes",
       });

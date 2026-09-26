@@ -47,6 +47,18 @@ export interface RunSource {
   title: string;
 }
 
+export interface OperatingTask {
+  id: number;
+  title: string;
+  status: "pending" | "active" | "completed" | "blocked";
+}
+
+export interface OperatingPlan {
+  runId: string;
+  summary: string;
+  tasks: OperatingTask[];
+}
+
 export interface TaskAgentState {
   envelope: TaskEnvelope | null;
   role: SpecialistRole | null;
@@ -59,4 +71,5 @@ export interface TaskAgentState {
   selectedGlobals: string[];
   workflowId: string;
   awaiting: "" | "input" | "memory";
+  operatingPlan?: OperatingPlan | null;
 }

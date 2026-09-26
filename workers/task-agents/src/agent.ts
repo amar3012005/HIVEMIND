@@ -7,6 +7,7 @@ import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { companyWorkComplete } from "./completion";
+import { updatePlanTask } from "./operating-plan";
 import { personaPrompt } from "./personas";
 import { companyFacts } from "./profile";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -14,7 +15,7 @@ import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
 import type { LocalCompany, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
 
-const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "" };
+const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "", operatingPlan: null };
 
 export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   initialState: TaskAgentState = EMPTY;
@@ -164,6 +165,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const orgId = match[1];
     const task = typeof parsed.task === "string" ? parsed.task.slice(0, 2000) : "";
+    this.setState({ ...this.state, operatingPlan: null });
     if (task) this.note("user", task);
     const supplied = {
       company: typeof parsed.company === "string" ? parsed.company.slice(0, 200) : "",
@@ -257,6 +259,25 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.setState({ ...this.state, envelope, role, tools: [...tools], catalogStage: "global", selectedGlobals: [] });
   }
 
+  setOperatingPlan(runId: string, summary: string, titles: string[]): void {
+    this.setState({
+      ...this.state,
+      operatingPlan: {
+        runId,
+        summary: summary.slice(0, 2000),
+        tasks: titles.slice(0, 6).map((title, index) => ({ id: index + 1, title: title.slice(0, 160), status: "pending" as const })),
+      },
+    });
+  }
+
+  updateOperatingTask(id: number, status: "active" | "completed" | "blocked"): { updated: boolean } {
+    const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status);
+    if (!plan) return { updated: false };
+    this.setState({ ...this.state, operatingPlan: plan });
+    this.note("task_updated", `${id}: ${status}`);
+    return { updated: true };
+  }
+
   async getSkills(): Promise<SkillSource[]> {
     const stage = this.state.catalogStage ?? "action";
     return stage === "action" ? [await toolkitSkillSource()] : [];
@@ -266,7 +287,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => this.state.catalogStage !== "action" ? name !== "reset_tools" : !catalogTools.has(name)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { chat_template_kwargs: { enable_thinking: false } } },
@@ -274,6 +295,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   getTools(): ToolSet {
+    const updatePlanTask = tool({
+      description: "Update one task in the operator-visible operating plan when work starts, finishes, or becomes blocked.",
+      inputSchema: z.object({ id: z.number().int().min(1).max(6), status: z.enum(["active", "completed", "blocked"]) }),
+      execute: async ({ id, status }): Promise<{ updated: boolean }> => this.updateOperatingTask(id, status),
+    });
     const packet = tool({
       description: "Load the sealed company packet for this task.",
       inputSchema: z.object({}),
@@ -535,6 +561,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       playbook_get: playbook,
       refine_local_playbook: refine,
       reset_tools: reset,
+      update_plan_task: updatePlanTask,
       save_local_companies: savePlaces,
       ...(this.gatewayEnv().BROWSER
         ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never })

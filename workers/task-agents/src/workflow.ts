@@ -84,10 +84,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
         await this.agent.note("operating-plan", plan.plan || "I’m using the relevant action skill and tools to finish this.");
       });
-      const actionContext = await durable.do("recall-action-context", async () =>
-        this.agent.recallTaskContext(work.orgId, work.userId, asked.slice(0, 1200)).catch(() => ({ error: "company_context_unavailable" })));
       const result = await step.prompt("action-execute", {
-        prompt: `Current operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Authenticated HIVEMIND context preflight: ${JSON.stringify(actionContext).slice(0, 3000)}. Use relevant facts from receipts and activate relevant action skills from the catalog. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Use share_progress when choosing a meaningful next step or changing approach. Use granted tools and finish requested output. Return finished answer in report; set needsInput only for a genuinely missing required choice.`,
+        prompt: `Current operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. The authenticated profile brief is already injected. Use hivemind_meta for missing internal evidence and hivemind_connected_task for connected-app status or work. Both native gateways are available now; load a detailed skill only when needed. Do not claim either gateway is absent without attempting its call. Use relevant facts from receipts and activate relevant action skills from the catalog. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Use share_progress when choosing a meaningful next step or changing approach. Use granted tools and finish requested output. Return finished answer in report; set needsInput only for a genuinely missing required choice.`,
         output: reportSchema,
         timeout: "30 minutes",
       });

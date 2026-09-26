@@ -359,7 +359,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
-    const tools = [...new Set([...toolsForGroups(groups), "hivemind_meta"])];
+    const tools = toolsForGroups(groups);
     this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
     this.note("reset_tools", groups.join(", "));
     return tools;
@@ -369,7 +369,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.draftCalls.clear();
     const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, "hivemind_meta"])], profileBrief: brief, catalogStage: "global", selectedGlobals: [], companyContextLoaded, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, ...toolsForGroups([])])], profileBrief: brief, catalogStage: "global", selectedGlobals: [], companyContextLoaded, companyContextRequired: false });
     await this.context.refreshSystemPrompt();
   }
 
@@ -600,9 +600,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           return { status: "ready", context: result.brief };
         }
         if (input.operation === "profiles") {
-          const profile = await readCompanyProfile(this.gatewayEnv(), identity.orgId, identity.userId);
-          if (profile && typeof profile === "object" && !("error" in profile)) this.setState({ ...this.state, companyContextLoaded: true });
-          return profile;
+          const [user, organization] = await Promise.all([
+            readCompanyProfile(this.gatewayEnv(), identity.orgId, identity.userId),
+            getControl(this.gatewayEnv(), `/internal/hyper/org-profile?org_id=${encodeURIComponent(identity.orgId)}&user_id=${encodeURIComponent(identity.userId)}`),
+          ]);
+          if (organization && typeof organization === "object" && !("error" in organization)) this.setState({ ...this.state, companyContextLoaded: true });
+          return { user, organization };
         }
         if (input.operation === "entities") {
           if (!input.query?.trim()) return { error: "query_required" };

@@ -7,6 +7,14 @@ test("company tools cannot prepare an unsolicited memory write", () => {
   assert.ok(!toolsForGroups(["company"]).includes("save_memory"));
 });
 
+test("native meta and connected gateways stay available across tool groups", () => {
+  for (const groups of [[], ["company"], ["browser"], ["connected_apps"]]) {
+    const names = toolsForGroups(groups);
+    assert.ok(names.includes("hivemind_meta"));
+    assert.ok(names.includes("hivemind_connected_task"));
+  }
+});
+
 test("publishes the four toolkit skills", () => {
   const manifest = toolkitSkillManifest();
   assert.deepEqual(manifest.skills.map((skill) => skill.name), [

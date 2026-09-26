@@ -112,7 +112,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactThisTurn("image");
         const output = imageMissing ? "I could not save the requested screenshot artifact." : reply;
         const complete = verdict.complete && !imageMissing;
-        if (complete) for (let index = 0; index < plan.tasks.length; index += 1) this.agent.updateOperatingTask(index + 1, "completed");
+        if (complete) for (let index = 0; index < plan.tasks.length; index += 1) this.agent.updateOperatingTask(index + 1, "completed", true);
         await this.agent.note("report", output);
         await this.agent.note("completion", complete ? "complete" : imageMissing ? "artifact_missing" : verdict.reason);
         return { runId: work.runId, orgId: work.orgId, complete, reason: complete ? "action_complete" : imageMissing ? "artifact_missing" : verdict.reason, report: output };
@@ -210,7 +210,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         body: written.report,
       });
       if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
-      for (const id of written.completedTaskIds) this.agent.updateOperatingTask(id, "completed");
+      for (const id of written.completedTaskIds) this.agent.updateOperatingTask(id, "completed", true);
       await this.agent.note("report", written.report);
       this.agent.rememberSources(written.report);
       if (!requestsMemorySave(asked)) {

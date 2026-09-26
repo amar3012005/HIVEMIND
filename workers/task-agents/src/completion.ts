@@ -38,8 +38,6 @@ export function companyWorkComplete(input: CompletionInput): CompletionResult {
     const cited = [...report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => hostname(match[0])).filter((host) => host && host !== companyHost);
     if (!cited.length || cited.some((host) => !hosts.has(host))) return { complete: false, reason: "prospect_sources_missing" };
   }
-  const hasJudgment = /competitor|candidate|gap|offer/i.test(report);
-  if (!hasJudgment) return { complete: false, reason: "judgment_missing" };
   return { complete: true, reason: "company_context_used" };
 }
 

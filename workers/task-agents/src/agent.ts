@@ -84,7 +84,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const turned = await this.testPrompt(prompt);
     const text = turned.text || `Places saved: ${JSON.stringify(this.state.places)}`;
     const recalled = (this.state.events ?? []).some((event) => event.step === "hivemind_recall");
-    const verdict = companyWorkComplete({ report: text, recalled });
+    const verdict = companyWorkComplete({ report: text, recalled, marketResearch: true });
     this.note("completion", verdict.complete ? "complete" : verdict.reason);
     this.note("day1", text.slice(0, 8000));
     return { status: verdict.complete ? "ok" : "incomplete", text, error: verdict.complete ? turned.error : verdict.reason, company };
@@ -341,12 +341,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     });
   }
 
-  updateOperatingTask(id: number, status: "active" | "completed" | "blocked"): { updated: boolean } {
-    const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status);
+  updateOperatingTask(id: number, status: "active" | "completed" | "blocked", verified = false): { updated: boolean; awaitingReport?: boolean } {
+    const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status, verified);
     if (!plan) return { updated: false };
     this.setState({ ...this.state, operatingPlan: plan });
-    this.note("task_updated", `${id}: ${status}`);
-    return { updated: true };
+    const awaitingReport = status === "completed" && plan.tasks.find((task) => task.id === id)?.status !== "completed";
+    this.note("task_updated", `${id}: ${awaitingReport ? "active" : status}`);
+    return awaitingReport ? { updated: true, awaitingReport: true } : { updated: true };
   }
 
   async getSkills(): Promise<SkillSource[]> {

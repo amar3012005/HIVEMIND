@@ -1,7 +1,8 @@
 import type { OperatingPlan, OperatingTask } from "./types";
 
-export function updatePlanTask(plan: OperatingPlan | null | undefined, runId: string | undefined, id: number, status: OperatingTask["status"]): OperatingPlan | null {
+export function updatePlanTask(plan: OperatingPlan | null | undefined, runId: string | undefined, id: number, status: OperatingTask["status"], verified = false): OperatingPlan | null {
   if (!plan || plan.runId !== runId || !plan.tasks.some((task) => task.id === id)) return null;
+  if (status === "completed" && id === plan.tasks.at(-1)?.id && !verified) status = "active";
   return { ...plan, tasks: plan.tasks.map((task) => task.id === id ? { ...task, status } : task) };
 }
 

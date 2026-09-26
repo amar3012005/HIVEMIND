@@ -17,6 +17,14 @@ test("accepts a reasoned report that used company memory", () => {
   });
 });
 
+test("accepts a finished campaign without competitor vocabulary", () => {
+  const report = "# First campaign\n\nAudience: regulated European buyers. Channels: website, LinkedIn, and email. Sequence: proof, research, invitation. Schedule: six weeks. Success signals: qualified replies and waitlist visits. Source: https://singulancelabs.com/benchmark";
+  assert.deepEqual(companyWorkComplete({ report, recalled: true }), {
+    complete: true,
+    reason: "company_context_used",
+  });
+});
+
 test("accepts a short reply to a greeting", () => {
   assert.deepEqual(directReplyComplete("Hi. What should I work on?"), {
     complete: true,

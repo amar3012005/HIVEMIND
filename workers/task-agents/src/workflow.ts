@@ -66,6 +66,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       output: planSchema,
       timeout: "30 minutes",
     });
+    if (/\bHIVEMIND\b/i.test(asked) && /\b(what|which|list|inventory|available|stored|personal)\b/i.test(asked)
+      && !/\b(how many|prior|previous|earlier)\b/i.test(asked)) {
+      plan.mode = "action";
+      plan.groups = ["company"];
+      plan.plan = "Inspect current scoped HIVEMIND memory and profile, then answer from those receipts.";
+      plan.tasks = ["Inspect scoped HIVEMIND recall and profile", "Answer from current receipts"];
+    }
     plan.tasks = currentTurnTasks(plan.tasks);
 
     if (plan.mode === "direct") {

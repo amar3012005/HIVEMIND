@@ -171,7 +171,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const connection = _connection as { send(data: string): void };
     const authenticated = (_connection as Connection<{ userId?: string; orgId?: string }>).state;
     if (!authenticated?.userId || !authenticated?.orgId) return;
-    if (parsed?.type === "CF_AGENT_TOOL_APPROVAL") {
+    if (parsed?.type === "cf_agent_tool_approval") {
       await super.onMessage(_connection as Connection, message as string);
       return;
     }

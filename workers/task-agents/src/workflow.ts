@@ -94,6 +94,14 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       });
       const actionContext = await durable.do("recall-action-context", async () =>
         this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)).catch(() => ({ error: "company_context_unavailable" })));
+      if (!actionContext || typeof actionContext !== "object" || !("ok" in actionContext) || actionContext.ok !== true) {
+        const reply = "HIVEMIND company context is unavailable. I could not start external action tools.";
+        await durable.do("action-context-unavailable", async () => {
+          await this.agent.note("report", reply);
+          await this.agent.note("completion", "company_context_unavailable");
+        });
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "company_context_unavailable", report: reply };
+      }
       const result = await step.prompt("action-execute", {
         prompt: `Operator request: ${asked}. Decision: ${plan.decision}. Plan: ${plan.plan}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. HIVEMIND context preflight: ${JSON.stringify(actionContext).slice(0, 3000)}. Use relevant company facts when applicable; do not invent facts when context is unavailable. Activate only relevant action skills from the catalog. Use share_progress once when choosing the next action, and again only if tool evidence changes your approach. Use granted tools and finish the requested output. For a webpage screenshot, use browser_capture and its saved artifact receipt. Do not load company playbooks. Return the finished answer in report; set needsInput only for a genuinely missing required choice.`,
         output: reportSchema,

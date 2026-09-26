@@ -324,7 +324,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const tools = prospect
       ? ["hivemind_recall", "parallel_search", "browser_markdown"]
       : toolsForGroups(groups);
-    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
+    this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: true });
     this.note("reset_tools", groups.join(", "));
     return tools;
   }
@@ -585,7 +585,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       execute: async ({ groups }): Promise<{ tools: string[] }> => {
         this.assertTool("reset_tools");
         const tools = toolsForGroups(groups);
-        this.setState({ ...this.state, toolGroups: [...groups], tools });
+        this.setState({ ...this.state, toolGroups: [...groups], tools, companyContextRequired: true });
         this.note("reset_tools", groups.join(", "));
         return { tools };
       },
@@ -768,7 +768,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       });
       const verdict = result.status === "completed"
         ? parseGovernanceVerdict(result.summary)
-        : { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
+        : { verdict: "unavailable" as const, note: `Review unavailable (${result.status}: ${String(result.error || "no detail").slice(0, 200)}); report delivered without model review.` };
       this.note("governance", `${verdict.verdict}: ${verdict.note}`);
       return verdict;
     } catch (error) {

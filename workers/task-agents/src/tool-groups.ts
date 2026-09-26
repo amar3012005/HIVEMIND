@@ -1,5 +1,5 @@
 export const TOOL_GROUPS = {
-  company: ["hivemind_recall", "get_user_profile", "load_company_packet", "save_memory"],
+  company: ["hivemind_recall", "get_user_profile", "load_company_packet"],
   web_research: ["parallel_search", "maps_search"],
   browser: ["browser_markdown", "browser_extract", "browser_links", "browser_capture"],
   connected_apps: ["composio_discover_reads", "composio_read"],

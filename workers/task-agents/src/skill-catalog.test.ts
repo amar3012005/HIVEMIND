@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { toolkitSkillManifest } from "./skill-catalog.ts";
+import { toolsForGroups } from "./tool-groups.ts";
+
+test("company tools cannot prepare an unsolicited memory write", () => {
+  assert.ok(!toolsForGroups(["company"]).includes("save_memory"));
+});
 
 test("publishes the four toolkit skills", () => {
   const manifest = toolkitSkillManifest();

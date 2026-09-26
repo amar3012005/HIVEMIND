@@ -77,11 +77,40 @@ test("memory save carries scope and idempotency and does not call pending saved"
     assert.equal(String(input), "https://core.example/api/memories?sync=true");
     const headers = init?.headers as Record<string, string>;
     assert.equal(headers["x-idempotency-key"], "save-1");
-    assert.deepEqual(JSON.parse(String(init?.body)).scope, "personal");
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.scope, "personal");
+    assert.equal(body.source_platform, "hyperagent");
+    assert.equal(body.source_session_id, "run-1");
+    assert.ok(body.tags.includes("hyperagent"));
     return Response.json({ status: "executing" }, { status: 202 });
   };
   try {
-    assert.deepEqual(await saveCompanyMemory({ HIVEMIND_CORE_URL: "https://core.example", HIVEMIND_MASTER_API_KEY: "test" }, "org-1", "user-1", "Title", "Content", { scope: "personal", idempotencyKey: "save-1" }), { ok: false, status: "pending", payload: { status: "executing" }, idempotencyKey: "save-1" });
+    assert.deepEqual(await saveCompanyMemory({ HIVEMIND_CORE_URL: "https://core.example", HIVEMIND_MASTER_API_KEY: "test" }, "org-1", "user-1", "Title", "Content", { scope: "personal", idempotencyKey: "save-1", sessionId: "run-1" }), { ok: false, status: "pending", payload: { status: "executing" }, idempotencyKey: "save-1" });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("HyperAgent recall filters by source and requests newest first", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      query_context: "recent decisions and completed work", max_memories: 20, mode: "auto",
+      source_platforms: ["hyperagent"], sort: "date_desc",
+    });
+    return Response.json({ memories: [
+      { id: "m-0", title: "Other source", source_platform: "api", created_at: "2026-09-27T12:00:00Z" },
+      { id: "m-1", title: "Decision", content: "Approved direction", source_platform: "hyperagent", created_at: "2026-09-26T12:00:00Z" },
+      { id: "m-2", title: "New decision", content: "Next direction", source_platform: "hyperagent", created_at: "2026-09-27T10:00:00Z" },
+    ] });
+  };
+  try {
+    assert.deepEqual(await readMetaRecall({ HIVEMIND_CORE_URL: "https://core.example", HIVEMIND_MASTER_API_KEY: "test" }, "org-1", "user-1", {
+      query: "recent decisions and completed work", sourcePlatforms: ["hyperagent"], sort: "date_desc",
+    }), { ok: true, count: 2, scoped: true, memories: [
+      { id: "m-2", title: "New decision", content: "Next direction", source: "hyperagent", citation: undefined, createdAt: "2026-09-27T10:00:00Z", validAt: undefined },
+      { id: "m-1", title: "Decision", content: "Approved direction", source: "hyperagent", citation: undefined, createdAt: "2026-09-26T12:00:00Z", validAt: undefined },
+    ] });
   } finally {
     globalThis.fetch = original;
   }

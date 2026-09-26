@@ -88,7 +88,7 @@ export async function mapsPlaces(env: GatewayEnv, textQuery: string): Promise<{ 
   return { places };
 }
 
-export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: string, title: string, content: string, options: { scope?: "personal" | "organization" | "project"; project?: string; idempotencyKey?: string } = {}): Promise<unknown> {
+export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: string, title: string, content: string, options: { scope?: "personal" | "organization" | "project"; project?: string; idempotencyKey?: string; sessionId?: string } = {}): Promise<unknown> {
   const base = (env.HIVEMIND_CORE_URL || env.HIVEMIND_CONTROL_URL)?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
   if (!base || !key) return { error: "hivemind_meta_unconfigured", tool: "save_memory" };
@@ -105,6 +105,8 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
       title: title.slice(0, 180),
       content: content.slice(0, 8000),
       tags: ["hyperagent", "company"],
+      source_platform: "hyperagent",
+      ...(options.sessionId ? { source_session_id: options.sessionId } : {}),
       memory_type: "decision",
       user_id: userId,
       org_id: orgId,
@@ -215,8 +217,9 @@ export async function readMetaRecall(env: GatewayEnv, orgId: string, userId: str
   entities?: string[]; sort?: string; includeSuperseded?: boolean;
 }): Promise<unknown> {
   const limit = Math.max(1, Math.min(input.limit ?? 5, 20));
+  const sourcePlatforms = input.sourcePlatforms?.map((source) => source.toLowerCase());
   const result = await coreMetaRequest(env, orgId, userId, "/api/recall", {
-    query_context: input.query, max_memories: limit, mode: input.mode || "auto",
+    query_context: input.query, max_memories: sourcePlatforms?.length ? 20 : limit, mode: input.mode || "auto",
     ...(input.scopeFilter ? { scope_filter: input.scopeFilter } : {}),
     ...(input.validAt ? { valid_at: input.validAt } : {}),
     ...(input.transactionAt ? { transaction_at: input.transactionAt } : {}),
@@ -230,11 +233,14 @@ export async function readMetaRecall(env: GatewayEnv, orgId: string, userId: str
     ...(input.includeSuperseded ? { include_superseded: true } : {}),
   });
   if (!result || typeof result !== "object" || !("memories" in result) || !Array.isArray(result.memories)) return result;
-  const memories = result.memories.slice(0, limit).map((row) => {
+  const memories = result.memories.map((row) => {
     const memory = row && typeof row === "object" ? row as Record<string, unknown> : {};
-    return { id: memory.id, title: memory.title, content: typeof memory.content === "string" ? memory.content.slice(0, 1200) : "", source: memory.source, citation: memory.citation, createdAt: memory.created_at, validAt: memory.valid_at };
-  });
-  return { ok: true, count: memories.length, scoped: true, memories };
+    const metadata = memory.source_metadata && typeof memory.source_metadata === "object" ? memory.source_metadata as Record<string, unknown> : {};
+    return { id: memory.id, title: memory.title, content: typeof memory.content === "string" ? memory.content.slice(0, 1200) : "", source: memory.source_platform || metadata.source_platform || memory.source, citation: memory.citation, createdAt: memory.created_at, validAt: memory.valid_at };
+  }).filter((memory) => !sourcePlatforms?.length || sourcePlatforms.includes(String(memory.source || "").toLowerCase()));
+  if (input.sort === "date_desc") memories.sort((left, right) => Date.parse(String(right.createdAt || "")) - Date.parse(String(left.createdAt || "")));
+  if (input.sort === "date_asc") memories.sort((left, right) => Date.parse(String(left.createdAt || "")) - Date.parse(String(right.createdAt || "")));
+  return { ok: true, count: Math.min(memories.length, limit), scoped: true, memories: memories.slice(0, limit) };
 }
 
 export async function readMetaSaveStatus(env: GatewayEnv, orgId: string, userId: string, key: string): Promise<unknown> {

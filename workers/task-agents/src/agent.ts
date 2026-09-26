@@ -356,7 +356,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return { error: "task_not_bound" };
     this.note("save_memory", title);
-    return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content);
+    return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content, { sessionId: envelope.runId });
   }
 
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
@@ -639,7 +639,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const source = `${this.state.envelope?.runId}:${input.scope}:${input.project || ""}:${input.title}:${input.content}`;
         const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
         const idempotencyKey = input.idempotencyKey || `hyper-${Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-        return writeHivemindMemory(this.gatewayEnv(), identity.orgId, identity.userId, input.title, input.content, { scope: input.scope, project: input.project, idempotencyKey });
+        return writeHivemindMemory(this.gatewayEnv(), identity.orgId, identity.userId, input.title, input.content, { scope: input.scope, project: input.project, idempotencyKey, sessionId: this.state.envelope?.runId });
       },
     });
     const discover = tool({

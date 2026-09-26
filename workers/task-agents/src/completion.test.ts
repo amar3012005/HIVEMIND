@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { companyWorkComplete, directReplyComplete, requestsMemorySave } from "./completion.ts";
+import { companyWorkComplete, directReplyComplete, requestsArtifact, requestsMemorySave } from "./completion.ts";
 
 test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsMemorySave("Save this to company memory."), true);
   assert.equal(requestsMemorySave("Do not launch or save company memory."), false);
   assert.equal(requestsMemorySave("Don't save it to HIVEMIND memory."), false);
+});
+
+test("artifact saving requires a positive creation request", () => {
+  assert.equal(requestsArtifact("Write a report on German competitors"), true);
+  assert.equal(requestsArtifact("Export this as a PDF"), true);
+  assert.equal(requestsArtifact("What do you have in HIVEMIND? No company strategy or report."), false);
+  assert.equal(requestsArtifact("Do not create a report"), false);
 });
 
 const judgment = "Competitors supported by a page. None of the local companies sell the same offer. Novo AI is machine monitoring. Gaps: phones were not on the Maps record.";

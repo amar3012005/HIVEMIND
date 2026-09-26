@@ -21,6 +21,11 @@ export function requestsMemorySave(task: string): boolean {
     && !/\b(do not|don't|never|without|no)\b[^.!?]{0,80}\b(save|store|remember)\b/i.test(task);
 }
 
+export function requestsArtifact(task: string): boolean {
+  return /\b(create|generate|make|save|export|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact|pdf)\b/i.test(task)
+    && !/\b(do not|don't|never|without|no)\b[^.!?]{0,100}\b(create|generate|make|save|export|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact|pdf)\b/i.test(task);
+}
+
 export function companyWorkComplete(input: CompletionInput): CompletionResult {
   const report = input.report.trim();
   if (report.length < 40) return { complete: false, reason: "report_missing" };

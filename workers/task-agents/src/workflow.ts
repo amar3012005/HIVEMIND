@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { companyWorkComplete, directReplyComplete, requestsMemorySave } from "./completion";
+import { companyWorkComplete, directReplyComplete, requestsArtifact, requestsMemorySave } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import type { TaskEnvelope } from "./types";
 
@@ -118,7 +118,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const reply = result.report.trim();
       return durable.do("complete-action", async () => {
         const verdict = directReplyComplete(reply);
-        if (/\b(report|document|artifact|pdf)\b/i.test(asked) && !/\b(screenshot|capture)\b/i.test(asked) && verdict.complete) {
+        if (requestsArtifact(asked) && !/\b(screenshot|capture)\b/i.test(asked) && verdict.complete) {
           const saved = await this.agent.saveCompanyArtifact({ kind: "report", title: reportTitle(reply, "Generated report"), contentType: "text/markdown", body: reply });
           if (/\bpdf\b/i.test(asked)) await this.agent.createPdfArtifact(saved.id);
         }

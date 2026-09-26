@@ -3,6 +3,7 @@ import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
+import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
@@ -138,14 +139,25 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const connection = _connection as { send(data: string): void };
     if (parsed?.type === "artifact-list") {
-      const artifacts = (await this.listCompanyArtifacts()).map(({ body, ...metadata }) => metadata);
+      const artifacts = await this.listArtifactMetadata();
       connection.send(JSON.stringify({ type: "artifact-list-result", artifacts }));
       return;
     }
     if (parsed?.type === "artifact-get") {
       const id = typeof parsed.id === "string" ? parsed.id : "";
-      const artifact = /^[0-9a-f-]{36}$/i.test(id) ? (await this.listCompanyArtifacts()).find((item) => item.id === id) : null;
+      const artifact = /^[0-9a-f-]{36}$/i.test(id) ? await this.getCompanyArtifact(id) : null;
       connection.send(JSON.stringify({ type: "artifact-get-result", artifact: artifact ?? null }));
+      return;
+    }
+    if (parsed?.type === "artifact-create-pdf") {
+      const id = typeof parsed.id === "string" ? parsed.id : "";
+      try {
+        if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("artifact_not_found");
+        const artifact = await this.createPdfArtifact(id);
+        connection.send(JSON.stringify({ type: "artifact-create-pdf-result", artifact }));
+      } catch (error) {
+        connection.send(JSON.stringify({ type: "artifact-create-pdf-result", error: error instanceof Error ? error.message : "pdf_generation_failed" }));
+      }
       return;
     }
     if (parsed?.type === "human-answer" || (parsed?.type === "room-start" && this.state.awaiting === "input")) {
@@ -206,7 +218,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       kind: input.kind,
       title: input.title.slice(0, 200),
       contentType: input.contentType.slice(0, 120),
-      body: (input.body ?? "").slice(0, 100000),
+      body: (input.body ?? "").slice(0, input.contentType === "application/pdf" ? 2800000 : 100000),
       storageLocation: input.storageLocation ?? "",
       createdAt: new Date().toISOString(),
     };
@@ -226,6 +238,39 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       storageLocation: String(row.storage_location ?? ""),
       createdAt: String(row.created_at),
     }));
+  }
+
+  async listArtifactMetadata(): Promise<Omit<StoredArtifact, "body">[]> {
+    ensureCompanyTables(this.sql.bind(this));
+    return this.sql`SELECT id, kind, title, content_type, storage_location, created_at FROM company_artifacts ORDER BY created_at DESC LIMIT 40`.map((row) => ({
+      id: String(row.id), kind: String(row.kind), title: String(row.title),
+      contentType: String(row.content_type), storageLocation: String(row.storage_location ?? ""), createdAt: String(row.created_at),
+    }));
+  }
+
+  async getCompanyArtifact(id: string): Promise<StoredArtifact | null> {
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT id, kind, title, content_type, body, storage_location, created_at FROM company_artifacts WHERE id = ${id} LIMIT 1`[0];
+    return row ? { id: String(row.id), kind: String(row.kind), title: String(row.title), contentType: String(row.content_type), body: String(row.body ?? ""), storageLocation: String(row.storage_location ?? ""), createdAt: String(row.created_at) } : null;
+  }
+
+  async createPdfArtifact(id: string): Promise<StoredArtifact> {
+    const source = await this.getCompanyArtifact(id);
+    if (!source || source.contentType !== "text/markdown") throw new Error("markdown_report_required");
+    const existing = this.sql`SELECT id FROM company_artifacts WHERE storage_location = ${`pdf-of:${id}`} LIMIT 1`[0];
+    if (existing) return (await this.getCompanyArtifact(String(existing.id)))!;
+    const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
+    if (!browser?.quickAction) throw new Error("browser_binding_missing");
+    const markdown = new MarkdownIt({ html: false, linkify: true });
+    markdown.renderer.rules.image = () => "";
+    const html = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:12pt/1.55 Arial,sans-serif;color:#171717;max-width:760px;margin:48px auto}h1,h2,h3{break-after:avoid}h1{font-size:22pt}h2{font-size:16pt;margin-top:25px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px;text-align:left}a{color:#2563a6}pre{white-space:pre-wrap}p,li{break-inside:avoid}</style></head><body>${markdown.render(source.body)}</body></html>`;
+    const response = await browser.quickAction("pdf", { html, pdfOptions: { format: "a4", printBackground: true } });
+    if (!response.ok) throw new Error(`pdf_generation_failed_${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length < 5 || new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-" || bytes.length > 2000000) throw new Error("pdf_invalid_or_too_large");
+    let body = "";
+    for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
+    return this.saveCompanyArtifact({ kind: "pdf", title: `${source.title.replace(/\.pdf$/i, "")}.pdf`, contentType: "application/pdf", body, storageLocation: `pdf-of:${id}` });
   }
 
   resolvePlaybook(id: string): string | null {

@@ -10,10 +10,12 @@
     "@cloudflare/think": "0.19.0",
     "agents": "0.24.0",
     "ai": "7.0.114",
+    "markdown-it": "^15.0.2",
     "workers-ai-provider": "4.0.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "typescript": "5.9.2",
     "wrangler": "^4.140.0"
   }

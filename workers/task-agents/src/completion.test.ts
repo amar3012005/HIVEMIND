@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
 import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 
 test("follow-up reuse selects report from preceding turn", () => {
@@ -106,13 +106,18 @@ test("rejects prospect URLs absent from tool evidence", () => {
 });
 
 test("versioned prospect contract requires per-account location and sector receipts", () => {
-  assert.equal(localPlaybookVersion("local:outreach.prospect-list"), 2);
+  assert.equal(localPlaybookVersion("local:outreach.prospect-list"), 3);
   assert.match(localPlaybookContract("local:outreach.prospect-list"), /Recovery:/);
+  assert.match(localPlaybookContract("local:outreach.prospect-list"), /Approvals:/);
   const report = "# Berlin prospects\nDKB: location https://dkb.example/impressum; sector https://dkb.example/banking.";
   const rows = [{ name: "DKB", locationUrl: "https://dkb.example/impressum", sectorUrl: "https://dkb.example/banking", caveat: "Buyer unconfirmed" }];
   assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum", "https://dkb.example/banking"]).complete, true);
   assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum"]).reason, "prospect_evidence_missing");
   assert.equal(prospectEvidenceComplete(report, [], ["https://dkb.example/impressum"]).reason, "prospect_rows_missing");
+  assert.equal(requestedProspectCount("Find three prospective Berlin organizations"), 3);
+  assert.equal(requestedProspectCount("Find 5 qualified bank prospects"), 5);
+  assert.equal(requestedProspectCount("Find two prospective Berlin banks"), 2);
+  assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum", "https://dkb.example/banking"], 3).reason, "prospect_count_short");
 });
 
 test("image capture is available only for a visual request", () => {

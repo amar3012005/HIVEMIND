@@ -1,4 +1,4 @@
-export type JevRoute = "direct" | "action";
+export type JevRoute = "action";
 
 export function readJevRoute(result: unknown): JevRoute | null {
   if (result && typeof result === "object" && "result" in result) result = result.result;
@@ -10,7 +10,8 @@ export function readJevRoute(result: unknown): JevRoute | null {
   const choice = route.choice;
   const confidence = route.confidence;
   const probabilities = route.probabilities;
-  if ((choice !== "direct" && choice !== "action") || typeof confidence !== "number" || !Number.isFinite(confidence)
+  // Fast routing may open tools, but must not skip Think's answer check.
+  if (choice !== "action" || typeof confidence !== "number" || !Number.isFinite(confidence)
     || !probabilities || typeof probabilities !== "object") return null;
   const selected = (probabilities as Record<string, unknown>)[choice];
   const others = Object.entries(probabilities).filter(([key]) => key !== choice).map(([, value]) => value);

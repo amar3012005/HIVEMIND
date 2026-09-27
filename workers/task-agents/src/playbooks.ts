@@ -86,21 +86,43 @@ export function localPlaybook(id: string): LocalPlaybook | null {
 }
 
 export function localPlaybookVersion(id: string): number {
-  return id === "local:outreach.prospect-list" ? 2 : 1;
+  return id === "local:outreach.prospect-list" ? PROSPECT_CONTRACT.version : 1;
 }
+
+export interface LocalExecutionContract {
+  version: number;
+  inputs: readonly string[];
+  owner: string;
+  allowedActions: readonly string[];
+  evidence: readonly string[];
+  completion: readonly string[];
+  recovery: readonly string[];
+  approvals: readonly string[];
+}
+
+export const PROSPECT_CONTRACT: LocalExecutionContract = {
+  version: 3,
+  inputs: ["Authenticated offer and ICP", "Requested geography", "Requested account count or a bounded default"],
+  owner: "Assigned room employee keeps responsibility through final handoff; specialists return evidence to that employee.",
+  allowedActions: ["Company recall", "One batched public search for broad discovery", "Focused primary-page reads", "Requested report artifact"],
+  evidence: ["Each accepted account has a structured name, locationUrl, sectorUrl, and caveat", "Both URLs appear beside that account in report and match this run's source receipts", "Primary pages are read with native browser_markdown before a location or sector claim is marked verified"],
+  completion: ["Every accepted account passes prospectEvidenceComplete", "Unreadable primary pages leave the run incomplete", "Requested artifact has a saved receipt; no artifact when operator forbids one"],
+  recovery: ["Resume from pinned playbook snapshot and existing source receipts", "Use one focused primary-source read for a missing fact instead of repeating broad discovery", "If evidence or provider status remains uncertain, report the gap and keep the run incomplete"],
+  approvals: ["No outreach, connected-app mutation, memory write, or screenshot without operator instruction", "Connected-app writes wait for runtime approval and provider receipt"],
+};
 
 export function localPlaybookContract(id: string): string {
   if (id !== "local:outreach.prospect-list") return "";
+  const contract = PROSPECT_CONTRACT;
   return [
-    "Execution contract v2:",
-    "Inputs: authenticated company offer and ICP, requested geography, requested count.",
-    "Owner: assigned room employee. Allowed actions: recall, public research, source inspection, requested report artifact.",
-    "No outreach, screenshot, connected-app mutation, or memory write without operator instruction and applicable approval. The room runtime saves the requested report artifact after final synthesis; never use hivemind_meta save for that artifact.",
-    "For every accepted prospect return structured name, locationUrl, sectorUrl, and caveat alongside the report.",
-    "Read primary evidence pages with native browser_markdown, which is available directly in every turn. Do not use connected-app discovery for public pages.",
-    "Each evidence URL must have a source receipt from this run and appear beside the account in the final report.",
-    "Completion: accepted accounts have location and regulated-sector or ICP evidence; requested artifact has a saved receipt.",
-    "Recovery: verify missing evidence with a focused source; if still missing, leave the run incomplete and disclose gaps.",
+    `Execution contract v${contract.version}:`,
+    `Inputs: ${contract.inputs.join("; ")}.`,
+    `Owner: ${contract.owner}`,
+    `Allowed actions: ${contract.allowedActions.join("; ")}.`,
+    `Evidence: ${contract.evidence.join("; ")}.`,
+    `Completion: ${contract.completion.join("; ")}.`,
+    `Recovery: ${contract.recovery.join("; ")}.`,
+    `Approvals: ${contract.approvals.join("; ")}. The room runtime saves a requested report artifact after final synthesis; never use hivemind_meta save for that artifact. Do not use connected-app discovery for public pages.`,
   ].join("\n");
 }
 

@@ -25,8 +25,16 @@ export interface ProspectEvidence {
   caveat: string;
 }
 
-export function prospectEvidenceComplete(report: string, prospects: readonly ProspectEvidence[], sourceUrls: readonly string[]): CompletionResult {
+export function requestedProspectCount(task: string): number {
+  const match = task.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\s+(?:(?:qualified|prospective|potential|Berlin|German|regulated|bank|insurance|healthcare)\s+){0,4}(?:prospects?|companies|accounts?|leads?|clients?|organizations?|banks?|insurers?|hospitals?)\b/i);
+  if (!match) return 1;
+  const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  return Math.min(30, words[match[1].toLowerCase()] ?? Number(match[1]));
+}
+
+export function prospectEvidenceComplete(report: string, prospects: readonly ProspectEvidence[], sourceUrls: readonly string[], minimumCount = 1): CompletionResult {
   if (!prospects.length) return { complete: false, reason: "prospect_rows_missing" };
+  if (prospects.length < minimumCount) return { complete: false, reason: "prospect_count_short" };
   const receipts = new Set(sourceUrls.map(sourceKey).filter(Boolean));
   for (const row of prospects) {
     if (!row.name.trim() || !report.toLowerCase().includes(row.name.trim().toLowerCase())) return { complete: false, reason: "prospect_row_not_in_report" };

@@ -4,10 +4,10 @@ import { readJevRoute, routeWithJev } from "./jev-route.ts";
 
 const choice = (route: string, confidence: number, probabilities: Record<string, number>) => ({ answers: { route: { choice: route, confidence, probabilities } } });
 
-test("confident direct and action choices use fast route", () => {
-  assert.equal(readJevRoute(choice("direct", 0.94, { direct: 0.95, action: 0.04, company: 0.01 })), "direct");
+test("only confident action choices use fast route", () => {
+  assert.equal(readJevRoute(choice("direct", 0.94, { direct: 0.95, action: 0.04, company: 0.01 })), null);
   assert.equal(readJevRoute(choice("action", 0.91, { direct: 0.02, action: 0.91, company: 0.07 })), "action");
-  assert.equal(readJevRoute({ state: {}, result: choice("direct", 0.94, { direct: 0.95, action: 0.04, company: 0.01 }) }), "direct");
+  assert.equal(readJevRoute({ state: {}, result: choice("action", 0.94, { direct: 0.04, action: 0.95, company: 0.01 }) }), "action");
 });
 
 test("company, ambiguous, and malformed choices retain Think planner", () => {

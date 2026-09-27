@@ -22,8 +22,32 @@ export function requestsMemorySave(task: string): boolean {
 }
 
 export function requestsArtifact(task: string): boolean {
-  return /\b(create|generate|make|save|export|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact|pdf)\b/i.test(task)
-    && !/\b(do not|don't|never|without|no)\b[^.!?]{0,100}\b(create|generate|make|save|export|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact|pdf)\b/i.test(task);
+  if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:create|generate|make|save|export|render)\b[^.!?]{0,80}\bartifact\b/i.test(task)
+    || /\b(?:no|without)\s+(?:an?\s+)?(?:saved\s+)?artifact\b/i.test(task)) return false;
+  return (/\b(create|generate|make|save|export|render|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact|pdf)\b/i.test(task)
+    || requestsSlideDeck(task))
+    && !/\b(do not|don't|never|without|no)\b[^.!?]{0,100}\b(create|generate|make|save|export|render|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact)\b/i.test(task);
+}
+
+export function requestsSlideDeck(task: string): boolean {
+  return /\b(?:create|craete|generate|make|build|write|draft|finish|complete|render|export|produce|design|give me)\b[^.!?]{0,140}\b(?:pitch\s+deck|picth\s+deck|slide\s+deck|presentation)\b/i.test(task)
+    && !/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:pitch\s+deck|slide\s+deck|presentation)\b/i.test(task);
+}
+
+export function slideDeckReady(report: string): boolean {
+  const slides = [...report.matchAll(/^##\s+Slide\s+(\d+)\s*[—:–-]\s*\S.+$/gim)];
+  return slides.length >= 8 && slides.every((match, index) => Number(match[1]) === index + 1)
+    && !/\b(?:deck\s+(?:outline|narrative)|pdf\s+(?:will|should)\s+render|room runtime renders)\b/i.test(report);
+}
+
+export function requestsPdf(task: string): boolean {
+  return /\b(create|generate|make|save|export|render|draft|write|give me)\b[^.!?]{0,100}\bpdf\b/i.test(task)
+    && !/\b(do not|don't|never|without|no)\b[^.!?]{0,100}\b(create|generate|make|save|export|render)\b[^.!?]{0,100}\bpdf\b/i.test(task)
+    && !/\b(no|without)\s+(?:a\s+)?pdf\b/i.test(task);
+}
+
+export function pdfReportReady(report: string): boolean {
+  return !/\b(?:pdf|document|file)[^.!?\n]{0,80}\b(?:blocked|unavailable|cannot|could not|not possible|no (?:tool|render|file|artifact)|print.to.pdf)\b|\b(?:no|without)\s+pdf.capable\b|\bprint.to.pdf\b/i.test(report);
 }
 
 export function companyWorkComplete(input: CompletionInput): CompletionResult {

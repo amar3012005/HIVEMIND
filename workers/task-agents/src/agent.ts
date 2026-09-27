@@ -16,7 +16,7 @@ import { partialToolText } from "./draft-stream";
 import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
-import { artifactForModel, trimStoredArtifactPart } from "./artifact-model";
+import { artifactForModel, trimStoredArtifactPart, visionObservation } from "./artifact-model";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
@@ -811,7 +811,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
             reasoning: false,
             max_tokens: 900,
           });
-          const answer = result && typeof result === "object" && "answer" in result ? String((result as { answer?: unknown }).answer ?? "") : "";
+          const answer = visionObservation(result);
           const observation = artifactForModel(chosen, answer);
           return answer ? observation : { ...observation, visionError: JSON.stringify(result).slice(0, 300) };
         } catch (error) {

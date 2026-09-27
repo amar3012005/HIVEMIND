@@ -6,6 +6,7 @@ import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkCo
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { globalCatalog, localCatalog, localPlaybook } from "./playbooks";
 import type { TaskEnvelope } from "./types";
+import { workflowErrorCode } from "./workflow-error";
 
 export interface CompanyWork extends TaskEnvelope {
   startedAt?: string;
@@ -58,10 +59,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await (step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> }).do("index-workrun-terminal", async () => this.agent.finishCurrentCompanyWorkRun(result.complete, result.reason));
       return result;
     } catch (error) {
+      const code = workflowErrorCode(error);
       await this.agent.finishCurrentCompanyWorkRun(false, error instanceof Error ? error.message : "workflow_failed").catch(() => undefined);
       await this.agent.markAwaiting("");
       await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");
-      await this.agent.note("report", "I could not finish this run. You can continue in this room.");
+      await this.agent.note("report", `I could not finish this run (${code}). You can continue in this room.`);
       throw error;
     }
   }
@@ -73,7 +75,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const work = event.payload;
     await durable.do("bind-employee", async () => {
       await this.agent.bindTask(work, "research", ["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook"]);
-      this.agent.enterPlanning();
+      await this.agent.enterPlanning();
       await this.agent.note("workrun", `starting ${work.company}`);
     });
 
@@ -172,10 +174,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const artifactTaskIds = artifactRequested
       ? plan.tasks.flatMap((task, index) => isArtifactPlanTask(task) ? [index + 1] : [])
       : [];
-    const completedContentTasks = (completed: readonly number[]) =>
-      [...new Set([...completed, ...this.agent.completedOperatingTaskIds()])];
-    const missingContentTasks = (completed: readonly number[]) =>
-      missingPlanTaskIds(plan.tasks.length, [...completedContentTasks(completed), ...artifactTaskIds]);
+    const completedContentTasks = async (completed: readonly number[]) =>
+      [...new Set([...completed, ...await this.agent.completedOperatingTaskIds()])];
+    const missingContentTasks = async (completed: readonly number[]) =>
+      missingPlanTaskIds(plan.tasks.length, [...await completedContentTasks(completed), ...artifactTaskIds]);
 
     if (plan.mode === "direct") {
       const reply = plan.reply.trim() || plan.decision.trim();
@@ -191,7 +193,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const proposalRequested = /(?:refin|improv|propos|chang)[^.!?]{0,80}playbook|playbook[^.!?]{0,80}(?:refin|improv|propos|chang)/i.test(asked);
       await durable.do("enable-action-tools", async () => {
         await this.agent.applyGroups(plan.groups, true);
-        this.agent.setOperatingPlan(work.runId, "", []);
+        await this.agent.setOperatingPlan(work.runId, "", []);
         if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
       });
       let result: z.infer<typeof reportSchema> = reportSchema.parse({});
@@ -207,7 +209,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           actionGuidance = "The room has a native PDF renderer. Remove PDF-tool failure/status text, finish the requested report as Markdown, and let runtime attach the PDF. Do not search other PDF tools. ";
           continue;
         }
-        if (/\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactSince("image", work.startedAt ?? "")) {
+        if (/\b(screenshot|capture)\b/i.test(asked) && !await this.agent.hasArtifactSince("image", work.startedAt ?? "")) {
           actionGuidance = "No image artifact was saved in this turn. A prior room artifact cannot satisfy this request. Call browser_capture for the requested page now, or report its concrete error without claiming success. ";
           continue;
         }
@@ -234,7 +236,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         }
         const verifiedReply = proposalId ? `Playbook revision proposed for review. Proposal ID: ${proposalId.id}. Status: pending_review. Not applied.\n\n${proposalId.instruction}` : reply;
         const verdict = directReplyComplete(verifiedReply);
-        const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactSince("image", work.startedAt ?? "");
+        const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !await this.agent.hasArtifactSince("image", work.startedAt ?? "");
         const output = imageMissing ? "I could not save the requested screenshot artifact." : verifiedReply;
         const missingTasks = missingPlanTaskIds(plan.tasks.length, result.completedTaskIds);
         const pdfSourceInvalid = requestsPdf(asked) && !pdfReportReady(reply);
@@ -243,7 +245,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           const saved = await this.agent.saveCompanyArtifact({ kind: "report", title: reportTitle(reply, "Generated report"), contentType: "text/markdown", body: reply });
           if (!pdfForbidden && (requestsPdf(asked) || deckRequested)) await this.agent.createPdfArtifact(saved.id);
         }
-        if (complete) for (const id of result.completedTaskIds) this.agent.updateOperatingTask(id, "completed", true);
+        if (complete) for (const id of result.completedTaskIds) await this.agent.updateOperatingTask(id, "completed", true);
         await this.agent.note("report", output);
         const reason = imageMissing ? "artifact_missing" : pdfSourceInvalid ? "pdf_report_incomplete" : missingTasks.length ? "plan_incomplete" : verdict.reason;
         await this.agent.note("completion", complete ? "complete" : reason);
@@ -255,7 +257,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const groups = plan.groups.length > 0 ? [...plan.groups] : ["company", "web_research", "browser", "records"];
       if (!groups.includes("company")) groups.push("company");
       await this.agent.applyGroups(groups, true);
-      this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
+      await this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
       if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
     });
@@ -267,7 +269,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const contextForFirstRound = recallSucceeded
       ? `Company memory recall succeeded: ${JSON.stringify(companyContext).slice(0, 1800)}. Use scoped items as evidence, not independent verification.`
       : "Company memory recall failed. Use authenticated compact profile, verify other evidence, and do not claim unavailable memory facts.";
-    if (!recallSucceeded && !this.agent.hasCompanyContext()) {
+    if (!recallSucceeded && !await this.agent.hasCompanyContext()) {
       const reply = "Company memory is unavailable. I cannot finish company research until it is reachable.";
       await durable.do("context-unavailable", async () => {
         await this.agent.note("report", reply);
@@ -300,7 +302,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           guidance += "The room has a native PDF renderer. Remove PDF-tool failure/status text, finish the requested report as Markdown, and let runtime attach the PDF. Do not search other PDF tools. ";
           continue;
         }
-        const missingPlanIds = missingContentTasks(result.completedTaskIds);
+        const missingPlanIds = await missingContentTasks(result.completedTaskIds);
         if (missingPlanIds.length) {
           guidance += `The report did not account for planned tasks ${missingPlanIds.join(", ")}. Complete each remaining task with visible output or evidence, then return every completed task id. Do not present an unfinished plan as final. `;
           continue;
@@ -362,7 +364,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await durable.do("pdf-source-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "pdf_report_incomplete"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "pdf_report_incomplete", report: reply };
     }
-    const missingPlanIds = missingContentTasks(written.completedTaskIds);
+    const missingPlanIds = await missingContentTasks(written.completedTaskIds);
     if (missingPlanIds.length) {
       const reply = `${written.report.trim()}\n\nI could not finish planned tasks ${missingPlanIds.join(", ")}. The plan remains open.`.trim();
       await durable.do("plan-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "plan_incomplete"); });
@@ -376,7 +378,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "playbook_proposal_missing", report: reply };
     }
     if (companyProposal) written.report = `# Playbook revision proposal\n\nProposal ID: ${companyProposal.id}. Status: pending_review. Not applied.\n\n## Proposed change\n${companyProposal.instruction}`;
-    const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website });
+    const finalVerdict = companyWorkComplete({ report: written.report, recalled: await this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
       const reply = `${reason === "prospect_sources_missing" ? "Prospect citations lack matching external tool receipts. Draft below is unverified; no artifact was saved. Plan remains open." : `I could not complete this work: ${reason}.`}\n\n${written.report.trim()}`.trim();
@@ -396,7 +398,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     const prepared = await durable.do("complete", async () => {
-      const recalled = this.agent.hasCompanyContext();
+      const recalled = await this.agent.hasCompanyContext();
       const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website });
       if (artifactRequested) {
         const saved = await this.agent.saveCompanyArtifact({
@@ -407,9 +409,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         });
         if (!pdfForbidden && (requestsPdf(asked) || deckRequested)) await this.agent.createPdfArtifact(saved.id);
       }
-      for (const id of new Set([...completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) this.agent.updateOperatingTask(id, "completed", true);
+      for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
       await this.agent.note("report", written.report);
-      this.agent.rememberSources(written.report);
+      await this.agent.rememberSources(written.report);
       if (!requestsMemorySave(asked)) {
         await this.agent.note("completion", "deliverable_ready");
         return { title: "", content: "", report: written.report, verdict };
@@ -417,7 +419,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const title = `${work.company}: ${asked.slice(0, 120)}`;
       const preview = written.report.slice(0, 700);
       await this.agent.note("approval", `Save this to company memory?\n${title}\n${preview}`);
-      this.agent.markAwaiting("memory");
+      await this.agent.markAwaiting("memory");
       return { title, content: written.report.slice(0, 4000), report: written.report, verdict };
     });
 
@@ -443,7 +445,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     const result = await durable.do("store-memory", async () => {
-      this.agent.markAwaiting("");
+      await this.agent.markAwaiting("");
       if (!approved) {
         await this.agent.note("completion", "memory_declined");
         return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "memory_declined", report: prepared.report };

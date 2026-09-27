@@ -22,6 +22,8 @@ export interface ProspectEvidence {
   name: string;
   locationUrl: string;
   sectorUrl: string;
+  locationEvidence: string;
+  sectorEvidence: string;
   caveat: string;
 }
 
@@ -38,12 +40,27 @@ export function prospectEvidenceComplete(report: string, prospects: readonly Pro
   const receipts = new Set(sourceUrls.map(sourceKey).filter(Boolean));
   for (const row of prospects) {
     if (!row.name.trim() || !report.toLowerCase().includes(row.name.trim().toLowerCase())) return { complete: false, reason: "prospect_row_not_in_report" };
+    if (row.locationEvidence.trim().length < 10 || row.sectorEvidence.trim().length < 10) return { complete: false, reason: "prospect_evidence_quote_missing" };
     for (const url of [row.locationUrl, row.sectorUrl]) {
       const key = sourceKey(url);
       if (!key || !receipts.has(key) || !report.includes(url)) return { complete: false, reason: "prospect_evidence_missing" };
     }
   }
   return { complete: true, reason: "prospect_evidence_verified" };
+}
+
+export function prospectQuotesVerified(prospects: readonly ProspectEvidence[], pages: readonly { url: string; excerpt: string }[]): CompletionResult {
+  const content = new Map(pages.map((page) => [sourceKey(page.url), canonicalPassage(page.excerpt)]));
+  for (const row of prospects) {
+    for (const [url, quote] of [[row.locationUrl, row.locationEvidence], [row.sectorUrl, row.sectorEvidence]]) {
+      if (!content.get(sourceKey(url))?.includes(canonicalPassage(quote))) return { complete: false, reason: "prospect_source_quote_mismatch" };
+    }
+  }
+  return { complete: true, reason: "prospect_quotes_verified" };
+}
+
+function canonicalPassage(text: string): string {
+  return text.normalize("NFKD").toLocaleLowerCase().replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
 function sourceKey(value: string): string {

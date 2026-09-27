@@ -101,11 +101,11 @@ export interface LocalExecutionContract {
 }
 
 export const PROSPECT_CONTRACT: LocalExecutionContract = {
-  version: 3,
+  version: 4,
   inputs: ["Authenticated offer and ICP", "Requested geography", "Requested account count or a bounded default"],
   owner: "Assigned room employee keeps responsibility through final handoff; specialists return evidence to that employee.",
   allowedActions: ["Company recall", "One batched public search for broad discovery", "Focused primary-page reads", "Requested report artifact"],
-  evidence: ["Each accepted account has a structured name, locationUrl, sectorUrl, and caveat", "Both URLs appear beside that account in report and match this run's source receipts", "Primary pages are read with native browser_markdown before a location or sector claim is marked verified"],
+  evidence: ["Each accepted account has a structured name, locationUrl, sectorUrl, short exact locationEvidence and sectorEvidence passages copied from those pages, and caveat", "Both URLs appear beside that account in report and match this run's source receipts", "Primary pages are read with native browser_markdown; quoted passages must match their cited pages before a location or sector claim is marked verified"],
   completion: ["Every accepted account passes prospectEvidenceComplete", "Unreadable primary pages leave the run incomplete", "Requested artifact has a saved receipt; no artifact when operator forbids one"],
   recovery: ["Resume from pinned playbook snapshot and existing source receipts", "Use one focused primary-source read for a missing fact instead of repeating broad discovery", "If evidence or provider status remains uncertain, report the gap and keep the run incomplete"],
   approvals: ["No outreach, connected-app mutation, memory write, or screenshot without operator instruction", "Connected-app writes wait for runtime approval and provider receipt"],

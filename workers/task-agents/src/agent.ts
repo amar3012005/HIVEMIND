@@ -1179,6 +1179,25 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return [...new Set(this.sourceReadReceipts().map((receipt) => receipt.url))];
   }
 
+  recordVerifiedProspectClaims(prospects: readonly ProspectEvidence[]): void {
+    const envelope = this.state.envelope;
+    if (!envelope) return;
+    const passages = new Map<string, Set<string>>();
+    for (const row of prospects) {
+      for (const [url, quote] of [[row.locationUrl, row.locationEvidence], [row.sectorUrl, row.sectorEvidence]]) {
+        if (!passages.has(url)) passages.set(url, new Set());
+        passages.get(url)!.add(quote);
+      }
+    }
+    for (const [url, quotes] of passages) {
+      const existing = this.sql`SELECT excerpt FROM source_read_receipts WHERE run_id = ${envelope.runId} AND url = ${url} LIMIT 1`[0];
+      if (!existing) continue;
+      const excerpt = `${String(existing.excerpt).slice(0, 900)}\nVerified prospect passages:\n${[...quotes].join("\n")}`.slice(0, 1800);
+      this.sql`UPDATE source_read_receipts SET excerpt = ${excerpt} WHERE run_id = ${envelope.runId} AND url = ${url}`;
+    }
+    this.note("source-verification", JSON.stringify(prospects.map((row) => ({ name: row.name, locationUrl: row.locationUrl, locationEvidence: row.locationEvidence, sectorUrl: row.sectorUrl, sectorEvidence: row.sectorEvidence }))));
+  }
+
   async verifyProspectPages(prospects: readonly ProspectEvidence[]): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
     const browser = this.gatewayEnv().BROWSER;
     const urls = [...new Set(prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]))].slice(0, 20);
@@ -1190,7 +1209,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
           if (!browser) throw new Error("browser_binding_missing");
           const markdown = await browserMarkdown(browser as never, { url, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
-          const excerpt = markdown.trim().slice(0, 5000);
+          const excerpt = markdown.trim().slice(0, 30000);
           if (excerpt.length < 80) throw new Error("page_content_missing");
           return { url, excerpt };
         } catch (error) {

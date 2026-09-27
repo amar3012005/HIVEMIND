@@ -16,6 +16,8 @@ export default {
       const headers = new Headers(request.headers);
       headers.set("x-hm-ticket-user-id", ticket.userId);
       headers.set("x-hm-ticket-org-id", ticket.orgId);
+      headers.delete("x-hm-ticket-employee");
+      if (ticket.employee) headers.set("x-hm-ticket-employee", JSON.stringify(ticket.employee));
       return (await routeAgentRequest(new Request(request, { headers }), env)) || new Response("Not found", { status: 404 });
     }
     if (url.pathname.startsWith("/v1/company/") && url.pathname.endsWith("/artifacts")) {

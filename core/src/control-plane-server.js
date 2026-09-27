@@ -10978,10 +10978,19 @@ Write the persona now.`;
         || !await getActiveOrganizationMembership(prisma, { userId, orgId })) {
       return jsonResponse(res, { error: 'Room not found' }, 404);
     }
-    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, archivedAt: null }, select: { id: true } });
+    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, archivedAt: null }, select: { id: true, permanentLeadId: true, participantIds: true } });
     if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+    const lead = room.permanentLeadId && room.participantIds.includes(room.permanentLeadId)
+      ? await prisma.digitalEmployee.findFirst({
+          where: { id: room.permanentLeadId, orgId, archivedAt: null },
+          select: { id: true, slug: true, name: true, roleArchetype: true, persona: true },
+        }) : null;
+    const employee = lead ? {
+      id: lead.id, slug: lead.slug.slice(0, 120), name: lead.name.slice(0, 100),
+      role: String(lead.roleArchetype || '').slice(0, 100), persona: String(lead.persona || '').slice(0, 2500),
+    } : null;
     const expiresAt = Date.now() + 120_000;
-    const encoded = Buffer.from(JSON.stringify({ v: 1, orgId, userId, agentName, expiresAt })).toString('base64url');
+    const encoded = Buffer.from(JSON.stringify({ v: employee ? 2 : 1, orgId, userId, agentName, expiresAt, ...(employee ? { employee } : {}) })).toString('base64url');
     const signature = crypto.createHmac('sha256', process.env.HIVEMIND_MASTER_API_KEY).update(encoded).digest('base64url');
     return jsonResponse(res, { ticket: `${encoded}.${signature}`, expiresAt });
   }

@@ -2,6 +2,14 @@ export const SPECIALIST_ROLES = ["research", "strategy", "verification"] as cons
 
 export type SpecialistRole = (typeof SPECIALIST_ROLES)[number];
 
+export interface EmployeeIdentity {
+  id: string;
+  slug: string;
+  name: string;
+  role: string;
+  persona: string;
+}
+
 export interface TaskEnvelope {
   runId: string;
   orgId: string;
@@ -11,6 +19,7 @@ export interface TaskEnvelope {
   inputRefs: string[];
   outputSchemaId: string;
   task?: string;
+  employee?: EmployeeIdentity;
 }
 
 export interface ToolGrant {
@@ -63,6 +72,7 @@ export interface OperatingPlan {
 export interface TaskAgentState {
   envelope: TaskEnvelope | null;
   role: SpecialistRole | null;
+  employee?: EmployeeIdentity | null;
   tools: string[];
   events: TraceEvent[];
   places: LocalCompany[];

@@ -16,6 +16,7 @@ import { partialToolText } from "./draft-stream";
 import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
+import { artifactForModel, trimStoredArtifactPart } from "./artifact-model";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
@@ -227,6 +228,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const orgId = match[1];
     const task = typeof parsed.task === "string" ? parsed.task.slice(0, 2000) : "";
+    await this.repairOversizedArtifactHistory();
     const previousRequest = [...(this.state.events ?? [])].reverse().find((event) => event.step === "user")?.detail ?? "";
     if (this.state.operatingPlan?.tasks.length) {
       const latestTurn = [...(this.state.events ?? [])].reverse();
@@ -307,6 +309,20 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     ensureCompanyTables(this.sql.bind(this));
     const row = this.sql`SELECT id, kind, title, content_type, body, storage_location, created_at FROM company_artifacts WHERE id = ${id} LIMIT 1`[0];
     return row ? { id: String(row.id), kind: String(row.kind), title: String(row.title), contentType: String(row.content_type), body: String(row.body ?? ""), storageLocation: String(row.storage_location ?? ""), createdAt: String(row.created_at) } : null;
+  }
+
+  private async repairOversizedArtifactHistory(): Promise<void> {
+    let repaired = false;
+    for (const row of await this.session.getHistoryRowStats()) {
+      if (row.role !== "assistant" || row.bytes < 12000) continue;
+      const message = await this.session.getMessage(row.id);
+      if (!message) continue;
+      const parts = message.parts.map(trimStoredArtifactPart);
+      if (parts.every((part, index) => part === message.parts[index])) continue;
+      await this.session.updateMessage({ ...message, parts });
+      repaired = true;
+    }
+    if (repaired) await this.syncMessagesFromStorage();
   }
 
   async createPdfArtifact(id: string): Promise<StoredArtifact> {
@@ -775,14 +791,32 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const loadArtifact = tool({
-      description: "Read one artifact this company already stored in Cloudflare.",
+      description: "Read bounded text or a visual observation of one stored artifact. Image bytes never enter model context. Save only verified visible facts.",
       inputSchema: z.object({ id: z.string().min(8).max(80).optional() }),
       execute: async ({ id }): Promise<unknown> => {
         this.assertTool("load_artifact");
-        const artifacts = await this.listCompanyArtifacts();
-        const chosen = id ? artifacts.find((item) => item.id === id) : artifacts[0];
+        const artifactId = id || (await this.listArtifactMetadata())[0]?.id;
+        const chosen = artifactId ? await this.getCompanyArtifact(artifactId) : null;
         this.note("load_artifact", chosen ? chosen.title : "none");
-        return chosen ?? { error: "artifact_not_found" };
+        if (!chosen) return { error: "artifact_not_found" };
+        if (!chosen.contentType.startsWith("image/")) return artifactForModel(chosen);
+        const ai = this.gatewayEnv().AI as { run?: (model: string, input: unknown) => Promise<unknown> } | undefined;
+        if (!ai?.run) return artifactForModel(chosen);
+        try {
+          const result = await ai.run("@cf/moondream/moondream3.1-9B-A2B", {
+            task: "query",
+            image: `data:${chosen.contentType};base64,${chosen.body}`,
+            question: "Describe visible page content and quote only clearly legible text. Separate page text from cookie notices. Say when text is unreadable.",
+            stream: false,
+            reasoning: false,
+            max_tokens: 900,
+          });
+          const answer = result && typeof result === "object" && "answer" in result ? String((result as { answer?: unknown }).answer ?? "") : "";
+          return artifactForModel(chosen, answer);
+        } catch (error) {
+          this.note("load_artifact", `vision unavailable: ${error instanceof Error ? error.message.slice(0, 100) : "unknown"}`);
+          return artifactForModel(chosen);
+        }
       },
     });
     const mapsTool = tool({

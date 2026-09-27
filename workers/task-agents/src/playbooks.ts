@@ -86,7 +86,7 @@ export function localPlaybook(id: string): LocalPlaybook | null {
 }
 
 export function localPlaybookVersion(id: string): number {
-  return id === "local:outreach.prospect-list" ? PROSPECT_CONTRACT.version : 1;
+  return LOCAL_CONTRACTS[id]?.version ?? 1;
 }
 
 export interface LocalExecutionContract {
@@ -111,9 +111,33 @@ export const PROSPECT_CONTRACT: LocalExecutionContract = {
   approvals: ["No outreach, connected-app mutation, memory write, or screenshot without operator instruction", "Connected-app writes wait for runtime approval and provider receipt"],
 };
 
+const LOCAL_CONTRACTS: Record<string, LocalExecutionContract> = {
+  "local:outreach.prospect-list": PROSPECT_CONTRACT,
+  "local:research.competitor-market": {
+    version: 2,
+    inputs: ["Authenticated company offer and audience", "Requested geography and question", "Requested output format and scope"],
+    owner: "Assigned room employee owns the judgment and final handoff.",
+    allowedActions: ["Focused company recall", "One batched public search when current market evidence is needed", "Primary-source reads", "Requested report artifact"],
+    evidence: ["Separate company memory from current external evidence", "Attach source URLs and dates to decisive competitor and market claims", "Treat missing scoped recall as unknown, not proof of no traction"],
+    completion: ["Answer the actual market question with a bounded judgment and gaps", "For a requested report, include a sourced comparison and saved artifact receipt", "For a direct status answer, do not create an unrequested artifact"],
+    recovery: ["Reuse pinned snapshot and verified receipts", "Fetch only missing decisive sources", "If evidence remains insufficient, give a bounded answer and name the gap"],
+    approvals: ["No connected-app mutation, publication, or company memory write without operator instruction"],
+  },
+  "local:fundraising.pitch-deck": {
+    version: 2,
+    inputs: ["Authenticated company facts", "Round and target audience", "Requested deck format and any supplied figures"],
+    owner: "Assigned room employee owns the investor narrative, artifact, and final handoff.",
+    allowedActions: ["Focused company recall", "Batched public research for current market claims", "Primary-source verification", "Deck artifact render"],
+    evidence: ["Each material claim has a slide number, source, date, and verified/company-reported/assumption/open-input status", "Never invent traction, revenue, valuation, market size, customer names, or raise terms"],
+    completion: ["Complete numbered slides covering problem, buyer, solution, product, evidence, market, competition, go-to-market, model, team, milestones, ask, and sources", "Produce a saved deck artifact and requested PDF receipt", "Never mark finished from outline text alone"],
+    recovery: ["Resume from pinned snapshot and saved slide content", "Render missing format without repeating completed research", "Keep run incomplete when a requested artifact has no receipt"],
+    approvals: ["No investor send, publication, connected-app mutation, or company memory write without operator instruction"],
+  },
+};
+
 export function localPlaybookContract(id: string): string {
-  if (id !== "local:outreach.prospect-list") return "";
-  const contract = PROSPECT_CONTRACT;
+  const contract = LOCAL_CONTRACTS[id];
+  if (!contract) return "";
   return [
     `Execution contract v${contract.version}:`,
     `Inputs: ${contract.inputs.join("; ")}.`,
@@ -122,7 +146,7 @@ export function localPlaybookContract(id: string): string {
     `Evidence: ${contract.evidence.join("; ")}.`,
     `Completion: ${contract.completion.join("; ")}.`,
     `Recovery: ${contract.recovery.join("; ")}.`,
-    `Approvals: ${contract.approvals.join("; ")}. The room runtime saves a requested report artifact after final synthesis; never use hivemind_meta save for that artifact. Do not use connected-app discovery for public pages.`,
+    `Approvals: ${contract.approvals.join("; ")}. The room runtime saves requested artifacts after final synthesis; never use hivemind_meta save for an artifact. Do not use connected-app discovery for public pages.`,
   ].join("\n");
 }
 

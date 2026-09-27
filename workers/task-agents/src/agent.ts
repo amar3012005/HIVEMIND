@@ -601,7 +601,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const refineRequested = this.playbookRefinementRequested();
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -959,7 +959,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const playbook = tool({
-      description: "Load one playbook method by id.",
+      description: "Read a versioned company playbook by its exact id, including execution contract. Use this for playbook questions; skill resources do not contain playbooks.",
       inputSchema: z.object({ id: z.string().min(3).max(80) }),
       execute: async ({ id }): Promise<{ id: string; body: string } | { error: string }> => {
         this.assertTool("playbook_get");

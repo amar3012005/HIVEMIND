@@ -120,6 +120,13 @@ test("versioned prospect contract requires per-account location and sector recei
   assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum", "https://dkb.example/banking"], 3).reason, "prospect_count_short");
 });
 
+test("market and deck contracts pin evidence and artifact completion", () => {
+  assert.equal(localPlaybookVersion("local:research.competitor-market"), 2);
+  assert.match(localPlaybookContract("local:research.competitor-market"), /missing scoped recall as unknown/);
+  assert.equal(localPlaybookVersion("local:fundraising.pitch-deck"), 2);
+  assert.match(localPlaybookContract("local:fundraising.pitch-deck"), /saved deck artifact and requested PDF receipt/);
+});
+
 test("image capture is available only for a visual request", () => {
   assert.equal(requestsImageCapture("Get a screenshot of the main page"), true);
   assert.equal(requestsImageCapture("Do a visual audit of the landing page"), true);

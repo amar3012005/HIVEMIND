@@ -435,6 +435,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return this.sql`SELECT id, org_id, user_id, room_name, employee_slug, goal, status, playbook_id, playbook_version, snapshot_hash, artifact_refs, source_refs, reason, created_at, updated_at FROM company_workrun_index ORDER BY created_at DESC LIMIT 50`;
   }
 
+  listIndexedEmployeeWorkRuns(input: { orgId: string; userId: string; employeeSlug: string; limit: number }): Record<string, unknown>[] {
+    if (String((this as { name?: string }).name ?? "") !== `company-${input.orgId}` || !/^[0-9a-f-]{36}$/i.test(input.userId)) throw new Error("workrun_index_invalid");
+    ensureCompanyTables(this.sql.bind(this));
+    return this.sql`SELECT id, room_name, goal, status, playbook_id, playbook_version, artifact_refs, source_refs, reason, created_at, updated_at FROM company_workrun_index WHERE org_id = ${input.orgId} AND user_id = ${input.userId} AND employee_slug = ${input.employeeSlug} ORDER BY created_at DESC LIMIT ${Math.min(10, Math.max(1, input.limit))}`;
+  }
+
   async finishCurrentCompanyWorkRun(complete: boolean, reason: string): Promise<void> {
     const envelope = this.state.envelope;
     if (!envelope) return;
@@ -918,6 +924,19 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         });
       },
     });
+    const employeeWorkRuns = tool({
+      description: "Read recent durable WorkRuns owned by this room's assigned employee in the authenticated workspace. Returns statuses and artifact/source references; does not read app data or change state.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(10).optional() }),
+      execute: async ({ limit }): Promise<{ runs: Record<string, unknown>[] }> => {
+        const identity = this.assertTool("employee_workruns");
+        const employeeSlug = this.state.employee?.slug;
+        if (!employeeSlug) return { runs: [] };
+        const company = await getAgentByName((this.gatewayEnv() as GatewayEnv & Env).HivemindTaskAgent as never, `company-${identity.orgId}`);
+        const runs = await (company as { listIndexedEmployeeWorkRuns(input: { orgId: string; userId: string; employeeSlug: string; limit: number }): Promise<Record<string, unknown>[]> }).listIndexedEmployeeWorkRuns({ orgId: identity.orgId, userId: identity.userId, employeeSlug, limit: limit ?? 5 });
+        this.note("employee_workruns", `${employeeSlug}: ${runs.length} runs`);
+        return { runs };
+      },
+    });
     const playbooks = tool({
       description: "List playbook names and one-line descriptions. Does not return the method.",
       inputSchema: z.object({}),
@@ -1104,6 +1123,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       composio_discover_reads: discover,
       composio_read: readApp,
       hivemind_connected_task: connectedTask,
+      employee_workruns: employeeWorkRuns,
       parallel_search: search,
       parallel_search_batch: searchBatch,
       composio_web_search: composioWeb,

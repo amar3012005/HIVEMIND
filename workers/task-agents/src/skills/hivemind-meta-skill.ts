@@ -14,5 +14,7 @@ The native hivemind_meta tool is registered separately from this skill. Call it 
 
 Use the compact profile already in the task prompt when sufficient. Call a tool for missing internal facts. Distinguish an empty receipt from an unavailable tool. External research still needs independent sources.
 
+For this assigned employee's recent task history, use employee_workruns from the records tool family. It reads Worker-owned WorkRun receipts across rooms for the authenticated user and employee; it is not a HIVEMIND memory inventory. Use hivemind_meta recall when the question needs saved company knowledge beyond those run receipts.
+
 Deletes and profile updates are unavailable.
 `;

@@ -300,6 +300,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       createdAt: new Date().toISOString(),
     };
     this.sql`INSERT INTO company_artifacts (id, kind, title, content_type, body, storage_location, created_at) VALUES (${row.id}, ${row.kind}, ${row.title}, ${row.contentType}, ${row.body}, ${row.storageLocation}, ${row.createdAt})`;
+    if (this.state.envelope?.runId) this.sql`INSERT INTO company_artifact_runs (artifact_id, run_id) VALUES (${row.id}, ${this.state.envelope.runId})`;
     this.note("artifact", JSON.stringify({ id: row.id, kind: row.kind, title: row.title, contentType: row.contentType }));
     return row;
   }
@@ -447,11 +448,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return;
     ensureCompanyTables(this.sql.bind(this));
-    const run = this.sql`SELECT created_at FROM company_runs WHERE id = ${envelope.runId} LIMIT 1`[0];
+    const run = this.sql`SELECT id FROM company_runs WHERE id = ${envelope.runId} LIMIT 1`[0];
     if (!run) return;
-    const artifactRefs = this.sql`SELECT id FROM company_artifacts WHERE created_at >= ${String(run.created_at)} ORDER BY created_at ASC LIMIT 40`.map((row) => String(row.id));
+    const artifactRefs = this.sql`SELECT artifact_id FROM company_artifact_runs WHERE run_id = ${envelope.runId} LIMIT 40`.map((row) => String(row.artifact_id));
+    const sourceRefs = this.sql`SELECT url FROM source_read_receipts WHERE run_id = ${envelope.runId} ORDER BY read_at ASC LIMIT 40`.map((row) => String(row.url));
     const company = await getAgentByName((this.gatewayEnv() as GatewayEnv & Env).HivemindTaskAgent as never, `company-${envelope.orgId}`);
-    const receipt = await (company as { finishIndexedCompanyWorkRun(input: { id: string; orgId: string; status: "completed" | "incomplete"; reason: string; artifactRefs: string[]; sourceRefs: string[] }): Promise<{ id: string; status: string }> }).finishIndexedCompanyWorkRun({ id: envelope.runId, orgId: envelope.orgId, status: complete ? "completed" : "incomplete", reason, artifactRefs, sourceRefs: this.verifiedSourceUrls() });
+    const receipt = await (company as { finishIndexedCompanyWorkRun(input: { id: string; orgId: string; status: "completed" | "incomplete"; reason: string; artifactRefs: string[]; sourceRefs: string[] }): Promise<{ id: string; status: string }> }).finishIndexedCompanyWorkRun({ id: envelope.runId, orgId: envelope.orgId, status: complete ? "completed" : "incomplete", reason, artifactRefs, sourceRefs });
     await this.note("workrun-index", `${receipt.id} ${receipt.status}`);
   }
 

@@ -20,6 +20,10 @@ export function ensureCompanyTables(sql: {
     storage_location TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   )`;
+  sql`CREATE TABLE IF NOT EXISTS company_artifact_runs (
+    artifact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL
+  )`;
   sql`CREATE TABLE IF NOT EXISTS company_runs (
     id TEXT PRIMARY KEY,
     employee_slug TEXT NOT NULL,

@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { companyWorkComplete, directReplyComplete, pdfReportReady, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion";
+import { companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { globalCatalog, localCatalog, localPlaybook } from "./playbooks";
 import type { TaskEnvelope } from "./types";
@@ -78,7 +78,6 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const deckRequested = plan.outputKind === "slide_deck" || requestsSlideDeck(asked);
     const artifactForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:artifact|file)\b/i.test(work.task ?? "");
     const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
-    const artifactRequested = !artifactForbidden && (requestsArtifact(asked) || deckRequested);
     if (work.modePreference === "company" || deckRequested) plan.mode = "company";
     else if (/\b(screenshot|capture)\b/i.test(asked) || (plan.mode === "direct" && requestsArtifact(asked))) plan.mode = "action";
     plan.tasks = plan.mode === "company" ? currentTurnTasks(plan.tasks) : [];
@@ -103,12 +102,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
     const selectedPlaybook = plan.mode === "company" ? localPlaybook(plan.localPlaybookId) : null;
     if (plan.mode === "company" && !selectedPlaybook) throw new Error("company_playbook_not_selected");
-    const isArtifactTask = (task: string) => /\b(?:render|save|create|export|attach|generate|produce)\b[^.!?]{0,100}\b(?:pdf|artifact|file)\b/i.test(task);
-    if (plan.mode === "company" && deckRequested && artifactRequested && !plan.tasks.some(isArtifactTask)) {
+    const artifactRequested = !artifactForbidden && planRequestsArtifact(work.task, plan.outputKind, plan.tasks);
+    if (plan.mode === "company" && deckRequested && artifactRequested && !plan.tasks.some(isArtifactPlanTask)) {
       plan.tasks = [...plan.tasks.slice(0, 5), "Render and verify the finished pitch deck PDF artifact"];
     }
     const artifactTaskIds = artifactRequested
-      ? plan.tasks.flatMap((task, index) => isArtifactTask(task) ? [index + 1] : [])
+      ? plan.tasks.flatMap((task, index) => isArtifactPlanTask(task) ? [index + 1] : [])
       : [];
     const missingContentTasks = (completed: readonly number[]) =>
       missingPlanTaskIds(plan.tasks.length, [...completed, ...artifactTaskIds]);
@@ -258,14 +257,14 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
     const missingPlanIds = missingContentTasks(written.completedTaskIds);
     if (missingPlanIds.length) {
-      const reply = `I could not finish planned tasks ${missingPlanIds.join(", ")}. I have kept the plan open.`;
+      const reply = `${written.report.trim()}\n\nI could not finish planned tasks ${missingPlanIds.join(", ")}. The plan remains open.`.trim();
       await durable.do("plan-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "plan_incomplete"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "plan_incomplete", report: reply };
     }
     const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
-      const reply = reason === "prospect_sources_missing" ? "I could not verify the prospect list against external sources. I have not saved it. Please retry the research." : `I could not complete this work: ${reason}.`;
+      const reply = `${reason === "prospect_sources_missing" ? "Prospect citations lack matching external tool receipts. Draft below is unverified; no artifact was saved. Plan remains open." : `I could not complete this work: ${reason}.`}\n\n${written.report.trim()}`.trim();
       await durable.do("incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", reason); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason, report: reply };
     }

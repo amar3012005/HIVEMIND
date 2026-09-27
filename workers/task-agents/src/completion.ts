@@ -29,6 +29,16 @@ export function requestsArtifact(task: string): boolean {
     && !/\b(do not|don't|never|without|no)\b[^.!?]{0,100}\b(create|generate|make|save|export|render|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact)\b/i.test(task);
 }
 
+export function planRequestsArtifact(task: string, outputKind: string, tasks: readonly string[]): boolean {
+  if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:artifact|file)\b/i.test(task)) return false;
+  return requestsArtifact(task) || outputKind !== "none" || tasks.some((step) =>
+    /\b(?:render|save|create|export|attach|generate|produce)\b[^.!?]{0,100}\b(?:pdf|artifact|file|document)\b/i.test(step));
+}
+
+export function isArtifactPlanTask(task: string): boolean {
+  return /\b(?:render|save|create|export|attach|generate|produce)\b[^.!?]{0,100}\b(?:pdf|artifact|file|document)\b/i.test(task);
+}
+
 export function requestsSlideDeck(task: string): boolean {
   return /\b(?:create|craete|generate|make|build|write|draft|finish|complete|render|export|produce|design|give me)\b[^.!?]{0,140}\b(?:pitch\s+deck|picth\s+deck|slide\s+deck|presentation)\b/i.test(task)
     && !/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:pitch\s+deck|slide\s+deck|presentation)\b/i.test(task);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { companyWorkComplete, directReplyComplete, pdfReportReady, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+import { companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
 
 test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsMemorySave("Save this to company memory."), true);
@@ -35,6 +35,14 @@ test("artifact saving requires a positive creation request", () => {
   assert.equal(requestsArtifact("craete me a full fundraising picth deck for singulance seed round"), true);
   assert.equal(requestsArtifact("Create a pitch deck. Do not create an artifact."), false);
   assert.equal(requestsSlideDeck("Review our investor presentation"), false);
+});
+
+test("Think plan document step triggers artifact handoff unless operator forbids it", () => {
+  const tasks = ["Find Berlin buyer accounts", "Save prospect list document and check its receipt"];
+  assert.equal(planRequestsArtifact("find me clients from berlin", "none", tasks), true);
+  assert.equal(isArtifactPlanTask(tasks[1]), true);
+  assert.equal(planRequestsArtifact("Find clients in Berlin. Do not create an artifact.", "document", tasks), false);
+  assert.equal(planRequestsArtifact("Summarize these findings", "none", []), false);
 });
 
 test("slide deck needs actual numbered slides", () => {

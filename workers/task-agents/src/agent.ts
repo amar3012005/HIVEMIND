@@ -11,6 +11,7 @@ import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { companyWorkComplete, requestsMemorySave } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
+import { scoreCompanyBehavior, type SpanScoreInput } from "./span-score";
 import { partialToolText } from "./draft-stream";
 import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
@@ -131,7 +132,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
   }
 
-  async startCompanyWork(work: { runId: string; orgId: string; userId: string; taskType: string; phase: string; inputRefs: string[]; outputSchemaId: string; company: string; website: string; market: string; task: string }): Promise<string> {
+  async startCompanyWork(work: { runId: string; orgId: string; userId: string; taskType: string; phase: string; inputRefs: string[]; outputSchemaId: string; company: string; website: string; market: string; task: string; previousRequest?: string; modePreference?: "auto" | "company" | "direct"; startedAt?: string }): Promise<string> {
     const workflowId = await this.runWorkflow("TASK_LIFECYCLE", work);
     this.setState({ ...this.state, workflowId });
     this.note("workrun", "queued");
@@ -162,9 +163,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async onMessage(_connection: unknown, message: unknown): Promise<void> {
     const text = typeof message === "string" ? message : "";
-    let parsed: { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown } | null = null;
+    let parsed: { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown; modePreference?: unknown } | null = null;
     try {
-      parsed = JSON.parse(text) as { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown };
+      parsed = JSON.parse(text) as { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown; modePreference?: unknown };
     } catch {
       return;
     }
@@ -226,6 +227,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const orgId = match[1];
     const task = typeof parsed.task === "string" ? parsed.task.slice(0, 2000) : "";
+    const previousRequest = [...(this.state.events ?? [])].reverse().find((event) => event.step === "user")?.detail ?? "";
     if (this.state.operatingPlan?.tasks.length) {
       const latestTurn = [...(this.state.events ?? [])].reverse();
       const lastUser = latestTurn.findIndex((event) => event.step === "user");
@@ -252,6 +254,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         phase: "room",
         inputRefs: facts.website ? [facts.website] : [],
         outputSchemaId: "room_report_v1",
+        previousRequest: previousRequest.slice(0, 2000),
+        modePreference: parsed.modePreference === "company" || parsed.modePreference === "direct" ? parsed.modePreference : "auto",
+        startedAt: new Date().toISOString(),
         ...facts,
         task,
       });
@@ -319,8 +324,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!browser?.quickAction) throw new Error("browser_binding_missing");
     const markdown = new MarkdownIt({ html: false, linkify: true });
     markdown.renderer.rules.image = () => "";
-    const html = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:12pt/1.55 Arial,sans-serif;color:#171717;max-width:760px;margin:48px auto}h1,h2,h3{break-after:avoid}h1{font-size:22pt}h2{font-size:16pt;margin-top:25px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px;text-align:left}a{color:#2563a6}pre{white-space:pre-wrap}p,li{break-inside:avoid}</style></head><body>${markdown.render(source.body)}</body></html>`;
-    const response = await browser.quickAction("pdf", { html, pdfOptions: { format: "a4", printBackground: true } });
+    const slideStarts = [...source.body.matchAll(/^##\s+Slide\s+\d+\s*[—:–-]\s*.+$/gim)];
+    const isDeck = slideStarts.length >= 8;
+    const content = isDeck
+      ? slideStarts.map((slide, index) => `<section class="slide">${markdown.render(source.body.slice(slide.index, slideStarts[index + 1]?.index))}</section>`).join("")
+      : markdown.render(source.body);
+    const html = `<!doctype html><html><head><meta charset="utf-8"><style>@page{size:${isDeck ? "297mm 167mm" : "a4"};margin:${isDeck ? "0" : "20mm"}}body{font:${isDeck ? "18pt/1.38" : "12pt/1.55"} Arial,sans-serif;color:#171717;${isDeck ? "margin:0" : "max-width:760px;margin:28px auto"}}h1,h2,h3{break-after:avoid}h1{font-size:22pt}h2{font-size:${isDeck ? "30pt" : "16pt"};margin-top:0}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px;text-align:left}a{color:#2563a6}pre{white-space:pre-wrap}p,li{break-inside:avoid}.slide{box-sizing:border-box;width:297mm;min-height:167mm;padding:18mm 22mm;break-after:page}.slide:last-child{break-after:auto}.slide p,.slide li{max-width:92ch}</style></head><body>${content}</body></html>`;
+    const response = await browser.quickAction("pdf", { html, pdfOptions: { format: "a4", landscape: isDeck, preferCSSPageSize: isDeck, printBackground: true } });
     if (!response.ok) throw new Error(`pdf_generation_failed_${response.status}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.length < 5 || new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-" || bytes.length > 2000000) throw new Error("pdf_invalid_or_too_large");
@@ -340,6 +350,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const global = globalPlaybookBody(id);
     return global ? global.body : null;
+  }
+
+  async loadTaskPlaybook(id: string): Promise<string> {
+    const body = this.resolvePlaybook(id);
+    if (!body || !localPlaybook(id)) throw new Error("company_playbook_not_found");
+    await this.note("playbook_get", id);
+    return body;
   }
 
   refineLocalPlaybook(id: string, instruction: string): { saved: true; id: string } | { error: string } {
@@ -384,7 +401,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       ...this.state,
       operatingPlan,
     });
-    this.note("operating-plan-state", JSON.stringify(operatingPlan));
+    if (titles.length) this.note("operating-plan-state", JSON.stringify(operatingPlan));
   }
 
   updateOperatingTask(id: number, status: "active" | "completed" | "blocked", verified = false): { updated: boolean; awaitingReport?: boolean } {
@@ -471,29 +488,33 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const capture = tool({
-      description: "Capture a full-page screenshot of a public HTTPS webpage with the native Cloudflare Browser Run binding and save its PNG artifact. Use directly for public pages; no connected-app search or grant is needed.",
+      description: "Capture a full-page screenshot of a public HTTPS webpage with the native Cloudflare Browser Run binding and save its image artifact. Use directly for public pages; no connected-app search or grant is needed.",
       inputSchema: z.object({ url: z.url(), title: z.string().min(3).max(120).optional() }),
-      execute: async ({ url, title }): Promise<{ id: string; title: string; contentType: string }> => {
+      execute: async ({ url, title }): Promise<{ id: string; title: string; contentType: string; sourceUrl: string }> => {
         this.assertTool("browser_capture");
         const target = new URL(url);
         if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+        if (/\b(?:home|main)\s*page\b/i.test(this.state.envelope?.task ?? "") && target.pathname !== "/") throw new Error("requested_homepage_required");
         const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
         if (!browser?.quickAction) throw new Error("browser_binding_missing");
         const response = await browser.quickAction("screenshot", {
           url: target.href,
-          screenshotOptions: { fullPage: true },
-          scrollPage: true,
-          gotoOptions: { waitUntil: "load", timeout: 45000 },
-          waitForTimeout: 2000,
-          actionTimeout: 60000,
+          screenshotOptions: { fullPage: true, type: "jpeg", quality: 65 },
+          viewport: { width: 1280, height: 800 },
+          scrollPage: false,
+          gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 },
+          ...(target.pathname === "/" ? { waitForSelector: { selector: "h1", visible: true, timeout: 20000 } } : {}),
+          waitForTimeout: 1000,
+          actionTimeout: 30000,
         });
         if (!response.ok) throw new Error(`capture_failed_${response.status}: ${(await response.text()).slice(0, 300)}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.length < 8 || bytes.length > 2000000 || ![137, 80, 78, 71].every((byte, index) => bytes[index] === byte)) throw new Error("capture_invalid_or_too_large");
+        if (bytes.length < 8 || bytes.length > 2000000 || bytes[0] !== 255 || bytes[1] !== 216) throw new Error("capture_invalid_or_too_large");
         let body = "";
         for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
-        const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.png$/i, "")}.png`, contentType: "image/png", body });
-        return { id: artifact.id, title: artifact.title, contentType: artifact.contentType };
+        const page = target.pathname === "/" ? "" : ` (${target.pathname})`;
+        const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.(png|jpe?g)$/i, "")}${page}.jpg`, contentType: "image/jpeg", body });
+        return { id: artifact.id, title: artifact.title, contentType: artifact.contentType, sourceUrl: target.href };
       },
     });
     const updatePlanTask = tool({
@@ -887,6 +908,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     });
   }
 
+  hasArtifactSince(kind: string, since: string): boolean {
+    if (!since) return false;
+    ensureCompanyTables(this.sql.bind(this));
+    return this.sql`SELECT id FROM company_artifacts WHERE kind = ${kind} AND created_at >= ${since} LIMIT 1`.length > 0;
+  }
+
   async recallTaskContext(orgId: string, userId: string, query: string): Promise<unknown> {
     const [result, profile] = await Promise.all([
       recallCompany(this.gatewayEnv(), orgId, userId, query),
@@ -932,6 +959,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       this.note("governance", `${verdict.verdict}: ${verdict.note}`);
       return verdict;
     }
+  }
+
+  async scoreCompletedCompanyWork(input: Omit<SpanScoreInput, "events">): Promise<void> {
+    const result = await scoreCompanyBehavior(this.gatewayEnv(), { ...input, events: this.trace() });
+    if (result.status !== "unavailable" || result.reason !== "disabled") this.note("behavior-score", JSON.stringify(result));
   }
 
   async snapshot(): Promise<{ events: TraceEvent[]; places: LocalCompany[]; transcript: string }> {

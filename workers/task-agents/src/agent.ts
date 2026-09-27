@@ -413,6 +413,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return { proposed: true, id: target, proposalId, status: "pending_review" };
   }
 
+  playbookProposalForCurrentRun(): { id: string; instruction: string } | null {
+    const runId = this.state.envelope?.runId;
+    if (!runId) return null;
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT id, instruction FROM company_playbook_proposals WHERE source_run_id = ${runId} ORDER BY created_at DESC LIMIT 1`[0];
+    return row ? { id: String(row.id), instruction: String(row.instruction) } : null;
+  }
+
+  playbookRefinementRequested(): boolean {
+    return /(?:refin|improv|propos|chang)[^.!?]{0,80}playbook|playbook[^.!?]{0,80}(?:refin|improv|propos|chang)/i.test(this.state.envelope?.task ?? "");
+  }
+
   async saveCompanyMemory(title: string, content: string, idempotencyKey?: string): Promise<unknown> {
     const envelope = this.state.envelope;
     if (!envelope) return { error: "task_not_bound" };
@@ -426,6 +438,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
     const tools = toolsForGroups(groups);
+    if (this.playbookRefinementRequested()) tools.push("refine_local_playbook");
     this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
     this.note("reset_tools", groups.join(", "));
     return tools;
@@ -484,9 +497,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
     };
     const granted = this.state.tools;
+    const refineRequested = this.playbookRefinementRequested();
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || !catalogTools.has(name)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -852,6 +866,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       execute: async ({ groups }): Promise<{ tools: string[] }> => {
         this.assertTool("reset_tools");
         const tools = toolsForGroups(groups);
+        if (this.playbookRefinementRequested()) tools.push("refine_local_playbook");
         this.setState({ ...this.state, toolGroups: [...groups], tools });
         this.note("reset_tools", groups.join(", "));
         return { tools };

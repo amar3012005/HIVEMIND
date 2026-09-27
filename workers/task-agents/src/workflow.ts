@@ -183,6 +183,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     if (plan.mode === "action") {
+      const proposalRequested = /(?:refin|improv|propos|chang)[^.!?]{0,80}playbook|playbook[^.!?]{0,80}(?:refin|improv|propos|chang)/i.test(asked);
       await durable.do("enable-action-tools", async () => {
         await this.agent.applyGroups(plan.groups, true);
         this.agent.setOperatingPlan(work.runId, "", []);
@@ -205,6 +206,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           actionGuidance = "No image artifact was saved in this turn. A prior room artifact cannot satisfy this request. Call browser_capture for the requested page now, or report its concrete error without claiming success. ";
           continue;
         }
+        if (proposalRequested && !this.agent.playbookProposalForCurrentRun()) {
+          actionGuidance = "No playbook proposal receipt exists. Call refine_local_playbook now; it creates a pending_review proposal without changing active instructions. Report only the returned proposal ID. ";
+          continue;
+        }
         if (!missingPlanTaskIds(plan.tasks.length, result.completedTaskIds).length) break;
         actionGuidance = `Previous response left planned tasks ${missingPlanTaskIds(plan.tasks.length, result.completedTaskIds).join(", ")} unaccounted for. Continue unfinished work, or explain a concrete blocker. Preserve completed results and return all completed task ids. `;
       }
@@ -215,9 +220,17 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
       const reply = result.report.trim();
       return durable.do("complete-action", async () => {
-        const verdict = directReplyComplete(reply);
+        const proposalId = proposalRequested ? this.agent.playbookProposalForCurrentRun() : null;
+        if (proposalRequested && !proposalId) {
+          const report = "No playbook proposal was saved. I cannot provide a proposal ID without a tool receipt.";
+          await this.agent.note("report", report);
+          await this.agent.note("completion", "playbook_proposal_missing");
+          return { runId: work.runId, orgId: work.orgId, complete: false, reason: "playbook_proposal_missing", report };
+        }
+        const verifiedReply = proposalId ? `Playbook revision proposed for review. Proposal ID: ${proposalId.id}. Status: pending_review. Not applied.\n\n${proposalId.instruction}` : reply;
+        const verdict = directReplyComplete(verifiedReply);
         const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !this.agent.hasArtifactSince("image", work.startedAt ?? "");
-        const output = imageMissing ? "I could not save the requested screenshot artifact." : reply;
+        const output = imageMissing ? "I could not save the requested screenshot artifact." : verifiedReply;
         const missingTasks = missingPlanTaskIds(plan.tasks.length, result.completedTaskIds);
         const pdfSourceInvalid = requestsPdf(asked) && !pdfReportReady(reply);
         const complete = verdict.complete && !imageMissing && !missingTasks.length && !pdfSourceInvalid;
@@ -348,6 +361,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await durable.do("plan-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "plan_incomplete"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "plan_incomplete", report: reply };
     }
+    if (this.agent.playbookRefinementRequested() && !this.agent.playbookProposalForCurrentRun()) {
+      const reply = "No playbook proposal was saved. I cannot provide a proposal ID without a tool receipt.";
+      await durable.do("proposal-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "playbook_proposal_missing"); });
+      return { runId: work.runId, orgId: work.orgId, complete: false, reason: "playbook_proposal_missing", report: reply };
+    }
+    const proposal = this.agent.playbookRefinementRequested() ? this.agent.playbookProposalForCurrentRun() : null;
+    if (proposal) written.report = `# Playbook revision proposal\n\nProposal ID: ${proposal.id}. Status: pending_review. Not applied.\n\n## Proposed change\n${proposal.instruction}`;
     const finalVerdict = companyWorkComplete({ report: written.report, recalled: this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;

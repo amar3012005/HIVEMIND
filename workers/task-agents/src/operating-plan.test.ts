@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { currentTurnTasks, missingPlanTaskIds, updatePlanTask } from "./operating-plan.ts";
+import { completedPlanTaskIds, currentTurnTasks, missingPlanTaskIds, updatePlanTask } from "./operating-plan.ts";
 
 test("updates only a task in the current run", () => {
   const plan = { runId: "run-1", summary: "Research", tasks: [{ id: 1, title: "Recall company", status: "pending" as const }] };
@@ -24,6 +24,16 @@ test("final task stays active until validated report is saved", () => {
 test("keeps a plan open while any planned task lacks completion evidence", () => {
   assert.deepEqual(missingPlanTaskIds(6, [1, 2]), [3, 4, 5, 6]);
   assert.deepEqual(missingPlanTaskIds(3, [3, 1, 2, 2]), []);
+});
+
+test("uses completed tool-updated steps only from current run", () => {
+  const plan = { runId: "run-1", summary: "Campaign", tasks: [
+    { id: 1, title: "Research", status: "completed" as const },
+    { id: 2, title: "Write", status: "active" as const },
+  ] };
+  assert.deepEqual(completedPlanTaskIds(plan, "run-1"), [1]);
+  assert.deepEqual(completedPlanTaskIds(plan, "run-2"), []);
+  assert.deepEqual(missingPlanTaskIds(2, completedPlanTaskIds(plan, "run-1")), [2]);
 });
 
 test("leaves post-approval work out of the current plan", () => {

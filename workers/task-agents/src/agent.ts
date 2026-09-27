@@ -17,7 +17,7 @@ import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdi
 import { scoreCompanyBehavior, type SpanScoreInput } from "./span-score";
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
-import { updatePlanTask } from "./operating-plan";
+import { completedPlanTaskIds, updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
 import { artifactForModel, trimStoredArtifactPart, visionObservation } from "./artifact-model";
@@ -585,6 +585,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.note("operating-plan-state", JSON.stringify(plan));
     this.note("task_updated", `${id}: ${awaitingReport ? "active" : status}`);
     return awaitingReport ? { updated: true, awaitingReport: true } : { updated: true };
+  }
+
+  completedOperatingTaskIds(): number[] {
+    return completedPlanTaskIds(this.state.operatingPlan, this.state.envelope?.runId);
   }
 
   async getSkills(): Promise<SkillSource[]> {

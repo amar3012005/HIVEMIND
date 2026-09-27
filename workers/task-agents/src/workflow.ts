@@ -172,8 +172,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const artifactTaskIds = artifactRequested
       ? plan.tasks.flatMap((task, index) => isArtifactPlanTask(task) ? [index + 1] : [])
       : [];
+    const completedContentTasks = (completed: readonly number[]) =>
+      [...new Set([...completed, ...this.agent.completedOperatingTaskIds()])];
     const missingContentTasks = (completed: readonly number[]) =>
-      missingPlanTaskIds(plan.tasks.length, [...completed, ...artifactTaskIds]);
+      missingPlanTaskIds(plan.tasks.length, [...completedContentTasks(completed), ...artifactTaskIds]);
 
     if (plan.mode === "direct") {
       const reply = plan.reply.trim() || plan.decision.trim();
@@ -405,7 +407,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         });
         if (!pdfForbidden && (requestsPdf(asked) || deckRequested)) await this.agent.createPdfArtifact(saved.id);
       }
-      for (const id of new Set([...written.completedTaskIds, ...artifactTaskIds])) this.agent.updateOperatingTask(id, "completed", true);
+      for (const id of new Set([...completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) this.agent.updateOperatingTask(id, "completed", true);
       await this.agent.note("report", written.report);
       this.agent.rememberSources(written.report);
       if (!requestsMemorySave(asked)) {

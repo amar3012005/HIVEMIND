@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parallelSearch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, saveCompanyMemory } from "./gateway.ts";
+import { parallelSearch, parallelSearchBatch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, saveCompanyMemory } from "./gateway.ts";
 import { toolsForGroups } from "./tool-groups.ts";
 
 test("company catalog exposes native memory gateway", () => {
@@ -41,6 +41,31 @@ test("parallel search uses direct AI Gateway route and keeps URL evidence", asyn
     const result = await parallelSearch({ CLOUDFLARE_ACCOUNT_ID: "account", AI_GATEWAY_ID: "gateway", CLOUDFLARE_AI_GATEWAY_TOKEN: "test-token" }, "Hannover prospects");
     assert.match(called, /\/parallel\/v1beta\/search$/);
     assert.deepEqual(result, { provider: "parallel-ai-gateway", results: [{ title: "Candidate", url: "https://candidate.example", snippet: "Hannover office" }] });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("batch search runs concurrently and preserves partial failures", async () => {
+  const original = globalThis.fetch;
+  let active = 0;
+  let peak = 0;
+  globalThis.fetch = async (_input, init) => {
+    const query = JSON.parse(String(init?.body)).objective as string;
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    if (query === "failed") return Response.json({}, { status: 502 });
+    return Response.json({ results: [{ title: query, url: `https://${query}.example`, text: "Source" }] });
+  };
+  try {
+    const result = await parallelSearchBatch({ CLOUDFLARE_ACCOUNT_ID: "account", AI_GATEWAY_ID: "gateway", CLOUDFLARE_AI_GATEWAY_TOKEN: "test-token" }, ["one", "two", "failed", "four"]);
+    assert.equal(peak, 4);
+    assert.equal(result.searches.length, 4);
+    assert.equal(result.searches[0]?.results[0]?.url, "https://one.example");
+    assert.equal(result.searches[2]?.error, "parallel_search_failed");
+    assert.equal(result.searches[3]?.results[0]?.url, "https://four.example");
   } finally {
     globalThis.fetch = original;
   }

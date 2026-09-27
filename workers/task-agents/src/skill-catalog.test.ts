@@ -6,6 +6,7 @@ import { toolsForGroups } from "./tool-groups.ts";
 
 test("company tools cannot prepare an unsolicited memory write", () => {
   assert.ok(!toolsForGroups(["company"]).includes("save_memory"));
+  assert.ok(toolsForGroups(["web_research"]).includes("parallel_search_batch"));
 });
 
 test("native meta and connected gateways stay available across tool groups", () => {

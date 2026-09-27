@@ -6,7 +6,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
-import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
+import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { companyWorkComplete, previousReport, requestsMemorySave } from "./completion";
 import { CompanyGovernor } from "./governor";
@@ -482,7 +482,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       return { action: "block", reason: "Operator did not request a memory save in this turn." };
     }
     if (this.state.companyContextRequired && !this.state.companyContextLoaded
-      && /^(browser_|parallel_search$|maps_search$|composio_|hivemind_connected_task$)/.test(ctx.toolName)) {
+      && /^(browser_|parallel_search(?:_batch)?$|maps_search$|composio_|hivemind_connected_task$)/.test(ctx.toolName)) {
       return { action: "block", reason: "Load HIVEMIND company context before external tools." };
     }
   }
@@ -924,6 +924,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         return result;
       },
     });
+    const searchBatch = tool({
+      description: "Run four or five distinct research queries concurrently in one tool call. Use for broad market, competitor, prospect, or policy research; inspect returned URL-backed results before synthesis. Use parallel_search for one narrow fact.",
+      inputSchema: z.object({ queries: z.array(z.string().min(3).max(1200)).min(4).max(5) }),
+      execute: async ({ queries }): Promise<unknown> => {
+        this.assertTool("parallel_search_batch");
+        this.note("parallel_search_batch", `${queries.length} searches started`);
+        const result = await parallelSearchBatch(this.gatewayEnv(), queries);
+        this.rememberSources(result.searches.flatMap((search) => search.results));
+        this.note("parallel_search_batch", `${result.searches.filter((search) => search.results.length).length}/${queries.length} searches returned sources`);
+        return result;
+      },
+    });
     return {
       load_company_packet: packet,
       record_evidence: evidence,
@@ -939,6 +951,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       composio_read: readApp,
       hivemind_connected_task: connectedTask,
       parallel_search: search,
+      parallel_search_batch: searchBatch,
       composio_web_search: composioWeb,
       maps_search: mapsTool,
       save_memory: saveMemory,

@@ -1,6 +1,6 @@
 export const TOOL_GROUPS = {
   company: ["hivemind_meta"],
-  web_research: ["parallel_search", "maps_search"],
+  web_research: ["parallel_search", "parallel_search_batch", "maps_search"],
   browser: ["browser_markdown", "browser_extract", "browser_links", "browser_capture"],
   connected_apps: ["hivemind_connected_task"],
   records: ["save_local_companies", "load_artifact"],

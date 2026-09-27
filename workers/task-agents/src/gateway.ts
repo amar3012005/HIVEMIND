@@ -274,6 +274,23 @@ export async function parallelSearch(env: GatewayEnv, query: string): Promise<un
   return { provider: "parallel-ai-gateway", results };
 }
 
+export async function parallelSearchBatch(env: GatewayEnv, queries: readonly string[]): Promise<{ provider: string; searches: Array<{ query: string; results: Array<{ title: string; url: string; snippet: string }>; error?: string }> }> {
+  const settled = await Promise.allSettled(queries.map((query) => parallelSearch(env, query)));
+  return {
+    provider: "parallel-ai-gateway",
+    searches: settled.map((item, index) => {
+      const query = queries[index] ?? "";
+      if (item.status === "rejected") return { query, results: [], error: "search_unavailable" };
+      const value = item.value && typeof item.value === "object" ? item.value as Record<string, unknown> : {};
+      if (!Array.isArray(value.results)) return { query, results: [], error: String(value.error || "search_unavailable") };
+      return { query, results: value.results.slice(0, 5).map((row) => {
+        const result = row && typeof row === "object" ? row as Record<string, unknown> : {};
+        return { title: String(result.title || "").slice(0, 200), url: String(result.url || "").slice(0, 1000), snippet: String(result.snippet || "").slice(0, 350) };
+      }).filter((row) => /^https?:\/\//.test(row.url)) };
+    }),
+  };
+}
+
 export async function postMeta(env: GatewayEnv, tool: string, body: Record<string, unknown>): Promise<unknown> {
   const base = env.HIVEMIND_META_URL?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;

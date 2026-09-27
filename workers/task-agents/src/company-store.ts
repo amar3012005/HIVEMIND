@@ -29,6 +29,23 @@ export function ensureCompanyTables(sql: {
     playbook_snapshot TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   )`;
+  sql`CREATE TABLE IF NOT EXISTS company_workrun_index (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    room_name TEXT NOT NULL,
+    employee_slug TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL,
+    playbook_id TEXT NOT NULL,
+    playbook_version INTEGER NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    artifact_refs TEXT NOT NULL DEFAULT '[]',
+    source_refs TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`;
   sql`CREATE TABLE IF NOT EXISTS company_playbook_notes (
     id TEXT PRIMARY KEY,
     playbook_id TEXT NOT NULL,

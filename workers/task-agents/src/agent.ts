@@ -1,7 +1,7 @@
 import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext } from "@cloudflare/think";
 import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
-import type { Connection } from "agents";
+import { getAgentByName, type Connection } from "agents";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
@@ -393,11 +393,57 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     ensureCompanyTables(this.sql.bind(this));
     const pinned = this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${runId} LIMIT 1`[0];
     if (pinned && String(pinned.playbook_id) !== id) throw new Error("run_playbook_conflict");
-    if (pinned?.playbook_snapshot) return String(pinned.playbook_snapshot);
-    const snapshot = `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
-    this.sql`INSERT OR IGNORE INTO company_runs (id, employee_slug, goal, status, playbook_id, playbook_snapshot, created_at) VALUES (${runId}, ${this.state.employee?.slug || "unassigned"}, ${this.state.operatingPlan?.summary || ""}, ${"active"}, ${id}, ${snapshot}, ${new Date().toISOString()})`;
-    await this.note("playbook_get", `${id}@v${localPlaybookVersion(id)}`);
+    const snapshot = pinned?.playbook_snapshot ? String(pinned.playbook_snapshot) : `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
+    const version = Number(snapshot.match(/^Local playbook \S+ version (\d+)\./)?.[1] || localPlaybookVersion(id));
+    if (!pinned) this.sql`INSERT INTO company_runs (id, employee_slug, goal, status, playbook_id, playbook_snapshot, created_at) VALUES (${runId}, ${this.state.employee?.slug || "unassigned"}, ${this.state.operatingPlan?.summary || ""}, ${"active"}, ${id}, ${snapshot}, ${new Date().toISOString()})`;
+    const envelope = this.state.envelope!;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(snapshot));
+    const snapshotHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const company = await getAgentByName((this.gatewayEnv() as GatewayEnv & Env).HivemindTaskAgent as never, `company-${envelope.orgId}`);
+    const receipt = await (company as { recordIndexedCompanyWorkRun(input: { id: string; orgId: string; userId: string; roomName: string; employeeSlug: string; goal: string; playbookId: string; playbookVersion: number; snapshotHash: string }): Promise<{ id: string; status: string }> }).recordIndexedCompanyWorkRun({ id: runId, orgId: envelope.orgId, userId: envelope.userId, roomName: String((this as { name?: string }).name ?? ""), employeeSlug: this.state.employee?.slug || "unassigned", goal: this.state.operatingPlan?.summary || envelope.task || "", playbookId: id, playbookVersion: version, snapshotHash });
+    await this.note("workrun-index", `${receipt.id} ${receipt.status}`);
+    await this.note("playbook_get", `${id}@v${version}`);
     return snapshot;
+  }
+
+  recordIndexedCompanyWorkRun(input: { id: string; orgId: string; userId: string; roomName: string; employeeSlug: string; goal: string; playbookId: string; playbookVersion: number; snapshotHash: string }): { id: string; status: string } {
+    if (String((this as { name?: string }).name ?? "") !== `company-${input.orgId}` || !/^session-[0-9a-f-]{36}-[0-9a-f-]{36}$/i.test(input.roomName) || !input.roomName.startsWith(`session-${input.orgId}-`) || !/^[0-9a-f-]{36}$/i.test(input.id) || !/^[a-f0-9]{64}$/.test(input.snapshotHash)) throw new Error("workrun_index_invalid");
+    ensureCompanyTables(this.sql.bind(this));
+    const existing = this.sql`SELECT * FROM company_workrun_index WHERE id = ${input.id} LIMIT 1`[0];
+    if (existing) {
+      if (String(existing.org_id) !== input.orgId || String(existing.user_id) !== input.userId || String(existing.room_name) !== input.roomName || String(existing.playbook_id) !== input.playbookId || Number(existing.playbook_version) !== input.playbookVersion || String(existing.snapshot_hash) !== input.snapshotHash) throw new Error("workrun_index_conflict");
+      return { id: input.id, status: String(existing.status) };
+    }
+    const now = new Date().toISOString();
+    this.sql`INSERT INTO company_workrun_index (id, org_id, user_id, room_name, employee_slug, goal, status, playbook_id, playbook_version, snapshot_hash, created_at, updated_at) VALUES (${input.id}, ${input.orgId}, ${input.userId}, ${input.roomName}, ${input.employeeSlug.slice(0, 100)}, ${input.goal.slice(0, 1000)}, ${"active"}, ${input.playbookId}, ${input.playbookVersion}, ${input.snapshotHash}, ${now}, ${now})`;
+    return { id: input.id, status: "active" };
+  }
+
+  finishIndexedCompanyWorkRun(input: { id: string; orgId: string; status: "completed" | "incomplete"; reason: string; artifactRefs: string[]; sourceRefs: string[] }): { id: string; status: string } {
+    if (String((this as { name?: string }).name ?? "") !== `company-${input.orgId}` || !/^[0-9a-f-]{36}$/i.test(input.id)) throw new Error("workrun_index_invalid");
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT status FROM company_workrun_index WHERE id = ${input.id} AND org_id = ${input.orgId} LIMIT 1`[0];
+    if (!row) throw new Error("workrun_index_missing");
+    if (String(row.status) !== "active") return { id: input.id, status: String(row.status) };
+    this.sql`UPDATE company_workrun_index SET status = ${input.status}, reason = ${input.reason.slice(0, 500)}, artifact_refs = ${JSON.stringify(input.artifactRefs.slice(0, 40))}, source_refs = ${JSON.stringify(input.sourceRefs.slice(0, 40))}, updated_at = ${new Date().toISOString()} WHERE id = ${input.id} AND org_id = ${input.orgId}`;
+    return { id: input.id, status: input.status };
+  }
+
+  listIndexedCompanyWorkRuns(): Record<string, unknown>[] {
+    ensureCompanyTables(this.sql.bind(this));
+    return this.sql`SELECT id, org_id, user_id, room_name, employee_slug, goal, status, playbook_id, playbook_version, snapshot_hash, artifact_refs, source_refs, reason, created_at, updated_at FROM company_workrun_index ORDER BY created_at DESC LIMIT 50`;
+  }
+
+  async finishCurrentCompanyWorkRun(complete: boolean, reason: string): Promise<void> {
+    const envelope = this.state.envelope;
+    if (!envelope) return;
+    ensureCompanyTables(this.sql.bind(this));
+    const run = this.sql`SELECT created_at FROM company_runs WHERE id = ${envelope.runId} LIMIT 1`[0];
+    if (!run) return;
+    const artifactRefs = this.sql`SELECT id FROM company_artifacts WHERE created_at >= ${String(run.created_at)} ORDER BY created_at ASC LIMIT 40`.map((row) => String(row.id));
+    const company = await getAgentByName((this.gatewayEnv() as GatewayEnv & Env).HivemindTaskAgent as never, `company-${envelope.orgId}`);
+    const receipt = await (company as { finishIndexedCompanyWorkRun(input: { id: string; orgId: string; status: "completed" | "incomplete"; reason: string; artifactRefs: string[]; sourceRefs: string[] }): Promise<{ id: string; status: string }> }).finishIndexedCompanyWorkRun({ id: envelope.runId, orgId: envelope.orgId, status: complete ? "completed" : "incomplete", reason, artifactRefs, sourceRefs: this.sourceUrls() });
+    await this.note("workrun-index", `${receipt.id} ${receipt.status}`);
   }
 
   refineLocalPlaybook(id: string, instruction: string): { proposed: true; id: string; proposalId: string; status: "pending_review" } | { error: string } {

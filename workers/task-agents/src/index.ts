@@ -25,6 +25,14 @@ export default {
       if (request.method === "POST") return saveCompanyArtifact(request, orgId, env);
       if (request.method === "GET") return routeAuthorized(request, env) ? companyArtifacts(orgId, env) : new Response("unauthorized", { status: 401 });
     }
+    if (request.method === "GET" && url.pathname.startsWith("/v1/company/") && url.pathname.endsWith("/runs")) {
+      if (!routeAuthorized(request, env)) return new Response("unauthorized", { status: 401 });
+      const orgId = url.pathname.slice("/v1/company/".length, -"/runs".length);
+      if (!/^[0-9a-f-]{36}$/i.test(orgId)) return new Response("Not found", { status: 404 });
+      const agent = await getAgentByName(env.HivemindTaskAgent as never, `company-${orgId}`);
+      const runs = await (agent as { listIndexedCompanyWorkRuns(): Promise<Record<string, unknown>[]> }).listIndexedCompanyWorkRuns();
+      return Response.json({ orgId, runs });
+    }
     if (request.method === "GET" && url.pathname.startsWith("/v1/runs/")) {
       const rest = url.pathname.slice("/v1/runs/".length);
       if (!routeAuthorized(request, env)) return new Response("unauthorized", { status: 401 });

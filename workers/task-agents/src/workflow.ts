@@ -54,8 +54,11 @@ export interface CompanyWorkResult {
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
   async run(event: AgentWorkflowEvent<CompanyWork>, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
     try {
-      return await this.runWork(event, step);
+      const result = await this.runWork(event, step);
+      await (step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> }).do("index-workrun-terminal", async () => this.agent.finishCurrentCompanyWorkRun(result.complete, result.reason));
+      return result;
     } catch (error) {
+      await this.agent.finishCurrentCompanyWorkRun(false, error instanceof Error ? error.message : "workflow_failed").catch(() => undefined);
       await this.agent.markAwaiting("");
       await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");
       await this.agent.note("report", "I could not finish this run. You can continue in this room.");

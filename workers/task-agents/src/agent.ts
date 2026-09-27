@@ -151,7 +151,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     else {
       this.nativeTurn = "route";
       try {
-        const result = await this.testPrompt(`Classify the operator's current request for the HyperAgent. Return only JSON: {"mode":"direct|action|company","groups":["company|web_research|browser|connected_apps|records"]}. Direct: answer from present context, no tool or deliverable. Action: bounded lookup, connected-app operation, screenshot, or other short tool task. Company: strategy, research report, fundraising, plan, or sustained operating work. Current request: ${work.task}. Previous room request for resolving references only: ${work.previousRequest || "none"}.`);
+        const result = await this.testPrompt(`Classify the operator's current request for the HyperAgent. Return only JSON: {"mode":"direct|action|company","groups":["company|web_research|browser|connected_apps|records"]}. Direct: answer from present context, no tool or deliverable. Action: bounded lookup, connected-app operation, screenshot, or other short tool task without a company operating method. Company: any positioning, strategy, company research note or report, fundraising material, plan, or decision about the operator's company, even when requested as a short note. Company work loads a playbook and keeps an operating plan. Current request: ${work.task}. Previous room request for resolving references only: ${work.previousRequest || "none"}.`);
         route = parseRoomRoute(result.text) ?? route;
       } catch { /* A failed intake stays on the durable company path. */ }
       finally { this.nativeTurn = ""; }

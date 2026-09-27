@@ -46,6 +46,19 @@ export function ensureCompanyTables(sql: {
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`;
+  sql`CREATE TABLE IF NOT EXISTS connected_write_attempts (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    tool_slug TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    receipt TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`;
   sql`CREATE TABLE IF NOT EXISTS company_playbook_notes (
     id TEXT PRIMARY KEY,
     playbook_id TEXT NOT NULL,

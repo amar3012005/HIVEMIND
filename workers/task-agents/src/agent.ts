@@ -8,6 +8,7 @@ import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
+import { connectedWriteKey } from "./connected-write";
 import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, type ProspectEvidence } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
@@ -446,6 +447,45 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     await this.note("workrun-index", `${receipt.id} ${receipt.status}`);
   }
 
+  async executeConnectedWrite(input: { orgId: string; userId: string; toolkit?: string; grantId: string; toolSlug: string; args: Record<string, unknown> }): Promise<unknown> {
+    const runId = this.state.envelope?.runId;
+    if (!runId || this.state.envelope?.orgId !== input.orgId || this.state.envelope?.userId !== input.userId) return { error: "connected_write_unbound" };
+    ensureCompanyTables(this.sql.bind(this));
+    const id = await connectedWriteKey(runId, input.toolSlug, input.args);
+    const existing = this.sql`SELECT attempt_id, status, receipt FROM connected_write_attempts WHERE id = ${id} LIMIT 1`[0];
+    if (existing) return String(existing.status) === "completed"
+      ? { status: "already_completed", receipt: JSON.parse(String(existing.receipt)) }
+      : { error: "connected_write_uncertain_reconcile_required", attemptId: String(existing.attempt_id) };
+    const attemptId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.sql`INSERT OR IGNORE INTO connected_write_attempts (id, run_id, org_id, user_id, tool_slug, attempt_id, status, created_at, updated_at) VALUES (${id}, ${runId}, ${input.orgId}, ${input.userId}, ${input.toolSlug}, ${attemptId}, ${"pending"}, ${now}, ${now})`;
+    const owner = this.sql`SELECT attempt_id FROM connected_write_attempts WHERE id = ${id} LIMIT 1`[0];
+    if (String(owner?.attempt_id ?? "") !== attemptId) return { error: "connected_write_uncertain_reconcile_required" };
+    this.note("connected-write", `${input.toolSlug} pending ${attemptId}`);
+    try {
+      const result = await postControl(this.gatewayEnv(), "/internal/hyper/connected-task", {
+        org_id: input.orgId, user_id: input.userId, action: "execute_write",
+        ...(input.toolkit ? { toolkit: input.toolkit } : {}), grant_id: input.grantId, tool_slug: input.toolSlug, arguments: input.args,
+      });
+      if (result && typeof result === "object" && "successful" in result && result.successful === true && "receipt" in result) {
+        const receipt = { ...(result.receipt && typeof result.receipt === "object" ? result.receipt : {}), attemptId, toolSlug: input.toolSlug };
+        this.sql`UPDATE connected_write_attempts SET status = ${"completed"}, receipt = ${JSON.stringify(receipt)}, updated_at = ${new Date().toISOString()} WHERE id = ${id}`;
+        this.note("connected-write", `${input.toolSlug} completed ${attemptId}`);
+        return { ...result, receipt };
+      }
+      const denied = result && typeof result === "object" && "status" in result && result.status === 403;
+      const status = denied ? "denied" : "uncertain";
+      if (denied) this.sql`DELETE FROM connected_write_attempts WHERE id = ${id} AND attempt_id = ${attemptId}`;
+      else this.sql`UPDATE connected_write_attempts SET status = ${status}, reason = ${JSON.stringify(result).slice(0, 500)}, updated_at = ${new Date().toISOString()} WHERE id = ${id}`;
+      this.note("connected-write", `${input.toolSlug} ${status} ${attemptId}`);
+      return denied ? result : { error: "connected_write_uncertain_reconcile_required", attemptId, providerResult: result };
+    } catch (error) {
+      this.sql`UPDATE connected_write_attempts SET status = ${"uncertain"}, reason = ${error instanceof Error ? error.message.slice(0, 500) : "provider_error"}, updated_at = ${new Date().toISOString()} WHERE id = ${id}`;
+      this.note("connected-write", `${input.toolSlug} uncertain ${attemptId}`);
+      return { error: "connected_write_uncertain_reconcile_required", attemptId };
+    }
+  }
+
   refineLocalPlaybook(id: string, instruction: string): { proposed: true; id: string; proposalId: string; status: "pending_review" } | { error: string } {
     const target = localPlaybook(id) ? id : "";
     if (!target) return { error: "playbook_not_found" };
@@ -854,6 +894,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       execute: async ({ action, toolkit, useCase, knownFields, grantId, toolSlug, arguments: args }): Promise<unknown> => {
         const identity = this.assertTool("hivemind_connected_task");
         this.note("hivemind_connected_task", `${action}${toolkit ? ` ${toolkit}` : ""}`);
+        if (action === "execute_write") {
+          if (!grantId || !toolSlug) return { error: "grant_and_tool_required" };
+          return this.executeConnectedWrite({ orgId: identity.orgId, userId: identity.userId, toolkit, grantId, toolSlug, args: args ?? {} });
+        }
         return postControl(this.gatewayEnv(), "/internal/hyper/connected-task", {
           org_id: identity.orgId, user_id: identity.userId, action,
           ...(toolkit ? { toolkit } : {}), ...(useCase ? { use_case: useCase } : {}),

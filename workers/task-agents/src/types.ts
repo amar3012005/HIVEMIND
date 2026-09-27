@@ -68,7 +68,7 @@ export interface TaskAgentState {
   places: LocalCompany[];
   sources: RunSource[];
   toolGroups: string[];
-  catalogStage: "global" | "local" | "action";
+  catalogStage: "planning" | "global" | "local" | "action";
   selectedGlobals: string[];
   workflowId: string;
   companyContextLoaded?: boolean;

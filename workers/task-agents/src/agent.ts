@@ -407,6 +407,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     await this.context.refreshSystemPrompt();
   }
 
+  enterPlanning(): void {
+    this.setState({ ...this.state, catalogStage: "planning" });
+  }
+
   setOperatingPlan(runId: string, summary: string, titles: string[]): void {
     const operatingPlan = {
       runId,
@@ -423,9 +427,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   updateOperatingTask(id: number, status: "active" | "completed" | "blocked", verified = false): { updated: boolean; awaitingReport?: boolean } {
     const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status, verified);
     if (!plan) return { updated: false };
+    const previous = this.state.operatingPlan?.tasks.find((task) => task.id === id)?.status;
+    const current = plan.tasks.find((task) => task.id === id)?.status;
+    const awaitingReport = status === "completed" && current !== "completed";
+    if (previous === current) return awaitingReport ? { updated: true, awaitingReport: true } : { updated: true };
     this.setState({ ...this.state, operatingPlan: plan });
     this.note("operating-plan-state", JSON.stringify(plan));
-    const awaitingReport = status === "completed" && plan.tasks.find((task) => task.id === id)?.status !== "completed";
     this.note("task_updated", `${id}: ${awaitingReport ? "active" : status}`);
     return awaitingReport ? { updated: true, awaitingReport: true } : { updated: true };
   }
@@ -436,6 +443,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   beforeTurn(): { activeTools: string[]; maxSteps: number; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
     this.textDraft = "";
+    if (this.state.catalogStage === "planning") return {
+      activeTools: ["think_final_answer"],
+      maxSteps: 1,
+      maxOutputTokens: 4096,
+      providerOptions: { "workers-ai": { reasoning_effort: "low" } },
+    };
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
@@ -952,22 +965,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async recallTaskContext(orgId: string, userId: string, query: string): Promise<unknown> {
-    const [result, profile] = await Promise.all([
-      recallCompany(this.gatewayEnv(), orgId, userId, query),
-      readCompanyProfile(this.gatewayEnv(), orgId, userId).catch(() => null),
-    ]);
+    const result = await recallCompany(this.gatewayEnv(), orgId, userId, query);
     if (result && typeof result === "object" && "ok" in result && result.ok === true) {
       const count = "count" in result ? Number(result.count) || 0 : 0;
       this.setState({ ...this.state, companyContextLoaded: true });
       this.note("hivemind_recall", `${count} company memories recalled`);
-      const facts = profile && typeof profile === "object" && "facts" in profile && Array.isArray(profile.facts)
-        ? profile.facts.filter((fact): fact is { key: string; value: string } =>
-          !!fact && typeof fact === "object" && typeof fact.key === "string" && typeof fact.value === "string"
-          && /^(company|product|mission|icp|industry|market|user|person|role|preference)/i.test(fact.key))
-          .slice(0, 20).map((fact) => ({ key: fact.key.slice(0, 100), value: fact.value.slice(0, 300) }))
-        : [];
-      this.note("get_user_profile", `${facts.length} company profile facts loaded`);
-      return { ...result, profileFacts: facts };
     }
     return result;
   }

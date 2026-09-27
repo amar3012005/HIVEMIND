@@ -93,9 +93,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     // silently become a strategy note even when the planner picks one.
     if (plan.mode === "company" && deckRequested) plan.localPlaybookId = "local:fundraising.pitch-deck";
     if (plan.mode === "company" && !localPlaybook(plan.localPlaybookId)) {
+      const playbookIds = playbookNames.map((item) => item.id) as [string, ...string[]];
       const choice = await step.prompt("select-local-playbook", {
-        prompt: `Choose one local playbook id for this company request: ${asked}. Match the requested final deliverable, not merely its topic. Available: ${JSON.stringify(playbookNames)}.`,
-        output: z.object({ id: z.string() }),
+        prompt: `Choose exactly one id from this list for the requested final deliverable: ${asked}. Available: ${JSON.stringify(playbookNames)}.`,
+        output: z.object({ id: z.enum(playbookIds) }),
         timeout: "30 minutes",
       });
       plan.localPlaybookId = choice.id;

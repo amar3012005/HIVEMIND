@@ -812,10 +812,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
             max_tokens: 900,
           });
           const answer = result && typeof result === "object" && "answer" in result ? String((result as { answer?: unknown }).answer ?? "") : "";
-          return artifactForModel(chosen, answer);
+          const observation = artifactForModel(chosen, answer);
+          return answer ? observation : { ...observation, visionError: JSON.stringify(result).slice(0, 300) };
         } catch (error) {
-          this.note("load_artifact", `vision unavailable: ${error instanceof Error ? error.message.slice(0, 100) : "unknown"}`);
-          return artifactForModel(chosen);
+          const reason = error instanceof Error ? error.message.slice(0, 300) : "unknown";
+          this.note("load_artifact", `vision unavailable: ${reason}`);
+          return { ...artifactForModel(chosen), visionError: reason };
         }
       },
     });

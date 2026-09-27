@@ -563,6 +563,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
         const page = target.pathname === "/" ? "" : ` (${target.pathname})`;
         const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.(png|jpe?g)$/i, "")}${page}.jpg`, contentType: "image/jpeg", body });
+        this.rememberSources({ sourceUrl: target.href, title: artifact.title });
         return { id: artifact.id, title: artifact.title, contentType: artifact.contentType, sourceUrl: target.href };
       },
     });

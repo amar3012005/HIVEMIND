@@ -7,6 +7,7 @@ import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { globalCatalog, localCatalog, localPlaybook } from "./playbooks";
 import type { TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
+import { checkpoint } from "./checkpoint";
 
 export interface CompanyWork extends TaskEnvelope {
   startedAt?: string;
@@ -56,6 +57,16 @@ export interface CompanyWorkResult {
 
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
   async run(event: AgentWorkflowEvent<CompanyWork>, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
+    const store = this.agent;
+    const nativeStep = step;
+    step = new Proxy(nativeStep, {
+      get(target, key) {
+        const method = Reflect.get(target, key);
+        if (typeof method !== "function") return method;
+        if (!["do", "prompt", "waitForEvent"].includes(String(key))) return (...args: unknown[]) => (target as any)[key](...args);
+        return (...args: unknown[]) => checkpoint(store, event.payload.runId, `${String(key)}:${String(args[0])}`, () => (target as any)[key](...args));
+      },
+    });
     try {
       const result = await this.runWork(event, step);
       try {
@@ -63,9 +74,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       } catch (error) {
         await this.agent.note("workrun-index", `terminal index failed: ${workflowErrorCode(error)}`);
       }
+      await this.agent.finishWorkRuntime(event.payload.runId, result.complete ? "completed" : "incomplete");
       return result;
     } catch (error) {
       const code = workflowErrorCode(error);
+      await this.agent.finishWorkRuntime(event.payload.runId, "errored");
       await this.agent.finishCurrentCompanyWorkRun(false, error instanceof Error ? error.message : "workflow_failed").catch(() => undefined);
       await this.agent.markAwaiting("");
       await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");

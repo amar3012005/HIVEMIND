@@ -73,6 +73,7 @@ export interface TaskAgentState {
   envelope: TaskEnvelope | null;
   role: SpecialistRole | null;
   employee?: EmployeeIdentity | null;
+  specialists?: EmployeeIdentity[];
   tools: string[];
   events: TraceEvent[];
   places: LocalCompany[];

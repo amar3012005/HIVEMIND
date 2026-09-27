@@ -11,6 +11,15 @@ export interface StoredArtifact {
 export function ensureCompanyTables(sql: {
   (strings: TemplateStringsArray, ...values: (string | number | boolean | null)[]): unknown[];
 }): void {
+  sql`CREATE TABLE IF NOT EXISTS workrun_runtime (
+    run_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL DEFAULT '',
+    work TEXT NOT NULL, state TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued',
+    updated_at TEXT NOT NULL
+  )`;
+  sql`CREATE TABLE IF NOT EXISTS workrun_checkpoints (
+    run_id TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, completed_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, stage)
+  )`;
   sql`CREATE TABLE IF NOT EXISTS company_artifacts (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -49,6 +58,9 @@ export function ensureCompanyTables(sql: {
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  )`;
+  sql`CREATE TABLE IF NOT EXISTS connected_write_payloads (
+    attempt_id TEXT PRIMARY KEY, toolkit TEXT NOT NULL, arguments TEXT NOT NULL
   )`;
   sql`CREATE TABLE IF NOT EXISTS connected_write_attempts (
     id TEXT PRIMARY KEY,

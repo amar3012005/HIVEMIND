@@ -1143,6 +1143,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       }));
       receipts.push(...batch);
     }
+    for (const receipt of receipts) if (!receipt.error) this.rememberSources({ url: receipt.url });
     this.note("source-verification", JSON.stringify(receipts.map(({ url, excerpt, error }) => ({ url, bytes: excerpt.length, error }))));
     return receipts;
   }

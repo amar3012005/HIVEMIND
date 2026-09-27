@@ -303,7 +303,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           guidance += `The report did not account for planned tasks ${missingPlanIds.join(", ")}. Complete each remaining task with visible output or evidence, then return every completed task id. Do not present an unfinished plan as final. `;
           continue;
         }
-        if (!isProspect || prospectEvidenceComplete(result.report, result.prospects, await this.agent.sourceUrls(), prospectCount).complete) break;
+        if (!isProspect || prospectEvidenceComplete(result.report, result.prospects, result.prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]), prospectCount).complete) break;
         guidance += `Prospect execution contract is incomplete. The request needs ${prospectCount} accepted account${prospectCount === 1 ? "" : "s"}. Return a structured prospects row for every accepted account, with name, locationUrl, sectorUrl, and caveat. Put both URLs beside that account in the report; URLs must match this run's source receipts. Read primary pages with native browser_markdown; it is already exposed, so do not search connected apps for browser access. Verify missing evidence with focused research. `;
         continue;
       }
@@ -328,24 +328,25 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       guidance += `The operator chose: ${answer}. `;
     }
 
-    const prospectSources = isProspect ? await this.agent.sourceUrls() : undefined;
+    let prospectSources: string[] | undefined;
     if (claimsArtifactApprovalPending(written.report)) {
       await durable.do("artifact-status-incomplete", async () => { await this.agent.note("completion", "artifact_status_unverified"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "artifact_status_unverified", report: "Report draft incorrectly claimed artifact approval was pending; no artifact was saved." };
     }
     if (isProspect) {
-      const evidence = prospectEvidenceComplete(written.report, written.prospects, prospectSources ?? [], prospectCount);
-      if (!evidence.complete) {
-        const reply = `${written.report.trim()}\n\nProspect evidence remains incomplete (${evidence.reason}); no artifact was saved.`.trim();
-        await durable.do("prospect-evidence-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", evidence.reason); });
-        return { runId: work.runId, orgId: work.orgId, complete: false, reason: evidence.reason, report: reply };
-      }
       const pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects));
       const missing = pages.filter((page) => page.error);
       if (missing.length) {
         const reply = `${written.report.trim()}\n\nSource pages could not be read (${missing.map((page) => `${page.url}: ${page.error}`).join("; ")}); no artifact was saved.`;
         await durable.do("prospect-pages-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "prospect_pages_unreadable"); });
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: "prospect_pages_unreadable", report: reply };
+      }
+      prospectSources = pages.map((page) => page.url);
+      const evidence = prospectEvidenceComplete(written.report, written.prospects, pages.filter((page) => !page.error).map((page) => page.url), prospectCount);
+      if (!evidence.complete) {
+        const reply = `${written.report.trim()}\n\nProspect evidence remains incomplete (${evidence.reason}); no artifact was saved.`.trim();
+        await durable.do("prospect-evidence-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", evidence.reason); });
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: evidence.reason, report: reply };
       }
       await durable.do("prospect-pages-verified", async () => this.agent.note("source-verification", JSON.stringify(pages)));
     }

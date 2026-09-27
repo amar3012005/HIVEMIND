@@ -1,4 +1,4 @@
-import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision } from "@cloudflare/think";
+import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext } from "@cloudflare/think";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import type { Connection } from "agents";
@@ -475,6 +475,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    const input = ctx.input && typeof ctx.input === "object" ? ctx.input as Record<string, unknown> : {};
+    this.note("tool-call", JSON.stringify({ id: ctx.toolCallId, name: ctx.toolName, phase: "started", target: typeof input.url === "string" ? input.url.slice(0, 300) : undefined }));
     if (ctx.toolName === "hivemind_meta" && (ctx.input as { operation?: string })?.operation === "save"
       && !requestsMemorySave(this.state.envelope?.task ?? "")) {
       return { action: "block", reason: "Operator did not request a memory save in this turn." };
@@ -483,6 +485,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       && /^(browser_|parallel_search$|maps_search$|composio_|hivemind_connected_task$)/.test(ctx.toolName)) {
       return { action: "block", reason: "Load HIVEMIND company context before external tools." };
     }
+  }
+
+  afterToolCall(ctx: ToolCallResultContext): void {
+    this.note("tool-call", JSON.stringify({ id: ctx.toolCallId, name: ctx.toolName, phase: ctx.success ? "returned" : "failed", durationMs: ctx.durationMs }));
   }
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {

@@ -104,7 +104,7 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
     },
     body: JSON.stringify({
       title: title.slice(0, 180),
-      content: content.slice(0, 8000),
+      content: content.slice(0, 30000),
       tags: ["hyperagent", "company"],
       source_platform: "hyperagent",
       ...(options.sessionId ? { source_session_id: options.sessionId } : {}),

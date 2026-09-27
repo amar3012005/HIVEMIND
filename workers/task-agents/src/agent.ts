@@ -8,7 +8,7 @@ import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
-import { companyWorkComplete, requestsMemorySave } from "./completion";
+import { companyWorkComplete, previousReport, requestsMemorySave } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { scoreCompanyBehavior, type SpanScoreInput } from "./span-score";
@@ -385,11 +385,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return { saved: true, id: target };
   }
 
-  async saveCompanyMemory(title: string, content: string): Promise<unknown> {
+  async saveCompanyMemory(title: string, content: string, idempotencyKey?: string): Promise<unknown> {
     const envelope = this.state.envelope;
     if (!envelope) return { error: "task_not_bound" };
     this.note("save_memory", title);
-    return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content, { sessionId: envelope.runId });
+    return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content, { sessionId: envelope.runId, idempotencyKey });
+  }
+
+  previousReport(): string | null {
+    return previousReport(this.state.events ?? []);
   }
 
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {

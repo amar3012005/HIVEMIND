@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+import { companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+
+test("follow-up reuse selects report from preceding turn", () => {
+  const draft = `# Monaco prospects\n${"Qualified draft. ".repeat(10)}`;
+  assert.equal(previousReport([
+    { step: "user", detail: "Find prospects" },
+    { step: "report", detail: draft },
+    { step: "user", detail: "Save it in HIVEMIND and as PDF" },
+    { step: "report", detail: "I could not finish this run." },
+  ]), draft.trim());
+});
 
 test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsMemorySave("Save this to company memory."), true);
@@ -8,6 +18,7 @@ test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsMemorySave("Don't save it to HIVEMIND memory."), false);
   assert.equal(requestsMemorySave("Draft only; do not publish or save memory."), false);
   assert.equal(requestsMemorySave("Save my name as Amar."), true);
+  assert.equal(requestsMemorySave("Finish saving the report to HIVEMIND as a draft."), true);
   assert.equal(requestsMemorySave("Save it as a PDF report."), false);
 });
 

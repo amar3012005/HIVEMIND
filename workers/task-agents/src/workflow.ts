@@ -68,6 +68,41 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.note("workrun", `starting ${work.company}`);
     });
 
+    const priorReport = await this.agent.previousReport();
+    if (priorReport && requestsMemorySave(work.task) && requestsPdf(work.task)
+      && /\b(?:it|that|this|previous|above)\b/i.test(work.task)) {
+      const title = reportTitle(priorReport, `${work.company} report`);
+      await this.agent.note("progress", "Found prior report. Saving its draft and rendering PDF.");
+      const markdownId = await durable.do("reuse-prior-report", async () => {
+        const saved = await this.agent.saveCompanyArtifact({ kind: "report", title, contentType: "text/markdown", body: priorReport });
+        return saved.id;
+      });
+      let pdfSaved = false;
+      let pdfError = "";
+      try {
+        await this.agent.note("progress", "Report draft saved. Rendering PDF now.");
+        await durable.do("render-prior-report-pdf", async () => {
+          const pdf = await this.agent.createPdfArtifact(markdownId);
+          return pdf.id;
+        });
+        pdfSaved = true;
+      } catch (error) {
+        pdfError = error instanceof Error ? error.message : "pdf_generation_failed";
+      }
+      await this.agent.note("progress", "Saving report to HIVEMIND with draft status and source caveats.");
+      const memorySaved = await durable.do("save-prior-report-memory", async () => {
+        const memory = await this.agent.saveCompanyMemory(
+          `${title} (draft; source verification pending)`, priorReport,
+          `${work.runId}:${work.startedAt ?? ""}:prior-report`,
+        );
+        return Boolean(memory && typeof memory === "object" && "ok" in memory && memory.ok === true);
+      });
+      const report = `Previous report ${pdfSaved ? "was rendered as a PDF" : `could not be rendered as a PDF (${pdfError})`}. HIVEMIND save ${memorySaved ? "completed" : "is not confirmed"}. Source verification remains pending; treat prospect list as a draft.`;
+      await this.agent.note("report", report);
+      await this.agent.note("completion", pdfSaved && memorySaved ? "complete" : "deliverable_incomplete");
+      return { runId: work.runId, orgId: work.orgId, complete: pdfSaved && memorySaved, reason: pdfSaved && memorySaved ? "prior_report_saved" : "deliverable_incomplete", report };
+    }
+
     let asked = work.task || "Map competitors and the local market.";
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
     const plan = await step.prompt("operating-plan", {

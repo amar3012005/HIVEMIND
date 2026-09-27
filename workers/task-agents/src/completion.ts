@@ -5,6 +5,14 @@ export interface CompletionInput {
   companyWebsite?: string;
 }
 
+export function previousReport(events: readonly { step: string; detail: string }[]): string | null {
+  const currentTurn = events.map((event) => event.step).lastIndexOf("user");
+  if (currentTurn < 0) return null;
+  const report = events.slice(0, currentTurn).reverse().find((event) =>
+    event.step === "report" && event.detail.length > 100 && /^#\s+/m.test(event.detail))?.detail.trim();
+  return report || null;
+}
+
 export interface CompletionResult {
   complete: boolean;
   reason: string;
@@ -16,9 +24,9 @@ export function directReplyComplete(report: string): CompletionResult {
 }
 
 export function requestsMemorySave(task: string): boolean {
-  if (/\b(do not|don't|never|without|no)\b[^.!?]{0,80}\b(save|store|remember|memorize)\b/i.test(task)) return false;
+  if (/\b(do not|don't|never|without|no)\b[^.!?]{0,80}\b(sav(?:e|ing)|stor(?:e|ing)|remember|memorize)\b/i.test(task)) return false;
   return /\b(remember|memorize)\b/i.test(task)
-    || /\b(save|store)\b[^.!?]{0,100}\b(memory|hivemind|name|preference|decision|fact|profile)\b/i.test(task);
+    || /\b(sav(?:e|ing)|stor(?:e|ing))\b[^.!?]{0,100}\b(memory|hivemind|name|preference|decision|fact|profile)\b/i.test(task);
 }
 
 export function requestsArtifact(task: string): boolean {

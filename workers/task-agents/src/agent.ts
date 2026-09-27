@@ -1,5 +1,5 @@
 import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext } from "@cloudflare/think";
-import { createQuickActionTools } from "@cloudflare/think/tools/browser";
+import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import type { Connection } from "agents";
 import { tool, type ToolSet } from "ai";
@@ -8,7 +8,7 @@ import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
-import { companyWorkComplete, previousReport, requestsMemorySave } from "./completion";
+import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, type ProspectEvidence } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { scoreCompanyBehavior, type SpanScoreInput } from "./span-score";
@@ -18,7 +18,7 @@ import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
 import { artifactForModel, trimStoredArtifactPart, visionObservation } from "./artifact-model";
-import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
+import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook, localPlaybookContract, localPlaybookVersion } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
 import type { LocalCompany, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
@@ -373,7 +373,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       ensureCompanyTables(this.sql.bind(this));
       const notes = this.sql`SELECT note FROM company_playbook_notes WHERE playbook_id = ${id} ORDER BY created_at ASC`.map((row) => String(row.note));
       const extra = notes.length ? notes.map((note) => `- ${note}`).join("\n") : "- No company special cases yet.";
-      return `${task.body}\n\nParent field: ${task.globalId}${parent ? ` version ${parent.version}` : ""}.\nCompany special cases:\n${extra}`;
+      return `${task.body}\n\n${localPlaybookContract(id)}\n\nParent field: ${task.globalId}${parent ? ` version ${parent.version}` : ""}.\nCompany special cases:\n${extra}`;
     }
     const global = globalPlaybookBody(id);
     return global ? global.body : null;
@@ -382,8 +382,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async loadTaskPlaybook(id: string): Promise<string> {
     const body = this.resolvePlaybook(id);
     if (!body || !localPlaybook(id)) throw new Error("company_playbook_not_found");
-    await this.note("playbook_get", id);
-    return body;
+    const runId = this.state.envelope?.runId;
+    if (!runId) throw new Error("task_not_bound");
+    ensureCompanyTables(this.sql.bind(this));
+    const pinned = this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${runId} LIMIT 1`[0];
+    if (pinned && String(pinned.playbook_id) !== id) throw new Error("run_playbook_conflict");
+    if (pinned?.playbook_snapshot) return String(pinned.playbook_snapshot);
+    const snapshot = `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
+    this.sql`INSERT OR IGNORE INTO company_runs (id, employee_slug, goal, status, playbook_id, playbook_snapshot, created_at) VALUES (${runId}, ${this.state.role || "research"}, ${this.state.operatingPlan?.summary || ""}, ${"active"}, ${id}, ${snapshot}, ${new Date().toISOString()})`;
+    await this.note("playbook_get", `${id}@v${localPlaybookVersion(id)}`);
+    return snapshot;
   }
 
   refineLocalPlaybook(id: string, instruction: string): { saved: true; id: string } | { error: string } {
@@ -418,7 +426,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.draftCalls.clear();
     const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, ...toolsForGroups([])])], profileBrief: brief, catalogStage: "global", selectedGlobals: [], companyContextLoaded, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, catalogStage: "global", selectedGlobals: [], companyContextLoaded, companyContextRequired: false });
     await this.context.refreshSystemPrompt();
   }
 
@@ -467,7 +475,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const granted = this.state.tools;
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || !catalogTools.has(name)) && (name !== "browser_capture" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || !catalogTools.has(name)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -477,6 +485,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
     const input = ctx.input && typeof ctx.input === "object" ? ctx.input as Record<string, unknown> : {};
     this.note("tool-call", JSON.stringify({ id: ctx.toolCallId, name: ctx.toolName, phase: "started", target: typeof input.url === "string" ? input.url.slice(0, 300) : undefined }));
+    if (ctx.toolName === "browser_capture" && !requestsImageCapture(this.state.envelope?.task ?? "")) {
+      return { action: "block", reason: "Operator did not request an image capture in this turn." };
+    }
     if (ctx.toolName === "hivemind_meta" && (ctx.input as { operation?: string })?.operation === "save"
       && !requestsMemorySave(this.state.envelope?.task ?? "")) {
       return { action: "block", reason: "Operator did not request a memory save in this turn." };
@@ -566,6 +577,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.(png|jpe?g)$/i, "")}${page}.jpg`, contentType: "image/jpeg", body });
         this.rememberSources({ url: target.href });
         return { id: artifact.id, title: artifact.title, contentType: artifact.contentType, sourceUrl: target.href };
+      },
+    });
+    const browserRead = tool({
+      description: "Read Markdown from a public HTTPS page through native Cloudflare Browser Run. Returns bounded page text and records a source receipt for verified reports. No connected-app grant is needed.",
+      inputSchema: z.object({ url: z.url() }),
+      execute: async ({ url }): Promise<{ url: string; markdown: string }> => {
+        this.assertTool("browser_markdown");
+        const target = new URL(url);
+        if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+        const browser = this.gatewayEnv().BROWSER;
+        if (!browser) throw new Error("browser_binding_missing");
+        const markdown = await browserMarkdown(browser as never, { url: target.href, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
+        if (markdown.trim().length < 80) throw new Error("page_content_missing");
+        this.rememberSources({ url: target.href });
+        this.note("browser_markdown", `${target.href}: ${markdown.length} characters`);
+        return { url: target.href, markdown: markdown.slice(0, 12000) };
       },
     });
     const updatePlanTask = tool({
@@ -968,6 +995,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       ...(this.gatewayEnv().BROWSER
         ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never })
         : {}),
+      browser_markdown: browserRead,
     };
   }
 
@@ -977,6 +1005,30 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   sourceUrls(): string[] {
     return (this.state.sources ?? []).map((source) => source.url);
+  }
+
+  async verifyProspectPages(prospects: readonly ProspectEvidence[]): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
+    const browser = this.gatewayEnv().BROWSER;
+    const urls = [...new Set(prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]))].slice(0, 20);
+    const receipts: Array<{ url: string; excerpt: string; error?: string }> = [];
+    for (let offset = 0; offset < urls.length; offset += 4) {
+      const batch = await Promise.all(urls.slice(offset, offset + 4).map(async (url) => {
+        try {
+          const target = new URL(url);
+          if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+          if (!browser) throw new Error("browser_binding_missing");
+          const markdown = await browserMarkdown(browser as never, { url, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
+          const excerpt = markdown.trim().slice(0, 5000);
+          if (excerpt.length < 80) throw new Error("page_content_missing");
+          return { url, excerpt };
+        } catch (error) {
+          return { url, excerpt: "", error: error instanceof Error ? error.message.slice(0, 160) : "page_unavailable" };
+        }
+      }));
+      receipts.push(...batch);
+    }
+    this.note("source-verification", JSON.stringify(receipts.map(({ url, excerpt, error }) => ({ url, bytes: excerpt.length, error }))));
+    return receipts;
   }
 
   hasCompanyContext(): boolean {
@@ -1021,7 +1073,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           plan: input.plan,
           report: input.report.slice(0, 30000),
           companyContext: input.companyContext,
-          sourceReceipts: input.sources.slice(0, 30),
+          sourceReceipts: input.sources.slice(-30),
         },
         display: { name: "Company review" },
       });
@@ -1077,6 +1129,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) }].slice(-300);
     this.setState({ ...this.state, events });
+    if (step === "completion" && this.state.envelope?.runId) {
+      ensureCompanyTables(this.sql.bind(this));
+      const status = ["complete", "deliverable_ready", "memory_saved"].includes(detail) ? "completed" : "incomplete";
+      this.sql`UPDATE company_runs SET status = ${status} WHERE id = ${this.state.envelope.runId}`;
+    }
   }
 
   async checkToolkit(name: string, orgId: string, userId: string, input: { query?: string; url?: string } = {}): Promise<unknown> {

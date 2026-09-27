@@ -85,6 +85,25 @@ export function localPlaybook(id: string): LocalPlaybook | null {
   return LOCAL_PLAYBOOKS.find((item) => item.id === id) ?? null;
 }
 
+export function localPlaybookVersion(id: string): number {
+  return id === "local:outreach.prospect-list" ? 2 : 1;
+}
+
+export function localPlaybookContract(id: string): string {
+  if (id !== "local:outreach.prospect-list") return "";
+  return [
+    "Execution contract v2:",
+    "Inputs: authenticated company offer and ICP, requested geography, requested count.",
+    "Owner: assigned room employee. Allowed actions: recall, public research, source inspection, requested report artifact.",
+    "No outreach, screenshot, connected-app mutation, or memory write without operator instruction and applicable approval. The room runtime saves the requested report artifact after final synthesis; never use hivemind_meta save for that artifact.",
+    "For every accepted prospect return structured name, locationUrl, sectorUrl, and caveat alongside the report.",
+    "Read primary evidence pages with native browser_markdown, which is available directly in every turn. Do not use connected-app discovery for public pages.",
+    "Each evidence URL must have a source receipt from this run and appear beside the account in the final report.",
+    "Completion: accepted accounts have location and regulated-sector or ICP evidence; requested artifact has a saved receipt.",
+    "Recovery: verify missing evidence with a focused source; if still missing, leave the run incomplete and disclose gaps.",
+  ].join("\n");
+}
+
 export function globalPlaybookBody(id: string): { version: number; body: string } | null {
   const found = allGlobals().find((item) => item.id === id);
   if (!found) return null;

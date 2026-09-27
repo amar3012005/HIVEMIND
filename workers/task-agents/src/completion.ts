@@ -18,6 +18,34 @@ export interface CompletionResult {
   reason: string;
 }
 
+export interface ProspectEvidence {
+  name: string;
+  locationUrl: string;
+  sectorUrl: string;
+  caveat: string;
+}
+
+export function prospectEvidenceComplete(report: string, prospects: readonly ProspectEvidence[], sourceUrls: readonly string[]): CompletionResult {
+  if (!prospects.length) return { complete: false, reason: "prospect_rows_missing" };
+  const receipts = new Set(sourceUrls.map(sourceKey).filter(Boolean));
+  for (const row of prospects) {
+    if (!row.name.trim() || !report.toLowerCase().includes(row.name.trim().toLowerCase())) return { complete: false, reason: "prospect_row_not_in_report" };
+    for (const url of [row.locationUrl, row.sectorUrl]) {
+      const key = sourceKey(url);
+      if (!key || !receipts.has(key) || !report.includes(url)) return { complete: false, reason: "prospect_evidence_missing" };
+    }
+  }
+  return { complete: true, reason: "prospect_evidence_verified" };
+}
+
+function sourceKey(value: string): string {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    return `${url.hostname.replace(/^www\./, "").toLowerCase()}${url.pathname.replace(/\/$/, "")}`;
+  } catch { return ""; }
+}
+
 export function directReplyComplete(report: string): CompletionResult {
   if (report.trim().length < 2) return { complete: false, reason: "reply_missing" };
   return { complete: true, reason: "direct_reply" };
@@ -29,16 +57,29 @@ export function requestsMemorySave(task: string): boolean {
     || /\b(sav(?:e|ing)|stor(?:e|ing))\b[^.!?]{0,100}\b(memory|hivemind|name|preference|decision|fact|profile)\b/i.test(task);
 }
 
+export function requestsImageCapture(task: string): boolean {
+  if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:screenshot|capture|image|visual)\b/i.test(task)) return false;
+  return /\b(?:screenshot|screen\s*shot|capture|visual\s+(?:audit|inspection|review)|image\s+of\s+(?:the\s+)?(?:page|site))\b/i.test(task);
+}
+
+export function claimsArtifactApprovalPending(report: string): boolean {
+  return /\b(?:artifact|report)\b[^.!?\n]{0,100}\b(?:pending|awaiting|requires?)\b[^.!?\n]{0,60}\bapproval\b/i.test(report);
+}
+
 export function requestsArtifact(task: string): boolean {
-  if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:create|generate|make|save|export|render)\b[^.!?]{0,80}\bartifact\b/i.test(task)
-    || /\b(?:no|without)\s+(?:an?\s+)?(?:saved\s+)?artifact\b/i.test(task)) return false;
+  if (artifactCreationForbidden(task)) return false;
   return (/\b(create|generate|make|save|export|render|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact|pdf)\b/i.test(task)
     || requestsSlideDeck(task))
     && !/\b(do not|don't|never|without|no)\b[^.!?]{0,100}\b(create|generate|make|save|export|render|draft|write|give me)\b[^.!?]{0,100}\b(report|document|artifact)\b/i.test(task);
 }
 
+export function artifactCreationForbidden(task: string): boolean {
+  return /\b(?:do not|don't|never|without|no)\b[^.!?]{0,40}\b(?:create|generate|make|save|export|render)\b[^.!?]{0,80}\bartifact\b/i.test(task)
+    || /\b(?:no|without)\s+(?:an?\s+)?(?:saved\s+)?artifact\b/i.test(task);
+}
+
 export function planRequestsArtifact(task: string, outputKind: string, tasks: readonly string[]): boolean {
-  if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:artifact|file)\b/i.test(task)) return false;
+  if (artifactCreationForbidden(task)) return false;
   return requestsArtifact(task) || outputKind !== "none" || tasks.some((step) =>
     /\b(?:render|save|create|export|attach|generate|produce)\b[^.!?]{0,100}\b(?:pdf|artifact|file|document)\b/i.test(step));
 }

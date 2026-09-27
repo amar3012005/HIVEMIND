@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion";
+import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { globalCatalog, localCatalog, localPlaybook } from "./playbooks";
 import type { TaskEnvelope } from "./types";
@@ -35,6 +35,12 @@ const reportSchema = z.object({
   options: z.array(z.string()).max(5).default([]),
   report: z.string().default(""),
   completedTaskIds: z.array(z.number().int().min(1).max(6)).max(6).default([]),
+  prospects: z.array(z.object({
+    name: z.string().min(1),
+    locationUrl: z.string().url(),
+    sectorUrl: z.string().url(),
+    caveat: z.string().default(""),
+  })).max(30).default([]),
 });
 
 export interface CompanyWorkResult {
@@ -125,7 +131,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     });
     asked = plan.resolvedRequest.trim() || asked;
     const deckRequested = plan.outputKind === "slide_deck" || requestsSlideDeck(asked);
-    const artifactForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:artifact|file)\b/i.test(work.task ?? "");
+    const artifactForbidden = artifactCreationForbidden(work.task ?? "");
     const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
     if (work.modePreference === "company" || deckRequested) plan.mode = "company";
     else if (/\b(screenshot|capture)\b/i.test(asked) || (plan.mode === "direct" && requestsArtifact(asked))) plan.mode = "action";
@@ -253,8 +259,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     let guidance = "";
-    let written = { report: "", completedTaskIds: [] as number[] };
-    const isProspect = /\bprospects?\b/i.test(asked);
+    let written: z.infer<typeof reportSchema> = reportSchema.parse({});
+    const isProspect = selectedPlaybook!.id === "local:outreach.prospect-list";
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
         prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Selected local playbook ${selectedPlaybook!.id}: ${round === 0 ? playbookBody : "already loaded earlier in this run"}. The operator asked: ${asked} Company ${work.company}. Profile location (not externally verified): ${work.market}. ${round === 0 ? contextForFirstRound : "Use company context and tool receipts already gathered in this run; recall again only for a specific missing fact."} ${guidance}Continue this same job. Do not reload the playbook catalog. Use injected profile and relevant recall first. Fetch external evidence only when a material claim needs verification; do not routinely capture the website. For broad external research, use one parallel_search_batch call with four or five complementary queries, inspect results together, then open primary sources for decisive claims. For a narrow missing fact, use parallel_search once. For a requested PDF, put the finished Markdown in report; runtime renders PDF after this response. Do not call browser_capture or HIVEMIND memory save to create a PDF. For a requested pitch deck, write finished numbered slides, not a generic report or outline. Do not claim an artifact exists before its receipt. If profile and memory conflict, name the conflict and leave the fact unresolved. Missing recall is not proof that the company's offer, revenue, or customers do not exist. Do not label dates, metrics, headquarters, or regulatory claims verified without a supporting primary source receipt. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task only for real status changes; runtime marks completed tasks from completedTaskIds. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. Treat numeric targets without baselines as proposals, not established facts. If one missing fact blocks the job, set needsInput true with one short question and 2 to 5 options. Otherwise set needsInput false and put the final result in report. Start report with a descriptive Markdown H1 title, then short sections and linked citations.`,
@@ -263,6 +269,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       });
       if (!result.needsInput) {
         written = result;
+        if (claimsArtifactApprovalPending(result.report)) {
+          guidance += "Report artifact is saved by this room runtime after your report passes verification. It needs no memory-write approval. Remove false claim that artifact save is pending approval; describe findings only. Do not call hivemind_meta save for an artifact. ";
+          continue;
+        }
         if (deckRequested && !slideDeckReady(result.report)) {
           guidance += "The requested pitch deck is not finished: provide at least eight consecutive, numbered slide sections with substantive content. An outline or generic report does not count. ";
           continue;
@@ -276,8 +286,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           guidance += `The report did not account for planned tasks ${missingPlanIds.join(", ")}. Complete each remaining task with visible output or evidence, then return every completed task id. Do not present an unfinished plan as final. `;
           continue;
         }
-        if (!isProspect || companyWorkComplete({ report: result.report, recalled: true, prospectSources: await this.agent.sourceUrls(), companyWebsite: work.website }).reason !== "prospect_sources_missing") break;
-        guidance += "No verified external source supports the proposed prospect list. Search buyer accounts in the requested location with parallel_search, inspect each accepted account when needed, and cite only URLs returned by those tools. Do not claim a source was checked if it was not. ";
+        if (!isProspect || prospectEvidenceComplete(result.report, result.prospects, await this.agent.sourceUrls()).complete) break;
+        guidance += "Prospect execution contract is incomplete. Return a structured prospects row for every accepted account, with name, locationUrl, sectorUrl, and caveat. Put both URLs beside that account in the report; URLs must match this run's source receipts. Read primary pages with native browser_markdown; it is already exposed, so do not search connected apps for browser access. Verify missing evidence with focused research. ";
         continue;
       }
       const options = result.options.map((option) => option.trim()).filter(Boolean).slice(0, 5);
@@ -295,13 +305,33 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.markAwaiting("");
       });
       if (!answer) {
-        written = { report: result.question || "I still need a choice to continue.", completedTaskIds: result.completedTaskIds };
+        written = { ...result, report: result.question || "I still need a choice to continue." };
         break;
       }
       guidance += `The operator chose: ${answer}. `;
     }
 
     const prospectSources = isProspect ? await this.agent.sourceUrls() : undefined;
+    if (claimsArtifactApprovalPending(written.report)) {
+      await durable.do("artifact-status-incomplete", async () => { await this.agent.note("completion", "artifact_status_unverified"); });
+      return { runId: work.runId, orgId: work.orgId, complete: false, reason: "artifact_status_unverified", report: "Report draft incorrectly claimed artifact approval was pending; no artifact was saved." };
+    }
+    if (isProspect) {
+      const evidence = prospectEvidenceComplete(written.report, written.prospects, prospectSources ?? []);
+      if (!evidence.complete) {
+        const reply = `${written.report.trim()}\n\nProspect evidence remains incomplete (${evidence.reason}); no artifact was saved.`.trim();
+        await durable.do("prospect-evidence-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", evidence.reason); });
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: evidence.reason, report: reply };
+      }
+      const pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects));
+      const missing = pages.filter((page) => page.error);
+      if (missing.length) {
+        const reply = `${written.report.trim()}\n\nSource pages could not be read (${missing.map((page) => `${page.url}: ${page.error}`).join("; ")}); no artifact was saved.`;
+        await durable.do("prospect-pages-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "prospect_pages_unreadable"); });
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "prospect_pages_unreadable", report: reply };
+      }
+      await durable.do("prospect-pages-verified", async () => this.agent.note("source-verification", JSON.stringify(pages)));
+    }
     if (deckRequested && !slideDeckReady(written.report)) {
       const reply = "I could not finish the requested pitch deck. The plan remains open; no deck artifact was created.";
       await durable.do("deck-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "deck_incomplete"); });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 
 test("follow-up reuse selects report from preceding turn", () => {
   const draft = `# Monaco prospects\n${"Qualified draft. ".repeat(10)}`;
@@ -28,10 +29,17 @@ test("blocked PDF handoff is not a finished render source", () => {
   assert.equal(pdfReportReady("# Note\n\nDecision and action plan, with cited evidence."), true);
 });
 
+test("report cannot claim artifact approval is pending when runtime saves it", () => {
+  assert.equal(claimsArtifactApprovalPending("Report artifact save is pending your approval."), true);
+  assert.equal(claimsArtifactApprovalPending("# Bank report\n\nSources verified; no memory was written."), false);
+});
+
 test("artifact saving requires a positive creation request", () => {
   assert.equal(requestsArtifact("Write a report on German competitors"), true);
   assert.equal(requestsArtifact("Export this as a PDF"), true);
   assert.equal(requestsArtifact("What do you have in HIVEMIND? No company strategy or report."), false);
+  assert.equal(requestsArtifact("Create a report artifact. Do not discuss artifact approval."), true);
+  assert.equal(planRequestsArtifact("Create a report artifact. Do not discuss artifact approval.", "none", []), true);
   assert.equal(requestsArtifact("Do not create a report"), false);
   assert.equal(requestsArtifact("Write a short report. Do not create an artifact."), false);
   assert.equal(requestsArtifact("Give one short positioning choice. Draft only; do not create an artifact."), false);
@@ -95,6 +103,23 @@ test("rejects prospect URLs absent from tool evidence", () => {
   const report = "Candidate Sparkasse Hannover fits the offer. Source: https://www.sparkasse-hannover.de";
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: [] }).reason, "prospect_sources_missing");
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).complete, true);
+});
+
+test("versioned prospect contract requires per-account location and sector receipts", () => {
+  assert.equal(localPlaybookVersion("local:outreach.prospect-list"), 2);
+  assert.match(localPlaybookContract("local:outreach.prospect-list"), /Recovery:/);
+  const report = "# Berlin prospects\nDKB: location https://dkb.example/impressum; sector https://dkb.example/banking.";
+  const rows = [{ name: "DKB", locationUrl: "https://dkb.example/impressum", sectorUrl: "https://dkb.example/banking", caveat: "Buyer unconfirmed" }];
+  assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum", "https://dkb.example/banking"]).complete, true);
+  assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum"]).reason, "prospect_evidence_missing");
+  assert.equal(prospectEvidenceComplete(report, [], ["https://dkb.example/impressum"]).reason, "prospect_rows_missing");
+});
+
+test("image capture is available only for a visual request", () => {
+  assert.equal(requestsImageCapture("Get a screenshot of the main page"), true);
+  assert.equal(requestsImageCapture("Do a visual audit of the landing page"), true);
+  assert.equal(requestsImageCapture("Create a prospect report and save an artifact"), false);
+  assert.equal(requestsImageCapture("Review the site but do not capture a screenshot"), false);
 });
 
 test("company completion does not depend on report length or prescribed vocabulary", () => {

@@ -35,6 +35,14 @@ export function ensureCompanyTables(sql: {
     note TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`;
+  sql`CREATE TABLE IF NOT EXISTS company_playbook_proposals (
+    id TEXT PRIMARY KEY,
+    playbook_id TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_review',
+    created_at TEXT NOT NULL
+  )`;
   sql`CREATE TABLE IF NOT EXISTS company_events (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,

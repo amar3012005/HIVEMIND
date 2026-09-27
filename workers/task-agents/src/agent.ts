@@ -400,14 +400,17 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return snapshot;
   }
 
-  refineLocalPlaybook(id: string, instruction: string): { saved: true; id: string } | { error: string } {
+  refineLocalPlaybook(id: string, instruction: string): { proposed: true; id: string; proposalId: string; status: "pending_review" } | { error: string } {
     const target = localPlaybook(id) ? id : "";
     if (!target) return { error: "playbook_not_found" };
+    const runId = this.state.envelope?.runId;
+    if (!runId) return { error: "task_not_bound" };
     ensureCompanyTables(this.sql.bind(this));
     const createdAt = new Date().toISOString();
-    this.sql`INSERT INTO company_playbook_notes (id, playbook_id, note, created_at) VALUES (${crypto.randomUUID()}, ${target}, ${instruction.slice(0, 2000)}, ${createdAt})`;
-    this.note("refine_local_playbook", target);
-    return { saved: true, id: target };
+    const proposalId = crypto.randomUUID();
+    this.sql`INSERT INTO company_playbook_proposals (id, playbook_id, instruction, source_run_id, status, created_at) VALUES (${proposalId}, ${target}, ${instruction.slice(0, 2000)}, ${runId}, ${"pending_review"}, ${createdAt})`;
+    this.note("refine_local_playbook", `${target} proposal ${proposalId} pending review`);
+    return { proposed: true, id: target, proposalId, status: "pending_review" };
   }
 
   async saveCompanyMemory(title: string, content: string, idempotencyKey?: string): Promise<unknown> {
@@ -834,9 +837,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const refine = tool({
-      description: "Add a company-specific special case to a local playbook. The global method stays unchanged.",
+      description: "Propose a company-specific playbook change for review. This does not alter current or future playbook instructions.",
       inputSchema: z.object({ id: z.string().min(3).max(120), instruction: z.string().min(8).max(2000) }),
-      execute: async ({ id, instruction }): Promise<{ saved: true; id: string } | { error: string }> => {
+      execute: async ({ id, instruction }): Promise<{ proposed: true; id: string; proposalId: string; status: "pending_review" } | { error: string }> => {
         this.assertTool("refine_local_playbook");
         return this.refineLocalPlaybook(id, instruction);
       },

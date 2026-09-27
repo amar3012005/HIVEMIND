@@ -656,6 +656,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const identity = this.assertTool("hivemind_meta");
         this.note("hivemind_meta", input.operation);
         if (input.operation === "context") {
+          if (this.state.profileBrief && !this.state.profileBrief.startsWith("Authenticated profile unavailable.")) {
+            return { status: "ready", context: this.state.profileBrief };
+          }
           const result = await this.loadProfileBrief(identity.orgId, identity.userId);
           if (result.brief.startsWith("Authenticated profile unavailable.")) return { status: "unavailable", user: result.user, organization: result.organization };
           this.setState({ ...this.state, profileBrief: result.brief, companyContextLoaded: true });

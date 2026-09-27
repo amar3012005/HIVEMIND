@@ -105,7 +105,20 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     let asked = work.task || "Map competitors and the local market.";
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
-    const plan = await step.prompt("operating-plan", {
+    const quickRoute = await durable.do("jev-route", async () =>
+      this.agent.routeTask(asked, work.previousRequest || "", work.company));
+    const quickDirect = quickRoute === "direct" ? await step.prompt("direct-answer", {
+      prompt: `Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here.`,
+      output: z.object({ reply: z.string().min(2) }),
+      timeout: "30 minutes",
+    }) : null;
+    const plan = quickRoute ? planSchema.parse({
+      mode: quickRoute,
+      decision: "",
+      reply: quickDirect?.reply || "",
+      groups: quickRoute === "action" ? ["company", "web_research", "browser", "connected_apps", "records"] : [],
+      resolvedRequest: asked,
+    }) : await step.prompt("operating-plan", {
       prompt: `Authenticated organization brief: ${work.company}; website: ${work.website}; profile location (not externally verified): ${work.market}. Current operator request: ${asked}. New-session mode preference: ${work.modePreference || "auto"}. Previous request in this same room, for reference only: ${work.previousRequest || "none"}. If current request refers to earlier work (for example, "do it"), set resolvedRequest to the concrete requested task, preserving current instruction. Otherwise set resolvedRequest to current request. Current request wins if it changes scope. Choose outputKind by requested deliverable, understanding ordinary spelling mistakes; a fundraising pitch deck is slide_deck, not document.\n\nUse the system prompt and action skill catalog to choose direct, action, or company work. Direct is only for greetings, general knowledge, calculations, or transforming facts the operator supplied in this turn. Questions about the organization, its offer, people, records, history, or earlier work are action even when the answer should be one sentence: make one focused HIVEMIND recall, not a company operating plan. The compact profile is not a complete memory inventory; never assert absence of an offer, ICP, history, or prior work merely because the brief omits it. Company mode is for substantive multi-part company positioning, strategy, research, decisions, plans, reports, fundraising materials, and investor deliverables; a company topic alone does not require a plan. Choose only tool families needed. For company work, choose the most specific local playbook whose named output matches the requested deliverable, set localPlaybookId to its id, and return a concise operator-visible plan with up to six tasks. A request for a finished file needs a plan step for creating that file and checking its receipt; drafting text alone is not completion. For action work, return no formal plan or tasks. Local playbook names (methods load after selection): ${JSON.stringify(playbookNames)}. Do not present private chain of thought as tasks.`,
       output: planSchema,
       timeout: "30 minutes",

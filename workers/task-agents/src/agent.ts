@@ -13,6 +13,7 @@ import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { scoreCompanyBehavior, type SpanScoreInput } from "./span-score";
 import { partialToolText } from "./draft-stream";
+import { routeWithJev, type JevRoute } from "./jev-route";
 import { updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
@@ -55,6 +56,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   getSystemPrompt(): string {
     return HYPERAGENT_INSTRUCTION;
+  }
+
+  async routeTask(request: string, previousRequest: string, company: string): Promise<JevRoute | null> {
+    const env = this.gatewayEnv();
+    if (env.JEV_ROUTING_ENABLED !== "true") return null;
+    const ai = env.AI as { run?: (model: string, input: unknown) => Promise<unknown> } | undefined;
+    const started = Date.now();
+    const route = await routeWithJev(ai?.run ? { run: ai.run.bind(ai) } : undefined, { request, previousRequest, company });
+    console.log(JSON.stringify({ event: "jev_route", route: route ?? "think", elapsedMs: Date.now() - started }));
+    return route;
   }
 
   configureSession(session: Session): Session {

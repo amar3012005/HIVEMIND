@@ -4,6 +4,7 @@ export interface GatewayEnv {
   HIVEMIND_META_URL?: string;
   HIVEMIND_CORE_URL?: string;
   AI?: unknown;
+  JEV_ROUTING_ENABLED?: string;
   AI_GATEWAY_ID?: string;
   AI_GATEWAY_MODEL?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;

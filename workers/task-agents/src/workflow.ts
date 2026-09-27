@@ -185,7 +185,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const playbookBody = await durable.do("load-local-playbook", async () => this.agent.loadTaskPlaybook(selectedPlaybook!.id));
 
     const companyContext = await durable.do("recall-company-context", async () =>
-      this.agent.recallTaskContext(work.orgId, work.userId, `${work.company} ${work.task}`.slice(0, 1200)));
+      this.agent.recallTaskContext(work.orgId, work.userId, asked.slice(0, 1200)));
     const recallSucceeded = Boolean(companyContext && typeof companyContext === "object" && "ok" in companyContext && companyContext.ok === true);
     if (!recallSucceeded && !this.agent.hasCompanyContext()) {
       const reply = "Company memory is unavailable. I cannot finish company research until it is reachable.";

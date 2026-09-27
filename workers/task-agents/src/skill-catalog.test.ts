@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { toolkitSkillManifest } from "./skill-catalog.ts";
+import { localPlaybook } from "./playbooks.ts";
 import { toolsForGroups } from "./tool-groups.ts";
 
 test("company tools cannot prepare an unsolicited memory write", () => {
@@ -44,4 +45,11 @@ test("publishes the four toolkit skills", () => {
     assert.ok(skill.description.length > 20);
     assert.ok(skill.body.includes("- "));
   }
+});
+
+test("market playbook answers status questions without mandatory capture", () => {
+  const method = localPlaybook("local:research.competitor-market")?.body ?? "";
+  assert.match(method, /market-status question/);
+  assert.match(method, /empty scoped recall is not proof/i);
+  assert.match(method, /Do not capture or load a homepage screenshot/i);
 });

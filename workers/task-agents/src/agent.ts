@@ -451,7 +451,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!run) return;
     const artifactRefs = this.sql`SELECT id FROM company_artifacts WHERE created_at >= ${String(run.created_at)} ORDER BY created_at ASC LIMIT 40`.map((row) => String(row.id));
     const company = await getAgentByName((this.gatewayEnv() as GatewayEnv & Env).HivemindTaskAgent as never, `company-${envelope.orgId}`);
-    const receipt = await (company as { finishIndexedCompanyWorkRun(input: { id: string; orgId: string; status: "completed" | "incomplete"; reason: string; artifactRefs: string[]; sourceRefs: string[] }): Promise<{ id: string; status: string }> }).finishIndexedCompanyWorkRun({ id: envelope.runId, orgId: envelope.orgId, status: complete ? "completed" : "incomplete", reason, artifactRefs, sourceRefs: this.sourceUrls() });
+    const receipt = await (company as { finishIndexedCompanyWorkRun(input: { id: string; orgId: string; status: "completed" | "incomplete"; reason: string; artifactRefs: string[]; sourceRefs: string[] }): Promise<{ id: string; status: string }> }).finishIndexedCompanyWorkRun({ id: envelope.runId, orgId: envelope.orgId, status: complete ? "completed" : "incomplete", reason, artifactRefs, sourceRefs: this.verifiedSourceUrls() });
     await this.note("workrun-index", `${receipt.id} ${receipt.status}`);
   }
 
@@ -722,6 +722,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         if (!browser) throw new Error("browser_binding_missing");
         const markdown = await browserMarkdown(browser as never, { url: target.href, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
         if (markdown.trim().length < 80) throw new Error("page_content_missing");
+        this.recordSourceRead(target.href, markdown);
         this.rememberSources({ url: target.href });
         this.note("browser_markdown", `${target.href}: ${markdown.length} characters`);
         return { url: target.href, markdown: markdown.slice(0, 12000) };
@@ -1160,6 +1161,24 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return [...new Set([...this.turnSources, ...(this.state.sources ?? [])].map((source) => source.url))];
   }
 
+  recordSourceRead(url: string, markdown: string): void {
+    const envelope = this.state.envelope;
+    if (!envelope) return;
+    ensureCompanyTables(this.sql.bind(this));
+    this.sql`INSERT OR REPLACE INTO source_read_receipts (run_id, org_id, user_id, url, excerpt, read_at) VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${url}, ${markdown.trim().slice(0, 1800)}, ${new Date().toISOString()})`;
+  }
+
+  sourceReadReceipts(): Array<{ url: string; excerpt: string; readAt: string }> {
+    const envelope = this.state.envelope;
+    if (!envelope) return [];
+    ensureCompanyTables(this.sql.bind(this));
+    return this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} ORDER BY read_at DESC LIMIT 12`.map((row) => ({ url: String(row.url), excerpt: String(row.excerpt), readAt: String(row.read_at) }));
+  }
+
+  verifiedSourceUrls(): string[] {
+    return [...new Set(this.sourceReadReceipts().map((receipt) => receipt.url))];
+  }
+
   async verifyProspectPages(prospects: readonly ProspectEvidence[]): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
     const browser = this.gatewayEnv().BROWSER;
     const urls = [...new Set(prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]))].slice(0, 20);
@@ -1180,7 +1199,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       }));
       receipts.push(...batch);
     }
-    for (const receipt of receipts) if (!receipt.error) this.rememberSources({ url: receipt.url });
+    for (const receipt of receipts) if (!receipt.error) {
+      this.recordSourceRead(receipt.url, receipt.excerpt);
+      this.rememberSources({ url: receipt.url });
+    }
     this.note("source-verification", JSON.stringify(receipts.map(({ url, excerpt, error }) => ({ url, bytes: excerpt.length, error }))));
     return receipts;
   }

@@ -81,4 +81,13 @@ export function ensureCompanyTables(sql: {
     detail TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   )`;
+  sql`CREATE TABLE IF NOT EXISTS source_read_receipts (
+    run_id TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    excerpt TEXT NOT NULL,
+    read_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, url)
+  )`;
 }

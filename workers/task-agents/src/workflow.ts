@@ -391,7 +391,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       plan: plan.tasks,
       report: written.report,
       companyContext,
-      sources: await this.agent.sourceUrls(),
+      sources: (await this.agent.sourceReadReceipts()).map((receipt: { url: string; readAt: string; excerpt: string }) => `${receipt.url} (read ${receipt.readAt}): ${receipt.excerpt}`),
     }));
     if (review.verdict === "caution" && review.note) {
       written.report += `\n\n## Review note\n${review.note}`;
@@ -428,7 +428,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       plan: plan.tasks,
       completedTaskIds: written.completedTaskIds,
       report: prepared.report,
-      sourceUrls: await this.agent.sourceUrls(),
+      sourceUrls: await this.agent.verifiedSourceUrls(),
     }));
 
     if (!prepared.title) {

@@ -486,6 +486,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
   }
 
+  connectedWriteStatuses(orgId: string, userId: string, attemptId?: string): Record<string, unknown>[] {
+    if (this.state.envelope?.orgId !== orgId || this.state.envelope?.userId !== userId) throw new Error("connected_write_unbound");
+    ensureCompanyTables(this.sql.bind(this));
+    const rows = attemptId
+      ? this.sql`SELECT attempt_id, tool_slug, status, receipt, reason, updated_at FROM connected_write_attempts WHERE org_id = ${orgId} AND user_id = ${userId} AND attempt_id = ${attemptId} LIMIT 1`
+      : this.sql`SELECT attempt_id, tool_slug, status, receipt, reason, updated_at FROM connected_write_attempts WHERE org_id = ${orgId} AND user_id = ${userId} ORDER BY updated_at DESC LIMIT 10`;
+    return rows.map((row) => ({ attemptId: row.attempt_id, toolSlug: row.tool_slug, status: row.status, receipt: row.receipt ? JSON.parse(String(row.receipt)) : null, reason: row.reason || null, updatedAt: row.updated_at }));
+  }
+
   refineLocalPlaybook(id: string, instruction: string): { proposed: true; id: string; proposalId: string; status: "pending_review" } | { error: string } {
     const target = localPlaybook(id) ? id : "";
     if (!target) return { error: "playbook_not_found" };
@@ -882,18 +891,20 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const connectedTask = tool({
       description: "Tenant-scoped connected-app gateway. Search tools, inspect selected schema, execute granted reads or approval-gated writes, and manage connection status.",
       inputSchema: z.object({
-        action: z.enum(["connection_status", "search", "schemas", "execute", "execute_write", "manage_connection", "wait_connection"]),
+        action: z.enum(["connection_status", "search", "schemas", "execute", "execute_write", "write_status", "manage_connection", "wait_connection"]),
         toolkit: z.string().min(1).max(80).optional(),
         useCase: z.string().min(1).max(1200).optional(),
         knownFields: z.string().max(1200).optional(),
         grantId: z.string().min(1).max(2000).optional(),
         toolSlug: z.string().min(1).max(160).optional(),
+        attemptId: z.uuid().optional(),
         arguments: z.record(z.string(), z.unknown()).optional(),
       }),
       needsApproval: async ({ action }) => action === "execute_write" || action === "manage_connection",
-      execute: async ({ action, toolkit, useCase, knownFields, grantId, toolSlug, arguments: args }): Promise<unknown> => {
+      execute: async ({ action, toolkit, useCase, knownFields, grantId, toolSlug, attemptId, arguments: args }): Promise<unknown> => {
         const identity = this.assertTool("hivemind_connected_task");
         this.note("hivemind_connected_task", `${action}${toolkit ? ` ${toolkit}` : ""}`);
+        if (action === "write_status") return { attempts: this.connectedWriteStatuses(identity.orgId, identity.userId, attemptId) };
         if (action === "execute_write") {
           if (!grantId || !toolSlug) return { error: "grant_and_tool_required" };
           return this.executeConnectedWrite({ orgId: identity.orgId, userId: identity.userId, toolkit, grantId, toolSlug, args: args ?? {} });

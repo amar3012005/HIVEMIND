@@ -82,8 +82,8 @@ export function requestsArtifact(task: string): boolean {
 }
 
 export function artifactCreationForbidden(task: string): boolean {
-  return /\b(?:do not|don't|never|without|no)\b[^.!?]{0,40}\b(?:create|generate|make|save|export|render)\b[^.!?]{0,80}\bartifact\b/i.test(task)
-    || /\b(?:no|without)\s+(?:an?\s+)?(?:saved\s+)?artifact\b/i.test(task);
+  return /\b(?:do not|don't|never|without|no)\b[^.!?]{0,40}\b(?:create|generate|make|save|export|render)\b[^.!?]{0,80}\b(?:artifact|report|document|file)\b/i.test(task)
+    || /\b(?:no|without)\b[^.!?]{0,80}\bartifacts?\b(?!\s+(?:approval|permission)\b)/i.test(task);
 }
 
 export function planRequestsArtifact(task: string, outputKind: string, tasks: readonly string[]): boolean {

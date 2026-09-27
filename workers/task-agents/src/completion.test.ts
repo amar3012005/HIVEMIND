@@ -44,6 +44,9 @@ test("artifact saving requires a positive creation request", () => {
   assert.equal(requestsArtifact("Write a short report. Do not create an artifact."), false);
   assert.equal(requestsArtifact("Give one short positioning choice. Draft only; do not create an artifact."), false);
   assert.equal(requestsArtifact("Write a report. No PDF."), true);
+  assert.equal(planRequestsArtifact("Build a growth plan. No external research, artifact, memory write, or connected-app action.", "document", ["Write the growth brief document"]), false);
+  assert.equal(planRequestsArtifact("Write the answer. Do not create a report.", "document", ["Save the report"]), false);
+  assert.equal(planRequestsArtifact("Create a report artifact. No artifact approval is needed.", "document", []), true);
   assert.equal(requestsPdf("Write a report. No PDF."), false);
   assert.equal(requestsPdf("Save it as a PDF report."), true);
   assert.equal(requestsArtifact("Render the SINGULANCE positioning note + action plan as a PDF artifact."), true);

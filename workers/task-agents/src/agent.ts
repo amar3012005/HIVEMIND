@@ -2,6 +2,7 @@ import { Think, type ChunkContext, type Session, type ToolCallContext, type Tool
 import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
+import type { ContextConfig } from "agents/context";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
@@ -59,8 +60,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return "@cf/zai-org/glm-5.3-flash";
   }
 
-  getSystemPrompt(): string {
-    return HYPERAGENT_INSTRUCTION;
+  configureContext(): ContextConfig[] {
+    return [{ label: "hyperagent:system", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
   }
 
   async routeTask(request: string, previousRequest: string, company: string): Promise<JevRoute | null> {

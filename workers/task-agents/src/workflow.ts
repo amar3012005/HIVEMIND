@@ -81,6 +81,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
     if (work.modePreference === "company" || deckRequested) plan.mode = "company";
     else if (/\b(screenshot|capture)\b/i.test(asked) || (plan.mode === "direct" && requestsArtifact(asked))) plan.mode = "action";
+    else if (plan.mode === "direct" && !/\b(?:do not|don't|no)\s+(?:use\s+)?tools?\b/i.test(work.task ?? "")
+      && /\b(?:need|requires?)\b[^.!?]{0,60}\b(?:recall|search|check|verify|evidence)\b|\b(?:not|isn't|aren't)\s+(?:specified|described|available|verified)\b/i.test(`${plan.reply} ${plan.decision}`)) {
+      plan.mode = "action";
+    }
     plan.tasks = plan.mode === "company" ? currentTurnTasks(plan.tasks) : [];
     if (plan.mode === "company" && !plan.tasks.length) {
       const revised = await step.prompt("complete-company-plan", {

@@ -9,6 +9,7 @@ import { authorizeCall } from "./capability";
 import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { connectedWriteKey } from "./connected-write";
+import { approvePendingInput } from "./operator-resume";
 import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, type ProspectEvidence } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
@@ -169,13 +170,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private async resumePaused(answer: string): Promise<boolean> {
     const workflowId = this.state.workflowId;
     if (this.state.awaiting !== "input" || !workflowId) return false;
+    const result = await approvePendingInput(() => this.approveWorkflow(workflowId, { reason: "operator", metadata: { answer } }));
+    if (!result.approved) {
+      this.note("question", result.error);
+      return false;
+    }
     this.markAwaiting("");
     if (answer) this.note("user", answer);
-    try {
-      await this.approveWorkflow(workflowId, { reason: "operator", metadata: { answer } });
-    } catch (error) {
-      this.note("question", error instanceof Error ? error.message : "resume_failed");
-    }
     return true;
   }
 

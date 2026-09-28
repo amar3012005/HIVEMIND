@@ -9,6 +9,8 @@ export interface GatewayEnv {
   AI_GATEWAY_MODEL?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_AI_GATEWAY_TOKEN?: string;
+  CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS?: string;
+  OPENROUTER_MODEL?: string;
   SPAN01_ENABLED?: string;
   OPENROUTER_SPAN01_KEY?: { get(): Promise<string> };
   GOOGLE_MAPS_API_KEY?: string;

@@ -1,4 +1,5 @@
 import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext } from "@cloudflare/think";
+import { thinkModel } from "./think-model";
 import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
@@ -57,9 +58,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     connection.setState({ userId, orgId, employee });
   }
 
-  getModel(): string {
-    return "@cf/zai-org/glm-5.3-flash";
-  }
+  getModel() { return thinkModel(this.gatewayEnv()); }
 
   configureContext(): ContextConfig[] {
     return [{ label: "hyperagent:system", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];

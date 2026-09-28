@@ -1,11 +1,12 @@
 import { Think } from "@cloudflare/think";
+import { thinkModel } from "./think-model";
 
 export class CompanyGovernor extends Think<Env> {
   override includeMcpTools = false;
   override workspaceBash = false;
   override storeMessages = true;
 
-  getModel(): string { return "@cf/zai-org/glm-5.3-flash"; }
+  getModel() { return thinkModel((this as unknown as { env: Env }).env); }
 
   getSystemPrompt(): string {
     return `You are a read-only company deliverable reviewer. Review once, never redo research or request a retry. Check whether output answers the task, distinguishes evidence from proposals, and avoids material claims unsupported by supplied receipts. Be practical: minor phrasing and incomplete source coverage do not block delivery. Reply only with JSON {"verdict":"clear"|"caution","note":"one concise, specific finding or empty string"}. Use caution only for a material, concrete issue. Never claim you verified a linked page; you only see provided receipts.`;

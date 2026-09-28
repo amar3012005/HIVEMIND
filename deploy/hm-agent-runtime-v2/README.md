@@ -107,8 +107,11 @@ python3 -m pytest deploy/hm-agent-runtime-v2/tests -q
 ## Version and release discipline
 
 AgentScope package version is pinned in [`requirements.txt`](requirements.txt).
-The runtime source branch and deployed image are separate facts: record source
-SHA, image digest, target control plane, and canary results for any deployment.
+Upstream latest release checked 2026-09-28 is
+[AgentScope v2.0.8](https://github.com/agentscope-ai/agentscope/releases/tag/v2.0.8),
+which matches this pin. The runtime source branch and deployed image are separate
+facts: record source SHA, image digest, target control plane, and canary results
+for any deployment.
 This documentation change does not deploy anything. Never infer preview or
 production rollout from a source push.
 

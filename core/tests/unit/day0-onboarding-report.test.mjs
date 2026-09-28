@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DAY_ZERO_REPORT_VERSION } from '../../src/email/templates/day0-company-onboarding.js';
+import { DAY_ZERO_EDITORIAL_REPORT_VERSION, DAY_ZERO_REPORT_VERSION } from '../../src/email/templates/day0-company-onboarding.js';
 import { startDayZeroOnboardingReport } from '../../src/lifecycle/day0-onboarding-report.js';
 
 const ORG_ID = '11111111-1111-4111-8111-111111111111';
@@ -78,4 +78,75 @@ test('Day 0 does not resend the current renderer version', async () => {
   const result = await startDayZeroOnboardingReport({ prisma, orgId: ORG_ID, hqRoomId: ROOM_ID, allowVersionedReissue: true });
   assert.deepEqual(result, { ok: true, accepted: false, status: 'sent', version: DAY_ZERO_REPORT_VERSION });
   assert.equal(prisma.writes.length, 0);
+});
+
+test('Day 0 uses the tenant-flagged multi-page editorial PDF for a versioned reissue without changing the email', async () => {
+  const prisma = fakePrisma({
+    company: 'Canary Co',
+    website: 'https://canary.example',
+    screenshot_pending: false,
+    screenshot: 'ready',
+    day0_report_email: { version: DAY_ZERO_REPORT_VERSION, status: 'sent', sent_at: '2026-09-01T10:00:00.000Z', message_id: 'old-message' },
+  });
+  let pdfHtml;
+  let pdfOptions;
+  let email;
+  const started = await startDayZeroOnboardingReport({
+    prisma,
+    orgId: ORG_ID,
+    hqRoomId: ROOM_ID,
+    userId: USER_ID,
+    allowVersionedReissue: true,
+    isEditorialRendererEnabled: async (target) => target.orgId === ORG_ID && target.userId === USER_ID,
+    renderPdf: async (html, options) => {
+      pdfHtml = html;
+      pdfOptions = options;
+      return Buffer.from('%PDF');
+    },
+    sendEmail: async (input) => {
+      email = input;
+      return { ok: true, provider: 'cloudflare', deliveryStatus: 'accepted', messageId: 'new-message' };
+    },
+  });
+
+  const completed = await started.completion;
+  assert.equal(completed.version, DAY_ZERO_EDITORIAL_REPORT_VERSION);
+  assert.equal(completed.report_template, 'multipage-editorial');
+  assert.match(pdfHtml, /Day 0 · Canary Co/);
+  assert.match(pdfHtml, /SINGULANCE/);
+  assert.deepEqual(pdfOptions, {
+    displayHeaderFooter: false,
+    preferCssPageSize: true,
+    margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
+  });
+  assert.match(email.rendered.html, /DAY 0 · THE RISE OF AWAKENING/);
+  assert.doesNotMatch(email.rendered.html, /FIRST OPERATING MODEL · READY FOR REVIEW/);
+  assert.equal(email.notification.data.report_template, 'multipage-editorial');
+  assert.equal(prisma.writes[0].report_template, 'multipage-editorial');
+  assert.equal(prisma.writes.at(-1).version, DAY_ZERO_EDITORIAL_REPORT_VERSION);
+});
+
+test('Day 0 reissue falls back to the current PDF if the rollout flag is off', async () => {
+  const prisma = fakePrisma({
+    company: 'Canary Co',
+    website: 'https://canary.example',
+    screenshot_pending: false,
+    screenshot: 'ready',
+    day0_report_email: { version: 'day-0-v2', status: 'sent' },
+  });
+  let pdfHtml;
+  const started = await startDayZeroOnboardingReport({
+    prisma,
+    orgId: ORG_ID,
+    hqRoomId: ROOM_ID,
+    allowVersionedReissue: true,
+    isEditorialRendererEnabled: async () => false,
+    renderPdf: async (html) => { pdfHtml = html; return Buffer.from('%PDF'); },
+    sendEmail: async () => ({ ok: true, provider: 'cloudflare', deliveryStatus: 'accepted' }),
+  });
+  const completed = await started.completion;
+  assert.equal(completed.version, DAY_ZERO_REPORT_VERSION);
+  assert.equal(completed.report_template, 'portrait-v8');
+  assert.match(pdfHtml, /HIVEMIND · COMPANY AWAKENING COMPLETE/);
+  assert.equal(prisma.writes.at(-1).version, DAY_ZERO_REPORT_VERSION);
 });

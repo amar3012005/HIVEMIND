@@ -8,7 +8,14 @@ export const DAY0_HEADER_TEMPLATE = `<div style="box-sizing:border-box;width:100
 export const DAY0_FOOTER_TEMPLATE = `<div style="box-sizing:border-box;width:100%;margin:0 15mm;padding:2.5mm 0 6mm;border-top:1px solid #e3e0db;display:flex;justify-content:space-between;font:700 6px/9px ui-monospace,monospace;letter-spacing:1.1px;color:#999"><span>SINGULANCE · HIVEMIND OPERATING SYSTEM</span><span>DAY 0 · COMPANY AWAKENING · <span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`;
 
 /** Render the exact Day-0 HTML document through the internal Playwright service. */
-export async function renderDayZeroOnboardingPdf(html, { fetchImpl = globalThis.fetch } = {}) {
+export async function renderDayZeroOnboardingPdf(html, {
+  fetchImpl = globalThis.fetch,
+  displayHeaderFooter = true,
+  preferCssPageSize = false,
+  margin = { top: '24mm', right: '0mm', bottom: '18mm', left: '0mm' },
+  headerTemplate = DAY0_HEADER_TEMPLATE,
+  footerTemplate = DAY0_FOOTER_TEMPLATE,
+} = {}) {
   if (typeof html !== 'string' || !html.trim()) throw new Error('day0_report_html_required');
   const token = process.env.PLAYWRIGHT_SERVICE_TOKEN || '';
   if (!token) throw new Error('playwright_service_token_missing');
@@ -18,11 +25,10 @@ export async function renderDayZeroOnboardingPdf(html, { fetchImpl = globalThis.
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       html,
-      display_header_footer: true,
-      prefer_css_page_size: false,
-      header_template: DAY0_HEADER_TEMPLATE,
-      footer_template: DAY0_FOOTER_TEMPLATE,
-      margin: { top: '24mm', right: '0mm', bottom: '18mm', left: '0mm' },
+      display_header_footer: displayHeaderFooter,
+      prefer_css_page_size: preferCssPageSize,
+      ...(displayHeaderFooter ? { header_template: headerTemplate, footer_template: footerTemplate } : {}),
+      margin,
     }),
     signal: AbortSignal.timeout(Math.max(5_000, Number(process.env.HIVEMIND_PLAYWRIGHT_PDF_TIMEOUT_MS || DEFAULT_TIMEOUT_MS))),
   });

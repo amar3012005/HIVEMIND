@@ -4,12 +4,14 @@ import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
 import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
-import { globalCatalog, localCatalog, localPlaybook } from "./playbooks";
+import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
+import { ineligiblePostRunJev, type PostRunJevReview } from "./post-run-jev";
 import type { TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
 import { checkpoint } from "./checkpoint";
 
 export interface CompanyWork extends TaskEnvelope {
+  occurrenceId?: string;
   startedAt?: string;
   company: string;
   website: string;
@@ -53,6 +55,8 @@ export interface CompanyWorkResult {
   complete: boolean;
   reason: string;
   report: string;
+  artifactRefs?: string[];
+  insights?: PostRunJevReview;
 }
 
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
@@ -75,6 +79,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.note("workrun-index", `terminal index failed: ${workflowErrorCode(error)}`);
       }
       await this.agent.finishWorkRuntime(event.payload.runId, result.complete ? "completed" : "incomplete");
+      if (event.payload.occurrenceId) {
+        await this.agent.recordTriggerOutcome(event.payload.occurrenceId, result)
+          .catch((error: unknown) => console.warn(JSON.stringify({ event: "trigger_outcome_failed", runId: event.payload.runId, code: workflowErrorCode(error) })));
+      }
       return result;
     } catch (error) {
       const code = workflowErrorCode(error);
@@ -83,6 +91,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.markAwaiting("");
       await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");
       await this.agent.note("report", `I could not finish this run (${code}). You can continue in this room.`);
+      if (event.payload.occurrenceId) {
+        await this.agent.recordTriggerOutcome(event.payload.occurrenceId, { complete: false, reason: code, report: "" })
+          .catch((receiptError: unknown) => console.warn(JSON.stringify({ event: "trigger_outcome_failed", runId: event.payload.runId, code: workflowErrorCode(receiptError) })));
+      }
       throw error;
     }
   }
@@ -428,6 +440,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const prepared = await durable.do("complete", async () => {
       const recalled = await this.agent.hasCompanyContext();
       const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website });
+      let artifactId = "";
       if (artifactRequested) {
         const saved = await this.agent.saveCompanyArtifact({
           kind: "report",
@@ -435,6 +448,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           contentType: "text/markdown",
           body: written.report,
         });
+        artifactId = saved.id;
         if (!pdfForbidden && (requestsPdf(asked) || deckRequested)) await this.agent.createPdfArtifact(saved.id);
       }
       for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
@@ -442,26 +456,35 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.rememberSources(written.report);
       if (!requestsMemorySave(asked)) {
         await this.agent.note("completion", "deliverable_ready");
-        return { title: "", content: "", report: written.report, verdict };
+        return { title: "", content: "", report: written.report, verdict, artifactId };
       }
       const title = `${work.company}: ${asked.slice(0, 120)}`;
       const preview = written.report.slice(0, 700);
       await this.agent.note("approval", `Save this to company memory?\n${title}\n${preview}`);
       await this.agent.markAwaiting("memory");
-      return { title, content: written.report.slice(0, 4000), report: written.report, verdict };
+      return { title, content: written.report.slice(0, 4000), report: written.report, verdict, artifactId };
     });
 
-    const scoreCompletedWork = () => durable.do("score-completed-company-work", async () => this.agent.scoreCompletedCompanyWork({
-      task: asked,
-      plan: plan.tasks,
-      completedTaskIds: written.completedTaskIds,
-      report: prepared.report,
-      sourceUrls: await this.agent.verifiedSourceUrls(),
-    }));
+    const reviewCompletedWork = () => durable.do("post-run-jev-review", async () => {
+      try {
+        const parent = selectedPlaybook ? globalPlaybookBody(selectedPlaybook.globalId) : null;
+        return await this.agent.reviewCompletedCompanyRun({
+          task: asked, report: prepared.report, completedTaskIds: written.completedTaskIds,
+          artifactId: prepared.artifactId,
+          playbook: selectedPlaybook ? { id: selectedPlaybook.id, globalId: selectedPlaybook.globalId,
+            globalVersion: parent?.version ?? null, snapshot: selectedPlaybook.body } : null,
+        });
+      } catch {
+        return ineligiblePostRunJev({ runId: work.runId, orgId: work.orgId, userId: work.userId,
+          taskType: work.taskType, phase: work.phase, task: asked, report: prepared.report,
+          completedTaskIds: written.completedTaskIds, artifactId: prepared.artifactId,
+          sources: [], activityCounts: {}, playbook: null }, "unavailable");
+      }
+    });
 
     if (!prepared.title) {
-      await scoreCompletedWork();
-      return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report };
+      const insights = await reviewCompletedWork();
+      return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
     }
 
     let approved = false;
@@ -489,7 +512,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         report: prepared.report,
       };
     });
-    await scoreCompletedWork();
-    return result;
+    const insights = await reviewCompletedWork();
+    return { ...result, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
   }
 }

@@ -15,9 +15,9 @@ import { approvePendingInput } from "./operator-resume";
 import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, type ProspectEvidence } from "./completion";
 import { CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
-import { scoreCompanyBehavior, type SpanScoreInput } from "./span-score";
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
+import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -155,7 +155,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
   }
 
-  async startCompanyWork(work: { runId: string; orgId: string; userId: string; taskType: string; phase: string; inputRefs: string[]; outputSchemaId: string; company: string; website: string; market: string; task: string; previousRequest?: string; modePreference?: "auto" | "company" | "direct"; startedAt?: string; employee?: EmployeeIdentity }): Promise<string> {
+  async startCompanyWork(work: { runId: string; orgId: string; userId: string; taskType: string; phase: string; inputRefs: string[]; outputSchemaId: string; company: string; website: string; market: string; task: string; previousRequest?: string; modePreference?: "auto" | "company" | "direct"; startedAt?: string; employee?: EmployeeIdentity; occurrenceId?: string }): Promise<string> {
     ensureCompanyTables(this.sql.bind(this));
     this.sql`INSERT OR IGNORE INTO workrun_runtime (run_id, work, updated_at) VALUES (${work.runId}, ${JSON.stringify(work)}, ${new Date().toISOString()})`;
     const workflowId = await this.runWorkflow("TASK_LIFECYCLE", work, { id: work.runId });
@@ -163,6 +163,50 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.setState({ ...this.state, workflowId });
     this.note("workrun", "queued");
     return workflowId;
+  }
+
+  async startTriggerOccurrence(occurrenceId: string): Promise<{ workflowId: string; status: string }> {
+    if (!/^[0-9a-f-]{36}$/i.test(occurrenceId)) throw new Error("invalid_occurrence");
+    const resolved = await getControl(this.gatewayEnv(), `/internal/hyper/task-triggers/occurrences/${occurrenceId}`) as {
+      occurrence?: { org_id: string; user_id: string; run_room_id: string; employee_id: string; task: string; task_packet?: { brief?: string; output_format?: string; acceptance_criteria?: string }; mode_preference?: string };
+      error?: string;
+    };
+    const occurrence = resolved.occurrence;
+    if (!occurrence || resolved.error) throw new Error(resolved.error || "occurrence_unavailable");
+    const expectedName = `session-${occurrence.org_id}-${occurrence.run_room_id}`;
+    if (this.name !== expectedName) throw new Error("wrong_room_agent");
+    const runId = `trigger-${occurrenceId}`;
+    ensureCompanyTables(this.sql.bind(this));
+    const existing = this.sql`SELECT workflow_id FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];
+    if (existing?.workflow_id) return { workflowId: String(existing.workflow_id), status: "already_started" };
+    const roster = await getControl(this.gatewayEnv(), `/internal/hyper/room-employee?org_id=${encodeURIComponent(occurrence.org_id)}&user_id=${encodeURIComponent(occurrence.user_id)}&room_id=${encodeURIComponent(occurrence.run_room_id)}`) as {
+      employee?: EmployeeIdentity; specialists?: EmployeeIdentity[]; error?: string;
+    };
+    if (roster.error || roster.employee?.id !== occurrence.employee_id) throw new Error("employee_roster_changed");
+    this.setState({ ...this.state, employee: roster.employee, specialists: roster.specialists || [], operatingPlan: null });
+    const profile = await readCompanyProfile(this.gatewayEnv(), occurrence.org_id, occurrence.user_id).catch(() => null);
+    const facts = companyFacts(profile, { company: "", website: "", market: "" });
+    const packet = occurrence.task_packet || {};
+    const task = [occurrence.task, packet.brief ? `Brief: ${packet.brief}` : "",
+      `Expected output format: ${packet.output_format || "plain_text"}.`,
+      packet.acceptance_criteria ? `Acceptance criteria: ${packet.acceptance_criteria}` : ""].filter(Boolean).join("\n");
+    this.note("user", task);
+    this.note("trigger", `Starting authorized ${occurrenceId}`);
+    const workflowId = await this.startCompanyWork({
+      runId, orgId: occurrence.org_id, userId: occurrence.user_id,
+      taskType: "triggered_room_task", phase: "trigger", inputRefs: facts.website ? [facts.website] : [],
+      outputSchemaId: "room_report_v1", modePreference: occurrence.mode_preference === "company" || occurrence.mode_preference === "direct" ? occurrence.mode_preference : "auto",
+      startedAt: new Date().toISOString(), occurrenceId, employee: roster.employee, ...facts, task,
+    });
+    return { workflowId, status: "started" };
+  }
+
+  async recordTriggerOutcome(occurrenceId: string, outcome: { complete: boolean; reason: string; report: string; artifactRefs?: string[] }): Promise<void> {
+    const receipt = await postControl(this.gatewayEnv(), `/internal/hyper/task-triggers/occurrences/${occurrenceId}/complete`, {
+      complete: outcome.complete, reason: outcome.reason, report: outcome.report,
+      artifact_refs: outcome.artifactRefs || [],
+    });
+    if (receipt && typeof receipt === "object" && "error" in receipt) throw new Error(String(receipt.error));
   }
 
   readWorkCheckpoint(runId: string, stage: string): { value: unknown } | null {
@@ -1456,9 +1500,55 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
   }
 
-  async scoreCompletedCompanyWork(input: Omit<SpanScoreInput, "events">): Promise<void> {
-    const result = await scoreCompanyBehavior(this.gatewayEnv(), { ...input, events: this.trace() });
-    if (result.status !== "unavailable" || result.reason !== "disabled") this.note("behavior-score", JSON.stringify(result));
+  async reviewCompletedCompanyRun(input: {
+    task: string;
+    report: string;
+    completedTaskIds: number[];
+    artifactId: string;
+    playbook: LocalPlaybookSnapshot | null;
+  }): Promise<PostRunJevReview> {
+    const envelope = this.state.envelope;
+    if (!envelope) throw new Error("task_not_bound");
+    ensureCompanyTables(this.sql.bind(this));
+    const existing = this.sql`SELECT org_id, user_id, review_json FROM company_run_insights WHERE run_id = ${envelope.runId} LIMIT 1`[0];
+    if (existing) {
+      if (String(existing.org_id) !== envelope.orgId || String(existing.user_id) !== envelope.userId) throw new Error("run_insight_owner_mismatch");
+      try {
+        const saved = JSON.parse(String(existing.review_json)) as PostRunJevReview;
+        if (saved.runId === envelope.runId && saved.policyVersion === POST_RUN_JEV_POLICY_VERSION) return saved;
+      } catch { /* an invalid stored result must never be promoted */ }
+      throw new Error("run_insight_persist_corrupt");
+    }
+    const activityCounts: Record<string, number> = {};
+    for (const event of this.state.events ?? []) {
+      if (["user", "report", "approval", "post_run_jev"].includes(event.step)) continue;
+      activityCounts[event.step.slice(0, 80)] = Math.min((activityCounts[event.step.slice(0, 80)] ?? 0) + 1, 100);
+    }
+    const reviewInput: PostRunJevInput = {
+      runId: envelope.runId, orgId: envelope.orgId, userId: envelope.userId,
+      taskType: envelope.taskType, phase: envelope.phase, task: input.task, report: input.report,
+      completedTaskIds: input.completedTaskIds, artifactId: input.artifactId,
+      sources: (this.state.sources ?? []).map(({ url, title }) => ({ url, title })),
+      activityCounts, playbook: input.playbook,
+    };
+    const env = this.gatewayEnv();
+    let review: PostRunJevReview;
+    if (env.JEV_POST_RUN_ENABLED !== "true") review = ineligiblePostRunJev(reviewInput, "disabled");
+    else if (!this.hasCompanyContext() || !input.report.trim() || !input.artifactId.trim()) review = ineligiblePostRunJev(reviewInput, "ineligible");
+    else {
+      try {
+        const ai = env.AI as { run?: (model: string, input: unknown) => Promise<unknown> } | undefined;
+        if (!ai?.run) throw new Error("ai_binding_missing");
+        const response = await ai.run("typesafe/jev", buildPostRunJevRequest(reviewInput));
+        review = parsePostRunJevResponse(response, reviewInput) ?? ineligiblePostRunJev(reviewInput, "unavailable");
+      } catch {
+        review = ineligiblePostRunJev(reviewInput, "unavailable");
+      }
+    }
+    this.sql`INSERT OR IGNORE INTO company_run_insights (run_id, org_id, user_id, task_type, artifact_id, policy_version, status, review_json, created_at)
+      VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${envelope.taskType}, ${input.artifactId.slice(0, 100)}, ${POST_RUN_JEV_POLICY_VERSION}, ${review.status}, ${JSON.stringify(review)}, ${new Date().toISOString()})`;
+    this.note("post_run_jev", JSON.stringify({ status: review.status, memoryDecision: review.memory.decision, playbookDecision: review.playbook.decision }));
+    return review;
   }
 
   async snapshot(): Promise<{ events: TraceEvent[]; places: LocalCompany[]; transcript: string }> {

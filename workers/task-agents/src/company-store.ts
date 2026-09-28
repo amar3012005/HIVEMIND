@@ -20,6 +20,17 @@ export function ensureCompanyTables(sql: {
     run_id TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, completed_at TEXT NOT NULL,
     PRIMARY KEY (run_id, stage)
   )`;
+  sql`CREATE TABLE IF NOT EXISTS company_run_insights (
+    run_id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    review_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`;
   sql`CREATE TABLE IF NOT EXISTS company_artifacts (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,

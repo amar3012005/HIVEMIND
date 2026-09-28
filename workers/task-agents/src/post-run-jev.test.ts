@@ -1,0 +1,109 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  buildPostRunJevRequest,
+  ineligiblePostRunJev,
+  parsePostRunJevResponse,
+  type PostRunJevInput,
+} from "./post-run-jev.ts";
+
+const baseInput: PostRunJevInput = {
+  runId: "run-123",
+  orgId: "org-private",
+  userId: "user-private",
+  taskType: "company_research",
+  phase: "preview",
+  task: "Find evidence about the market for example@example.com",
+  report: "A sourced report with a reusable research method. Call +1 (415) 555-0134; api_key=not-for-jev. See https://user:pass@example.com/page?token=secret#fragment.",
+  completedTaskIds: [1, 2],
+  artifactId: "artifact-123",
+  sources: [{ url: "https://example.com/page?token=secret#fragment", title: "Example" }],
+  activityCounts: { parallel_search: 3, source_read: 2 },
+  playbook: null,
+};
+
+function jevResponse(input: PostRunJevInput, values: {
+  memoryProbability?: number;
+  memoryKind?: string;
+  memoryScore?: number;
+  playbookProbability?: number;
+  changeKind?: string;
+  playbookScore?: number;
+} = {}): unknown {
+  const answers: Record<string, unknown> = {
+    memory_worthy: { type: "noul", noul: values.memoryProbability ?? 0.91 },
+    memory_kind: { type: "choice", choice: values.memoryKind ?? "learning", confidence: 0.88, probabilities: { learning: 0.88, none: 0.12 } },
+    memory_evidence: { type: "score", score: values.memoryScore ?? 2.4, confidence: 0.92, legend: { 0: "none", 1: "weak", 2: "clear", 3: "strong" }, probabilities: { 0: 0, 1: 0.04, 2: 0.52, 3: 0.44 } },
+  };
+  if (input.playbook?.id.startsWith("local:")) {
+    answers.playbook_worthy = { type: "noul", noul: values.playbookProbability ?? 0.82 };
+    answers.playbook_change_kind = { type: "choice", choice: values.changeKind ?? "clarify", confidence: 0.84 };
+    answers.playbook_generalizability = { type: "score", score: values.playbookScore ?? 2.1, confidence: 0.89, probabilities: { 0: 0, 1: 0.1, 2: 0.7, 3: 0.2 } };
+  }
+  return { model: "jev-1.13.0", answers };
+}
+
+test("request is bounded, omits tenant identifiers, redacts contact data, and only evaluates a loaded local playbook", () => {
+  const request = buildPostRunJevRequest({
+    ...baseInput,
+    playbook: { id: "local:research.example", globalId: "research.base", globalVersion: 3, snapshot: "Use verified primary sources." },
+  });
+  const state = JSON.stringify(request.state);
+  assert.equal(request.questions.playbook_worthy !== undefined, true);
+  assert.equal(state.includes("org-private"), false);
+  assert.equal(state.includes("user-private"), false);
+  assert.equal(state.includes("example@example.com"), false);
+  assert.equal(state.includes("415) 555-0134"), false);
+  assert.equal(state.includes("not-for-jev"), false);
+  assert.equal(state.includes("user:pass"), false);
+  assert.equal(state.includes("token=secret"), false);
+  assert.equal(state.includes("token=secret"), false);
+  assert.equal(state.includes("https://example.com/page"), true);
+
+  const withoutPlaybook = buildPostRunJevRequest(baseInput);
+  assert.equal(withoutPlaybook.questions.playbook_worthy, undefined);
+  assert.equal(withoutPlaybook.state.localPlaybook, null);
+});
+
+test("evaluates both memory and local playbook candidates with conservative human-review gates", () => {
+  const input: PostRunJevInput = {
+    ...baseInput,
+    playbook: { id: "local:research.example", globalId: "research.base", globalVersion: 3, snapshot: "Use verified primary sources." },
+  };
+  const review = parsePostRunJevResponse(jevResponse(input), input);
+  assert.ok(review);
+  assert.equal(review.status, "evaluated");
+  assert.equal(review.memory.decision, "review_recommended");
+  assert.equal(review.memory.kind, "learning");
+  assert.equal(review.playbook.decision, "review_recommended");
+  assert.equal(review.playbook.changeKind, "clarify");
+});
+
+test("one-off/weak and conflicting judgments do not become automatic learning approvals", () => {
+  const input = { ...baseInput, playbook: null };
+  const weak = parsePostRunJevResponse(jevResponse(input, { memoryProbability: 0.14, memoryScore: 0.2, memoryKind: "none" }), input);
+  assert.equal(weak?.memory.decision, "no_candidate");
+
+  const conflict = parsePostRunJevResponse(jevResponse(input, { memoryProbability: 0.94, memoryScore: 2.8, memoryKind: "none" }), input);
+  assert.equal(conflict?.memory.decision, "uncertain");
+});
+
+test("rejects malformed or out-of-range model responses rather than inventing a decision", () => {
+  assert.equal(parsePostRunJevResponse({ model: "jev", answers: {} }, baseInput), null);
+  const bad = jevResponse(baseInput, { memoryProbability: 1.2 });
+  assert.equal(parsePostRunJevResponse(bad, baseInput), null);
+});
+
+test("accepts Cloudflare REST-wrapped Jev response shape", () => {
+  const wrapped = { success: true, result: { state: {}, result: jevResponse(baseInput), gatewayMetadata: {} } };
+  const review = parsePostRunJevResponse(wrapped, baseInput);
+  assert.equal(review?.model, "jev-1.13.0");
+});
+
+test("unavailable evaluation remains uncertain without proposing a write", () => {
+  const input: PostRunJevInput = { ...baseInput, playbook: { id: "local:research.example", globalId: "research.base", globalVersion: 3, snapshot: "Use sources." } };
+  const review = ineligiblePostRunJev(input, "unavailable");
+  assert.equal(review.memory.decision, "uncertain");
+  assert.equal(review.playbook.decision, "uncertain");
+  assert.equal(ineligiblePostRunJev(input, "ineligible").memory.decision, "not_applicable");
+});

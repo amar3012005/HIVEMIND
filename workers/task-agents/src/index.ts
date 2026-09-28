@@ -3,6 +3,7 @@ import { HivemindTaskAgent } from "./agent";
 import { TaskLifecycleWorkflow } from "./workflow";
 import { CompanyGovernor } from "./governor";
 import { verifyRoomTicket } from "./room-ticket";
+import { getControl, postControl } from "./gateway";
 
 export { HivemindTaskAgent, TaskLifecycleWorkflow, CompanyGovernor };
 
@@ -40,12 +41,50 @@ export default {
       return runTrace(rest, env);
     }
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    if (url.pathname === "/v1/tasks/trigger-tick") {
+      if (!routeAuthorized(request, env)) return new Response("unauthorized", { status: 401 });
+      return Response.json(await dispatchDueTriggers(env));
+    }
     if (url.pathname === "/v1/tasks/tool-check") return toolCheck(request, env);
     if (url.pathname === "/v1/tasks/day1-research") return day1Research(request, env);
     if (url.pathname === "/v1/test-turn") return testTurn(request, env);
     return new Response("Not found", { status: 404 });
   },
-} satisfies ExportedHandler<Env>;
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
+    const result = await dispatchDueTriggers(env);
+    if (result.errors.length) console.warn(JSON.stringify({ event: "trigger_dispatch_failed", claimed: result.claimed, started: result.started, errors: result.errors }));
+  },
+} satisfies ExportedHandler<Env> & { scheduled(controller: unknown, env: Env): Promise<void> };
+
+async function dispatchDueTriggers(env: Env): Promise<{ claimed: number; started: number; errors: string[] }> {
+  const claim = await postControl(env, "/internal/hyper/task-triggers/claim-due", {}) as { occurrence_ids?: unknown; error?: string };
+  if (claim.error) return { claimed: 0, started: 0, errors: [claim.error] };
+  const ids = Array.isArray(claim.occurrence_ids)
+    ? claim.occurrence_ids.filter((id): id is string => typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id)).slice(0, 20)
+    : [];
+  let started = 0;
+  const errors: string[] = [];
+  for (const id of ids) {
+    try {
+      const resolved = await getControl(env, `/internal/hyper/task-triggers/occurrences/${id}`) as { occurrence?: { org_id: string; run_room_id: string }; error?: string };
+      if (!resolved.occurrence || resolved.error) throw new Error(resolved.error || "occurrence_unavailable");
+      const { org_id: orgId, run_room_id: roomId } = resolved.occurrence;
+      const agent = await getAgentByName(env.HivemindTaskAgent as never, `session-${orgId}-${roomId}`);
+      const run = await (agent as { startTriggerOccurrence(id: string): Promise<{ workflowId: string }> }).startTriggerOccurrence(id);
+      const receipt = await postControl(env, `/internal/hyper/task-triggers/occurrences/${id}/started`, { workflow_id: run.workflowId }) as { error?: string };
+      if (receipt.error) {
+        // A very short run can finish before the dispatch receipt reaches Core.
+        // Its terminal occurrence is already authoritative in that case.
+        const latest = await getControl(env, `/internal/hyper/task-triggers/occurrences/${id}`) as { occurrence?: { status?: string } };
+        if (!["complete", "failed", "input_required"].includes(latest.occurrence?.status || "")) throw new Error(receipt.error);
+      }
+      started++;
+    } catch (error) {
+      errors.push(`${id}: ${error instanceof Error ? error.message : "dispatch_failed"}`);
+    }
+  }
+  return { claimed: ids.length, started, errors };
+}
 
 async function saveCompanyArtifact(request: Request, orgId: string, env: Env): Promise<Response> {
   if (!routeAuthorized(request, env)) return new Response("unauthorized", { status: 401 });

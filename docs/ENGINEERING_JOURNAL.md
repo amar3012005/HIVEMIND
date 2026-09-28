@@ -2500,3 +2500,50 @@ git diff --check: passed (line-ending warnings only)
   dependency link was removed; feature worktree is clean after journal commit.
 - Next: continue toward local acceptance; shared integration still requires a
   clean designated integration worktree and production-history reconciliation.
+
+## 2026-09-28 UTC — hm-understand candidate handoff for singulance-local
+
+- State: Candidate implementation and focused component checks are ready for
+  serialized integration review; no accepted local release or production
+  release exists.
+- Base: `origin/singulance-local` at `b4c600de16783a9b27647a76a901429585c73c7e`.
+- Scope across this session branch: harden hm-extract evidence segmentation,
+  exact source offsets, bounded streaming responses, and admission control;
+  add stateless CPU hm-understand with pinned GLiNER, typed entity/literal/
+  candidate output and discourse qualifiers; connect it to Core using exact
+  parser evidence, tenant-scoped Flagship `hm_understand_v1` (`off` by default),
+  bounded shadow receipts, conservative assisted prompt compaction, BYOD skip,
+  and fail-safe fallback. Add local Compose wiring, contracts, fixtures, tests,
+  and operational limits. Core remains sole authorization and memory writer.
+- This branch does **not** prove multi-tenant vCPU capacity, broad multilingual
+  quality, authenticated upload-to-durable-recall behavior, or production
+  readiness. The shared Core container has not been recreated and is not wired
+  to the candidate services. Keep the feature off until local integration
+  acceptance and resource/quality gates pass.
+- Verification on 2026-09-28:
+  - `/Users/amar/HIVE-MIND-hm-understand-preview-local/hm-understand/.venv/bin/python
+    -m pytest -q hm-understand/tests` from repository root -> 23 passed; one
+    upstream Starlette deprecation warning.
+  - `node --test test/admission.test.js test/extract-response.test.js
+    test/segments-offsets.test.js` from `hm-extract/` -> 10 passed.
+  - `node --test --test-concurrency=1
+    tests/unit/hm-extract-adapter.test.js
+    tests/unit/hm-understand-adapter.test.js
+    tests/unit/document-hm-extract-segments.test.js
+    tests/unit/document-hm-understand-shadow.test.js
+    tests/unit/hm-understand-assisted.test.js` from `core/` -> 24 passed,
+    0 failed. Used a temporary `core/node_modules` symlink to the compatible
+    sibling dependency tree; trap removed it after the run.
+  - `git diff --check origin/singulance-local...HEAD` -> passed before this
+    journal-only handoff entry.
+- Integration blocker: the designated `/Users/amar/HIVE-MIND-local-main`
+  worktree is dirty in `core/prisma/schema.prisma` and
+  `core/tests/unit/hyper-turn-event-resilience.test.js`, and its branch is
+  ahead of `origin/singulance-local` by 67 commits. Per
+  `docs/LOCAL_INTEGRATION_PROTOCOL.md`, do not merge or push the shared branch
+  from this feature worktree; preserve the dirty integration state for its
+  owner and integrate serially after it is reconciled.
+- Accepted release: none. No shared container or production state changed.
+- Next: integrate this pushed session branch through a clean permanent
+  integration worktree after its existing dirty edits and branch history are
+  reconciled.

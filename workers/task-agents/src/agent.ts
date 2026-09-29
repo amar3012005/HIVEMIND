@@ -156,14 +156,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
    * validates and publishes the resulting artifact after this method returns.
    */
   async streamNarrative(prompt: string): Promise<string> {
-    this.setState({ ...this.state, narrativeTurn: true });
+    this.setState({ ...this.state, narrativeTurn: true, workflowDirective: prompt });
     this.lastReportDraft = "";
     this.textDraft = "";
     this.broadcast(JSON.stringify({ type: "narrative-stream-start" }));
     try {
       const promptId = crypto.randomUUID();
       const result = await this.saveMessages((messages) => [...messages,
-        { id: promptId, role: "user", parts: [{ type: "text", text: prompt }], createdAt: new Date() }]);
+        { id: promptId, role: "user", parts: [{ type: "text", text: "Finish the current WorkRun report using the current stage directive and saved evidence." }], createdAt: new Date() }]);
       if (result.status !== "completed") throw new Error(`narrative_turn_${result.status}`);
       const messages = await this.getMessages();
       const promptIndex = messages.findIndex((message) => message.id === promptId);
@@ -173,7 +173,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (!report) throw new Error("narrative_turn_empty");
       return report;
     } finally {
-      this.setState({ ...this.state, narrativeTurn: false });
+      this.setState({ ...this.state, narrativeTurn: false, workflowDirective: undefined });
     }
   }
 
@@ -181,12 +181,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
    * final contract, so this turn has no required final-answer tool call.
    */
   async streamTaskTurn(prompt: string, finalSynthesisFollows = false): Promise<string> {
-    this.setState({ ...this.state, executionTurn: true });
+    this.setState({ ...this.state, executionTurn: true, workflowDirective: prompt });
     this.broadcast(JSON.stringify({ type: "execution-stream-start", finalSynthesisFollows }));
     try {
       const promptId = crypto.randomUUID();
       const result = await this.saveMessages((messages) => [...messages,
-        { id: promptId, role: "user", parts: [{ type: "text", text: prompt }], createdAt: new Date() }]);
+        { id: promptId, role: "user", parts: [{ type: "text", text: "Continue the current WorkRun step using the current stage directive and saved evidence." }], createdAt: new Date() }]);
       if (result.status !== "completed") {
         console.error(JSON.stringify({ event: "think_execution_not_completed", runId: this.state.envelope?.runId,
           status: result.status }));
@@ -200,7 +200,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (!report) throw new Error("execution_turn_empty");
       return report;
     } finally {
-      this.setState({ ...this.state, executionTurn: false });
+      this.setState({ ...this.state, executionTurn: false, workflowDirective: undefined });
     }
   }
 
@@ -1356,7 +1356,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   beforeTurn(ctx: TurnContext) {
     this.textDraft = "";
     this.recoveryStepUsed = false;
-    const currentSystem = runContext(this.state);
+    const currentSystem = [runContext(this.state), this.state.workflowDirective && (this.state.executionTurn || this.state.narrativeTurn)
+      ? `Current Workflow stage directive (active for this turn only): ${this.state.workflowDirective}` : ""].filter(Boolean).join("\n\n");
     const finalOnly = this.finalOnlyRecoveryTurn;
     this.finalOnlyRecoveryTurn = false;
     const repairToolCall: NonNullable<Parameters<typeof streamText>[0]["repairToolCall"]> = async ({ toolCall }) => {

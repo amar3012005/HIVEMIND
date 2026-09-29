@@ -187,7 +187,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     let asked = work.task || "Map competitors and the local market.";
     const quickRoute = work.continuation ? null : await durable.do("jev-route", async () =>
       this.agent.routeTask(asked, work.previousRequest || "", work.company));
-    if (quickRoute === "agent_memory_session") return this.savePrivateRoomSession(work, step);
+    // A connected room Durable Object can briefly serve the previous route
+    // vocabulary while the Workflow version has already advanced.
+    if (quickRoute === "agent_memory_session" || String(quickRoute) === "agent_memory")
+      return this.savePrivateRoomSession(work, step);
     await durable.do("bind-employee", async () => {
       await this.agent.bindTask(work, "research", ["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook"]);
       await this.agent.enterPlanning();

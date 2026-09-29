@@ -455,7 +455,6 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.note("report", written.report);
       await this.agent.rememberSources(written.report);
       if (!requestsMemorySave(asked)) {
-        await this.agent.note("completion", "deliverable_ready");
         return { title: "", content: "", report: written.report, verdict, artifactId };
       }
       const title = `${work.company}: ${asked.slice(0, 120)}`;
@@ -484,6 +483,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     if (!prepared.title) {
       const insights = await reviewCompletedWork();
+      await durable.do("deliverable-ready", async () => this.agent.note("completion", "deliverable_ready"));
       return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
     }
 

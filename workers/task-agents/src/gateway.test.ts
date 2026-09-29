@@ -11,6 +11,15 @@ test("company catalog exposes native memory gateway", () => {
   assert.ok(!names.includes("hivemind_get_memory"));
 });
 
+test("strict execution exposes only selected tool families", () => {
+  const names = toolsForGroups(["web_research", "browser"], true);
+  assert.ok(names.includes("parallel_search"));
+  assert.ok(names.includes("browser_markdown"));
+  assert.ok(!names.includes("hivemind_meta"));
+  assert.ok(!names.includes("hyperagents_memory"));
+  assert.ok(!names.includes("hivemind_connected_task"));
+});
+
 test("company profile reads Core under sealed identity", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async (input, init) => {

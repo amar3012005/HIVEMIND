@@ -119,8 +119,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   private async loadProfileBrief(orgId: string, userId: string): Promise<{ brief: string; user: unknown; organization: unknown }> {
     const [user, organization] = await Promise.all([
-      readCompactProfile(this.gatewayEnv(), orgId, userId).catch(() => ({ error: "profile_context_unavailable" })),
-      getControl(this.gatewayEnv(), `/internal/hyper/org-profile?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`).catch(() => ({ error: "organization_profile_unavailable" })),
+      readCompactProfile(this.gatewayEnv(), orgId, userId, 5_000).catch(() => ({ error: "profile_context_unavailable" })),
+      getControl(this.gatewayEnv(), `/internal/hyper/org-profile?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, 5_000).catch(() => ({ error: "organization_profile_unavailable" })),
     ]);
     return { brief: authenticatedProfileBrief(user, organization), user, organization };
   }
@@ -1076,7 +1076,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
-    const tools = toolsForGroups(groups);
+    // Once execution begins, expose only the selected tool families. Planning
+    // keeps the native catalog so reset_tools can deliberately open another
+    // family without carrying every schema through every model step.
+    const tools = toolsForGroups(groups, action);
     if (this.playbookRefinementRequested()) tools.push("refine_local_playbook");
     this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
     this.note("reset_tools", groups.join(", "));
@@ -1089,7 +1092,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.discoveredUrls.clear();
     this.pageReadCounts.clear();
     this.capturedPages.clear();
-    const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
+    const previous = this.state.envelope;
+    const cachedBrief = previous?.orgId === envelope.orgId && previous.userId === envelope.userId
+      && this.state.profileBrief && !this.state.profileBrief.startsWith("Authenticated profile unavailable.")
+      ? this.state.profileBrief : "";
+    const brief = cachedBrief || (await this.loadProfileBrief(envelope.orgId, envelope.userId)).brief;
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
     this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });

@@ -19,13 +19,13 @@ export interface GatewayEnv {
   BROWSER?: unknown;
 }
 
-export async function getControl(env: GatewayEnv, path: string): Promise<unknown> {
+export async function getControl(env: GatewayEnv, path: string, timeoutMs = 20_000): Promise<unknown> {
   const base = env.HIVEMIND_CONTROL_URL?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
   if (!base || !key) return { error: "control_plane_unconfigured" };
   const response = await fetch(`${base}${path}`, {
     headers: { authorization: `Bearer ${key}` },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload: unknown = await response.json().catch(() => ({ error: "invalid_control_response" }));
   if (!response.ok) {
@@ -213,13 +213,13 @@ export async function readCompanyProfile(env: GatewayEnv, orgId: string, userId:
   return response.ok ? payload : { error: "profile_read_failed", status: response.status };
 }
 
-export async function readCompactProfile(env: GatewayEnv, orgId: string, userId: string): Promise<{ context: string } | { error: string; status?: number }> {
+export async function readCompactProfile(env: GatewayEnv, orgId: string, userId: string, timeoutMs = 20_000): Promise<{ context: string } | { error: string; status?: number }> {
   const base = env.HIVEMIND_CORE_URL?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
   if (!base || !key) return { error: "hivemind_profile_unconfigured" };
   const response = await fetch(`${base}/api/profiles/context`, {
     headers: { authorization: `Bearer ${key}`, "x-hm-user-id": userId, "x-hm-org-id": orgId },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok || !payload || typeof payload !== "object" || !("context" in payload) || typeof payload.context !== "string") {

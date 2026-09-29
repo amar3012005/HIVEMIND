@@ -191,7 +191,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.sql`INSERT OR IGNORE INTO workrun_runtime (run_id, work, updated_at) VALUES (${work.runId}, ${JSON.stringify(work)}, ${new Date().toISOString()})`;
     const workflowId = await this.runWorkflow("TASK_LIFECYCLE", work, { id: work.runId });
     this.sql`UPDATE workrun_runtime SET workflow_id = ${workflowId}, status = ${"running"} WHERE run_id = ${work.runId}`;
-    this.setState({ ...this.state, workflowId });
+    // Claim the room state for this run before its first Workflow step. A
+    // previous run may have ended with stop_requested; leaving that envelope
+    // active makes startup failures on a fresh scheduled occurrence look like
+    // an operator stop and hides the real error.
+    this.setState({ ...this.state, workflowId, envelope: work, awaiting: "", operatingPlan: null });
     this.note("workrun", "queued");
     return workflowId;
   }
@@ -333,8 +337,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.sql`UPDATE workrun_runtime SET status = ${status}, updated_at = ${new Date().toISOString()} WHERE run_id = ${runId}`;
   }
 
-  isStopRequested(): boolean {
-    const runId = this.state.envelope?.runId;
+  isStopRequested(requestedRunId?: string): boolean {
+    const runId = requestedRunId || this.state.envelope?.runId;
     if (!runId) return false;
     ensureCompanyTables(this.sql.bind(this));
     const row = this.sql`SELECT status FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];

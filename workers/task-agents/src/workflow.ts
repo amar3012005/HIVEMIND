@@ -185,7 +185,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return result;
     } catch (error) {
       let stopped = false;
-      try { stopped = this.agent.isStopRequested(); } catch { /* preserve original failure */ }
+      try { stopped = this.agent.isStopRequested(event.payload.runId); } catch { /* preserve original failure */ }
       const code = stopped ? "workrun_stopped" : workflowErrorCode(error);
       console.error(JSON.stringify({ event: "company_workflow_failed", runId: event.payload.runId, code }));
       // The room DO may itself be unavailable. Preserve the original Workflow

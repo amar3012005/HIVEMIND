@@ -2,7 +2,7 @@
 export function isNonblockingExecutionChoice(question: string, options: readonly string[]): boolean {
   const choice = `${question} ${options.join(" ")}`;
   if (/\b(?:approval|permission|consent|recipient|send|publish|post|contact|delete|purchase|pay|memory write|save memory)\b/i.test(choice)) return false;
-  return /\b(?:browser_(?:markdown|extract|links|scrape)|which (?:read|browser|research|fetch) tool|which (?:fetch|browser|research) method|fall back to (?:browser|another read tool)|fetch the pages using)\b/i.test(choice);
+  return /\b(?:browser_(?:markdown|extract|links|scrape)|which (?:read|browser|research|fetch) tool|which (?:fetch|browser|research) method|fall back to (?:browser|another read tool)|fetch the pages using|(?:should I|do you want me to|would you like me to) (?:continue|proceed|retry|try|use|fetch|search|read|draft|prepare)\b)/i.test(choice);
 }
 
-export const READ_TOOL_FALLBACK = "The operator already authorized this read-only research. Do not pause for a browser-tool choice. Use browser_markdown with the exact public HTTPS URL first for quotable page text; if it fails or omits the needed passage, try browser_extract with its required URL parameter or another authorized read path. Keep source receipts and state a concrete evidence gap only if those paths fail. ";
+export const READ_TOOL_FALLBACK = "The operator already authorized this task. Choose routine read-only tools and methods yourself; continue the requested research or draft without asking whether to proceed. Use browser_markdown with the exact public HTTPS URL first for quotable page text; if it fails or omits the needed passage, try browser_extract with its required URL parameter or another authorized read path. Keep source receipts and state a concrete evidence gap only if those paths fail. ";

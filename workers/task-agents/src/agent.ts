@@ -1300,6 +1300,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         maxSteps: 1,
         maxOutputTokens: 8000,
         sendReasoning: false,
+        providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } },
       };
     }
     if (finalOnly) {

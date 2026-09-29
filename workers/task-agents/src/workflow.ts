@@ -223,6 +223,16 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.note("workrun", `starting ${work.company}`);
     });
 
+    // The room's current state belongs to the new turn. Read the previous
+    // WorkRun's scoped, durable plan and receipts before resuming it.
+    const recovery = work.continuation ? await durable.do("read-continuation-state", async () =>
+      this.agent.readRunRecoverySnapshot(work.continuation!.previousRunId, work.orgId, work.userId)) : null;
+    if (work.continuation && (!recovery?.plan || !recovery.playbookId || recovery.playbookId !== work.continuation.playbookId)) {
+      throw new Error("workrun_recovery_snapshot_unavailable");
+    }
+    if (recovery) await durable.do("show-continuation-state", async () => this.agent.note("workrun-recovery",
+      `Continuing ${recovery.runId}: ${recovery.plan!.tasks.filter((task: OperatingPlan["tasks"][number]) => task.status === "completed").length}/${recovery.plan!.tasks.length} steps completed; ${recovery.sourceCount} source and ${recovery.artifactCount} artifact receipts.`));
+
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
     const quickDirect = quickRoute === "direct" ? await step.prompt("direct-answer", {
       prompt: `Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here.`,
@@ -231,9 +241,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }) : null;
     const plan = work.continuation ? planSchema.parse({
       mode: "company", decision: `Continue unfinished WorkRun ${work.continuation.previousRunId}`,
-      plan: work.continuation.plan.summary,
-      tasks: work.continuation.plan.tasks.map((task: OperatingPlan["tasks"][number]) => task.title),
-      localPlaybookId: work.continuation.playbookId,
+      plan: recovery!.plan!.summary,
+      tasks: recovery!.plan!.tasks.map((task: OperatingPlan["tasks"][number]) => task.title),
+      localPlaybookId: recovery!.playbookId,
       resolvedRequest: asked,
     }) : quickRoute ? planSchema.parse({
       mode: quickRoute,
@@ -399,7 +409,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const groups = plan.groups.length > 0 ? [...plan.groups] : ["company", "web_research", "browser", "records"];
       if (!groups.includes("company")) groups.push("company");
       await this.agent.applyGroups(groups, true);
-      await this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks, work.continuation?.plan);
+      await this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks, recovery?.plan ?? undefined);
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
       if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
     });

@@ -43,3 +43,10 @@ test("planning context keeps direct answers tool-free", () => {
   assert.match(context, /not from a keyword/);
   assert.doesNotMatch(context, /Pinned local method/);
 });
+
+test("prior WorkRun status is visible but cannot become the new turn's plan", () => {
+  const context = runContext(state({ catalogStage: "planning", recoveryBrief: "run old; status incomplete; next unfinished step 2: Save report" }));
+  assert.match(context, /Prior WorkRun receipt/);
+  assert.match(context, /current request controls whether to continue/);
+  assert.doesNotMatch(context, /Current run old/);
+});

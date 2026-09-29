@@ -21,13 +21,17 @@ export function currentTurnTasks(tasks: readonly string[]): string[] {
 }
 
 export function continuedPlan(runId: string, summary: string, titles: readonly string[], previous?: OperatingPlan): OperatingPlan {
+  let completedPrefix = 0;
+  while (completedPrefix < titles.length - 1
+    && previous?.tasks[completedPrefix]?.title === titles[completedPrefix]
+    && previous.tasks[completedPrefix].status === "completed") completedPrefix += 1;
   return {
     runId,
     summary: summary.slice(0, 2000),
     tasks: titles.slice(0, 6).map((title, index) => ({
       id: index + 1,
       title: title.slice(0, 160),
-      status: index < titles.length - 1 && previous?.tasks[index]?.title === title && previous.tasks[index].status === "completed" ? "completed" : "pending",
+      status: index < completedPrefix ? "completed" : "pending",
     })),
   };
 }

@@ -317,6 +317,53 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.sql`UPDATE workrun_runtime SET status = ${status}, updated_at = ${new Date().toISOString()} WHERE run_id = ${runId}`;
   }
 
+  private storedOperatingPlan(runId: string): OperatingPlan | null {
+    ensureCompanyTables(this.sql.bind(this));
+    const saved = this.sql`SELECT plan_json FROM workrun_plans WHERE run_id = ${runId} LIMIT 1`[0];
+    // Older preview runs only persisted the room state. Use it solely when it
+    // still belongs to this exact run; never graft another turn's plan on.
+    const value: unknown = saved ? JSON.parse(String(saved.plan_json))
+      : this.state.operatingPlan?.runId === runId ? this.state.operatingPlan : null;
+    if (!value || typeof value !== "object") return null;
+    const plan = value as OperatingPlan;
+    return plan.runId === runId && Array.isArray(plan.tasks) ? plan : null;
+  }
+
+  private saveOperatingPlan(plan: OperatingPlan): void {
+    ensureCompanyTables(this.sql.bind(this));
+    this.sql`INSERT INTO workrun_plans (run_id, plan_json, updated_at) VALUES (${plan.runId}, ${JSON.stringify(plan)}, ${new Date().toISOString()})
+      ON CONFLICT(run_id) DO UPDATE SET plan_json = excluded.plan_json, updated_at = excluded.updated_at`;
+  }
+
+  readRunRecoverySnapshot(runId: string, orgId: string, userId: string): {
+    runId: string; status: string; plan: OperatingPlan | null; playbookId: string; sourceCount: number; artifactCount: number;
+  } {
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT work, status FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];
+    if (!row) throw new Error("workrun_not_found");
+    const work = JSON.parse(String(row.work)) as { orgId?: string; userId?: string };
+    if (work.orgId !== orgId || work.userId !== userId) throw new Error("workrun_scope_denied");
+    const pinned = this.sql`SELECT playbook_id FROM company_runs WHERE id = ${runId} LIMIT 1`[0];
+    const source = this.sql`SELECT COUNT(*) AS total FROM source_read_receipts WHERE run_id = ${runId} AND org_id = ${orgId} AND user_id = ${userId}`[0];
+    const artifact = this.sql`SELECT COUNT(*) AS total FROM company_artifact_runs WHERE run_id = ${runId}`[0];
+    return { runId, status: String(row.status), plan: this.storedOperatingPlan(runId), playbookId: String(pinned?.playbook_id || ""),
+      sourceCount: Number(source?.total || 0), artifactCount: Number(artifact?.total || 0) };
+  }
+
+  private priorRunBrief(orgId: string, userId: string, currentRunId: string): string {
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT run_id, work, status FROM workrun_runtime
+      WHERE run_id <> ${currentRunId} AND json_extract(work, '$.orgId') = ${orgId} AND json_extract(work, '$.userId') = ${userId}
+      ORDER BY updated_at DESC LIMIT 1`[0];
+    if (!row) return "";
+    const prior = JSON.parse(String(row.work)) as { task?: string };
+    const snapshot = this.readRunRecoverySnapshot(String(row.run_id), orgId, userId);
+    const next = snapshot.plan?.tasks.find((task) => task.status !== "completed");
+    return `run ${snapshot.runId}; status ${snapshot.status}; goal ${String(prior.task || "").slice(0, 180)}; `
+      + `next unfinished step ${next ? `${next.id}: ${next.title}` : "none"}; `
+      + `source receipts ${snapshot.sourceCount}; artifact receipts ${snapshot.artifactCount}; pinned method ${snapshot.playbookId || "none"}.`;
+  }
+
   async controlWorkRun(action: string, orgId: string, userId: string): Promise<unknown> {
     ensureCompanyTables(this.sql.bind(this));
     const row = this.sql`SELECT * FROM workrun_runtime ORDER BY updated_at DESC LIMIT 1`[0];
@@ -329,11 +376,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       && (this.state.events ?? []).some((event) => event.step === "workrun-index" && event.detail === `${work.runId} incomplete`);
     const logicalStatus = current.status === "complete" && (String(row.status) === "incomplete" || indexedIncomplete) ? "incomplete" : current.status;
     if (action === "continue-plan") {
-      if (logicalStatus !== "incomplete" || this.state.envelope?.runId !== work.runId) throw new Error("workrun_plan_not_continuable");
-      const plan = this.state.operatingPlan;
-      const pinned = this.sql`SELECT playbook_id FROM company_runs WHERE id = ${work.runId} LIMIT 1`[0];
-      const playbookId = String(pinned?.playbook_id || "");
+      if (logicalStatus !== "incomplete") throw new Error("workrun_plan_not_continuable");
+      const snapshot = this.readRunRecoverySnapshot(work.runId, orgId, userId);
+      const plan = snapshot.plan;
+      const playbookId = snapshot.playbookId;
       if (!plan || plan.runId !== work.runId || !plan.tasks.length || !playbookId) throw new Error("workrun_plan_unavailable");
+      this.saveOperatingPlan(plan);
       const next = { ...work, runId: crypto.randomUUID(), startedAt: new Date().toISOString(), occurrenceId: undefined,
         modePreference: "company" as const,
         continuation: { previousRunId: work.runId, plan, playbookId } };
@@ -929,8 +977,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "task_status", status: "completed", limit: 5 }).catch(() => null),
     ]);
     const memoryBrief = operatingMemoryBrief(learnings, completed);
+    const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
+    if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (memoryBrief) this.note("operating-memory-recall", "Recent learnings and completed work loaded from the private agent brain");
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
@@ -942,6 +992,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   setOperatingPlan(runId: string, summary: string, titles: string[], previous?: OperatingPlan): void {
     const operatingPlan = continuedPlan(runId, summary, titles, previous);
+    this.saveOperatingPlan(operatingPlan);
     this.setState({
       ...this.state,
       operatingPlan,
@@ -956,6 +1007,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const current = plan.tasks.find((task) => task.id === id)?.status;
     const awaitingReport = status === "completed" && current !== "completed";
     if (previous === current) return awaitingReport ? { updated: true, awaitingReport: true } : { updated: true };
+    this.saveOperatingPlan(plan);
     this.setState({ ...this.state, operatingPlan: plan });
     this.note("operating-plan-state", JSON.stringify(plan));
     this.note("task_updated", `${id}: ${awaitingReport ? "active" : status}`);

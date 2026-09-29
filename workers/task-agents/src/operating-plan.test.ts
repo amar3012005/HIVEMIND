@@ -53,3 +53,13 @@ test("a continuation keeps completed steps but gives the new WorkRun its own pla
   const falselyFinished = { ...previous, tasks: previous.tasks.map((task) => ({ ...task, status: "completed" as const })) };
   assert.deepEqual(continuedPlan("retry", previous.summary, falselyFinished.tasks.map((task) => task.title), falselyFinished).tasks.map((task) => task.status), ["completed", "pending"]);
 });
+
+test("a continuation carries only a contiguous completed prefix", () => {
+  const previous = { runId: "old", summary: "Research", tasks: [
+    { id: 1, title: "Find sources", status: "active" as const },
+    { id: 2, title: "Verify", status: "completed" as const },
+    { id: 3, title: "Save report", status: "pending" as const },
+  ] };
+  assert.deepEqual(continuedPlan("new", previous.summary, previous.tasks.map((task) => task.title), previous)
+    .tasks.map((task) => task.status), ["pending", "pending", "pending"]);
+});

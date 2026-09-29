@@ -17,6 +17,7 @@ const baseInput: PostRunJevInput = {
   report: "A sourced report with a reusable research method. Call +1 (415) 555-0134; api_key=not-for-jev. See https://user:pass@example.com/page?token=secret#fragment.",
   completedTaskIds: [1, 2],
   artifactId: "artifact-123",
+  artifactReceipts: [{ id: "artifact-123", kind: "report", title: "Research report" }, { id: "pdf-123", kind: "pdf", title: "Research report.pdf" }],
   sources: [{ url: "https://example.com/page?token=secret#fragment", title: "Example" }],
   activityCounts: { parallel_search: 3, source_read: 2 },
   playbook: null,
@@ -62,6 +63,7 @@ test("request is bounded, omits tenant identifiers, redacts contact data, and on
   assert.equal(state.includes("token=secret"), false);
   assert.equal(state.includes("https://example.com/page"), true);
   assert.equal(state.includes("verifiedPageReads"), true);
+  assert.equal(state.includes('"kind":"pdf"'), true);
 
   const withoutPlaybook = buildPostRunJevRequest(baseInput);
   assert.equal(withoutPlaybook.questions.playbook_worthy, undefined);

@@ -478,7 +478,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return ineligiblePostRunJev({ runId: work.runId, orgId: work.orgId, userId: work.userId,
           taskType: work.taskType, phase: work.phase, task: asked, report: prepared.report,
           completedTaskIds: written.completedTaskIds, artifactId: prepared.artifactId,
-          sources: [], activityCounts: {}, playbook: null }, "unavailable");
+          artifactReceipts: [], sources: [], activityCounts: {}, playbook: null }, "unavailable");
       }
     });
 

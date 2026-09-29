@@ -1518,7 +1518,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const saved = JSON.parse(String(existing.review_json)) as PostRunJevReview;
         // A completed Workflow replay must reuse its original review, even
         // after policy upgrades; the new policy applies to new runs only.
-        if (saved.runId === envelope.runId && /^post-run-jev-v[12]$/.test(saved.policyVersion)) return saved;
+        if (saved.runId === envelope.runId && /^post-run-jev-v[123]$/.test(saved.policyVersion)) return saved;
       } catch { /* an invalid stored result must never be promoted */ }
       throw new Error("run_insight_persist_corrupt");
     }
@@ -1534,6 +1534,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       sources: this.sourceReadReceipts().map(({ url, excerpt }) => ({
         url, excerpt, title: this.state.sources?.find((source) => source.url === url)?.title || "Verified page read",
       })),
+      artifactReceipts: this.sql`SELECT a.id, a.kind, a.title FROM company_artifacts a JOIN company_artifact_runs r ON r.artifact_id = a.id WHERE r.run_id = ${envelope.runId} ORDER BY a.created_at ASC LIMIT 12`
+        .map((row) => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) })),
       activityCounts, playbook: input.playbook,
     };
     const env = this.gatewayEnv();

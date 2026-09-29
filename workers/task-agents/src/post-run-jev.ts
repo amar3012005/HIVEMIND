@@ -1,4 +1,4 @@
-export const POST_RUN_JEV_POLICY_VERSION = "post-run-jev-v2";
+export const POST_RUN_JEV_POLICY_VERSION = "post-run-jev-v3";
 
 export type MemoryKind = "learning" | "bug_or_failure" | "mistake_and_correction" | "decision" | "user_requirement" | "none";
 export type PlaybookChangeKind = "add_step" | "clarify" | "guardrail" | "no_change";
@@ -21,6 +21,7 @@ export interface PostRunJevInput {
   report: string;
   completedTaskIds: number[];
   artifactId: string;
+  artifactReceipts: Array<{ id: string; kind: string; title: string }>;
   sources: Array<{ url: string; title: string; excerpt?: string }>;
   activityCounts: Record<string, number>;
   playbook: LocalPlaybookSnapshot | null;
@@ -211,7 +212,9 @@ export function buildPostRunJevRequest(input: PostRunJevInput): PostRunJevReques
       phase: safeText(input.phase, 120),
       outcome: safeText(input.report, 7000),
       completedTaskIds: input.completedTaskIds.slice(0, 6),
-      artifactReceipt: { saved: true, id: input.artifactId.slice(0, 80), kind: "report" },
+      artifactReceipts: input.artifactReceipts.slice(0, 12).map((receipt) => ({
+        id: receipt.id.slice(0, 80), kind: safeText(receipt.kind, 40), title: safeText(receipt.title, 160),
+      })),
       verifiedPageReads: input.sources.slice(0, 12)
         .map((source) => {
           const safe = safeSource(source.url, source.title);

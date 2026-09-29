@@ -1,4 +1,4 @@
-export type JevRoute = "action" | "agent_memory";
+export type JevRoute = "action" | "agent_memory_session";
 
 function confidentChoice(answer: unknown, expected: string, threshold = 0.85): boolean {
   if (!answer || typeof answer !== "object") return false;
@@ -21,8 +21,9 @@ export function readJevRoute(result: unknown): JevRoute | null {
   if (!answers || typeof answers !== "object") return null;
   const decisions = answers as Record<string, unknown>;
   // The destination is a model decision about authority, not a phrase match.
-  if (confidentChoice(decisions.memory_destination, "agent")) return "agent_memory";
-  if (!confidentChoice(decisions.memory_destination, "none", 0.75)) return null;
+  if (confidentChoice(decisions.memory_intent, "agent_session")) return "agent_memory_session";
+  if (!confidentChoice(decisions.memory_intent, "none", 0.75)
+    && !confidentChoice(decisions.memory_intent, "agent_record")) return null;
   // Ordinary fast routing may open tools, but must not skip Think's answer check.
   return confidentChoice(decisions.route, "action") ? "action" : null;
 }
@@ -40,13 +41,14 @@ export async function routeWithJev(
         company: input.company?.slice(0, 120) || "",
       },
       questions: {
-        memory_destination: {
+        memory_intent: {
           type: "choice",
-          instructions: "Does the operator request persistent storage, and which brain owns that information? Decide from meaning and authority, not literal phrasing. If uncertain, choose none so Think can clarify the destination. A private operating handoff belongs only in the agent brain; canonical organization facts belong to the approval-governed company brain.",
+          instructions: "Decide the requested memory operation from meaning and authority, not literal phrasing. Distinguish summarizing this room's prior work from saving one explicitly supplied lesson or fact. If the destination is uncertain, select company so Think can decide. Private operating handoffs belong to the agent brain; canonical organization records belong to approval-governed HIVEMIND.",
           criteria: {
-            none: "No persistent memory write is requested, or the requested destination is unclear.",
-            agent: "A request to persist this agent's working context, session handoff, or reusable learning in its private operating brain.",
-            company: "A request to publish a fact, profile, decision, or other record into canonical HIVEMIND company memory.",
+            none: "No persistent memory write is requested.",
+            agent_session: "Summarize and persist the prior room session as a private operating handoff.",
+            agent_record: "Save a specific lesson, decision note, or handoff supplied by the operator in the private agent brain.",
+            company: "Publish a canonical organization fact, profile, decision, or other record into HIVEMIND company memory, or the destination is unclear.",
           },
         },
         route: {
@@ -63,8 +65,8 @@ export async function routeWithJev(
     const payload = result && typeof result === "object" && "result" in result ? result.result : result;
     const answer = payload && typeof payload === "object" && "answers" in payload && payload.answers && typeof payload.answers === "object" && "route" in payload.answers
       ? payload.answers.route : null;
-    const memory = payload && typeof payload === "object" && "answers" in payload && payload.answers && typeof payload.answers === "object" && "memory_destination" in payload.answers
-      ? payload.answers.memory_destination : null;
+    const memory = payload && typeof payload === "object" && "answers" in payload && payload.answers && typeof payload.answers === "object" && "memory_intent" in payload.answers
+      ? payload.answers.memory_intent : null;
     console.log(JSON.stringify({ event: "jev_result", answer, memory }));
     return readJevRoute(result);
   } catch (error) {

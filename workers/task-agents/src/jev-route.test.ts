@@ -4,7 +4,7 @@ import { readJevRoute, routeWithJev } from "./jev-route.ts";
 
 const choice = (route: string, confidence: number, probabilities: Record<string, number>) => ({ answers: {
   route: { choice: route, confidence, probabilities },
-  memory_destination: { choice: "none", confidence: 0.96, probabilities: { none: 0.96, agent: 0.02, company: 0.02 } },
+  memory_intent: { choice: "none", confidence: 0.96, probabilities: { none: 0.96, agent_session: 0.01, agent_record: 0.01, company: 0.02 } },
 } });
 
 test("only confident action choices use fast route", () => {
@@ -16,11 +16,14 @@ test("only confident action choices use fast route", () => {
 test("semantic private-memory destination takes the short durable route", () => {
   const result = { answers: {
     route: { choice: "action", confidence: 0.92, probabilities: { direct: 0.02, action: 0.92, company: 0.06 } },
-    memory_destination: { choice: "agent", confidence: 0.96, probabilities: { none: 0.02, agent: 0.96, company: 0.02 } },
+    memory_intent: { choice: "agent_session", confidence: 0.96, probabilities: { none: 0.01, agent_session: 0.96, agent_record: 0.01, company: 0.02 } },
   } };
-  assert.equal(readJevRoute(result), "agent_memory");
-  assert.equal(readJevRoute({ answers: { ...result.answers, memory_destination: {
-    choice: "company", confidence: 0.97, probabilities: { none: 0.02, agent: 0.01, company: 0.97 },
+  assert.equal(readJevRoute(result), "agent_memory_session");
+  assert.equal(readJevRoute({ answers: { ...result.answers, memory_intent: {
+    choice: "agent_record", confidence: 0.97, probabilities: { none: 0.01, agent_session: 0.01, agent_record: 0.97, company: 0.01 },
+  } } }), "action");
+  assert.equal(readJevRoute({ answers: { ...result.answers, memory_intent: {
+    choice: "company", confidence: 0.97, probabilities: { none: 0.01, agent_session: 0.01, agent_record: 0.01, company: 0.97 },
   } } }), null);
 });
 

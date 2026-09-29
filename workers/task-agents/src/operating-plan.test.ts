@@ -40,13 +40,14 @@ test("leaves post-approval work out of the current plan", () => {
   assert.deepEqual(currentTurnTasks(["Draft campaign direction", "Stop for operator approval", "On approval: draft channel assets"]), ["Draft campaign direction", "Stop for operator approval"]);
 });
 
-test("a continuation keeps completed steps but gives the new WorkRun its own plan", () => {
-  const previous = { runId: "old", summary: "Research insurers", tasks: [
+test("a continuation keeps completed steps and the operator's memory boundary", () => {
+  const previous = { runId: "old", summary: "Research insurers", privateMemoryWritesAllowed: false, tasks: [
     { id: 1, title: "Verify sources", status: "completed" as const },
     { id: 2, title: "Write verified report", status: "active" as const },
   ] };
   const continued = continuedPlan("new", previous.summary, previous.tasks.map((task) => task.title), previous);
   assert.equal(continued.runId, "new");
+  assert.equal(continued.privateMemoryWritesAllowed, false);
   assert.deepEqual(continued.tasks.map((task) => task.status), ["completed", "pending"]);
   assert.deepEqual(missingPlanTaskIds(continued.tasks.length, completedPlanTaskIds(continued, "new")), [2]);
   assert.deepEqual(continuedPlan("replacement", "New request", ["Different task"], previous).tasks.map((task) => task.status), ["pending"]);

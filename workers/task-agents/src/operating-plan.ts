@@ -28,6 +28,7 @@ export function continuedPlan(runId: string, summary: string, titles: readonly s
   return {
     runId,
     summary: summary.slice(0, 2000),
+    privateMemoryWritesAllowed: previous?.privateMemoryWritesAllowed,
     tasks: titles.slice(0, 6).map((title, index) => ({
       id: index + 1,
       title: title.slice(0, 160),

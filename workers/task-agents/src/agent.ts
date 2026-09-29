@@ -35,7 +35,7 @@ import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
 import type { EmployeeIdentity, LocalCompany, OperatingPlan, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
 
-const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "", operatingPlan: null };
+const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "", operatingPlan: null, privateMemoryWritesAllowed: false };
 
 export function reportTitle(body: string, fallback: string): string {
   const heading = body.match(/^#\s+(.+)$/m)?.[1]?.trim();
@@ -396,7 +396,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async recordOperatingWorkResult(complete: boolean, reason: string, artifactRefs: string[] = []): Promise<void> {
     const envelope = this.state.envelope;
-    if (!envelope) return;
+    if (!envelope || !this.state.privateMemoryWritesAllowed) return;
     const saved = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
       kind: "task_status", status: complete ? "completed" : "incomplete", writer: "runtime",
       agent_slug: this.state.employee?.slug || "hyperagent", title: complete ? "Task completed" : "Task incomplete",
@@ -417,7 +417,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     // The evidence receipt and bounded candidate are the authority here;
     // uncertainty about publishing to company memory must not erase a
     // verified lesson from the employee's own persistent brain.
-    if (!envelope) return;
+    if (!envelope || !this.state.privateMemoryWritesAllowed) return;
     const evidence = new Set([...this.sourceReadReceipts().map((source) => source.url), artifactId].filter(Boolean));
     const safe = candidates.slice(0, 2).filter((item) => evidence.has(item.evidenceRef)
       && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${item.title} ${item.summary}`));
@@ -1120,6 +1120,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.setState({ ...this.state, companyMemoryIntent: requested, companyMemoryReceiptId: "" });
   }
 
+  setPrivateMemoryWritesAllowed(allowed: boolean): void {
+    this.setState({ ...this.state, privateMemoryWritesAllowed: allowed });
+  }
+
   hasCompanyMemoryReceipt(): boolean {
     return Boolean(this.state.companyMemoryIntent && this.state.companyMemoryReceiptId);
   }
@@ -1235,7 +1239,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const brief = cachedBrief || (await this.loadProfileBrief(envelope.orgId, envelope.userId)).brief;
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", narrativeTurn: false, executionTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", narrativeTurn: false, executionTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "", privateMemoryWritesAllowed: false });
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
@@ -1278,6 +1282,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   setOperatingPlan(runId: string, summary: string, titles: string[], previous?: OperatingPlan): void {
     const operatingPlan = continuedPlan(runId, summary, titles, previous);
+    operatingPlan.privateMemoryWritesAllowed = this.state.privateMemoryWritesAllowed;
     this.saveOperatingPlan(operatingPlan);
     this.setState({
       ...this.state,
@@ -1715,6 +1720,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           kind: input.kind, agent_slug: input.agentSlug, status: input.status, query: input.query, limit: input.limit,
         });
         const runId = this.state.envelope?.runId;
+        if (!this.state.privateMemoryWritesAllowed && input.operation === "save") return { error: "operating_memory_write_not_authorized" };
         if (!runId || !input.title?.trim() || !input.summary?.trim()
           || !input.kind || !["learning", "decision_note", "handoff"].includes(input.kind)) return { error: "operating_memory_save_invalid" };
         const source = `${runId}:${input.kind}:${input.title}:${input.summary}`;

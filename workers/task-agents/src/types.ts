@@ -67,6 +67,7 @@ export interface OperatingPlan {
   runId: string;
   summary: string;
   tasks: OperatingTask[];
+  privateMemoryWritesAllowed?: boolean;
 }
 
 export interface TaskAgentState {
@@ -88,6 +89,7 @@ export interface TaskAgentState {
   companyContextRequired?: boolean;
   companyMemoryIntent?: boolean;
   companyMemoryReceiptId?: string;
+  privateMemoryWritesAllowed?: boolean;
   profileBrief?: string;
   operatingMemoryBrief?: string;
   recoveryBrief?: string;

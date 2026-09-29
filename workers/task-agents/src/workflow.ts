@@ -37,6 +37,7 @@ const planSchema = z.object({
   resolvedRequest: z.string().max(2000).default(""),
   outputKind: z.enum(["none", "document", "slide_deck", "image"]).default("none"),
   memoryIntent: z.enum(["none", "agent_session", "agent_record", "company"]).default("none"),
+  privateMemoryWritePolicy: z.enum(["allow", "forbid"]).default("allow"),
 });
 
 const sessionMemorySchema = z.object({
@@ -361,6 +362,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       tasks: recovery!.plan!.tasks.map((task: OperatingPlan["tasks"][number]) => task.title),
       localPlaybookId: recovery!.playbookId,
       resolvedRequest: asked,
+      privateMemoryWritePolicy: recovery!.plan!.privateMemoryWritesAllowed === false ? "forbid" : "allow",
     }) : quickRoute ? planSchema.parse({
       mode: quickRoute,
       decision: "",
@@ -369,10 +371,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         ? (requiredToolGroups.length ? requiredToolGroups : ["company", "web_research", "browser", "connected_apps", "records"])
         : [],
       resolvedRequest: asked,
+      // Fast direct/action routes do not create durable company work to learn from.
+      privateMemoryWritePolicy: "forbid",
     }) : await (async () => {
       const prompt = `Authenticated organization brief: ${work.company}; website: ${work.website}; profile location (not externally verified): ${work.market}. Current operator request: ${asked}. New-session mode preference: ${work.modePreference || "auto"}. Previous request in this same room, for reference only: ${work.previousRequest || "none"}. If current request refers to earlier work (for example, "do it"), set resolvedRequest to the concrete requested task, preserving current instruction. Otherwise set resolvedRequest to current request. Current request wins if it changes scope. Choose outputKind by requested deliverable, understanding ordinary spelling mistakes; a fundraising pitch deck is slide_deck, not document. Choose memoryIntent from the meaning of the request, not word matching: agent_session for summarizing prior room work into a private handoff, agent_record for one specific private learning or note, company for canonical HIVEMIND publication, none otherwise. Agent_record uses the normal private-memory tool; it is not a room-session summary.\n\nUse the system prompt and action skill catalog to choose direct, action, or company work. Direct is only for greetings, general knowledge, calculations, or transforming facts the operator supplied in this turn. Questions about the organization, its offer, people, records, history, or earlier work are action even when the answer should be one sentence: make a focused private operating-memory recall for agent work or a focused HIVEMIND recall for canonical company facts, not a company operating plan. The compact profile is not a complete memory inventory; never assert absence of an offer, ICP, history, or prior work merely because the brief omits it. Company mode is for substantive multi-part company positioning, strategy, research, decisions, plans, reports, fundraising materials, and investor deliverables; a company topic alone does not require a plan. Choose only tool families needed. For company work, return a concise operator-visible plan with three to six observable tasks and leave localPlaybookId empty; the matching method is selected only after the company route is known. A request for a finished file needs a plan step for creating that file and checking its receipt; drafting text alone is not completion. For action work, return no formal plan or tasks. Do not present private chain of thought as tasks.`;
       const requestPlan = (name: string) => step.prompt(name, {
-        prompt,
+        prompt: `${prompt}\n\nSet privateMemoryWritePolicy to forbid when the current operator request disallows memory saves of any kind, including the private agent brain. Otherwise allow routine, evidence-backed private operating memory. The current request overrides older standing instructions. This policy controls private learning and task-status writes independently of company-memory publication.`,
         output: planSchema,
         timeout: "30 minutes",
       });
@@ -406,12 +410,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
             resolvedRequest: asked,
             outputKind: requestsArtifact(asked) ? "document" : "none",
             memoryIntent: "none",
+            privateMemoryWritePolicy: "forbid",
           });
         }
       }
     })();
     if (!quickRoute && !work.continuation) plan.localPlaybookId = "";
     asked = plan.resolvedRequest.trim() || asked;
+    // Reapply on Workflow replay: this is room state, not a one-time external write.
+    await this.agent.setPrivateMemoryWritesAllowed(plan.privateMemoryWritePolicy === "allow");
     if (plan.memoryIntent === "agent_session" && !requestsArtifact(work.task)) return this.savePrivateRoomSession(work, step);
     if (requestsArtifact(work.task) && plan.memoryIntent === "agent_session") plan.memoryIntent = "none";
     // A task packet may permit a reusable private learning after the requested

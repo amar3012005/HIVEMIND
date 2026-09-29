@@ -357,7 +357,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));
     const playbookMenu = playbookNames.map(({ id, name, description, base }) => ({ id, name, description, globalId: base }));
     const quickDirect = quickRoute === "direct" ? await durable.do("direct-answer", async () =>
-      this.agent.streamNarrative(`Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here. Reply in your own voice.`)) : "";
+      this.agent.streamNarrative(`Answer only this current operator request in your active HyperAgent persona: ${asked}. Earlier room turns are context, not tasks to repeat or continue. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, recap earlier answers, or claim company facts not established here. Reply in your own voice.`)) : "";
     const plan = work.continuation ? planSchema.parse({
       mode: "company", decision: `Continue unfinished WorkRun ${work.continuation.previousRunId}`,
       plan: recovery!.plan!.summary,

@@ -521,6 +521,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       WHERE run_id <> ${currentRunId} AND json_extract(work, '$.orgId') = ${orgId} AND json_extract(work, '$.userId') = ${userId}
       ORDER BY updated_at DESC LIMIT 1`[0];
     if (!row) return "";
+    // A completed turn is conversation history, not recovery work. Injecting
+    // it as an active WorkRun makes a fresh request inherit its prior goal.
+    if (["complete", "completed"].includes(String(row.status))) return "";
     const prior = JSON.parse(String(row.work)) as { task?: string };
     const snapshot = this.readRunRecoverySnapshot(String(row.run_id), orgId, userId);
     const next = snapshot.plan?.tasks.find((task) => task.status !== "completed");

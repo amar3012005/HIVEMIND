@@ -22,10 +22,11 @@ export function readJevRoute(result: unknown): JevRoute | null {
   const decisions = answers as Record<string, unknown>;
   // The destination is a model decision about authority, not a phrase match.
   if (confidentChoice(decisions.memory_intent, "agent_session")) return "agent_memory_session";
-  if (!confidentChoice(decisions.memory_intent, "none", 0.75)
-    && !confidentChoice(decisions.memory_intent, "agent_record")) return null;
+  if (confidentChoice(decisions.memory_intent, "agent_record")) return confidentChoice(decisions.route, "action") ? "action" : null;
+  if (!confidentChoice(decisions.memory_intent, "none", 0.75)) return null;
   // Ordinary fast routing may open tools, but must not skip Think's answer check.
-  return confidentChoice(decisions.route, "action") ? "action" : null;
+  // A saved or multi-stage deliverable always needs Think's operating plan.
+  return confidentChoice(decisions.route, "action") && confidentChoice(decisions.work_shape, "bounded") ? "action" : null;
 }
 
 export async function routeWithJev(
@@ -58,6 +59,14 @@ export async function routeWithJev(
             direct: "Greeting, general knowledge, calculation, or transformation using only facts supplied in current request; no tool or company history needed.",
             action: "Focused task or question needing tool, skill, company memory, connected app, screenshot, or simple file; no company operating plan.",
             company: "Substantive multi-step company research, strategy, decision, plan, report, fundraising deliverable, or uncertain reference to prior company work.",
+          },
+        },
+        work_shape: {
+          type: "choice",
+          instructions: "Assess the current request's execution contract independently of the route. A requested saved artifact or a multi-stage deliverable requires a durable operating plan even if the initial lookup is simple. When uncertain, choose staged.",
+          criteria: {
+            bounded: "A focused answer or single bounded action with no required saved deliverable or multi-stage acceptance criteria.",
+            staged: "The request requires a saved artifact, several verified stages, or explicit deliverable acceptance criteria.",
           },
         },
       },

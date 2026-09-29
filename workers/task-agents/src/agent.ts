@@ -276,8 +276,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async recordOperatingLearnings(candidates: readonly { title: string; summary: string; evidenceRef: string }[],
     review: PostRunJevReview, artifactId: string): Promise<void> {
     const envelope = this.state.envelope;
-    if (!envelope || review.status !== "evaluated" || review.memory.decision !== "review_recommended"
-      || !["learning", "bug_or_failure", "mistake_and_correction"].includes(review.memory.kind || "")) return;
+    // Jev's company-brain review is advisory for private operating memory.
+    // The evidence receipt and bounded candidate are the authority here;
+    // uncertainty about publishing to company memory must not erase a
+    // verified lesson from the employee's own persistent brain.
+    if (!envelope) return;
     const evidence = new Set([...this.sourceReadReceipts().map((source) => source.url), artifactId].filter(Boolean));
     const safe = candidates.slice(0, 2).filter((item) => evidence.has(item.evidenceRef)
       && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${item.title} ${item.summary}`));
@@ -287,12 +290,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         title: item.title, summary: item.summary,
         idempotency_key: `workrun:${envelope.runId}:learning:${index}`,
         room_id: this.currentRoomId() || undefined, run_id: envelope.runId,
-        context: { evidenceRef: item.evidenceRef, review: review.policyVersion },
+        context: { evidenceRef: item.evidenceRef, review: review.policyVersion,
+          reviewDecision: review.memory.decision },
       })));
     const saved = results.filter((result) => result.status === "fulfilled" && result.value
       && typeof result.value === "object" && "ok" in result.value && result.value.ok === true).length;
     if (saved) this.note("operating-memory-learning", `${saved} verified learning${saved === 1 ? "" : "s"} saved in the private agent brain`);
-    if (results.some((result) => result.status === "rejected")) console.warn(JSON.stringify({ event: "operating_learning_save_failed", runId: envelope.runId }));
+    if (results.some((result) => result.status === "rejected" || (result.status === "fulfilled"
+      && (!result.value || typeof result.value !== "object" || !("ok" in result.value) || result.value.ok !== true))))
+      console.warn(JSON.stringify({ event: "operating_learning_save_failed", runId: envelope.runId }));
   }
 
   private currentRoomId(): string | null {

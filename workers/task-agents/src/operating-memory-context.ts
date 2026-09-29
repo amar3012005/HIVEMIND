@@ -18,6 +18,6 @@ export function operatingMemoryBrief(learnings: unknown, completed: unknown): st
     kind: short(row.kind, 24), status: short(row.status, 24), agent: short(row.agentSlug, 120),
     title: short(row.title, 150), summary: short(row.summary, 180),
     runId: short(row.runId, 80), at: short(row.createdAt, 40),
-  })).filter((row) => row.title);
+  })).filter((row) => row.title).sort((a, b) => b.at.localeCompare(a.at));
   return compact.length ? JSON.stringify(compact).slice(0, 3_500) : "";
 }

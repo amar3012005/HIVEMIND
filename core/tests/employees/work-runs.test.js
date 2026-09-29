@@ -199,12 +199,28 @@ test('completion gate reads AgentScope task snapshots and playbook evidence rule
   assert.equal(complete.ok, true);
 });
 
+test('PDF completion refuses a mislabeled or missing registered artifact', async () => {
+  const prisma = {
+    $queryRawUnsafe: async (sql) => {
+      if (sql.startsWith('SELECT org_id, user_id, scope')) return [{ org_id: 'org-1', user_id: 'user-1',
+        scope: { completion_contract: { min_artifacts: 1, artifact_content_type: 'application/pdf' } },
+        result_artifact_ids: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'], events: [] }];
+      throw new Error(`unexpected query: ${sql}`);
+    },
+    sourceArtifact: { findMany: async () => [{ contentType: 'text/html' }] },
+  };
+  const blocked = await completeWorkRun(prisma, 'run-1', { validate: true });
+  assert.equal(blocked.reason, 'completion_contract_unmet');
+  assert.deepEqual(blocked.unmet.map(({ predicate }) => predicate), ['artifact_content_type']);
+});
+
 test('dispatch creates the Core envelope before calling the AgentScope runtime', async () => {
   const calls = [];
   const prisma = {
     $queryRawUnsafe: async (sql, ...params) => {
       calls.push({ sql, params });
       if (sql.includes('SELECT id FROM "hivemind"."hyper_rooms"')) return [{ id: 'room-1' }];
+      if (sql.includes('SELECT id FROM "hivemind"."hyper_rooms" WHERE id')) return [{ id: 'room-1' }];
       if (sql.startsWith('INSERT INTO "hivemind"."work_runs"')) return [{ id: 'run-1', status: 'queued' }];
       if (sql.startsWith('UPDATE "hivemind"."work_runs"\n       SET events')) return [{ id: 'run-1', status: 'queued' }];
       if (sql.startsWith('SELECT id, status FROM')) return [{ id: 'run-1', status: calls.filter((entry) => entry.sql.startsWith('UPDATE "hivemind"."work_runs" SET status')).length ? 'starting' : 'queued' }];

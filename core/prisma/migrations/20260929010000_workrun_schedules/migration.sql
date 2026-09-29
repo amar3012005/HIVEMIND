@@ -1,0 +1,33 @@
+CREATE TABLE "hivemind"."work_run_schedules" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "org_id" UUID NOT NULL,
+  "user_id" UUID NOT NULL,
+  "room_id" UUID NOT NULL,
+  "goal" TEXT NOT NULL,
+  "instructions" TEXT NOT NULL DEFAULT '',
+  "agent_slug" VARCHAR(120) NOT NULL,
+  "playbook_id" VARCHAR(120),
+  "scope" JSONB NOT NULL DEFAULT '{}'::jsonb,
+  "output_format" VARCHAR(16) NOT NULL,
+  "cadence" VARCHAR(16) NOT NULL,
+  "timezone" VARCHAR(100),
+  "local_time" VARCHAR(5),
+  "next_run_at" TIMESTAMPTZ(6),
+  "status" VARCHAR(16) NOT NULL DEFAULT 'active',
+  "lease_owner" VARCHAR(160),
+  "lease_until" TIMESTAMPTZ(6),
+  "failure_count" INTEGER NOT NULL DEFAULT 0,
+  "last_error" TEXT,
+  "last_workrun_id" UUID,
+  "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
+  "updated_at" TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
+  CONSTRAINT "work_run_schedules_cadence_check" CHECK (cadence IN ('once','daily')),
+  CONSTRAINT "work_run_schedules_status_check" CHECK (status IN ('active','paused','completed')),
+  CONSTRAINT "work_run_schedules_output_check" CHECK (output_format IN ('pdf','html','pptx','xlsx','png','mp4')),
+  CONSTRAINT "work_run_schedules_org_fk" FOREIGN KEY (org_id) REFERENCES "hivemind"."organizations"(id) ON DELETE CASCADE,
+  CONSTRAINT "work_run_schedules_user_fk" FOREIGN KEY (user_id) REFERENCES "hivemind"."users"(id) ON DELETE CASCADE,
+  CONSTRAINT "work_run_schedules_room_fk" FOREIGN KEY (room_id) REFERENCES "hivemind"."hyper_rooms"(id) ON DELETE CASCADE,
+  CONSTRAINT "work_run_schedules_last_run_fk" FOREIGN KEY (last_workrun_id) REFERENCES "hivemind"."work_runs"(id) ON DELETE SET NULL
+);
+CREATE INDEX "work_run_schedules_status_due_idx" ON "hivemind"."work_run_schedules" (status,next_run_at);
+CREATE INDEX "work_run_schedules_user_org_idx" ON "hivemind"."work_run_schedules" (user_id,org_id);

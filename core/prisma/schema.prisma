@@ -3677,6 +3677,36 @@ model WorkRun {
   @@map("work_runs")
 }
 
+/// User-owned room trigger. Core owns wall-clock and idempotency; AgentScope owns execution.
+model WorkRunSchedule {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String    @map("org_id") @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  roomId        String    @map("room_id") @db.Uuid
+  goal          String    @db.Text
+  instructions  String    @default("") @db.Text
+  agentSlug     String    @map("agent_slug") @db.VarChar(120)
+  playbookId    String?   @map("playbook_id") @db.VarChar(120)
+  scope         Json      @default("{}")
+  outputFormat  String    @map("output_format") @db.VarChar(16)
+  cadence       String    @db.VarChar(16)
+  timezone      String?   @db.VarChar(100)
+  localTime     String?   @map("local_time") @db.VarChar(5)
+  nextRunAt     DateTime? @map("next_run_at") @db.Timestamptz(6)
+  status        String    @default("active") @db.VarChar(16)
+  leaseOwner    String?   @map("lease_owner") @db.VarChar(160)
+  leaseUntil    DateTime? @map("lease_until") @db.Timestamptz(6)
+  failureCount  Int       @default(0) @map("failure_count")
+  lastError     String?   @map("last_error") @db.Text
+  lastWorkrunId String?   @map("last_workrun_id") @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, nextRunAt])
+  @@index([userId, orgId])
+  @@map("work_run_schedules")
+}
+
 /// HyperClaim — a durable, queryable claim/hypothesis/synthesis artifact emitted
 /// during a turn. Persisted from turn events (hypothesis | line:lead/synthesis |
 /// chain_of_thought) so the reasoning graph survives beyond the lines[] transcript.

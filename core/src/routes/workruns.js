@@ -9,7 +9,7 @@ export async function handleInternalWorkRunEventRoute({
   const applied = await applyRuntimeEvent(prisma, workRunId, body.event);
   let completion = null;
   if (body.complete) completion = await completeWorkRun(prisma, workRunId, {
-    result: body.result || {}, error: body.error || null,
+    result: body.result || {}, error: body.error || null, validate: true,
   });
   return jsonResponse(res, { ok: true, ...applied, ...(completion ? { completion } : {}) });
 }

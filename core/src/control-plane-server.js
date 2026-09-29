@@ -123,6 +123,7 @@ import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
 import { previewApprovalToken, consumeApprovalToken } from './hq-runtime/approval-links.js';
 import { activateHqAfterOnboarding, appendHqEvent, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
+import { createWorkRunSchedule, startWorkRunScheduler } from './employees/work-run-schedules.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
@@ -1289,6 +1290,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
   startHqScheduler({ prisma })
     .then((scheduler) => { hqScheduler = scheduler; })
     .catch((error) => console.warn('[hq-runtime] scheduler unavailable:', error.message));
+  startWorkRunScheduler({ prisma });
 }
 
 // Chromium is heavy; cap concurrent captures so parallel onboardings can't
@@ -14572,6 +14574,48 @@ Write the persona now.`;
 
     // ─── AgentScope WorkRuns ───────────────────────────────────────────────
     // Browser access stays on the Core. The runtime is service-to-service only.
+    const scheduleMatch = pathname.match(/^\/v1\/workrun-schedules\/([0-9a-f-]{36})$/);
+    if (pathname === '/v1/workrun-schedules' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const schedule = await createWorkRunSchedule({
+          prisma, orgId: current.session.orgId, userId: current.session.userId,
+          body: await parseBody(req),
+        });
+        return jsonResponse(res, { schedule }, 201);
+      } catch (error) { return jsonResponse(res, { error: error.message }, error.status || 500); }
+    }
+    if (pathname === '/v1/workrun-schedules' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const schedules = await prisma.$queryRawUnsafe(
+        'SELECT * FROM "hivemind"."work_run_schedules" WHERE user_id = $1::uuid AND org_id = $2::uuid ORDER BY created_at DESC LIMIT 200',
+        current.session.userId, current.session.orgId,
+      );
+      return jsonResponse(res, { schedules });
+    }
+    if (scheduleMatch && ['GET', 'PATCH', 'DELETE'].includes(req.method)) {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const id = scheduleMatch[1];
+      if (req.method === 'GET') {
+        const rows = await prisma.$queryRawUnsafe(
+          'SELECT * FROM "hivemind"."work_run_schedules" WHERE id = $1::uuid AND user_id = $2::uuid AND org_id = $3::uuid',
+          id, current.session.userId, current.session.orgId,
+        );
+        return rows?.[0] ? jsonResponse(res, { schedule: rows[0] }) : jsonResponse(res, { error: 'Schedule not found' }, 404);
+      }
+      const body = req.method === 'PATCH' ? await parseBody(req) : { status: 'paused' };
+      if (!['active', 'paused'].includes(body?.status)) return jsonResponse(res, { error: 'status must be active or paused' }, 400);
+      const rows = await prisma.$queryRawUnsafe(
+        `UPDATE "hivemind"."work_run_schedules" SET status = $4, lease_owner = NULL, lease_until = NULL, updated_at = now()
+          WHERE id = $1::uuid AND user_id = $2::uuid AND org_id = $3::uuid
+            AND status != 'completed' AND (status != 'active' OR $4 != 'active') RETURNING *`,
+        id, current.session.userId, current.session.orgId, body.status,
+      );
+      return rows?.[0] ? jsonResponse(res, { schedule: rows[0] }) : jsonResponse(res, { error: 'Schedule not found or cannot change status' }, 404);
+    }
     const workRunMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})(\/stream|\/events|\/session\/messages|\/session\/stream|\/chat|\/cancel|\/recover)?$/);
     const workRunArtifactMatch = pathname.match(/^\/v1\/workruns\/([0-9a-f-]{36})\/artifacts\/([0-9a-f-]{36})$/);
     if (workRunArtifactMatch && req.method === 'GET') {

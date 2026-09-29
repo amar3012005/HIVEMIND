@@ -267,9 +267,22 @@ export async function applyRuntimeEvent(prisma, workRunId, rawEvent) {
 export async function completeWorkRun(prisma, workRunId, { result = {}, error = null, validate = false } = {}) {
   if (validate && !error) {
     const rows = await prisma.$queryRawUnsafe(
-      'SELECT scope, events, result_artifact_ids FROM "hivemind"."work_runs" WHERE id = $1::uuid', workRunId,
+      'SELECT org_id, user_id, scope, events, result_artifact_ids FROM "hivemind"."work_runs" WHERE id = $1::uuid', workRunId,
     );
-    const verdict = validateWorkRunCompletion(rows?.[0]);
+    const run = rows?.[0];
+    const verdict = validateWorkRunCompletion(run);
+    const contentType = asObject(asObject(run?.scope).completion_contract).artifact_content_type;
+    if (contentType && verdict.ok) {
+      const ids = asArray(run?.result_artifact_ids).filter((id) => /^[0-9a-f-]{36}$/i.test(String(id)));
+      const artifacts = ids.length ? await prisma.sourceArtifact.findMany({
+        where: { id: { in: ids }, orgId: run.org_id, userId: run.user_id },
+        select: { contentType: true },
+      }) : [];
+      if (!artifacts.some((artifact) => artifact.contentType === contentType)) {
+        verdict.ok = false;
+        verdict.unmet.push({ predicate: 'artifact_content_type', expected: contentType, message: `A registered ${contentType} artifact is required.` });
+      }
+    }
     if (!verdict.ok) return { ok: false, reason: 'completion_contract_unmet', ...verdict };
   }
   const to = error ? 'failed' : 'completed';
@@ -368,10 +381,14 @@ export async function recoverWorkRun({ prisma, workRunId, userId, orgId, runtime
 export async function dispatchWorkRun({
   prisma, orgId, userId, goal, roomId = null, playbookId = null,
   playbookVersion = null, scope = {}, chatModelConfig = null,
+  agentId = 'workrun-default', hyperagentSlug = null, triggerKey = null, completionContract = null,
   runtimeFetch = internalFetch,
 } = {}) {
   if (!orgId || !userId || !String(goal || '').trim()) throw new Error('orgId, userId, and goal are required');
+  if (triggerKey && !/^[a-f0-9]{64}$/.test(triggerKey)) throw new Error('Scheduled WorkRun trigger key is invalid');
+  if (!/^[a-zA-Z0-9_-]{1,120}$/.test(String(agentId))) throw new Error('WorkRun agent id is invalid');
   const initialScope = normalizeInitialWorkRunScope(scope);
+  if (completionContract) initialScope.completion_contract = completionContract;
   await verifyAgentScopeRuntimeBuild({ runtimeFetch, userId, orgId });
   let resolvedRoomId = roomId;
   if (!resolvedRoomId) {
@@ -384,30 +401,54 @@ export async function dispatchWorkRun({
     resolvedRoomId = rows?.[0]?.id || null;
   }
   if (!resolvedRoomId) throw new Error('No active room is available for this WorkRun. Create or restore a room first.');
+  const ownedRoom = await prisma.$queryRawUnsafe(
+    'SELECT id FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid AND user_id = $2::uuid AND org_id = $3::uuid AND archived_at IS NULL LIMIT 1',
+    resolvedRoomId, userId, orgId,
+  );
+  if (!ownedRoom?.[0]) throw new Error('WorkRun room is unavailable to this user');
 
-  const turn = await prisma.$transaction(async (tx) => {
-    const last = await tx.hyperTurn.findFirst({ where: { roomId: resolvedRoomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
-    const seq = (last?.seq ?? 0) + 1;
-    return tx.hyperTurn.create({ data: {
-      roomId: resolvedRoomId, seq, userMessage: String(goal).slice(0, 8000), status: 'live',
-      idempotencyKey: `workrun:${resolvedRoomId}:${seq}:${Date.now()}`.slice(0, 64),
-      lines: [{ t: 'turn_ack', agent: 'director', content: 'Request received. Preparing the right context and capabilities.', immediate: true, ts: Date.now() }],
-    } });
-  });
+  let turn;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      turn = await prisma.$transaction(async (tx) => {
+        if (triggerKey) {
+          const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey: triggerKey } });
+          if (existing) return existing;
+        }
+        const last = await tx.hyperTurn.findFirst({ where: { roomId: resolvedRoomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
+        const seq = (last?.seq ?? 0) + 1;
+        return tx.hyperTurn.create({ data: {
+          roomId: resolvedRoomId, seq, userMessage: String(goal).slice(0, 8000), status: 'live',
+          idempotencyKey: triggerKey || `workrun:${resolvedRoomId}:${seq}:${Date.now()}`.slice(0, 64),
+          lines: [{ t: 'turn_ack', agent: 'director', content: 'Request received. Preparing the right context and capabilities.', immediate: true, ts: Date.now() }],
+        } });
+      });
+      break;
+    } catch (error) {
+      if (error.code !== 'P2002' || attempt === 2) throw error;
+    }
+  }
   const inserted = await prisma.$queryRawUnsafe(
     `INSERT INTO "hivemind"."work_runs" (org_id, user_id, room_id, turn_id, goal, status, playbook_id, playbook_version, scope)
-     VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 'queued', $6, $7, $8::jsonb) RETURNING *`,
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 'queued', $6, $7, $8::jsonb)
+     ON CONFLICT (turn_id) DO NOTHING RETURNING *`,
     orgId, userId, resolvedRoomId, turn.id, String(goal), playbookId, playbookVersion, JSON.stringify(initialScope),
   );
-  const workRun = inserted?.[0];
+  const workRun = inserted?.[0] || (triggerKey ? (await prisma.$queryRawUnsafe(
+    'SELECT * FROM "hivemind"."work_runs" WHERE turn_id = $1::uuid', turn.id,
+  ))?.[0] : null);
   if (!workRun) throw new Error('WorkRun creation did not return a record');
-  await appendWorkRunEvent(prisma, workRun.id, { t: 'workrun.started', goal: String(goal).slice(0, 500), playbook: playbookId, ts: Date.now() });
-  await transitionWorkRun(prisma, workRun.id, 'starting');
+  if (!inserted?.[0] && !['queued', 'starting'].includes(workRun.status)) {
+    return { workRun, turnId: turn.id, sessionId: workRun.agentscope_session_id || null };
+  }
+  if (inserted?.[0]) await appendWorkRunEvent(prisma, workRun.id, { t: 'workrun.started', goal: String(goal).slice(0, 500), playbook: playbookId, ts: Date.now() });
+  if (workRun.status === 'queued') await transitionWorkRun(prisma, workRun.id, 'starting');
   try {
     const response = await runtimeFetch(`${agentScopeRuntimeUrl()}/workrun/`, {
       service: 'hm-agent-runtime', method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: {
-        workrun_id: workRun.id, agent_id: 'workrun-default', turn_id: turn.id, room_id: resolvedRoomId,
+        workrun_id: workRun.id, agent_id: agentId, turn_id: turn.id, room_id: resolvedRoomId,
+        ...(hyperagentSlug ? { hyperagent_slug: hyperagentSlug } : {}),
         org_id: orgId, goal: String(goal), playbook_id: playbookId, playbook_version: playbookVersion,
         scope: initialScope, ...(chatModelConfig ? { chat_model_config: chatModelConfig } : {}),
       }, userId, orgId, timeoutMs: 30_000,

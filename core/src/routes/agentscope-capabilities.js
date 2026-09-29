@@ -264,6 +264,9 @@ export async function handleAgentScopeCapabilityRoute({
     let bytes;
     try { bytes = decodeArtifact(body?.content_base64); }
     catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+    if (body?.content_type === 'application/pdf' && !bytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
+      return jsonResponse(res, { error: 'PDF artifact bytes are invalid.' }, 400);
+    }
     const path = String(body?.path || '').trim().replace(/^\/+/, '');
     const title = String(body?.title || '').trim();
     if (!path || path.includes('..') || path.length > 400 || !title || title.length > 500) return jsonResponse(res, { error: 'A safe relative path (max 400 characters) and title (max 500 characters) are required.' }, 400);

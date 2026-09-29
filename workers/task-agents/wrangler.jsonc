@@ -30,6 +30,11 @@
       "name": "hivemind-task-lifecycle",
       "binding": "TASK_LIFECYCLE",
       "class_name": "TaskLifecycleWorkflow"
+    },
+    {
+      "name": "hivemind-post-run-review",
+      "binding": "POST_RUN_REVIEW",
+      "class_name": "PostRunReviewWorkflow"
     }
   ],
   "env": {
@@ -59,6 +64,11 @@
           "name": "hivemind-task-lifecycle-preview",
           "binding": "TASK_LIFECYCLE",
           "class_name": "TaskLifecycleWorkflow"
+        },
+        {
+          "name": "hivemind-post-run-review-preview",
+          "binding": "POST_RUN_REVIEW",
+          "class_name": "PostRunReviewWorkflow"
         }
       ]
     }

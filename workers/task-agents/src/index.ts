@@ -2,11 +2,12 @@ import { getAgentByName, routeAgentRequest } from "agents";
 import { HivemindTaskAgent } from "./agent";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
 import { TaskLifecycleWorkflow } from "./workflow";
+import { PostRunReviewWorkflow } from "./post-run-review-workflow";
 import { CompanyGovernor } from "./governor";
 import { verifyRoomTicket } from "./room-ticket";
 import { getControl, postControl } from "./gateway";
 
-export { HivemindTaskAgent, EmployeeSpecialistAgent, TaskLifecycleWorkflow, CompanyGovernor };
+export { HivemindTaskAgent, EmployeeSpecialistAgent, TaskLifecycleWorkflow, PostRunReviewWorkflow, CompanyGovernor };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

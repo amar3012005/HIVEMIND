@@ -29,6 +29,24 @@ export interface PostRunJevInput {
   playbook: LocalPlaybookSnapshot | null;
 }
 
+/** Immutable handoff to the post-run Workflow. It never reads the room's
+ * mutable current employee or WorkRun when the review executes later. */
+export interface PostRunReviewPacket {
+  input: PostRunJevInput;
+  companyContextLoaded: boolean;
+  privateMemoryWritesAllowed: boolean;
+  employeeSlug: string;
+  roomId: string | null;
+  learnings: Array<{ title: string; summary: string; evidenceRef: string }>;
+}
+
+export function verifiedPostRunLearnings(packet: PostRunReviewPacket): PostRunReviewPacket["learnings"] {
+  if (!packet.privateMemoryWritesAllowed) return [];
+  const evidence = new Set([...packet.input.sources.map((source) => source.url), packet.input.artifactId].filter(Boolean));
+  return packet.learnings.slice(0, 2).filter((item) => evidence.has(item.evidenceRef)
+    && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${item.title} ${item.summary}`));
+}
+
 export interface ParsedScore {
   score: number;
   confidence: number | null;

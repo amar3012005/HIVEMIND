@@ -20,7 +20,7 @@ import { COMPANY_GOVERNOR_PROMPT } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
-import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
+import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, verifiedPostRunLearnings, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview, type PostRunReviewPacket } from "./post-run-jev";
 import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
 import { operatingMemoryBrief, operatingWorkStatusKey } from "./operating-memory-context";
 import { privateMemoryReceiptId, sessionMemoryEvidence, verifiedPrivateLearning } from "./session-memory";
@@ -445,29 +445,39 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async recordOperatingLearnings(candidates: readonly { title: string; summary: string; evidenceRef: string }[],
     review: PostRunJevReview, artifactId: string): Promise<void> {
     const envelope = this.state.envelope;
-    // Jev's company-brain review is advisory for private operating memory.
-    // The evidence receipt and bounded candidate are the authority here;
-    // uncertainty about publishing to company memory must not erase a
-    // verified lesson from the employee's own persistent brain.
     if (!envelope || !this.state.privateMemoryWritesAllowed) return;
-    const evidence = new Set([...this.sourceReadReceipts().map((source) => source.url), artifactId].filter(Boolean));
-    const safe = candidates.slice(0, 2).filter((item) => evidence.has(item.evidenceRef)
-      && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${item.title} ${item.summary}`));
+    return this.saveReviewedOperatingLearnings({
+      input: { runId: envelope.runId, orgId: envelope.orgId, userId: envelope.userId, taskType: envelope.taskType,
+        phase: envelope.phase, task: envelope.task ?? "", report: "", completedTaskIds: [], artifactId,
+        artifactReceipts: [], sources: this.sourceReadReceipts().map(({ url }) => ({ url, title: "Verified page read" })),
+        activityCounts: {}, playbook: null },
+      companyContextLoaded: this.hasCompanyContext(), privateMemoryWritesAllowed: true,
+      employeeSlug: this.state.employee?.slug || "hyperagent", roomId: this.currentRoomId(), learnings: [...candidates],
+    }, review);
+  }
+
+  async saveReviewedOperatingLearnings(packet: PostRunReviewPacket, review: PostRunJevReview): Promise<void> {
+    if (!packet.privateMemoryWritesAllowed) return;
+    const { input } = packet;
+    this.assertPostRunPacketScope(packet);
+    // Jev is advisory; only a receipt from this exact run may back a private
+    // learning, even if the room has already moved to another WorkRun.
+    const safe = verifiedPostRunLearnings(packet);
     const results = await Promise.allSettled(safe.map((item, index) => saveOperatingMemory(
-      this.gatewayEnv(), envelope.orgId, envelope.userId, {
-        kind: "learning", status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
+      this.gatewayEnv(), input.orgId, input.userId, {
+        kind: "learning", status: "recorded", agent_slug: packet.employeeSlug,
         title: item.title, summary: item.summary,
-        idempotency_key: `workrun:${envelope.runId}:learning:${index}`,
-        room_id: this.currentRoomId() || undefined, run_id: envelope.runId,
+        idempotency_key: `workrun:${input.runId}:learning:${index}`,
+        room_id: packet.roomId || undefined, run_id: input.runId,
         context: { evidenceRef: item.evidenceRef, review: review.policyVersion,
           reviewDecision: review.memory.decision },
       })));
     const saved = results.filter((result) => result.status === "fulfilled" && result.value
       && typeof result.value === "object" && "ok" in result.value && result.value.ok === true).length;
-    if (saved) this.note("operating-memory-learning", `${saved} verified learning${saved === 1 ? "" : "s"} saved in the private agent brain`);
+    if (saved && this.state.envelope?.runId === input.runId) this.note("operating-memory-learning", `${saved} verified learning${saved === 1 ? "" : "s"} saved in the private agent brain`);
     if (results.some((result) => result.status === "rejected" || (result.status === "fulfilled"
       && (!result.value || typeof result.value !== "object" || !("ok" in result.value) || result.value.ok !== true))))
-      console.warn(JSON.stringify({ event: "operating_learning_save_failed", runId: envelope.runId }));
+      console.warn(JSON.stringify({ event: "operating_learning_save_failed", runId: input.runId }));
   }
 
   private currentRoomId(): string | null {
@@ -2237,20 +2247,21 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     outcome?: "complete" | "incomplete";
     failureReason?: string;
   }): Promise<PostRunJevReview> {
+    return this.evaluatePostRunReviewPacket(this.preparePostRunReviewPacket(input, []));
+  }
+
+  preparePostRunReviewPacket(input: {
+    task: string;
+    report: string;
+    completedTaskIds: number[];
+    artifactId: string;
+    playbook: LocalPlaybookSnapshot | null;
+    outcome?: "complete" | "incomplete";
+    failureReason?: string;
+  }, learnings: PostRunReviewPacket["learnings"]): PostRunReviewPacket {
     const envelope = this.state.envelope;
     if (!envelope) throw new Error("task_not_bound");
     ensureCompanyTables(this.sql.bind(this));
-    const existing = this.sql`SELECT org_id, user_id, review_json FROM company_run_insights WHERE run_id = ${envelope.runId} LIMIT 1`[0];
-    if (existing) {
-      if (String(existing.org_id) !== envelope.orgId || String(existing.user_id) !== envelope.userId) throw new Error("run_insight_owner_mismatch");
-      try {
-        const saved = JSON.parse(String(existing.review_json)) as PostRunJevReview;
-        // A completed Workflow replay must reuse its original review, even
-        // after policy upgrades; the new policy applies to new runs only.
-        if (saved.runId === envelope.runId && /^post-run-jev-v[1-4]$/.test(saved.policyVersion)) return saved;
-      } catch { /* an invalid stored result must never be promoted */ }
-      throw new Error("run_insight_persist_corrupt");
-    }
     const activityCounts: Record<string, number> = {};
     for (const event of this.state.events ?? []) {
       if (["user", "report", "approval", "post_run_jev"].includes(event.step)) continue;
@@ -2268,10 +2279,49 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         .map((row) => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) })),
       activityCounts, playbook: input.playbook,
     };
+    return {
+      input: reviewInput,
+      companyContextLoaded: this.hasCompanyContext(),
+      privateMemoryWritesAllowed: this.state.privateMemoryWritesAllowed ?? false,
+      employeeSlug: this.state.employee?.slug || "hyperagent",
+      roomId: this.currentRoomId(),
+      learnings: learnings.slice(0, 2),
+    };
+  }
+
+  async startPostRunReview(packet: PostRunReviewPacket): Promise<string> {
+    this.assertPostRunPacketScope(packet);
+    return this.runWorkflow("POST_RUN_REVIEW", packet, { id: `review-${packet.input.runId}` });
+  }
+
+  private assertPostRunPacketScope(packet: PostRunReviewPacket): void {
+    const { input } = packet;
+    const current = this.state.envelope;
+    // company_runs is room-local and has no org/user columns. Bind the packet
+    // to this room's authenticated identity and its durable run row.
+    if (!current || current.orgId !== input.orgId || current.userId !== input.userId
+      || (packet.roomId && packet.roomId !== this.currentRoomId())
+      || !this.sql`SELECT id FROM company_runs WHERE id = ${input.runId} LIMIT 1`[0])
+      throw new Error("post_run_review_scope_denied");
+  }
+
+  async evaluatePostRunReviewPacket(packet: PostRunReviewPacket): Promise<PostRunJevReview> {
+    const reviewInput = packet.input;
+    ensureCompanyTables(this.sql.bind(this));
+    this.assertPostRunPacketScope(packet);
+    const existing = this.sql`SELECT org_id, user_id, review_json FROM company_run_insights WHERE run_id = ${reviewInput.runId} LIMIT 1`[0];
+    if (existing) {
+      if (String(existing.org_id) !== reviewInput.orgId || String(existing.user_id) !== reviewInput.userId) throw new Error("run_insight_owner_mismatch");
+      try {
+        const saved = JSON.parse(String(existing.review_json)) as PostRunJevReview;
+        if (saved.runId === reviewInput.runId && /^post-run-jev-v[1-4]$/.test(saved.policyVersion)) return saved;
+      } catch { /* an invalid stored result must never be promoted */ }
+      throw new Error("run_insight_persist_corrupt");
+    }
     const env = this.gatewayEnv();
     let review: PostRunJevReview;
     if (env.JEV_POST_RUN_ENABLED !== "true") review = ineligiblePostRunJev(reviewInput, "disabled");
-    else if (!this.hasCompanyContext() || !input.report.trim()) review = ineligiblePostRunJev(reviewInput, "ineligible");
+    else if (!packet.companyContextLoaded || !reviewInput.report.trim()) review = ineligiblePostRunJev(reviewInput, "ineligible");
     else {
       try {
         const ai = env.AI as { run?: (model: string, input: unknown) => Promise<unknown> } | undefined;
@@ -2283,8 +2333,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       }
     }
     this.sql`INSERT OR IGNORE INTO company_run_insights (run_id, org_id, user_id, task_type, artifact_id, policy_version, status, review_json, created_at)
-      VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${envelope.taskType}, ${input.artifactId.slice(0, 100)}, ${POST_RUN_JEV_POLICY_VERSION}, ${review.status}, ${JSON.stringify(review)}, ${new Date().toISOString()})`;
-    this.note("post_run_jev", postRunJevSummary(review));
+      VALUES (${reviewInput.runId}, ${reviewInput.orgId}, ${reviewInput.userId}, ${reviewInput.taskType}, ${reviewInput.artifactId.slice(0, 100)}, ${POST_RUN_JEV_POLICY_VERSION}, ${review.status}, ${JSON.stringify(review)}, ${new Date().toISOString()})`;
+    if (this.state.envelope?.runId === reviewInput.runId) this.note("post_run_jev", postRunJevSummary(review));
     return review;
   }
 

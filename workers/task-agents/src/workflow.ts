@@ -2,11 +2,11 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
-import { ineligiblePostRunJev, type PostRunJevReview } from "./post-run-jev";
+import { ineligiblePostRunJev, type PostRunJevReview, type PostRunReviewPacket } from "./post-run-jev";
 import { confirmedCompanyMemoryId } from "./gateway";
 import type { OperatingPlan, TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
@@ -102,6 +102,7 @@ export interface CompanyWorkResult {
   report: string;
   artifactRefs?: string[];
   insights?: PostRunJevReview;
+  postRunPacket?: PostRunReviewPacket;
 }
 
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
@@ -232,7 +233,16 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.recordTriggerOutcome(event.payload.occurrenceId, result)
           .catch((error: unknown) => console.warn(JSON.stringify({ event: "trigger_outcome_failed", runId: event.payload.runId, code: workflowErrorCode(error) })));
       }
-      return result;
+      if (result.postRunPacket) {
+        try {
+          await (step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> })
+            .do("queue-post-run-review", () => this.agent.startPostRunReview(result.postRunPacket!));
+        } catch (error) {
+          console.warn(JSON.stringify({ event: "post_run_review_launch_failed", runId: result.runId, code: workflowErrorCode(error) }));
+        }
+      }
+      const { postRunPacket: _postRunPacket, ...publicResult } = result;
+      return publicResult;
     } catch (error) {
       const failureCode = workflowErrorCode(error);
       let stopped = failureCode === "workrun_stopped";
@@ -681,11 +691,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       guidance += `The operator chose: ${answer}. `;
     }
 
-    // The Think tool turn may end with a progress sentence after its last tool.
-    // Draft the actual deliverable in a separate, tool-free native Think turn
-    // from the completed conversation and bounded source receipts. Its deltas
-    // stream to the room; only this document may cross the artifact boundary.
+    // The Think tool turn can itself produce the finished document. Keep that
+    // streamed report when it is complete; a second model call can replace it
+    // with a progress sentence or malformed tool markup. Synthesize only when
+    // the execution turn stopped before the actual deliverable.
     if (artifactRequested && !deckRequested) {
+      const executedDocument = extractReportDocument(written.report);
+      if (executedDocument) written = { ...written, report: executedDocument };
+    }
+    if (artifactRequested && !deckRequested && !reportDocumentReady(written.report)) {
       const sources = (await this.agent.sourceReadReceipts()).slice(0, 12)
         .map(({ url, excerpt }: { url: string; excerpt: string }) => `${url}: ${sourceEvidenceWindows(excerpt, 900)}`).join("\n");
       const finalReport = await durable.do("synthesize-final-report", async () => this.agent.streamNarrative(
@@ -891,10 +905,13 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
       }
     });
 
-    const insights = await reviewCompletedWork();
-    await durable.do("save-reviewed-operating-learnings", async () =>
-      this.agent.recordOperatingLearnings(written.operatingLearnings, insights, prepared.artifactId));
     if (!prepared.title) {
+      const postRunPacket = await durable.do("prepare-post-run-review", async () => this.agent.preparePostRunReviewPacket({
+        task: asked, report: prepared.report, completedTaskIds: written.completedTaskIds,
+        artifactId: prepared.artifactId,
+        playbook: selectedPlaybook ? { id: selectedPlaybook.id, globalId: selectedPlaybook.globalId,
+          globalVersion: globalPlaybookBody(selectedPlaybook.globalId)?.version ?? null, snapshot: selectedPlaybook.body } : null,
+      }, written.operatingLearnings));
       await durable.do("deliverable-ready", async () => {
         if (plan.memoryIntent === "company") {
           for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
@@ -902,9 +919,12 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
         }
         await this.agent.note("completion", "deliverable_ready");
       });
-      return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
+      return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], postRunPacket };
     }
 
+    const insights = await reviewCompletedWork();
+    await durable.do("save-reviewed-operating-learnings", async () =>
+      this.agent.recordOperatingLearnings(written.operatingLearnings, insights, prepared.artifactId));
     let approved = false;
     try {
       const approval = await this.waitForApproval(step, { timeout: "7 days", stepName: "memory-approval" });

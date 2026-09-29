@@ -20,6 +20,7 @@ interface Env {
   BROWSER?: unknown;
   HivemindTaskAgent: DurableObjectNamespace;
   TASK_LIFECYCLE: Workflow;
+  POST_RUN_REVIEW: Workflow;
 }
 
 interface ExportedHandler<E> {

@@ -386,6 +386,15 @@ export function reportDocumentReady(report: string): boolean {
   return title === 0 && sections >= 2 && body.length >= 200;
 }
 
+/** Keep the complete document when a model prefaces it with conversation. */
+export function extractReportDocument(output: string): string | null {
+  const heading = /^#\s+\S/m.exec(output);
+  if (!heading || heading.index === undefined) return null;
+  const document = output.slice(heading.index).trim();
+  if (/\<｜DSML｜tool_calls\>/.test(document)) return null;
+  return reportDocumentReady(document) ? document : null;
+}
+
 export function companyWorkComplete(input: CompletionInput): CompletionResult {
   const report = input.report.trim();
   if (!report) return { complete: false, reason: "report_missing" };

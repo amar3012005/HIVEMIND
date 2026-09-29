@@ -5,7 +5,9 @@ import {
   ineligiblePostRunJev,
   parsePostRunJevResponse,
   postRunJevSummary,
+  verifiedPostRunLearnings,
   type PostRunJevInput,
+  type PostRunReviewPacket,
 } from "./post-run-jev.ts";
 
 test("post-run receipt explains conservative decisions without implying a write", () => {
@@ -31,6 +33,21 @@ const baseInput: PostRunJevInput = {
   activityCounts: { parallel_search: 3, source_read: 2 },
   playbook: null,
 };
+
+test("late post-run review only saves learnings backed by its own immutable run packet", () => {
+  const packet: PostRunReviewPacket = {
+    input: baseInput, companyContextLoaded: true, privateMemoryWritesAllowed: true,
+    employeeSlug: "elena", roomId: "room-1",
+    learnings: [
+      { title: "Verified method", summary: "Use the official page receipt.", evidenceRef: baseInput.sources[0].url },
+      { title: "Other room's page", summary: "Do not inherit this.", evidenceRef: "https://other.example/page" },
+      { title: "Secret", summary: "api_key=not-for-memory", evidenceRef: baseInput.artifactId },
+    ],
+  };
+  assert.deepEqual(verifiedPostRunLearnings(packet).map((item) => item.title), ["Verified method"]);
+  assert.deepEqual(verifiedPostRunLearnings({ ...packet, learnings: [packet.learnings[0], packet.learnings[2]] }).map((item) => item.title), ["Verified method"]);
+  assert.deepEqual(verifiedPostRunLearnings({ ...packet, privateMemoryWritesAllowed: false }), []);
+});
 
 function jevResponse(input: PostRunJevInput, values: {
   memoryProbability?: number;

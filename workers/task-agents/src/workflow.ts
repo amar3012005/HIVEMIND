@@ -37,7 +37,7 @@ const planSchema = z.object({
   resolvedRequest: z.string().max(2000).default(""),
   outputKind: z.enum(["none", "document", "slide_deck", "image"]).default("none"),
   memoryIntent: z.enum(["none", "agent_session", "agent_record", "company"]).default("none"),
-  privateMemoryWritePolicy: z.enum(["allow", "forbid"]).default("allow"),
+  privateMemoryWritePolicy: z.enum(["allow", "forbid"]).default("forbid"),
 });
 
 const sessionMemorySchema = z.object({

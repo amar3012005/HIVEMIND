@@ -162,8 +162,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.broadcast(JSON.stringify({ type: "narrative-stream-start" }));
     try {
       const promptId = crypto.randomUUID();
+      const currentTask = this.state.envelope?.task?.slice(0, 1800) || "the current WorkRun";
       const result = await this.saveMessages((messages) => [...messages,
-        { id: promptId, role: "user", parts: [{ type: "text", text: "Finish the current WorkRun report using the current stage directive and saved evidence." }], createdAt: new Date() }]);
+        { id: promptId, role: "user", parts: [{ type: "text", text: `Current request: ${currentTask}\nFinish its report using the current stage directive and saved evidence.` }], createdAt: new Date() }]);
       if (result.status !== "completed") throw new Error(`narrative_turn_${result.status}`);
       const messages = await this.getMessages();
       const promptIndex = messages.findIndex((message) => message.id === promptId);
@@ -185,8 +186,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.broadcast(JSON.stringify({ type: "execution-stream-start", finalSynthesisFollows }));
     try {
       const promptId = crypto.randomUUID();
+      const currentTask = this.state.envelope?.task?.slice(0, 1800) || "the current WorkRun";
       const result = await this.saveMessages((messages) => [...messages,
-        { id: promptId, role: "user", parts: [{ type: "text", text: "Continue the current WorkRun step using the current stage directive and saved evidence." }], createdAt: new Date() }]);
+        { id: promptId, role: "user", parts: [{ type: "text", text: `Current request: ${currentTask}\nContinue its WorkRun step using the current stage directive and saved evidence.` }], createdAt: new Date() }]);
       if (result.status !== "completed") {
         console.error(JSON.stringify({ event: "think_execution_not_completed", runId: this.state.envelope?.runId,
           status: result.status }));

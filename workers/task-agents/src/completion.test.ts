@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -300,4 +300,9 @@ test("one explicit screenshot URL selects one deterministic capture", () => {
 test("company completion does not depend on report length or prescribed vocabulary", () => {
   assert.equal(companyWorkComplete({ report: "Decision: run a pilot.", recalled: true }).complete, true);
   assert.equal(companyWorkComplete({ report: "  ", recalled: true }).reason, "report_missing");
+});
+
+test("artifact boundary rejects a progress utterance even after plan tools finish", () => {
+  assert.equal(reportDocumentReady("Report structure loaded and progress shared. Saving the positioning brief now."), false);
+  assert.equal(reportDocumentReady("# Decision brief\n\n## Evidence\n" + "A sourced finding. ".repeat(12) + "\n\n## Recommendation\n" + "One decision and its rationale. ".repeat(8)), true);
 });

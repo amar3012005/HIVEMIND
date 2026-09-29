@@ -375,6 +375,17 @@ export function pdfReportReady(report: string): boolean {
   return !/\b(?:pdf|document|file)[^.!?\n]{0,80}\b(?:blocked|unavailable|cannot|could not|not possible|no (?:tool|render|file|artifact)|print.to.pdf)\b|\b(?:no|without)\s+pdf.capable\b|\bprint.to.pdf\b/i.test(report);
 }
 
+/** A saved company report must be a document, not the last progress utterance
+ * from an agent's tool turn. This checks document structure, independent of
+ * the task's subject or wording. */
+export function reportDocumentReady(report: string): boolean {
+  const lines = report.trim().split(/\r?\n/).map((line) => line.trim());
+  const title = lines.findIndex((line) => /^#\s+\S/.test(line));
+  const sections = lines.filter((line) => /^##\s+\S/.test(line)).length;
+  const body = lines.filter((line) => line && !/^#{1,6}\s/.test(line)).join(" ");
+  return title === 0 && sections >= 2 && body.length >= 200;
+}
+
 export function companyWorkComplete(input: CompletionInput): CompletionResult {
   const report = input.report.trim();
   if (!report) return { complete: false, reason: "report_missing" };

@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -679,6 +679,23 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         break;
       }
       guidance += `The operator chose: ${answer}. `;
+    }
+
+    // The Think tool turn may end with a progress sentence after its last tool.
+    // Draft the actual deliverable in a separate, tool-free native Think turn
+    // from the completed conversation and bounded source receipts. Its deltas
+    // stream to the room; only this document may cross the artifact boundary.
+    if (artifactRequested && !deckRequested) {
+      const sources = (await this.agent.sourceReadReceipts()).slice(0, 12)
+        .map(({ url, excerpt }: { url: string; excerpt: string }) => `${url}: ${sourceEvidenceWindows(excerpt, 900)}`).join("\n");
+      const finalReport = await durable.do("synthesize-final-report", async () => this.agent.streamNarrative(
+        `Write the finished Markdown report for the current operator task, not a progress update. Start with a descriptive H1 and include at least two substantive H2 sections. Complete every requested comparison, decision, and deliverable section now. Separate facts from inference and cite only URLs in the saved read receipts. Do not claim the artifact is already saved; the Workflow saves it after this turn. Do not use tools or ask for internal method choices.\n\nTask: ${asked}\nPlan: ${plan.tasks.map((task, index) => `${index + 1}. ${task}`).join(" ")}\nWork already done: ${written.report.slice(0, 4000)}\nVerified page receipts: ${sources || "None"}`));
+      written = { ...written, report: finalReport };
+      if (!reportDocumentReady(written.report)) {
+        await durable.do("report-document-incomplete", async () => this.agent.note("completion", "report_document_incomplete"));
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "report_document_incomplete",
+          report: "The final synthesis did not produce a complete report document. No artifact was saved; continue this WorkRun from its evidence receipts." };
+      }
     }
 
     let prospectSources: string[] | undefined;

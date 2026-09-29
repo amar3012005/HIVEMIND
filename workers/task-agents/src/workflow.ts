@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -673,6 +673,16 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "artifact_status_unverified", report: "Report draft incorrectly claimed artifact approval was pending; no artifact was saved." };
     }
     if (isProspect) {
+      if (written.prospects.length < prospectCount) {
+        const receipts = (await this.agent.sourceReadReceipts() as Array<{ url: string; excerpt: string }>).slice(0, 12);
+        if (receipts.length) {
+          await this.agent.note("model-recovery", "Synthesizing the unfinished prospect contract from saved source receipts without more tools");
+          const raw = await this.agent.recoverStructuredWithoutTool(
+            `Return ONE JSON object matching this schema, without Markdown fences or tool calls: ${JSON.stringify(z.toJSONSchema(reportSchema))}. The operator requested: ${asked}. Complete the report and up to ${prospectCount} structured prospect rows using only the saved official page receipts below. Each row needs name, locationUrl, sectorUrl, short exact locationEvidence and sectorEvidence, and caveat. Insurance evidence must state business activity, license, or business form, not merely a heading or copyright. Cite only receipt URLs; mark an unavailable digital/AI signal unavailable. Separate verified facts from ICP-fit inference. Include completedTaskIds only for plan steps that the report and receipts support; do not claim the artifact is saved. If the evidence is insufficient, leave unsupported rows out so verification fails closed. Prior draft: ${written.report.slice(0, 9000)}. Plan: ${plan.tasks.map((task, index) => `${index + 1}. ${task}`).join(" ")}. Source receipts:\n${receipts.map(({ url, excerpt }) => `${url}: ${sourceEvidenceWindows(excerpt)}`).join("\n")}`,
+          );
+          written = mergeReportProgress(written, parseToolFreeJson(raw, reportSchema));
+        }
+      }
       // Some providers finish a valid report after a protocol recovery but
       // omit its companion structured rows. Recover only that projection from
       // existing source-read receipts; the binder below remains authoritative.
@@ -682,7 +692,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           await this.agent.note("model-recovery", "Recovering missing prospect rows from the finished draft and saved source receipts");
           const rows = await this.structuredPrompt(step, "recover-prospect-rows",
             `Extract up to ${prospectCount} distinct prospects from this report. Use only the exact official URLs and copied passages in these already fetched receipts. Do not research again, invent a URL, or use a heading/copyright footer as proof of insurance business. A sector passage must state actual insurance activity, license, or business. If a prospect lacks either location or sector proof, omit it. Return {prospects:[{name,locationUrl,sectorUrl,locationEvidence,sectorEvidence,caveat}]}.
-Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ url, excerpt }) => `${url}: ${sourceExcerptForQuoteRepair(excerpt, []).slice(0, 1400)}`).join("\n")}`,
+Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ url, excerpt }) => `${url}: ${sourceEvidenceWindows(excerpt, 1800)}`).join("\n")}`,
             reportSchema.pick({ prospects: true }));
           written = { ...written, prospects: rows.prospects };
         }

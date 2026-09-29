@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -23,6 +23,14 @@ test("quote repair includes source location in a long page footer and sector tex
   assert.match(excerpt, /HDI-Platz 1, 30659 Hannover/);
   assert.match(excerpt, /corporate insurance/);
   assert.ok(excerpt.length < page.length);
+});
+
+test("compact recovery context keeps exact activity and late address passages", () => {
+  const page = `# Company\nVHV offers commercial insurance. ${"Unrelated navigation. ".repeat(800)} Registered office: VHV-Platz 1, 30177 Hannover.`;
+  const summary = sourceEvidenceWindows(page);
+  assert.match(summary, /VHV offers commercial insurance/);
+  assert.match(summary, /VHV-Platz 1, 30177 Hannover/);
+  assert.ok(summary.length < page.length);
 });
 
 test("runtime binds prospect passages to fetched pages without another model turn", () => {

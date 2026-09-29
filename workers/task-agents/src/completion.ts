@@ -257,6 +257,23 @@ export function sourceExcerptForQuoteRepair(page: string, quotes: readonly strin
     : relevant;
 }
 
+/** Compact exact page text for evidence-led recovery without sending the full
+ * browser result back through another model turn. Include both early and late
+ * matches because legal addresses often live in the footer. */
+export function sourceEvidenceWindows(page: string, maxChars = 2600): string {
+  const windows = [page.slice(0, 250)];
+  const lower = page.toLocaleLowerCase();
+  const positions = new Set<number>();
+  for (const term of ["hannover", "insurance", "reinsurance", "versicherung", "rückversicherung", "digital", "artificial intelligence", " k.i."]) {
+    const first = lower.indexOf(term);
+    const last = lower.lastIndexOf(term);
+    if (first >= 0) positions.add(first);
+    if (last >= 0) positions.add(last);
+  }
+  for (const at of positions) windows.push(page.slice(Math.max(0, at - 160), Math.min(page.length, at + 340)));
+  return [...new Set(windows)].join("\n…\n").slice(0, maxChars);
+}
+
 /** Exact page passages near a proposed quote, for a bounded model repair. */
 export function sourceQuoteCandidates(page: string, quote: string, limit = 4): string[] {
   const wanted = new Set(canonicalPassage(quote).split(" ").filter((word) => word.length >= 4));

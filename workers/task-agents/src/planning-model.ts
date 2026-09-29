@@ -20,5 +20,5 @@ export function isInitialOperatingPlan(messages: readonly { role: string; conten
     }
     return "";
   };
-  return text(lastUser.content).includes(OPERATING_PLAN_MARKER);
+  return text(lastUser.content).includes(OPERATING_PLAN_MARKER) || JSON.stringify(lastUser).includes(OPERATING_PLAN_MARKER);
 }

@@ -778,7 +778,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.textDraft = "";
     if (this.state.catalogStage === "planning") {
       const fastStart = isInitialOperatingPlan(ctx.messages, ctx.continuation) ? initialPlanModel(this.gatewayEnv()) : null;
-      console.log(JSON.stringify({ event: "planner_model_selected", model: fastStart ? "openai/gpt-oss-20b:nitro" : "main", firstPlan: !!fastStart, continuation: ctx.continuation }));
+      const last = ctx.messages.at(-1);
+      console.log(JSON.stringify({ event: "planner_model_selected", model: fastStart ? "openai/gpt-oss-20b:nitro" : "main", firstPlan: !!fastStart, continuation: ctx.continuation, lastRole: last?.role, lastKeys: last ? Object.keys(last) : [], markerInLast: last ? JSON.stringify(last).includes("[hivemind:operating-plan-v1]") : false, markerInAny: JSON.stringify(ctx.messages).includes("[hivemind:operating-plan-v1]") }));
       return {
         ...(fastStart ? { model: fastStart } : {}),
         activeTools: ["think_final_answer"],

@@ -2,6 +2,7 @@ import { internalFetch } from '../internal/internal-fetch.js';
 import crypto from 'node:crypto';
 import { appendWorkRunEvent, completeWorkRun } from '../employees/work-runs.js';
 import { CloudflareKnowledgeIngestClient } from '../knowledge/cloudflare-ingest-client.js';
+import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
 import {
   discoverGovernedSessionReads,
   executeGovernedSessionRead,
@@ -115,6 +116,7 @@ export async function handleAgentScopeCapabilityRoute({
   composio = { discoverGovernedSessionReads, executeGovernedSessionRead, issueGovernedReadGrant, resolveGovernedReadGrant },
   artifactStorage = new CloudflareKnowledgeIngestClient({ logger: console }),
   completeWorkRunFn = completeWorkRun,
+  renderPdfFn = renderDayZeroOnboardingPdf,
 }) {
   const p = await principal(req, prisma);
   if (p.error) return jsonResponse(res, { error: p.error }, 403);
@@ -257,19 +259,29 @@ export async function handleAgentScopeCapabilityRoute({
     const records = await companyRecords(prisma, recordMatch[1], p);
     return jsonResponse(res, { status: 'completed', kind: recordMatch[1], records });
   }
-  if (pathname === '/internal/hivemind/artifacts') {
+  if (pathname === '/internal/hivemind/artifacts' || pathname === '/internal/hivemind/render-pdf') {
     const sessionId = String(body?.agentscope_session_id || '').trim();
     const run = await scopedWorkRun(prisma, sessionId, p);
     if (!run) return jsonResponse(res, { error: 'No active WorkRun matches this AgentScope session.' }, 404);
     let bytes;
-    try { bytes = decodeArtifact(body?.content_base64); }
-    catch (error) { return jsonResponse(res, { error: error.message }, 400); }
-    if (body?.content_type === 'application/pdf' && !bytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
+    const renderingPdf = pathname.endsWith('/render-pdf');
+    try {
+      if (renderingPdf) {
+        const html = decodeArtifact(body?.content_base64).toString('utf8');
+        if (Buffer.byteLength(html) > 1024 * 1024) throw new Error('HTML exceeds the 1 MiB PDF render limit');
+        bytes = await renderPdfFn(html);
+        if (!bytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) throw new Error('PDF renderer returned invalid bytes');
+      } else {
+        bytes = decodeArtifact(body?.content_base64);
+      }
+    }
+    catch (error) { return jsonResponse(res, { error: error.message }, renderingPdf ? 502 : 400); }
+    if ((renderingPdf || body?.content_type === 'application/pdf') && !bytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
       return jsonResponse(res, { error: 'PDF artifact bytes are invalid.' }, 400);
     }
     const path = String(body?.path || '').trim().replace(/^\/+/, '');
     const title = String(body?.title || '').trim();
-    if (!path || path.includes('..') || path.length > 400 || !title || title.length > 500) return jsonResponse(res, { error: 'A safe relative path (max 400 characters) and title (max 500 characters) are required.' }, 400);
+    if (!path || path.includes('..') || path.length > 400 || !title || title.length > 500 || (renderingPdf && !path.toLowerCase().endsWith('.pdf'))) return jsonResponse(res, { error: 'A safe relative path (max 400 characters), valid PDF extension when rendering, and title (max 500 characters) are required.' }, 400);
     const checksum = crypto.createHash('sha256').update(bytes).digest('hex');
     // SourceArtifact already provides the immutable content receipt and a
     // version column. A stable room/path source id lets successive generated
@@ -299,7 +311,7 @@ export async function handleAgentScopeCapabilityRoute({
       where: { userId_orgId_checksum_sourcePlatform: { userId: p.userId, orgId: p.orgId, checksum, sourcePlatform: 'agentscope_workrun' } },
       create: {
         userId: p.userId, orgId: p.orgId, artifactType: 'generated', sourcePlatform: 'agentscope_workrun',
-        sourceId: artifactKey, contentType: String(body?.content_type || 'application/octet-stream').slice(0, 100),
+        sourceId: artifactKey, contentType: renderingPdf ? 'application/pdf' : String(body?.content_type || 'application/octet-stream').slice(0, 100),
         sizeBytes: bytes.length, checksum, version,
         storageLocation: durableObject?.objectKey ? `r2:${durableObject.objectKey}` : 'inline:source_artifacts.payload',
         payload: durableObject?.objectKey

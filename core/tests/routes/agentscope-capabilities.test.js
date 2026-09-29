@@ -88,6 +88,29 @@ test('artifact registration stores immutable bytes and appends a durable WorkRun
   assert.ok(calls.some(({ sql }) => sql.includes('SET events')));
 });
 
+test('PDF render stores validated bytes as an artifact, never just an HTML claim', async () => {
+  let created;
+  const prisma = {
+    userOrganization: { findFirst: async () => ({ orgId: '22222222-2222-2222-2222-222222222222' }) },
+    $queryRawUnsafe: async (sql) => sql.includes('SELECT id, room_id, turn_id, status')
+      ? [{ id: '33333333-3333-3333-3333-333333333333', room_id: '44444444-4444-4444-4444-444444444444', turn_id: '55555555-5555-5555-5555-555555555555', status: 'running' }]
+      : [],
+    sourceArtifact: { findFirst: async () => null, upsert: async ({ create }) => {
+      created = create;
+      return { id: '66666666-6666-6666-6666-666666666666', checksum: create.checksum, contentType: create.contentType, sizeBytes: create.sizeBytes, version: create.version };
+    } },
+  };
+  const body = { agentscope_session_id: 'session-1', path: 'reports/brief.pdf', title: 'Brief PDF', content_base64: Buffer.from('<h1>Brief</h1>').toString('base64') };
+  const result = await handleAgentScopeCapabilityRoute({ req: baseReq, res: {}, parseBody: async () => body, jsonResponse, prisma, pathname: '/internal/hivemind/render-pdf', renderPdfFn: async (html) => {
+    assert.equal(html, '<h1>Brief</h1>');
+    return Buffer.from('%PDF-1.7\nexample');
+  } });
+  assert.equal(result.statusCode, 200);
+  assert.equal(created.contentType, 'application/pdf');
+  assert.equal(result.body.artifact.path, 'reports/brief.pdf');
+  assert.equal(Buffer.from(created.payload.content_base64, 'base64').subarray(0, 5).toString(), '%PDF-');
+});
+
 test('artifact registration stores WorkRun bytes in the configured object store', async () => {
   let stored = null;
   const prisma = {

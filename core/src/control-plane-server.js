@@ -15478,6 +15478,7 @@ Write the persona now.`;
       || pathname === '/internal/hivemind/playbooks'
       || pathname === '/internal/hivemind/playbooks/get'
       || pathname === '/internal/hivemind/artifacts'
+      || pathname === '/internal/hivemind/render-pdf'
       || pathname === '/internal/hivemind/workruns/complete'
       || /^\/internal\/hivemind\/context\/(people|projects|objectives|work|artifacts)$/.test(pathname)
     ) {

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from hm_bridge import EventForwarder, WorkRunBinding, build_execution_identity
-from extra_agent_tools import RecordArtifactTool
+from extra_agent_tools import RecordArtifactTool, RenderPdfTool
 
 
 class _Response:
@@ -131,6 +131,29 @@ class HmBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["path"], "/internal/hivemind/artifacts")
         self.assertEqual(captured["body"]["agentscope_session_id"], "agentscope-session-1")
         self.assertEqual(captured["body"]["content_base64"], "ZHVyYWJsZSByZXBvcnQ=")
+
+    async def test_render_pdf_tool_reads_html_and_uses_core_renderer(self):
+        captured = {}
+
+        async def call_hm_core(path, **kwargs):
+            captured["path"] = path
+            captured.update(kwargs)
+            return {"status": "completed", "artifact": {"content_type": "application/pdf"}}
+
+        async def read_workspace_file(session_id, path, *, max_bytes):
+            self.assertEqual((session_id, path), ("agentscope-session-1", "reports/brief.html"))
+            self.assertEqual(max_bytes, 1024 * 1024)
+            return b"<h1>Brief</h1>"
+
+        tool = RenderPdfTool("user-1", "org-1", "agentscope-session-1")
+        with patch("extra_agent_tools._call_hm_core", call_hm_core), patch(
+            "extra_agent_tools.read_workspace_file", read_workspace_file,
+        ):
+            await tool.call("reports/brief.html", "reports/brief.pdf", "Brief PDF")
+
+        self.assertEqual(captured["path"], "/internal/hivemind/render-pdf")
+        self.assertEqual(captured["body"]["path"], "reports/brief.pdf")
+        self.assertEqual(captured["body"]["content_base64"], "PGgxPkJyaWVmPC9oMT4=")
 
 
 if __name__ == "__main__":

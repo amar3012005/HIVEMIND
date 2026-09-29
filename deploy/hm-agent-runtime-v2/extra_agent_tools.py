@@ -620,6 +620,43 @@ artifact is not an artifact."""
         return _ok(data)
 
 
+class RenderPdfTool(_HiveMindToolBase):
+    """Render workspace HTML to a durable PDF through HIVE's existing service."""
+
+    name: str = "hivemind_render_pdf"
+    description: str = """Render a workspace HTML file into a PDF artifact and return its durable receipt.
+Use for PDF output contracts. Pass an existing workspace-relative HTML path and desired PDF path.
+The renderer and artifact storage run in HIVE-MIND; do not claim PDF completion from HTML alone."""
+    is_read_only: bool = False
+
+    class Params(BaseModel):
+        html_path: str = Field(description="Workspace-relative path of existing HTML source.")
+        pdf_path: str = Field(description="Workspace-relative path for PDF artifact receipt, ending in .pdf.")
+        title: str = Field(description="Human-readable PDF title.")
+
+    input_schema: dict = Params.model_json_schema()
+
+    async def call(self, html_path: str, pdf_path: str, title: str) -> ToolChunk:
+        if not pdf_path.lower().endswith(".pdf"):
+            return _err("pdf_path must end with .pdf", path=pdf_path)
+        try:
+            html = await read_workspace_file(str(self._session_id or ""), html_path, max_bytes=1024 * 1024)
+            data = await _call_hm_core(
+                "/internal/hivemind/render-pdf",
+                user_id=self._user_id,
+                org_id=self._org_id,
+                body={
+                    "path": pdf_path,
+                    "title": title,
+                    "agentscope_session_id": self._session_id,
+                    "content_base64": base64.b64encode(html).decode("ascii"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc), path=html_path)
+        return _ok(data)
+
+
 class PlaybookListTool(_HiveMindToolBase):
     """Compact catalog of global, org, and WorkRun-local playbooks. No keyword routing."""
 
@@ -806,6 +843,7 @@ _TOOL_CLASSES = (
     WebSearchTool,
     SaveMemoryTool,
     RecordArtifactTool,
+    RenderPdfTool,
     PlaybookListTool,
     PlaybookGetTool,
     ComposioToolsTool,

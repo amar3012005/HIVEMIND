@@ -31,6 +31,7 @@ HIVEMIND_NAMES = {
     "hivemind_save_prospect",
     "hivemind_save_memory",
     "hivemind_record_artifact",
+    "hivemind_render_pdf",
     "hivemind_complete_workrun",
 }
 WEB_NAMES = {"hivemind_web_search"}

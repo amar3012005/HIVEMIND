@@ -20,6 +20,7 @@ import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
 import { operatingMemoryBrief } from "./operating-memory-context";
+import { sessionMemoryEvidence } from "./session-memory";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { runContext } from "./run-context";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -854,6 +855,39 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.setState({ ...this.state, envelope, employee: envelope.employee ?? this.state.employee ?? null,
       operatingPlan: null, awaiting: "", catalogStage: "action" });
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
+  }
+
+  /** Keep a private-memory handoff independent of profile and tool discovery. */
+  async bindOperatingMemoryTask(envelope: TaskEnvelope): Promise<void> {
+    this.bindArtifactTask(envelope);
+    this.enterPlanning();
+    await this.context.refreshSystemPrompt();
+  }
+
+  roomSessionMemoryEvidence(): string {
+    return sessionMemoryEvidence(this.state.events ?? []);
+  }
+
+  async saveRoomSessionMemories(entries: readonly { kind: "learning" | "handoff" | "decision_note"; title: string; summary: string }[]): Promise<{ saved: { id: string; kind: string; title: string }[] }> {
+    const envelope = this.state.envelope;
+    if (!envelope) throw new Error("operating_memory_task_not_bound");
+    const safe = entries.slice(0, 2).filter((entry) => entry.title.trim().length >= 8 && entry.summary.trim().length >= 30
+      && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${entry.title} ${entry.summary}`));
+    const attempts = await Promise.allSettled(safe.map((entry, index) => saveOperatingMemory(
+      this.gatewayEnv(), envelope.orgId, envelope.userId, {
+        kind: entry.kind, status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
+        title: entry.title.trim(), summary: entry.summary.trim(),
+        idempotency_key: `room-session:${envelope.runId}:${index}`,
+        room_id: this.currentRoomId() || undefined, run_id: envelope.runId,
+        context: { source: "bounded_room_session", version: 1 },
+      })));
+    const saved = attempts.flatMap((attempt, index) => {
+      if (attempt.status !== "fulfilled" || !attempt.value || typeof attempt.value !== "object"
+        || !("ok" in attempt.value) || attempt.value.ok !== true || !("id" in attempt.value)) return [];
+      return [{ id: String(attempt.value.id), kind: safe[index].kind, title: safe[index].title.trim() }];
+    });
+    if (saved.length) this.note("hyperagents_memory", `${saved.length} private room-session record${saved.length === 1 ? "" : "s"} saved`);
+    return { saved };
   }
 
   async previousReportArtifact(): Promise<StoredArtifact | null> {

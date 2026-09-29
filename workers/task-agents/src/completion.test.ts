@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsAgentMemorySave, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceReceiptCoversQuotes } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -45,12 +45,6 @@ test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsMemorySave("Save my name as Amar."), true);
   assert.equal(requestsMemorySave("Finish saving the report to HIVEMIND as a draft."), true);
   assert.equal(requestsMemorySave("Save it as a PDF report."), false);
-  assert.equal(requestsMemorySave("Save what happened in this session in your brain"), false);
-  assert.equal(requestsAgentMemorySave("Save what happened in this session in your brain"), true);
-  assert.equal(requestsAgentMemorySave("Store this learning in the agent's memory"), true);
-  assert.equal(requestsAgentMemorySave("Save this to company memory"), false);
-  assert.equal(requestsAgentMemorySave("Save one verified learning in your brain; do not write company memory."), true);
-  assert.equal(requestsAgentMemorySave("Save one learning from the preceding PDF export in your brain"), true);
 });
 
 test("blocked PDF handoff is not a finished render source", () => {

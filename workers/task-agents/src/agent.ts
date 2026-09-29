@@ -1372,6 +1372,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.recoveryStepUsed = false;
     const currentSystem = [runContext(this.state), this.state.workflowDirective && (this.state.executionTurn || this.state.narrativeTurn)
       ? `Current Workflow stage directive (active for this turn only): ${this.state.workflowDirective}` : ""].filter(Boolean).join("\n\n");
+    console.log(JSON.stringify({ event: "think_turn_context", runId: this.state.envelope?.runId || null,
+      employeeSlug: this.state.employee?.slug || null, personaInBase: Boolean(this.state.employee && ctx.system.includes(`Assigned employee: ${this.state.employee.name}`)),
+      personaInTurn: Boolean(this.state.employee && currentSystem.includes(`Room owner: ${this.state.employee.name}`)),
+      stage: this.state.catalogStage, narrative: this.state.narrativeTurn }));
     const finalOnly = this.finalOnlyRecoveryTurn;
     this.finalOnlyRecoveryTurn = false;
     const repairToolCall: NonNullable<Parameters<typeof streamText>[0]["repairToolCall"]> = async ({ toolCall }) => {
@@ -1389,11 +1393,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       return { ...toolCall, ...repaired };
     };
     if (this.state.narrativeTurn) {
+      const fastDirect = this.state.catalogStage === "planning" && !this.state.operatingPlan;
+      const directIdentity = this.state.employee
+        ? `You are ${this.state.employee.name}, ${this.state.employee.role || "a HyperAgent"} in this room. Speak as this employee; never invent or substitute another name.`
+        : "You are the unnamed HyperAgent bound to this room. Do not invent an employee name.";
       return {
-        system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
+        system: fastDirect
+          ? `${directIdentity}\nAnswer the current operator request directly and briefly. Use only the current request and authenticated room identity; do not claim a tool or artifact result.\n${this.state.workflowDirective || ""}`
+          : currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
+        ...(fastDirect ? { messages: ctx.messages.slice(-1) } : {}),
         activeTools: [],
         maxSteps: 1,
-        maxOutputTokens: 8000,
+        maxOutputTokens: fastDirect ? 512 : 8000,
         sendReasoning: false,
         providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } },
       };

@@ -9,6 +9,12 @@ export function privateMemoryReceiptId(value: unknown): string | null {
   return value.memory.id;
 }
 
+export function verifiedPrivateLearning(entry: { title: string; summary: string; evidenceRef: string }, evidence: string): boolean {
+  return entry.title.trim().length >= 8 && entry.summary.trim().length >= 30
+    && entry.evidenceRef.trim().length >= 8 && evidence.includes(entry.evidenceRef.trim())
+    && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${entry.title} ${entry.summary}`);
+}
+
 /** Give one model call bounded, receipt-bearing room history rather than a transcript dump. */
 export function sessionMemoryEvidence(events: readonly TraceEvent[]): string {
   const current = events.map((event) => event.step).lastIndexOf("user");

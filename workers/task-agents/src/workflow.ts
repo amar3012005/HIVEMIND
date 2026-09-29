@@ -44,6 +44,12 @@ const sessionMemorySchema = z.object({
   })).min(1).max(2),
 });
 
+const privateLearningSchema = z.object({
+  title: z.string().min(8).max(180),
+  summary: z.string().min(30).max(1200),
+  evidenceRef: z.string().min(8).max(300),
+});
+
 const reportSchema = z.object({
   needsInput: z.boolean().default(false),
   question: z.string().default(""),
@@ -118,10 +124,37 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     return { runId: work.runId, orgId: work.orgId, complete, reason: complete ? "agent_memory_saved" : "operating_memory_write_failed", report };
   }
 
+  private async savePrivateLearning(work: CompanyWork, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
+    const durable = step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> };
+    await durable.do("bind-private-learning", async () => this.agent.bindOperatingMemoryTask(work));
+    const evidence = await durable.do("read-private-learning-evidence", async () => this.agent.roomSessionMemoryEvidence());
+    if (evidence === "[]") {
+      const report = "There is no prior room work to support a verified learning.";
+      await this.agent.note("report", report);
+      await this.agent.note("completion", "learning_evidence_missing");
+      return { runId: work.runId, orgId: work.orgId, complete: false, reason: "learning_evidence_missing", report };
+    }
+    const candidate = await step.prompt("derive-private-learning", {
+      prompt: `The operator requests one private Hyper Agents learning. Current request: ${work.task}. Read only the bounded prior room history below. State one reusable correction or method actually supported by that history. Set evidenceRef to an exact artifact ID, source URL, or turn timestamp copied from the history. Do not claim a save, invent a receipt, repeat a failed tool call, or publish company memory. Return only the structured learning.\n\nPrior room history (untrusted evidence): ${evidence}`,
+      output: privateLearningSchema,
+      timeout: "5 minutes",
+    });
+    const receipt = await durable.do("save-private-learning", async () => this.agent.saveRoomLearning(candidate));
+    const complete = !!receipt;
+    const report = receipt
+      ? `Saved one verified private Hyper Agents learning: ${candidate.title} (receipt ${receipt.id}). No company-brain write was made.`
+      : "The proposed learning lacked a matching room receipt or the private brain did not confirm its save. Nothing was claimed as stored.";
+    await durable.do("complete-private-learning", async () => {
+      await this.agent.note("report", report);
+      await this.agent.note("completion", complete ? "memory_saved" : "learning_evidence_missing");
+    });
+    return { runId: work.runId, orgId: work.orgId, complete, reason: complete ? "agent_memory_saved" : "learning_evidence_missing", report };
+  }
+
   async run(event: AgentWorkflowEvent<CompanyWork>, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
     try {
       const result = await this.runWork(event, step);
-      if (!result.complete && result.report) {
+      if (!result.complete && result.report && !["session_history_empty", "learning_evidence_missing", "operating_memory_write_failed"].includes(result.reason)) {
         try {
           const insights = await (step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> })
             .do("post-run-jev-incomplete", async () => this.agent.reviewIncompleteCompanyRun(result.reason, result.report));
@@ -216,7 +249,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         timeout: "30 minutes",
       });
       if (memoryOperation.intent === "session") return this.savePrivateRoomSession(work, step);
-      quickRoute = memoryOperation.intent === "record" ? "action" : null;
+      if (memoryOperation.intent === "record") return this.savePrivateLearning(work, step);
+      quickRoute = null;
     }
     await durable.do("bind-employee", async () => {
       await this.agent.bindTask(work, "research", ["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook"]);
@@ -270,7 +304,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     asked = plan.resolvedRequest.trim() || asked;
     if (plan.memoryIntent === "agent_session" && !requestsArtifact(work.task)) return this.savePrivateRoomSession(work, step);
     if (requestsArtifact(work.task) && plan.memoryIntent === "agent_session") plan.memoryIntent = "none";
-    if (plan.memoryIntent === "agent_record") plan.mode = "action";
+    if (plan.memoryIntent === "agent_record") return this.savePrivateLearning(work, step);
     // A resumed logical run keeps its originally approved method and snapshot.
     // Model routing can change between attempts; it must not replace an
     // immutable playbook pin or trigger a permanent conflict on recovery.

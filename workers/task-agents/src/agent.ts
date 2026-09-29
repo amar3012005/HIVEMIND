@@ -21,7 +21,7 @@ import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
 import { operatingMemoryBrief } from "./operating-memory-context";
-import { privateMemoryReceiptId, sessionMemoryEvidence } from "./session-memory";
+import { privateMemoryReceiptId, sessionMemoryEvidence, verifiedPrivateLearning } from "./session-memory";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { runContext } from "./run-context";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -952,6 +952,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return { saved };
   }
 
+  /** A private learning is saved by the durable Workflow from a cited room receipt. */
+  async saveRoomLearning(entry: { title: string; summary: string; evidenceRef: string }): Promise<{ id: string } | null> {
+    const envelope = this.state.envelope;
+    if (!envelope || !verifiedPrivateLearning(entry, this.roomSessionMemoryEvidence())) return null;
+    const result = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
+      kind: "learning", status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
+      title: entry.title.trim(), summary: entry.summary.trim(),
+      idempotency_key: `room-learning:${envelope.runId}`,
+      room_id: this.currentRoomId() || undefined, run_id: envelope.runId,
+      context: { evidenceRef: entry.evidenceRef.trim(), source: "bounded_room_session", version: 1 },
+    });
+    const id = privateMemoryReceiptId(result);
+    if (id) this.note("hyperagents_memory", `Verified private learning saved (${id})`);
+    return id ? { id } : null;
+  }
+
   async previousReportArtifact(): Promise<StoredArtifact | null> {
     const report = this.previousReport();
     if (!report) return null;
@@ -1385,7 +1401,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const operatingMemory = tool({
-      description: "Private Hyper Agents operating memory across this organization's agents. Recall newest-first by kind, agent or status. Save only concise learnings, handoffs or decision notes; runtime records authoritative task and trigger outcomes. Never use this as company-brain memory or evidence that a task succeeded.",
+      description: "Private Hyper Agents operating memory across this organization's agents. Recall newest-first by kind, agent or status. For save, kind must be learning, decision_note or handoff AND both title and summary are required. Runtime records authoritative task and trigger outcomes. Never use this as company-brain memory or evidence that a task succeeded.",
       inputSchema: z.object({
         operation: z.enum(["recall", "save"]),
         kind: z.enum(["learning", "decision_note", "handoff", "task_status", "trigger_status"]).optional(),

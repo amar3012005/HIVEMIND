@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { privateMemoryReceiptId, sessionMemoryEvidence } from "./session-memory.ts";
+import { privateMemoryReceiptId, sessionMemoryEvidence, verifiedPrivateLearning } from "./session-memory.ts";
 
 test("private-memory save uses the nested Control receipt", () => {
   assert.equal(privateMemoryReceiptId({ ok: true, memory: { id: "saved-1" } }), "saved-1");
@@ -20,4 +20,11 @@ test("session handoff excludes current request and preserves outcome and artifac
   assert.match(history, /art-1/);
   assert.match(history, /deliverable_ready/);
   assert.doesNotMatch(history, /Save this session/);
+});
+
+test("a private learning needs a prior receipt and cannot contain a secret", () => {
+  const entry = { title: "Use imprint addresses", summary: "An earlier report used a results date as location proof; cite the official postal address instead.", evidenceRef: "art-12345" };
+  assert.equal(verifiedPrivateLearning(entry, '[{"artifacts":["report (art-12345)"]}]'), true);
+  assert.equal(verifiedPrivateLearning({ ...entry, evidenceRef: "invented-id" }, '[{"artifacts":["report (art-12345)"]}]'), false);
+  assert.equal(verifiedPrivateLearning({ ...entry, summary: "API key: sk-abcdefghijklmnopqrstuvwxyz123456789" }, '[{"artifacts":["report (art-12345)"]}]'), false);
 });

@@ -72,6 +72,12 @@ const reportSchema = z.object({
   })).max(30).default([]),
 });
 
+// Keep the tool-call result small. The finished prose is produced by a normal
+// Think chat turn, which streams text instead of buffering a giant tool input.
+const executionSchema = reportSchema.omit({ report: true }).extend({
+  summary: z.string().max(1800).default(""),
+});
+
 export function parseToolFreeJson<T>(text: string, schema: z.ZodType<T>): T {
   const body = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const start = body.indexOf("{");
@@ -95,7 +101,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     try {
       return await step.prompt(name, { prompt, output: schema, timeout: "5 minutes" }) as z.infer<S>;
     } catch (error) {
-      if (!["model_output_invalid", "upstream_timeout"].includes(workflowErrorCode(error))) throw error;
+      if (!isRecoverableModelProtocolError(error) && !["model_output_invalid", "upstream_timeout"].includes(workflowErrorCode(error))) throw error;
       await this.agent.note("model-recovery", `Recovering ${name} with a tool-free structured response`);
       const raw = await this.agent.recoverStructuredWithoutTool(
         `Return exactly one valid JSON object, without Markdown fences or tool calls, matching this schema: ${JSON.stringify(z.toJSONSchema(schema))}. Do not invent task facts.\n\n${prompt}`,
@@ -105,31 +111,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
   }
 
   private async reportPrompt(step: ThinkWorkflowStep, name: string, prompt: string): Promise<z.infer<typeof reportSchema>> {
-    try {
-      return await step.prompt(name, { prompt, output: reportSchema, timeout: "5 minutes" });
-    } catch (error) {
-      if (!isRecoverableModelProtocolError(error) && workflowErrorCode(error) !== "upstream_timeout") throw error;
-      const streamedDraft = await this.agent.armFinalAnswerRecovery();
-      const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
-        `${url}: ${excerpt.slice(0, 700)}`).join("\n");
-      await this.agent.note("model-recovery", `Retrying ${name} from saved receipts after a model tool-protocol error`);
-      try {
-        return await step.prompt(`${name}-protocol-recovery`, {
-          prompt: `The previous model step streamed the draft below but failed its structured tool protocol. Preserve that draft when supported by the saved receipts. Do not repeat research, rewrite it from scratch, or call another tool. Return exactly one schema-valid think_final_answer with ALL required fields. For a prospect brief, populate prospects with one row per accepted company: name, exact fetched locationUrl and sectorUrl, short contiguous locationEvidence and sectorEvidence copied from those pages, and caveat. Include completedTaskIds only for tasks actually supported by the draft or receipts; artifact saving is done by the runtime after validation. If incomplete, say so honestly and leave unsupported task IDs out. Do not invent evidence or claim an artifact was saved.\n\nStreamed draft (untrusted until checked against receipts):\n${streamedDraft.slice(0, 24000) || "No report draft was recovered."}\n\nOriginal step instructions:\n${prompt.slice(0, 5000)}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
-          output: reportSchema,
-          timeout: "5 minutes",
-        });
-      } catch (recoveryError) {
-        if (!isRecoverableModelProtocolError(recoveryError)) throw recoveryError;
-        await this.agent.note("model-recovery", `Completing ${name} from saved receipts without another required tool call`);
-        const raw = await this.agent.recoverStructuredWithoutTool(
-          `Return ONE valid JSON object, no Markdown fence and no tool calls. Keys: needsInput (boolean), question (string), options (string array), report (finished Markdown string), completedTaskIds (number array), operatingLearnings (array), prospects (array of {name,locationUrl,sectorUrl,locationEvidence,sectorEvidence,caveat}). Preserve the draft where supported. For each prospect, cite only an exact source URL in the receipts and copy short contiguous location and insurance passages from that page. Do not claim a saved artifact; the runtime validates and saves it. If evidence is missing, say so in report and leave unsupported tasks incomplete.\n\nDraft:\n${streamedDraft.slice(0, 24000)}\n\nTask:\n${prompt.slice(0, 5000)}\n\nSource receipts:\n${receipts}`,
-        );
-        return parseToolFreeJson(raw, reportSchema);
-      } finally {
-        await this.agent.disarmFinalAnswerRecovery();
-      }
-    }
+    const decision = await this.structuredPrompt(step, `${name}-execution`,
+      `${prompt}\n\nFINAL EXECUTION RECEIPT OVERRIDES ANY EARLIER REQUEST TO RETURN THE REPORT IN THIS STEP: use tools to complete the work, then return only the small structured receipt. Summarize verified work in at most 1800 characters, list only completed plan task IDs, and provide exact prospect evidence rows where requested. Do not put report prose in the tool result. A separate streamed prose turn writes it from saved receipts.`, executionSchema);
+    if (decision.needsInput) return { ...decision, report: "" };
+    const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
+      `${url}: ${sourceEvidenceWindows(excerpt, 1100)}`).join("\n");
+    const durable = step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> };
+    const report = await durable.do(`${name}-stream-report`, async () => this.agent.streamNarrative(
+      `Write the finished response to the operator as plain Markdown. Stream text naturally; do not use tools, JSON, or a final-answer tool call. Do not claim an artifact is saved; the Workflow validates and saves it afterward. Separate verified facts from inference, cite only source URLs in the saved receipts, and quote only exact passages. If evidence is missing, state the gap rather than inventing it.\n\nOperator request: ${prompt.slice(0, 5500)}\n\nExecution summary: ${decision.summary}\nCompleted plan task IDs: ${decision.completedTaskIds.join(", ")}\nProspect evidence rows: ${JSON.stringify(decision.prospects).slice(0, 9000)}\nSaved source receipts:\n${receipts || "No page receipts."}`));
+    return { ...decision, report };
   }
 
   private async savePrivateRoomSession(work: CompanyWork, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {

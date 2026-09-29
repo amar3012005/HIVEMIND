@@ -145,6 +145,29 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return result.text.trim();
   }
 
+  /** Run final prose through Think's ordinary streamed chat turn. The Workflow
+   * validates and publishes the resulting artifact after this method returns.
+   */
+  async streamNarrative(prompt: string): Promise<string> {
+    this.setState({ ...this.state, narrativeTurn: true });
+    this.lastReportDraft = "";
+    try {
+      const promptId = crypto.randomUUID();
+      const result = await this.saveMessages((messages) => [...messages,
+        { id: promptId, role: "user", parts: [{ type: "text", text: prompt }], createdAt: new Date() }]);
+      if (result.status !== "completed") throw new Error(`narrative_turn_${result.status}`);
+      const messages = await this.getMessages();
+      const promptIndex = messages.findIndex((message) => message.id === promptId);
+      const latest = promptIndex < 0 ? null : messages.slice(promptIndex + 1).find((message) => message.role === "assistant");
+      const report = latest?.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
+        .map((part) => part.text).join("").trim() || "";
+      if (!report) throw new Error("narrative_turn_empty");
+      return report;
+    } finally {
+      this.setState({ ...this.state, narrativeTurn: false });
+    }
+  }
+
   configureContext(): ContextConfig[] {
     return [{ label: "hyperagent:system", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
   }
@@ -1177,7 +1200,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const brief = cachedBrief || (await this.loadProfileBrief(envelope.orgId, envelope.userId)).brief;
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", narrativeTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
@@ -1270,6 +1293,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       this.note("tool-call-repair", `Read ${repaired.toolName} after URL-only browser_extract input`);
       return { ...toolCall, ...repaired };
     };
+    if (this.state.narrativeTurn) {
+      return {
+        system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
+        activeTools: [],
+        maxSteps: 1,
+        maxOutputTokens: 8000,
+        sendReasoning: false,
+      };
+    }
     if (finalOnly) {
       return {
         system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
@@ -1368,10 +1400,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (this.suppressRecoveryDrafts) return;
       if (this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
       const text = chunk.text;
-      if (!text || this.textDraft.length > 4000) return;
-      if (!this.textDraft) this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
+      if (!text || this.textDraft.length > (this.state.narrativeTurn ? 60000 : 4000)) return;
+      const draftType = this.state.narrativeTurn ? "report-draft" : "progress-draft";
+      if (!this.textDraft) this.broadcast(JSON.stringify({ type: draftType, delta: "", reset: true }));
       this.textDraft += text;
-      this.broadcast(JSON.stringify({ type: "progress-draft", delta: text }));
+      this.broadcast(JSON.stringify({ type: draftType, delta: text }));
       return;
     }
     const callId = "id" in chunk ? String(chunk.id) : "";

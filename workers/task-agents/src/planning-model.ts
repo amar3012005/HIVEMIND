@@ -1,12 +1,24 @@
 export const OPERATING_PLAN_MARKER = "[hivemind:operating-plan-v1]";
 
-export function isInitialOperatingPlan(messages: readonly { role: string; content: unknown }[], continuation: boolean): boolean {
-  if (continuation) return false;
-  const last = messages.at(-1);
-  if (last?.role !== "user") return false;
-  const content = last.content;
-  const text = typeof content === "string" ? content
-    : Array.isArray(content) ? content.filter((part) => part && typeof part === "object" && part.type === "text")
-      .map((part) => part.text).filter((part): part is string => typeof part === "string").join("") : "";
-  return text.startsWith(OPERATING_PLAN_MARKER);
+export function isInitialOperatingPlan(messages: readonly { role: string; content: unknown }[], _continuation: boolean): boolean {
+  let lastUser: { role: string; content: unknown } | undefined;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === "user") {
+      lastUser = messages[index];
+      break;
+    }
+  }
+  if (!lastUser) return false;
+  const text = (content: unknown): string => {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) return content.map((part) => text(part)).join("");
+    if (content && typeof content === "object") {
+      const part = content as { type?: string; text?: unknown; parts?: unknown; content?: unknown };
+      if (part.type === "text" && typeof part.text === "string") return part.text;
+      if (part.parts) return text(part.parts);
+      if (part.content) return text(part.content);
+    }
+    return "";
+  };
+  return text(lastUser.content).includes(OPERATING_PLAN_MARKER);
 }

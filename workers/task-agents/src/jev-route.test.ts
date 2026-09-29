@@ -22,7 +22,7 @@ test("semantic private-memory destination takes the short durable route", () => 
   assert.equal(readJevRoute(result), "agent_memory_session");
   assert.equal(readJevRoute({ answers: { ...result.answers, memory_intent: {
     choice: "agent_record", confidence: 0.97, probabilities: { none: 0.01, agent_session: 0.01, agent_record: 0.97, company: 0.01 },
-  } } }), "action");
+  } } }), "agent_memory_record");
   assert.equal(readJevRoute({ answers: { ...result.answers, memory_intent: {
     choice: "company", confidence: 0.97, probabilities: { none: 0.01, agent_session: 0.01, agent_record: 0.01, company: 0.97 },
   } } }), null);

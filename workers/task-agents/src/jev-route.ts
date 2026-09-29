@@ -1,4 +1,4 @@
-export type JevRoute = "action" | "agent_memory_session";
+export type JevRoute = "action" | "agent_memory_session" | "agent_memory_record";
 
 function confidentChoice(answer: unknown, expected: string, threshold = 0.85): boolean {
   if (!answer || typeof answer !== "object") return false;
@@ -25,7 +25,7 @@ export function readJevRoute(result: unknown): JevRoute | null {
   if (confidentChoice(decisions.work_shape, "staged")) return null;
   // The destination is a model decision about authority, not a phrase match.
   if (confidentChoice(decisions.memory_intent, "agent_session")) return "agent_memory_session";
-  if (confidentChoice(decisions.memory_intent, "agent_record")) return confidentChoice(decisions.route, "action") ? "action" : null;
+  if (confidentChoice(decisions.memory_intent, "agent_record")) return confidentChoice(decisions.route, "action") ? "agent_memory_record" : null;
   if (!confidentChoice(decisions.memory_intent, "none", 0.75)) return null;
   // Ordinary fast routing may open tools, but must not skip Think's answer check.
   // A saved or multi-stage deliverable always needs Think's operating plan.

@@ -240,6 +240,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       this.agent.routeTask(asked, work.previousRequest || "", work.company));
     if (requestsArtifact(asked)) quickRoute = null;
     if (quickRoute === "agent_memory_session") return this.savePrivateRoomSession(work, step);
+    if (quickRoute === "agent_memory_record") return this.savePrivateLearning(work, step);
     // A connected room Durable Object can briefly serve its previous broad
     // private-memory route. Ask the model for the operation before acting.
     if (String(quickRoute) === "agent_memory") {

@@ -521,7 +521,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: evidence.reason, report: reply };
       }
       const locationHint = asked.match(/\b([\p{L}-]+)-based\b/iu)?.[1]
-        ?? asked.match(/\b(?:in|near|around)\s+([\p{L}-]+)/iu)?.[1] ?? "";
+        ?? asked.match(/\b(?:in|near|around)\s+([\p{L}-]+)/iu)?.[1]
+        ?? asked.match(/\b([\p{L}-]+)\s+(?:insurers?|insurance|banks?|prospects?|companies)\b/iu)?.[1]
+        ?? "";
       const bound = bindProspectSourcePassages(written.report, written.prospects, pages, locationHint);
       if (bound) {
         written = { ...written, ...bound };

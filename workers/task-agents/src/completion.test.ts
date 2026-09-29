@@ -39,6 +39,21 @@ test("runtime binds prospect passages to fetched pages without another model tur
   assert.match(bound.report, /Verified primary-source passages/);
   assert.equal(bindProspectSourcePassages(draft, bound.prospects, [{ url, excerpt: "# Imprint\nThis is a vendor in Berlin." }], "Hannover"), null);
 });
+
+test("location binding rejects a results date and prefers the named insurer's address", () => {
+  const url = "https://www.talanx.com/en/talanx-group";
+  const page = "# Talanx Group\nClick here for more information on the results as at 30 June 2026 and all other results.\nTalanx is a global multi-brand provider with a focus on B2B insurance.\nHDI-Platz 1 · 30659 Hannover\n";
+  const bound = bindProspectSourcePassages(`# Talanx\n\nLocation passage: \"Click here for more information on the results as at 30 June 2026 and all other results.\" ${url}`,
+    [{ name: "Talanx AG / HDI Gruppe", locationUrl: url, sectorUrl: url,
+      locationEvidence: "Click here for more information on the results as at 30 June 2026 and all other results.",
+      sectorEvidence: "Talanx is a global multi-brand provider with a focus on B2B insurance.", caveat: "" }],
+    [{ url, excerpt: page }], "Hannover");
+  assert.ok(bound);
+  assert.equal(bound.prospects[0].locationEvidence, "HDI-Platz 1 · 30659 Hannover");
+  assert.doesNotMatch(bound.report, /Location passage: \"Click here/);
+  assert.equal(bindProspectSourcePassages("# Talanx", bound.prospects,
+    [{ url, excerpt: "Click here for more information on the results as at 30 June 2026 and all other results. Talanx sells insurance." }], "Hannover"), null);
+});
 import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 
 test("follow-up reuse selects report from preceding turn", () => {

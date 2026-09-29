@@ -92,8 +92,8 @@ export function bindProspectSourcePassages(
     const locationPage = byUrl.get(sourceKey(row.locationUrl));
     const sectorPage = byUrl.get(sourceKey(row.sectorUrl));
     if (!locationPage || !sectorPage) return null;
-    const location = selectSourcePassage(locationPage, row.locationEvidence, "location", locationHint);
-    const sector = selectSourcePassage(sectorPage, row.sectorEvidence, "sector");
+    const location = selectSourcePassage(locationPage, row.locationEvidence, "location", locationHint, row.name);
+    const sector = selectSourcePassage(sectorPage, row.sectorEvidence, "sector", "", row.name);
     if (!location || !sector) return null;
     for (const [draft, verified] of [[row.locationEvidence, location], [row.sectorEvidence, sector]]) {
       if (draft.trim() && draft !== verified) verifiedReport = verifiedReport.replaceAll(draft, verified);
@@ -106,21 +106,35 @@ export function bindProspectSourcePassages(
   return { report: verifiedReport, prospects: bound };
 }
 
-function selectSourcePassage(page: string, draft: string, kind: "location" | "sector", locationHint = ""): string | null {
+function selectSourcePassage(page: string, draft: string, kind: "location" | "sector", locationHint = "", companyName = ""): string | null {
   if (sourceReceiptCoversQuotes(page, [draft]) && supportsClaim(draft, kind, locationHint)) return draft.trim();
   const candidates = sourceQuoteCandidates(page, draft, 12);
   const lines = page.split(/\n+|(?<=[.!?])\s+(?=[A-Z\p{Lu}])/u)
     .map((part) => part.trim()).filter((part) => part.length >= 12 && part.length <= 350);
-  const selected = [...candidates, ...lines].find((part) =>
+  const brand = canonicalPassage(companyName).split(" ").find((token) =>
+    token.length >= 3 && token !== canonicalPassage(locationHint) && !["gruppe", "group", "insurance", "insurer", "ag", "se"].includes(token));
+  const ranked = [...new Set([...candidates, ...lines])].sort((a, b) =>
+    brandScore(b, brand) - brandScore(a, brand));
+  const selected = ranked.find((part) =>
     supportsClaim(part, kind, locationHint) && sourceReceiptCoversQuotes(page, [part]));
   return selected ?? null;
 }
 
+function brandScore(passage: string, brand?: string): number {
+  if (!brand) return 0;
+  const words = canonicalPassage(passage).split(" ");
+  const at = words.indexOf(brand);
+  return at < 0 ? 0 : at <= 2 ? 2 : 1;
+}
+
 function supportsClaim(passage: string, kind: "location" | "sector", locationHint: string): boolean {
   if (kind === "sector") return /\b(?:insur\w*|reinsur\w*|versicher\w*|rückversicher\w*)\b/i.test(passage);
-  const hint = locationHint.trim();
-  return hint ? canonicalPassage(passage).includes(canonicalPassage(hint))
-    : /\b(?:headquarters?|headquartered|registered office|address|adresse|sitz|standort|\d{4,5}\s+[\p{L}-]+)\b/iu.test(passage);
+  const hint = canonicalPassage(locationHint);
+  if (!hint || !canonicalPassage(passage).split(" ").includes(hint)) return false;
+  // A city mention alone can be a brand or navigation item. Require a street,
+  // postal address, or explicit registered-office statement on that same line.
+  return /\b\d{5}\b/.test(passage)
+    || /\b(?:headquarters?|headquartered|registered office|registered address|adresse|address|sitz|hauptsitz)\b/i.test(passage);
 }
 
 /** A prior page read is reusable only when it contains every requested quote. */

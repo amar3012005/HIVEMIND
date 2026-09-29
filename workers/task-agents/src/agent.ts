@@ -809,7 +809,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   afterToolCall(ctx: ToolCallResultContext): void {
-    this.note("tool-call", JSON.stringify({ id: ctx.toolCallId, name: ctx.toolName, phase: ctx.success ? "returned" : "failed", durationMs: ctx.durationMs }));
+    this.note("tool-call", JSON.stringify({
+      id: ctx.toolCallId,
+      name: ctx.toolName,
+      phase: ctx.success ? "returned" : "failed",
+      durationMs: ctx.durationMs,
+      result: toolResultPreview(ctx.success ? ctx.output : ctx.error),
+    }));
   }
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {
@@ -1679,6 +1685,30 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       envelope.orgId,
     );
     return { orgId: envelope.orgId, userId: envelope.userId };
+  }
+}
+
+function toolResultPreview(output: unknown): string {
+  let visited = 0;
+  const compact = (value: unknown, depth: number): unknown => {
+    if (++visited > 180 || depth > 5) return "[truncated]";
+    if (typeof value === "string") {
+      if (/\bBearer\s+[A-Za-z0-9._~+/-]+/i.test(value)) return "[redacted]";
+      return value.length > 700 ? `${value.slice(0, 700)}… [truncated]` : value;
+    }
+    if (value instanceof Error) return { error: value.message.slice(0, 700) };
+    if (Array.isArray(value)) return [...value.slice(0, 35).map((item) => compact(item, depth + 1)), ...(value.length > 35 ? [`… ${value.length - 35} more items`] : [])];
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      return Object.fromEntries(entries.slice(0, 40).map(([key, item]) => [key, /token|secret|password|credential|authorization|cookie|api[_-]?key/i.test(key) ? "[redacted]" : compact(item, depth + 1)]));
+    }
+    return value ?? null;
+  };
+  try {
+    const preview = JSON.stringify(compact(output, 0));
+    return preview.length > 5000 ? `${preview.slice(0, 5000)}… [truncated]` : preview;
+  } catch {
+    return "[result unavailable]";
   }
 }
 

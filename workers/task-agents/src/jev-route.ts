@@ -1,4 +1,4 @@
-export type JevRoute = "action" | "agent_memory_session" | "agent_memory_record";
+export type JevRoute = "direct" | "action" | "agent_memory_session" | "agent_memory_record";
 
 function confidentChoice(answer: unknown, expected: string, threshold = 0.85): boolean {
   if (!answer || typeof answer !== "object") return false;
@@ -27,6 +27,11 @@ export function readJevRoute(result: unknown): JevRoute | null {
   if (confidentChoice(decisions.memory_intent, "agent_session")) return "agent_memory_session";
   if (confidentChoice(decisions.memory_intent, "agent_record")) return confidentChoice(decisions.route, "action") ? "agent_memory_record" : null;
   if (!confidentChoice(decisions.memory_intent, "none", 0.75)) return null;
+  // A bounded, tool-free answer can use the native direct-answer step. The
+  // Workflow still validates the reply and promotes explicit tool requests or
+  // saved deliverables out of this route before execution.
+  if (confidentChoice(decisions.route, "direct", 0.9)
+    && confidentChoice(decisions.work_shape, "bounded", 0.9)) return "direct";
   // Ordinary fast routing may open tools, but must not skip Think's answer check.
   // A saved or multi-stage deliverable always needs Think's operating plan.
   return confidentChoice(decisions.route, "action") && confidentChoice(decisions.work_shape, "bounded") ? "action" : null;

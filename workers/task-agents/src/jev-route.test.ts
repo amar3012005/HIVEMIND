@@ -8,8 +8,8 @@ const choice = (route: string, confidence: number, probabilities: Record<string,
   work_shape: { choice: "bounded", confidence: 0.96, probabilities: { bounded: 0.96, staged: 0.04 } },
 } });
 
-test("only confident action choices use fast route", () => {
-  assert.equal(readJevRoute(choice("direct", 0.94, { direct: 0.95, action: 0.04, company: 0.01 })), null);
+test("confident bounded direct and action choices avoid a second planner", () => {
+  assert.equal(readJevRoute(choice("direct", 0.94, { direct: 0.95, action: 0.04, company: 0.01 })), "direct");
   assert.equal(readJevRoute(choice("action", 0.91, { direct: 0.02, action: 0.91, company: 0.07 })), "action");
   assert.equal(readJevRoute({ state: {}, result: choice("action", 0.94, { direct: 0.04, action: 0.95, company: 0.01 }) }), "action");
 });

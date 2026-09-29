@@ -38,6 +38,7 @@ export async function postControl(
   env: GatewayEnv,
   path: string,
   body: Record<string, unknown>,
+  timeoutMs = 20_000,
 ): Promise<unknown> {
   const base = env.HIVEMIND_CONTROL_URL?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
@@ -46,7 +47,7 @@ export async function postControl(
     method: "POST",
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload: unknown = await response.json().catch(() => ({ error: "invalid_control_response" }));
   if (!response.ok) {
@@ -79,7 +80,7 @@ export async function saveOperatingMemory(env: GatewayEnv, orgId: string, userId
 export async function recallOperatingMemory(env: GatewayEnv, orgId: string, userId: string, filter: {
   kind?: OperatingMemoryKind; agent_slug?: string; status?: string; room_id?: string; run_id?: string; limit?: number;
 } = {}): Promise<unknown> {
-  return postControl(env, "/internal/hyper/operating-memory", { action: "recall", org_id: orgId, user_id: userId, ...filter });
+  return postControl(env, "/internal/hyper/operating-memory", { action: "recall", org_id: orgId, user_id: userId, ...filter }, 3_500);
 }
 
 export interface MapPlace {

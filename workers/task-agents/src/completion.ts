@@ -13,6 +13,13 @@ export function previousReport(events: readonly { step: string; detail: string }
   return report || null;
 }
 
+/** Export an existing room answer without sending it back through a model. */
+export function requestsPreviousReportPdf(task: string): boolean {
+  const request = task.trim().replace(/[.!?]+$/, "").trim();
+  return request.length <= 180 && !artifactCreationForbidden(request)
+    && /^(?:(?:please|now|can you|could you)\s+)*(?:save|render|export|convert|turn|make|give me)\s+(?:(?:the|this|that|it|above|previous|prior|last)\s+)*(?:(?:report|document|artifact|answer|response|text|brief)\s+)?(?:as|to|into|in)\s+(?:a\s+)?pdf(?:\s+(?:file|report|artifact))?$/i.test(request);
+}
+
 export interface CompletionResult {
   complete: boolean;
   reason: string;

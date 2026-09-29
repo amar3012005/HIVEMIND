@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceReceiptCoversQuotes } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -26,6 +26,15 @@ test("follow-up reuse selects report from preceding turn", () => {
     { step: "user", detail: "Save it in HIVEMIND and as PDF" },
     { step: "report", detail: "I could not finish this run." },
   ]), draft.trim());
+});
+
+test("a PDF-only follow-up reuses the previous report instead of rewriting it", () => {
+  assert.equal(requestsPreviousReportPdf("save this as pdf"), true);
+  assert.equal(requestsPreviousReportPdf("render it as a PDF"), true);
+  assert.equal(requestsPreviousReportPdf("Export the previous report to PDF"), true);
+  assert.equal(requestsPreviousReportPdf("Research two insurers and render a PDF"), false);
+  assert.equal(requestsPreviousReportPdf("Save this as PDF and to company memory"), false);
+  assert.equal(requestsPreviousReportPdf("Do not save it as a PDF"), false);
 });
 
 test("memory approval follows explicit positive intent", () => {

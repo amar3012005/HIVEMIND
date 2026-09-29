@@ -19,6 +19,7 @@ import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
+import { operatingMemoryBrief } from "./operating-memory-context";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { runContext } from "./run-context";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -256,9 +257,36 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       agent_slug: this.state.employee?.slug || "hyperagent", title: complete ? "Task completed" : "Task incomplete",
       summary: `${complete ? "Completed" : "Incomplete"}: ${(envelope.task || "company task").slice(0, 700)}`,
       idempotency_key: `workrun:${envelope.runId}:terminal`, run_id: envelope.runId,
+      room_id: this.currentRoomId() || undefined,
       context: { reason: reason.slice(0, 200), artifactRefs: artifactRefs.slice(0, 10) },
     });
     if (saved && typeof saved === "object" && "error" in saved) throw new Error(String(saved.error));
+  }
+
+  async recordOperatingLearnings(candidates: readonly { title: string; summary: string; evidenceRef: string }[],
+    review: PostRunJevReview, artifactId: string): Promise<void> {
+    const envelope = this.state.envelope;
+    if (!envelope || review.status !== "evaluated" || review.memory.decision !== "review_recommended"
+      || !["learning", "bug_or_failure", "mistake_and_correction"].includes(review.memory.kind || "")) return;
+    const evidence = new Set([...this.sourceReadReceipts().map((source) => source.url), artifactId].filter(Boolean));
+    const safe = candidates.slice(0, 2).filter((item) => evidence.has(item.evidenceRef)
+      && !/\b(?:Bearer|password|api[_-]?key|secret|token)\s*[:=]|\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}/i.test(`${item.title} ${item.summary}`));
+    const results = await Promise.allSettled(safe.map((item, index) => saveOperatingMemory(
+      this.gatewayEnv(), envelope.orgId, envelope.userId, {
+        kind: "learning", status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
+        title: item.title, summary: item.summary,
+        idempotency_key: `workrun:${envelope.runId}:learning:${index}`,
+        room_id: this.currentRoomId() || undefined, run_id: envelope.runId,
+        context: { evidenceRef: item.evidenceRef, review: review.policyVersion },
+      })));
+    const saved = results.filter((result) => result.status === "fulfilled" && result.value
+      && typeof result.value === "object" && "ok" in result.value && result.value.ok === true).length;
+    if (saved) this.note("operating-memory-learning", `${saved} verified learning${saved === 1 ? "" : "s"} saved in the private agent brain`);
+    if (results.some((result) => result.status === "rejected")) console.warn(JSON.stringify({ event: "operating_learning_save_failed", runId: envelope.runId }));
+  }
+
+  private currentRoomId(): string | null {
+    return /^session-[0-9a-f-]{36}-([0-9a-f-]{36})$/i.exec(String(this.name || ""))?.[1] || null;
   }
 
   readWorkCheckpoint(runId: string, stage: string): { value: unknown } | null {
@@ -587,7 +615,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const existing = this.sql`SELECT id FROM company_artifacts WHERE storage_location = ${`pdf-of:${id}`} LIMIT 1`[0];
     if (existing) {
       this.sql`UPDATE company_artifacts SET title = ${title} WHERE id = ${String(existing.id)}`;
-      return (await this.getCompanyArtifact(String(existing.id)))!;
+      const pdf = (await this.getCompanyArtifact(String(existing.id)))!;
+      if (!this.hasArtifactThisTurn("pdf")) this.note("artifact", JSON.stringify({ id: pdf.id, kind: pdf.kind, title: pdf.title, contentType: pdf.contentType }));
+      return pdf;
     }
     const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
     if (!browser?.quickAction) throw new Error("browser_binding_missing");
@@ -819,6 +849,27 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return previousReport(this.state.events ?? []);
   }
 
+  /** A conversion turn needs the existing room document, not another model or profile fetch. */
+  bindArtifactTask(envelope: TaskEnvelope): void {
+    this.setState({ ...this.state, envelope, employee: envelope.employee ?? this.state.employee ?? null,
+      operatingPlan: null, awaiting: "", catalogStage: "action" });
+    if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
+  }
+
+  async previousReportArtifact(): Promise<StoredArtifact | null> {
+    const report = this.previousReport();
+    if (!report) return null;
+    ensureCompanyTables(this.sql.bind(this));
+    const prefix = report.slice(0, 1000);
+    const existing = this.sql`SELECT id, body FROM company_artifacts WHERE kind = ${"report"} AND content_type = ${"text/markdown"} AND substr(body, 1, ${prefix.length}) = ${prefix} ORDER BY created_at DESC LIMIT 10`
+      .find((row) => String(row.body).startsWith(report) || report.startsWith(String(row.body)));
+    if (existing) return this.getCompanyArtifact(String(existing.id));
+    // Room events cap report text at 30 KB. Never silently export a truncated report.
+    if (report.length >= 30_000) return null;
+    return this.saveCompanyArtifact({ kind: "report", title: reportTitle(report, "Previous report"),
+      contentType: "text/markdown", body: report });
+  }
+
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
     const tools = toolsForGroups(groups);
     if (this.playbookRefinementRequested()) tools.push("refine_local_playbook");
@@ -830,9 +881,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
     this.draftCalls.clear();
     this.turnSources = [];
-    const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
+    const [{ brief }, learnings, completed] = await Promise.all([
+      this.loadProfileBrief(envelope.orgId, envelope.userId),
+      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "learning", limit: 5 }).catch(() => null),
+      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "task_status", status: "completed", limit: 5 }).catch(() => null),
+    ]);
+    const memoryBrief = operatingMemoryBrief(learnings, completed);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
+    if (memoryBrief) this.note("operating-memory-recall", "Recent learnings and completed work loaded from the private agent brain");
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
   }
@@ -1223,6 +1280,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         return saveOperatingMemory(this.gatewayEnv(), identity.orgId, identity.userId, {
           kind: input.kind, status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
           title: input.title, summary: input.summary, run_id: runId,
+          room_id: this.currentRoomId() || undefined,
           idempotency_key: `agent:${hash}`,
         });
       },

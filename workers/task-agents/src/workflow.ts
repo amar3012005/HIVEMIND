@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -40,6 +40,9 @@ const reportSchema = z.object({
   options: z.array(z.string()).max(5).default([]),
   report: z.string().default(""),
   completedTaskIds: z.array(z.number().int().min(1).max(6)).max(6).default([]),
+  operatingLearnings: z.array(z.object({
+    title: z.string().min(8).max(180), summary: z.string().min(30).max(600), evidenceRef: z.string().max(600),
+  })).max(2).default([]),
   prospects: z.array(z.object({
     name: z.string().min(1),
     locationUrl: z.string().url(),
@@ -114,46 +117,42 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       do<T>(name: string, callback: () => Promise<T>): Promise<T>;
     };
     const work = event.payload;
+    if (requestsPreviousReportPdf(work.task)) {
+      await durable.do("bind-pdf-conversion", async () => this.agent.bindArtifactTask(work));
+      const sourceId = await durable.do("resolve-previous-report", async () =>
+        (await this.agent.previousReportArtifact())?.id ?? "");
+      if (!sourceId) {
+        const report = "I could not find a finished report in the previous room turn to export as PDF.";
+        await durable.do("previous-report-missing", async () => {
+          await this.agent.note("report", report);
+          await this.agent.note("completion", "previous_report_missing");
+        });
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "previous_report_missing", report };
+      }
+      try {
+        const pdfId = await durable.do("render-previous-report-pdf", async () =>
+          (await this.agent.createPdfArtifact(sourceId)).id);
+        const report = "I rendered the previous report as a PDF from its existing room document. The PDF is attached below.";
+        await durable.do("complete-pdf-conversion", async () => {
+          await this.agent.note("report", report);
+          await this.agent.note("completion", "deliverable_ready");
+        });
+        return { runId: work.runId, orgId: work.orgId, complete: true, reason: "pdf_exported", report,
+          artifactRefs: [sourceId, pdfId] };
+      } catch (error) {
+        const reason = workflowErrorCode(error);
+        const report = `The prior report is preserved, but PDF rendering failed (${reason}). The report can be exported again without rewriting it.`;
+        await this.agent.note("report", report);
+        await this.agent.note("completion", "pdf_render_failed");
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "pdf_render_failed", report,
+          artifactRefs: [sourceId] };
+      }
+    }
     await durable.do("bind-employee", async () => {
       await this.agent.bindTask(work, "research", ["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook"]);
       await this.agent.enterPlanning();
       await this.agent.note("workrun", `starting ${work.company}`);
     });
-
-    const priorReport = await this.agent.previousReport();
-    if (priorReport && requestsMemorySave(work.task) && requestsPdf(work.task)
-      && /\b(?:it|that|this|previous|above)\b/i.test(work.task)) {
-      const title = reportTitle(priorReport, `${work.company} report`);
-      await this.agent.note("progress", "Found prior report. Saving its draft and rendering PDF.");
-      const markdownId = await durable.do("reuse-prior-report", async () => {
-        const saved = await this.agent.saveCompanyArtifact({ kind: "report", title, contentType: "text/markdown", body: priorReport });
-        return saved.id;
-      });
-      let pdfSaved = false;
-      let pdfError = "";
-      try {
-        await this.agent.note("progress", "Report draft saved. Rendering PDF now.");
-        await durable.do("render-prior-report-pdf", async () => {
-          const pdf = await this.agent.createPdfArtifact(markdownId);
-          return pdf.id;
-        });
-        pdfSaved = true;
-      } catch (error) {
-        pdfError = error instanceof Error ? error.message : "pdf_generation_failed";
-      }
-      await this.agent.note("progress", "Saving report to HIVEMIND with draft status and source caveats.");
-      const memorySaved = await durable.do("save-prior-report-memory", async () => {
-        const memory = await this.agent.saveCompanyMemory(
-          `${title} (draft; source verification pending)`, priorReport,
-          `${work.runId}:${work.startedAt ?? ""}:prior-report`,
-        );
-        return Boolean(memory && typeof memory === "object" && "ok" in memory && memory.ok === true);
-      });
-      const report = `Previous report ${pdfSaved ? "was rendered as a PDF" : `could not be rendered as a PDF (${pdfError})`}. HIVEMIND save ${memorySaved ? "completed" : "is not confirmed"}. Source verification remains pending; treat prospect list as a draft.`;
-      await this.agent.note("report", report);
-      await this.agent.note("completion", pdfSaved && memorySaved ? "complete" : "deliverable_incomplete");
-      return { runId: work.runId, orgId: work.orgId, complete: pdfSaved && memorySaved, reason: pdfSaved && memorySaved ? "prior_report_saved" : "deliverable_incomplete", report };
-    }
 
     let asked = work.task || "Map competitors and the local market.";
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
@@ -362,7 +361,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const prospectCount = isProspect ? requestedProspectCount(asked) : 1;
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {
-        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Pinned company method ${selectedPlaybook!.id}: ${playbookBody}. The operator asked: ${asked} Company ${work.company}. Profile location (not externally verified): ${work.market}. ${round === 0 ? contextForFirstRound : "Use company context and tool receipts already gathered in this run; recall again only for a specific missing fact."} ${guidance}${READ_TOOL_FALLBACK}${isProspect ? "For each accepted prospect, return short contiguous locationEvidence and sectorEvidence passages copied from their respective fetched pages. In the report, rely on those verified facts and label buyer fit as an inference. Omit asset, customer, and other numerical claims unless their exact source passages are included in the report and tool evidence. " : ""}Continue this same job from the next unfinished plan task. Do not reload the playbook catalog. Activate the full relevant action skill only at the step that needs it. Use injected profile and relevant recall first. Fetch external evidence only when a material claim needs verification; do not routinely capture the website. For broad external research, use one parallel_search_batch call with four or five complementary queries, inspect results together, then open primary sources for decisive claims. For a narrow missing fact, use parallel_search once. For a requested PDF, put the finished Markdown in report; runtime renders PDF after this response. Do not call browser_capture or HIVEMIND memory save to create a PDF. For a requested pitch deck, write finished numbered slides, not a generic report or outline. Do not claim an artifact exists before its receipt. If profile and memory conflict, name the conflict and leave the fact unresolved. Missing recall is not proof that the company's offer, revenue, or customers do not exist. Do not label dates, metrics, headquarters, or regulatory claims verified without a supporting primary source receipt. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task only for real status changes; runtime marks completed tasks from completedTaskIds. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. Treat numeric targets without baselines as proposals, not established facts. Set needsInput true only when a fact or authority essential to the task is missing, never to ask which read-only tool or method to use. Otherwise set needsInput false and put the final result in report. Start report with a descriptive Markdown H1 title, then short sections and linked citations.`,
+        prompt: `Decision: ${plan.decision || asked}. Plan: ${plan.plan || "Recall company context and verify external evidence before answering."}. Tasks: ${plan.tasks.map((title, index) => `${index + 1}. ${title}`).join(" ")}. Pinned company method ${selectedPlaybook!.id}: ${playbookBody}. The operator asked: ${asked} Company ${work.company}. Profile location (not externally verified): ${work.market}. ${round === 0 ? contextForFirstRound : "Use company context and tool receipts already gathered in this run; recall again only for a specific missing fact."} ${guidance}${READ_TOOL_FALLBACK}${isProspect ? "For each accepted prospect, return short contiguous locationEvidence and sectorEvidence passages copied from their respective fetched pages. In the report, rely on those verified facts and label buyer fit as an inference. Omit asset, customer, and other numerical claims unless their exact source passages are included in the report and tool evidence. " : ""}Continue this same job from the next unfinished plan task. Do not reload the playbook catalog. Activate the full relevant action skill only at the step that needs it. Use injected profile and relevant recall first. Fetch external evidence only when a material claim needs verification; do not routinely capture the website. For broad external research, use one parallel_search_batch call with four or five complementary queries, inspect results together, then open primary sources for decisive claims. For a narrow missing fact, use parallel_search once. For a requested PDF, put the finished Markdown in report; runtime renders PDF after this response. Do not call browser_capture or HIVEMIND memory save to create a PDF. For a requested pitch deck, write finished numbered slides, not a generic report or outline. Do not claim an artifact exists before its receipt. If profile and memory conflict, name the conflict and leave the fact unresolved. Missing recall is not proof that the company's offer, revenue, or customers do not exist. Do not label dates, metrics, headquarters, or regulatory claims verified without a supporting primary source receipt. Before external work, use share_progress to tell the operator your next decision in your own words; update it only when evidence changes your approach. Use update_plan_task only for real status changes; runtime marks completed tasks from completedTaskIds. Return completedTaskIds only for tasks whose deliverables are present in report or whose tool receipts prove completion. Do not finish until every planned task is done; stopping at an approval boundary counts as done when the deliverable is ready and nothing was launched. Treat numeric targets without baselines as proposals, not established facts. Set needsInput true only when a fact or authority essential to the task is missing, never to ask which read-only tool or method to use. Otherwise set needsInput false and put the final result in report. Start report with a descriptive Markdown H1 title, then short sections and linked citations. If a reusable operational lesson or correction was actually verified, include at most two operatingLearnings, each with a concise title, summary, and evidenceRef matching a fetched source URL or saved artifact ID. Use [] for ordinary findings, guesses, or transient issues. These candidates enter the private agent brain only after receipt and post-run review; they are not company-brain memory.`,
         output: reportSchema,
         timeout: "30 minutes",
       });
@@ -568,8 +567,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
     });
 
+    const insights = await reviewCompletedWork();
+    await durable.do("save-reviewed-operating-learnings", async () =>
+      this.agent.recordOperatingLearnings(written.operatingLearnings, insights, prepared.artifactId));
     if (!prepared.title) {
-      const insights = await reviewCompletedWork();
       await durable.do("deliverable-ready", async () => this.agent.note("completion", "deliverable_ready"));
       return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
     }
@@ -599,7 +600,6 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         report: prepared.report,
       };
     });
-    const insights = await reviewCompletedWork();
     return { ...result, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
   }
 }

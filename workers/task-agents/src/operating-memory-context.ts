@@ -4,20 +4,51 @@ type MemoryRow = { kind?: unknown; status?: unknown; agentSlug?: unknown; title?
 function rows(result: unknown): MemoryRow[] {
   if (!result || typeof result !== "object" || !("ok" in result) || result.ok !== true
     || !("memories" in result) || !Array.isArray(result.memories)) return [];
-  return result.memories.slice(0, 5).filter((row): row is MemoryRow =>
-    Boolean(row && typeof row === "object"));
+  return result.memories.filter((row): row is MemoryRow => Boolean(row && typeof row === "object"));
 }
 
 function short(value: unknown, max: number): string {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
 }
 
-/** Keep the automatic recall bounded; the full typed tool remains available on demand. */
-export function operatingMemoryBrief(learnings: unknown, completed: unknown): string {
-  const compact = [...rows(learnings), ...rows(completed)].map((row) => ({
-    kind: short(row.kind, 24), status: short(row.status, 24), agent: short(row.agentSlug, 120),
-    title: short(row.title, 150), summary: short(row.summary, 180),
-    runId: short(row.runId, 80), at: short(row.createdAt, 40),
-  })).filter((row) => row.title).sort((a, b) => b.at.localeCompare(a.at));
-  return compact.length ? JSON.stringify(compact).slice(0, 3_500) : "";
+function trigrams(value: string): Set<string> {
+  const normalized = value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+  const result = new Set<string>();
+  for (let index = 0; index + 3 <= normalized.length; index++) result.add(normalized.slice(index, index + 3));
+  return result;
+}
+
+function relevance(query: Set<string>, row: MemoryRow): number {
+  if (!query.size) return 0;
+  const document = trigrams(`${short(row.title, 150)} ${short(row.summary, 300)}`);
+  let matches = 0;
+  for (const gram of query) if (document.has(gram)) matches++;
+  return matches / query.size;
+}
+
+/** Recent records always survive; the remaining slots favor task-relevant, deduplicated memories. */
+export function operatingMemoryBrief(learnings: unknown, completed: unknown, task = ""): string {
+  const unique = new Map<string, MemoryRow>();
+  for (const row of [...rows(learnings), ...rows(completed)]) {
+    const title = short(row.title, 150);
+    if (!title) continue;
+    const key = `${short(row.kind, 24)}:${title.normalize("NFKC").toLocaleLowerCase()}`;
+    const previous = unique.get(key);
+    if (!previous || short(row.createdAt, 40) > short(previous.createdAt, 40)) unique.set(key, row);
+  }
+  const ordered = [...unique.values()].sort((a, b) => short(b.createdAt, 40).localeCompare(short(a.createdAt, 40)));
+  const chosen = new Set([...ordered.filter((row) => row.kind === "learning").slice(0, 2),
+    ...ordered.filter((row) => row.kind === "task_status").slice(0, 2)]);
+  const query = trigrams(short(task, 500));
+  const candidates = ordered.filter((row) => !chosen.has(row)).sort((a, b) =>
+    relevance(query, b) - relevance(query, a)
+      || short(b.createdAt, 40).localeCompare(short(a.createdAt, 40)));
+  for (const row of candidates.slice(0, Math.max(0, 6 - chosen.size))) chosen.add(row);
+  const compact = [...chosen].sort((a, b) => short(b.createdAt, 40).localeCompare(short(a.createdAt, 40))).map((row) => ({
+    kind: short(row.kind, 24), status: short(row.status, 24), agent: short(row.agentSlug, 60),
+    title: short(row.title, 120), summary: short(row.summary, 150),
+    runId: short(row.runId, 50), at: short(row.createdAt, 40),
+  }));
+  while (compact.length && JSON.stringify(compact).length > 3_500) compact.pop();
+  return compact.length ? JSON.stringify(compact) : "";
 }

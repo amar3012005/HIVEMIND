@@ -995,10 +995,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.turnSources = [];
     const [{ brief }, learnings, completed] = await Promise.all([
       this.loadProfileBrief(envelope.orgId, envelope.userId),
-      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "learning", limit: 5 }).catch(() => null),
-      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "task_status", status: "completed", limit: 5 }).catch(() => null),
+      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "learning", limit: 20 }).catch(() => null),
+      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "task_status", status: "completed", limit: 10 }).catch(() => null),
     ]);
-    const memoryBrief = operatingMemoryBrief(learnings, completed);
+    const memoryBrief = operatingMemoryBrief(learnings, completed, envelope.task);
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
     this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
@@ -1081,7 +1081,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
       system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length && this.state.operatingPlan?.tasks.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },

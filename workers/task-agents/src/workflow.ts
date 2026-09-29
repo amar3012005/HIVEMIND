@@ -374,6 +374,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
 
     let prospectSources: string[] | undefined;
+    let verifiedProspectPages: Array<{ url: string; excerpt: string }> = [];
     if (claimsArtifactApprovalPending(written.report)) {
       await durable.do("artifact-status-incomplete", async () => { await this.agent.note("completion", "artifact_status_unverified"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "artifact_status_unverified", report: "Report draft incorrectly claimed artifact approval was pending; no artifact was saved." };
@@ -429,6 +430,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: quotes.reason, report: reply };
       }
       await durable.do("prospect-pages-verified", async () => this.agent.recordVerifiedProspectClaims(written.prospects));
+      verifiedProspectPages = pages.map(({ url, excerpt }) => ({ url, excerpt }));
     }
     if (deckRequested && !slideDeckReady(written.report)) {
       const reply = "I could not finish the requested pitch deck. The plan remains open; no deck artifact was created.";
@@ -467,10 +469,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       plan: plan.tasks,
       report: written.report,
       companyContext,
-      sources: [
-        ...(await this.agent.sourceReadReceipts()).map((receipt: { url: string; readAt: string; excerpt: string }) => `${receipt.url} (read ${receipt.readAt}): ${receipt.excerpt}`),
-        ...(isProspect ? written.prospects.map((row) => `Runtime checked these exact passages against fetched page text: ${row.locationUrl} — ${row.locationEvidence}; ${row.sectorUrl} — ${row.sectorEvidence}`) : []),
-      ],
+      sources: isProspect
+        ? verifiedProspectPages.map((page) => {
+            const reportQuotes = [...written.report.matchAll(/[“"]([^”"]{8,220})[”"]/g)].map((match) => match[1]);
+            return `${page.url} (freshly fetched, excerpted for review): ${sourceExcerptForQuoteRepair(page.excerpt, reportQuotes)}`;
+          })
+        : (await this.agent.sourceReadReceipts()).map((receipt: { url: string; readAt: string; excerpt: string }) => `${receipt.url} (read ${receipt.readAt}): ${receipt.excerpt}`),
     }));
     if (review.verdict === "caution" && review.note) {
       written.report += `\n\n## Review note\n${review.note}`;

@@ -1527,7 +1527,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           report: input.report.slice(0, 30000),
           authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
           companyContext: input.companyContext,
-          sourceReceipts: input.sources.slice(-30),
+          sourceReceipts: input.sources.slice(-8).map((source) => source.slice(0, 12500)),
         },
         display: { name: "Company review" },
       });
@@ -1547,7 +1547,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
               task: input.task.slice(0, 2000), plan: input.plan.slice(0, 6), report: input.report.slice(0, 16000),
               authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
               companyContext: JSON.stringify(input.companyContext ?? null).slice(0, 2500),
-              sourceReceipts: input.sources.slice(-16).map((source) => source.slice(0, 700)),
+              sourceReceipts: input.sources.slice(-8).map((source) => source.slice(0, 12500)),
             }),
             maxOutputTokens: 1024,
             abortSignal: AbortSignal.timeout(15_000),

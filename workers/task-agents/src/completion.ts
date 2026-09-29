@@ -99,7 +99,10 @@ export function sourceExcerptForQuoteRepair(page: string, quotes: readonly strin
     if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
     else merged.push([start, end]);
   }
-  return merged.map(([start, end]) => page.slice(start, end)).join("\n\n[... page section omitted ...]\n\n").slice(0, 16000);
+  const relevant = merged.map(([start, end]) => page.slice(start, end)).join("\n\n[... page section omitted ...]\n\n");
+  return relevant.length > 12000
+    ? `${relevant.slice(0, 6000)}\n\n[... page section omitted ...]\n\n${relevant.slice(-6000)}`
+    : relevant;
 }
 
 function canonicalPassage(text: string): string {

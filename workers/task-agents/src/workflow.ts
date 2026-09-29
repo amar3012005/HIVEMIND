@@ -182,7 +182,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
       return result;
     } catch (error) {
-      const code = workflowErrorCode(error);
+      let stopped = false;
+      try { stopped = this.agent.isStopRequested(); } catch { /* preserve original failure */ }
+      const code = stopped ? "workrun_stopped" : workflowErrorCode(error);
       console.error(JSON.stringify({ event: "company_workflow_failed", runId: event.payload.runId, code }));
       // The room DO may itself be unavailable. Preserve the original Workflow
       // failure; controlWorkRun reconciles the visible terminal state later.
@@ -190,7 +192,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       try { await this.agent.finishCurrentCompanyWorkRun(false, code); } catch { /* reconcile on reconnect */ }
       try { await this.agent.recordOperatingWorkResult(false, code); } catch { /* reconcile on reconnect */ }
       try { await this.agent.markAwaiting(""); } catch { /* reconcile on reconnect */ }
-      try { await this.agent.note("report", `I could not finish this run (${code}). You can continue in this room.`); } catch { /* reconcile on reconnect */ }
+      try { await this.agent.note("report", code === "workrun_stopped" ? "Stopped by the operator. Any artifact saved before Stop remains available in this room." : `I could not finish this run (${code}). You can continue in this room.`); } catch { /* reconcile on reconnect */ }
       try { await this.agent.note("completion", code); } catch { /* reconcile on reconnect */ }
       if (event.payload.occurrenceId) {
         await this.agent.recordTriggerOutcome(event.payload.occurrenceId, { complete: false, reason: code, report: "" })

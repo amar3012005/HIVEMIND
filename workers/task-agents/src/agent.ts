@@ -322,7 +322,17 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   finishWorkRuntime(runId: string, status: string): void {
     ensureCompanyTables(this.sql.bind(this));
+    const prior = this.sql`SELECT status FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];
+    if (["stop_requested", "stopping", "terminated"].includes(String(prior?.status ?? "")) && status === "completed") return;
     this.sql`UPDATE workrun_runtime SET status = ${status}, updated_at = ${new Date().toISOString()} WHERE run_id = ${runId}`;
+  }
+
+  isStopRequested(): boolean {
+    const runId = this.state.envelope?.runId;
+    if (!runId) return false;
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT status FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];
+    return ["stop_requested", "stopping", "terminated"].includes(String(row?.status ?? ""));
   }
 
   private storedOperatingPlan(runId: string): OperatingPlan | null {
@@ -382,7 +392,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const current = await this.getWorkflowStatus("TASK_LIFECYCLE", id);
     const indexedIncomplete = this.state.envelope?.runId === work.runId
       && (this.state.events ?? []).some((event) => event.step === "workrun-index" && event.detail === `${work.runId} incomplete`);
-    const logicalStatus = current.status === "complete" && (String(row.status) === "incomplete" || indexedIncomplete) ? "incomplete" : current.status;
+    let stopRequested = ["stop_requested", "stopping", "terminated"].includes(String(row.status));
+    const logicalStatus = stopRequested ? (["complete", "terminated", "errored"].includes(current.status) ? "terminated" : "stopping")
+      : current.status === "complete" && (String(row.status) === "incomplete" || indexedIncomplete) ? "incomplete" : current.status;
     if (action === "continue-plan") {
       if (logicalStatus !== "incomplete") throw new Error("workrun_plan_not_continuable");
       const snapshot = this.readRunRecoverySnapshot(work.runId, orgId, userId);
@@ -397,7 +409,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       id = await this.startCompanyWork(next);
       return { runId: next.runId, workflowId: id, status: "running", checkpoints: [], continuationOf: work.runId };
     }
-    if (action === "stop" && ["queued", "running", "paused", "waiting"].includes(current.status)) await this.terminateWorkflow(id);
+    if (action === "stop" && ["queued", "running", "paused", "waiting"].includes(current.status)) {
+      stopRequested = true;
+      this.sql`UPDATE workrun_runtime SET status = ${"stop_requested"}, updated_at = ${new Date().toISOString()} WHERE run_id = ${work.runId}`;
+      this.note("workrun-stop-requested", work.runId);
+      try { await this.terminateWorkflow(id); }
+      catch (error) { console.warn(JSON.stringify({ event: "workflow_stop_pending", runId: work.runId,
+        reason: error instanceof Error ? error.message.slice(0, 160) : "unknown" })); }
+    }
     else if (action === "pause" && current.status === "running") {
       try {
         await this.pauseWorkflow(id);
@@ -411,7 +430,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       }
     }
     else if (action === "resume" && current.status === "paused") await this.resumeWorkflow(id);
-    else if (action === "resume" && ["errored", "terminated"].includes(current.status)) {
+    else if (action === "resume" && ["errored", "terminated"].includes(logicalStatus)) {
       // A restarted instance has the same Think prompt idempotency keys. Its
       // previous completion notifications have already been consumed, so it
       // can wait forever. A fresh Workflow ID is a fresh attempt of this same
@@ -421,8 +440,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       this.sql`UPDATE workrun_runtime SET workflow_id = ${id}, status = ${"queued"}, updated_at = ${new Date().toISOString()} WHERE run_id = ${work.runId}`;
       this.setState({ ...this.state, workflowId: id, envelope: work });
     } else if (action !== "status") throw new Error(`workrun_cannot_${action}_${current.status}`);
-    const status = action === "status" ? logicalStatus : (await this.getWorkflowStatus("TASK_LIFECYCLE", id)).status;
-    if (action !== "status" || status !== "incomplete") this.finishWorkRuntime(work.runId, status);
+    const observedStatus = action === "status" ? logicalStatus : (await this.getWorkflowStatus("TASK_LIFECYCLE", id)).status;
+    const status = action === "stop" && stopRequested && ["complete", "terminated", "errored"].includes(observedStatus)
+      ? "terminated" : action === "stop" && stopRequested ? "stopping" : observedStatus;
+    if ((action !== "status" || status !== "incomplete") && (action !== "stop" || ["terminated", "errored", "complete"].includes(status))) this.finishWorkRuntime(work.runId, status);
     const checkpoints = this.sql`SELECT stage, completed_at FROM workrun_checkpoints WHERE run_id = ${work.runId} ORDER BY completed_at ASC`;
     if (status === "errored" && this.state.envelope?.runId === work.runId) {
       const events = this.state.events ?? [];
@@ -665,6 +686,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     });
     if (!response.ok) throw new Error(`capture_failed_${response.status}: ${(await response.text()).slice(0, 300)}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
+    if (this.isStopRequested()) throw new Error("workrun_stopped");
     if (bytes.length < 8 || bytes.length > 2000000 || bytes[0] !== 255 || bytes[1] !== 216) throw new Error("capture_invalid_or_too_large");
     let body = "";
     for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));

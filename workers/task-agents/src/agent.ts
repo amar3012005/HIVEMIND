@@ -1,6 +1,5 @@
 import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
 import { initialPlanModel, thinkModel } from "./think-model";
-import { isInitialOperatingPlan } from "./planning-model";
 import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
@@ -61,6 +60,28 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   getModel() { return thinkModel(this.gatewayEnv()); }
+
+  async fastOperatingPlan(prompt: string): Promise<string | null> {
+    const model = initialPlanModel(this.gatewayEnv());
+    if (!model) return null;
+    const started = Date.now();
+    try {
+      const response = streamText({
+        model,
+        system: 'Return one JSON object only. It must have mode ("direct", "action", or "company"), decision, plan, tasks (three to six short observable steps for company work; empty otherwise), reply, groups (only needed values from "company", "web_research", "browser", "connected_apps", "records"), localPlaybookId (empty), resolvedRequest, and outputKind ("none", "document", "slide_deck", or "image"). Do not call tools. Do not invent company facts or grant connected-app work that the operator did not request.',
+        prompt,
+        maxOutputTokens: 1600,
+        temperature: 0,
+        abortSignal: AbortSignal.timeout(12000),
+      });
+      const text = (await response.text).trim();
+      console.log(JSON.stringify({ event: "fast_plan_probe", model: "openai/gpt-oss-20b:nitro", outcome: text ? "returned" : "empty", elapsedMs: Date.now() - started }));
+      return text || null;
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "fast_plan_probe", model: "openai/gpt-oss-20b:nitro", outcome: "failed", error: error instanceof Error ? error.name : "unknown", elapsedMs: Date.now() - started }));
+      return null;
+    }
+  }
 
   configureContext(): ContextConfig[] {
     return [{ label: "hyperagent:system", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
@@ -777,11 +798,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   beforeTurn(ctx: TurnContext) {
     this.textDraft = "";
     if (this.state.catalogStage === "planning") {
-      const fastStart = isInitialOperatingPlan(ctx.messages, ctx.continuation) ? initialPlanModel(this.gatewayEnv()) : null;
-      const last = ctx.messages.at(-1);
-      console.log(JSON.stringify({ event: "planner_model_selected", model: fastStart ? "openai/gpt-oss-20b:nitro" : "main", firstPlan: !!fastStart, continuation: ctx.continuation, lastRole: last?.role, lastKeys: last ? Object.keys(last) : [], markerInLast: last ? JSON.stringify(last).includes("[hivemind:operating-plan-v1]") : false, markerInAny: JSON.stringify(ctx.messages).includes("[hivemind:operating-plan-v1]") }));
       return {
-        ...(fastStart ? { model: fastStart } : {}),
         activeTools: ["think_final_answer"],
         maxSteps: 1,
         maxOutputTokens: 4096,

@@ -88,12 +88,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     } catch (error) {
       if (!isRecoverableModelProtocolError(error)) throw error;
       const streamedDraft = await this.agent.armFinalAnswerRecovery();
-      const receipts = (await this.agent.sourceReadReceipts()).slice(0, 8).map(({ url, excerpt }: { url: string; excerpt: string }) =>
-        `${url}: ${excerpt.slice(0, 1000)}`).join("\n");
+      const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
+        `${url}: ${excerpt.slice(0, 700)}`).join("\n");
       await this.agent.note("model-recovery", `Retrying ${name} from saved receipts after a model tool-protocol error`);
       try {
         return await step.prompt(`${name}-protocol-recovery`, {
-          prompt: `The previous model step streamed the draft below but failed its structured tool protocol. Preserve that draft when it is supported by the saved receipts. Do not repeat research, rewrite it from scratch, or call another tool. Return exactly one schema-valid think_final_answer. If the deliverable is incomplete, say so honestly and leave completedTaskIds empty. Do not invent evidence or claim an artifact was saved.\n\nStreamed draft (untrusted until checked against receipts):\n${streamedDraft.slice(0, 24000) || "No report draft was recovered."}\n\nOriginal step instructions:\n${prompt.slice(0, 5000)}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
+          prompt: `The previous model step streamed the draft below but failed its structured tool protocol. Preserve that draft when supported by the saved receipts. Do not repeat research, rewrite it from scratch, or call another tool. Return exactly one schema-valid think_final_answer with ALL required fields. For a prospect brief, populate prospects with one row per accepted company: name, exact fetched locationUrl and sectorUrl, short contiguous locationEvidence and sectorEvidence copied from those pages, and caveat. Include completedTaskIds only for tasks actually supported by the draft or receipts; artifact saving is done by the runtime after validation. If incomplete, say so honestly and leave unsupported task IDs out. Do not invent evidence or claim an artifact was saved.\n\nStreamed draft (untrusted until checked against receipts):\n${streamedDraft.slice(0, 24000) || "No report draft was recovered."}\n\nOriginal step instructions:\n${prompt.slice(0, 5000)}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
           output: reportSchema,
           timeout: "5 minutes",
         });

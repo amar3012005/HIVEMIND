@@ -67,6 +67,18 @@ test("a group imprint binds the named insurer, not another group company", () =>
   assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
 });
 
+test("official English imprint can support a city spelled differently in the task", () => {
+  const url = "https://www.vhv-gruppe.de/en/meta/imprint";
+  const page = "# Imprint\n## VHV Vereinigte Hannoversche Versicherung a.G. (Publisher)\nVHV-Platz 1 30177 Hanover, Germany\nOther VHV Group Companies:\nVHV Allgemeine Versicherung AG\nVHV-Platz 1 30177 Hanover, Germany\n";
+  const row = { name: "VHV Group (VHV Allgemeine Versicherung AG)", locationUrl: url, sectorUrl: url,
+    locationEvidence: "VHV Allgemeine Versicherung AG is based in Hannover", sectorEvidence: "VHV Allgemeine Versicherung AG", caveat: "" };
+  const bound = bindProspectSourcePassages(`# VHV Group\n${url}`, [row], [{ url, excerpt: page }], "Hannover");
+  assert.ok(bound);
+  assert.match(bound.prospects[0].locationEvidence, /VHV Allgemeine Versicherung AG/);
+  assert.match(bound.prospects[0].locationEvidence, /30177 Hanover/);
+  assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
+});
+
 test("source binding retains the user's city when the planner abbreviates the task", () => {
   assert.equal(requestedLocationHint("Create a report on three Hannover-based insurers", "Verify official addresses"), "Hannover");
   assert.equal(requestedLocationHint("Correct the Hannover insurance brief", "Verify each source"), "Hannover");

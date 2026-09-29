@@ -127,7 +127,7 @@ export function bindProspectSourcePassages(
 function selectSourcePassage(page: string, draft: string, kind: "location" | "sector", locationHint = "", companyName = ""): string | null {
   const legalName = kind === "location" ? companyName.match(/\(([^)]+)\)/)?.[1]?.trim() : undefined;
   const legalAt = legalName ? page.toLocaleLowerCase().indexOf(legalName.toLocaleLowerCase()) : -1;
-  const legalTail = legalAt >= 0 ? page.slice(legalAt, Math.min(page.length, legalAt + 240)) : "";
+  const legalTail = legalAt >= 0 ? page.slice(legalAt, Math.min(page.length, legalAt + 800)) : "";
   const addressEnd = legalTail.match(/\b\d{5}\s+[\p{L}-]+/u);
   const legalWindow = addressEnd?.index !== undefined
     ? legalTail.slice(0, addressEnd.index + addressEnd[0].length).trim()
@@ -174,11 +174,30 @@ function brandScore(passage: string, brands: readonly string[]): number {
 function supportsClaim(passage: string, kind: "location" | "sector", locationHint: string): boolean {
   if (kind === "sector") return /\b(?:insur\w*|reinsur\w*|versicher\w*|rückversicher\w*)\b/i.test(passage);
   const hint = canonicalPassage(locationHint);
-  if (!hint || !canonicalPassage(passage).split(" ").includes(hint)) return false;
+  if (!hint || !canonicalPassage(passage).split(" ").some((word) => samePlaceSpelling(word, hint))) return false;
   // A city mention alone can be a brand or navigation item. Require a street,
   // postal address, or explicit registered-office statement on that same line.
   return /\b\d{5}\b/.test(passage)
     || /\b(?:headquarters?|headquartered|registered office|registered address|adresse|address|sitz|hauptsitz)\b/i.test(passage);
+}
+
+// Official pages may use a localized spelling of the requested city. Keep
+// the postal-address/registered-office requirement above, and allow only a
+// single-character spelling difference for a substantial city name.
+function samePlaceSpelling(found: string, requested: string): boolean {
+  if (found === requested) return true;
+  if (Math.min(found.length, requested.length) < 7 || Math.abs(found.length - requested.length) > 1) return false;
+  let left = 0;
+  let right = 0;
+  let edits = 0;
+  while (left < found.length && right < requested.length) {
+    if (found[left] === requested[right]) { left++; right++; continue; }
+    if (++edits > 1) return false;
+    if (found.length > requested.length) left++;
+    else if (requested.length > found.length) right++;
+    else { left++; right++; }
+  }
+  return edits + Number(left < found.length || right < requested.length) <= 1;
 }
 
 /** A prior page read is reusable only when it contains every requested quote. */

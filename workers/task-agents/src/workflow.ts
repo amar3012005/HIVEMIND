@@ -678,7 +678,16 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       if (bound) {
         written = { ...written, ...bound };
         await this.agent.note("source-verification", "Prospect passages bound to fetched source receipts.");
-      } else if (bindingFailure) await this.agent.note("source-verification", bindingFailure);
+      } else {
+        const detail = bindingFailure || "A location or insurance passage was absent from its cited page";
+        const reply = `The official source evidence still has a gap: ${detail}. The plan remains open; no report or PDF was saved.`;
+        await durable.do("prospect-binding-incomplete", async () => {
+          await this.agent.note("source-verification", detail);
+          await this.agent.note("report", reply);
+          await this.agent.note("completion", "prospect_source_binding_missing");
+        });
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "prospect_source_binding_missing", report: reply };
+      }
       const quotes = prospectQuotesVerified(written.prospects, pages);
       if (!quotes.complete) {
         const reply = `The quoted passages did not exactly match the fetched source pages (${quotes.reason}). I did not save a report or PDF.`;

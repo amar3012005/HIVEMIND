@@ -1086,18 +1086,30 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.turnSources = [];
     this.pageReadCounts.clear();
     this.capturedPages.clear();
-    const [{ brief }, learnings, completed] = await Promise.all([
-      this.loadProfileBrief(envelope.orgId, envelope.userId),
-      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "learning", limit: 20 }).catch(() => null),
-      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "task_status", status: "completed", limit: 10 }).catch(() => null),
-    ]);
-    const memoryBrief = operatingMemoryBrief(learnings, completed, envelope.task);
+    const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
-    if (memoryBrief) this.note("operating-memory-recall", "Recent learnings and completed work loaded from the private agent brain");
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
+    await this.context.refreshSystemPrompt();
+  }
+
+  /** Load bounded shared operating history only after a turn is routed to work. */
+  async loadTaskOperatingMemory(task: string): Promise<void> {
+    const envelope = this.state.envelope;
+    if (!envelope) return;
+    const filters = [
+      { kind: "learning" as const, limit: 20 },
+      { kind: "task_status" as const, status: "completed", limit: 10 },
+      { kind: "decision_note" as const, limit: 10 },
+      { kind: "handoff" as const, limit: 10 },
+    ];
+    const results = await Promise.all(filters.map((filter) =>
+      recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, filter).catch(() => null)));
+    const memoryBrief = operatingMemoryBrief(results, task);
+    this.setState({ ...this.state, operatingMemoryBrief: memoryBrief });
+    if (memoryBrief) this.note("operating-memory-recall", "Task-relevant learnings, completed work, decisions, and handoffs loaded from the private agent brain");
     await this.context.refreshSystemPrompt();
   }
 

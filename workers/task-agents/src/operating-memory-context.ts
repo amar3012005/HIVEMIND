@@ -32,9 +32,9 @@ function relevance(query: Set<string>, row: MemoryRow): number {
 }
 
 /** Recent records always survive; the remaining slots favor task-relevant, deduplicated memories. */
-export function operatingMemoryBrief(learnings: unknown, completed: unknown, task = ""): string {
+export function operatingMemoryBrief(results: readonly unknown[], task = ""): string {
   const unique = new Map<string, MemoryRow>();
-  for (const row of [...rows(learnings), ...rows(completed)]) {
+  for (const row of results.flatMap(rows)) {
     const title = short(row.title, 150);
     if (!title) continue;
     const key = `${short(row.kind, 24)}:${title.normalize("NFKC").toLocaleLowerCase()}`;

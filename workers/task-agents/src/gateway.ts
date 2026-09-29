@@ -56,6 +56,32 @@ export async function postControl(
   return payload;
 }
 
+export type OperatingMemoryKind = "learning" | "decision_note" | "handoff" | "task_status" | "trigger_status";
+
+export interface OperatingMemoryWrite {
+  kind: OperatingMemoryKind;
+  status: "recorded" | "active" | "completed" | "incomplete" | "errored" | "paused";
+  agent_slug: string;
+  title: string;
+  summary: string;
+  idempotency_key: string;
+  room_id?: string;
+  run_id?: string;
+  trigger_id?: string;
+  context?: Record<string, unknown>;
+  writer?: "runtime";
+}
+
+export async function saveOperatingMemory(env: GatewayEnv, orgId: string, userId: string, memory: OperatingMemoryWrite): Promise<unknown> {
+  return postControl(env, "/internal/hyper/operating-memory", { action: "save", org_id: orgId, user_id: userId, ...memory });
+}
+
+export async function recallOperatingMemory(env: GatewayEnv, orgId: string, userId: string, filter: {
+  kind?: OperatingMemoryKind; agent_slug?: string; status?: string; room_id?: string; run_id?: string; limit?: number;
+} = {}): Promise<unknown> {
+  return postControl(env, "/internal/hyper/operating-memory", { action: "recall", org_id: orgId, user_id: userId, ...filter });
+}
+
 export interface MapPlace {
   name: string;
   address: string;

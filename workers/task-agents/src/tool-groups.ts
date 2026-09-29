@@ -1,5 +1,5 @@
 export const TOOL_GROUPS = {
-  company: ["hivemind_meta"],
+  company: ["hivemind_meta", "hyperagents_memory"],
   web_research: ["parallel_search", "parallel_search_batch", "maps_search"],
   browser: ["browser_markdown", "browser_extract", "browser_links", "browser_capture"],
   connected_apps: ["hivemind_connected_task"],
@@ -8,7 +8,7 @@ export const TOOL_GROUPS = {
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
 
-export const BASIC_TOOLS = ["hivemind_meta", "hivemind_connected_task", "employee_workruns", "browser_markdown", "browser_capture", "load_artifact", "playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"] as const;
+export const BASIC_TOOLS = ["hivemind_meta", "hyperagents_memory", "hivemind_connected_task", "employee_workruns", "browser_markdown", "browser_capture", "load_artifact", "playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"] as const;
 
 export function toolsForGroups(groups: readonly string[]): string[] {
   const names = new Set<string>(BASIC_TOOLS);

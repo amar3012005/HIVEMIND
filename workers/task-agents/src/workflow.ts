@@ -78,6 +78,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       } catch (error) {
         await this.agent.note("workrun-index", `terminal index failed: ${workflowErrorCode(error)}`);
       }
+      try {
+        await (step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> }).do("record-operating-memory", async () =>
+          this.agent.recordOperatingWorkResult(result.complete, result.reason, result.artifactRefs || []));
+      } catch (error) {
+        console.warn(JSON.stringify({ event: "operating_memory_write_failed", runId: event.payload.runId, code: workflowErrorCode(error) }));
+      }
       await this.agent.finishWorkRuntime(event.payload.runId, result.complete ? "completed" : "incomplete");
       if (event.payload.occurrenceId) {
         await this.agent.recordTriggerOutcome(event.payload.occurrenceId, result)
@@ -91,6 +97,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       // failure; controlWorkRun reconciles the visible terminal state later.
       try { await this.agent.finishWorkRuntime(event.payload.runId, "errored"); } catch { /* reconcile on reconnect */ }
       try { await this.agent.finishCurrentCompanyWorkRun(false, code); } catch { /* reconcile on reconnect */ }
+      try { await this.agent.recordOperatingWorkResult(false, code); } catch { /* reconcile on reconnect */ }
       try { await this.agent.markAwaiting(""); } catch { /* reconcile on reconnect */ }
       try { await this.agent.note("report", `I could not finish this run (${code}). You can continue in this room.`); } catch { /* reconcile on reconnect */ }
       try { await this.agent.note("completion", code); } catch { /* reconcile on reconnect */ }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parallelSearch, parallelSearchBatch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, saveCompanyMemory } from "./gateway.ts";
+import { parallelSearch, parallelSearchBatch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, recallOperatingMemory, saveCompanyMemory, saveOperatingMemory } from "./gateway.ts";
 import { toolsForGroups } from "./tool-groups.ts";
 
 test("company catalog exposes native memory gateway", () => {
@@ -146,6 +146,26 @@ test("memory save reports completion only after synchronous Core receipt", async
   globalThis.fetch = async () => Response.json({ success: true, id: "memory-1" }, { status: 201 });
   try {
     assert.deepEqual(await saveCompanyMemory({ HIVEMIND_CORE_URL: "https://core.example", HIVEMIND_MASTER_API_KEY: "test" }, "org-1", "user-1", "Operator name: Amar", "Operator's preferred name is Amar.", { scope: "personal", idempotencyKey: "save-2" }), { ok: true, status: "completed", payload: { success: true, id: "memory-1" }, idempotencyKey: "save-2" });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("Hyper Agents memory uses only the sealed internal Control Plane route", async () => {
+  const original = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), "https://control.example/internal/hyper/operating-memory");
+    assert.equal((init?.headers as Record<string, string>).authorization, "Bearer test");
+    bodies.push(JSON.parse(String(init?.body)));
+    return Response.json({ ok: true, memories: [] });
+  };
+  const env = { HIVEMIND_CONTROL_URL: "https://control.example", HIVEMIND_MASTER_API_KEY: "test" };
+  try {
+    await saveOperatingMemory(env, "org-1", "user-1", { kind: "learning", status: "recorded", agent_slug: "elena", title: "Lesson", summary: "Check receipts", idempotency_key: "run-1:lesson" });
+    await recallOperatingMemory(env, "org-1", "user-1", { kind: "task_status", status: "completed", limit: 5 });
+    assert.deepEqual(bodies[0], { action: "save", org_id: "org-1", user_id: "user-1", kind: "learning", status: "recorded", agent_slug: "elena", title: "Lesson", summary: "Check receipts", idempotency_key: "run-1:lesson" });
+    assert.deepEqual(bodies[1], { action: "recall", org_id: "org-1", user_id: "user-1", kind: "task_status", status: "completed", limit: 5 });
   } finally {
     globalThis.fetch = original;
   }

@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { getPrismaClient } from './db/prisma.js';
+import { recallOperatingMemory, saveOperatingMemory } from './hyperagents/operating-memory.js';
 import {
   authenticatePersistedApiKey,
   createPersistedApiKey,
@@ -10806,6 +10807,34 @@ Write the persona now.`;
       } catch (error) { return jsonResponse(res, { error: error.message }, 422); }
     }
     return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
+  if (pathname === '/internal/hyper/operating-memory' && (req.method === 'POST' || req.method === 'GET')) {
+    const callerKey = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!process.env.HIVEMIND_MASTER_API_KEY || callerKey !== process.env.HIVEMIND_MASTER_API_KEY) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const input = req.method === 'POST' ? await parseBody(req).catch(() => ({})) : Object.fromEntries(url.searchParams);
+    const orgId = String(input.org_id || '');
+    const userId = String(input.user_id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId)
+        || !await getActiveOrganizationMembership(prisma, { userId, orgId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    try {
+      if (req.method === 'GET' || input.action === 'recall') {
+        return jsonResponse(res, await recallOperatingMemory(prisma, orgId, input));
+      }
+      if (input.action !== 'save') return jsonResponse(res, { error: 'invalid_action' }, 400);
+      return jsonResponse(res, await saveOperatingMemory(prisma, input, { orgId, userId }, {
+        source: input.writer === 'runtime' ? 'runtime' : 'agent',
+      }));
+    } catch (error) {
+      const known = /^(invalid_|runtime_|receipt_|memory_context_)/.test(String(error.message));
+      if (!known) console.error('[hyperagents-operating-memory]', error);
+      return jsonResponse(res, { error: known ? error.message : 'operating_memory_unavailable' }, known ? 400 : 503);
+    }
   }
 
   if (pathname === '/internal/hyper/org-profile' && req.method === 'GET') {

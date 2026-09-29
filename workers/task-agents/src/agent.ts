@@ -8,7 +8,7 @@ import { streamText, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
-import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
+import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, recallOperatingMemory, saveOperatingMemory, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { connectedWriteKey, reconciledRecord } from "./connected-write";
 import { approvePendingInput } from "./operator-resume";
@@ -212,6 +212,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       outputSchemaId: "room_report_v1", modePreference: occurrence.mode_preference === "company" || occurrence.mode_preference === "direct" ? occurrence.mode_preference : "auto",
       startedAt: new Date().toISOString(), occurrenceId, employee: roster.employee, ...facts, task,
     });
+    try {
+      await saveOperatingMemory(this.gatewayEnv(), occurrence.org_id, occurrence.user_id, {
+        kind: "trigger_status", status: "active", writer: "runtime", agent_slug: roster.employee.slug,
+        title: "Scheduled task started", summary: `Started: ${occurrence.task.slice(0, 700)}`,
+        idempotency_key: `trigger:${occurrenceId}:started`, run_id: runId, trigger_id: occurrenceId,
+        room_id: occurrence.run_room_id,
+      });
+    } catch {
+      console.warn(JSON.stringify({ event: "trigger_operating_memory_failed", occurrenceId }));
+    }
     return { workflowId, status: "started" };
   }
 
@@ -221,6 +231,30 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       artifact_refs: outcome.artifactRefs || [],
     });
     if (receipt && typeof receipt === "object" && "error" in receipt) throw new Error(String(receipt.error));
+    const envelope = this.state.envelope;
+    if (envelope) {
+      const saved = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
+        kind: "trigger_status", status: outcome.complete ? "completed" : "incomplete", writer: "runtime",
+        agent_slug: this.state.employee?.slug || "hyperagent", title: "Scheduled task outcome",
+        summary: `${outcome.complete ? "Completed" : "Incomplete"}: ${(envelope.task || "scheduled task").slice(0, 700)}`,
+        idempotency_key: `trigger:${occurrenceId}:terminal`, run_id: envelope.runId, trigger_id: occurrenceId,
+        context: { reason: outcome.reason.slice(0, 200), artifactRefs: (outcome.artifactRefs || []).slice(0, 10) },
+      });
+      if (saved && typeof saved === "object" && "error" in saved) throw new Error(String(saved.error));
+    }
+  }
+
+  async recordOperatingWorkResult(complete: boolean, reason: string, artifactRefs: string[] = []): Promise<void> {
+    const envelope = this.state.envelope;
+    if (!envelope) return;
+    const saved = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
+      kind: "task_status", status: complete ? "completed" : "incomplete", writer: "runtime",
+      agent_slug: this.state.employee?.slug || "hyperagent", title: complete ? "Task completed" : "Task incomplete",
+      summary: `${complete ? "Completed" : "Incomplete"}: ${(envelope.task || "company task").slice(0, 700)}`,
+      idempotency_key: `workrun:${envelope.runId}:terminal`, run_id: envelope.runId,
+      context: { reason: reason.slice(0, 200), artifactRefs: artifactRefs.slice(0, 10) },
+    });
+    if (saved && typeof saved === "object" && "error" in saved) throw new Error(String(saved.error));
   }
 
   readWorkCheckpoint(runId: string, stage: string): { value: unknown } | null {
@@ -934,6 +968,23 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         });
         if (result.status !== "completed") return { status: result.status, error: result.error || "specialist_unavailable" };
         this.note("delegation", `${specialist.name} returned findings`);
+        const envelope = this.state.envelope;
+        if (envelope) try {
+          const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${envelope.runId}:${employeeId}:${assignment}`));
+          const key = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+          const saved = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
+            kind: "handoff", status: "recorded", writer: "runtime", agent_slug: specialist.slug,
+            title: `${specialist.name} specialist handoff`,
+            summary: `Assignment: ${assignment.slice(0, 450)}. Findings: ${String(result.output || result.summary || "").slice(0, 1700)}`,
+            idempotency_key: `delegation:${key}`, run_id: envelope.runId,
+            context: { leadAgent: this.state.employee.slug, specialistId: specialist.id },
+          });
+          if (saved && typeof saved === "object" && "error" in saved) {
+            console.warn(JSON.stringify({ event: "specialist_handoff_memory_failed", runId: envelope.runId }));
+          }
+        } catch {
+          console.warn(JSON.stringify({ event: "specialist_handoff_memory_failed", runId: envelope.runId }));
+        }
         return { status: "completed", employee: specialist.name, findings: result.output || result.summary || "" };
       },
     });
@@ -1140,6 +1191,36 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
         const idempotencyKey = input.idempotencyKey || `hyper-${Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
         return writeHivemindMemory(this.gatewayEnv(), identity.orgId, identity.userId, input.title, input.content, { scope: input.scope, project: input.project, idempotencyKey, sessionId: this.state.envelope?.runId });
+      },
+    });
+    const operatingMemory = tool({
+      description: "Private Hyper Agents operating memory across this organization's agents. Recall newest-first by kind, agent or status. Save only concise learnings, handoffs or decision notes; runtime records authoritative task and trigger outcomes. Never use this as company-brain memory or evidence that a task succeeded.",
+      inputSchema: z.object({
+        operation: z.enum(["recall", "save"]),
+        kind: z.enum(["learning", "decision_note", "handoff", "task_status", "trigger_status"]).optional(),
+        agentSlug: z.string().max(120).optional(),
+        status: z.enum(["recorded", "active", "completed", "incomplete", "errored", "paused"]).optional(),
+        limit: z.number().int().min(1).max(20).optional(),
+        title: z.string().max(180).optional(),
+        summary: z.string().max(2400).optional(),
+      }),
+      execute: async (input): Promise<unknown> => {
+        const identity = this.assertTool("hyperagents_memory");
+        this.note("hyperagents_memory", `${input.operation}${input.kind ? ` ${input.kind}` : ""}`);
+        if (input.operation === "recall") return recallOperatingMemory(this.gatewayEnv(), identity.orgId, identity.userId, {
+          kind: input.kind, agent_slug: input.agentSlug, status: input.status, limit: input.limit,
+        });
+        const runId = this.state.envelope?.runId;
+        if (!runId || !input.title?.trim() || !input.summary?.trim()
+          || !input.kind || !["learning", "decision_note", "handoff"].includes(input.kind)) return { error: "operating_memory_save_invalid" };
+        const source = `${runId}:${input.kind}:${input.title}:${input.summary}`;
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+        const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        return saveOperatingMemory(this.gatewayEnv(), identity.orgId, identity.userId, {
+          kind: input.kind, status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
+          title: input.title, summary: input.summary, run_id: runId,
+          idempotency_key: `agent:${hash}`,
+        });
       },
     });
     const discover = tool({
@@ -1411,6 +1492,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       check_receipt: check,
       hivemind_recall: recall,
       hivemind_meta: meta,
+      hyperagents_memory: operatingMemory,
       hivemind_get_memory: memory,
       hivemind_list_memories: memories,
       hivemind_list_projects: projects,

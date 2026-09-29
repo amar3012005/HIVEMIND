@@ -1146,11 +1146,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     await this.context.refreshSystemPrompt();
   }
 
-  private consumeBoundedSearch(batch = false): void {
+  private consumeBoundedSearch(): void {
     // A company operating plan must not disable the discovery budget. Once
     // URLs have been collected, move to page reads instead of searching in a
     // loop while the operator sees an idle plan.
-    this.boundedActionSearches += batch ? 2 : 1;
     if (this.boundedActionSearches < 3) return;
     this.setState({
       ...this.state,
@@ -1276,6 +1275,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
     const input = ctx.input && typeof ctx.input === "object" ? ctx.input as Record<string, unknown> : {};
     this.note("tool-call", JSON.stringify({ id: ctx.toolCallId, name: ctx.toolName, phase: "started", target: typeof input.url === "string" ? input.url.slice(0, 300) : undefined }));
+    if (ctx.toolName === "parallel_search" || ctx.toolName === "parallel_search_batch") {
+      const units = ctx.toolName === "parallel_search_batch" ? 2 : 1;
+      if (this.boundedActionSearches + units > 3) {
+        return { action: "block", reason: "Discovery budget is complete. Open the returned official URLs with browser_markdown, or report the specific evidence gap." };
+      }
+      this.boundedActionSearches += units;
+      this.consumeBoundedSearch();
+    }
     if (ctx.toolName === "browser_markdown" && typeof input.url === "string") {
       let target = input.url;
       try { target = new URL(input.url).href; } catch { /* Let the tool validate malformed URLs. */ }
@@ -1863,7 +1870,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.rememberSources(result);
         const provider = result && typeof result === "object" && "provider" in result ? String(result.provider) : "unknown";
         this.note("parallel_search", provider);
-        this.consumeBoundedSearch();
         return result;
       },
     });
@@ -1877,7 +1883,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         for (const source of collectSourceLinks(result.searches.flatMap((search) => search.results))) this.discoveredUrls.add(source.url);
         this.rememberSources(result.searches.flatMap((search) => search.results));
         this.note("parallel_search_batch", `${result.searches.filter((search) => search.results.length).length}/${queries.length} searches returned sources`);
-        this.consumeBoundedSearch(true);
         return result;
       },
     });

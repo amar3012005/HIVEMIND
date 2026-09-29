@@ -93,9 +93,9 @@ export interface CompanyWorkResult {
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
   private async structuredPrompt<S extends z.ZodObject<z.ZodRawShape>>(step: ThinkWorkflowStep, name: string, prompt: string, schema: S): Promise<z.infer<S>> {
     try {
-      return await step.prompt(name, { prompt, output: schema, timeout: "30 minutes" }) as z.infer<S>;
+      return await step.prompt(name, { prompt, output: schema, timeout: "5 minutes" }) as z.infer<S>;
     } catch (error) {
-      if (workflowErrorCode(error) !== "model_output_invalid") throw error;
+      if (!["model_output_invalid", "upstream_timeout"].includes(workflowErrorCode(error))) throw error;
       await this.agent.note("model-recovery", `Recovering ${name} with a tool-free structured response`);
       const raw = await this.agent.recoverStructuredWithoutTool(
         `Return exactly one valid JSON object, without Markdown fences or tool calls, matching this schema: ${JSON.stringify(z.toJSONSchema(schema))}. Do not invent task facts.\n\n${prompt}`,
@@ -106,9 +106,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
   private async reportPrompt(step: ThinkWorkflowStep, name: string, prompt: string): Promise<z.infer<typeof reportSchema>> {
     try {
-      return await step.prompt(name, { prompt, output: reportSchema, timeout: "30 minutes" });
+      return await step.prompt(name, { prompt, output: reportSchema, timeout: "5 minutes" });
     } catch (error) {
-      if (!isRecoverableModelProtocolError(error)) throw error;
+      if (!isRecoverableModelProtocolError(error) && workflowErrorCode(error) !== "upstream_timeout") throw error;
       const streamedDraft = await this.agent.armFinalAnswerRecovery();
       const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
         `${url}: ${excerpt.slice(0, 700)}`).join("\n");

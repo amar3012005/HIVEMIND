@@ -2,6 +2,9 @@
 export function isNonblockingExecutionChoice(question: string, options: readonly string[]): boolean {
   const choice = `${question} ${options.join(" ")}`;
   if (/\b(?:approval|permission|consent|recipient|send|publish|post|contact|delete|purchase|pay|memory write|save memory)\b/i.test(choice)) return false;
+  // An optionless "which/what/how" method question gives the operator no
+  // actionable choice. Resolve authorized read methods inside the harness.
+  if (!options.length && (!question.trim() || /^\s*(?:which|what|how|should i)\b/i.test(question))) return true;
   return /\b(?:browser_(?:markdown|extract|links|scrape)|which (?:read|browser|research|fetch) tool|which (?:fetch|browser|research) method|fall back to (?:browser|another read tool)|fetch the pages using|(?:should I|do you want me to|would you like me to) (?:continue|proceed|retry|try|use|fetch|search|read|draft|prepare)\b)/i.test(choice);
 }
 

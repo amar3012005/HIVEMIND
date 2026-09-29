@@ -58,6 +58,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   private textDraft = "";
   private turnSources: RunSource[] = [];
+  private pageReadCounts = new Map<string, number>();
   private recoveryStepPending = false;
   private recoveryStepUsed = false;
   private finalOnlyRecoveryTurn = false;
@@ -1012,6 +1013,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
     this.draftCalls.clear();
     this.turnSources = [];
+    this.pageReadCounts.clear();
     const [{ brief }, learnings, completed] = await Promise.all([
       this.loadProfileBrief(envelope.orgId, envelope.userId),
       recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "learning", limit: 20 }).catch(() => null),
@@ -1119,6 +1121,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
     const input = ctx.input && typeof ctx.input === "object" ? ctx.input as Record<string, unknown> : {};
     this.note("tool-call", JSON.stringify({ id: ctx.toolCallId, name: ctx.toolName, phase: "started", target: typeof input.url === "string" ? input.url.slice(0, 300) : undefined }));
+    if (ctx.toolName === "browser_markdown" && typeof input.url === "string") {
+      let target = input.url;
+      try { target = new URL(input.url).href; } catch { /* Let the tool validate malformed URLs. */ }
+      const reads = this.pageReadCounts.get(target) ?? 0;
+      if (reads >= 2) {
+        this.note("browser-read-limit", `${target}: use the existing page receipt or move to the next planned action`);
+        return { action: "block", reason: "This page was already read twice in this run. Use its existing receipt or move to the next planned action; do not read the same URL again." };
+      }
+      this.pageReadCounts.set(target, reads + 1);
+    }
     if (ctx.toolName === "browser_capture" && !requestsImageCapture(this.state.envelope?.task ?? "")) {
       return { action: "block", reason: "Operator did not request an image capture in this turn." };
     }

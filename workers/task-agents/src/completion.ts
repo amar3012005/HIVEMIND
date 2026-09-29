@@ -68,6 +68,13 @@ export function prospectQuotesVerified(prospects: readonly ProspectEvidence[], p
   return { complete: true, reason: "prospect_quotes_verified" };
 }
 
+/** A prior page read is reusable only when it contains every requested quote. */
+export function sourceReceiptCoversQuotes(excerpt: string, quotes: readonly string[]): boolean {
+  const page = canonicalPassage(excerpt);
+  return excerpt.length >= 80 && quotes.length > 0 && quotes.every((quote) =>
+    canonicalPassage(quote).length >= 10 && page.includes(canonicalPassage(quote)));
+}
+
 /** Give quote repair the relevant parts of a fetched page, including its footer. */
 export function sourceExcerptForQuoteRepair(page: string, quotes: readonly string[]): string {
   if (page.length <= 12000) return page;

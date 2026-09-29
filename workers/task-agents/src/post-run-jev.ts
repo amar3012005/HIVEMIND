@@ -1,4 +1,4 @@
-export const POST_RUN_JEV_POLICY_VERSION = "post-run-jev-v3";
+export const POST_RUN_JEV_POLICY_VERSION = "post-run-jev-v4";
 
 export type MemoryKind = "learning" | "bug_or_failure" | "mistake_and_correction" | "decision" | "user_requirement" | "none";
 export type PlaybookChangeKind = "add_step" | "clarify" | "guardrail" | "no_change";
@@ -19,6 +19,8 @@ export interface PostRunJevInput {
   phase: string;
   task: string;
   report: string;
+  outcome?: "complete" | "incomplete";
+  failureReason?: string;
   completedTaskIds: number[];
   artifactId: string;
   artifactReceipts: Array<{ id: string; kind: string; title: string }>;
@@ -81,7 +83,7 @@ const REVIEW_CONFIDENCE = 0.7;
 const memoryQuestions: Record<string, JevQuestion> = {
   memory_worthy: {
     type: "noul",
-    instructions: "Does this completed run contain a stable, useful, evidence-supported insight worth proposing for this employee's future work? Do not recommend storing transient task output, sensitive data, unsupported claims, or facts that are only guesses.",
+    instructions: "Does this run contain a stable, useful, evidence-supported insight worth proposing for this employee's future work? An incomplete run may reveal a verified reusable failure, but a one-off external outage is not a company memory. Do not recommend storing transient task output, sensitive data, unsupported claims, or guesses.",
     criteria: {
       true: "A durable lesson, corrected mistake, material decision, or explicit lasting user requirement is clearly supported and could improve future work.",
       false: "The run contains only transient output, weak or unverified evidence, sensitive details, no reusable insight, or a one-off circumstance.",
@@ -181,7 +183,7 @@ export function buildPostRunJevRequest(input: PostRunJevInput): PostRunJevReques
   if (localPlaybook) {
     questions.playbook_worthy = {
       type: "noul",
-      instructions: "Does evidence from this completed run support a reusable change to the exact local playbook snapshot that was used? Separate a playbook gap from an isolated execution miss, external outage, or unsupported report claim.",
+      instructions: "Does evidence from this run support a reusable change to the exact local playbook snapshot that was used? An incomplete outcome alone does not prove a playbook defect. Separate a demonstrated playbook gap from an isolated execution miss, external outage, or unsupported report claim.",
       criteria: {
         true: "A reusable method gap or improvement is evidenced and plausibly attributable to the local playbook.",
         false: "No change is justified, the issue is isolated or external, or evidence is insufficient.",
@@ -223,6 +225,8 @@ export function buildPostRunJevRequest(input: PostRunJevInput): PostRunJevReques
       taskType: safeText(input.taskType, 120),
       phase: safeText(input.phase, 120),
       outcome: safeText(input.report, 7000),
+      completionStatus: input.outcome ?? "complete",
+      failureReason: safeText(input.failureReason ?? "", 160),
       completedTaskIds: input.completedTaskIds.slice(0, 6),
       artifactReceipts: input.artifactReceipts.slice(0, 12).map((receipt) => ({
         id: receipt.id.slice(0, 80), kind: safeText(receipt.kind, 40), title: safeText(receipt.title, 160),

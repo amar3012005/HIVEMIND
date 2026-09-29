@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceReceiptCoversQuotes } from "./completion.ts";
+
+test("a persisted page receipt covers only exact normalized source passages", () => {
+  const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
+  assert.equal(sourceReceiptCoversQuotes(page, ["Hannover Re is a reinsurer", "Karl-Wiechert-Allee 50, 30625 Hannover"]), true);
+  assert.equal(sourceReceiptCoversQuotes(page, ["Hannover Re is an insurer"]), false);
+  assert.equal(sourceReceiptCoversQuotes(page, []), false);
+});
 
 test("quote repair includes source location in a long page footer and sector text in the body", () => {
   const page = `HDI Global provides corporate insurance. ${"Other navigation and content. ".repeat(850)} Registered address: HDI-Platz 1, 30659 Hannover.`;

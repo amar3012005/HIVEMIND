@@ -1,6 +1,6 @@
 import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
 import { thinkModel } from "./think-model";
-import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
+import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
@@ -12,7 +12,7 @@ import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postContro
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { connectedWriteKey, reconciledRecord } from "./connected-write";
 import { approvePendingInput } from "./operator-resume";
-import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, type ProspectEvidence } from "./completion";
+import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, sourceReceiptCoversQuotes, type ProspectEvidence } from "./completion";
 import { COMPANY_GOVERNOR_PROMPT, CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { partialToolText } from "./draft-stream";
@@ -36,6 +36,18 @@ export function reportTitle(body: string, fallback: string): string {
   const heading = body.match(/^#\s+(.+)$/m)?.[1]?.trim();
   const candidate = heading || fallback;
   return candidate.replace(/\s+report\s*\.pdf$/i, " report").replace(/\.pdf$/i, "").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "Company report";
+}
+
+async function readBrowserPage(browser: unknown, url: string, timeout: number): Promise<string> {
+  const binding = browser as { quickAction?: (action: string, options: unknown) => Promise<Response> };
+  if (!binding.quickAction) throw new Error("browser_binding_missing");
+  const response = await binding.quickAction("markdown", {
+    url, gotoOptions: { waitUntil: "domcontentloaded", timeout }, actionTimeout: Math.min(timeout + 10000, 60000),
+  });
+  if (!response.ok) throw new Error(`browser_markdown_http_${response.status}`);
+  const payload = await response.json() as { success?: boolean; result?: unknown };
+  if (payload.success === false || typeof payload.result !== "string") throw new Error("browser_markdown_invalid_response");
+  return payload.result;
 }
 
 export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
@@ -973,7 +985,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
         const browser = this.gatewayEnv().BROWSER;
         if (!browser) throw new Error("browser_binding_missing");
-        const markdown = await browserMarkdown(browser as never, { url: target.href, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
+        const markdown = await readBrowserPage(browser, target.href, 35000);
         if (markdown.trim().length < 80) throw new Error("page_content_missing");
         this.recordSourceRead(target.href, markdown);
         this.rememberSources({ url: target.href });
@@ -1441,7 +1453,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return;
     ensureCompanyTables(this.sql.bind(this));
-    this.sql`INSERT OR REPLACE INTO source_read_receipts (run_id, org_id, user_id, url, excerpt, read_at) VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${url}, ${markdown.trim().slice(0, 1800)}, ${new Date().toISOString()})`;
+    this.sql`INSERT OR REPLACE INTO source_read_receipts (run_id, org_id, user_id, url, excerpt, read_at) VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${url}, ${markdown.trim().slice(0, 100000)}, ${new Date().toISOString()})`;
   }
 
   sourceReadReceipts(): Array<{ url: string; excerpt: string; readAt: string }> {
@@ -1458,33 +1470,43 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   recordVerifiedProspectClaims(prospects: readonly ProspectEvidence[]): void {
     const envelope = this.state.envelope;
     if (!envelope) return;
-    const passages = new Map<string, Set<string>>();
-    for (const row of prospects) {
-      for (const [url, quote] of [[row.locationUrl, row.locationEvidence], [row.sectorUrl, row.sectorEvidence]]) {
-        if (!passages.has(url)) passages.set(url, new Set());
-        passages.get(url)!.add(quote);
-      }
-    }
-    for (const [url, quotes] of passages) {
-      const existing = this.sql`SELECT excerpt FROM source_read_receipts WHERE run_id = ${envelope.runId} AND url = ${url} LIMIT 1`[0];
-      if (!existing) continue;
-      const excerpt = `${String(existing.excerpt).slice(0, 900)}\nVerified prospect passages:\n${[...quotes].join("\n")}`.slice(0, 1800);
-      this.sql`UPDATE source_read_receipts SET excerpt = ${excerpt} WHERE run_id = ${envelope.runId} AND url = ${url}`;
-    }
+    // Keep original page receipts intact. Appending model-supplied quotes would
+    // let a later verifier mistake those claims for fetched source text.
     this.note("source-verification", JSON.stringify(prospects.map((row) => ({ name: row.name, locationUrl: row.locationUrl, locationEvidence: row.locationEvidence, sectorUrl: row.sectorUrl, sectorEvidence: row.sectorEvidence }))));
   }
 
   async verifyProspectPages(prospects: readonly ProspectEvidence[]): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
     const browser = this.gatewayEnv().BROWSER;
     const urls = [...new Set(prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]))].slice(0, 20);
+    const envelope = this.state.envelope;
+    const previousRunId = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } } | undefined)?.continuation?.previousRunId;
+    const requiredQuotes = (url: string) => prospects.flatMap((row) => [
+      ...(row.locationUrl === url ? [row.locationEvidence] : []),
+      ...(row.sectorUrl === url ? [row.sectorEvidence] : []),
+    ]);
     const receipts: Array<{ url: string; excerpt: string; error?: string }> = [];
     for (let offset = 0; offset < urls.length; offset += 4) {
       const batch = await Promise.all(urls.slice(offset, offset + 4).map(async (url) => {
         try {
           const target = new URL(url);
           if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+          // The original Browser Run read is already evidence. Avoid reopening
+          // a slow page if its persisted text covers the exact quoted claims.
+          for (const runId of [envelope?.runId, previousRunId].filter((id): id is string => Boolean(id))) {
+            const prior = this.sql`SELECT excerpt, read_at FROM source_read_receipts WHERE run_id = ${runId} AND org_id = ${envelope?.orgId ?? ""} AND user_id = ${envelope?.userId ?? ""} AND url = ${url} LIMIT 1`[0];
+            if (prior && Date.now() - Date.parse(String(prior.read_at)) < 24 * 60 * 60 * 1000
+              && sourceReceiptCoversQuotes(String(prior.excerpt), requiredQuotes(url))) return { url, excerpt: String(prior.excerpt) };
+          }
           if (!browser) throw new Error("browser_binding_missing");
-          const markdown = await browserMarkdown(browser as never, { url, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
+          let markdown = "";
+          let lastError: unknown;
+          for (const timeout of [30000, 45000]) {
+            try {
+              markdown = await readBrowserPage(browser, url, timeout);
+              break;
+            } catch (error) { lastError = error; }
+          }
+          if (!markdown) throw lastError ?? new Error("page_unavailable");
           // Location evidence is often in a footer after the first 30 KB.
           // Keep enough of the fetched page for the exact quote verifier;
           // the repair prompt later selects only relevant windows.
@@ -1590,6 +1612,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     completedTaskIds: number[];
     artifactId: string;
     playbook: LocalPlaybookSnapshot | null;
+    outcome?: "complete" | "incomplete";
+    failureReason?: string;
   }): Promise<PostRunJevReview> {
     const envelope = this.state.envelope;
     if (!envelope) throw new Error("task_not_bound");
@@ -1601,7 +1625,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const saved = JSON.parse(String(existing.review_json)) as PostRunJevReview;
         // A completed Workflow replay must reuse its original review, even
         // after policy upgrades; the new policy applies to new runs only.
-        if (saved.runId === envelope.runId && /^post-run-jev-v[123]$/.test(saved.policyVersion)) return saved;
+        if (saved.runId === envelope.runId && /^post-run-jev-v[1-4]$/.test(saved.policyVersion)) return saved;
       } catch { /* an invalid stored result must never be promoted */ }
       throw new Error("run_insight_persist_corrupt");
     }
@@ -1613,9 +1637,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const reviewInput: PostRunJevInput = {
       runId: envelope.runId, orgId: envelope.orgId, userId: envelope.userId,
       taskType: envelope.taskType, phase: envelope.phase, task: input.task, report: input.report,
+      outcome: input.outcome ?? "complete", failureReason: input.failureReason ?? "",
       completedTaskIds: input.completedTaskIds, artifactId: input.artifactId,
       sources: this.sourceReadReceipts().map(({ url, excerpt }) => ({
-        url, excerpt, title: this.state.sources?.find((source) => source.url === url)?.title || "Verified page read",
+        url, excerpt: excerpt.slice(0, 1800), title: this.state.sources?.find((source) => source.url === url)?.title || "Verified page read",
       })),
       artifactReceipts: this.sql`SELECT a.id, a.kind, a.title FROM company_artifacts a JOIN company_artifact_runs r ON r.artifact_id = a.id WHERE r.run_id = ${envelope.runId} ORDER BY a.created_at ASC LIMIT 12`
         .map((row) => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) })),
@@ -1624,7 +1649,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const env = this.gatewayEnv();
     let review: PostRunJevReview;
     if (env.JEV_POST_RUN_ENABLED !== "true") review = ineligiblePostRunJev(reviewInput, "disabled");
-    else if (!this.hasCompanyContext() || !input.report.trim() || !input.artifactId.trim()) review = ineligiblePostRunJev(reviewInput, "ineligible");
+    else if (!this.hasCompanyContext() || !input.report.trim()) review = ineligiblePostRunJev(reviewInput, "ineligible");
     else {
       try {
         const ai = env.AI as { run?: (model: string, input: unknown) => Promise<unknown> } | undefined;
@@ -1639,6 +1664,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${envelope.taskType}, ${input.artifactId.slice(0, 100)}, ${POST_RUN_JEV_POLICY_VERSION}, ${review.status}, ${JSON.stringify(review)}, ${new Date().toISOString()})`;
     this.note("post_run_jev", postRunJevSummary(review));
     return review;
+  }
+
+  async reviewIncompleteCompanyRun(reason: string, report: string): Promise<PostRunJevReview | null> {
+    const envelope = this.state.envelope;
+    if (!envelope || !this.state.operatingPlan || !this.hasCompanyContext()) return null;
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${envelope.runId} LIMIT 1`[0];
+    if (!row || !String(row.playbook_id).startsWith("local:")) return null;
+    const id = String(row.playbook_id);
+    const local = localPlaybook(id);
+    const parent = local ? globalPlaybookBody(local.globalId) : null;
+    return this.reviewCompletedCompanyRun({
+      task: envelope.task ?? "", report, completedTaskIds: [], artifactId: "",
+      playbook: local ? { id, globalId: local.globalId, globalVersion: parent?.version ?? null, snapshot: String(row.playbook_snapshot) } : null,
+      outcome: "incomplete", failureReason: reason,
+    });
   }
 
   async snapshot(): Promise<{ events: TraceEvent[]; places: LocalCompany[]; transcript: string }> {

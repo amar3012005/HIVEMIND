@@ -129,3 +129,10 @@ test("unavailable evaluation remains uncertain without proposing a write", () =>
   assert.equal(review.playbook.decision, "uncertain");
   assert.equal(ineligiblePostRunJev(input, "ineligible").memory.decision, "not_applicable");
 });
+
+test("incomplete company run supplies failure status and pinned playbook to Jev", () => {
+  const request = buildPostRunJevRequest({ ...baseInput, outcome: "incomplete", failureReason: "prospect_pages_unreadable", artifactId: "", artifactReceipts: [], playbook: { id: "local:outreach.prospect-list", globalId: "outreach.prospect-list", globalVersion: 4, snapshot: "Verify source passages." } });
+  assert.equal(request.state.completionStatus, "incomplete");
+  assert.equal(request.state.failureReason, "prospect_pages_unreadable");
+  assert.ok(request.questions.playbook_worthy);
+});

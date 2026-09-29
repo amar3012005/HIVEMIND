@@ -1147,9 +1147,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   private consumeBoundedSearch(batch = false): void {
-    if (this.state.operatingPlan?.tasks.length) return;
+    // A company operating plan must not disable the discovery budget. Once
+    // URLs have been collected, move to page reads instead of searching in a
+    // loop while the operator sees an idle plan.
     this.boundedActionSearches += batch ? 2 : 1;
-    if (this.boundedActionSearches < 2) return;
+    if (this.boundedActionSearches < 3) return;
     this.setState({
       ...this.state,
       tools: this.state.tools.filter((name) => name !== "parallel_search" && name !== "parallel_search_batch"),

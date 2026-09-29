@@ -1,7 +1,8 @@
-import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
+import { Think, defaultContextOverflowClassifier, type ChatRecoveryContext, type ChatRecoveryOptions, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
 import { recoveryModel, thinkModel } from "./think-model";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
+import { createCompactFunction } from "agents/sessions";
 import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
 import { generateText, streamText, tool, type ToolSet } from "ai";
@@ -56,6 +57,18 @@ async function readBrowserPage(browser: unknown, url: string, timeout: number): 
 
 export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   initialState: TaskAgentState = EMPTY;
+  override chatRecovery = {
+    maxAttempts: 3,
+    noProgressTimeoutMs: 90_000,
+    terminalMessage: "This turn was interrupted and could not recover. Its WorkRun remains available for inspection.",
+  };
+  override chatStreamStallTimeoutMs = 120_000;
+  override contextOverflow = {
+    reactive: true,
+    maxRetries: 1,
+    proactive: { maxInputTokens: 100_000, maxCompactions: 1 },
+  };
+  override classifyChatError = defaultContextOverflowClassifier;
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   private textDraft = "";
   private lastReportDraft = "";
@@ -74,6 +87,20 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   override workspaceBash = false;
   override storeMessages = true;
   override storeTools = true;
+
+  protected override async onChatRecovery(_ctx: ChatRecoveryContext): Promise<ChatRecoveryOptions> {
+    // Think may resume a turn after a deploy or eviction. An operator stop is
+    // durable WorkRun state and must win over automatic chat continuation.
+    const runId = this.state.envelope?.runId;
+    if (runId) {
+      ensureCompanyTables(this.sql.bind(this));
+      const row = this.sql`SELECT status FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];
+      if (["stop_requested", "stopping", "terminated"].includes(String(row?.status ?? ""))) {
+        return { continue: false };
+      }
+    }
+    return {};
+  }
 
   shouldConnectionBeReadonly(connection: { url?: string }): boolean {
     return String(connection.url ?? "").includes("dashboard");
@@ -134,6 +161,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   configureSession(session: Session): Session {
     return session
+      .onCompaction(createCompactFunction({
+        summarize: async (prompt) => {
+          const candidate = thinkModel(this.gatewayEnv());
+          const model = typeof candidate === "string" ? recoveryModel(this.gatewayEnv()) : candidate;
+          const result = await generateText({ model, prompt, maxOutputTokens: 2500 });
+          return result.text;
+        },
+        keepRecentTokens: 12_000,
+      }))
+      .compactAfter(80_000)
       .withContext("employee-persona", { provider: { get: async () => this.state.employee
         ? `Assigned employee: ${this.state.employee.name} (${this.state.employee.role || "HyperAgent"}). Keep this identity through this room and speak in this employee's voice.\nEmployee persona:\n${this.state.employee.persona}`
         : "No named employee is bound to this room. Speak as a HyperAgent without inventing a name." } })

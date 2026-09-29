@@ -785,7 +785,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const refineRequested = this.playbookRefinementRequested();
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -1171,12 +1171,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const localPlaybooks = tool({
-      description: "List local playbooks inside the global ids already chosen. Names and one line only.",
-      inputSchema: z.object({ globalIds: z.array(z.string().min(3).max(120)).min(1).max(6) }),
+      description: "List local playbook names and one-line descriptions. Pass globalIds: [] to list the complete local catalog once for a catalog question; pass selected global ids when choosing a method for a task. Do not open each playbook just to count them.",
+      inputSchema: z.object({ globalIds: z.array(z.string().min(3).max(120)).max(6).default([]) }),
       execute: async ({ globalIds }): Promise<{ playbooks: ReturnType<typeof localCatalog> }> => {
         this.assertTool("playbook_list_local");
-        const playbooks = localCatalog(globalIds);
-        this.setState({ ...this.state, selectedGlobals: [...globalIds], catalogStage: "local" });
+        const playbooks = localCatalog(globalIds.length ? globalIds : globalCatalog().map((item) => item.id));
+        if (globalIds.length) this.setState({ ...this.state, selectedGlobals: [...globalIds], catalogStage: "local" });
         this.note("playbook_list_local", playbooks.map((item) => item.id).join(", "));
         return { playbooks };
       },

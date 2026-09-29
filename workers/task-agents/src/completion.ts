@@ -123,6 +123,18 @@ export function bindProspectSourcePassages(
 }
 
 function selectSourcePassage(page: string, draft: string, kind: "location" | "sector", locationHint = "", companyName = ""): string | null {
+  const legalName = kind === "location" ? companyName.match(/\(([^)]+)\)/)?.[1]?.trim() : undefined;
+  const legalAt = legalName ? page.toLocaleLowerCase().indexOf(legalName.toLocaleLowerCase()) : -1;
+  const legalTail = legalAt >= 0 ? page.slice(legalAt, Math.min(page.length, legalAt + 240)) : "";
+  const addressEnd = legalTail.match(/\b\d{5}\s+[\p{L}-]+/u);
+  const legalWindow = addressEnd?.index !== undefined
+    ? legalTail.slice(0, addressEnd.index + addressEnd[0].length).trim()
+    : legalTail.split(/\n#{1,6}\s/u, 1)[0].trim();
+  // A group imprint can contain several subsidiaries at the same address.
+  // When the requested legal entity is present, cite its own entry.
+  if (legalWindow && supportsClaim(legalWindow, kind, locationHint)
+    && sourceReceiptCoversQuotes(page, [legalWindow])) return legalWindow;
+  if (legalAt >= 0) return null;
   if (sourceReceiptCoversQuotes(page, [draft]) && supportsClaim(draft, kind, locationHint)) return draft.trim();
   const candidates = sourceQuoteCandidates(page, draft, 12);
   const lines = page.split(/\n+|(?<=[.!?])\s+(?=[A-Z\p{Lu}])/u)

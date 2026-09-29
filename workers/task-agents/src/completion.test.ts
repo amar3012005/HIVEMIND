@@ -55,6 +55,18 @@ test("location binding rejects a results date and prefers the named insurer's ad
     [{ url, excerpt: "Click here for more information on the results as at 30 June 2026 and all other results. Talanx sells insurance." }], "Hannover"), null);
 });
 
+test("a group imprint binds the named insurer, not another group company", () => {
+  const url = "https://www.vhv-gruppe.de/impressum";
+  const page = "# Imprint\n## VHV Vereinigte Hannoversche Versicherung a.G. (Herausgeber)\nVHV-Platz 1 <br>30177 Hannover\nOther legal notes.\n### VHV Holding SE<br>VHV-Platz 1 <br>30177 Hannover\n## Experten für Versicherung und Vorsorge\n";
+  const row = { name: "VHV Gruppe (VHV Vereinigte Hannoversche Versicherung a.G.)", locationUrl: url, sectorUrl: url,
+    locationEvidence: "### VHV Holding SE<br>VHV-Platz 1 <br>30177 Hannover", sectorEvidence: "Experten für Versicherung und Vorsorge", caveat: "" };
+  const bound = bindProspectSourcePassages(`# VHV Gruppe\n${url}`, [row], [{ url, excerpt: page }], "Hannover");
+  assert.ok(bound);
+  assert.match(bound.prospects[0].locationEvidence, /VHV Vereinigte Hannoversche Versicherung/);
+  assert.doesNotMatch(bound.prospects[0].locationEvidence, /VHV Holding SE/);
+  assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
+});
+
 test("source binding retains the user's city when the planner abbreviates the task", () => {
   assert.equal(requestedLocationHint("Create a report on three Hannover-based insurers", "Verify official addresses"), "Hannover");
   assert.equal(requestedLocationHint("Correct the Hannover insurance brief", "Verify each source"), "Hannover");

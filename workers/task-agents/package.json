@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/artifact-model.test.ts src/capability.test.ts src/skill-catalog.test.ts src/completion.test.ts src/profile.test.ts src/gateway.test.ts src/operating-plan.test.ts src/operating-memory-context.test.ts src/session-memory.test.ts src/governor.test.ts src/draft-stream.test.ts src/room-ticket.test.ts src/span-score.test.ts src/jev-route.test.ts src/post-run-jev.test.ts src/connected-write.test.ts src/operator-resume.test.ts src/workflow-error.test.ts src/checkpoint.test.ts src/run-context.test.ts src/execution-choice.test.ts"
+    "test": "node --experimental-strip-types --test src/artifact-model.test.ts src/capability.test.ts src/skill-catalog.test.ts src/completion.test.ts src/profile.test.ts src/gateway.test.ts src/operating-plan.test.ts src/operating-memory-context.test.ts src/session-memory.test.ts src/governor.test.ts src/draft-stream.test.ts src/room-ticket.test.ts src/span-score.test.ts src/jev-route.test.ts src/post-run-jev.test.ts src/connected-write.test.ts src/operator-resume.test.ts src/workflow-error.test.ts src/checkpoint.test.ts src/run-context.test.ts src/execution-choice.test.ts src/tool-recovery.test.ts"
   },
   "dependencies": {
     "@cloudflare/think": "0.19.0",

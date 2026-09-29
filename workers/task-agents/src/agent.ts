@@ -1,10 +1,11 @@
 import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
-import { thinkModel } from "./think-model";
+import { recoveryModel, thinkModel } from "./think-model";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
 import { streamText, tool, type ToolSet } from "ai";
+import { repairBrowserExtractCall } from "./tool-recovery";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -57,6 +58,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   private textDraft = "";
   private turnSources: RunSource[] = [];
+  private recoveryStepPending = false;
+  private recoveryStepUsed = false;
+  private finalOnlyRecoveryTurn = false;
   override includeMcpTools = false;
   override workspaceBash = false;
   override storeMessages = true;
@@ -75,6 +79,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   getModel() { return thinkModel(this.gatewayEnv()); }
+
+  armFinalAnswerRecovery(): void {
+    this.finalOnlyRecoveryTurn = true;
+    this.recoveryStepPending = true;
+  }
 
   configureContext(): ContextConfig[] {
     return [{ label: "hyperagent:system", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
@@ -963,7 +972,26 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   beforeTurn(ctx: TurnContext) {
     this.textDraft = "";
+    this.recoveryStepUsed = false;
     const currentSystem = runContext(this.state);
+    const finalOnly = this.finalOnlyRecoveryTurn;
+    this.finalOnlyRecoveryTurn = false;
+    const repairToolCall: NonNullable<Parameters<typeof streamText>[0]["repairToolCall"]> = async ({ toolCall }) => {
+      const repaired = repairBrowserExtractCall(toolCall.toolName, toolCall.input);
+      if (!repaired) return null;
+      this.recoveryStepPending = true;
+      this.note("tool-call-repair", `Read ${repaired.toolName} after URL-only browser_extract input`);
+      return { ...toolCall, ...repaired };
+    };
+    if (finalOnly) {
+      return {
+        system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
+        activeTools: ["think_final_answer"],
+        maxSteps: 1,
+        maxOutputTokens: 4096,
+        repairToolCall,
+      };
+    }
     if (this.state.catalogStage === "planning") {
       return {
         system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
@@ -971,6 +999,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         maxSteps: 1,
         maxOutputTokens: 4096,
         providerOptions: { "workers-ai": { reasoning_effort: "low" } },
+        repairToolCall,
       };
     }
     const granted = this.state.tools;
@@ -982,7 +1011,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
+      repairToolCall,
     };
+  }
+
+  beforeStep() {
+    if (!this.recoveryStepPending || this.recoveryStepUsed) return;
+    this.recoveryStepPending = false;
+    this.recoveryStepUsed = true;
+    this.note("model-recovery", "One model step uses the recovery model after a tool or protocol error");
+    return { model: recoveryModel(this.gatewayEnv()) };
   }
 
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
@@ -1002,6 +1040,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   afterToolCall(ctx: ToolCallResultContext): void {
+    if (!ctx.success && !this.recoveryStepUsed) this.recoveryStepPending = true;
     this.note("tool-call", JSON.stringify({
       id: ctx.toolCallId,
       name: ctx.toolName,
@@ -1612,7 +1651,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       save_local_companies: savePlaces,
       browser_capture: capture,
       ...(this.gatewayEnv().BROWSER
-        ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never })
+        ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never, maxChars: 16000 })
         : {}),
       browser_markdown: browserRead,
     };

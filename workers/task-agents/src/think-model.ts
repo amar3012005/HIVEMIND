@@ -9,7 +9,11 @@ export function thinkModel(env: GatewayEnv): LanguageModel | string {
   return openRouterModel(env, DEEPSEEK_MODEL);
 }
 
-function openRouterModel(env: GatewayEnv, model: string): LanguageModel {
+export function recoveryModel(env: GatewayEnv): LanguageModel {
+  return openRouterModel(env, env.OPENROUTER_RECOVERY_MODEL || "anthropic/claude-sonnet-4.5", false);
+}
+
+function openRouterModel(env: GatewayEnv, model: string, lowReasoning = true): LanguageModel {
   if (!env.CLOUDFLARE_ACCOUNT_ID || !env.AI_GATEWAY_ID || !env.CLOUDFLARE_AI_GATEWAY_TOKEN || !env.CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS) {
     throw new Error("OpenRouter gateway configuration is incomplete");
   }
@@ -27,5 +31,5 @@ function openRouterModel(env: GatewayEnv, model: string): LanguageModel {
       return fetch(input, { ...init, headers });
     },
   });
-  return provider.chat(model, { extraBody: { reasoning: { effort: "low" } } });
+  return provider.chat(model, lowReasoning ? { extraBody: { reasoning: { effort: "low" } } } : {});
 }

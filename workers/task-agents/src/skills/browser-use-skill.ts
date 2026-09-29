@@ -6,7 +6,7 @@ description: Load before reading a live page. Use Cloudflare Browser Run quick a
 Think exposes these tools when the Browser Run binding is present:
 
 - browser_markdown: read a page or HTML as markdown.
-- browser_extract: extract structured fields from a rendered page.
+- browser_extract: extract structured fields from a rendered page. Pass a URL and a specific prompt or schema. A URL alone is invalid; use browser_markdown for a page read.
 - browser_links: list links.
 - browser_scrape: read elements by CSS selector.
 - browser_execute: run CDP only when the quick actions cannot see the content.

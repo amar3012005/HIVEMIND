@@ -62,6 +62,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private discoveredUrls = new Set<string>();
   private pageReadCounts = new Map<string, number>();
   private capturedPages = new Map<string, string>();
+  private boundedActionSearches = 0;
   private recoveryStepPending = false;
   private recoveryStepUsed = false;
   private finalOnlyRecoveryTurn = false;
@@ -1092,6 +1093,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.discoveredUrls.clear();
     this.pageReadCounts.clear();
     this.capturedPages.clear();
+    this.boundedActionSearches = 0;
     const previous = this.state.envelope;
     const cachedBrief = previous?.orgId === envelope.orgId && previous.userId === envelope.userId
       && this.state.profileBrief && !this.state.profileBrief.startsWith("Authenticated profile unavailable.")
@@ -1103,6 +1105,17 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
+  }
+
+  private consumeBoundedSearch(batch = false): void {
+    if (this.state.operatingPlan?.tasks.length) return;
+    this.boundedActionSearches += batch ? 2 : 1;
+    if (this.boundedActionSearches < 2) return;
+    this.setState({
+      ...this.state,
+      tools: this.state.tools.filter((name) => name !== "parallel_search" && name !== "parallel_search_batch"),
+    });
+    this.note("search-budget", "Search receipts collected; continue with returned URLs and existing evidence");
   }
 
   /** Load bounded shared operating history only after a turn is routed to work. */
@@ -1793,6 +1806,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.rememberSources(result);
         const provider = result && typeof result === "object" && "provider" in result ? String(result.provider) : "unknown";
         this.note("parallel_search", provider);
+        this.consumeBoundedSearch();
         return result;
       },
     });
@@ -1806,6 +1820,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         for (const source of collectSourceLinks(result.searches.flatMap((search) => search.results))) this.discoveredUrls.add(source.url);
         this.rememberSources(result.searches.flatMap((search) => search.results));
         this.note("parallel_search_batch", `${result.searches.filter((search) => search.results.length).length}/${queries.length} searches returned sources`);
+        this.consumeBoundedSearch(true);
         return result;
       },
     });

@@ -16,6 +16,12 @@ export function completedPlanTaskIds(plan: OperatingPlan | null | undefined, run
   return plan.tasks.filter((task) => task.status === "completed").map((task) => task.id);
 }
 
+export function finalPlanStepReady(plan: OperatingPlan | null | undefined, runId: string | undefined): boolean {
+  return !!plan && plan.runId === runId && plan.tasks.length > 1
+    && plan.tasks.slice(0, -1).every((task) => task.status === "completed")
+    && ["pending", "active"].includes(plan.tasks.at(-1)?.status ?? "");
+}
+
 export function currentTurnTasks(tasks: readonly string[]): string[] {
   return tasks.filter((task) => !/^\s*(?:on|after|upon|once)\s+(?:operator\s+)?approval\b/i.test(task));
 }

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { completedPlanTaskIds, continuedPlan, currentTurnTasks, missingPlanTaskIds, updatePlanTask } from "./operating-plan.ts";
+import { completedPlanTaskIds, continuedPlan, currentTurnTasks, finalPlanStepReady, missingPlanTaskIds, updatePlanTask } from "./operating-plan.ts";
+
+test("final synthesis mode begins only after prior tasks have receipts in this run", () => {
+  const plan = { runId: "run-1", summary: "Brief", tasks: [
+    { id: 1, title: "Verify sources", status: "completed" as const },
+    { id: 2, title: "Save report", status: "active" as const },
+  ] };
+  assert.equal(finalPlanStepReady(plan, "run-1"), true);
+  assert.equal(finalPlanStepReady(plan, "other-run"), false);
+  assert.equal(finalPlanStepReady({ ...plan, tasks: [{ ...plan.tasks[0], status: "active" }, plan.tasks[1]] }, "run-1"), false);
+  assert.equal(finalPlanStepReady({ ...plan, tasks: [plan.tasks[0], { ...plan.tasks[1], status: "completed" }] }, "run-1"), false);
+});
 
 test("updates only a task in the current run", () => {
   const plan = { runId: "run-1", summary: "Research", tasks: [{ id: 1, title: "Recall company", status: "pending" as const }] };

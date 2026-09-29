@@ -1,4 +1,4 @@
-import { Think, defaultContextOverflowClassifier, type ChatErrorContext, type ChatRecoveryContext, type ChatRecoveryOptions, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
+import { Think, defaultContextOverflowClassifier, type ChatErrorContext, type ChatRecoveryContext, type ChatRecoveryOptions, type ChunkContext, type PrepareStepContext, type Session, type StepContext, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
 import { recoveryModel, thinkModel } from "./think-model";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
@@ -21,7 +21,7 @@ import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdi
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, verifiedPostRunLearnings, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview, type PostRunReviewPacket } from "./post-run-jev";
-import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
+import { completedPlanTaskIds, continuedPlan, finalPlanStepReady, updatePlanTask } from "./operating-plan";
 import { operatingMemoryBrief, operatingWorkStatusKey } from "./operating-memory-context";
 import { privateMemoryReceiptId, sessionMemoryEvidence, verifiedPrivateLearning } from "./session-memory";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
@@ -90,6 +90,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private recoveryStepPending = false;
   private recoveryStepUsed = false;
   private finalOnlyRecoveryTurn = false;
+  private stepStartedAt = 0;
+  private firstVisibleChunkLogged = false;
+  private stepNumber = 0;
   override includeMcpTools = false;
   override workspaceBash = false;
   override storeMessages = true;
@@ -1432,13 +1435,30 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER) && (name !== "browser_extract" || !granted.includes("browser_markdown"))), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length && this.state.operatingPlan?.tasks.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", ...(this.state.executionTurn ? [] : ["think_final_answer"])];
   }
 
-  beforeStep() {
+  beforeStep(ctx: PrepareStepContext) {
+    this.stepStartedAt = Date.now();
+    this.firstVisibleChunkLogged = false;
+    this.stepNumber = ctx.stepNumber;
     if (this.state.narrativeTurn || this.state.catalogStage === "planning") return;
     const activeTools = this.activeExecutionTools();
-    if (!this.recoveryStepPending || this.recoveryStepUsed) return { activeTools };
+    // The final plan task is delivery/receipt reconciliation. Earlier steps
+    // keep the model's reasoning; final prose can stream without hidden
+    // reasoning tokens while the Workflow still validates the artifact.
+    const finalPlanStep = this.state.executionTurn
+      && finalPlanStepReady(this.state.operatingPlan, this.state.envelope?.runId);
+    const synthesis = finalPlanStep ? { providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } } } : {};
+    if (!this.recoveryStepPending || this.recoveryStepUsed) return { activeTools, ...synthesis };
     this.recoveryStepPending = false;
     this.recoveryStepUsed = true;
-    return { model: recoveryModel(this.gatewayEnv()), activeTools };
+    return { model: recoveryModel(this.gatewayEnv()), activeTools, ...synthesis };
+  }
+
+  onStepEnd(ctx: StepContext): void {
+    console.log(JSON.stringify({ event: "think_step_timing", runId: this.state.envelope?.runId,
+      stage: this.state.narrativeTurn ? "narrative" : this.state.executionTurn ? "execution" : "chat",
+      step: this.stepNumber, elapsedMs: Date.now() - this.stepStartedAt,
+      usage: ctx.usage,
+      toolCalls: ctx.toolCalls.length, finishReason: ctx.finishReason }));
   }
 
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
@@ -1492,6 +1512,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {
+    if (!this.firstVisibleChunkLogged && (chunk.type === "text-delta" || chunk.type === "tool-input-start")) {
+      this.firstVisibleChunkLogged = true;
+      console.log(JSON.stringify({ event: "think_first_visible_chunk", runId: this.state.envelope?.runId,
+        stage: this.state.narrativeTurn ? "narrative" : this.state.executionTurn ? "execution" : "chat",
+        step: this.stepNumber, elapsedMs: Date.now() - this.stepStartedAt }));
+    }
     // Workflow routing and structured planning use the same model transport,
     // but their partial tokens are not conversation output. Only execution
     // stages may publish drafts to the room.

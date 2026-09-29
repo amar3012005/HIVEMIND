@@ -452,14 +452,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     if (pinnedPlaybookId) plan.localPlaybookId = pinnedPlaybookId;
     else if (plan.mode === "company" && deckRequested) plan.localPlaybookId = "local:fundraising.pitch-deck";
     if (plan.mode === "company" && !localPlaybook(plan.localPlaybookId)) {
-      const playbookIds = playbookNames.map((item) => item.id) as [string, ...string[]];
       const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));
       const playbookMenu = playbookNames.map(({ id, name, description, base }) => ({ id, name, description, globalId: base }));
       const choice = await this.structuredPrompt(step, "select-local-playbook",
-        `Operator request: ${asked}. First recognize the relevant global method from this compact catalog: ${JSON.stringify(globalMenu)}. Then choose one organization-specific local method whose globalId matches that method: ${JSON.stringify(playbookMenu)}. Return its exact local id and three to six observable operating tasks shaped by that method and the operator's acceptance criteria. End with the requested deliverable and its saved receipt when a file is requested. For target organizations with ICP fit and approach, choose local:outreach.prospect-list; local:research.competitor-market compares competitors. These are catalog summaries only; the chosen full method loads after selection. Action skills load only when their plan step begins.`,
-        z.object({ id: z.enum(playbookIds), tasks: z.array(z.string().min(4).max(160)).min(3).max(6) }));
+        `Operator request: ${asked}. First recognize the relevant global method from this compact catalog: ${JSON.stringify(globalMenu)}. Then choose one organization-specific local method whose globalId matches that method: ${JSON.stringify(playbookMenu)}. Return only its exact local id. The existing operator-visible plan remains in force; the selected full method loads after this choice and action skills load only when their plan step begins. For target organizations with ICP fit and approach, choose local:outreach.prospect-list; local:research.competitor-market compares competitors.`,
+        z.object({ id: z.string().min(4) }));
       plan.localPlaybookId = choice.id;
-      plan.tasks = currentTurnTasks(choice.tasks);
     }
     const selectedPlaybook = plan.mode === "company" ? localPlaybook(plan.localPlaybookId) : null;
     if (plan.mode === "company" && !selectedPlaybook) throw new Error("company_playbook_not_selected");

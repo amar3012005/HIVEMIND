@@ -13,4 +13,5 @@ test("classifies recoverable workflow failures without returning raw provider te
 test("classifies missing required structured calls as model output failures", () => {
   assert.equal(workflowErrorCode(new Error("AI_ToolChoiceViolationError: Model response did not contain a call to the required tool 'think_final_answer'.")), "model_output_invalid");
   assert.equal(workflowErrorCode(new Error("Think prompt returned invalid structured output")), "model_output_invalid");
+  assert.equal(workflowErrorCode(Object.assign(new Error("Invalid playbook id"), { name: "ZodError" })), "model_output_invalid");
 });

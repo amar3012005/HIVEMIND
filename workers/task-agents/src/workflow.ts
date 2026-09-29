@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsAgentMemorySave, requestsArtifact, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -156,7 +156,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     let asked = work.task || "Map competitors and the local market.";
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
-    const quickRoute = work.continuation ? null : await durable.do("jev-route", async () =>
+    const privateMemoryRequest = requestsAgentMemorySave(asked);
+    const quickRoute = work.continuation ? null : privateMemoryRequest ? "action" : await durable.do("jev-route", async () =>
       this.agent.routeTask(asked, work.previousRequest || "", work.company));
     const quickDirect = quickRoute === "direct" ? await step.prompt("direct-answer", {
       prompt: `Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here.`,
@@ -200,7 +201,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const deckRequested = plan.outputKind === "slide_deck" || requestsSlideDeck(asked);
     const artifactForbidden = artifactCreationForbidden(work.task ?? "");
     const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
-    if (work.modePreference === "company" || deckRequested) plan.mode = "company";
+    if (privateMemoryRequest) plan.mode = "action";
+    else if (work.modePreference === "company" || deckRequested) plan.mode = "company";
     else if (/\b(screenshot|capture)\b/i.test(asked) || (plan.mode === "direct" && requestsArtifact(asked))) plan.mode = "action";
     else if (plan.mode === "direct" && !/\b(?:do not|don't|no)\s+(?:use\s+)?tools?\b/i.test(work.task ?? "")
       && /\b(?:need|requires?)\b[^.!?]{0,60}\b(?:recall|search|check|verify|evidence)\b|\b(?:not|isn't|aren't)\s+(?:specified|described|available|verified)\b/i.test(`${plan.reply} ${plan.decision}`)) {
@@ -261,7 +263,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
       });
       let result: z.infer<typeof reportSchema> = reportSchema.parse({});
-      let actionGuidance = "";
+      let actionGuidance = privateMemoryRequest
+        ? "The operator said your/agent brain: use hyperagents_memory, never hivemind_meta save. Summarize only reusable verified lessons or handoffs from this room, no transcript dump. Save at most two concise entries with evidence context, check the returned receipts, then report exactly what the private brain stored. No company-memory approval is needed. "
+        : "";
       let readMethodUnresolved = false;
       for (let round = 0; round < 3; round += 1) {
         result = await step.prompt(round === 0 ? "action-execute" : `action-continue-${round}`, {

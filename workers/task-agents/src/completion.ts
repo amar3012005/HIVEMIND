@@ -137,9 +137,17 @@ export function directReplyComplete(report: string): CompletionResult {
 }
 
 export function requestsMemorySave(task: string): boolean {
+  if (requestsAgentMemorySave(task)) return false;
   if (/\b(do not|don't|never|without|no)\b[^.!?]{0,80}\b(sav(?:e|ing)|stor(?:e|ing)|remember|memorize)\b/i.test(task)) return false;
   return /\b(remember|memorize)\b/i.test(task)
     || /\b(sav(?:e|ing)|stor(?:e|ing))\b[^.!?]{0,100}\b(memory|hivemind|name|preference|decision|fact|profile)\b/i.test(task);
+}
+
+/** The operator's "your brain" is the private agent mind, never company memory. */
+export function requestsAgentMemorySave(task: string): boolean {
+  if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:save|store|remember|memorize)\b/i.test(task)) return false;
+  return /\b(?:save|store|remember|memorize|persist)\b[^.!?]{0,100}\b(?:your|agent(?:'s)?|hyper\s*agents?|private|operating\s*system)\s+(?:own\s+)?(?:brain|mind|memory)\b/i.test(task)
+    && !/\b(?:company|hivemind|organization(?:al)?)\s+(?:brain|memory)\b/i.test(task);
 }
 
 export function requestsImageCapture(task: string): boolean {

@@ -1,6 +1,11 @@
 type MemoryRow = { kind?: unknown; status?: unknown; agentSlug?: unknown; title?: unknown;
   summary?: unknown; runId?: unknown; createdAt?: unknown };
 
+/** One idempotent event per terminal outcome; an incomplete attempt may later recover. */
+export function operatingWorkStatusKey(runId: string, complete: boolean): string {
+  return `workrun:${runId}:terminal:${complete ? "completed" : "incomplete"}`;
+}
+
 function rows(result: unknown): MemoryRow[] {
   if (!result || typeof result !== "object" || !("ok" in result) || result.ok !== true
     || !("memories" in result) || !Array.isArray(result.memories)) return [];

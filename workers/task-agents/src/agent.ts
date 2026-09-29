@@ -20,7 +20,7 @@ import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
-import { operatingMemoryBrief } from "./operating-memory-context";
+import { operatingMemoryBrief, operatingWorkStatusKey } from "./operating-memory-context";
 import { privateMemoryReceiptId, sessionMemoryEvidence, verifiedPrivateLearning } from "./session-memory";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { runContext } from "./run-context";
@@ -268,7 +268,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       kind: "task_status", status: complete ? "completed" : "incomplete", writer: "runtime",
       agent_slug: this.state.employee?.slug || "hyperagent", title: complete ? "Task completed" : "Task incomplete",
       summary: `${complete ? "Completed" : "Incomplete"}: ${(envelope.task || "company task").slice(0, 700)}`,
-      idempotency_key: `workrun:${envelope.runId}:terminal`, run_id: envelope.runId,
+      // A stopped/incomplete attempt may later finish on recovery. They are
+      // distinct status events, each idempotent across replay of that outcome.
+      idempotency_key: operatingWorkStatusKey(envelope.runId, complete), run_id: envelope.runId,
       room_id: this.currentRoomId() || undefined,
       context: { reason: reason.slice(0, 200), artifactRefs: artifactRefs.slice(0, 10) },
     });

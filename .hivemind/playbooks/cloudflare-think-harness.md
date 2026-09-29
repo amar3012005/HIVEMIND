@@ -23,5 +23,6 @@ Use this after the `cordis-harness-platform` skill when changing `workers/task-a
 
 - A direct `browser_capture` Workflow path once completed in about 12 seconds while the room showed only employee setup. The capture had no transcript tool event, so the UI could not display its in-flight operation. Instrument the boundary, not an artificial typing animation.
 - A delivered image was followed by repeated `operating_memory_unavailable` attempts in `record-operating-memory`; the Workflow stayed running and rejected another room request. Nonessential memory persistence must not delay the terminal WorkRun.
+- The Control log later identified `memory_idempotency_conflict`: an earlier stopped attempt saved `incomplete`, then a successful recovery tried to save `completed` under the same key. Outcome transitions are distinct private-memory events with distinct idempotency keys; replay of each event must retain its own receipt.
 - The room UI optimistically displayed a new turn even when the Worker rejected `room-start` because prior work was active. A rejection must terminate that optimistic working state and expose recovery status.
 - Preserve a user's existing FE session/room layout and Worker persona/tool contracts. Compare exact diffs and test a live room before promotion; a deployment UUID alone is not a source SHA.

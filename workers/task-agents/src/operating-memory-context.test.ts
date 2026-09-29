@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { operatingMemoryBrief } from "./operating-memory-context.ts";
+import { operatingMemoryBrief, operatingWorkStatusKey } from "./operating-memory-context.ts";
+
+test("a recovered WorkRun can record completion without conflicting with its incomplete attempt", () => {
+  const incomplete = operatingWorkStatusKey("run-1", false);
+  const completed = operatingWorkStatusKey("run-1", true);
+  assert.notEqual(incomplete, completed);
+  assert.equal(operatingWorkStatusKey("run-1", false), incomplete);
+  assert.equal(operatingWorkStatusKey("run-1", true), completed);
+});
 
 test("automatic operating recall is bounded and preserves typed newest-first records", () => {
   const result = { ok: true, memories: [{ kind: "learning", agentSlug: "marta", title: "New lesson",

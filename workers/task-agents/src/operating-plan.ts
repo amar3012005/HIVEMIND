@@ -19,3 +19,15 @@ export function completedPlanTaskIds(plan: OperatingPlan | null | undefined, run
 export function currentTurnTasks(tasks: readonly string[]): string[] {
   return tasks.filter((task) => !/^\s*(?:on|after|upon|once)\s+(?:operator\s+)?approval\b/i.test(task));
 }
+
+export function continuedPlan(runId: string, summary: string, titles: readonly string[], previous?: OperatingPlan): OperatingPlan {
+  return {
+    runId,
+    summary: summary.slice(0, 2000),
+    tasks: titles.slice(0, 6).map((title, index) => ({
+      id: index + 1,
+      title: title.slice(0, 160),
+      status: index < titles.length - 1 && previous?.tasks[index]?.title === title && previous.tasks[index].status === "completed" ? "completed" : "pending",
+    })),
+  };
+}

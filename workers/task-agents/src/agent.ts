@@ -18,7 +18,7 @@ import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdi
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
-import { completedPlanTaskIds, updatePlanTask } from "./operating-plan";
+import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { runContext } from "./run-context";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -28,7 +28,7 @@ import { artifactForModel, trimStoredArtifactPart, visionObservation } from "./a
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook, localPlaybookContract, localPlaybookVersion } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
-import type { EmployeeIdentity, LocalCompany, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
+import type { EmployeeIdentity, LocalCompany, OperatingPlan, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
 
 const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "", operatingPlan: null };
 
@@ -157,7 +157,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
   }
 
-  async startCompanyWork(work: { runId: string; orgId: string; userId: string; taskType: string; phase: string; inputRefs: string[]; outputSchemaId: string; company: string; website: string; market: string; task: string; previousRequest?: string; modePreference?: "auto" | "company" | "direct"; startedAt?: string; employee?: EmployeeIdentity; occurrenceId?: string }): Promise<string> {
+  async startCompanyWork(work: { runId: string; orgId: string; userId: string; taskType: string; phase: string; inputRefs: string[]; outputSchemaId: string; company: string; website: string; market: string; task: string; previousRequest?: string; modePreference?: "auto" | "company" | "direct"; startedAt?: string; employee?: EmployeeIdentity; occurrenceId?: string; continuation?: { previousRunId: string; plan: OperatingPlan; playbookId: string } }): Promise<string> {
     ensureCompanyTables(this.sql.bind(this));
     this.sql`INSERT OR IGNORE INTO workrun_runtime (run_id, work, updated_at) VALUES (${work.runId}, ${JSON.stringify(work)}, ${new Date().toISOString()})`;
     const workflowId = await this.runWorkflow("TASK_LIFECYCLE", work, { id: work.runId });
@@ -237,6 +237,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (work.orgId !== orgId || work.userId !== userId) throw new Error("workrun_scope_denied");
     let id = String(row.workflow_id);
     const current = await this.getWorkflowStatus("TASK_LIFECYCLE", id);
+    const indexedIncomplete = this.state.envelope?.runId === work.runId
+      && (this.state.events ?? []).some((event) => event.step === "workrun-index" && event.detail === `${work.runId} incomplete`);
+    const logicalStatus = current.status === "complete" && (String(row.status) === "incomplete" || indexedIncomplete) ? "incomplete" : current.status;
+    if (action === "continue-plan") {
+      if (logicalStatus !== "incomplete" || this.state.envelope?.runId !== work.runId) throw new Error("workrun_plan_not_continuable");
+      const plan = this.state.operatingPlan;
+      const pinned = this.sql`SELECT playbook_id FROM company_runs WHERE id = ${work.runId} LIMIT 1`[0];
+      const playbookId = String(pinned?.playbook_id || "");
+      if (!plan || plan.runId !== work.runId || !plan.tasks.length || !playbookId) throw new Error("workrun_plan_unavailable");
+      const next = { ...work, runId: crypto.randomUUID(), startedAt: new Date().toISOString(), occurrenceId: undefined,
+        modePreference: "company" as const,
+        continuation: { previousRunId: work.runId, plan, playbookId } };
+      this.note("user", `Continue the unfinished plan from WorkRun ${work.runId}`);
+      id = await this.startCompanyWork(next);
+      return { runId: next.runId, workflowId: id, status: "running", checkpoints: [], continuationOf: work.runId };
+    }
     if (action === "pause" && current.status === "running") await this.pauseWorkflow(id);
     else if (action === "resume" && current.status === "paused") await this.resumeWorkflow(id);
     else if (action === "resume" && ["errored", "terminated"].includes(current.status)) {
@@ -249,8 +265,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       this.sql`UPDATE workrun_runtime SET workflow_id = ${id}, status = ${"queued"}, updated_at = ${new Date().toISOString()} WHERE run_id = ${work.runId}`;
       this.setState({ ...this.state, workflowId: id, envelope: work });
     } else if (action !== "status") throw new Error(`workrun_cannot_${action}_${current.status}`);
-    const status = action === "status" ? current.status : (await this.getWorkflowStatus("TASK_LIFECYCLE", id)).status;
-    this.finishWorkRuntime(work.runId, status);
+    const status = action === "status" ? logicalStatus : (await this.getWorkflowStatus("TASK_LIFECYCLE", id)).status;
+    if (action !== "status" || status !== "incomplete") this.finishWorkRuntime(work.runId, status);
     const checkpoints = this.sql`SELECT stage, completed_at FROM workrun_checkpoints WHERE run_id = ${work.runId} ORDER BY completed_at ASC`;
     if (status === "errored" && this.state.envelope?.runId === work.runId) {
       const events = this.state.events ?? [];
@@ -570,7 +586,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     ensureCompanyTables(this.sql.bind(this));
     const pinned = this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${runId} LIMIT 1`[0];
     if (pinned && String(pinned.playbook_id) !== id) throw new Error("run_playbook_conflict");
-    const snapshot = pinned?.playbook_snapshot ? String(pinned.playbook_snapshot) : `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
+    const continuation = (this.state.envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation;
+    const previous = continuation && !pinned
+      ? this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${continuation.previousRunId} LIMIT 1`[0]
+      : null;
+    if (continuation && (!previous || String(previous.playbook_id) !== id || !previous.playbook_snapshot)) throw new Error("continuation_playbook_unavailable");
+    const snapshot = pinned?.playbook_snapshot ? String(pinned.playbook_snapshot)
+      : previous?.playbook_snapshot ? String(previous.playbook_snapshot)
+      : `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
     const version = Number(snapshot.match(/^Local playbook \S+ version (\d+)\./)?.[1] || localPlaybookVersion(id));
     this.setState({ ...this.state, activePlaybookId: id });
     if (!pinned) this.sql`INSERT INTO company_runs (id, employee_slug, goal, status, playbook_id, playbook_snapshot, created_at) VALUES (${runId}, ${this.state.employee?.slug || "unassigned"}, ${this.state.operatingPlan?.summary || ""}, ${"active"}, ${id}, ${snapshot}, ${new Date().toISOString()})`;
@@ -765,12 +788,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.setState({ ...this.state, catalogStage: "planning" });
   }
 
-  setOperatingPlan(runId: string, summary: string, titles: string[]): void {
-    const operatingPlan = {
-      runId,
-      summary: summary.slice(0, 2000),
-      tasks: titles.slice(0, 6).map((title, index) => ({ id: index + 1, title: title.slice(0, 160), status: "pending" as const })),
-    };
+  setOperatingPlan(runId: string, summary: string, titles: string[], previous?: OperatingPlan): void {
+    const operatingPlan = continuedPlan(runId, summary, titles, previous);
     this.setState({
       ...this.state,
       operatingPlan,

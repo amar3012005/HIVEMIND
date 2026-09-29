@@ -7,7 +7,7 @@ import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { ineligiblePostRunJev, type PostRunJevReview } from "./post-run-jev";
-import type { TaskEnvelope } from "./types";
+import type { OperatingPlan, TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
 
 export interface CompanyWork extends TaskEnvelope {
@@ -19,6 +19,7 @@ export interface CompanyWork extends TaskEnvelope {
   task: string;
   previousRequest?: string;
   modePreference?: "auto" | "company" | "direct";
+  continuation?: { previousRunId: string; plan: OperatingPlan; playbookId: string };
 }
 
 const planSchema = z.object({
@@ -140,14 +141,20 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     let asked = work.task || "Map competitors and the local market.";
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
-    const quickRoute = await durable.do("jev-route", async () =>
+    const quickRoute = work.continuation ? null : await durable.do("jev-route", async () =>
       this.agent.routeTask(asked, work.previousRequest || "", work.company));
     const quickDirect = quickRoute === "direct" ? await step.prompt("direct-answer", {
       prompt: `Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here.`,
       output: z.object({ reply: z.string().min(2) }),
       timeout: "30 minutes",
     }) : null;
-    const plan = quickRoute ? planSchema.parse({
+    const plan = work.continuation ? planSchema.parse({
+      mode: "company", decision: `Continue unfinished WorkRun ${work.continuation.previousRunId}`,
+      plan: work.continuation.plan.summary,
+      tasks: work.continuation.plan.tasks.map((task: OperatingPlan["tasks"][number]) => task.title),
+      localPlaybookId: work.continuation.playbookId,
+      resolvedRequest: asked,
+    }) : quickRoute ? planSchema.parse({
       mode: quickRoute,
       decision: "",
       reply: quickDirect?.reply || "",
@@ -167,7 +174,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return requestPlan("operating-plan-retry");
       }
     })();
-    if (!quickRoute) plan.localPlaybookId = "";
+    if (!quickRoute && !work.continuation) plan.localPlaybookId = "";
     asked = plan.resolvedRequest.trim() || asked;
     // A resumed logical run keeps its originally approved method and snapshot.
     // Model routing can change between attempts; it must not replace an
@@ -312,7 +319,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const groups = plan.groups.length > 0 ? [...plan.groups] : ["company", "web_research", "browser", "records"];
       if (!groups.includes("company")) groups.push("company");
       await this.agent.applyGroups(groups, true);
-      await this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks);
+      await this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks, work.continuation?.plan);
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
       if (plan.decision.trim()) await this.agent.note("progress", plan.decision.trim());
     });

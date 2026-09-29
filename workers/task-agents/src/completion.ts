@@ -75,6 +75,54 @@ export function prospectQuotesVerified(prospects: readonly ProspectEvidence[], p
   return { complete: true, reason: "prospect_quotes_verified" };
 }
 
+/** Bind a prospect's evidence to immutable text from the fetched pages.
+ * The model may identify a source and paraphrase it, but only the runtime may
+ * place a quotation in a deliverable. A missing supporting passage fails closed.
+ */
+export function bindProspectSourcePassages(
+  report: string,
+  prospects: readonly ProspectEvidence[],
+  pages: readonly { url: string; excerpt: string }[],
+  locationHint = "",
+): { report: string; prospects: ProspectEvidence[] } | null {
+  const byUrl = new Map(pages.map((page) => [sourceKey(page.url), page.excerpt]));
+  const bound: ProspectEvidence[] = [];
+  let verifiedReport = report;
+  for (const row of prospects) {
+    const locationPage = byUrl.get(sourceKey(row.locationUrl));
+    const sectorPage = byUrl.get(sourceKey(row.sectorUrl));
+    if (!locationPage || !sectorPage) return null;
+    const location = selectSourcePassage(locationPage, row.locationEvidence, "location", locationHint);
+    const sector = selectSourcePassage(sectorPage, row.sectorEvidence, "sector");
+    if (!location || !sector) return null;
+    for (const [draft, verified] of [[row.locationEvidence, location], [row.sectorEvidence, sector]]) {
+      if (draft.trim() && draft !== verified) verifiedReport = verifiedReport.replaceAll(draft, verified);
+    }
+    bound.push({ ...row, locationEvidence: location, sectorEvidence: sector });
+  }
+  const evidence = bound.map((row) =>
+    `### ${row.name}\n\n- Location: “${row.locationEvidence}” ([official source](${row.locationUrl}))\n- Insurance business: “${row.sectorEvidence}” ([official source](${row.sectorUrl}))`).join("\n\n");
+  verifiedReport += `\n\n## Verified primary-source passages\n\n${evidence}\n`;
+  return { report: verifiedReport, prospects: bound };
+}
+
+function selectSourcePassage(page: string, draft: string, kind: "location" | "sector", locationHint = ""): string | null {
+  if (sourceReceiptCoversQuotes(page, [draft]) && supportsClaim(draft, kind, locationHint)) return draft.trim();
+  const candidates = sourceQuoteCandidates(page, draft, 12);
+  const lines = page.split(/\n+|(?<=[.!?])\s+(?=[A-Z\p{Lu}])/u)
+    .map((part) => part.trim()).filter((part) => part.length >= 12 && part.length <= 350);
+  const selected = [...candidates, ...lines].find((part) =>
+    supportsClaim(part, kind, locationHint) && sourceReceiptCoversQuotes(page, [part]));
+  return selected ?? null;
+}
+
+function supportsClaim(passage: string, kind: "location" | "sector", locationHint: string): boolean {
+  if (kind === "sector") return /\b(?:insur\w*|reinsur\w*|versicher\w*|rückversicher\w*)\b/i.test(passage);
+  const hint = locationHint.trim();
+  return hint ? canonicalPassage(passage).includes(canonicalPassage(hint))
+    : /\b(?:headquarters?|headquartered|registered office|address|adresse|sitz|standort|\d{4,5}\s+[\p{L}-]+)\b/iu.test(passage);
+}
+
 /** A prior page read is reusable only when it contains every requested quote. */
 export function sourceReceiptCoversQuotes(excerpt: string, quotes: readonly string[]): boolean {
   const page = canonicalPassage(excerpt);

@@ -1754,22 +1754,19 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const urls = [...new Set(prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]))].slice(0, 20);
     const envelope = this.state.envelope;
     const previousRunId = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } } | undefined)?.continuation?.previousRunId;
-    const requiredQuotes = (url: string) => prospects.flatMap((row) => [
-      ...(row.locationUrl === url ? [row.locationEvidence] : []),
-      ...(row.sectorUrl === url ? [row.sectorEvidence] : []),
-    ]);
     const receipts: Array<{ url: string; excerpt: string; error?: string }> = [];
     for (let offset = 0; offset < urls.length; offset += 4) {
       const batch = await Promise.all(urls.slice(offset, offset + 4).map(async (url) => {
         try {
           const target = new URL(url);
           if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
-          // The original Browser Run read is already evidence. Avoid reopening
-          // a slow page if its persisted text covers the exact quoted claims.
+          // The original Browser Run read is the authority even when the model
+          // paraphrased its quote. Reopening the page cannot repair a model
+          // quote; bind passages to this receipt after the read step instead.
           for (const runId of [envelope?.runId, previousRunId].filter((id): id is string => Boolean(id))) {
             const prior = this.sql`SELECT excerpt, read_at FROM source_read_receipts WHERE run_id = ${runId} AND org_id = ${envelope?.orgId ?? ""} AND user_id = ${envelope?.userId ?? ""} AND url = ${url} LIMIT 1`[0];
             if (prior && Date.now() - Date.parse(String(prior.read_at)) < 24 * 60 * 60 * 1000
-              && sourceReceiptCoversQuotes(String(prior.excerpt), requiredQuotes(url))) return { url, excerpt: String(prior.excerpt) };
+              && String(prior.excerpt).length >= 80) return { url, excerpt: String(prior.excerpt) };
           }
           if (!browser) throw new Error("browser_binding_missing");
           let markdown = "";

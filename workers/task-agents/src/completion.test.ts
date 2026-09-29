@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -23,6 +23,21 @@ test("quote repair includes source location in a long page footer and sector tex
   assert.match(excerpt, /HDI-Platz 1, 30659 Hannover/);
   assert.match(excerpt, /corporate insurance/);
   assert.ok(excerpt.length < page.length);
+});
+
+test("runtime binds prospect passages to fetched pages without another model turn", () => {
+  const url = "https://www.hannover-re.com/en/imprint/";
+  const page = "# Imprint\nHannover Re is a global reinsurer.\nRegistered office: Karl-Wiechert-Allee 50, 30625 Hannover.\n";
+  const draft = "# Hannover insurers\n\nHannover Re is a reinsurer in Hannover. " + url;
+  const bound = bindProspectSourcePassages(draft, [{ name: "Hannover Re", locationUrl: url, sectorUrl: url,
+    locationEvidence: "Hannover Re is headquartered at 30625 Hannover", sectorEvidence: "Hannover Re sells reinsurance", caveat: "" }],
+    [{ url, excerpt: page }], "Hannover");
+  assert.ok(bound);
+  assert.equal(bound.prospects[0].locationEvidence, "Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.");
+  assert.equal(bound.prospects[0].sectorEvidence, "Hannover Re is a global reinsurer.");
+  assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
+  assert.match(bound.report, /Verified primary-source passages/);
+  assert.equal(bindProspectSourcePassages(draft, bound.prospects, [{ url, excerpt: "# Imprint\nThis is a vendor in Berlin." }], "Hannover"), null);
 });
 import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 

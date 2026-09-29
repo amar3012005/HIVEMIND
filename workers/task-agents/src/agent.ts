@@ -1,4 +1,4 @@
-import { Think, defaultContextOverflowClassifier, type ChatRecoveryContext, type ChatRecoveryOptions, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
+import { Think, defaultContextOverflowClassifier, type ChatErrorContext, type ChatRecoveryContext, type ChatRecoveryOptions, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
 import { recoveryModel, thinkModel } from "./think-model";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
@@ -33,6 +33,7 @@ import { artifactForModel, trimStoredArtifactPart, visionObservation } from "./a
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook, localPlaybookContract, localPlaybookVersion } from "./playbooks";
 import { toolkitSkillSource } from "./skill-catalog";
 import { toolsForGroups } from "./tool-groups";
+import { workflowErrorCode } from "./workflow-error";
 import type { EmployeeIdentity, LocalCompany, OperatingPlan, RunSource, SpecialistRole, TaskAgentState, TaskEnvelope, TraceEvent } from "./types";
 
 const EMPTY: TaskAgentState = { envelope: null, role: null, tools: [], events: [], places: [], sources: [], toolGroups: [], catalogStage: "action", selectedGlobals: [], workflowId: "", awaiting: "", operatingPlan: null, privateMemoryWritesAllowed: false };
@@ -69,6 +70,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     proactive: { maxInputTokens: 100_000, maxCompactions: 1 },
   };
   override classifyChatError = defaultContextOverflowClassifier;
+  override onChatError(error: unknown, ctx?: ChatErrorContext): unknown {
+    console.error(JSON.stringify({ event: "think_turn_failed", runId: this.state.envelope?.runId,
+      code: workflowErrorCode(error), stage: ctx?.stage, classification: ctx?.classification,
+      messagesPersisted: ctx?.messagesPersisted, requestId: ctx?.requestId }));
+    return error;
+  }
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   private textDraft = "";
   private lastReportDraft = "";
@@ -177,7 +184,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       const promptId = crypto.randomUUID();
       const result = await this.saveMessages((messages) => [...messages,
         { id: promptId, role: "user", parts: [{ type: "text", text: prompt }], createdAt: new Date() }]);
-      if (result.status !== "completed") throw new Error(`execution_turn_${result.status}`);
+      if (result.status !== "completed") {
+        console.error(JSON.stringify({ event: "think_execution_not_completed", runId: this.state.envelope?.runId,
+          status: result.status }));
+        throw new Error(`execution_turn_${result.status}`);
+      }
       const messages = await this.getMessages();
       const promptIndex = messages.findIndex((message) => message.id === promptId);
       const latest = promptIndex < 0 ? null : messages.slice(promptIndex + 1).reverse().find((message) => message.role === "assistant");

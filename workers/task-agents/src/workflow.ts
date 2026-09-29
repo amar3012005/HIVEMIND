@@ -381,6 +381,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     asked = plan.resolvedRequest.trim() || asked;
     if (plan.memoryIntent === "agent_session" && !requestsArtifact(work.task)) return this.savePrivateRoomSession(work, step);
     if (requestsArtifact(work.task) && plan.memoryIntent === "agent_session") plan.memoryIntent = "none";
+    // A task packet may permit a reusable private learning after the requested
+    // deliverable is verified. That optional post-run record cannot replace
+    // the company task or its artifact. Only a standalone memory request takes
+    // the short private-learning route.
+    if (plan.memoryIntent === "agent_record" && (work.modePreference === "company" || plan.mode === "company"
+      || requestsArtifact(work.task) || plan.outputKind !== "none")) plan.memoryIntent = "none";
     if (plan.memoryIntent === "agent_record") return this.savePrivateLearning(work, step);
     await durable.do("bind-company-memory-intent", async () =>
       this.agent.setCompanyMemoryIntent(plan.memoryIntent === "company"));

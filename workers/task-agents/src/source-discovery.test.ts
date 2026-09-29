@@ -8,6 +8,11 @@ test("browser reads require an exact discovered or user-provided URL", () => {
   assert.equal(browserTargetAllowed("https://example.com/guessed-page", found, []), false);
   assert.equal(browserTargetAllowed("https://example.com/report", found, ["Read https://example.com/report."]), true);
   assert.equal(browserTargetAllowed("https://example.com/other", found, ["Read https://example.com/report."]), false);
+  assert.equal(browserTargetAllowed("https://developers.cloudflare.com/workflows/", new Set(["https://developers.cloudflare.com/workflows/index.md"]), []), true);
+  assert.equal(browserTargetAllowed("https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/", new Set(["https://developers.cloudflare.com/workflows/build/sleeping-and-retrying"]), []), true);
+  assert.equal(browserTargetAllowed("https://developers.cloudflare.com/workflows/guessed", new Set(["https://developers.cloudflare.com/workflows/index.md"]), []), false);
+  assert.equal(browserTargetAllowed("https://other.example/workflows/", new Set(["https://developers.cloudflare.com/workflows/index.md"]), []), false);
+  assert.equal(browserTargetAllowed("https://developers.cloudflare.com/workflows/?draft=1", new Set(["https://developers.cloudflare.com/workflows/index.md"]), []), false);
 });
 
 test("fetched same-site links become exact browser targets without a second search", () => {

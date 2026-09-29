@@ -1,17 +1,28 @@
 /** A browser read needs a URL discovered in this turn or supplied by the task. */
 export function browserTargetAllowed(url: string, discovered: ReadonlySet<string>, supplied: readonly string[]): boolean {
-  let target: string;
-  try { target = new URL(url).href; } catch { return false; }
+  const target = canonicalSourceUrl(url);
+  if (!target) return false;
   if ([...discovered].some((candidate) => {
-    try { return new URL(candidate).href === target; } catch { return false; }
+    return canonicalSourceUrl(candidate) === target;
   })) return true;
   return supplied.some((text) => {
     for (const match of text.matchAll(/https?:\/\/[^\s<>"')\]]+/g)) {
-      try { if (new URL(match[0].replace(/[.,]$/, "")).href === target) return true; }
-      catch { /* Ignore malformed text, not the explicit target. */ }
+      if (canonicalSourceUrl(match[0].replace(/[.,]$/, "")) === target) return true;
     }
     return false;
   });
+}
+
+function canonicalSourceUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!/^https?:$/.test(url.protocol)) return null;
+    url.hash = "";
+    // Documentation indexes and slash-terminated routes identify the same
+    // page. This does not grant neighboring paths or cross-origin URLs.
+    url.pathname = url.pathname.replace(/\/(?:index\.md|index\.html)$/i, "").replace(/\/+$/, "") || "/";
+    return url.href;
+  } catch { return null; }
 }
 
 /** Same-site links in a fetched page are discovered evidence, not guessed URLs. */

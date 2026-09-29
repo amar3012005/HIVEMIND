@@ -613,6 +613,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       ? "terminated" : action === "stop" && stopRequested ? "stopping" : observedStatus;
     if ((action !== "status" || status !== "incomplete") && (action !== "stop" || ["terminated", "errored", "complete"].includes(status))) this.finishWorkRuntime(work.runId, status);
     const checkpoints = this.sql`SELECT stage, completed_at FROM workrun_checkpoints WHERE run_id = ${work.runId} ORDER BY completed_at ASC`;
+    const snapshot = this.readRunRecoverySnapshot(work.runId, orgId, userId);
+    const receipts = {
+      planCompleted: snapshot.plan?.tasks.filter((task) => task.status === "completed").length ?? 0,
+      planTotal: snapshot.plan?.tasks.length ?? 0,
+      sources: snapshot.sourceCount,
+      artifacts: snapshot.artifactCount,
+    };
     if (status === "errored" && this.state.envelope?.runId === work.runId) {
       const events = this.state.events ?? [];
       const lastUser = events.map((event) => event.step).lastIndexOf("user");
@@ -626,7 +633,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const reason = status === "incomplete" && this.state.envelope?.runId === work.runId
       ? [...(this.state.events ?? [])].reverse().find((event) => event.step === "completion")?.detail || "plan_incomplete"
       : "";
-    return { runId: work.runId, workflowId: id, status, reason, checkpoints };
+    return { runId: work.runId, workflowId: id, status, reason, checkpoints, receipts };
   }
 
   markAwaiting(awaiting: "" | "input" | "memory"): void {

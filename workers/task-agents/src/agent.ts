@@ -210,7 +210,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!occurrence || resolved.error) throw new Error(resolved.error || "occurrence_unavailable");
     const expectedName = `session-${occurrence.org_id}-${occurrence.run_room_id}`;
     if (this.name !== expectedName) throw new Error("wrong_room_agent");
-    const runId = `trigger-${occurrenceId}`;
+    // Core's canonical WorkRun ledger accepts UUID identities. The occurrence
+    // is already immutable and unique, so use its UUID for both WorkRun and
+    // Workflow idempotency instead of a non-UUID `trigger-` prefix.
+    const runId = occurrenceId;
     ensureCompanyTables(this.sql.bind(this));
     const existing = this.sql`SELECT workflow_id FROM workrun_runtime WHERE run_id = ${runId} LIMIT 1`[0];
     if (existing?.workflow_id) return { workflowId: String(existing.workflow_id), status: "already_started" };

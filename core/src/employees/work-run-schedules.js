@@ -94,10 +94,10 @@ export async function runDueWorkRunSchedule({ prisma, now = new Date(), owner = 
   const release = async (patch) => prisma.$queryRawUnsafe(
     `UPDATE "hivemind"."work_run_schedules"
         SET status = $3, next_run_at = $4::timestamptz, last_workrun_id = $5::uuid,
-            failure_count = $6, last_error = $7, lease_owner = NULL, lease_until = NULL, updated_at = now()
+            failure_count = $6, last_error = $7, lease_owner = NULL, lease_until = $8::timestamptz, updated_at = now()
       WHERE id = $1::uuid AND lease_owner = $2 RETURNING id`,
     schedule.id, owner, patch.status, patch.nextRunAt, patch.workRunId,
-    patch.failures, patch.error,
+    patch.failures, patch.error, patch.retryAt || null,
   );
   try {
     const membership = await getActiveOrganizationMembership(prisma, { orgId: schedule.org_id, userId: schedule.user_id });
@@ -123,7 +123,8 @@ export async function runDueWorkRunSchedule({ prisma, now = new Date(), owner = 
   } catch (error) {
     const failures = Number(schedule.failure_count || 0) + 1;
     await release({ status: failures >= 3 ? 'paused' : 'active', nextRunAt: due,
-      workRunId: schedule.last_workrun_id || null, failures, error: String(error.message).slice(0, 1000) });
+      workRunId: schedule.last_workrun_id || null, failures, error: String(error.message).slice(0, 1000),
+      retryAt: failures >= 3 ? null : new Date(now.getTime() + 60_000 * (2 ** (failures - 1))) });
     logger.warn?.('[workrun-schedule] dispatch failed', { schedule_id: schedule.id, failures, error: error.message });
     return { scheduleId: schedule.id, status: failures >= 3 ? 'paused' : 'retry', error: error.message };
   }

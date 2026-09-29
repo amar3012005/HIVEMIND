@@ -89,3 +89,21 @@ test('inactive scheduled owner never dispatches and repeated failures pause trig
   assert.equal(result.status, 'paused');
   assert.equal(releases[0][2], 'paused');
 });
+
+test('retry waits before claiming same occurrence again', async () => {
+  const now = new Date('2026-09-29T22:00:00Z');
+  const releases = [];
+  const prisma = {
+    $queryRawUnsafe: async (sql, ...args) => {
+      if (sql.startsWith('WITH candidate')) return [{ id: scheduleId, org_id: orgId, user_id: userId,
+        room_id: roomId, next_run_at: now, failure_count: 0 }];
+      releases.push(args); return [{ id: scheduleId }];
+    },
+    userOrganization: { findUnique: async () => ({ isActive: false }) },
+    hyperRoom: { findFirst: async () => ({ id: roomId }) },
+    digitalEmployee: { findFirst: async () => ({ id: 'employee' }) },
+  };
+  const result = await runDueWorkRunSchedule({ prisma, now, owner: 'test', logger: { warn() {} } });
+  assert.equal(result.status, 'retry');
+  assert.equal(releases[0][7].toISOString(), '2026-09-29T22:01:00.000Z');
+});

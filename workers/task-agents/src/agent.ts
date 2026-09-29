@@ -180,6 +180,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
    */
   async streamTaskTurn(prompt: string): Promise<string> {
     this.setState({ ...this.state, executionTurn: true });
+    this.broadcast(JSON.stringify({ type: "execution-stream-start" }));
     try {
       const promptId = crypto.randomUUID();
       const result = await this.saveMessages((messages) => [...messages,

@@ -7,7 +7,7 @@ import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
 import { generateText, streamText, tool, type ToolSet } from "ai";
 import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
-import { browserTargetAllowed } from "./source-discovery";
+import { browserTargetAllowed, linkedPageUrls } from "./source-discovery";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -1538,7 +1538,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const browserRead = tool({
-      description: "Read Markdown from an exact public HTTPS URL supplied by the operator or returned by parallel_search/parallel_search_batch. Discover an official page URL with search before calling this tool; never guess paths. Returns bounded page text and records a source receipt for verified reports. No connected-app grant is needed.",
+      description: "Read Markdown from an exact public HTTPS URL supplied by the operator, returned by search, or linked from a page already read in this turn. Discover an official URL before reading; never guess paths. You can follow exact same-site links in returned Markdown without searching again. Returns bounded page text and a source receipt. No connected-app grant is needed.",
       inputSchema: z.object({ url: z.url() }),
       execute: async ({ url }): Promise<{ url: string; markdown: string }> => {
         this.assertTool("browser_markdown");
@@ -1548,6 +1548,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         if (!browser) throw new Error("browser_binding_missing");
         const markdown = await readBrowserPage(browser, target.href, 35000);
         if (markdown.trim().length < 80) throw new Error("page_content_missing");
+        for (const link of linkedPageUrls(target.href, markdown)) this.discoveredUrls.add(link);
         this.recordSourceRead(target.href, markdown);
         this.rememberSources({ url: target.href });
         this.note("browser_markdown", `${target.href}: ${markdown.length} characters`);

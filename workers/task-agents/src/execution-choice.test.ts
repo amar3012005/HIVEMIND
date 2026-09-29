@@ -3,7 +3,8 @@ import test from "node:test";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice.ts";
 
 test("read guidance discovers unknown URLs before browser reads", () => {
-  assert.match(READ_TOOL_FALLBACK, /discover the exact public HTTPS URL with parallel_search/);
+  assert.match(READ_TOOL_FALLBACK, /exact URL returned by parallel_search/);
+  assert.match(READ_TOOL_FALLBACK, /exact same-site link in a page already read/);
   assert.match(READ_TOOL_FALLBACK, /Read a URL supplied by the operator directly/);
   assert.doesNotMatch(READ_TOOL_FALLBACK, /browser_markdown with the exact public HTTPS URL first/);
 });

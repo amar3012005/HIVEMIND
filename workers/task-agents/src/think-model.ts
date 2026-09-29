@@ -3,16 +3,10 @@ import type { LanguageModel } from "ai";
 import type { GatewayEnv } from "./gateway";
 
 const DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash-0731:nitro";
-const FAST_START_MODEL = "openai/gpt-oss-20b:nitro";
 
 export function thinkModel(env: GatewayEnv): LanguageModel | string {
   if (env.OPENROUTER_MODEL !== DEEPSEEK_MODEL) return "@cf/zai-org/glm-5.3-flash";
   return openRouterModel(env, DEEPSEEK_MODEL);
-}
-
-export function initialPlanModel(env: GatewayEnv): LanguageModel | null {
-  if (env.OPENROUTER_MODEL !== DEEPSEEK_MODEL) return null;
-  return openRouterModel(env, FAST_START_MODEL);
 }
 
 function openRouterModel(env: GatewayEnv, model: string): LanguageModel {

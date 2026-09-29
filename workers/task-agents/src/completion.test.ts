@@ -33,7 +33,8 @@ test("runtime binds prospect passages to fetched pages without another model tur
     locationEvidence: "Hannover Re is headquartered at 30625 Hannover", sectorEvidence: "Hannover Re sells reinsurance", caveat: "" }],
     [{ url, excerpt: page }], "Hannover");
   assert.ok(bound);
-  assert.equal(bound.prospects[0].locationEvidence, "Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.");
+  assert.match(bound.prospects[0].locationEvidence, /Registered office: Karl-Wiechert-Allee 50, 30625 Hannover/);
+  assert.ok(bound.prospects[0].locationEvidence.length <= 300);
   assert.equal(bound.prospects[0].sectorEvidence, "Hannover Re is a global reinsurer.");
   assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
   assert.match(bound.report, /Verified primary-source passages/);
@@ -77,6 +78,17 @@ test("official English imprint can support a city spelled differently in the tas
   assert.match(bound.prospects[0].locationEvidence, /VHV Allgemeine Versicherung AG/);
   assert.match(bound.prospects[0].locationEvidence, /30177 Hanover/);
   assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
+});
+
+test("address binding skips early metadata and keeps the exact passage short", () => {
+  const url = "https://www.hannover-re.com/en/imprint";
+  const page = `title: Hannover Re Official Information\n${"Navigation and company metadata. ".repeat(20)}\n# Imprint\n### Hannover Rück SE\nrepresented by the Executive Board:\nClemens Jungsthöfel, Chairman\nKarl-Wiechert-Allee 50\n30625 Hannover\nHannover Re provides reinsurance.\n`;
+  const row = { name: "Hannover Rück SE (Hannover Re)", locationUrl: url, sectorUrl: url,
+    locationEvidence: "Hannover Re is in Hannover", sectorEvidence: "Hannover Re provides reinsurance", caveat: "" };
+  const bound = bindProspectSourcePassages(`# Hannover Re\n${url}`, [row], [{ url, excerpt: page }], "Hannover");
+  assert.ok(bound);
+  assert.ok(bound.prospects[0].locationEvidence.length <= 300);
+  assert.doesNotMatch(bound.prospects[0].locationEvidence, /Navigation and company metadata/);
 });
 
 test("source binding retains the user's city when the planner abbreviates the task", () => {
@@ -215,12 +227,13 @@ test("stays open when the employee never loaded the company brain", () => {
 test("rejects prospect URLs absent from tool evidence", () => {
   const report = "Candidate Sparkasse Hannover fits the offer. Source: https://www.sparkasse-hannover.de";
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: [] }).reason, "prospect_sources_missing");
-  assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).complete, true);
+  assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).reason, "prospect_sources_missing");
+  assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/"] }).complete, true);
   const withContext = `${report} Group context: https://www.vhv-gruppe.de/unternehmen/wer-wir-sind`;
   assert.equal(companyWorkComplete({ report: withContext, recalled: true,
     prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).reason, "prospect_sources_missing");
   assert.equal(companyWorkComplete({ report: withContext, recalled: true,
-    prospectSources: ["https://www.sparkasse-hannover.de/de/home.html", "https://www.vhv-gruppe.de/unternehmen/wer-wir-sind"] }).complete, true);
+    prospectSources: ["https://www.sparkasse-hannover.de/", "https://www.vhv-gruppe.de/unternehmen/wer-wir-sind"] }).complete, true);
 });
 
 test("versioned prospect contract requires per-account location and sector receipts", () => {

@@ -1961,9 +1961,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.note("source-verification", JSON.stringify(prospects.map((row) => ({ name: row.name, locationUrl: row.locationUrl, locationEvidence: row.locationEvidence, sectorUrl: row.sectorUrl, sectorEvidence: row.sectorEvidence }))));
   }
 
-  async verifyProspectPages(prospects: readonly ProspectEvidence[]): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
+  async verifyProspectPages(prospects: readonly ProspectEvidence[], citedUrls: readonly string[] = []): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
     const browser = this.gatewayEnv().BROWSER;
-    const urls = [...new Set(prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]))].slice(0, 20);
+    const urls = [...new Set([...prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]), ...citedUrls])].slice(0, 20);
     const envelope = this.state.envelope;
     const previousRunId = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } } | undefined)?.continuation?.previousRunId;
     const receipts: Array<{ url: string; excerpt: string; error?: string }> = [];

@@ -126,17 +126,22 @@ export function bindProspectSourcePassages(
 
 function selectSourcePassage(page: string, draft: string, kind: "location" | "sector", locationHint = "", companyName = ""): string | null {
   const legalName = kind === "location" ? companyName.match(/\(([^)]+)\)/)?.[1]?.trim() : undefined;
-  const legalAt = legalName ? page.toLocaleLowerCase().indexOf(legalName.toLocaleLowerCase()) : -1;
-  const legalTail = legalAt >= 0 ? page.slice(legalAt, Math.min(page.length, legalAt + 800)) : "";
-  const addressEnd = legalTail.match(/\b\d{5}\s+[\p{L}-]+/u);
-  const legalWindow = addressEnd?.index !== undefined
-    ? legalTail.slice(0, addressEnd.index + addressEnd[0].length).trim()
-    : legalTail.split(/\n#{1,6}\s/u, 1)[0].trim();
+  const legalNames = kind === "location" ? [legalName, companyName.split(/\s*\(/, 1)[0]?.trim()].filter((name): name is string => !!name) : [];
   // A group imprint can contain several subsidiaries at the same address.
-  // When the requested legal entity is present, cite its own entry.
-  if (legalWindow && supportsClaim(legalWindow, kind, locationHint)
-    && sourceReceiptCoversQuotes(page, [legalWindow])) return legalWindow;
-  if (legalAt >= 0) return null;
+  // Look for a short span from the named entity to its own postal address,
+  // skipping navigation/metadata mentions of the same name.
+  for (const name of legalNames) {
+    const lower = page.toLocaleLowerCase();
+    let at = lower.indexOf(name.toLocaleLowerCase());
+    for (let count = 0; at >= 0 && count < 50; count += 1) {
+      const tail = page.slice(at, Math.min(page.length, at + 340));
+      const address = tail.match(/\b\d{5}\s+[\p{L}-]+/u);
+      const passage = address?.index === undefined ? "" : tail.slice(0, address.index + address[0].length).trim();
+      if (passage.length <= 300 && supportsClaim(passage, kind, locationHint)
+        && sourceReceiptCoversQuotes(page, [passage])) return passage;
+      at = lower.indexOf(name.toLocaleLowerCase(), at + name.length);
+    }
+  }
   if (sourceReceiptCoversQuotes(page, [draft]) && supportsClaim(draft, kind, locationHint)) return draft.trim();
   const candidates = sourceQuoteCandidates(page, draft, 12);
   const lines = page.split(/\n+|(?<=[.!?])\s+(?=[A-Z\p{Lu}])/u)
@@ -157,8 +162,8 @@ function selectSourcePassage(page: string, draft: string, kind: "location" | "se
     token.length >= 3 && token !== canonicalPassage(locationHint) && !["gruppe", "group", "insurance", "insurer", "ag", "se"].includes(token));
   const ranked = [...new Set([...candidates, ...lines, ...windows])].sort((a, b) =>
     brandScore(b, brands) - brandScore(a, brands) || a.length - b.length);
-  const selected = ranked.find((part) =>
-    supportsClaim(part, kind, locationHint) && sourceReceiptCoversQuotes(page, [part]));
+  const selected = ranked.find((part) => part.length <= 300
+    && supportsClaim(part, kind, locationHint) && sourceReceiptCoversQuotes(page, [part]));
   return selected ?? null;
 }
 
@@ -350,10 +355,10 @@ export function companyWorkComplete(input: CompletionInput): CompletionResult {
   if (!report) return { complete: false, reason: "report_missing" };
   if (!input.recalled) return { complete: false, reason: "company_context_missing" };
   if (input.prospectSources) {
-    const hosts = new Set(input.prospectSources.map(hostname).filter(Boolean));
+    const receipts = new Set(input.prospectSources.map(sourceKey).filter(Boolean));
     const companyHost = hostname(input.companyWebsite || "");
-    const cited = [...report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => hostname(match[0])).filter((host) => host && host !== companyHost);
-    if (!cited.length || cited.some((host) => !hosts.has(host))) return { complete: false, reason: "prospect_sources_missing" };
+    const cited = [...report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => match[0]).filter((url) => hostname(url) && hostname(url) !== companyHost);
+    if (!cited.length || cited.some((url) => !receipts.has(sourceKey(url)))) return { complete: false, reason: "prospect_sources_missing" };
   }
   return { complete: true, reason: "company_context_used" };
 }

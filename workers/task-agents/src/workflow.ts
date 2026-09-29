@@ -673,7 +673,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "artifact_status_unverified", report: "Report draft incorrectly claimed artifact approval was pending; no artifact was saved." };
     }
     if (isProspect) {
-      const pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects));
+      const citedUrls = [...written.report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => match[0]);
+      const pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects, citedUrls));
       const missing = pages.filter((page) => page.error);
       if (missing.length) {
         const reply = `I could not verify the requested source pages (${missing.map((page) => `${page.url}: ${page.error}`).join("; ")}). I did not save a report or PDF.`;

@@ -646,7 +646,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       // authenticated continuation. Keep the exact prospect claims bound to
       // their fresh page receipts, and validate every other cited host against
       // the same durable source-read registry.
-      prospectSources = [...new Set([...pages.map((page) => page.url), ...this.agent.verifiedSourceUrls()])];
+      prospectSources = [...new Set([...pages.map((page) => page.url), ...await this.agent.verifiedSourceUrls()])];
       const evidence = prospectEvidenceComplete(written.report, written.prospects, pages.filter((page) => !page.error).map((page) => page.url), prospectCount);
       if (!evidence.complete) {
         const reply = `The requested location and sector evidence is incomplete (${evidence.reason}). I did not save a report or PDF.`;

@@ -16,7 +16,7 @@ import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { connectedWriteKey, reconciledRecord } from "./connected-write";
 import { approvePendingInput } from "./operator-resume";
 import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, sourceReceiptCoversQuotes, type ProspectEvidence } from "./completion";
-import { COMPANY_GOVERNOR_PROMPT, CompanyGovernor } from "./governor";
+import { COMPANY_GOVERNOR_PROMPT } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
@@ -2121,47 +2121,27 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async reviewCompanyReport(input: { task: string; plan: string[]; report: string; companyContext: unknown; sources: string[] }): Promise<GovernanceVerdict> {
-    const workflowId = this.state.workflowId || this.state.envelope?.runId || crypto.randomUUID();
     let verdict: GovernanceVerdict = { verdict: "unavailable", note: "Review unavailable; report delivered without model review." };
     try {
-      const result = await this.runAgentTool(CompanyGovernor, {
-        runId: `govern-${workflowId}`,
-        input: {
-          task: input.task.slice(0, 2000),
-          plan: input.plan,
-          report: input.report.slice(0, 30000),
-          authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
-          companyContext: input.companyContext,
-          sourceReceipts: input.sources.slice(-8).map((source) => source.slice(0, 12500)),
-        },
-        display: { name: "Company review" },
-      });
-      if (result.status === "completed") verdict = parseGovernanceVerdict(result.summary);
-      else console.warn(JSON.stringify({ event: "governor_child_incomplete", status: result.status }));
-    } catch (error) {
-      console.warn(JSON.stringify({ event: "governor_child_failed", name: error instanceof Error ? error.name : "unknown" }));
-    }
-    if (verdict.verdict === "unavailable") {
-      try {
-        const model = thinkModel(this.gatewayEnv());
-        if (typeof model !== "string") {
-          const review = streamText({
-            model,
-            system: COMPANY_GOVERNOR_PROMPT,
-            prompt: JSON.stringify({
-              task: input.task.slice(0, 2000), plan: input.plan.slice(0, 6), report: input.report.slice(0, 16000),
-              authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
-              companyContext: JSON.stringify(input.companyContext ?? null).slice(0, 2500),
-              sourceReceipts: input.sources.slice(-8).map((source) => source.slice(0, 12500)),
-            }),
-            maxOutputTokens: 1024,
-            abortSignal: AbortSignal.timeout(15_000),
-          });
-          verdict = parseGovernanceVerdict(await review.text);
-        }
-      } catch (error) {
-        console.warn(JSON.stringify({ event: "governor_fallback_failed", name: error instanceof Error ? error.name : "unknown" }));
+      const model = thinkModel(this.gatewayEnv());
+      if (typeof model !== "string") {
+        const review = streamText({
+          model,
+          system: COMPANY_GOVERNOR_PROMPT,
+          prompt: JSON.stringify({
+            task: input.task.slice(0, 2000), plan: input.plan.slice(0, 6), report: input.report.slice(0, 16000),
+            authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
+            companyContext: JSON.stringify(input.companyContext ?? null).slice(0, 2500),
+            sourceReceipts: input.sources.slice(-8).map((source) => source.slice(0, 12500)),
+          }),
+          maxOutputTokens: 512,
+          abortSignal: AbortSignal.timeout(10_000),
+          providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } },
+        });
+        verdict = parseGovernanceVerdict(await review.text);
       }
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "governor_review_failed", name: error instanceof Error ? error.name : "unknown" }));
     }
     this.note("governance", `${verdict.verdict}: ${verdict.note || (verdict.verdict === "clear" ? "No material content issue found in the supplied report and receipts." : "Review found a material issue; inspect the report before external use.")}`);
     return verdict;

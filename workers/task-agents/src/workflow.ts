@@ -11,6 +11,7 @@ import { confirmedCompanyMemoryId } from "./gateway";
 import type { OperatingPlan, TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
 import { isRecoverableModelProtocolError } from "./tool-recovery";
+import { explicitToolGroups } from "./explicit-tool-intent";
 
 export interface CompanyWork extends TaskEnvelope {
   occurrenceId?: string;
@@ -269,9 +270,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
     }
     let asked = work.task || "Map competitors and the local market.";
+    const requiredToolGroups = explicitToolGroups(work.task);
     let quickRoute = work.continuation ? null : await durable.do("jev-route", async () =>
       this.agent.routeTask(asked, work.previousRequest || "", work.company));
     if (requestsArtifact(asked)) quickRoute = null;
+    if (requiredToolGroups.length && quickRoute === "direct") quickRoute = "action";
     if (quickRoute === "agent_memory_session") return this.savePrivateRoomSession(work, step);
     if (quickRoute === "agent_memory_record") return this.savePrivateLearning(work, step);
     // A connected room Durable Object can briefly serve its previous broad
@@ -342,6 +345,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     await durable.do("bind-company-memory-intent", async () =>
       this.agent.setCompanyMemoryIntent(plan.memoryIntent === "company"));
     if (plan.memoryIntent === "company" && plan.mode === "direct") plan.mode = "action";
+    if (requiredToolGroups.length) {
+      if (plan.mode === "direct") plan.mode = "action";
+      plan.groups = [...new Set([...plan.groups, ...requiredToolGroups])];
+    }
     // A resumed logical run keeps its originally approved method and snapshot.
     // Model routing can change between attempts; it must not replace an
     // immutable playbook pin or trigger a permanent conflict on recovery.

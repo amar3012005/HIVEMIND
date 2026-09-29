@@ -20,6 +20,9 @@ export function readJevRoute(result: unknown): JevRoute | null {
   const answers = result.answers;
   if (!answers || typeof answers !== "object") return null;
   const decisions = answers as Record<string, unknown>;
+  // A staged deliverable must reach Think's operating plan regardless of a
+  // contradictory private-memory classification from the fast scorer.
+  if (confidentChoice(decisions.work_shape, "staged")) return null;
   // The destination is a model decision about authority, not a phrase match.
   if (confidentChoice(decisions.memory_intent, "agent_session")) return "agent_memory_session";
   if (confidentChoice(decisions.memory_intent, "agent_record")) return confidentChoice(decisions.route, "action") ? "action" : null;

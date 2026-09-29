@@ -41,6 +41,10 @@ test("saved or multi-stage deliverables cannot bypass the Think plan", () => {
   routed.answers.work_shape = { choice: "staged", confidence: 0.96, probabilities: { bounded: 0.04, staged: 0.96 } };
   assert.equal(readJevRoute(routed), null);
   assert.equal(readJevRoute({ answers: { route: routed.answers.route, memory_intent: routed.answers.memory_intent } }), null);
+  assert.equal(readJevRoute({ answers: { ...routed.answers, memory_intent: {
+    choice: "agent_session", confidence: 0.96,
+    probabilities: { none: 0.01, agent_session: 0.96, agent_record: 0.01, company: 0.02 },
+  } } }), null);
 });
 
 test("model failure falls back without failing turn", async () => {

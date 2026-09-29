@@ -205,6 +205,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     let asked = work.task || "Map competitors and the local market.";
     let quickRoute = work.continuation ? null : await durable.do("jev-route", async () =>
       this.agent.routeTask(asked, work.previousRequest || "", work.company));
+    if (requestsArtifact(asked)) quickRoute = null;
     if (quickRoute === "agent_memory_session") return this.savePrivateRoomSession(work, step);
     // A connected room Durable Object can briefly serve its previous broad
     // private-memory route. Ask the model for the operation before acting.
@@ -267,7 +268,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     })();
     if (!quickRoute && !work.continuation) plan.localPlaybookId = "";
     asked = plan.resolvedRequest.trim() || asked;
-    if (plan.memoryIntent === "agent_session") return this.savePrivateRoomSession(work, step);
+    if (plan.memoryIntent === "agent_session" && !requestsArtifact(work.task)) return this.savePrivateRoomSession(work, step);
+    if (requestsArtifact(work.task) && plan.memoryIntent === "agent_session") plan.memoryIntent = "none";
     if (plan.memoryIntent === "agent_record") plan.mode = "action";
     // A resumed logical run keeps its originally approved method and snapshot.
     // Model routing can change between attempts; it must not replace an

@@ -111,14 +111,28 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
   }
 
   private async reportPrompt(step: ThinkWorkflowStep, name: string, prompt: string): Promise<z.infer<typeof reportSchema>> {
-    const decision = await this.structuredPrompt(step, `${name}-execution`,
-      `${prompt}\n\nFINAL EXECUTION RECEIPT OVERRIDES ANY EARLIER REQUEST TO RETURN THE REPORT IN THIS STEP: use tools to complete the work, then return only the small structured receipt. Summarize verified work in at most 1800 characters, list only completed plan task IDs, and provide exact prospect evidence rows where requested. Do not put report prose in the tool result. A separate streamed prose turn writes it from saved receipts.`, executionSchema);
-    if (decision.needsInput) return { ...decision, report: "" };
+    const durable = step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> };
+    const report = await durable.do(`${name}-native-turn`, async () => this.agent.streamTaskTurn(
+      `${prompt}\n\nWork as the assigned employee. Narrate meaningful progress in your own words while tools run. Finish with the requested Markdown response in plain text. Never call think_final_answer; the Workflow checks receipts and saves artifacts after this turn. Do not claim an artifact was saved before its receipt.`));
     const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
       `${url}: ${sourceEvidenceWindows(excerpt, 1100)}`).join("\n");
-    const durable = step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> };
-    const report = await durable.do(`${name}-stream-report`, async () => this.agent.streamNarrative(
-      `Write the finished response to the operator as plain Markdown. Stream text naturally; do not use tools, JSON, or a final-answer tool call. Do not claim an artifact is saved; the Workflow validates and saves it afterward. Separate verified facts from inference, cite only source URLs in the saved receipts, and quote only exact passages. If evidence is missing, state the gap rather than inventing it.\n\nOperator request: ${prompt.slice(0, 5500)}\n\nExecution summary: ${decision.summary}\nCompleted plan task IDs: ${decision.completedTaskIds.join(", ")}\nProspect evidence rows: ${JSON.stringify(decision.prospects).slice(0, 9000)}\nSaved source receipts:\n${receipts || "No page receipts."}`));
+    const receiptPrompt = `Return exactly one JSON object, no Markdown fences or tool calls, matching this schema: ${JSON.stringify(z.toJSONSchema(executionSchema))}. Classify only the completed work visible in the finished response and saved receipts; do not invent completed plan IDs or source passages. If a necessary fact or authorization is missing, set needsInput and a concrete question. The report artifact is saved only after the Workflow validates it.\n\nTask and plan: ${prompt.slice(0, 3800)}\n\nFinished response: ${report.slice(0, 12000)}\n\nSource receipts: ${receipts || "None."}`;
+    let decision: z.infer<typeof executionSchema>;
+    try {
+      const raw = await durable.do(`${name}-receipt`, async () => {
+        try { return await this.agent.extractExecutionReceipt(receiptPrompt); }
+        catch { return ""; }
+      });
+      decision = parseToolFreeJson(raw, executionSchema);
+    } catch (error) {
+      await this.agent.note("model-recovery", `Recovering the small execution receipt for ${name} without repeating research`);
+      const raw = await durable.do(`${name}-receipt-recovery`, async () => {
+        try { return await this.agent.recoverStructuredWithoutTool(receiptPrompt); }
+        catch { return ""; }
+      });
+      try { decision = parseToolFreeJson(raw, executionSchema); }
+      catch { decision = executionSchema.parse({}); }
+    }
     return { ...decision, report };
   }
 

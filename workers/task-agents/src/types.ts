@@ -81,6 +81,7 @@ export interface TaskAgentState {
   toolGroups: string[];
   catalogStage: "planning" | "global" | "local" | "action";
   narrativeTurn?: boolean;
+  executionTurn?: boolean;
   selectedGlobals: string[];
   workflowId: string;
   companyContextLoaded?: boolean;

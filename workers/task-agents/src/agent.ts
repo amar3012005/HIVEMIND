@@ -158,7 +158,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (result.status !== "completed") throw new Error(`narrative_turn_${result.status}`);
       const messages = await this.getMessages();
       const promptIndex = messages.findIndex((message) => message.id === promptId);
-      const latest = promptIndex < 0 ? null : messages.slice(promptIndex + 1).find((message) => message.role === "assistant");
+      const latest = promptIndex < 0 ? null : messages.slice(promptIndex + 1).reverse().find((message) => message.role === "assistant");
       const report = latest?.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
         .map((part) => part.text).join("").trim() || "";
       if (!report) throw new Error("narrative_turn_empty");
@@ -166,6 +166,41 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     } finally {
       this.setState({ ...this.state, narrativeTurn: false });
     }
+  }
+
+  /** Native Think turn for tool work and streamed prose. The Workflow owns the
+   * final contract, so this turn has no required final-answer tool call.
+   */
+  async streamTaskTurn(prompt: string): Promise<string> {
+    this.setState({ ...this.state, executionTurn: true });
+    try {
+      const promptId = crypto.randomUUID();
+      const result = await this.saveMessages((messages) => [...messages,
+        { id: promptId, role: "user", parts: [{ type: "text", text: prompt }], createdAt: new Date() }]);
+      if (result.status !== "completed") throw new Error(`execution_turn_${result.status}`);
+      const messages = await this.getMessages();
+      const promptIndex = messages.findIndex((message) => message.id === promptId);
+      const latest = promptIndex < 0 ? null : messages.slice(promptIndex + 1).reverse().find((message) => message.role === "assistant");
+      const report = latest?.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
+        .at(-1)?.text.trim() || "";
+      if (!report) throw new Error("execution_turn_empty");
+      return report;
+    } finally {
+      this.setState({ ...this.state, executionTurn: false });
+    }
+  }
+
+  async extractExecutionReceipt(prompt: string): Promise<string> {
+    const candidate = thinkModel(this.gatewayEnv());
+    const result = await generateText({
+      model: typeof candidate === "string" ? recoveryModel(this.gatewayEnv()) : candidate,
+      prompt,
+      maxOutputTokens: 2800,
+      temperature: 0,
+      abortSignal: AbortSignal.timeout(15_000),
+      providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } },
+    });
+    return result.text.trim();
   }
 
   configureContext(): ContextConfig[] {
@@ -1200,7 +1235,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const brief = cachedBrief || (await this.loadProfileBrief(envelope.orgId, envelope.userId)).brief;
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", narrativeTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", narrativeTurn: false, executionTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
@@ -1327,7 +1362,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
       system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER) && (name !== "browser_extract" || !granted.includes("browser_markdown"))), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length && this.state.operatingPlan?.tasks.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
+      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER) && (name !== "browser_extract" || !granted.includes("browser_markdown"))), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length && this.state.operatingPlan?.tasks.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", ...(this.state.executionTurn ? [] : ["think_final_answer"])],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -1401,8 +1436,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (this.suppressRecoveryDrafts) return;
       if (this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
       const text = chunk.text;
-      if (!text || this.textDraft.length > (this.state.narrativeTurn ? 60000 : 4000)) return;
-      const draftType = this.state.narrativeTurn ? "report-draft" : "progress-draft";
+      if (!text || this.textDraft.length > (this.state.narrativeTurn || this.state.executionTurn ? 60000 : 4000)) return;
+      const draftType = this.state.narrativeTurn || this.state.executionTurn ? "report-draft" : "progress-draft";
       if (!this.textDraft) this.broadcast(JSON.stringify({ type: draftType, delta: "", reset: true }));
       this.textDraft += text;
       this.broadcast(JSON.stringify({ type: draftType, delta: text }));

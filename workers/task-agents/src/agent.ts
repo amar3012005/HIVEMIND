@@ -1362,12 +1362,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         repairToolCall,
       };
     }
-    const granted = this.state.tools;
-    const refineRequested = this.playbookRefinementRequested();
-    const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
       system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
-      activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER) && (name !== "browser_extract" || !granted.includes("browser_markdown"))), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length && this.state.operatingPlan?.tasks.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", ...(this.state.executionTurn ? [] : ["think_final_answer"])],
+      activeTools: this.activeExecutionTools(),
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
@@ -1375,11 +1372,20 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     };
   }
 
+  private activeExecutionTools(): string[] {
+    const granted = this.state.tools;
+    const refineRequested = this.playbookRefinementRequested();
+    const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
+    return [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER) && (name !== "browser_extract" || !granted.includes("browser_markdown"))), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length && this.state.operatingPlan?.tasks.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", ...(this.state.executionTurn ? [] : ["think_final_answer"])];
+  }
+
   beforeStep() {
-    if (!this.recoveryStepPending || this.recoveryStepUsed) return;
+    if (this.state.narrativeTurn || this.state.catalogStage === "planning") return;
+    const activeTools = this.activeExecutionTools();
+    if (!this.recoveryStepPending || this.recoveryStepUsed) return { activeTools };
     this.recoveryStepPending = false;
     this.recoveryStepUsed = true;
-    return { model: recoveryModel(this.gatewayEnv()) };
+    return { model: recoveryModel(this.gatewayEnv()), activeTools };
   }
 
   beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {

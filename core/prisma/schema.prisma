@@ -5572,6 +5572,7 @@ model HarnessSession {
   events                HarnessSessionEvent[]
   leases                HarnessSessionLease[]
   connectedAppReceipts  ConnectedAppReceipt[]
+  scheduledTasks        HarnessScheduledTask[]
 
   @@unique([id, orgId, userId], map: "harness_sessions_tenant_identity_key")
   @@index([orgId, userId, updatedAt(sort: Desc)], map: "harness_sessions_tenant_updated_idx")
@@ -5579,6 +5580,44 @@ model HarnessSession {
   @@index([orgId, projectId, updatedAt(sort: Desc)], map: "harness_sessions_project_updated_idx")
   @@index([orgId, userId, scopeKind, updatedAt(sort: Desc)], map: "harness_sessions_scope_updated_idx")
   @@map("harness_sessions")
+}
+
+/// A DSH Schedule task is bound to one tenant-owned native Harness Session.
+/// The JSON record follows DSH's versioned ScheduleRecord contract.
+model HarnessScheduledTask {
+  id             String         @id @db.VarChar(180)
+  sessionId      String         @map("session_id") @db.VarChar(180)
+  orgId          String         @map("org_id") @db.Uuid
+  userId         String         @map("user_id") @db.Uuid
+  record         Json           @db.JsonB
+  status         String         @default("active") @db.VarChar(16)
+  scheduledAt    DateTime       @map("scheduled_at") @db.Timestamptz(6)
+  lastDelivery   Json?          @map("last_delivery") @db.JsonB
+  deliveryHistory Json?         @map("delivery_history") @db.JsonB
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  session        HarnessSession @relation(fields: [sessionId, orgId, userId], references: [id, orgId, userId], onDelete: Cascade, onUpdate: NoAction)
+  due            HarnessScheduledDue?
+
+  @@unique([id, orgId, userId], map: "harness_scheduled_tasks_tenant_identity_key")
+
+  @@index([orgId, userId, status, scheduledAt], map: "harness_scheduled_tasks_tenant_due_idx")
+  @@index([sessionId, orgId, userId], map: "harness_scheduled_tasks_session_idx")
+  @@map("harness_scheduled_tasks")
+}
+
+/// Scheduler-only wake index. No task prompt or delivery content is stored here.
+/// The runner claims due rows, then opens the task under its recorded RLS scope.
+model HarnessScheduledDue {
+  taskId         String                @id @map("task_id") @db.VarChar(180)
+  orgId          String                @map("org_id") @db.Uuid
+  userId         String                @map("user_id") @db.Uuid
+  dueAt          DateTime              @map("due_at") @db.Timestamptz(6)
+  task           HarnessScheduledTask  @relation(fields: [taskId, orgId, userId], references: [id, orgId, userId], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([taskId, orgId, userId], map: "harness_scheduled_due_tenant_identity_key")
+  @@index([dueAt], map: "harness_scheduled_due_claim_idx")
+  @@map("harness_scheduled_due")
 }
 
 /// Encrypted provider output owned by one authenticated Harness tool call.

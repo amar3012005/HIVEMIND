@@ -11,6 +11,14 @@ Use this after the `cordis-harness-platform` skill when changing `workers/task-a
 - A tool validation/protocol error should get one repaired or stronger-model retry for that step from saved receipts, then a visible recoverable error. Avoid repeating identical invalid calls or restarting completed research. Reconcile uncertain external writes before retry.
 - Private operating memory is separate from HIVEMIND company memory. It uses scoped, typed, idempotent records; a failed private-memory write is logged and may be reconciled, but cannot hold a delivered task open through long Workflow retries. Company-memory writes still require their authorization and receipt.
 
+## Persistent employee and two-brain context
+
+- The employee identity persists across rooms. A room provides conversation state; WorkRun and artifact receipts provide durable task state; the private Hyper Agents operating-memory lane provides cross-room and cross-employee learnings, handoffs, decisions, completed tasks, and trigger status. A new model invocation is not a new employee.
+- Choose the route before loading operating memory. Direct greetings and self-contained answers skip that recall. Action and company work load a bounded, task-relevant brief from the private lane. The employee decides whether a narrower typed recall is useful for the next step; do not call every kind for every question or repeat a recall already answered by the brief.
+- Recall `learning` for a demonstrated method or correction, `decision_note` for a previous operational choice, `handoff` for another employee's work, `task_status` for completed or interrupted work, and `trigger_status` for scheduled work. Filter by status or agent when appropriate, read newest first, and verify decisive claims against WorkRun, artifact, or source receipts.
+- HIVEMIND Meta is the separately governed company brain for canonical organization facts and approved decisions. Private agent notes cannot be presented as company truth or used to bypass company-memory approval. A healthy empty recall does not prove a company fact is absent.
+- Self-evolution is controlled: capture a verified learning in private memory, evaluate outcomes, and propose a playbook revision for review. Never silently modify instructions, playbooks, or authority from a memory note.
+
 ## Before deploying preview
 
 1. Record the currently deployed Worker and frontend versions and current source commit. Inspect the diff for unrelated route, persona, tool, or room changes.

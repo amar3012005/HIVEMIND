@@ -158,6 +158,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async streamNarrative(prompt: string): Promise<string> {
     this.setState({ ...this.state, narrativeTurn: true });
     this.lastReportDraft = "";
+    this.textDraft = "";
+    this.broadcast(JSON.stringify({ type: "narrative-stream-start" }));
     try {
       const promptId = crypto.randomUUID();
       const result = await this.saveMessages((messages) => [...messages,
@@ -178,9 +180,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   /** Native Think turn for tool work and streamed prose. The Workflow owns the
    * final contract, so this turn has no required final-answer tool call.
    */
-  async streamTaskTurn(prompt: string): Promise<string> {
+  async streamTaskTurn(prompt: string, finalSynthesisFollows = false): Promise<string> {
     this.setState({ ...this.state, executionTurn: true });
-    this.broadcast(JSON.stringify({ type: "execution-stream-start" }));
+    this.broadcast(JSON.stringify({ type: "execution-stream-start", finalSynthesisFollows }));
     try {
       const promptId = crypto.randomUUID();
       const result = await this.saveMessages((messages) => [...messages,

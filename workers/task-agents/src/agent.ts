@@ -5,7 +5,7 @@ import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
 import { streamText, tool, type ToolSet } from "ai";
-import { repairBrowserExtractCall } from "./tool-recovery";
+import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
 import { browserTargetAllowed } from "./source-discovery";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
@@ -63,6 +63,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private pageReadCounts = new Map<string, number>();
   private capturedPages = new Map<string, string>();
   private boundedActionSearches = 0;
+  private browserExtractRepairUsed = false;
   private recoveryStepPending = false;
   private recoveryStepUsed = false;
   private finalOnlyRecoveryTurn = false;
@@ -1094,6 +1095,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.pageReadCounts.clear();
     this.capturedPages.clear();
     this.boundedActionSearches = 0;
+    this.browserExtractRepairUsed = false;
     const previous = this.state.envelope;
     const cachedBrief = previous?.orgId === envelope.orgId && previous.userId === envelope.userId
       && this.state.profileBrief && !this.state.profileBrief.startsWith("Authenticated profile unavailable.")
@@ -1182,6 +1184,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const repairToolCall: NonNullable<Parameters<typeof streamText>[0]["repairToolCall"]> = async ({ toolCall }) => {
       const repaired = repairBrowserExtractCall(toolCall.toolName, toolCall.input);
       if (!repaired) return null;
+      let target = "";
+      try { target = new URL(String((JSON.parse(repaired.input) as { url?: string }).url || "")).href; } catch { return null; }
+      const supplied = [this.state.envelope?.task ?? "", ...(this.state.envelope?.inputRefs ?? [])];
+      if (!mayRepairBrowserExtract(this.browserExtractRepairUsed, browserTargetAllowed(target, this.discoveredUrls, supplied), this.pageReadCounts.get(target) ?? 0)) {
+        this.note("tool-call-repair-stopped", "Malformed browser extraction was not replayed; continue from existing source receipts");
+        return null;
+      }
+      this.browserExtractRepairUsed = true;
       this.note("tool-call-repair", `Read ${repaired.toolName} after URL-only browser_extract input`);
       return { ...toolCall, ...repaired };
     };

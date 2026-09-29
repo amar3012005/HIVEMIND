@@ -10,6 +10,10 @@ export function repairBrowserExtractCall(toolName: string, input: string): { too
   return { toolName: "browser_markdown", input: JSON.stringify({ url: call.url }) };
 }
 
+export function mayRepairBrowserExtract(repairUsed: boolean, allowedTarget: boolean, priorReads: number): boolean {
+  return !repairUsed && allowedTarget && priorReads === 0;
+}
+
 export function isRecoverableModelProtocolError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current; depth += 1) {

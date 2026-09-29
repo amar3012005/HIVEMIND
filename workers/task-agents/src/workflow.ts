@@ -356,12 +356,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
     const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));
     const playbookMenu = playbookNames.map(({ id, name, description, base }) => ({ id, name, description, globalId: base }));
-    if (quickRoute === "direct") await durable.do("enable-direct-stream", async () => this.agent.applyGroups([], true));
-    const quickDirect = quickRoute === "direct" ? await step.prompt("direct-answer", {
-      prompt: `Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here.`,
-      output: z.object({ reply: z.string().min(2) }),
-      timeout: "30 minutes",
-    }) : null;
+    const quickDirect = quickRoute === "direct" ? await durable.do("direct-answer", async () =>
+      this.agent.streamNarrative(`Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here. Reply in your own voice.`)) : "";
     const plan = work.continuation ? planSchema.parse({
       mode: "company", decision: `Continue unfinished WorkRun ${work.continuation.previousRunId}`,
       plan: recovery!.plan!.summary,
@@ -372,7 +368,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }) : (quickRoute === "direct" || quickRoute === "action") ? planSchema.parse({
       mode: quickRoute,
       decision: "",
-      reply: quickDirect?.reply || "",
+      reply: quickDirect,
       groups: quickRoute === "action"
         ? (requiredToolGroups.length ? requiredToolGroups : ["company", "web_research", "browser", "connected_apps", "records"])
         : [],

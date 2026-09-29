@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parallelSearch, parallelSearchBatch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, recallOperatingMemory, saveCompanyMemory, saveOperatingMemory } from "./gateway.ts";
+import { confirmedCompanyMemoryId, parallelSearch, parallelSearchBatch, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, recallOperatingMemory, saveCompanyMemory, saveOperatingMemory } from "./gateway.ts";
 import { toolsForGroups } from "./tool-groups.ts";
 
 test("company catalog exposes native memory gateway", () => {
@@ -149,6 +149,13 @@ test("memory save reports completion only after synchronous Core receipt", async
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("company-memory completion requires Core's persisted memory id", () => {
+  assert.equal(confirmedCompanyMemoryId({ ok: true, status: "completed", payload: { success: true, memory: { id: "memory-1" } } }), "memory-1");
+  assert.equal(confirmedCompanyMemoryId({ ok: true, status: "completed", payload: { success: true } }), "");
+  assert.equal(confirmedCompanyMemoryId({ ok: false, status: "pending", payload: { memory: { id: "memory-1" } } }), "");
+  assert.equal(confirmedCompanyMemoryId({ ok: true, status: "completed", payload: { success: true, skipped: true } }), "");
 });
 
 test("Hyper Agents memory uses only the sealed internal Control Plane route", async () => {

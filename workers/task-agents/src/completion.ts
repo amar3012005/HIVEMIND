@@ -8,8 +8,10 @@ export interface CompletionInput {
 export function previousReport(events: readonly { step: string; detail: string }[]): string | null {
   const currentTurn = events.map((event) => event.step).lastIndexOf("user");
   if (currentTurn < 0) return null;
-  const report = events.slice(0, currentTurn).reverse().find((event) =>
-    event.step === "report" && event.detail.length > 100 && /^#\s+/m.test(event.detail))?.detail.trim();
+  const previousUser = events.slice(0, currentTurn).map((event) => event.step).lastIndexOf("user");
+  const report = events.slice(previousUser + 1, currentTurn).reverse().find((event) =>
+    event.step === "report" && event.detail.length > 100
+    && !/^(?:I could not finish|The report artifact is preserved|I need one detail)/i.test(event.detail))?.detail.trim();
   return report || null;
 }
 
@@ -17,7 +19,7 @@ export function previousReport(events: readonly { step: string; detail: string }
 export function requestsPreviousReportPdf(task: string): boolean {
   const request = task.trim().replace(/[.!?]+$/, "").trim();
   return request.length <= 180 && !artifactCreationForbidden(request)
-    && /^(?:(?:please|now|can you|could you)\s+)*(?:save|render|export|convert|turn|make|give me)\s+(?:(?:the|this|that|it|above|previous|prior|last)\s+)*(?:(?:report|document|artifact|answer|response|text|brief)\s+)?(?:as|to|into|in)\s+(?:a\s+)?pdf(?:\s+(?:file|report|artifact))?$/i.test(request);
+    && /^(?:(?:please|now|can you|could you)\s+)*(?:save|render|export|convert|turn|make|give me|download)\s+(?:(?:the|this|that|it|above|previous|prior|last)\s+)*(?:(?:report|document|artifact|answer|response|text|brief)\s+)?(?:as|to|into|in)\s+(?:a\s+)?pdf(?:\s+(?:file|report|artifact))?$/i.test(request);
 }
 
 export interface CompletionResult {

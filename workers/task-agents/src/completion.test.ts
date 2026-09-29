@@ -93,11 +93,18 @@ test("follow-up reuse selects report from preceding turn", () => {
     { step: "user", detail: "Save it in HIVEMIND and as PDF" },
     { step: "report", detail: "I could not finish this run." },
   ]), draft.trim());
+  const plainAnswer = `Private operating learnings — ${"one verified learning and its source receipt. ".repeat(5)}`;
+  assert.equal(previousReport([
+    { step: "user", detail: "List private learnings" },
+    { step: "report", detail: plainAnswer },
+    { step: "user", detail: "download it as a pdf" },
+  ]), plainAnswer.trim());
 });
 
 test("a PDF-only follow-up reuses the previous report instead of rewriting it", () => {
   assert.equal(requestsPreviousReportPdf("save this as pdf"), true);
   assert.equal(requestsPreviousReportPdf("render it as a PDF"), true);
+  assert.equal(requestsPreviousReportPdf("download it as a pdf"), true);
   assert.equal(requestsPreviousReportPdf("Export the previous report to PDF"), true);
   assert.equal(requestsPreviousReportPdf("Research two insurers and render a PDF"), false);
   assert.equal(requestsPreviousReportPdf("Save this as PDF and to company memory"), false);

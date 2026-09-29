@@ -9,7 +9,7 @@ import { repairBrowserExtractCall } from "./tool-recovery";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
-import { getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, recallOperatingMemory, saveOperatingMemory, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
+import { confirmedCompanyMemoryId, getControl, mapsPlaces, parallelSearch, parallelSearchBatch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, recallOperatingMemory, saveOperatingMemory, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { connectedWriteKey, reconciledRecord } from "./connected-write";
 import { approvePendingInput } from "./operator-resume";
@@ -906,7 +906,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return { error: "task_not_bound" };
     this.note("save_memory", title);
-    return writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content, { sessionId: envelope.runId, idempotencyKey });
+    const result = await writeHivemindMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, title, content, { sessionId: envelope.runId, idempotencyKey });
+    const receiptId = confirmedCompanyMemoryId(result);
+    if (receiptId) this.setState({ ...this.state, companyMemoryReceiptId: receiptId });
+    return result;
+  }
+
+  setCompanyMemoryIntent(requested: boolean): void {
+    this.setState({ ...this.state, companyMemoryIntent: requested, companyMemoryReceiptId: "" });
+  }
+
+  hasCompanyMemoryReceipt(): boolean {
+    return Boolean(this.state.companyMemoryIntent && this.state.companyMemoryReceiptId);
   }
 
   previousReport(): string | null {
@@ -969,9 +980,17 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async previousReportArtifact(): Promise<StoredArtifact | null> {
-    const report = this.previousReport();
-    if (!report) return null;
     ensureCompanyTables(this.sql.bind(this));
+    const report = this.previousReport();
+    // A prior WorkRun receipt is authoritative when it matches the preceding
+    // answer. Otherwise the preceding answer itself is the conversion source.
+    const prior = this.sql`SELECT a.id FROM company_artifacts a
+      JOIN company_artifact_runs ar ON ar.artifact_id = a.id
+      JOIN company_runs r ON r.id = ar.run_id
+      WHERE a.kind = ${"report"} AND a.content_type = ${"text/markdown"}
+        AND r.status = ${"completed"} AND r.id != ${this.state.envelope?.runId ?? ""}
+      ORDER BY a.created_at DESC LIMIT 1`[0];
+    if (!report) return prior ? this.getCompanyArtifact(String(prior.id)) : null;
     const prefix = report.slice(0, 1000);
     const existing = this.sql`SELECT id, body FROM company_artifacts WHERE kind = ${"report"} AND content_type = ${"text/markdown"} AND substr(body, 1, ${prefix.length}) = ${prefix} ORDER BY created_at DESC LIMIT 10`
       .find((row) => String(row.body).startsWith(report) || report.startsWith(String(row.body)));
@@ -1001,7 +1020,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const memoryBrief = operatingMemoryBrief(learnings, completed, envelope.task);
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: memoryBrief, recoveryBrief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "" });
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (memoryBrief) this.note("operating-memory-recall", "Recent learnings and completed work loaded from the private agent brain");
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
@@ -1104,8 +1123,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       return { action: "block", reason: "Operator did not request an image capture in this turn." };
     }
     if (ctx.toolName === "hivemind_meta" && (ctx.input as { operation?: string })?.operation === "save"
-      && !requestsMemorySave(this.state.envelope?.task ?? "")) {
-      return { action: "block", reason: "Operator did not request a memory save in this turn." };
+      && !this.state.companyMemoryIntent) {
+      return { action: "block", reason: "Company-memory publication is outside this run's authorized intent." };
     }
     if (this.state.companyContextRequired && !this.state.companyContextLoaded
       && /^(browser_|parallel_search(?:_batch)?$|maps_search$|composio_|hivemind_connected_task$)/.test(ctx.toolName)) {
@@ -1126,6 +1145,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {
     if (chunk.type === "text-delta") {
+      if (this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
       const text = chunk.text;
       if (!text || this.textDraft.length > 4000) return;
       if (!this.textDraft) this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
@@ -1140,7 +1160,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (field) {
         this.draftCalls.set(callId, { field, raw: "", text: "" });
         if (field === "report") this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
-        this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
+        if (field !== "report" || !this.state.companyMemoryIntent || this.state.companyMemoryReceiptId)
+          this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
       }
       return;
     }
@@ -1158,6 +1179,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const reset = !next.startsWith(draft.text);
     const delta = reset ? next : next.slice(draft.text.length);
     draft.text = next;
+    if (draft.field === "report" && this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
     this.broadcast(JSON.stringify({ type: draft.field === "report" ? "report-draft" : "progress-draft", delta, reset }));
   }
 
@@ -1355,7 +1377,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         content: z.string().max(8000).optional(),
         idempotencyKey: z.string().max(200).optional(),
       }),
-      needsApproval: async ({ operation }) => operation === "save" && requestsMemorySave(this.state.envelope?.task ?? ""),
+      needsApproval: async ({ operation }) => operation === "save" && this.state.companyMemoryIntent === true,
       execute: async (input): Promise<unknown> => {
         const identity = this.assertTool("hivemind_meta");
         this.note("hivemind_meta", input.operation);
@@ -1391,13 +1413,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           if (!input.idempotencyKey?.trim()) return { error: "idempotency_key_required" };
           return readMetaSaveStatus(this.gatewayEnv(), identity.orgId, identity.userId, input.idempotencyKey);
         }
-        if (!requestsMemorySave(this.state.envelope?.task ?? "")) return { error: "memory_save_not_requested" };
+        if (!this.state.companyMemoryIntent) return { error: "memory_save_not_requested" };
         if (!input.title?.trim() || !input.content?.trim() || !input.scope) return { error: "title_content_and_scope_required" };
         if (input.scope === "project" && !input.project) return { error: "project_required" };
         const source = `${this.state.envelope?.runId}:${input.scope}:${input.project || ""}:${input.title}:${input.content}`;
         const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
         const idempotencyKey = input.idempotencyKey || `hyper-${Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-        return writeHivemindMemory(this.gatewayEnv(), identity.orgId, identity.userId, input.title, input.content, { scope: input.scope, project: input.project, idempotencyKey, sessionId: this.state.envelope?.runId });
+        const result = await writeHivemindMemory(this.gatewayEnv(), identity.orgId, identity.userId, input.title, input.content, { scope: input.scope, project: input.project, idempotencyKey, sessionId: this.state.envelope?.runId });
+        const receiptId = confirmedCompanyMemoryId(result);
+        if (receiptId) this.setState({ ...this.state, companyMemoryReceiptId: receiptId });
+        return result;
       },
     });
     const operatingMemory = tool({

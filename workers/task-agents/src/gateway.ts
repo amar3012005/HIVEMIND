@@ -156,6 +156,17 @@ export async function saveCompanyMemory(env: GatewayEnv, orgId: string, userId: 
   return { ok: response.status !== 202, status: response.status === 202 ? "pending" : "completed", payload, ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}) };
 }
 
+/** A successful HTTP response alone is not evidence that Core persisted a memory. */
+export function confirmedCompanyMemoryId(result: unknown): string {
+  if (!result || typeof result !== "object" || !("ok" in result) || result.ok !== true
+    || !("status" in result) || result.status !== "completed"
+    || !("payload" in result) || !result.payload || typeof result.payload !== "object") return "";
+  const payload = result.payload as { id?: unknown; memory_id?: unknown; memory?: { id?: unknown }; success?: unknown; skipped?: unknown };
+  if (payload.success === false || payload.skipped === true) return "";
+  const id = payload.id ?? payload.memory_id ?? payload.memory?.id;
+  return typeof id === "string" && id.trim() ? id.trim() : "";
+}
+
 export async function recallCompany(env: GatewayEnv, orgId: string, userId: string, query: string): Promise<unknown> {
   const base = (env.HIVEMIND_CORE_URL || env.HIVEMIND_CONTROL_URL)?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;

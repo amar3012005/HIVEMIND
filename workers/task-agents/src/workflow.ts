@@ -2,11 +2,12 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { ineligiblePostRunJev, type PostRunJevReview } from "./post-run-jev";
+import { confirmedCompanyMemoryId } from "./gateway";
 import type { OperatingPlan, TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
 import { isRecoverableModelProtocolError } from "./tool-recovery";
@@ -306,6 +307,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     if (plan.memoryIntent === "agent_session" && !requestsArtifact(work.task)) return this.savePrivateRoomSession(work, step);
     if (requestsArtifact(work.task) && plan.memoryIntent === "agent_session") plan.memoryIntent = "none";
     if (plan.memoryIntent === "agent_record") return this.savePrivateLearning(work, step);
+    await durable.do("bind-company-memory-intent", async () =>
+      this.agent.setCompanyMemoryIntent(plan.memoryIntent === "company"));
+    if (plan.memoryIntent === "company" && plan.mode === "direct") plan.mode = "action";
     // A resumed logical run keeps its originally approved method and snapshot.
     // Model routing can change between attempts; it must not replace an
     // immutable playbook pin or trigger a permanent conflict on recovery.
@@ -381,7 +385,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       let readMethodUnresolved = false;
       for (let round = 0; round < 3; round += 1) {
         result = await this.reportPrompt(step, round === 0 ? "action-execute" : `action-continue-${round}`,
-          `Current operator request: ${asked}. Decision: ${plan.decision}. The authenticated profile brief is already injected; do not reload it. ${actionGuidance}${READ_TOOL_FALLBACK}${round === 0 ? "First share_progress with your immediate next action in your own words." : "Share a new progress update only if a receipt changes your next step."} For a missing internal fact, make one focused hivemind_meta recall with the named subject; do not call context first. A scoped recall is not a complete inventory, so do not infer that an offer, ICP, or prior work does not exist solely from missing results. For broad external research, use one parallel_search_batch call with four or five complementary queries, inspect all URL-backed results, then verify material claims; use parallel_search for one narrow fact. For a public webpage screenshot, call native browser_capture in this turn; prior room artifacts do not complete a new request. It saves a full-page image artifact without connected-app discovery or grant. Capture the requested page, not an adjacent path; do not guess URL variants or save a fallback page as the requested screenshot. If capture fails, report that error once. For a requested PDF, provide the finished Markdown report; the room runtime renders and attaches its PDF after this response. Do not use browser_capture or memory save for PDF generation. Use hivemind_connected_task for connected-app status or account-specific work. For status-only requests, call connection_status and stop after its receipt; do not search or read app content. Load a detailed skill only when needed. Use relevant facts from receipts and activate relevant action skills from the catalog. If the next step needs another tool family, open it with reset_tools. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Finish requested output. Return finished answer in report; set needsInput only for a genuinely missing required choice, never an internal tool or method choice.`);
+          `Current operator request: ${asked}. Decision: ${plan.decision}. The authenticated profile brief is already injected; do not reload it. ${actionGuidance}${READ_TOOL_FALLBACK}${round === 0 ? "First share_progress with your immediate next action in your own words." : "Share a new progress update only if a receipt changes your next step."} For a missing internal fact, make one focused hivemind_meta recall with the named subject; do not call context first. A scoped recall is not a complete inventory, so do not infer that an offer, ICP, or prior work does not exist solely from missing results. ${plan.memoryIntent === "company" ? "This run requests a canonical company-memory save. Use hivemind_meta save with the intended scope, wait for its approval and persisted memory ID, and never say saved without that receipt. " : "Do not save company memory unless the operator requested it in this run. "} For broad external research, use one parallel_search_batch call with four or five complementary queries, inspect all URL-backed results, then verify material claims; use parallel_search for one narrow fact. For a public webpage screenshot, call native browser_capture in this turn; prior room artifacts do not complete a new request. It saves a full-page image artifact without connected-app discovery or grant. Capture the requested page, not an adjacent path; do not guess URL variants or save a fallback page as the requested screenshot. If capture fails, report that error once. For a requested PDF, provide the finished Markdown report; the room runtime renders and attaches its PDF after this response. Do not use browser_capture or memory save for PDF generation. Use hivemind_connected_task for connected-app status or account-specific work. For status-only requests, call connection_status and stop after its receipt; do not search or read app content. Load a detailed skill only when needed. Use relevant facts from receipts and activate relevant action skills from the catalog. If the next step needs another tool family, open it with reset_tools. If context is unavailable, proceed with independent work and identify any fact you cannot verify. Finish requested output. Return finished answer in report; set needsInput only for a genuinely missing required choice, never an internal tool or method choice.`);
         if (result.needsInput && isNonblockingExecutionChoice(result.question, result.options)) {
           actionGuidance = READ_TOOL_FALLBACK;
           if (round < 2) continue;
@@ -403,6 +407,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         }
         if (proposalRequested && !await this.agent.playbookProposalForCurrentRun()) {
           actionGuidance = "No playbook proposal receipt exists. Call refine_local_playbook now; it creates a pending_review proposal without changing active instructions. Report only the returned proposal ID. ";
+          continue;
+        }
+        if (plan.memoryIntent === "company" && !await this.agent.hasCompanyMemoryReceipt()) {
+          actionGuidance = "No persisted company-memory receipt exists. The save is incomplete; do not claim success. Use hivemind_meta save and wait for the confirmed Core memory ID. ";
           continue;
         }
         if (!missingPlanTaskIds(plan.tasks.length, result.completedTaskIds).length) break;
@@ -427,6 +435,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
       const reply = result.report.trim();
       return durable.do("complete-action", async () => {
+        if (plan.memoryIntent === "company" && !await this.agent.hasCompanyMemoryReceipt()) {
+          const report = "The company brain did not confirm a saved memory. This run is incomplete; no company-memory write is claimed.";
+          await this.agent.note("report", report);
+          await this.agent.note("completion", "memory_receipt_missing");
+          return { runId: work.runId, orgId: work.orgId, complete: false, reason: "memory_receipt_missing", report };
+        }
         const proposalId = proposalRequested ? await this.agent.playbookProposalForCurrentRun() : null;
         if (proposalRequested && !proposalId) {
           const report = "No playbook proposal was saved. I cannot provide a proposal ID without a tool receipt.";
@@ -638,10 +652,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         artifactId = saved.id;
         if (!pdfForbidden && (requestsPdf(asked) || deckRequested)) await this.agent.createPdfArtifact(saved.id);
       }
-      for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
-      await this.agent.note("report", written.report);
+      if (plan.memoryIntent !== "company") {
+        for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
+        await this.agent.note("report", written.report);
+      }
       await this.agent.rememberSources(written.report);
-      if (!requestsMemorySave(asked)) {
+      if (plan.memoryIntent !== "company") {
+        return { title: "", content: "", report: written.report, verdict, artifactId };
+      }
+      if (await this.agent.hasCompanyMemoryReceipt()) {
         return { title: "", content: "", report: written.report, verdict, artifactId };
       }
       const title = `${work.company}: ${asked.slice(0, 120)}`;
@@ -672,7 +691,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     await durable.do("save-reviewed-operating-learnings", async () =>
       this.agent.recordOperatingLearnings(written.operatingLearnings, insights, prepared.artifactId));
     if (!prepared.title) {
-      await durable.do("deliverable-ready", async () => this.agent.note("completion", "deliverable_ready"));
+      await durable.do("deliverable-ready", async () => {
+        if (plan.memoryIntent === "company") {
+          for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
+          await this.agent.note("report", prepared.report);
+        }
+        await this.agent.note("completion", "deliverable_ready");
+      });
       return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "deliverable_ready", report: prepared.report, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };
     }
 
@@ -688,17 +713,21 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.markAwaiting("");
       if (!approved) {
         await this.agent.note("completion", "memory_declined");
-        return { runId: work.runId, orgId: work.orgId, complete: prepared.verdict.complete, reason: "memory_declined", report: prepared.report };
+        return { runId: work.runId, orgId: work.orgId, complete: false, reason: "memory_declined", report: "The report artifact is preserved, but company-memory publication was not approved. No company-memory save is claimed." };
       }
       const memory = await this.agent.saveCompanyMemory(prepared.title, prepared.content);
-      const memorySaved = Boolean(memory && typeof memory === "object" && "ok" in memory && memory.ok === true);
+      const memorySaved = Boolean(confirmedCompanyMemoryId(memory));
+      if (memorySaved) {
+        for (const id of new Set([...await completedContentTasks(written.completedTaskIds), ...artifactTaskIds])) await this.agent.updateOperatingTask(id, "completed", true);
+        await this.agent.note("report", prepared.report);
+      }
       await this.agent.note("completion", memorySaved ? "memory_saved" : "memory_write_failed");
       return {
         runId: work.runId,
         orgId: work.orgId,
         complete: prepared.verdict.complete && memorySaved,
         reason: memorySaved ? prepared.verdict.reason : "memory_write_failed",
-        report: prepared.report,
+        report: memorySaved ? prepared.report : "The report artifact is preserved, but the company brain did not confirm a saved memory. No company-memory save is claimed.",
       };
     });
     return { ...result, artifactRefs: prepared.artifactId ? [prepared.artifactId] : [], insights };

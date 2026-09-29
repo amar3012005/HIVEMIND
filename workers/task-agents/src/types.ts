@@ -84,6 +84,8 @@ export interface TaskAgentState {
   workflowId: string;
   companyContextLoaded?: boolean;
   companyContextRequired?: boolean;
+  companyMemoryIntent?: boolean;
+  companyMemoryReceiptId?: string;
   profileBrief?: string;
   operatingMemoryBrief?: string;
   recoveryBrief?: string;

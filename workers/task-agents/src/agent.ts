@@ -778,6 +778,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.textDraft = "";
     if (this.state.catalogStage === "planning") {
       const fastStart = isInitialOperatingPlan(ctx.messages, ctx.continuation) ? initialPlanModel(this.gatewayEnv()) : null;
+      console.log(JSON.stringify({ event: "planner_model_selected", model: fastStart ? "openai/gpt-oss-20b:nitro" : "main", firstPlan: !!fastStart }));
       return {
         ...(fastStart ? { model: fastStart } : {}),
         activeTools: ["think_final_answer"],
@@ -1527,7 +1528,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         console.warn(JSON.stringify({ event: "governor_fallback_failed", name: error instanceof Error ? error.name : "unknown" }));
       }
     }
-    this.note("governance", `${verdict.verdict}: ${verdict.note}`);
+    this.note("governance", `${verdict.verdict}: ${verdict.note || (verdict.verdict === "clear" ? "No material content issue found in the supplied report and receipts." : "Review found a material issue; inspect the report before external use.")}`);
     return verdict;
   }
 

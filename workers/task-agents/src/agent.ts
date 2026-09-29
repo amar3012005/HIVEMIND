@@ -1267,6 +1267,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async onChunk({ chunk }: ChunkContext): Promise<void> {
+    // Workflow routing and structured planning use the same model transport,
+    // but their partial tokens are not conversation output. Only execution
+    // stages may publish drafts to the room.
+    if (this.state.catalogStage !== "action") return;
     if (chunk.type === "text-delta") {
       if (this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
       const text = chunk.text;

@@ -306,6 +306,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       `Continuing ${recovery.runId}: ${recovery.plan!.tasks.filter((task: OperatingPlan["tasks"][number]) => task.status === "completed").length}/${recovery.plan!.tasks.length} steps completed; ${recovery.sourceCount} source and ${recovery.artifactCount} artifact receipts.`));
 
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
+    if (quickRoute === "direct") await durable.do("enable-direct-stream", async () => this.agent.applyGroups([], true));
     const quickDirect = quickRoute === "direct" ? await step.prompt("direct-answer", {
       prompt: `Answer the current operator request directly in your active HyperAgent persona. Current request: ${asked}. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, or claim company facts not established here.`,
       output: z.object({ reply: z.string().min(2) }),

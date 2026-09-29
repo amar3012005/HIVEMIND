@@ -6,6 +6,7 @@ import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
 import { streamText, tool, type ToolSet } from "ai";
 import { repairBrowserExtractCall } from "./tool-recovery";
+import { browserTargetAllowed } from "./source-discovery";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -58,6 +59,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   private textDraft = "";
   private turnSources: RunSource[] = [];
+  private discoveredUrls = new Set<string>();
   private pageReadCounts = new Map<string, number>();
   private capturedPages = new Map<string, string>();
   private recoveryStepPending = false;
@@ -1084,6 +1086,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
     this.draftCalls.clear();
     this.turnSources = [];
+    this.discoveredUrls.clear();
     this.pageReadCounts.clear();
     this.capturedPages.clear();
     const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
@@ -1159,7 +1162,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const repairToolCall: NonNullable<Parameters<typeof streamText>[0]["repairToolCall"]> = async ({ toolCall }) => {
       const repaired = repairBrowserExtractCall(toolCall.toolName, toolCall.input);
       if (!repaired) return null;
-      this.recoveryStepPending = true;
       this.note("tool-call-repair", `Read ${repaired.toolName} after URL-only browser_extract input`);
       return { ...toolCall, ...repaired };
     };
@@ -1199,7 +1201,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!this.recoveryStepPending || this.recoveryStepUsed) return;
     this.recoveryStepPending = false;
     this.recoveryStepUsed = true;
-    this.note("model-recovery", "One model step uses the recovery model after a tool or protocol error");
     return { model: recoveryModel(this.gatewayEnv()) };
   }
 
@@ -1209,6 +1210,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (ctx.toolName === "browser_markdown" && typeof input.url === "string") {
       let target = input.url;
       try { target = new URL(input.url).href; } catch { /* Let the tool validate malformed URLs. */ }
+      if (!browserTargetAllowed(target, this.discoveredUrls, [this.state.envelope?.task ?? "", ...(this.state.envelope?.inputRefs ?? [])])) {
+        this.note("source-discovery-required", target);
+        return { action: "block", reason: "Resolve this exact page URL with parallel_search or parallel_search_batch before browser_markdown. Use a returned URL, not a guessed path." };
+      }
       const reads = this.pageReadCounts.get(target) ?? 0;
       if (reads >= 2) {
         this.note("browser-read-limit", `${target}: use the existing page receipt or move to the next planned action`);
@@ -1230,13 +1235,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   afterToolCall(ctx: ToolCallResultContext): void {
-    if (!ctx.success && !this.recoveryStepUsed) this.recoveryStepPending = true;
     this.note("tool-call", JSON.stringify({
       id: ctx.toolCallId,
       name: ctx.toolName,
       phase: ctx.success ? "returned" : "failed",
       durationMs: ctx.durationMs,
-      result: toolResultPreview(ctx.success ? ctx.output : ctx.error),
+      result: ctx.success && ctx.toolName === "activate_skill"
+        ? loadedSkillPreview(ctx.output)
+        : toolResultPreview(ctx.success ? ctx.output : ctx.error),
     }));
   }
 
@@ -1776,6 +1782,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.assertTool("parallel_search");
         this.note("parallel_search", query);
         const result = await parallelSearch(this.gatewayEnv(), query);
+        for (const source of collectSourceLinks(result)) this.discoveredUrls.add(source.url);
         this.rememberSources(result);
         const provider = result && typeof result === "object" && "provider" in result ? String(result.provider) : "unknown";
         this.note("parallel_search", provider);
@@ -1789,6 +1796,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.assertTool("parallel_search_batch");
         this.note("parallel_search_batch", `${queries.length} searches started`);
         const result = await parallelSearchBatch(this.gatewayEnv(), queries);
+        for (const source of collectSourceLinks(result.searches.flatMap((search) => search.results))) this.discoveredUrls.add(source.url);
         this.rememberSources(result.searches.flatMap((search) => search.results));
         this.note("parallel_search_batch", `${result.searches.filter((search) => search.results.length).length}/${queries.length} searches returned sources`);
         return result;
@@ -2226,6 +2234,13 @@ function toolResultPreview(output: unknown): string {
   } catch {
     return "[result unavailable]";
   }
+}
+
+function loadedSkillPreview(output: unknown): string {
+  const body = typeof output === "string" ? output : JSON.stringify(output ?? "");
+  const name = body.match(/name=\\?\"([a-z0-9-]+)\\?\"/i)?.[1]
+    ?? body.match(/name:\s*([a-z0-9-]+)/i)?.[1];
+  return JSON.stringify({ loaded: true, skill: name || "requested skill" });
 }
 
 function collectSourceLinks(payload: unknown): RunSource[] {

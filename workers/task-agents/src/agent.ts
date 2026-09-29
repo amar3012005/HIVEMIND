@@ -215,6 +215,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return result.text.trim();
   }
 
+  /** A planning decision is data, not an agent tool call. Keep it outside the
+   * Think tool loop so a provider's forced-tool protocol cannot stall the run.
+   */
+  async planTaskWithoutTools(prompt: string): Promise<string> {
+    const candidate = thinkModel(this.gatewayEnv());
+    const result = await generateText({
+      model: typeof candidate === "string" ? recoveryModel(this.gatewayEnv()) : candidate,
+      prompt,
+      maxOutputTokens: 1800,
+      temperature: 0,
+      abortSignal: AbortSignal.timeout(25_000),
+      providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } },
+    });
+    return result.text.trim();
+  }
+
   configureContext(): ContextConfig[] {
     return [{ label: "hyperagent:system", provider: { get: async () => HYPERAGENT_INSTRUCTION } }];
   }

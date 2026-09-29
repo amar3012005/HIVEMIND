@@ -3615,6 +3615,52 @@ model DigitalEmployee {
 /// message kicks off a Lead + Reactors turn that lives in HyperTurn.
 /// Per-user (not per-org) for v1. summaryMemoryId is set on archive
 /// when the transcript is distilled into a canonical Memory.
+/// Core-owned trigger definition. The Cloudflare room Worker executes one
+/// occurrence at a time; it is not authoritative for schedule or consent.
+model HyperTaskTrigger {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  roomId         String    @map("room_id") @db.Uuid
+  employeeId     String    @map("employee_id") @db.Uuid
+  kind           String    @db.VarChar(16)
+  status         String    @default("active") @db.VarChar(16)
+  task           String    @db.Text
+  taskPacket     Json      @default("{}") @map("task_packet") @db.JsonB
+  modePreference String    @default("auto") @map("mode_preference") @db.VarChar(16)
+  timezone       String?   @db.VarChar(64)
+  localTime      String?   @map("local_time") @db.VarChar(5)
+  nextRunAt      DateTime? @map("next_run_at") @db.Timestamptz(6)
+  eventKey       String?   @map("event_key") @db.VarChar(120)
+  version        Int       @default(1)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, createdAt(sort: Desc)], map: "hyper_task_triggers_owner_idx")
+  @@map("hyper_task_triggers")
+}
+
+model HyperTaskOccurrence {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  triggerId    String    @map("trigger_id") @db.Uuid
+  orgId        String    @map("org_id") @db.Uuid
+  logicalKey   String    @map("logical_key") @db.VarChar(160)
+  dueAt        DateTime  @map("due_at") @db.Timestamptz(6)
+  status       String    @default("queued") @db.VarChar(24)
+  leaseUntil   DateTime? @map("lease_until") @db.Timestamptz(6)
+  workflowId   String?   @map("workflow_id") @db.VarChar(160)
+  runRoomId    String?   @unique(map: "hyper_task_occurrences_run_room_id_key") @map("run_room_id") @db.Uuid
+  artifactRefs Json      @default("[]") @map("artifact_refs") @db.JsonB
+  result       Json      @default("{}") @db.JsonB
+  attempts     Int       @default(0)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([triggerId, logicalKey])
+  @@index([status, leaseUntil], map: "hyper_task_occurrences_claim_idx")
+  @@map("hyper_task_occurrences")
+}
+
 model HyperRoom {
   id                 String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId             String       @map("user_id") @db.Uuid

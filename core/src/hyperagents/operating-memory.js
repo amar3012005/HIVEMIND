@@ -112,3 +112,18 @@ export async function recallOperatingMemory(prisma, orgId, input = {}) {
     ORDER BY created_at DESC, id DESC LIMIT $${args.length}`, ...args);
   return { ok: true, project: OPERATING_MEMORY_PROJECT, count: rows.length, memories: rows.map(publicRecord) };
 }
+
+export async function recordTriggerDefinition(prisma, trigger) {
+  const employee = await prisma.digitalEmployee.findFirst({
+    where: { id: trigger.employee_id, orgId: trigger.org_id }, select: { slug: true },
+  });
+  if (!employee?.slug) throw new Error('trigger_employee_unavailable');
+  return saveOperatingMemory(prisma, {
+    kind: 'trigger_status', status: trigger.status === 'active' ? 'active' : trigger.status === 'paused' ? 'paused' : 'recorded',
+    agent_slug: employee.slug, title: Number(trigger.version || 1) > 1 ? 'Durable trigger updated' : 'Durable trigger created',
+    summary: `Scheduled ${trigger.kind} task: ${String(trigger.task || '').slice(0, 700)}`,
+    idempotency_key: `trigger-definition:${trigger.id}:v${trigger.version || 1}`,
+    trigger_id: trigger.id, room_id: trigger.room_id,
+    context: { kind: trigger.kind, nextRunAt: trigger.next_run_at, timezone: trigger.timezone, outputFormat: trigger.task_packet?.output_format },
+  }, { orgId: trigger.org_id, userId: trigger.user_id }, { source: 'runtime' });
+}

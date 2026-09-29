@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { recallOperatingMemory, saveOperatingMemory, validateOperatingMemory } from './operating-memory.js';
+import { recallOperatingMemory, recordTriggerDefinition, saveOperatingMemory, validateOperatingMemory } from './operating-memory.js';
 
 const orgId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const userId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -41,4 +41,40 @@ test('recall filters at the database before newest-first pagination', async () =
 test('invalid filters and oversized content are rejected', async () => {
   await assert.rejects(() => recallOperatingMemory({}, orgId, { limit: 100 }), /invalid_limit/);
   assert.throws(() => validateOperatingMemory({ kind: 'learning', status: 'recorded', agent_slug: 'elena', title: 'Lesson', summary: 'x'.repeat(2401), idempotency_key: 'x' }, { orgId, userId }), /invalid_memory_content/);
+});
+
+test('a durable trigger definition is attributed to its selected employee', async () => {
+  const rows = [];
+  const prisma = {
+    digitalEmployee: { findFirst: async () => ({ slug: 'elena' }) },
+    project: { upsert: async () => ({ id: userId, name: 'Hyper Agents', policy: 'private' }) },
+    projectMember: { upsert: async () => ({}) },
+    $queryRawUnsafe: async (_sql, ...args) => { rows.push(args); return [{
+      id: runId, kind: 'trigger_status', status: 'active', agent_slug: 'elena', title: 'Durable trigger created',
+      summary: 'Scheduled daily task: Research competitors', room_id: null, run_id: null,
+      trigger_id: runId, context: {}, created_at: new Date(),
+    }]; },
+  };
+  await recordTriggerDefinition(prisma, { id: runId, org_id: orgId, user_id: userId,
+    employee_id: userId, kind: 'daily', task: 'Research competitors', status: 'active', version: 1 });
+  assert.equal(rows[0][3], 'trigger_status');
+  assert.equal(rows[0][5], 'elena');
+});
+
+test('a paused trigger records a new version without overwriting its earlier state', async () => {
+  const rows = [];
+  const prisma = {
+    digitalEmployee: { findFirst: async () => ({ slug: 'elena' }) },
+    project: { upsert: async () => ({ id: userId, name: 'Hyper Agents', policy: 'private' }) },
+    projectMember: { upsert: async () => ({}) },
+    $queryRawUnsafe: async (_sql, ...args) => { rows.push(args); return [{
+      id: runId, kind: 'trigger_status', status: 'paused', agent_slug: 'elena',
+      title: 'Durable trigger updated', summary: 'Scheduled daily task: Research competitors',
+      room_id: null, run_id: null, trigger_id: runId, context: {}, created_at: new Date(),
+    }]; },
+  };
+  await recordTriggerDefinition(prisma, { id: runId, org_id: orgId, user_id: userId,
+    employee_id: userId, kind: 'daily', task: 'Research competitors', status: 'paused', version: 2 });
+  assert.equal(rows[0][2], `trigger-definition:${runId}:v2`);
+  assert.equal(rows[0][4], 'paused');
 });

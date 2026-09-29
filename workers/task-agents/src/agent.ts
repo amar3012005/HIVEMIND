@@ -233,14 +233,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (receipt && typeof receipt === "object" && "error" in receipt) throw new Error(String(receipt.error));
     const envelope = this.state.envelope;
     if (envelope) {
-      const saved = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
-        kind: "trigger_status", status: outcome.complete ? "completed" : "incomplete", writer: "runtime",
-        agent_slug: this.state.employee?.slug || "hyperagent", title: "Scheduled task outcome",
-        summary: `${outcome.complete ? "Completed" : "Incomplete"}: ${(envelope.task || "scheduled task").slice(0, 700)}`,
-        idempotency_key: `trigger:${occurrenceId}:terminal`, run_id: envelope.runId, trigger_id: occurrenceId,
-        context: { reason: outcome.reason.slice(0, 200), artifactRefs: (outcome.artifactRefs || []).slice(0, 10) },
-      });
-      if (saved && typeof saved === "object" && "error" in saved) throw new Error(String(saved.error));
+      try {
+        const saved = await saveOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, {
+          kind: "trigger_status", status: outcome.complete ? "completed" : "incomplete", writer: "runtime",
+          agent_slug: this.state.employee?.slug || "hyperagent", title: "Scheduled task outcome",
+          summary: `${outcome.complete ? "Completed" : "Incomplete"}: ${(envelope.task || "scheduled task").slice(0, 700)}`,
+          idempotency_key: `trigger:${occurrenceId}:terminal`, run_id: envelope.runId, trigger_id: occurrenceId,
+          context: { reason: outcome.reason.slice(0, 200), artifactRefs: (outcome.artifactRefs || []).slice(0, 10) },
+        });
+        if (saved && typeof saved === "object" && "error" in saved) throw new Error(String(saved.error));
+      } catch {
+        console.warn(JSON.stringify({ event: "trigger_operating_memory_failed", occurrenceId }));
+      }
     }
   }
 

@@ -4,8 +4,12 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import {
+  claimDueOccurrences, completeOccurrence, createTrigger, fireTrigger, getOccurrence,
+  listTriggers, markOccurrenceStarted, updateTriggerStatus,
+} from './employees/task-triggers.js';
 import { getPrismaClient } from './db/prisma.js';
-import { recallOperatingMemory, saveOperatingMemory } from './hyperagents/operating-memory.js';
+import { recallOperatingMemory, recordTriggerDefinition, saveOperatingMemory } from './hyperagents/operating-memory.js';
 import {
   authenticatePersistedApiKey,
   createPersistedApiKey,
@@ -164,6 +168,7 @@ import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
+import { resolveAuthorizedRoomEmployeeRoster } from './employees/room-employee-roster.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 import { announcementForAdmin, announcementMetrics, nextWorkspaceAnnouncement, normalizeAnnouncementInput, recordWorkspaceAnnouncementDelivery } from './workspace/announcements.js';
@@ -10882,6 +10887,95 @@ Write the persona now.`;
     });
   }
 
+  // Cloudflare's minute tick discovers due work; Core alone creates and leases
+  // occurrences. The Worker only receives opaque occurrence IDs.
+  if (pathname === '/internal/hyper/task-triggers/claim-due' && req.method === 'POST') {
+    const callerKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!process.env.HIVEMIND_MASTER_API_KEY || callerKey !== process.env.HIVEMIND_MASTER_API_KEY) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try { return jsonResponse(res, { occurrence_ids: await claimDueOccurrences(prisma) }); }
+    catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+  }
+  const internalTaskOccurrence = pathname.match(/^\/internal\/hyper\/task-triggers\/occurrences\/([0-9a-f-]{36})(?:\/(started|complete))?$/i);
+  if (internalTaskOccurrence) {
+    const callerKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!process.env.HIVEMIND_MASTER_API_KEY || callerKey !== process.env.HIVEMIND_MASTER_API_KEY) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const id = internalTaskOccurrence[1];
+    const action = internalTaskOccurrence[2];
+    try {
+      if (!action && req.method === 'GET') {
+        const occurrence = await getOccurrence(prisma, id);
+        if (!occurrence) return jsonResponse(res, { error: 'Occurrence not found' }, 404);
+        const roster = await resolveAuthorizedRoomEmployeeRoster(prisma, {
+          orgId: occurrence.org_id, userId: occurrence.user_id, roomId: occurrence.run_room_id,
+        });
+        if (!roster.authorized || roster.roster?.employee?.id !== occurrence.employee_id) {
+          return jsonResponse(res, { error: 'Room employee unavailable' }, 404);
+        }
+        return jsonResponse(res, { occurrence });
+      }
+      if (req.method === 'POST' && action === 'started') {
+        const body = await parseBody(req);
+        const started = await markOccurrenceStarted(prisma, id, String(body.workflow_id || ''));
+        return started ? jsonResponse(res, { occurrence: started }) : jsonResponse(res, { error: 'Occurrence not claimable' }, 409);
+      }
+      if (req.method === 'POST' && action === 'complete') {
+        const body = await parseBody(req);
+        const completed = await completeOccurrence(prisma, id, {
+          complete: body.complete === true, reason: body.reason, report: body.report,
+          artifactRefs: Array.isArray(body.artifact_refs) ? body.artifact_refs : [],
+        });
+        return completed ? jsonResponse(res, { occurrence: completed }) : jsonResponse(res, { error: 'Occurrence not running' }, 409);
+      }
+      return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+  }
+
+  if (pathname === '/internal/hyper/task-triggers/propose' && req.method === 'POST') {
+    const callerKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!process.env.HIVEMIND_MASTER_API_KEY || callerKey !== process.env.HIVEMIND_MASTER_API_KEY) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const body = await parseBody(req);
+    try {
+      const trigger = await createTrigger(prisma, {
+        orgId: String(body.org_id || ''), userId: String(body.user_id || ''),
+        roomId: String(body.room_id || ''), employeeId: String(body.employee_id || ''),
+        input: body, proposed: true,
+      });
+      try { await recordTriggerDefinition(prisma, trigger); }
+      catch { console.warn('[hyperagents-operating-memory] trigger proposal record deferred'); }
+      return jsonResponse(res, { trigger }, 201);
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+  }
+
+  // Preview task rooms resolve their chosen employee from the persisted room.
+  // Model or browser payloads never supply the persona or tenant scope.
+  if (pathname === '/internal/hyper/room-employee' && req.method === 'GET') {
+    const callerKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    if (!process.env.HIVEMIND_MASTER_API_KEY || callerKey !== process.env.HIVEMIND_MASTER_API_KEY) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const orgId = String(url.searchParams.get('org_id') || '');
+    const userId = String(url.searchParams.get('user_id') || '');
+    const roomId = String(url.searchParams.get('room_id') || '');
+    if (![orgId, userId, roomId].every((id) => /^[0-9a-f-]{36}$/i.test(id))) {
+      return jsonResponse(res, { error: 'org_id, user_id and room_id are required' }, 400);
+    }
+    const resolved = await resolveAuthorizedRoomEmployeeRoster(prisma, { orgId, userId, roomId });
+    if (!resolved.authorized) return jsonResponse(res, { error: 'Resource not found' }, 404);
+    if (!resolved.roster) return jsonResponse(res, { error: 'Room not found' }, 404);
+    return jsonResponse(res, resolved.roster);
+  }
+
   if (pathname === '/internal/hyper/brand-dna' && req.method === 'GET') {
     const callerKey = (req.headers.authorization || '').replace('Bearer ', '').trim()
       || String(req.headers['x-api-key'] || '').trim();
@@ -11993,6 +12087,59 @@ Write the persona now.`;
     return;
   }
   // ─── End Team Tasks ───────────────────────────────────────
+
+  // Authenticated durable task triggers for Cloudflare employee rooms.
+  const triggerRoute = pathname.match(/^\/v1\/hyper\/task-triggers(?:\/([0-9a-f-]{36}))?(?:\/(fire|occurrences))?$/i);
+  if (triggerRoute) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const orgId = current.session.orgId;
+    const userId = current.session.userId;
+    if (!await getActiveOrganizationMembership(prisma, { orgId, userId })) {
+      return jsonResponse(res, { error: 'Resource not found' }, 404);
+    }
+    const triggerId = triggerRoute[1];
+    const action = triggerRoute[2];
+    try {
+      if (req.method === 'GET' && !triggerId) return jsonResponse(res, { triggers: await listTriggers(prisma, { orgId, userId }) });
+      if (req.method === 'POST' && !triggerId) {
+        const body = await parseBody(req);
+        const trigger = await createTrigger(prisma, {
+          orgId, userId, roomId: String(body.room_id || ''), employeeId: String(body.employee_id || ''), input: body,
+        });
+        try { await recordTriggerDefinition(prisma, trigger); }
+        catch { console.warn('[hyperagents-operating-memory] trigger record deferred'); }
+        return jsonResponse(res, { trigger }, 201);
+      }
+      if (req.method === 'PATCH' && triggerId && !action) {
+        const body = await parseBody(req);
+        const trigger = await updateTriggerStatus(prisma, { orgId, userId, triggerId, status: String(body.status || '') });
+        if (trigger) {
+          try { await recordTriggerDefinition(prisma, trigger); }
+          catch { console.warn('[hyperagents-operating-memory] trigger update record deferred'); }
+        }
+        return trigger ? jsonResponse(res, { trigger }) : jsonResponse(res, { error: 'Trigger not found' }, 404);
+      }
+      if (req.method === 'POST' && triggerId && action === 'fire') {
+        const body = await parseBody(req);
+        const kind = body.kind === 'event' ? 'event' : 'manual';
+        const occurrence = await fireTrigger(prisma, {
+          orgId, userId, triggerId, logicalKey: String(body.event_id || crypto.randomUUID()),
+          kind, eventKey: kind === 'event' ? String(body.event_key || '') : null,
+        });
+        return occurrence ? jsonResponse(res, { occurrence }) : jsonResponse(res, { error: 'Trigger unavailable' }, 404);
+      }
+      if (req.method === 'GET' && triggerId && action === 'occurrences') {
+        const rows = await prisma.$queryRawUnsafe(
+          'SELECT o.id,o.logical_key,o.due_at,o.status,o.workflow_id,o.run_room_id,o.artifact_refs,o.result FROM "hivemind"."hyper_task_occurrences" o JOIN "hivemind"."hyper_task_triggers" t ON t.id=o.trigger_id WHERE t.id=$1::uuid AND t.org_id=$2::uuid AND t.user_id=$3::uuid ORDER BY o.created_at DESC LIMIT 50',
+          triggerId, orgId, userId,
+        );
+        return jsonResponse(res, { occurrences: rows });
+      }
+      return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+  }
 
   // ═══════════════════════════════════════════════════════════
   // Hyper Agents — Rooms (Slack/WhatsApp-style CSI swarm)

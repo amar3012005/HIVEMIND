@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceReceiptCoversQuotes } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
   assert.equal(sourceReceiptCoversQuotes(page, ["Hannover Re is a reinsurer", "Karl-Wiechert-Allee 50, 30625 Hannover"]), true);
   assert.equal(sourceReceiptCoversQuotes(page, ["Hannover Re is an insurer"]), false);
   assert.equal(sourceReceiptCoversQuotes(page, []), false);
+});
+
+test("quote repair offers only passages copied from the actual source", () => {
+  const page = "# Imprint\nHannover Re, Karl-Wiechert-Allee 50, 30625 Hannover.\nHannover Re is a global reinsurer.\nOther material.";
+  const candidates = sourceQuoteCandidates(page, "Hannover Re is headquartered at Karl-Wiechert-Allee 50 in Hannover");
+  assert.ok(candidates.some((candidate) => candidate.includes("30625 Hannover")));
+  assert.ok(candidates.every((candidate) => page.includes(candidate)));
+  assert.deepEqual(sourceQuoteCandidates(page, "Imaginary company is based in Berlin"), []);
 });
 
 test("quote repair includes source location in a long page footer and sector text in the body", () => {

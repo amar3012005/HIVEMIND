@@ -119,6 +119,21 @@ export function sourceExcerptForQuoteRepair(page: string, quotes: readonly strin
     : relevant;
 }
 
+/** Exact page passages near a proposed quote, for a bounded model repair. */
+export function sourceQuoteCandidates(page: string, quote: string, limit = 4): string[] {
+  const wanted = new Set(canonicalPassage(quote).split(" ").filter((word) => word.length >= 4));
+  if (!wanted.size) return [];
+  const passages = page.split(/\n+|(?<=[.!?])\s+(?=[A-Z\p{Lu}])/u)
+    .map((part) => part.trim()).filter((part) => part.length >= 12 && part.length <= 350);
+  return passages.map((text) => {
+    const found = new Set(canonicalPassage(text).split(" "));
+    const overlap = [...wanted].filter((word) => found.has(word)).length;
+    return { text, score: overlap / wanted.size, overlap };
+  }).filter((item) => item.overlap >= Math.min(2, wanted.size) && item.score >= 0.3)
+    .sort((a, b) => b.score - a.score || b.overlap - a.overlap || a.text.length - b.text.length)
+    .slice(0, limit).map((item) => item.text);
+}
+
 function canonicalPassage(text: string): string {
   return text.normalize("NFKD").toLocaleLowerCase().replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }

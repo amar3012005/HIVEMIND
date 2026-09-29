@@ -204,6 +204,11 @@ test("rejects prospect URLs absent from tool evidence", () => {
   const report = "Candidate Sparkasse Hannover fits the offer. Source: https://www.sparkasse-hannover.de";
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: [] }).reason, "prospect_sources_missing");
   assert.equal(companyWorkComplete({ report, recalled: true, prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).complete, true);
+  const withContext = `${report} Group context: https://www.vhv-gruppe.de/unternehmen/wer-wir-sind`;
+  assert.equal(companyWorkComplete({ report: withContext, recalled: true,
+    prospectSources: ["https://www.sparkasse-hannover.de/de/home.html"] }).reason, "prospect_sources_missing");
+  assert.equal(companyWorkComplete({ report: withContext, recalled: true,
+    prospectSources: ["https://www.sparkasse-hannover.de/de/home.html", "https://www.vhv-gruppe.de/unternehmen/wer-wir-sind"] }).complete, true);
 });
 
 test("versioned prospect contract requires per-account location and sector receipts", () => {

@@ -1100,10 +1100,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return;
     const filters = [
-      { kind: "learning" as const, limit: 20 },
-      { kind: "task_status" as const, status: "completed", limit: 10 },
-      { kind: "decision_note" as const, limit: 10 },
-      { kind: "handoff" as const, limit: 10 },
+      { kind: "learning" as const, query: task, limit: 12 },
+      { kind: "learning" as const, limit: 5 },
+      { kind: "task_status" as const, status: "completed", query: task, limit: 5 },
+      { kind: "decision_note" as const, query: task, limit: 5 },
+      { kind: "handoff" as const, query: task, limit: 5 },
     ];
     const results = await Promise.all(filters.map((filter) =>
       recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, filter).catch(() => null)));
@@ -1499,13 +1500,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const operatingMemory = tool({
-      description: "Private Hyper Agents operating memory across this organization's agents. Recall newest-first by kind, agent or status. For save, kind must be learning, decision_note or handoff AND both title and summary are required. Runtime records authoritative task and trigger outcomes. Never use this as company-brain memory or evidence that a task succeeded.",
+      description: "Private Hyper Agents operating memory across this organization's agents. Recall by task query, kind, agent or status; query searches all history and ranks matching records, while unfiltered recall is newest-first. Save only a verified reusable learning, decision, or handoff; use supersedesId when correcting an older record of the same kind and author. Runtime records authoritative task and trigger outcomes. Never use this as company-brain memory or evidence that a task succeeded.",
       inputSchema: z.object({
         operation: z.enum(["recall", "save"]),
         kind: z.enum(["learning", "decision_note", "handoff", "task_status", "trigger_status"]).optional(),
         agentSlug: z.string().max(120).optional(),
         status: z.enum(["recorded", "active", "completed", "incomplete", "errored", "paused"]).optional(),
         limit: z.number().int().min(1).max(20).optional(),
+        query: z.string().max(500).optional(),
+        supersedesId: z.string().uuid().optional(),
         title: z.string().max(180).optional(),
         summary: z.string().max(2400).optional(),
       }),
@@ -1513,7 +1516,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const identity = this.assertTool("hyperagents_memory");
         this.note("hyperagents_memory", `${input.operation}${input.kind ? ` ${input.kind}` : ""}`);
         if (input.operation === "recall") return recallOperatingMemory(this.gatewayEnv(), identity.orgId, identity.userId, {
-          kind: input.kind, agent_slug: input.agentSlug, status: input.status, limit: input.limit,
+          kind: input.kind, agent_slug: input.agentSlug, status: input.status, query: input.query, limit: input.limit,
         });
         const runId = this.state.envelope?.runId;
         if (!runId || !input.title?.trim() || !input.summary?.trim()
@@ -1525,6 +1528,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           kind: input.kind, status: "recorded", agent_slug: this.state.employee?.slug || "hyperagent",
           title: input.title, summary: input.summary, run_id: runId,
           room_id: this.currentRoomId() || undefined,
+          supersedes_id: input.supersedesId,
           idempotency_key: `agent:${hash}`,
         });
       },
@@ -1852,7 +1856,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   verifiedSourceUrls(): string[] {
-    return [...new Set(this.sourceReadReceipts().map((receipt) => receipt.url))];
+    const envelope = this.state.envelope;
+    if (!envelope) return [];
+    ensureCompanyTables(this.sql.bind(this));
+    // This SQLite database belongs to one room Durable Object. A continuation
+    // can span several WorkRuns, so use that room's authenticated source ledger
+    // rather than only the immediately preceding run.
+    const rows = this.sql`SELECT url FROM source_read_receipts
+      WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId}
+      ORDER BY read_at DESC LIMIT 100`;
+    return [...new Set(rows.map((row) => String(row.url)))];
   }
 
   recordVerifiedProspectClaims(prospects: readonly ProspectEvidence[]): void {

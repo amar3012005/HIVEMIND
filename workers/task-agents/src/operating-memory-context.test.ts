@@ -58,3 +58,17 @@ test("task recall brings a relevant cross-employee decision and handoff into the
   assert.ok(records.some((row) => row.kind === "decision_note" && row.agent === "marta"));
   assert.ok(records.some((row) => row.kind === "handoff" && row.agent === "ravi"));
 });
+
+test("near-duplicate lessons from one employee do not crowd out another employee's finding", () => {
+  const brief = operatingMemoryBrief([{ ok: true, memories: [
+    { kind: "learning", agentSlug: "elena", title: "Verify insurer headquarters from official imprint",
+      summary: "Quote the official postal address when checking insurer headquarters in Hannover", createdAt: "2026-09-29T12:00:00Z" },
+    { kind: "learning", agentSlug: "elena", title: "Verify insurer headquarters using official imprint",
+      summary: "Quote the official postal address when checking insurer headquarters in Hannover", createdAt: "2026-09-29T11:00:00Z" },
+    { kind: "learning", agentSlug: "marta", title: "Validate regulatory sector",
+      summary: "Use the insurer's supervisory statement", createdAt: "2026-09-29T10:00:00Z" },
+  ] }]);
+  const records = JSON.parse(brief) as { title: string }[];
+  assert.equal(records.filter((row) => row.title.includes("Verify insurer headquarters")).length, 1);
+  assert.ok(records.some((row) => row.title === "Validate regulatory sector"));
+});

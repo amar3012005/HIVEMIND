@@ -30,7 +30,12 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
     }
   }
   if ((kind === 'task_status' && !ids.run_id) || (kind === 'trigger_status' && !ids.trigger_id)) throw new Error('receipt_reference_required');
-  const context = input?.context && typeof input.context === 'object' && !Array.isArray(input.context) ? input.context : {};
+  const context = input?.context && typeof input.context === 'object' && !Array.isArray(input.context) ? { ...input.context } : {};
+  const supersedesId = input?.supersedes_id == null ? null : String(input.supersedes_id);
+  if (Object.hasOwn(context, 'supersedesId')) throw new Error('reserved_memory_context_key');
+  if (supersedesId && !UUID.test(supersedesId)) throw new Error('invalid_supersedes_id');
+  if (supersedesId && !['learning', 'decision_note', 'handoff'].includes(kind)) throw new Error('invalid_supersession_kind');
+  if (supersedesId) context.supersedesId = supersedesId;
   if (JSON.stringify(context).length > 4000) throw new Error('memory_context_too_large');
   return { orgId, userId, kind, status, agentSlug, title, summary, idempotencyKey, context, ...ids };
 }
@@ -41,14 +46,16 @@ export function validateOperatingMemoryFilter(input) {
   const status = input?.status == null ? null : String(input.status);
   const roomId = input?.room_id == null ? null : String(input.room_id);
   const runId = input?.run_id == null ? null : String(input.run_id);
+  const query = input?.query == null ? null : String(input.query).trim();
   if (kind && !OPERATING_MEMORY_KINDS.includes(kind)) throw new Error('invalid_memory_type');
   if (agentSlug && !SLUG.test(agentSlug)) throw new Error('invalid_agent_slug');
   if (status && !STATUSES.has(status)) throw new Error('invalid_memory_status');
   if (roomId && !UUID.test(roomId)) throw new Error('invalid_room_id');
   if (runId && !RUN_ID.test(runId)) throw new Error('invalid_run_id');
+  if (query && query.length > 500) throw new Error('invalid_query');
   const limit = Number(input?.limit ?? 10);
   if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('invalid_limit');
-  return { kind, agentSlug, status, roomId, runId, limit };
+  return { kind, agentSlug, status, roomId, runId, query, limit };
 }
 
 function publicRecord(row) {
@@ -56,12 +63,20 @@ function publicRecord(row) {
     id: row.id, project: OPERATING_MEMORY_PROJECT, kind: row.kind, status: row.status,
     agentSlug: row.agent_slug, title: row.title, summary: row.summary,
     roomId: row.room_id, runId: row.run_id, triggerId: row.trigger_id,
-    context: row.context, createdAt: row.created_at,
+    context: row.context, supersedesId: row.context?.supersedesId || null, createdAt: row.created_at,
   };
 }
 
 export async function saveOperatingMemory(prisma, input, identity, options = {}) {
   const row = validateOperatingMemory(input, { ...identity, source: options.source || 'agent' });
+  if (row.context.supersedesId) {
+    const prior = await prisma.$queryRawUnsafe(`
+      SELECT id FROM hivemind.hyper_agent_operating_memories
+      WHERE id = $1::uuid AND org_id = $2::uuid AND project_slug = 'hyper-agents'
+        AND kind = $3 AND agent_slug = $4 LIMIT 1`,
+    row.context.supersedesId, row.orgId, row.kind, row.agentSlug);
+    if (!prior.length) throw new Error('superseded_memory_unavailable');
+  }
   const project = await prisma.project.upsert({
     where: { orgId_slug: { orgId: row.orgId, slug: OPERATING_MEMORY_PROJECT } },
     update: {},
@@ -89,27 +104,44 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
   if (!persisted) throw new Error('memory_receipt_unavailable');
   if (!created.length && (persisted.kind !== row.kind || persisted.status !== row.status
     || persisted.agent_slug !== row.agentSlug || persisted.summary !== row.summary
-    || String(persisted.run_id || '') !== String(row.run_id || ''))) throw new Error('memory_idempotency_conflict');
+    || String(persisted.run_id || '') !== String(row.run_id || '')
+    || String(persisted.context?.supersedesId || '') !== String(row.context.supersedesId || ''))) throw new Error('memory_idempotency_conflict');
   return { ok: true, replayed: !created.length, memory: publicRecord(persisted) };
 }
 
 export async function recallOperatingMemory(prisma, orgId, input = {}) {
   if (!UUID.test(String(orgId || ''))) throw new Error('invalid_identity');
   const filter = validateOperatingMemoryFilter(input);
-  const clauses = ['org_id = $1::uuid', "project_slug = 'hyper-agents'"];
+  const clauses = ['m.org_id = $1::uuid', "m.project_slug = 'hyper-agents'", `NOT EXISTS (
+    SELECT 1 FROM hivemind.hyper_agent_operating_memories successor
+    WHERE successor.org_id = m.org_id AND successor.project_slug = 'hyper-agents'
+      AND successor.context->>'supersedesId' = m.id::text)`];
   const args = [orgId];
   for (const [column, value, cast] of [
     ['kind', filter.kind, ''], ['agent_slug', filter.agentSlug, ''], ['status', filter.status, ''],
     ['room_id', filter.roomId, '::uuid'], ['run_id', filter.runId, ''],
   ]) {
-    if (value) { args.push(value); clauses.push(`${column} = $${args.length}${cast}`); }
+    if (value) { args.push(value); clauses.push(`m.${column} = $${args.length}${cast}`); }
+  }
+  let ranking = '';
+  if (filter.query) {
+    const stop = new Set(['with', 'from', 'that', 'this', 'what', 'when', 'where', 'about', 'have', 'their', 'them', 'your', 'into', 'will', 'task', 'work']);
+    const terms = [...new Set(filter.query.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || [])]
+      .filter((term) => !stop.has(term)).slice(0, 12);
+    if (terms.length) {
+      args.push(terms.join(' | '));
+      const vector = `to_tsvector('simple', m.title || ' ' || m.summary)`;
+      const tsquery = `to_tsquery('simple', $${args.length})`;
+      clauses.push(`${vector} @@ ${tsquery}`);
+      ranking = `ts_rank(${vector}, ${tsquery}) DESC, `;
+    }
   }
   args.push(filter.limit);
   const rows = await prisma.$queryRawUnsafe(`
-    SELECT id, kind, status, agent_slug, title, summary, room_id, run_id, trigger_id, context, created_at
-    FROM hivemind.hyper_agent_operating_memories
+    SELECT m.id, m.kind, m.status, m.agent_slug, m.title, m.summary, m.room_id, m.run_id, m.trigger_id, m.context, m.created_at
+    FROM hivemind.hyper_agent_operating_memories m
     WHERE ${clauses.join(' AND ')}
-    ORDER BY created_at DESC, id DESC LIMIT $${args.length}`, ...args);
+    ORDER BY ${ranking}m.created_at DESC, m.id DESC LIMIT $${args.length}`, ...args);
   return { ok: true, project: OPERATING_MEMORY_PROJECT, count: rows.length, memories: rows.map(publicRecord) };
 }
 

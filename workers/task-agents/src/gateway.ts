@@ -70,6 +70,7 @@ export interface OperatingMemoryWrite {
   room_id?: string;
   run_id?: string;
   trigger_id?: string;
+  supersedes_id?: string;
   context?: Record<string, unknown>;
   writer?: "runtime";
 }
@@ -79,7 +80,7 @@ export async function saveOperatingMemory(env: GatewayEnv, orgId: string, userId
 }
 
 export async function recallOperatingMemory(env: GatewayEnv, orgId: string, userId: string, filter: {
-  kind?: OperatingMemoryKind; agent_slug?: string; status?: string; room_id?: string; run_id?: string; limit?: number;
+  kind?: OperatingMemoryKind; agent_slug?: string; status?: string; room_id?: string; run_id?: string; query?: string; limit?: number;
 } = {}): Promise<unknown> {
   return postControl(env, "/internal/hyper/operating-memory", { action: "recall", org_id: orgId, user_id: userId, ...filter }, 3_500);
 }

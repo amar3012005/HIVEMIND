@@ -31,6 +31,22 @@ function relevance(query: Set<string>, row: MemoryRow): number {
   return matches / query.size;
 }
 
+function similarity(left: string, right: string): number {
+  const a = trigrams(left);
+  const b = trigrams(right);
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const gram of a) if (b.has(gram)) shared++;
+  return shared / Math.max(a.size, b.size);
+}
+
+function repeatedLesson(row: MemoryRow, retained: MemoryRow[]): boolean {
+  return row.kind === "learning" && retained.some((prior) => prior.kind === "learning"
+    && prior.agentSlug === row.agentSlug
+    && similarity(short(prior.title, 150), short(row.title, 150)) >= 0.72
+    && similarity(short(prior.summary, 500), short(row.summary, 500)) >= 0.62);
+}
+
 /** Recent records always survive; the remaining slots favor task-relevant, deduplicated memories. */
 export function operatingMemoryBrief(results: readonly unknown[], task = ""): string {
   const unique = new Map<string, MemoryRow>();
@@ -41,7 +57,8 @@ export function operatingMemoryBrief(results: readonly unknown[], task = ""): st
     const previous = unique.get(key);
     if (!previous || short(row.createdAt, 40) > short(previous.createdAt, 40)) unique.set(key, row);
   }
-  const ordered = [...unique.values()].sort((a, b) => short(b.createdAt, 40).localeCompare(short(a.createdAt, 40)));
+  const ordered = [...unique.values()].sort((a, b) => short(b.createdAt, 40).localeCompare(short(a.createdAt, 40)))
+    .filter((row, index, all) => !repeatedLesson(row, all.slice(0, index)));
   const chosen = new Set([...ordered.filter((row) => row.kind === "learning").slice(0, 2),
     ...ordered.filter((row) => row.kind === "task_status").slice(0, 2)]);
   const query = trigrams(short(task, 500));

@@ -599,7 +599,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await durable.do("prospect-pages-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "prospect_pages_unreadable"); });
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: "prospect_pages_unreadable", report: reply };
       }
-      prospectSources = pages.map((page) => page.url);
+      // The report may cite other pages already fetched in this run or its
+      // authenticated continuation. Keep the exact prospect claims bound to
+      // their fresh page receipts, and validate every other cited host against
+      // the same durable source-read registry.
+      prospectSources = [...new Set([...pages.map((page) => page.url), ...this.agent.verifiedSourceUrls()])];
       const evidence = prospectEvidenceComplete(written.report, written.prospects, pages.filter((page) => !page.error).map((page) => page.url), prospectCount);
       if (!evidence.complete) {
         const reply = `The requested location and sector evidence is incomplete (${evidence.reason}). I did not save a report or PDF.`;

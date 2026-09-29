@@ -1150,7 +1150,9 @@ async function storeRenderedWebsiteVisual({ screenshot, orgId }) {
 async function captureValidatedHomepageVisual({ websiteUrl, orgId }) {
   const rendered = await captureWebsiteScreenshot(websiteUrl);
   const screenshot = await storeRenderedWebsiteVisual({ screenshot: rendered, orgId });
-  return screenshot ? { screenshot, source: 'cloudflare-browser-rendering' } : null;
+  return screenshot ? { screenshot, source: process.env.HIVEMIND_LOCAL_MODE === 'true'
+    && process.env.HIVEMIND_ONBOARDING_SCREENSHOT_PROVIDER === 'local_playwright'
+    ? 'local-playwright' : 'cloudflare-browser-rendering' } : null;
 }
 
 // ── HyperAgents nightly operating cycle (Polsia's "works while you sleep") ──
@@ -11101,19 +11103,10 @@ Write the persona now.`;
         || !await getActiveOrganizationMembership(prisma, { userId, orgId })) {
       return jsonResponse(res, { error: 'Room not found' }, 404);
     }
-    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, archivedAt: null }, select: { id: true, permanentLeadId: true, participantIds: true } });
+    const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId, archivedAt: null }, select: { id: true } });
     if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-    const lead = room.permanentLeadId && room.participantIds.includes(room.permanentLeadId)
-      ? await prisma.digitalEmployee.findFirst({
-          where: { id: room.permanentLeadId, orgId, archivedAt: null },
-          select: { id: true, slug: true, name: true, roleArchetype: true, persona: true },
-        }) : null;
-    const employee = lead ? {
-      id: lead.id, slug: lead.slug.slice(0, 120), name: lead.name.slice(0, 100),
-      role: String(lead.roleArchetype || '').slice(0, 100), persona: String(lead.persona || '').slice(0, 2500),
-    } : null;
     const expiresAt = Date.now() + 120_000;
-    const encoded = Buffer.from(JSON.stringify({ v: employee ? 2 : 1, orgId, userId, agentName, expiresAt, ...(employee ? { employee } : {}) })).toString('base64url');
+    const encoded = Buffer.from(JSON.stringify({ v: 1, orgId, userId, agentName, expiresAt })).toString('base64url');
     const signature = crypto.createHmac('sha256', process.env.HIVEMIND_MASTER_API_KEY).update(encoded).digest('base64url');
     return jsonResponse(res, { ticket: `${encoded}.${signature}`, expiresAt });
   }
@@ -11189,6 +11182,9 @@ Write the persona now.`;
     const userId = String(body?.user_id || '');
     const query = String(body?.query || '').trim().slice(0, 1200);
     const limit = Math.max(1, Math.min(Number(body?.limit || 6), 10));
+    const requestedProvider = String(body?.provider || 'auto');
+    const useComposio = requestedProvider !== 'parallel';
+    const useParallel = requestedProvider !== 'composio';
     if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(userId) || query.length < 3) {
       return jsonResponse(res, { error: 'org_id, user_id and query are required' }, 400);
     }
@@ -11196,7 +11192,7 @@ Write the persona now.`;
       return jsonResponse(res, { error: 'Resource not found' }, 404);
     }
     const providerAttempts = [];
-    try {
+    if (useComposio) try {
       const executed = await composioService.executeTool(orgId, 'COMPOSIO_SEARCH_WEB', { query });
       if (!executed?.successful) {
         providerAttempts.push({ provider: 'composio_search', status: 'failed' });
@@ -11229,7 +11225,7 @@ Write the persona now.`;
     } catch (err) {
       providerAttempts.push({ provider: 'composio_search', status: 'unavailable' });
     }
-    try {
+    if (useParallel) try {
       const executed = await executeGovernedResearchTool(orgId, 'parallel_search', {
         search_queries: [query], objective: query,
       }, { mode: 'canary' });
@@ -13342,7 +13338,9 @@ Write the persona now.`;
           void (async () => {
             const rendered = await homepageVisualPromise;
             const storedScreenshot = await storeRenderedWebsiteVisual({ screenshot: rendered, orgId });
-            const visual = storedScreenshot ? { screenshot: storedScreenshot, source: 'cloudflare-browser-rendering' } : null;
+            const visual = storedScreenshot ? { screenshot: storedScreenshot, source: process.env.HIVEMIND_LOCAL_MODE === 'true'
+              && process.env.HIVEMIND_ONBOARDING_SCREENSHOT_PROVIDER === 'local_playwright'
+              ? 'local-playwright' : 'cloudflare-browser-rendering' } : null;
             resultPayload.screenshot = visual?.screenshot || null;
             resultPayload.website_visual_source = visual?.source || null;
             resultPayload.screenshot_pending = false;

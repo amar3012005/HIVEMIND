@@ -177,7 +177,15 @@ function brandScore(passage: string, brands: readonly string[]): number {
 }
 
 function supportsClaim(passage: string, kind: "location" | "sector", locationHint: string): boolean {
-  if (kind === "sector") return /\b(?:insur\w*|reinsur\w*|versicher\w*|rückversicher\w*)\b/i.test(passage);
+  if (kind === "sector") {
+    // A brand heading or copyright footer proves the page's identity, not
+    // what the company does. Require an activity, license, or business form
+    // in the same short passage as the insurance term.
+    const text = passage.replace(/<[^>]*>/g, " ").trim();
+    if (/^(?:#{1,6}\s*|©\s*\d{4}\s*)/u.test(text)) return false;
+    return /\b(?:insur\w*|reinsur\w*|versicher\w*|rückversicher\w*)\b/i.test(text)
+      && /\b(?:is|are|as|offers?|provides?|operates?|underwrites?|licensed?|licen[sc]e|business|provider|company|group|industry|market|for|für|ist|sind|bietet|betreibt|unternehmen|gesellschaft|branche|geschäft|experten|expertise|speciali[sz]\w*)\b/i.test(text);
+  }
   const hint = canonicalPassage(locationHint);
   if (!hint || !canonicalPassage(passage).split(" ").some((word) => samePlaceSpelling(word, hint))) return false;
   // A city mention alone can be a brand or navigation item. Require a street,

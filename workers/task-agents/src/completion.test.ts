@@ -68,6 +68,19 @@ test("a group imprint binds the named insurer, not another group company", () =>
   assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
 });
 
+test("sector evidence rejects a brand-only heading or copyright footer", () => {
+  const url = "https://example.test/company";
+  const location = "Registered office: Example Street 1, 30159 Hannover.";
+  const row = { name: "Example Versicherungen", locationUrl: url, sectorUrl: url,
+    locationEvidence: location, sectorEvidence: "##### Example Versicherungen", caveat: "" };
+  const identityOnly = `${location}\n##### Example Versicherungen\n© 2026 Example Versicherungen`;
+  assert.equal(bindProspectSourcePassages("# Report", [row], [{ url, excerpt: identityOnly }], "Hannover"), null);
+  const withBusiness = `${identityOnly}\nExample Versicherungen offers commercial insurance to companies.`;
+  const bound = bindProspectSourcePassages("# Report", [row], [{ url, excerpt: withBusiness }], "Hannover");
+  assert.ok(bound);
+  assert.equal(bound.prospects[0].sectorEvidence, "Example Versicherungen offers commercial insurance to companies.");
+});
+
 test("official English imprint can support a city spelled differently in the task", () => {
   const url = "https://www.vhv-gruppe.de/en/meta/imprint";
   const page = "# Imprint\n## VHV Vereinigte Hannoversche Versicherung a.G. (Publisher)\nVHV-Platz 1 30177 Hanover, Germany\nOther VHV Group Companies:\nVHV Allgemeine Versicherung AG\nVHV-Platz 1 30177 Hanover, Germany\n";

@@ -1429,9 +1429,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const updatePlanTask = tool({
-      description: "Update one task in the operator-visible operating plan when work starts, finishes, or becomes blocked.",
+      description: "Update one task in the operator-visible operating plan when work starts, finishes, or becomes blocked. If awaitingReport is true, the final task stays active until its deliverable has a saved receipt; do not report it as complete yet.",
       inputSchema: z.object({ id: z.number().int().min(1).max(6), status: z.enum(["active", "completed", "blocked"]) }),
-      execute: async ({ id, status }): Promise<{ updated: boolean }> => this.updateOperatingTask(id, status),
+      execute: async ({ id, status }): Promise<{ updated: boolean; awaitingReport?: boolean }> => this.updateOperatingTask(id, status),
     });
     const packet = tool({
       description: "Load the sealed company packet for this task.",

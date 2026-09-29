@@ -27,6 +27,10 @@ Choose one skill with `ROUTING.json`:
 - `platform-release` for any local, Enigma, or production deployment.
 - `ops-gateway` when calling or diagnosing the native production deployment tools.
 
+For HyperAgents work, read the project playbooks that match the boundary before editing:
+[`playbooks/cloudflare-think-harness.md`](playbooks/cloudflare-think-harness.md) for the Agent/Workflow,
+and [`playbooks/task-room-streaming.md`](playbooks/task-room-streaming.md) for the room UI.
+
 ## Deploy through the Ops Gateway
 
 The Ops Gateway is the preferred deployment interface. It is an already configured MCP server;

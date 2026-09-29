@@ -168,6 +168,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     })();
     if (!quickRoute) plan.localPlaybookId = "";
     asked = plan.resolvedRequest.trim() || asked;
+    // A resumed logical run keeps its originally approved method and snapshot.
+    // Model routing can change between attempts; it must not replace an
+    // immutable playbook pin or trigger a permanent conflict on recovery.
+    const pinnedPlaybookId = await durable.do("read-pinned-playbook", async () =>
+      this.agent.pinnedTaskPlaybookId(work.runId));
+    if (pinnedPlaybookId) plan.mode = "company";
     const deckRequested = plan.outputKind === "slide_deck" || requestsSlideDeck(asked);
     const artifactForbidden = artifactCreationForbidden(work.task ?? "");
     const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
@@ -188,7 +194,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
     // A named output wins over a broad topic playbook: deck work must not
     // silently become a strategy note even when the planner picks one.
-    if (plan.mode === "company" && deckRequested) plan.localPlaybookId = "local:fundraising.pitch-deck";
+    if (pinnedPlaybookId) plan.localPlaybookId = pinnedPlaybookId;
+    else if (plan.mode === "company" && deckRequested) plan.localPlaybookId = "local:fundraising.pitch-deck";
     if (plan.mode === "company" && !localPlaybook(plan.localPlaybookId)) {
       const playbookIds = playbookNames.map((item) => item.id) as [string, ...string[]];
       const playbookMenu = playbookNames.map(({ id, name }) => ({ id, name }));

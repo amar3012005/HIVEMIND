@@ -552,6 +552,16 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return global ? global.body : null;
   }
 
+  pinnedTaskPlaybookId(runId: string): string | null {
+    if (this.state.envelope?.runId !== runId) throw new Error("run_scope_denied");
+    ensureCompanyTables(this.sql.bind(this));
+    const row = this.sql`SELECT playbook_id FROM company_runs WHERE id = ${runId} LIMIT 1`[0];
+    if (!row) return null;
+    const id = String(row.playbook_id);
+    if (!localPlaybook(id)) throw new Error("pinned_playbook_unavailable");
+    return id;
+  }
+
   async loadTaskPlaybook(id: string): Promise<string> {
     const body = this.resolvePlaybook(id);
     if (!body || !localPlaybook(id)) throw new Error("company_playbook_not_found");

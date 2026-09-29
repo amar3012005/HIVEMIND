@@ -587,7 +587,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (this.state.workflowId) {
       const active = await this.getWorkflowStatus("TASK_LIFECYCLE", this.state.workflowId);
       if (["queued", "running", "paused", "waiting"].includes(active.status)) {
-        connection.send(JSON.stringify({ type: "workrun-control-result", error: "Current work is active. Resume or finish it before starting another request." }));
+        connection.send(JSON.stringify({ type: "workrun-control-result", operation: "room-start", error: "Current work is active. Resume or finish it before starting another request." }));
         return;
       }
     }
@@ -604,6 +604,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.setState({ ...this.state, operatingPlan: null });
     if (task) this.note("user", task);
     this.note("workrun", "Loading authenticated context");
+    this.note("progress", "Loading the assigned employee and company context.");
     const supplied = {
       company: typeof parsed.company === "string" ? parsed.company.slice(0, 200) : "",
       website: typeof parsed.website === "string" ? parsed.website.slice(0, 300) : "",

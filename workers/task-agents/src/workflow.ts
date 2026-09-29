@@ -170,8 +170,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         await this.agent.note("workrun-index", `terminal index failed: ${workflowErrorCode(error)}`);
       }
       try {
-        await (step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> }).do("record-operating-memory", async () =>
-          this.agent.recordOperatingWorkResult(result.complete, result.reason, result.artifactRefs || []));
+        // This write is idempotent, but private-memory availability must not
+        // hold a delivered WorkRun open through Workflow's retry schedule.
+        await this.agent.recordOperatingWorkResult(result.complete, result.reason, result.artifactRefs || []);
       } catch (error) {
         console.warn(JSON.stringify({ event: "operating_memory_write_failed", runId: event.payload.runId, code: workflowErrorCode(error) }));
       }
@@ -210,7 +211,24 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const captureUrl = singlePageCaptureUrl(work.task);
     if (captureUrl) {
       await durable.do("bind-page-capture", async () => this.agent.bindArtifactTask(work));
-      const artifact = await durable.do("capture-requested-page", async () => this.agent.capturePublicPage(captureUrl));
+      const callId = `capture-page:${work.runId}`;
+      const artifact = await durable.do("capture-requested-page", async () => {
+        await this.agent.note("tool-call", JSON.stringify({ id: callId, name: "browser_capture", phase: "started", target: captureUrl }));
+        try {
+          const captured = await this.agent.capturePublicPage(captureUrl);
+          await this.agent.note("tool-call", JSON.stringify({
+            id: callId, name: "browser_capture", phase: "returned", target: captureUrl,
+            result: JSON.stringify({ artifactId: captured.id, title: captured.title, contentType: captured.contentType }),
+          }));
+          return captured;
+        } catch (error) {
+          await this.agent.note("tool-call", JSON.stringify({
+            id: callId, name: "browser_capture", phase: "failed", target: captureUrl,
+            result: JSON.stringify({ error: workflowErrorCode(error) }),
+          }));
+          throw error;
+        }
+      });
       const report = `Captured the full page at ${captureUrl}. The saved image artifact is attached below.`;
       await durable.do("complete-page-capture", async () => {
         await this.agent.note("report", report);

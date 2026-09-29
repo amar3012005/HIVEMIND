@@ -1498,6 +1498,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           task: input.task.slice(0, 2000),
           plan: input.plan,
           report: input.report.slice(0, 30000),
+          authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
           companyContext: input.companyContext,
           sourceReceipts: input.sources.slice(-30),
         },
@@ -1517,6 +1518,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
             system: COMPANY_GOVERNOR_PROMPT,
             prompt: JSON.stringify({
               task: input.task.slice(0, 2000), plan: input.plan.slice(0, 6), report: input.report.slice(0, 16000),
+              authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
               companyContext: JSON.stringify(input.companyContext ?? null).slice(0, 2500),
               sourceReceipts: input.sources.slice(-16).map((source) => source.slice(0, 700)),
             }),

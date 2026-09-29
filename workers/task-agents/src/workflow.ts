@@ -673,6 +673,20 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "artifact_status_unverified", report: "Report draft incorrectly claimed artifact approval was pending; no artifact was saved." };
     }
     if (isProspect) {
+      // Some providers finish a valid report after a protocol recovery but
+      // omit its companion structured rows. Recover only that projection from
+      // existing source-read receipts; the binder below remains authoritative.
+      if (written.prospects.length < prospectCount && written.report.trim().length > 200) {
+          const receipts = (await this.agent.sourceReadReceipts() as Array<{ url: string; excerpt: string }>).slice(0, 12);
+        if (receipts.length) {
+          await this.agent.note("model-recovery", "Recovering missing prospect rows from the finished draft and saved source receipts");
+          const rows = await this.structuredPrompt(step, "recover-prospect-rows",
+            `Extract up to ${prospectCount} distinct prospects from this report. Use only the exact official URLs and copied passages in these already fetched receipts. Do not research again, invent a URL, or use a heading/copyright footer as proof of insurance business. A sector passage must state actual insurance activity, license, or business. If a prospect lacks either location or sector proof, omit it. Return {prospects:[{name,locationUrl,sectorUrl,locationEvidence,sectorEvidence,caveat}]}.
+Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ url, excerpt }) => `${url}: ${sourceExcerptForQuoteRepair(excerpt, []).slice(0, 1400)}`).join("\n")}`,
+            reportSchema.pick({ prospects: true }));
+          written = { ...written, prospects: rows.prospects };
+        }
+      }
       const citedUrls = [...written.report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => match[0]);
       const pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects, citedUrls));
       const missing = pages.filter((page) => page.error);

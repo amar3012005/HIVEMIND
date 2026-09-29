@@ -72,6 +72,14 @@ const reportSchema = z.object({
   })).max(30).default([]),
 });
 
+export function parseToolFreeReport(text: string): z.infer<typeof reportSchema> {
+  const body = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("recovery_report_json_missing");
+  return reportSchema.parse(JSON.parse(body.slice(start, end + 1)));
+}
+
 export interface CompanyWorkResult {
   runId: string;
   orgId: string;
@@ -98,6 +106,13 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           output: reportSchema,
           timeout: "5 minutes",
         });
+      } catch (recoveryError) {
+        if (!isRecoverableModelProtocolError(recoveryError)) throw recoveryError;
+        await this.agent.note("model-recovery", `Completing ${name} from saved receipts without another required tool call`);
+        const raw = await this.agent.recoverReportWithoutTool(
+          `Return ONE valid JSON object, no Markdown fence and no tool calls. Keys: needsInput (boolean), question (string), options (string array), report (finished Markdown string), completedTaskIds (number array), operatingLearnings (array), prospects (array of {name,locationUrl,sectorUrl,locationEvidence,sectorEvidence,caveat}). Preserve the draft where supported. For each prospect, cite only an exact source URL in the receipts and copy short contiguous location and insurance passages from that page. Do not claim a saved artifact; the runtime validates and saves it. If evidence is missing, say so in report and leave unsupported tasks incomplete.\n\nDraft:\n${streamedDraft.slice(0, 24000)}\n\nTask:\n${prompt.slice(0, 5000)}\n\nSource receipts:\n${receipts}`,
+        );
+        return parseToolFreeReport(raw);
       } finally {
         await this.agent.disarmFinalAnswerRecovery();
       }

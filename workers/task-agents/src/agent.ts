@@ -4,7 +4,7 @@ import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
-import { streamText, tool, type ToolSet } from "ai";
+import { generateText, streamText, tool, type ToolSet } from "ai";
 import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
 import { browserTargetAllowed } from "./source-discovery";
 import { z } from "zod";
@@ -103,6 +103,19 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   disarmFinalAnswerRecovery(): void {
     this.suppressRecoveryDrafts = false;
     this.reportDraftRecovery = "";
+  }
+
+  /** Recover a structured handoff when the Think tool protocol fails twice.
+   * This call has no tools; Workflow still validates the schema and evidence.
+   */
+  async recoverReportWithoutTool(prompt: string): Promise<string> {
+    const result = await generateText({
+      model: recoveryModel(this.gatewayEnv()),
+      prompt,
+      maxOutputTokens: 6000,
+      temperature: 0,
+    });
+    return result.text.trim();
   }
 
   configureContext(): ContextConfig[] {

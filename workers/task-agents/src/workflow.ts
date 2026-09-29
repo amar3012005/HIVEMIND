@@ -224,12 +224,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     } catch (error) {
       const failureCode = workflowErrorCode(error);
       let stopped = failureCode === "workrun_stopped";
-      // Only an otherwise unclassified failure may be reclassified from the
-      // authoritative runtime stop flag. Never hide a model/tool protocol
-      // failure behind a stale or racing stop observation.
-      if (failureCode === "workflow_failed") {
-        try { stopped = this.agent.isStopRequested(event.payload.runId); } catch { /* preserve original failure */ }
-      }
+      // A stop is reported only when the thrown error is the stop signal.
+      // A room flag can race with an unrelated Workflow failure.
       const code = stopped ? "workrun_stopped" : failureCode;
       console.error(JSON.stringify({ event: "company_workflow_failed", runId: event.payload.runId, code }));
       // The room DO may itself be unavailable. Preserve the original Workflow
@@ -444,8 +440,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const deckRequested = plan.outputKind === "slide_deck" || requestsSlideDeck(asked);
     const artifactForbidden = artifactCreationForbidden(work.task ?? "");
     const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
-    if (work.modePreference === "company" || deckRequested
-      || (!artifactForbidden && plan.outputKind === "document" && plan.memoryIntent === "none")) plan.mode = "company";
+    if (work.modePreference === "company" || deckRequested) plan.mode = "company";
     else if (/\b(screenshot|capture)\b/i.test(asked) || (plan.mode === "direct" && requestsArtifact(asked))) plan.mode = "action";
     else if (plan.mode === "direct" && !/\b(?:do not|don't|no)\s+(?:use\s+)?tools?\b/i.test(work.task ?? "")
       && /\b(?:need|requires?)\b[^.!?]{0,60}\b(?:recall|search|check|verify|evidence)\b|\b(?:not|isn't|aren't)\s+(?:specified|described|available|verified)\b/i.test(`${plan.reply} ${plan.decision}`)) {
@@ -465,9 +460,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     if (plan.mode === "company" && !localPlaybook(plan.localPlaybookId)) {
       const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));
       const playbookMenu = playbookNames.map(({ id, name, description, base }) => ({ id, name, description, globalId: base }));
+      const catalogIds = playbookMenu.map(({ id }) => id);
+      if (!catalogIds.length) throw new Error("company_playbook_catalog_empty");
       const choice = await this.structuredPrompt(step, "select-local-playbook",
         `Operator request: ${asked}. First recognize the relevant global method from this compact catalog: ${JSON.stringify(globalMenu)}. Then choose one organization-specific local method whose globalId matches that method: ${JSON.stringify(playbookMenu)}. Return only its exact local id. The existing operator-visible plan remains in force; the selected full method loads after this choice and action skills load only when their plan step begins. For target organizations with ICP fit and approach, choose local:outreach.prospect-list; local:research.competitor-market compares competitors.`,
-        z.object({ id: z.string().min(4) }));
+        z.object({ id: z.enum(catalogIds as [string, ...string[]]) }));
       plan.localPlaybookId = choice.id;
     }
     const selectedPlaybook = plan.mode === "company" ? localPlaybook(plan.localPlaybookId) : null;

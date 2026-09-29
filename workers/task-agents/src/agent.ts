@@ -58,6 +58,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   initialState: TaskAgentState = EMPTY;
   private draftCalls = new Map<string, { field: "report" | "message"; raw: string; text: string }>();
   private textDraft = "";
+  private lastReportDraft = "";
+  private reportDraftRecovery = "";
+  private suppressRecoveryDrafts = false;
   private turnSources: RunSource[] = [];
   private discoveredUrls = new Set<string>();
   private pageReadCounts = new Map<string, number>();
@@ -86,9 +89,20 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   getModel() { return thinkModel(this.gatewayEnv()); }
 
-  armFinalAnswerRecovery(): void {
+  armFinalAnswerRecovery(): string {
+    this.reportDraftRecovery = [this.lastReportDraft, ...[...this.draftCalls.values()]
+      .filter((draft) => draft.field === "report")
+      .map((draft) => draft.text)]
+      .sort((left, right) => right.length - left.length)[0] ?? "";
+    this.suppressRecoveryDrafts = true;
     this.finalOnlyRecoveryTurn = true;
     this.recoveryStepPending = true;
+    return this.reportDraftRecovery;
+  }
+
+  disarmFinalAnswerRecovery(): void {
+    this.suppressRecoveryDrafts = false;
+    this.reportDraftRecovery = "";
   }
 
   configureContext(): ContextConfig[] {
@@ -1097,6 +1111,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async bindTask(envelope: TaskEnvelope, role: SpecialistRole, tools: readonly string[]): Promise<void> {
     this.draftCalls.clear();
+    this.lastReportDraft = "";
+    this.reportDraftRecovery = "";
+    this.suppressRecoveryDrafts = false;
     this.turnSources = [];
     this.discoveredUrls.clear();
     this.pageReadCounts.clear();
@@ -1289,6 +1306,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     // stages may publish drafts to the room.
     if (this.state.catalogStage !== "action") return;
     if (chunk.type === "text-delta") {
+      if (this.suppressRecoveryDrafts) return;
       if (this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
       const text = chunk.text;
       if (!text || this.textDraft.length > 4000) return;
@@ -1302,10 +1320,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       this.textDraft = "";
       const field = chunk.toolName.startsWith("think_final_answer") ? "report" : chunk.toolName === "share_progress" ? "message" : null;
       if (field) {
+        if (field === "report" && !this.suppressRecoveryDrafts) this.lastReportDraft = "";
         this.draftCalls.set(callId, { field, raw: "", text: "" });
-        if (field === "report") this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
+        if (field === "report" && !this.suppressRecoveryDrafts) this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
         if (field !== "report" || !this.state.companyMemoryIntent || this.state.companyMemoryReceiptId)
-          this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
+          if (!this.suppressRecoveryDrafts) this.broadcast(JSON.stringify({ type: field === "report" ? "report-draft" : "progress-draft", delta: "", reset: true }));
       }
       return;
     }
@@ -1323,7 +1342,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const reset = !next.startsWith(draft.text);
     const delta = reset ? next : next.slice(draft.text.length);
     draft.text = next;
+    if (draft.field === "report" && next.length >= this.lastReportDraft.length) this.lastReportDraft = next;
     if (draft.field === "report" && this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
+    if (this.suppressRecoveryDrafts) return;
     this.broadcast(JSON.stringify({ type: draft.field === "report" ? "report-draft" : "progress-draft", delta, reset }));
   }
 

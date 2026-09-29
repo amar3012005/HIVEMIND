@@ -87,15 +87,19 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return await step.prompt(name, { prompt, output: reportSchema, timeout: "30 minutes" });
     } catch (error) {
       if (!isRecoverableModelProtocolError(error)) throw error;
-      await this.agent.armFinalAnswerRecovery();
+      const streamedDraft = await this.agent.armFinalAnswerRecovery();
       const receipts = (await this.agent.sourceReadReceipts()).slice(0, 8).map(({ url, excerpt }: { url: string; excerpt: string }) =>
         `${url}: ${excerpt.slice(0, 1000)}`).join("\n");
       await this.agent.note("model-recovery", `Retrying ${name} from saved receipts after a model tool-protocol error`);
-      return step.prompt(`${name}-protocol-recovery`, {
-        prompt: `The previous model step failed its tool protocol. Continue this same run from saved evidence; do not repeat research or call another tool. Return a schema-valid final answer using think_final_answer. If the deliverable is incomplete, say so honestly and leave completedTaskIds empty. Do not invent evidence or claim an artifact was saved.\n\nOriginal step instructions:\n${prompt.slice(0, 5000)}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
-        output: reportSchema,
-        timeout: "5 minutes",
-      });
+      try {
+        return await step.prompt(`${name}-protocol-recovery`, {
+          prompt: `The previous model step streamed the draft below but failed its structured tool protocol. Preserve that draft when it is supported by the saved receipts. Do not repeat research, rewrite it from scratch, or call another tool. Return exactly one schema-valid think_final_answer. If the deliverable is incomplete, say so honestly and leave completedTaskIds empty. Do not invent evidence or claim an artifact was saved.\n\nStreamed draft (untrusted until checked against receipts):\n${streamedDraft.slice(0, 24000) || "No report draft was recovered."}\n\nOriginal step instructions:\n${prompt.slice(0, 5000)}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
+          output: reportSchema,
+          timeout: "5 minutes",
+        });
+      } finally {
+        await this.agent.disarmFinalAnswerRecovery();
+      }
     }
   }
 
@@ -573,6 +577,8 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     let guidance = "";
     let written: z.infer<typeof reportSchema> = reportSchema.parse({});
     const isProspect = selectedPlaybook!.id === "local:outreach.prospect-list" || requestsVerifiedProspectRows(asked);
+    const packetFallbackPlan = plan.plan === "Use the task packet as the durable execution contract.";
+    if (packetFallbackPlan) await durable.do("packet-stage-context-ready", async () => this.agent.updateOperatingTask(1, "completed", true));
     const prospectCount = isProspect ? requestedProspectCount(asked) : 1;
     for (let round = 0; round < 3; round += 1) {
       const result = await this.reportPrompt(step, round === 0 ? "execute" : `continue-${round}`,
@@ -670,6 +676,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return { runId: work.runId, orgId: work.orgId, complete: false, reason: quotes.reason, report: reply };
       }
       await durable.do("prospect-pages-verified", async () => this.agent.recordVerifiedProspectClaims(written.prospects));
+      if (packetFallbackPlan) await durable.do("packet-stage-evidence-ready", async () => this.agent.updateOperatingTask(2, "completed", true));
       verifiedProspectPages = pages.map(({ url, excerpt }) => ({ url, excerpt }));
     }
     if (deckRequested && !slideDeckReady(written.report)) {
@@ -719,6 +726,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     if (review.verdict === "caution" && review.note) {
       written.report += `\n\n## Review note\n${review.note}`;
     }
+    if (packetFallbackPlan) await durable.do("packet-stage-deliverable-ready", async () => this.agent.updateOperatingTask(3, "completed", true));
 
     const prepared = await durable.do("complete", async () => {
       const recalled = await this.agent.hasCompanyContext();

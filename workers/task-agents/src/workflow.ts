@@ -79,12 +79,12 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return await step.prompt(name, { prompt, output: reportSchema, timeout: "30 minutes" });
     } catch (error) {
       if (!isRecoverableModelProtocolError(error)) throw error;
-      this.agent.armFinalAnswerRecovery();
-      const receipts = this.agent.sourceReadReceipts().slice(0, 8).map(({ url, excerpt }: { url: string; excerpt: string }) =>
+      await this.agent.armFinalAnswerRecovery();
+      const receipts = (await this.agent.sourceReadReceipts()).slice(0, 8).map(({ url, excerpt }: { url: string; excerpt: string }) =>
         `${url}: ${excerpt.slice(0, 1000)}`).join("\n");
       await this.agent.note("model-recovery", `Retrying ${name} from saved receipts after a model tool-protocol error`);
       return step.prompt(`${name}-protocol-recovery`, {
-        prompt: `The previous model step failed its tool protocol. Continue this same run from saved evidence; do not repeat research or call another tool. Return a schema-valid final answer using think_final_answer. If the deliverable is incomplete, say so honestly and leave completedTaskIds empty. Do not invent evidence or claim an artifact was saved.\n\nTask: ${this.agent.state.envelope?.task ?? "Current task"}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
+        prompt: `The previous model step failed its tool protocol. Continue this same run from saved evidence; do not repeat research or call another tool. Return a schema-valid final answer using think_final_answer. If the deliverable is incomplete, say so honestly and leave completedTaskIds empty. Do not invent evidence or claim an artifact was saved.\n\nOriginal step instructions:\n${prompt.slice(0, 5000)}\n\nSaved source receipts:\n${receipts || "No source receipts were saved."}`,
         output: reportSchema,
         timeout: "5 minutes",
       });

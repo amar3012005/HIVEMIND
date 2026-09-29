@@ -688,8 +688,24 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
         }
       }
       const citedUrls = [...written.report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => match[0]);
-      const pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects, citedUrls));
-      const missing = pages.filter((page) => page.error);
+      let pages: Awaited<ReturnType<HivemindTaskAgent["verifyProspectPages"]>> = await durable.do("verify-prospect-pages", async () => this.agent.verifyProspectPages(written.prospects, citedUrls));
+      let missing = pages.filter((page) => page.error);
+      if (missing.length && written.report.trim()) {
+        const requiredUrls = new Set(written.prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]));
+        // Reconcile optional citations once. Mandatory location/sector pages
+        // stay mandatory; an unreadable optional page cannot support a claim.
+        const optionalMissing = missing.filter((page) => !requiredUrls.has(page.url));
+        if (optionalMissing.length) {
+          await this.agent.note("source-verification", `Reconciling ${optionalMissing.length} unreadable optional citation(s) from saved receipts`);
+          const repair = await this.structuredPrompt(step, "reconcile-unreadable-citations",
+            `Revise this report using only the verified source receipts below. These cited URLs were unreadable: ${optionalMissing.map((page) => page.url).join(", ")}. Remove each unreadable URL and its unsupported factual claim; for a requested digital/AI signal, say "unavailable from verified official sources" when no verified official page supports it. Preserve the report's supported claims, three prospects, priority decision, and non-contact next steps. Do not invent replacement URLs or facts. Return the full corrected Markdown report as {report:string}.\nDraft:\n${written.report.slice(0, 20000)}\nVerified receipts:\n${pages.filter((page) => !page.error).map((page) => `${page.url}: ${sourceExcerptForQuoteRepair(page.excerpt, []).slice(0, 700)}`).join("\n")}`,
+            z.object({ report: z.string().min(100) }));
+          written = { ...written, report: repair.report };
+          const revisedUrls = [...written.report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => match[0]);
+          pages = await durable.do("verify-prospect-pages-reconciled", async () => this.agent.verifyProspectPages(written.prospects, revisedUrls));
+          missing = pages.filter((page) => page.error);
+        }
+      }
       if (missing.length) {
         const reply = `I could not verify the requested source pages (${missing.map((page) => `${page.url}: ${page.error}`).join("; ")}). I did not save a report or PDF.`;
         await durable.do("prospect-pages-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "prospect_pages_unreadable"); });

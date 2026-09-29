@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -238,6 +238,12 @@ test("image capture is available only for a visual request", () => {
   assert.equal(requestsImageCapture("Do a visual audit of the landing page"), true);
   assert.equal(requestsImageCapture("Create a prospect report and save an artifact"), false);
   assert.equal(requestsImageCapture("Review the site but do not capture a screenshot"), false);
+});
+
+test("one explicit screenshot URL selects one deterministic capture", () => {
+  assert.equal(singlePageCaptureUrl("Capture a full-page screenshot of https://singulancelabs.com/ and report the image."), "https://singulancelabs.com/");
+  assert.equal(singlePageCaptureUrl("Get screenshots of all pages at https://singulancelabs.com/"), null);
+  assert.equal(singlePageCaptureUrl("Capture https://example.com/a and https://example.com/b"), null);
 });
 
 test("company completion does not depend on report length or prescribed vocabulary", () => {

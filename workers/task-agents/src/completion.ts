@@ -268,6 +268,17 @@ export function requestsImageCapture(task: string): boolean {
   return /\b(?:screenshot|screen\s*shot|capture|visual\s+(?:audit|inspection|review)|image\s+of\s+(?:the\s+)?(?:page|site))\b/i.test(task);
 }
 
+/** A single explicit screenshot URL is a deterministic artifact operation. */
+export function singlePageCaptureUrl(task: string): string | null {
+  if (!requestsImageCapture(task) || /\b(?:all|every|multiple)\s+(?:of\s+(?:my|the)\s+)?pages\b/i.test(task)) return null;
+  const matches = [...task.matchAll(/https:\/\/[^\s<>"']+/gi)].map(([raw]) => raw.replace(/[.,;!?)]*$/, ""));
+  if (matches.length !== 1) return null;
+  try {
+    const target = new URL(matches[0]);
+    return target.protocol === "https:" ? target.href : null;
+  } catch { return null; }
+}
+
 export function claimsArtifactApprovalPending(report: string): boolean {
   return /\b(?:artifact|report)\b[^.!?\n]{0,100}\b(?:pending|awaiting|requires?)\b[^.!?\n]{0,60}\bapproval\b/i.test(report);
 }

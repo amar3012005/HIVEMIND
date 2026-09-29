@@ -59,6 +59,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   private textDraft = "";
   private turnSources: RunSource[] = [];
   private pageReadCounts = new Map<string, number>();
+  private capturedPages = new Map<string, string>();
   private recoveryStepPending = false;
   private recoveryStepUsed = false;
   private finalOnlyRecoveryTurn = false;
@@ -396,7 +397,19 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       id = await this.startCompanyWork(next);
       return { runId: next.runId, workflowId: id, status: "running", checkpoints: [], continuationOf: work.runId };
     }
-    if (action === "pause" && current.status === "running") await this.pauseWorkflow(id);
+    if (action === "stop" && ["queued", "running", "paused", "waiting"].includes(current.status)) await this.terminateWorkflow(id);
+    else if (action === "pause" && current.status === "running") {
+      try {
+        await this.pauseWorkflow(id);
+      } catch (error) {
+        // Workflow pause can fail while a provider/tool step is in flight.
+        // Stop the instance so the operator can resume the same logical run
+        // through the existing receipt-aware restart path.
+        console.warn(JSON.stringify({ event: "workflow_pause_fallback", runId: work.runId,
+          reason: error instanceof Error ? error.message.slice(0, 160) : "unknown" }));
+        await this.terminateWorkflow(id);
+      }
+    }
     else if (action === "resume" && current.status === "paused") await this.resumeWorkflow(id);
     else if (action === "resume" && ["errored", "terminated"].includes(current.status)) {
       // A restarted instance has the same Think prompt idempotency keys. Its
@@ -628,6 +641,38 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (this.state.envelope?.runId) this.sql`INSERT INTO company_artifact_runs (artifact_id, run_id) VALUES (${row.id}, ${this.state.envelope.runId})`;
     this.note("artifact", JSON.stringify({ id: row.id, kind: row.kind, title: row.title, contentType: row.contentType }));
     return row;
+  }
+
+  async capturePublicPage(url: string, title?: string): Promise<{ id: string; title: string; contentType: string; sourceUrl: string }> {
+    const target = new URL(url);
+    if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+    const existingId = this.capturedPages.get(target.href);
+    if (existingId) {
+      const existing = await this.getCompanyArtifact(existingId);
+      if (existing) return { id: existing.id, title: existing.title, contentType: existing.contentType, sourceUrl: target.href };
+    }
+    const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
+    if (!browser?.quickAction) throw new Error("browser_binding_missing");
+    const response = await browser.quickAction("screenshot", {
+      url: target.href,
+      screenshotOptions: { fullPage: true, type: "jpeg", quality: 65 },
+      viewport: { width: 1280, height: 800 },
+      scrollPage: false,
+      gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 },
+      ...(target.pathname === "/" ? { waitForSelector: { selector: "h1", visible: true, timeout: 20000 } } : {}),
+      waitForTimeout: 1000,
+      actionTimeout: 30000,
+    });
+    if (!response.ok) throw new Error(`capture_failed_${response.status}: ${(await response.text()).slice(0, 300)}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length < 8 || bytes.length > 2000000 || bytes[0] !== 255 || bytes[1] !== 216) throw new Error("capture_invalid_or_too_large");
+    let body = "";
+    for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
+    const page = target.pathname === "/" ? "" : ` (${target.pathname})`;
+    const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.(png|jpe?g)$/i, "")}${page}.jpg`, contentType: "image/jpeg", body });
+    this.capturedPages.set(target.href, artifact.id);
+    this.rememberSources({ url: target.href });
+    return { id: artifact.id, title: artifact.title, contentType: artifact.contentType, sourceUrl: target.href };
   }
 
   async listCompanyArtifacts(): Promise<StoredArtifact[]> {
@@ -927,6 +972,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   /** A conversion turn needs the existing room document, not another model or profile fetch. */
   bindArtifactTask(envelope: TaskEnvelope): void {
+    this.capturedPages.clear();
     this.setState({ ...this.state, envelope, employee: envelope.employee ?? this.state.employee ?? null,
       operatingPlan: null, awaiting: "", catalogStage: "action" });
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
@@ -1014,6 +1060,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.draftCalls.clear();
     this.turnSources = [];
     this.pageReadCounts.clear();
+    this.capturedPages.clear();
     const [{ brief }, learnings, completed] = await Promise.all([
       this.loadProfileBrief(envelope.orgId, envelope.userId),
       recallOperatingMemory(this.gatewayEnv(), envelope.orgId, envelope.userId, { kind: "learning", limit: 20 }).catch(() => null),
@@ -1242,30 +1289,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       inputSchema: z.object({ url: z.url(), title: z.string().min(3).max(120).optional() }),
       execute: async ({ url, title }): Promise<{ id: string; title: string; contentType: string; sourceUrl: string }> => {
         this.assertTool("browser_capture");
-        const target = new URL(url);
-        if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
-        if (/\b(?:home|main)\s*page\b/i.test(this.state.envelope?.task ?? "") && target.pathname !== "/") throw new Error("requested_homepage_required");
-        const browser = this.gatewayEnv().BROWSER as { quickAction(type: string, options: unknown): Promise<Response> } | undefined;
-        if (!browser?.quickAction) throw new Error("browser_binding_missing");
-        const response = await browser.quickAction("screenshot", {
-          url: target.href,
-          screenshotOptions: { fullPage: true, type: "jpeg", quality: 65 },
-          viewport: { width: 1280, height: 800 },
-          scrollPage: false,
-          gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 },
-          ...(target.pathname === "/" ? { waitForSelector: { selector: "h1", visible: true, timeout: 20000 } } : {}),
-          waitForTimeout: 1000,
-          actionTimeout: 30000,
-        });
-        if (!response.ok) throw new Error(`capture_failed_${response.status}: ${(await response.text()).slice(0, 300)}`);
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.length < 8 || bytes.length > 2000000 || bytes[0] !== 255 || bytes[1] !== 216) throw new Error("capture_invalid_or_too_large");
-        let body = "";
-        for (let at = 0; at < bytes.length; at += 8190) body += btoa(String.fromCharCode(...bytes.subarray(at, at + 8190)));
-        const page = target.pathname === "/" ? "" : ` (${target.pathname})`;
-        const artifact = await this.saveCompanyArtifact({ kind: "image", title: `${(title || `${target.hostname} screenshot`).replace(/\.(png|jpe?g)$/i, "")}${page}.jpg`, contentType: "image/jpeg", body });
-        this.rememberSources({ url: target.href });
-        return { id: artifact.id, title: artifact.title, contentType: artifact.contentType, sourceUrl: target.href };
+        return this.capturePublicPage(url, title);
       },
     });
     const browserRead = tool({

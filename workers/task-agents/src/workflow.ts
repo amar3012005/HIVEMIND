@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -205,6 +205,18 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       do<T>(name: string, callback: () => Promise<T>): Promise<T>;
     };
     const work = event.payload;
+    const captureUrl = singlePageCaptureUrl(work.task);
+    if (captureUrl) {
+      await durable.do("bind-page-capture", async () => this.agent.bindArtifactTask(work));
+      const artifact = await durable.do("capture-requested-page", async () => this.agent.capturePublicPage(captureUrl));
+      const report = `Captured the full page at ${captureUrl}. The saved image artifact is attached below.`;
+      await durable.do("complete-page-capture", async () => {
+        await this.agent.note("report", report);
+        await this.agent.note("completion", "deliverable_ready");
+      });
+      return { runId: work.runId, orgId: work.orgId, complete: true, reason: "image_captured", report,
+        artifactRefs: [artifact.id] };
+    }
     if (requestsPreviousReportPdf(work.task)) {
       await durable.do("bind-pdf-conversion", async () => this.agent.bindArtifactTask(work));
       const sourceId = await durable.do("resolve-previous-report", async () =>

@@ -146,8 +146,7 @@ export function requestsMemorySave(task: string): boolean {
 /** The operator's "your brain" is the private agent mind, never company memory. */
 export function requestsAgentMemorySave(task: string): boolean {
   if (/\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\b(?:save|store|remember|memorize)\b/i.test(task)) return false;
-  return /\b(?:save|store|remember|memorize|persist)\b[^.!?]{0,100}\b(?:your|agent(?:'s)?|hyper\s*agents?|private|operating\s*system)\s+(?:own\s+)?(?:brain|mind|memory)\b/i.test(task)
-    && !/\b(?:company|hivemind|organization(?:al)?)\s+(?:brain|memory)\b/i.test(task);
+  return /\b(?:save|store|remember|memorize|persist)\b[^.!?]{0,100}\b(?:your|agent(?:'s)?|hyper\s*agents?|private|operating\s*system)\s+(?:own\s+)?(?:brain|mind|memory)\b/i.test(task);
 }
 
 export function requestsImageCapture(task: string): boolean {

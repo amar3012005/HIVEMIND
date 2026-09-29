@@ -49,6 +49,8 @@ test("memory approval follows explicit positive intent", () => {
   assert.equal(requestsAgentMemorySave("Save what happened in this session in your brain"), true);
   assert.equal(requestsAgentMemorySave("Store this learning in the agent's memory"), true);
   assert.equal(requestsAgentMemorySave("Save this to company memory"), false);
+  assert.equal(requestsAgentMemorySave("Save one verified learning in your brain; do not write company memory."), true);
+  assert.equal(requestsAgentMemorySave("Save one learning from the preceding PDF export in your brain"), true);
 });
 
 test("blocked PDF handoff is not a finished render source", () => {

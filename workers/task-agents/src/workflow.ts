@@ -199,8 +199,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       this.agent.pinnedTaskPlaybookId(work.runId));
     if (pinnedPlaybookId) plan.mode = "company";
     const deckRequested = plan.outputKind === "slide_deck" || requestsSlideDeck(asked);
-    const artifactForbidden = artifactCreationForbidden(work.task ?? "");
-    const pdfForbidden = /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
+    // A private-memory request can mention an earlier PDF as evidence; it is
+    // not a new document request. Keep intent classes exclusive for this run.
+    const artifactForbidden = privateMemoryRequest || artifactCreationForbidden(work.task ?? "");
+    const pdfForbidden = privateMemoryRequest || /\b(?:do not|don't|never|without|no)\b[^.!?]{0,80}\bpdf\b/i.test(work.task ?? "");
     if (privateMemoryRequest) plan.mode = "action";
     else if (work.modePreference === "company" || deckRequested) plan.mode = "company";
     else if (/\b(screenshot|capture)\b/i.test(asked) || (plan.mode === "direct" && requestsArtifact(asked))) plan.mode = "action";
@@ -280,7 +282,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
           break;
         }
         if (result.needsInput) break;
-        if (requestsPdf(asked) && !pdfReportReady(result.report)) {
+        if (!pdfForbidden && requestsPdf(asked) && !pdfReportReady(result.report)) {
           actionGuidance = "The room has a native PDF renderer. Remove PDF-tool failure/status text, finish the requested report as Markdown, and let runtime attach the PDF. Do not search other PDF tools. ";
           continue;
         }
@@ -320,7 +322,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         const imageMissing = /\b(screenshot|capture)\b/i.test(asked) && !await this.agent.hasArtifactSince("image", work.startedAt ?? "");
         const output = imageMissing ? "I could not save the requested screenshot artifact." : verifiedReply;
         const missingTasks = missingPlanTaskIds(plan.tasks.length, result.completedTaskIds);
-        const pdfSourceInvalid = requestsPdf(asked) && !pdfReportReady(reply);
+        const pdfSourceInvalid = !pdfForbidden && requestsPdf(asked) && !pdfReportReady(reply);
         const complete = verdict.complete && !imageMissing && !missingTasks.length && !pdfSourceInvalid;
         if (complete && artifactRequested && !/\b(screenshot|capture)\b/i.test(asked)) {
           const saved = await this.agent.saveCompanyArtifact({ kind: "report", title: reportTitle(reply, "Generated report"), contentType: "text/markdown", body: reply });

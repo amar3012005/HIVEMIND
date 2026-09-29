@@ -235,14 +235,19 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!row) return { status: "none", checkpoints: [] };
     const work = JSON.parse(String(row.work));
     if (work.orgId !== orgId || work.userId !== userId) throw new Error("workrun_scope_denied");
-    const id = String(row.workflow_id);
+    let id = String(row.workflow_id);
     const current = await this.getWorkflowStatus("TASK_LIFECYCLE", id);
     if (action === "pause" && current.status === "running") await this.pauseWorkflow(id);
     else if (action === "resume" && current.status === "paused") await this.resumeWorkflow(id);
     else if (action === "resume" && ["errored", "terminated"].includes(current.status)) {
-      const restored = JSON.parse(String(row.state));
-      this.setState({ ...this.state, ...restored, workflowId: id, envelope: work });
-      await this.restartWorkflow(id, { resetTracking: false });
+      // A restarted instance has the same Think prompt idempotency keys. Its
+      // previous completion notifications have already been consumed, so it
+      // can wait forever. A fresh Workflow ID is a fresh attempt of this same
+      // logical run; run-scoped artifacts and connected writes remain deduped.
+      const nextId = crypto.randomUUID();
+      id = await this.runWorkflow("TASK_LIFECYCLE", work, { id: nextId });
+      this.sql`UPDATE workrun_runtime SET workflow_id = ${id}, status = ${"queued"}, updated_at = ${new Date().toISOString()} WHERE run_id = ${work.runId}`;
+      this.setState({ ...this.state, workflowId: id, envelope: work });
     } else if (action !== "status") throw new Error(`workrun_cannot_${action}_${current.status}`);
     const status = action === "status" ? current.status : (await this.getWorkflowStatus("TASK_LIFECYCLE", id)).status;
     this.finishWorkRuntime(work.runId, status);

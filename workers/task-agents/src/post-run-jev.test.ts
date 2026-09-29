@@ -33,11 +33,13 @@ function jevResponse(input: PostRunJevInput, values: {
   const answers: Record<string, unknown> = {
     memory_worthy: { type: "noul", noul: values.memoryProbability ?? 0.91 },
     memory_kind: { type: "choice", choice: values.memoryKind ?? "learning", confidence: 0.88, probabilities: { learning: 0.88, none: 0.12 } },
+    memory_origin: { type: "choice", choice: values.memoryKind === "none" ? "none" : "demonstrated_method", confidence: 0.9 },
     memory_evidence: { type: "score", score: values.memoryScore ?? 2.4, confidence: 0.92, legend: { 0: "none", 1: "weak", 2: "clear", 3: "strong" }, probabilities: { 0: 0, 1: 0.04, 2: 0.52, 3: 0.44 } },
   };
   if (input.playbook?.id.startsWith("local:")) {
     answers.playbook_worthy = { type: "noul", noul: values.playbookProbability ?? 0.82 };
     answers.playbook_change_kind = { type: "choice", choice: values.changeKind ?? "clarify", confidence: 0.84 };
+    answers.playbook_gap_observed = { type: "noul", noul: values.changeKind === "no_change" ? 0.1 : 0.91 };
     answers.playbook_generalizability = { type: "score", score: values.playbookScore ?? 2.1, confidence: 0.89, probabilities: { 0: 0, 1: 0.1, 2: 0.7, 3: 0.2 } };
   }
   return { model: "jev-1.13.0", answers };
@@ -59,6 +61,7 @@ test("request is bounded, omits tenant identifiers, redacts contact data, and on
   assert.equal(state.includes("token=secret"), false);
   assert.equal(state.includes("token=secret"), false);
   assert.equal(state.includes("https://example.com/page"), true);
+  assert.equal(state.includes("verifiedPageReads"), true);
 
   const withoutPlaybook = buildPostRunJevRequest(baseInput);
   assert.equal(withoutPlaybook.questions.playbook_worthy, undefined);
@@ -86,6 +89,14 @@ test("one-off/weak and conflicting judgments do not become automatic learning ap
 
   const conflict = parsePostRunJevResponse(jevResponse(input, { memoryProbability: 0.94, memoryScore: 2.8, memoryKind: "none" }), input);
   assert.equal(conflict?.memory.decision, "uncertain");
+});
+
+test("a polished report without a durable learning receipt cannot recommend memory or playbook promotion", () => {
+  const input = { ...baseInput, playbook: { id: "local:research.example", globalId: "research.base", globalVersion: 3, snapshot: "Use sources." } };
+  const response = jevResponse(input, { memoryProbability: 0.3, memoryKind: "none", memoryScore: 0.8, playbookProbability: 0.28, changeKind: "no_change", playbookScore: 0.7 });
+  const review = parsePostRunJevResponse(response, input);
+  assert.equal(review?.memory.decision, "no_candidate");
+  assert.equal(review?.playbook.decision, "no_candidate");
 });
 
 test("rejects malformed or out-of-range model responses rather than inventing a decision", () => {

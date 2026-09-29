@@ -9,6 +9,14 @@ export interface RoomTicket {
   employee?: EmployeeIdentity;
 }
 
+// The authenticated room roster is authoritative. A ticket can carry a
+// previously bound persona, but it cannot override a changed room assignment.
+export function bindRoomEmployee(ticketEmployee: EmployeeIdentity | null | undefined, rosterEmployee: EmployeeIdentity | null | undefined): EmployeeIdentity {
+  if (!rosterEmployee?.id || !rosterEmployee.name || !rosterEmployee.slug) throw new Error("room_employee_unavailable");
+  if (ticketEmployee && ticketEmployee.id !== rosterEmployee.id) throw new Error("room_employee_changed");
+  return rosterEmployee;
+}
+
 export async function verifyRoomTicket(token: string, secret: string, agentName: string, now = Date.now()): Promise<RoomTicket | null> {
   if (!token || !secret) return null;
   const [encoded, signed, extra] = token.split(".");

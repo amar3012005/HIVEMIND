@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { verifyRoomTicket } from "./room-ticket.ts";
+import { bindRoomEmployee, verifyRoomTicket } from "./room-ticket.ts";
+
+test("room roster restores a missing ticket persona and rejects reassignment", () => {
+  const lead = { id: "44444444-4444-4444-8444-444444444444", slug: "maya", name: "Maya", role: "Lead", persona: "Research." };
+  assert.equal(bindRoomEmployee(null, lead).name, "Maya");
+  assert.equal(bindRoomEmployee(lead, lead).id, lead.id);
+  assert.throws(() => bindRoomEmployee({ ...lead, id: "55555555-5555-4555-8555-555555555555" }, lead), /room_employee_changed/);
+  assert.throws(() => bindRoomEmployee(null, null), /room_employee_unavailable/);
+});
 
 test("room ticket binds user, organization, room and expiry", async () => {
   const secret = "test-secret";

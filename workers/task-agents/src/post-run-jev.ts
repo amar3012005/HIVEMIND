@@ -1,4 +1,4 @@
-export const POST_RUN_JEV_POLICY_VERSION = "post-run-jev-v1";
+export const POST_RUN_JEV_POLICY_VERSION = "post-run-jev-v2";
 
 export type MemoryKind = "learning" | "bug_or_failure" | "mistake_and_correction" | "decision" | "user_requirement" | "none";
 export type PlaybookChangeKind = "add_step" | "clarify" | "guardrail" | "no_change";
@@ -21,7 +21,7 @@ export interface PostRunJevInput {
   report: string;
   completedTaskIds: number[];
   artifactId: string;
-  sources: Array<{ url: string; title: string }>;
+  sources: Array<{ url: string; title: string; excerpt?: string }>;
   activityCounts: Record<string, number>;
   playbook: LocalPlaybookSnapshot | null;
 }
@@ -84,6 +84,16 @@ const memoryQuestions: Record<string, JevQuestion> = {
       decision: "A material company decision and its rationale that should persist.",
       user_requirement: "An explicit, lasting user requirement or preference.",
       none: "No durable, evidence-supported memory should be proposed.",
+    },
+  },
+  memory_origin: {
+    type: "choice",
+    instructions: "What receipt in this run supports a new, durable employee memory? An agent's own recommendation is not an operator decision. An ordinary sourced report is not a newly learned method.",
+    criteria: {
+      operator_decision: "The operator explicitly made or approved a lasting decision in this run.",
+      verified_correction: "A specific mistake was corrected and the correction was verified by a tool or source receipt.",
+      demonstrated_method: "A new reusable method, beyond the loaded playbook, was demonstrated and its outcome verified.",
+      none: "No such receipt exists; the run only produced its requested deliverable or recommendations.",
     },
   },
   memory_evidence: {
@@ -174,6 +184,14 @@ export function buildPostRunJevRequest(input: PostRunJevInput): PostRunJevReques
         no_change: "Do not propose a playbook edit.",
       },
     };
+    questions.playbook_gap_observed = {
+      type: "noul",
+      instructions: "Did this run actually reveal a reusable defect or omission in the loaded playbook, with a concrete failed step or verified correction? A successful report, uncertain source, or generic suggestion is not a playbook gap.",
+      criteria: {
+        true: "A concrete playbook instruction failed or was missing, and the run contains a receipt for the correction.",
+        false: "No demonstrated playbook gap; the task completed normally or any issue was external or unverified.",
+      },
+    };
     questions.playbook_generalizability = {
       type: "score",
       instructions: "Score how likely this evidence is to generalize to future runs of this local playbook. Do not infer recurrence unless it is present in the supplied state.",
@@ -194,9 +212,12 @@ export function buildPostRunJevRequest(input: PostRunJevInput): PostRunJevReques
       outcome: safeText(input.report, 7000),
       completedTaskIds: input.completedTaskIds.slice(0, 6),
       artifactReceipt: { saved: true, id: input.artifactId.slice(0, 80), kind: "report" },
-      sources: input.sources.slice(0, 20)
-        .map((source) => safeSource(source.url, source.title))
-        .filter((source): source is { url: string; title: string } => source !== null),
+      verifiedPageReads: input.sources.slice(0, 12)
+        .map((source) => {
+          const safe = safeSource(source.url, source.title);
+          return safe ? { ...safe, excerpt: safeText(source.excerpt || "", 500) } : null;
+        })
+        .filter((source): source is { url: string; title: string; excerpt: string } => source !== null),
       activityCounts: Object.fromEntries(Object.entries(input.activityCounts).slice(0, 20)),
       localPlaybook: localPlaybook ? {
         id: localPlaybook.id.slice(0, 120),
@@ -258,7 +279,7 @@ function parseScore(answers: Record<string, unknown>, key: string, maxScore: num
 function reviewDecision(probability: number | null, score: ParsedScore | null, categoryConfidence: number | null): ReviewDecision {
   if (probability === null || !score || score.confidence === null) return "uncertain";
   if (probability >= REVIEW_PROBABILITY && score.score >= REVIEW_SCORE && score.confidence >= REVIEW_CONFIDENCE && categoryConfidence !== null && categoryConfidence >= REVIEW_CONFIDENCE) return "review_recommended";
-  if (probability <= 0.25 && score.score < 1) return "no_candidate";
+  if (probability <= 0.4 && score.score <= 1.25 && score.confidence >= REVIEW_CONFIDENCE) return "no_candidate";
   return "uncertain";
 }
 
@@ -268,11 +289,14 @@ export function parsePostRunJevResponse(payload: unknown, input: PostRunJevInput
   const { answers, model } = extracted;
   const memoryProbability = parseNoul(answers, "memory_worthy");
   const memoryKind = parseChoice(answers, "memory_kind", MEMORY_KINDS);
+  const memoryOrigin = parseChoice(answers, "memory_origin", ["operator_decision", "verified_correction", "demonstrated_method", "none"] as const);
   const memoryEvidence = parseScore(answers, "memory_evidence", 3);
-  if (memoryProbability === null || !memoryKind || !memoryEvidence) return null;
+  if (memoryProbability === null || !memoryKind || !memoryOrigin || !memoryEvidence) return null;
 
   let memoryDecision = reviewDecision(memoryProbability, memoryEvidence, memoryKind.confidence);
-  if (memoryKind.value === "none" && memoryDecision === "review_recommended") memoryDecision = "uncertain";
+  if (memoryKind.value === "none" || memoryOrigin.value === "none") {
+    memoryDecision = memoryProbability <= 0.4 ? "no_candidate" : "uncertain";
+  } else if (memoryOrigin.confidence === null || memoryOrigin.confidence < REVIEW_CONFIDENCE) memoryDecision = "uncertain";
 
   let playbook: PostRunJevReview["playbook"] = {
     decision: "not_applicable",
@@ -283,11 +307,14 @@ export function parsePostRunJevResponse(payload: unknown, input: PostRunJevInput
   };
   if (isLocalPlaybook(input.playbook)) {
     const playbookProbability = parseNoul(answers, "playbook_worthy");
+    const gapProbability = parseNoul(answers, "playbook_gap_observed");
     const changeKind = parseChoice(answers, "playbook_change_kind", PLAYBOOK_CHANGE_KINDS);
     const generalizability = parseScore(answers, "playbook_generalizability", 3);
-    if (playbookProbability === null || !changeKind || !generalizability) return null;
+    if (playbookProbability === null || gapProbability === null || !changeKind || !generalizability) return null;
     let decision = reviewDecision(playbookProbability, generalizability, changeKind.confidence);
-    if (changeKind.value === "no_change" && decision === "review_recommended") decision = "uncertain";
+    if (changeKind.value === "no_change" || gapProbability <= 0.25) {
+      decision = playbookProbability <= 0.4 ? "no_candidate" : "uncertain";
+    } else if (gapProbability < REVIEW_PROBABILITY) decision = "uncertain";
     playbook = {
       decision,
       probability: playbookProbability,

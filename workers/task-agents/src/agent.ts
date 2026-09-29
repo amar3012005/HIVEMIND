@@ -21,6 +21,7 @@ import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, 
 import { completedPlanTaskIds, updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
+import { bindRoomEmployee } from "./room-ticket";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
 import { artifactForModel, trimStoredArtifactPart, visionObservation } from "./artifact-model";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook, localPlaybookContract, localPlaybookVersion } from "./playbooks";
@@ -399,13 +400,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     };
     try {
       const roomId = named.match(/^session-[0-9a-f-]{36}-([0-9a-f-]{36})$/i)?.[1];
+      let roomEmployee = authenticated.employee ?? undefined;
       if (roomId) {
-        const roster = await getControl(this.gatewayEnv(), `/internal/hyper/room-employee?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}&room_id=${encodeURIComponent(roomId)}`) as { specialists?: EmployeeIdentity[]; error?: string };
-        if (roster.error) this.note("delegation-unavailable", String(roster.error).slice(0, 100));
-        else {
-          this.setState({ ...this.state, specialists: roster.specialists || [] });
-          this.note("specialists-available", `${roster.specialists?.length || 0} assigned`);
-        }
+        const roster = await getControl(this.gatewayEnv(), `/internal/hyper/room-employee?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}&room_id=${encodeURIComponent(roomId)}`) as { employee?: EmployeeIdentity | null; specialists?: EmployeeIdentity[]; error?: string };
+        if (roster.error) throw new Error("room_employee_unavailable");
+        roomEmployee = bindRoomEmployee(roomEmployee, roster.employee);
+        this.setState({ ...this.state, employee: roomEmployee, specialists: roster.specialists || [] });
+        this.note("specialists-available", `${roster.specialists?.length || 0} assigned`);
       }
       const profile = await readCompanyProfile(this.gatewayEnv(), orgId, userId).catch(() => null);
       const facts = companyFacts(profile, supplied);
@@ -420,7 +421,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         previousRequest: previousRequest.slice(0, 2000),
         modePreference: parsed.modePreference === "company" || parsed.modePreference === "direct" ? parsed.modePreference : "auto",
         startedAt: new Date().toISOString(),
-        employee: authenticated.employee ?? undefined,
+        employee: roomEmployee,
         ...facts,
         task,
       });
@@ -1388,7 +1389,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return [];
     ensureCompanyTables(this.sql.bind(this));
-    return this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} ORDER BY read_at DESC LIMIT 12`.map((row) => ({ url: String(row.url), excerpt: String(row.excerpt), readAt: String(row.read_at) }));
+    return this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE run_id = ${envelope.runId} AND org_id = ${envelope.orgId} AND user_id = ${envelope.userId} ORDER BY read_at DESC LIMIT 12`.map((row) => ({ url: String(row.url), excerpt: String(row.excerpt), readAt: String(row.read_at) }));
   }
 
   verifiedSourceUrls(): string[] {
@@ -1515,7 +1516,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (String(existing.org_id) !== envelope.orgId || String(existing.user_id) !== envelope.userId) throw new Error("run_insight_owner_mismatch");
       try {
         const saved = JSON.parse(String(existing.review_json)) as PostRunJevReview;
-        if (saved.runId === envelope.runId && saved.policyVersion === POST_RUN_JEV_POLICY_VERSION) return saved;
+        // A completed Workflow replay must reuse its original review, even
+        // after policy upgrades; the new policy applies to new runs only.
+        if (saved.runId === envelope.runId && /^post-run-jev-v[12]$/.test(saved.policyVersion)) return saved;
       } catch { /* an invalid stored result must never be promoted */ }
       throw new Error("run_insight_persist_corrupt");
     }
@@ -1528,7 +1531,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       runId: envelope.runId, orgId: envelope.orgId, userId: envelope.userId,
       taskType: envelope.taskType, phase: envelope.phase, task: input.task, report: input.report,
       completedTaskIds: input.completedTaskIds, artifactId: input.artifactId,
-      sources: (this.state.sources ?? []).map(({ url, title }) => ({ url, title })),
+      sources: this.sourceReadReceipts().map(({ url, excerpt }) => ({
+        url, excerpt, title: this.state.sources?.find((source) => source.url === url)?.title || "Verified page read",
+      })),
       activityCounts, playbook: input.playbook,
     };
     const env = this.gatewayEnv();
@@ -1585,8 +1590,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       const last = [...(this.state.events ?? [])].reverse().find((event) => event.step === "progress" || event.step === "user");
       if (last?.step === "progress" && last.detail === detail) return;
     }
-    const events = [...(this.state.events ?? []), { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) }].slice(-300);
+    const event = { at: new Date().toISOString(), step, detail: detail.slice(0, step === "report" ? 30000 : 8000) };
+    const events = [...(this.state.events ?? []), event].slice(-300);
     this.setState({ ...this.state, events });
+    // State is the durable replay source; the event frame gives connected rooms
+    // an immediate update while a long Workflow/model step is still running.
+    this.broadcast(JSON.stringify(event));
     if (step === "completion" && this.state.envelope?.runId) {
       ensureCompanyTables(this.sql.bind(this));
       const status = ["complete", "deliverable_ready", "memory_saved"].includes(detail) ? "completed" : "incomplete";

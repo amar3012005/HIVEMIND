@@ -120,8 +120,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
   private async reportPrompt(step: ThinkWorkflowStep, name: string, prompt: string, options: { prospects: boolean; privateLearnings: boolean }): Promise<z.infer<typeof reportSchema>> {
     const durable = step as ThinkWorkflowStep & { do<T>(name: string, callback: () => Promise<T>): Promise<T> };
+    const turnStarted = Date.now();
     const report = await durable.do(`${name}-native-turn`, async () => this.agent.streamTaskTurn(
       `${prompt}\n\nWork as the assigned employee. Narrate meaningful progress in your own words while tools run. Finish with the requested Markdown response in plain text. Keep plan IDs and control fields out of the user-facing answer; the Workflow derives them separately from receipts. Never call think_final_answer; the Workflow checks receipts and saves artifacts after this turn. Do not claim an artifact was saved before its receipt.`));
+    console.log(JSON.stringify({ event: "company_stage_timing", stage: "native_turn", name, elapsedMs: Date.now() - turnStarted, reportChars: report.length }));
+    const receiptStarted = Date.now();
     const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
       `${url}: ${sourceEvidenceWindows(excerpt, 1100)}`).join("\n");
     const receiptSchema = executionReceiptSchema(options);
@@ -142,6 +145,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       try { decision = executionSchema.parse(parseToolFreeJson(raw, receiptSchema)); }
       catch { decision = executionSchema.parse({}); }
     }
+    console.log(JSON.stringify({ event: "company_stage_timing", stage: "receipt_projection", name, elapsedMs: Date.now() - receiptStarted }));
     return { ...decision, report };
   }
 
@@ -358,6 +362,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const playbookMenu = playbookNames.map(({ id, name, description, base }) => ({ id, name, description, globalId: base }));
     const quickDirect = quickRoute === "direct" ? await durable.do("direct-answer", async () =>
       this.agent.streamNarrative(`Answer only this current operator request in your active HyperAgent persona: ${asked}. Earlier room turns are context, not tasks to repeat or continue. Use only facts supplied in this request or general knowledge. Do not create a plan, invoke tools, recap earlier answers, or claim company facts not established here. Reply in your own voice.`)) : "";
+    const planStarted = Date.now();
     const plan = work.continuation ? planSchema.parse({
       mode: "company", decision: `Continue unfinished WorkRun ${work.continuation.previousRunId}`,
       plan: recovery!.plan!.summary,
@@ -417,6 +422,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         }
       }
     })();
+    console.log(JSON.stringify({ event: "company_stage_timing", stage: "plan", elapsedMs: Date.now() - planStarted, mode: plan.mode }));
     asked = plan.resolvedRequest.trim() || asked;
     // Reapply on Workflow replay: this is room state, not a one-time external write.
     await this.agent.setPrivateMemoryWritesAllowed(plan.privateMemoryWritePolicy === "allow");

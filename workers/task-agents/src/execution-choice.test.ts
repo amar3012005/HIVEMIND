@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isNonblockingExecutionChoice } from "./execution-choice.ts";
+import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice.ts";
+
+test("read guidance discovers unknown URLs before browser reads", () => {
+  assert.match(READ_TOOL_FALLBACK, /discover the exact public HTTPS URL with parallel_search/);
+  assert.match(READ_TOOL_FALLBACK, /Read a URL supplied by the operator directly/);
+  assert.doesNotMatch(READ_TOOL_FALLBACK, /browser_markdown with the exact public HTTPS URL first/);
+});
 
 test("browser tool choice is an internal execution decision", () => {
   assert.equal(isNonblockingExecutionChoice("Do you want me to fetch the pages using browser_extract with the required URL parameter, or fall back to browser_markdown?", ["Use browser_extract", "Use browser_markdown"]), true);

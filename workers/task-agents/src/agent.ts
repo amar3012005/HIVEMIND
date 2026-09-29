@@ -1532,7 +1532,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const browserRead = tool({
-      description: "Read Markdown from a public HTTPS page through native Cloudflare Browser Run. Returns bounded page text and records a source receipt for verified reports. No connected-app grant is needed.",
+      description: "Read Markdown from an exact public HTTPS URL supplied by the operator or returned by parallel_search/parallel_search_batch. Discover an official page URL with search before calling this tool; never guess paths. Returns bounded page text and records a source receipt for verified reports. No connected-app grant is needed.",
       inputSchema: z.object({ url: z.url() }),
       execute: async ({ url }): Promise<{ url: string; markdown: string }> => {
         this.assertTool("browser_markdown");

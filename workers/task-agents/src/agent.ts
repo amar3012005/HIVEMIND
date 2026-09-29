@@ -1,10 +1,11 @@
-import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext } from "@cloudflare/think";
-import { thinkModel } from "./think-model";
+import { Think, type ChunkContext, type Session, type ToolCallContext, type ToolCallDecision, type ToolCallResultContext, type TurnContext } from "@cloudflare/think";
+import { initialPlanModel, thinkModel } from "./think-model";
+import { isInitialOperatingPlan } from "./planning-model";
 import { browserMarkdown, createQuickActionTools } from "@cloudflare/think/tools/browser";
 import type { SkillSource } from "agents/skills";
 import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
-import { tool, type ToolSet } from "ai";
+import { streamText, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -13,11 +14,11 @@ import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { connectedWriteKey, reconciledRecord } from "./connected-write";
 import { approvePendingInput } from "./operator-resume";
 import { companyWorkComplete, previousReport, requestsImageCapture, requestsMemorySave, type ProspectEvidence } from "./completion";
-import { CompanyGovernor } from "./governor";
+import { COMPANY_GOVERNOR_PROMPT, CompanyGovernor } from "./governor";
 import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdict";
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
-import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
+import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -773,14 +774,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     return [await toolkitSkillSource()];
   }
 
-  beforeTurn(): { activeTools: string[]; maxSteps: number; maxOutputTokens: number; providerOptions: Record<string, unknown> } {
+  beforeTurn(ctx: TurnContext) {
     this.textDraft = "";
-    if (this.state.catalogStage === "planning") return {
-      activeTools: ["think_final_answer"],
-      maxSteps: 1,
-      maxOutputTokens: 4096,
-      providerOptions: { "workers-ai": { reasoning_effort: "low" } },
-    };
+    if (this.state.catalogStage === "planning") {
+      const fastStart = isInitialOperatingPlan(ctx.messages, ctx.continuation) ? initialPlanModel(this.gatewayEnv()) : null;
+      return {
+        ...(fastStart ? { model: fastStart } : {}),
+        activeTools: ["think_final_answer"],
+        maxSteps: 1,
+        maxOutputTokens: 4096,
+        providerOptions: { "workers-ai": { reasoning_effort: "low" } },
+      };
+    }
     const granted = this.state.tools;
     const refineRequested = this.playbookRefinementRequested();
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
@@ -1483,6 +1488,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async reviewCompanyReport(input: { task: string; plan: string[]; report: string; companyContext: unknown; sources: string[] }): Promise<GovernanceVerdict> {
     const workflowId = this.state.workflowId || this.state.envelope?.runId || crypto.randomUUID();
+    let verdict: GovernanceVerdict = { verdict: "unavailable", note: "Review unavailable; report delivered without model review." };
     try {
       const result = await this.runAgentTool(CompanyGovernor, {
         runId: `govern-${workflowId}`,
@@ -1495,16 +1501,34 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         },
         display: { name: "Company review" },
       });
-      const verdict = result.status === "completed"
-        ? parseGovernanceVerdict(result.summary)
-        : { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
-      this.note("governance", `${verdict.verdict}: ${verdict.note}`);
-      return verdict;
-    } catch {
-      const verdict = { verdict: "unavailable" as const, note: "Review unavailable; report delivered without model review." };
-      this.note("governance", `${verdict.verdict}: ${verdict.note}`);
-      return verdict;
+      if (result.status === "completed") verdict = parseGovernanceVerdict(result.summary);
+      else console.warn(JSON.stringify({ event: "governor_child_incomplete", status: result.status }));
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "governor_child_failed", name: error instanceof Error ? error.name : "unknown" }));
     }
+    if (verdict.verdict === "unavailable") {
+      try {
+        const model = thinkModel(this.gatewayEnv());
+        if (typeof model !== "string") {
+          const review = streamText({
+            model,
+            system: COMPANY_GOVERNOR_PROMPT,
+            prompt: JSON.stringify({
+              task: input.task.slice(0, 2000), plan: input.plan.slice(0, 6), report: input.report.slice(0, 16000),
+              companyContext: JSON.stringify(input.companyContext ?? null).slice(0, 2500),
+              sourceReceipts: input.sources.slice(-16).map((source) => source.slice(0, 700)),
+            }),
+            maxOutputTokens: 1024,
+            abortSignal: AbortSignal.timeout(15_000),
+          });
+          verdict = parseGovernanceVerdict(await review.text);
+        }
+      } catch (error) {
+        console.warn(JSON.stringify({ event: "governor_fallback_failed", name: error instanceof Error ? error.name : "unknown" }));
+      }
+    }
+    this.note("governance", `${verdict.verdict}: ${verdict.note}`);
+    return verdict;
   }
 
   async reviewCompletedCompanyRun(input: {
@@ -1560,7 +1584,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     this.sql`INSERT OR IGNORE INTO company_run_insights (run_id, org_id, user_id, task_type, artifact_id, policy_version, status, review_json, created_at)
       VALUES (${envelope.runId}, ${envelope.orgId}, ${envelope.userId}, ${envelope.taskType}, ${input.artifactId.slice(0, 100)}, ${POST_RUN_JEV_POLICY_VERSION}, ${review.status}, ${JSON.stringify(review)}, ${new Date().toISOString()})`;
-    this.note("post_run_jev", JSON.stringify({ status: review.status, memoryDecision: review.memory.decision, playbookDecision: review.playbook.decision }));
+    this.note("post_run_jev", postRunJevSummary(review));
     return review;
   }
 

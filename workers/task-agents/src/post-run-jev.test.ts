@@ -4,8 +4,17 @@ import {
   buildPostRunJevRequest,
   ineligiblePostRunJev,
   parsePostRunJevResponse,
+  postRunJevSummary,
   type PostRunJevInput,
 } from "./post-run-jev.ts";
+
+test("post-run receipt explains conservative decisions without implying a write", () => {
+  const review = ineligiblePostRunJev({ ...baseInput, playbook: { id: "local:research.example", globalId: "research.base", globalVersion: 1, snapshot: "Verify sources." } }, "unavailable");
+  assert.match(postRunJevSummary(review), /no memory or playbook change applied/i);
+  const evaluated = { ...review, status: "evaluated" as const, memory: { ...review.memory, decision: "uncertain" as const }, playbook: { ...review.playbook, decision: "no_candidate" as const } };
+  assert.match(postRunJevSummary(evaluated), /Memory evidence inconclusive; no playbook revision justified/);
+  assert.match(postRunJevSummary(evaluated), /No automatic memory or playbook write/);
+});
 
 const baseInput: PostRunJevInput = {
   runId: "run-123",

@@ -54,6 +54,18 @@ export interface PostRunJevReview {
   };
 }
 
+export function postRunJevSummary(review: PostRunJevReview): string {
+  if (review.status !== "evaluated") return `Learning review ${review.status}; no memory or playbook change applied.`;
+  const memory = review.memory.decision === "review_recommended" ? "Memory candidate ready for human review"
+    : review.memory.decision === "uncertain" ? "Memory evidence inconclusive"
+    : "No durable memory candidate";
+  const playbook = review.playbook.decision === "review_recommended" ? "playbook revision ready for human review"
+    : review.playbook.decision === "uncertain" ? "playbook evidence inconclusive"
+    : review.playbook.decision === "no_candidate" ? "no playbook revision justified"
+    : "no local playbook evaluated";
+  return `${memory}; ${playbook}. No automatic memory or playbook write.`;
+}
+
 type JevQuestion = Record<string, unknown>;
 export interface PostRunJevRequest extends Record<string, unknown> {
   state: Record<string, unknown>;

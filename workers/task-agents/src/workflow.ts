@@ -72,12 +72,12 @@ const reportSchema = z.object({
   })).max(30).default([]),
 });
 
-export function parseToolFreeReport(text: string): z.infer<typeof reportSchema> {
+export function parseToolFreeJson<T>(text: string, schema: z.ZodType<T>): T {
   const body = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const start = body.indexOf("{");
   const end = body.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("recovery_report_json_missing");
-  return reportSchema.parse(JSON.parse(body.slice(start, end + 1)));
+  return schema.parse(JSON.parse(body.slice(start, end + 1)));
 }
 
 export interface CompanyWorkResult {
@@ -91,6 +91,19 @@ export interface CompanyWorkResult {
 }
 
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
+  private async structuredPrompt<S extends z.ZodObject<z.ZodRawShape>>(step: ThinkWorkflowStep, name: string, prompt: string, schema: S): Promise<z.infer<S>> {
+    try {
+      return await step.prompt(name, { prompt, output: schema, timeout: "30 minutes" }) as z.infer<S>;
+    } catch (error) {
+      if (workflowErrorCode(error) !== "model_output_invalid") throw error;
+      await this.agent.note("model-recovery", `Recovering ${name} with a tool-free structured response`);
+      const raw = await this.agent.recoverStructuredWithoutTool(
+        `Return exactly one valid JSON object, without Markdown fences or tool calls, matching this schema: ${JSON.stringify(z.toJSONSchema(schema))}. Do not invent task facts.\n\n${prompt}`,
+      );
+      return parseToolFreeJson(raw, schema) as z.infer<S>;
+    }
+  }
+
   private async reportPrompt(step: ThinkWorkflowStep, name: string, prompt: string): Promise<z.infer<typeof reportSchema>> {
     try {
       return await step.prompt(name, { prompt, output: reportSchema, timeout: "30 minutes" });
@@ -109,10 +122,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       } catch (recoveryError) {
         if (!isRecoverableModelProtocolError(recoveryError)) throw recoveryError;
         await this.agent.note("model-recovery", `Completing ${name} from saved receipts without another required tool call`);
-        const raw = await this.agent.recoverReportWithoutTool(
+        const raw = await this.agent.recoverStructuredWithoutTool(
           `Return ONE valid JSON object, no Markdown fence and no tool calls. Keys: needsInput (boolean), question (string), options (string array), report (finished Markdown string), completedTaskIds (number array), operatingLearnings (array), prospects (array of {name,locationUrl,sectorUrl,locationEvidence,sectorEvidence,caveat}). Preserve the draft where supported. For each prospect, cite only an exact source URL in the receipts and copy short contiguous location and insurance passages from that page. Do not claim a saved artifact; the runtime validates and saves it. If evidence is missing, say so in report and leave unsupported tasks incomplete.\n\nDraft:\n${streamedDraft.slice(0, 24000)}\n\nTask:\n${prompt.slice(0, 5000)}\n\nSource receipts:\n${receipts}`,
         );
-        return parseToolFreeReport(raw);
+        return parseToolFreeJson(raw, reportSchema);
       } finally {
         await this.agent.disarmFinalAnswerRecovery();
       }
@@ -429,11 +442,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
     plan.tasks = plan.mode === "company" ? currentTurnTasks(plan.tasks) : [];
     if (plan.mode === "company" && !plan.tasks.length) {
-      const revised = await step.prompt("complete-company-plan", {
-        prompt: `Operator request: ${asked}. Write three to six observable company-work tasks that end with the requested deliverable and actual file receipt. No private reasoning or approval-only task.`,
-        output: z.object({ tasks: z.array(z.string().min(4).max(160)).min(3).max(6) }),
-        timeout: "30 minutes",
-      });
+      const revised = await this.structuredPrompt(step, "complete-company-plan",
+        `Operator request: ${asked}. Write three to six observable company-work tasks that end with the requested deliverable and actual file receipt. No private reasoning or approval-only task.`,
+        z.object({ tasks: z.array(z.string().min(4).max(160)).min(3).max(6) }));
       plan.tasks = currentTurnTasks(revised.tasks);
     }
     // A named output wins over a broad topic playbook: deck work must not
@@ -444,11 +455,9 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const playbookIds = playbookNames.map((item) => item.id) as [string, ...string[]];
       const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));
       const playbookMenu = playbookNames.map(({ id, name, description, base }) => ({ id, name, description, globalId: base }));
-      const choice = await step.prompt("select-local-playbook", {
-        prompt: `Operator request: ${asked}. First recognize the relevant global method from this compact catalog: ${JSON.stringify(globalMenu)}. Then choose one organization-specific local method whose globalId matches that method: ${JSON.stringify(playbookMenu)}. Return its exact local id and three to six observable operating tasks shaped by that method and the operator's acceptance criteria. End with the requested deliverable and its saved receipt when a file is requested. For target organizations with ICP fit and approach, choose local:outreach.prospect-list; local:research.competitor-market compares competitors. These are catalog summaries only; the chosen full method loads after selection. Action skills load only when their plan step begins.`,
-        output: z.object({ id: z.enum(playbookIds), tasks: z.array(z.string().min(4).max(160)).min(3).max(6) }),
-        timeout: "30 minutes",
-      });
+      const choice = await this.structuredPrompt(step, "select-local-playbook",
+        `Operator request: ${asked}. First recognize the relevant global method from this compact catalog: ${JSON.stringify(globalMenu)}. Then choose one organization-specific local method whose globalId matches that method: ${JSON.stringify(playbookMenu)}. Return its exact local id and three to six observable operating tasks shaped by that method and the operator's acceptance criteria. End with the requested deliverable and its saved receipt when a file is requested. For target organizations with ICP fit and approach, choose local:outreach.prospect-list; local:research.competitor-market compares competitors. These are catalog summaries only; the chosen full method loads after selection. Action skills load only when their plan step begins.`,
+        z.object({ id: z.enum(playbookIds), tasks: z.array(z.string().min(4).max(160)).min(3).max(6) }));
       plan.localPlaybookId = choice.id;
       plan.tasks = currentTurnTasks(choice.tasks);
     }

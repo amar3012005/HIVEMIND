@@ -108,7 +108,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   /** Recover a structured handoff when the Think tool protocol fails twice.
    * This call has no tools; Workflow still validates the schema and evidence.
    */
-  async recoverReportWithoutTool(prompt: string): Promise<string> {
+  async recoverStructuredWithoutTool(prompt: string): Promise<string> {
     const result = await generateText({
       model: recoveryModel(this.gatewayEnv()),
       prompt,

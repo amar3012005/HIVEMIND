@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;
@@ -53,6 +53,23 @@ test("location binding rejects a results date and prefers the named insurer's ad
   assert.doesNotMatch(bound.report, /Location passage: \"Click here/);
   assert.equal(bindProspectSourcePassages("# Talanx", bound.prospects,
     [{ url, excerpt: "Click here for more information on the results as at 30 June 2026 and all other results. Talanx sells insurance." }], "Hannover"), null);
+});
+
+test("source binding retains the user's city when the planner abbreviates the task", () => {
+  assert.equal(requestedLocationHint("Create a report on three Hannover-based insurers", "Verify official addresses"), "Hannover");
+  assert.equal(requestedLocationHint("Correct the Hannover insurance brief", "Verify each source"), "Hannover");
+});
+
+test("source binding can quote an address embedded in long fetched markup", () => {
+  const url = "https://www.example-insurer.test/imprint";
+  const page = `${"Navigation and other site material. ".repeat(20)}Registered office of Example Insurance AG: Example-Platz 1 <br> 30177 Hannover. ${"Other site material. ".repeat(20)}This company offers insurance to households and businesses.`;
+  const bound = bindProspectSourcePassages(`# Example Insurance\n${url}`,
+    [{ name: "Example Insurance", locationUrl: url, sectorUrl: url,
+      locationEvidence: "Example Insurance is headquartered in Hannover", sectorEvidence: "The insurer covers households", caveat: "" }],
+    [{ url, excerpt: page }], "Hannover");
+  assert.ok(bound);
+  assert.match(bound.prospects[0].locationEvidence, /30177 Hannover/);
+  assert.equal(prospectQuotesVerified(bound.prospects, [{ url, excerpt: page }]).complete, true);
 });
 import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 

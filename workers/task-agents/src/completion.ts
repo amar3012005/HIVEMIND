@@ -34,6 +34,15 @@ export interface ProspectEvidence {
   caveat: string;
 }
 
+/** Keep the operator's geographic constraint when the planner abbreviates it. */
+export function requestedLocationHint(original: string, resolved = ""): string {
+  const scope = `${original}\n${resolved}`;
+  return scope.match(/\b([\p{L}-]+)-based\b/iu)?.[1]
+    ?? scope.match(/\b([\p{L}-]+)\s+(?:insurers?|insurance|banks?|prospects?|companies|addresses?)\b/iu)?.[1]
+    ?? scope.match(/\b(?:in|near|around)\s+([\p{L}-]+)/iu)?.[1]
+    ?? "";
+}
+
 export function requestedProspectCount(task: string): number {
   const match = task.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\s+(?:(?:qualified|prospective|potential|Berlin|German|regulated|bank|insurance|healthcare)\s+){0,4}(?:prospects?|companies|accounts?|leads?|clients?|organizations?|banks?|insurers?|hospitals?)\b/i);
   if (!match) return 1;
@@ -84,6 +93,7 @@ export function bindProspectSourcePassages(
   prospects: readonly ProspectEvidence[],
   pages: readonly { url: string; excerpt: string }[],
   locationHint = "",
+  onFailure?: (reason: string) => void,
 ): { report: string; prospects: ProspectEvidence[] } | null {
   const byUrl = new Map(pages.map((page) => [sourceKey(page.url), page.excerpt]));
   const bound: ProspectEvidence[] = [];
@@ -91,10 +101,16 @@ export function bindProspectSourcePassages(
   for (const row of prospects) {
     const locationPage = byUrl.get(sourceKey(row.locationUrl));
     const sectorPage = byUrl.get(sourceKey(row.sectorUrl));
-    if (!locationPage || !sectorPage) return null;
+    if (!locationPage || !sectorPage) {
+      onFailure?.(`${row.name}: source page missing`);
+      return null;
+    }
     const location = selectSourcePassage(locationPage, row.locationEvidence, "location", locationHint, row.name);
     const sector = selectSourcePassage(sectorPage, row.sectorEvidence, "sector", "", row.name);
-    if (!location || !sector) return null;
+    if (!location || !sector) {
+      onFailure?.(`${row.name}: ${!location ? "location" : "sector"} passage missing from fetched page`);
+      return null;
+    }
     for (const [draft, verified] of [[row.locationEvidence, location], [row.sectorEvidence, sector]]) {
       if (draft.trim() && draft !== verified) verifiedReport = verifiedReport.replaceAll(draft, verified);
     }
@@ -111,20 +127,34 @@ function selectSourcePassage(page: string, draft: string, kind: "location" | "se
   const candidates = sourceQuoteCandidates(page, draft, 12);
   const lines = page.split(/\n+|(?<=[.!?])\s+(?=[A-Z\p{Lu}])/u)
     .map((part) => part.trim()).filter((part) => part.length >= 12 && part.length <= 350);
-  const brand = canonicalPassage(companyName).split(" ").find((token) =>
+  const needles = kind === "location" ? [locationHint] : ["insurance", "reinsurance", "versicherung", "rückversicherung"];
+  const windows = needles.flatMap((needle) => {
+    if (!needle) return [];
+    const result: string[] = [];
+    const lower = page.toLocaleLowerCase();
+    let at = lower.indexOf(needle.toLocaleLowerCase());
+    for (let count = 0; at >= 0 && count < 120; count += 1) {
+      result.push(page.slice(Math.max(0, at - 100), Math.min(page.length, at + needle.length + 100)).trim());
+      at = lower.indexOf(needle.toLocaleLowerCase(), at + needle.length);
+    }
+    return result;
+  });
+  const brands = canonicalPassage(companyName).split(" ").filter((token) =>
     token.length >= 3 && token !== canonicalPassage(locationHint) && !["gruppe", "group", "insurance", "insurer", "ag", "se"].includes(token));
-  const ranked = [...new Set([...candidates, ...lines])].sort((a, b) =>
-    brandScore(b, brand) - brandScore(a, brand));
+  const ranked = [...new Set([...candidates, ...lines, ...windows])].sort((a, b) =>
+    brandScore(b, brands) - brandScore(a, brands) || a.length - b.length);
   const selected = ranked.find((part) =>
     supportsClaim(part, kind, locationHint) && sourceReceiptCoversQuotes(page, [part]));
   return selected ?? null;
 }
 
-function brandScore(passage: string, brand?: string): number {
-  if (!brand) return 0;
+function brandScore(passage: string, brands: readonly string[]): number {
+  if (!brands.length) return 0;
   const words = canonicalPassage(passage).split(" ");
-  const at = words.indexOf(brand);
-  return at < 0 ? 0 : at <= 2 ? 2 : 1;
+  return Math.max(0, ...brands.map((brand) => {
+    const at = words.indexOf(brand);
+    return at < 0 ? 0 : at <= 2 ? 2 : 1;
+  }));
 }
 
 function supportsClaim(passage: string, kind: "location" | "sector", locationHint: string): boolean {

@@ -2,6 +2,13 @@ import type { TraceEvent } from "./types";
 
 type SessionTurn = { at: string; request: string; report?: string; outcome?: string; artifacts: string[] };
 
+export function privateMemoryReceiptId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !("ok" in value) || value.ok !== true
+    || !("memory" in value) || !value.memory || typeof value.memory !== "object"
+    || !("id" in value.memory) || typeof value.memory.id !== "string") return null;
+  return value.memory.id;
+}
+
 /** Give one model call bounded, receipt-bearing room history rather than a transcript dump. */
 export function sessionMemoryEvidence(events: readonly TraceEvent[]): string {
   const current = events.map((event) => event.step).lastIndexOf("user");

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sessionMemoryEvidence } from "./session-memory.ts";
+import { privateMemoryReceiptId, sessionMemoryEvidence } from "./session-memory.ts";
+
+test("private-memory save uses the nested Control receipt", () => {
+  assert.equal(privateMemoryReceiptId({ ok: true, memory: { id: "saved-1" } }), "saved-1");
+  assert.equal(privateMemoryReceiptId({ ok: true, id: "wrong-shape" }), null);
+  assert.equal(privateMemoryReceiptId({ ok: false, memory: { id: "unsaved" } }), null);
+});
 
 test("session handoff excludes current request and preserves outcome and artifact receipts", () => {
   const history = sessionMemoryEvidence([

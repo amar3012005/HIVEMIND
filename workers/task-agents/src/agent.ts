@@ -20,7 +20,7 @@ import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, continuedPlan, updatePlanTask } from "./operating-plan";
 import { operatingMemoryBrief } from "./operating-memory-context";
-import { sessionMemoryEvidence } from "./session-memory";
+import { privateMemoryReceiptId, sessionMemoryEvidence } from "./session-memory";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
 import { runContext } from "./run-context";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
@@ -882,9 +882,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         context: { source: "bounded_room_session", version: 1 },
       })));
     const saved = attempts.flatMap((attempt, index) => {
-      if (attempt.status !== "fulfilled" || !attempt.value || typeof attempt.value !== "object"
-        || !("ok" in attempt.value) || attempt.value.ok !== true || !("id" in attempt.value)) return [];
-      return [{ id: String(attempt.value.id), kind: safe[index].kind, title: safe[index].title.trim() }];
+      const id = attempt.status === "fulfilled" ? privateMemoryReceiptId(attempt.value) : null;
+      return id ? [{ id, kind: safe[index].kind, title: safe[index].title.trim() }] : [];
     });
     if (saved.length) this.note("hyperagents_memory", `${saved.length} private room-session record${saved.length === 1 ? "" : "s"} saved`);
     return { saved };

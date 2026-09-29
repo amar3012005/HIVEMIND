@@ -1463,7 +1463,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
           if (!browser) throw new Error("browser_binding_missing");
           const markdown = await browserMarkdown(browser as never, { url, gotoOptions: { waitUntil: "domcontentloaded", timeout: 20000 } });
-          const excerpt = markdown.trim().slice(0, 30000);
+          // Location evidence is often in a footer after the first 30 KB.
+          // Keep enough of the fetched page for the exact quote verifier;
+          // the repair prompt later selects only relevant windows.
+          const excerpt = markdown.trim().slice(0, 100000);
           if (excerpt.length < 80) throw new Error("page_content_missing");
           return { url, excerpt };
         } catch (error) {

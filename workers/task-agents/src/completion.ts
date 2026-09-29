@@ -68,6 +68,40 @@ export function prospectQuotesVerified(prospects: readonly ProspectEvidence[], p
   return { complete: true, reason: "prospect_quotes_verified" };
 }
 
+/** Give quote repair the relevant parts of a fetched page, including its footer. */
+export function sourceExcerptForQuoteRepair(page: string, quotes: readonly string[]): string {
+  if (page.length <= 12000) return page;
+  const windows: Array<[number, number]> = [[0, 1500], [Math.max(0, page.length - 3500), page.length]];
+  const lower = page.toLocaleLowerCase();
+  for (const quote of quotes) {
+    const tokens = [...new Set(quote.toLocaleLowerCase().match(/[\p{L}\p{N}]{5,}/gu) ?? [])]
+      .sort((a, b) => b.length - a.length).slice(0, 10);
+    const candidates: Array<{ at: number; score: number }> = [];
+    for (const token of tokens) {
+      let at = lower.indexOf(token);
+      for (let count = 0; at >= 0 && count < 30; count += 1) {
+        const start = Math.max(0, at - 900);
+        const end = Math.min(page.length, at + 1600);
+        const nearby = lower.slice(start, end);
+        candidates.push({ at, score: tokens.filter((word) => nearby.includes(word)).length });
+        at = lower.indexOf(token, at + token.length);
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    for (const candidate of candidates.slice(0, 2)) {
+      windows.push([Math.max(0, candidate.at - 900), Math.min(page.length, candidate.at + 1600)]);
+    }
+  }
+  windows.sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of windows) {
+    const previous = merged.at(-1);
+    if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+    else merged.push([start, end]);
+  }
+  return merged.map(([start, end]) => page.slice(start, end)).join("\n\n[... page section omitted ...]\n\n").slice(0, 16000);
+}
+
 function canonicalPassage(text: string): string {
   return text.normalize("NFKD").toLocaleLowerCase().replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }

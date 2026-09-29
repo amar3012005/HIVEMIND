@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady, sourceExcerptForQuoteRepair } from "./completion.ts";
+
+test("quote repair includes source location in a long page footer and sector text in the body", () => {
+  const page = `HDI Global provides corporate insurance. ${"Other navigation and content. ".repeat(850)} Registered address: HDI-Platz 1, 30659 Hannover.`;
+  const excerpt = sourceExcerptForQuoteRepair(page, ["HDI-Platz 1, 30659 Hannover", "corporate insurance"]);
+  assert.match(excerpt, /HDI-Platz 1, 30659 Hannover/);
+  assert.match(excerpt, /corporate insurance/);
+  assert.ok(excerpt.length < page.length);
+});
 import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 
 test("follow-up reuse selects report from preceding turn", () => {

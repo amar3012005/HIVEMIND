@@ -278,7 +278,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       }
     }
     if (action !== "status") this.note("workrun-recovery", `${action}: ${status}; ${checkpoints.length} checkpoints retained`);
-    return { runId: work.runId, workflowId: id, status, checkpoints };
+    const reason = status === "incomplete" && this.state.envelope?.runId === work.runId
+      ? [...(this.state.events ?? [])].reverse().find((event) => event.step === "completion")?.detail || "plan_incomplete"
+      : "";
+    return { runId: work.runId, workflowId: id, status, reason, checkpoints };
   }
 
   markAwaiting(awaiting: "" | "input" | "memory"): void {

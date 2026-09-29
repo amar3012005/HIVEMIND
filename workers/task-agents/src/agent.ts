@@ -1481,10 +1481,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       if (this.state.companyMemoryIntent && !this.state.companyMemoryReceiptId) return;
       const text = chunk.text;
       if (!text || this.textDraft.length > (this.state.narrativeTurn || this.state.executionTurn ? 60000 : 4000)) return;
-      const draftType = this.state.narrativeTurn || this.state.executionTurn ? "report-draft" : "progress-draft";
-      if (!this.textDraft) this.broadcast(JSON.stringify({ type: draftType, delta: "", reset: true }));
+      // Think already streams execution and narrative text to the room through
+      // cf_agent_use_chat_response. Sending the same deltas as report-draft
+      // creates a second, independently replayed transcript on reconnect.
+      const nativeChatTurn = this.state.narrativeTurn || this.state.executionTurn;
+      if (!this.textDraft && !nativeChatTurn) this.broadcast(JSON.stringify({ type: "progress-draft", delta: "", reset: true }));
       this.textDraft += text;
-      this.broadcast(JSON.stringify({ type: draftType, delta: text }));
+      if (!nativeChatTurn) this.broadcast(JSON.stringify({ type: "progress-draft", delta: text }));
       return;
     }
     const callId = "id" in chunk ? String(chunk.id) : "";

@@ -38,7 +38,10 @@ test("a new run cannot inherit a previous run's operating plan", () => {
 });
 
 test("planning context keeps direct answers tool-free", () => {
-  const context = runContext(state({ catalogStage: "planning" }));
+  const context = runContext(state({ catalogStage: "planning", employee: {
+    id: "employee-1", name: "Elena Kovács", slug: "elena-kov-cs", role: "Strategist", persona: "Product strategy lead",
+  } }));
+  assert.match(context, /Room owner: Elena Kovács/);
   assert.match(context, /Answer directly/);
   assert.match(context, /not from a keyword/);
   assert.doesNotMatch(context, /Pinned local method/);

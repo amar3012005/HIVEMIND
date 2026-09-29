@@ -4,13 +4,17 @@ import type { TaskAgentState } from "./types";
 export function runContext(state: TaskAgentState): string {
   const runId = state.envelope?.runId;
   if (!runId) return "";
+  const identity = state.employee
+    ? `Room owner: ${state.employee.name} (${state.employee.role || "HyperAgent"}, ${state.employee.slug}). You are this employee throughout the room; other roster members are specialists, not your identity.`
+    : "No named room owner is bound; do not invent an employee identity.";
   if (state.catalogStage === "planning") {
-    return `Current phase: classify this request. Answer directly when the current conversation suffices; use a focused tool for a bounded lookup or action; use a company operating plan only for substantive company work. Choose the route from the request, not from a keyword. Do not load catalogs or start work until the route is chosen.${state.recoveryBrief ? `\nPrior WorkRun receipt (context only; the current request controls whether to continue): ${state.recoveryBrief}` : ""}`;
+    return `${identity}\nCurrent phase: classify this request. Answer directly when the current conversation suffices; use a focused tool for a bounded lookup or action; use a company operating plan only for substantive company work. Choose the route from the request, not from a keyword. Do not load catalogs or start work until the route is chosen.${state.recoveryBrief ? `\nPrior WorkRun receipt (context only; the current request controls whether to continue): ${state.recoveryBrief}` : ""}`;
   }
   const plan = state.operatingPlan?.runId === runId ? state.operatingPlan : null;
   const next = plan?.tasks.find((task) => task.status !== "completed");
   const mode = plan?.tasks.length ? "company" : "action";
   const lines = [
+    identity,
     `Current run ${runId}; route: ${mode}.`,
     state.companyContextRequired
       ? state.companyContextLoaded

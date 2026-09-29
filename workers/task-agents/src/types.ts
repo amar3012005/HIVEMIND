@@ -87,4 +87,5 @@ export interface TaskAgentState {
   profileBrief?: string;
   awaiting: "" | "input" | "memory";
   operatingPlan?: OperatingPlan | null;
+  activePlaybookId?: string | null;
 }

@@ -20,6 +20,7 @@ import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview } from "./post-run-jev";
 import { completedPlanTaskIds, updatePlanTask } from "./operating-plan";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
+import { runContext } from "./run-context";
 import { EmployeeSpecialistAgent } from "./employee-specialist";
 import { bindRoomEmployee } from "./room-ticket";
 import { authenticatedProfileBrief, companyFacts } from "./profile";
@@ -531,7 +532,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       ensureCompanyTables(this.sql.bind(this));
       const notes = this.sql`SELECT note FROM company_playbook_notes WHERE playbook_id = ${id} ORDER BY created_at ASC`.map((row) => String(row.note));
       const extra = notes.length ? notes.map((note) => `- ${note}`).join("\n") : "- No company special cases yet.";
-      return `${task.body}\n\n${localPlaybookContract(id)}\n\nParent field: ${task.globalId}${parent ? ` version ${parent.version}` : ""}.\nCompany special cases:\n${extra}`;
+      return `Global method ${task.globalId}${parent ? ` version ${parent.version}` : ""}: ${parent?.body || "No parent method available."}\n\nLocal method ${id}: ${task.body}\n\n${localPlaybookContract(id)}\n\nCompany special cases:\n${extra}`;
     }
     const global = globalPlaybookBody(id);
     return global ? global.body : null;
@@ -547,6 +548,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (pinned && String(pinned.playbook_id) !== id) throw new Error("run_playbook_conflict");
     const snapshot = pinned?.playbook_snapshot ? String(pinned.playbook_snapshot) : `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
     const version = Number(snapshot.match(/^Local playbook \S+ version (\d+)\./)?.[1] || localPlaybookVersion(id));
+    this.setState({ ...this.state, activePlaybookId: id });
     if (!pinned) this.sql`INSERT INTO company_runs (id, employee_slug, goal, status, playbook_id, playbook_snapshot, created_at) VALUES (${runId}, ${this.state.employee?.slug || "unassigned"}, ${this.state.operatingPlan?.summary || ""}, ${"active"}, ${id}, ${snapshot}, ${new Date().toISOString()})`;
     const envelope = this.state.envelope!;
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(snapshot));
@@ -730,7 +732,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.turnSources = [];
     const { brief } = await this.loadProfileBrief(envelope.orgId, envelope.userId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, catalogStage: "global", selectedGlobals: [], companyContextLoaded, companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, catalogStage: "global", selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false });
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();
   }
@@ -775,8 +777,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   beforeTurn(ctx: TurnContext) {
     this.textDraft = "";
+    const currentSystem = runContext(this.state);
     if (this.state.catalogStage === "planning") {
       return {
+        system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
         activeTools: ["think_final_answer"],
         maxSteps: 1,
         maxOutputTokens: 4096,
@@ -787,6 +791,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const refineRequested = this.playbookRefinementRequested();
     const catalogTools = new Set(["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"]);
     return {
+      system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
       activeTools: [...granted.filter((name) => (this.state.catalogStage !== "action" ? name !== "reset_tools" : name === "reset_tools" || name === "playbook_get" || name === "playbook_list" || name === "playbook_list_local" || !catalogTools.has(name) || (name === "refine_local_playbook" && refineRequested)) && (name !== "browser_capture" || (!!this.gatewayEnv().BROWSER && requestsImageCapture(this.state.envelope?.task ?? ""))) && (name !== "browser_markdown" || !!this.gatewayEnv().BROWSER)), ...(this.state.operatingPlan?.tasks.length ? ["update_plan_task"] : []), ...(this.state.specialists?.length ? ["delegate_employee"] : []), "share_progress", "activate_skill", "read_skill_resource", "think_final_answer"],
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,

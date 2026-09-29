@@ -2131,45 +2131,32 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async verifyProspectPages(prospects: readonly ProspectEvidence[], citedUrls: readonly string[] = []): Promise<Array<{ url: string; excerpt: string; error?: string }>> {
-    const browser = this.gatewayEnv().BROWSER;
     const urls = [...new Set([...prospects.flatMap((row) => [row.locationUrl, row.sectorUrl]), ...citedUrls])].slice(0, 20);
     const envelope = this.state.envelope;
     const previousRunId = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } } | undefined)?.continuation?.previousRunId;
     const receipts: Array<{ url: string; excerpt: string; error?: string }> = [];
-    for (let offset = 0; offset < urls.length; offset += 4) {
-      const batch = await Promise.all(urls.slice(offset, offset + 4).map(async (url) => {
-        try {
-          const target = new URL(url);
-          if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
-          // The original Browser Run read is the authority even when the model
-          // paraphrased its quote. Reopening the page cannot repair a model
-          // quote; bind passages to this receipt after the read step instead.
-          for (const runId of [envelope?.runId, previousRunId].filter((id): id is string => Boolean(id))) {
-            const prior = this.sql`SELECT excerpt, read_at FROM source_read_receipts WHERE run_id = ${runId} AND org_id = ${envelope?.orgId ?? ""} AND user_id = ${envelope?.userId ?? ""} AND url = ${url} LIMIT 1`[0];
-            if (prior && Date.now() - Date.parse(String(prior.read_at)) < 24 * 60 * 60 * 1000
-              && String(prior.excerpt).length >= 80) return { url, excerpt: String(prior.excerpt) };
+    for (const url of urls) {
+      try {
+        const target = new URL(url);
+        if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+        // The original Browser Run read is the authority even when the model
+        // paraphrased its quote. Reopening the page cannot repair a model
+        // quote; bind passages to this receipt after the read step instead.
+        for (const runId of [envelope?.runId, previousRunId].filter((id): id is string => Boolean(id))) {
+          const prior = this.sql`SELECT excerpt, read_at FROM source_read_receipts WHERE run_id = ${runId} AND org_id = ${envelope?.orgId ?? ""} AND user_id = ${envelope?.userId ?? ""} AND url = ${url} LIMIT 1`[0];
+          if (prior && Date.now() - Date.parse(String(prior.read_at)) < 24 * 60 * 60 * 1000
+            && String(prior.excerpt).length >= 80) {
+            receipts.push({ url, excerpt: String(prior.excerpt) });
+            break;
           }
-          if (!browser) throw new Error("browser_binding_missing");
-          let markdown = "";
-          let lastError: unknown;
-          for (const timeout of [30000, 45000]) {
-            try {
-              markdown = await readBrowserPage(browser, url, timeout);
-              break;
-            } catch (error) { lastError = error; }
-          }
-          if (!markdown) throw lastError ?? new Error("page_unavailable");
-          // Location evidence is often in a footer after the first 30 KB.
-          // Keep enough of the fetched page for the exact quote verifier;
-          // the repair prompt later selects only relevant windows.
-          const excerpt = markdown.trim().slice(0, 100000);
-          if (excerpt.length < 80) throw new Error("page_content_missing");
-          return { url, excerpt };
-        } catch (error) {
-          return { url, excerpt: "", error: error instanceof Error ? error.message.slice(0, 160) : "page_unavailable" };
         }
-      }));
-      receipts.push(...batch);
+        if (receipts.at(-1)?.url === url) continue;
+        // Validation cannot fetch a missing URL and retroactively treat it as
+        // evidence the employee inspected during execution.
+        throw new Error("source_not_read_in_workrun");
+      } catch (error) {
+        receipts.push({ url, excerpt: "", error: error instanceof Error ? error.message.slice(0, 160) : "page_unavailable" });
+      }
     }
     for (const receipt of receipts) if (!receipt.error) {
       this.recordSourceRead(receipt.url, receipt.excerpt);

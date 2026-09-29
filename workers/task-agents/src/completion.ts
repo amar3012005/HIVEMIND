@@ -34,6 +34,15 @@ export function requestedProspectCount(task: string): number {
   return Math.min(30, words[match[1].toLowerCase()] ?? Number(match[1]));
 }
 
+// This is a deliverable validation rule, not a route selector. An operator who
+// asks for target accounts with fit and approach needs per-account evidence even
+// if the planning model picked a broader research playbook.
+export function requestsVerifiedProspectRows(task: string): boolean {
+  return /\b(?:prospects?|leads?|target accounts?|candidates?|insurers?|banks?)\b/i.test(task)
+    && /\b(?:fit|qualif\w*|approach|ICP)\b/i.test(task)
+    && /\b(?:location|headquarters?|HQ|source passages?|source quotes?)\b/i.test(task);
+}
+
 export function prospectEvidenceComplete(report: string, prospects: readonly ProspectEvidence[], sourceUrls: readonly string[], minimumCount = 1): CompletionResult {
   if (!prospects.length) return { complete: false, reason: "prospect_rows_missing" };
   if (prospects.length < minimumCount) return { complete: false, reason: "prospect_count_short" };

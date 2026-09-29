@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion.ts";
+import { claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady } from "./completion.ts";
 import { localPlaybookContract, localPlaybookVersion } from "./playbooks.ts";
 
 test("follow-up reuse selects report from preceding turn", () => {
@@ -120,6 +120,8 @@ test("versioned prospect contract requires per-account location and sector recei
   assert.equal(requestedProspectCount("Find three prospective Berlin organizations"), 3);
   assert.equal(requestedProspectCount("Find 5 qualified bank prospects"), 5);
   assert.equal(requestedProspectCount("Find two prospective Berlin banks"), 2);
+  assert.equal(requestsVerifiedProspectRows("Research two Hannover-based insurers; quote exact short passages for location and sector, explain why each fits our ICP and how to approach it"), true);
+  assert.equal(requestsVerifiedProspectRows("Compare the Berlin AI market and recommend a strategy"), false);
   assert.equal(prospectEvidenceComplete(report, rows, ["https://dkb.example/impressum", "https://dkb.example/banking"], 3).reason, "prospect_count_short");
   assert.equal(prospectQuotesVerified(rows, [{ url: rows[0].locationUrl, excerpt: "Heidestrasse 26 Berlin" }, { url: rows[0].sectorUrl, excerpt: "Supervised credit institution" }]).complete, true);
   assert.equal(prospectQuotesVerified([{ ...rows[0], locationEvidence: "Heidestraße 26 – 28 / 10557 Berlin" }], [{ url: rows[0].locationUrl, excerpt: "Heidestraße 26-28\n10557 Berlin" }, { url: rows[0].sectorUrl, excerpt: "Supervised credit institution" }]).complete, true);

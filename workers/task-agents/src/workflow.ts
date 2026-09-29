@@ -2,13 +2,12 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, slideDeckReady } from "./completion";
+import { artifactCreationForbidden, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, requestedProspectCount, requestsArtifact, requestsMemorySave, requestsPdf, requestsSlideDeck, requestsVerifiedProspectRows, slideDeckReady } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { ineligiblePostRunJev, type PostRunJevReview } from "./post-run-jev";
 import type { TaskEnvelope } from "./types";
 import { workflowErrorCode } from "./workflow-error";
-import { checkpoint } from "./checkpoint";
 
 export interface CompanyWork extends TaskEnvelope {
   occurrenceId?: string;
@@ -61,16 +60,6 @@ export interface CompanyWorkResult {
 
 export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, CompanyWork> {
   async run(event: AgentWorkflowEvent<CompanyWork>, step: ThinkWorkflowStep): Promise<CompanyWorkResult> {
-    const store = this.agent;
-    const nativeStep = step;
-    step = new Proxy(nativeStep, {
-      get(target, key) {
-        const method = Reflect.get(target, key);
-        if (typeof method !== "function") return method;
-        if (!["do", "prompt", "waitForEvent"].includes(String(key))) return (...args: unknown[]) => (target as any)[key](...args);
-        return (...args: unknown[]) => checkpoint(store, event.payload.runId, `${String(key)}:${String(args[0])}`, () => (target as any)[key](...args));
-      },
-    });
     try {
       const result = await this.runWork(event, step);
       try {
@@ -86,11 +75,14 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       return result;
     } catch (error) {
       const code = workflowErrorCode(error);
-      await this.agent.finishWorkRuntime(event.payload.runId, "errored");
-      await this.agent.finishCurrentCompanyWorkRun(false, error instanceof Error ? error.message : "workflow_failed").catch(() => undefined);
-      await this.agent.markAwaiting("");
-      await this.agent.note("completion", error instanceof Error ? `workflow_failed: ${error.message}` : "workflow_failed");
-      await this.agent.note("report", `I could not finish this run (${code}). You can continue in this room.`);
+      console.error(JSON.stringify({ event: "company_workflow_failed", runId: event.payload.runId, code }));
+      // The room DO may itself be unavailable. Preserve the original Workflow
+      // failure; controlWorkRun reconciles the visible terminal state later.
+      try { await this.agent.finishWorkRuntime(event.payload.runId, "errored"); } catch { /* reconcile on reconnect */ }
+      try { await this.agent.finishCurrentCompanyWorkRun(false, code); } catch { /* reconcile on reconnect */ }
+      try { await this.agent.markAwaiting(""); } catch { /* reconcile on reconnect */ }
+      try { await this.agent.note("report", `I could not finish this run (${code}). You can continue in this room.`); } catch { /* reconcile on reconnect */ }
+      try { await this.agent.note("completion", code); } catch { /* reconcile on reconnect */ }
       if (event.payload.occurrenceId) {
         await this.agent.recordTriggerOutcome(event.payload.occurrenceId, { complete: false, reason: code, report: "" })
           .catch((receiptError: unknown) => console.warn(JSON.stringify({ event: "trigger_outcome_failed", runId: event.payload.runId, code: workflowErrorCode(receiptError) })));
@@ -201,7 +193,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       const playbookIds = playbookNames.map((item) => item.id) as [string, ...string[]];
       const playbookMenu = playbookNames.map(({ id, name }) => ({ id, name }));
       const choice = await step.prompt("select-local-playbook", {
-        prompt: `Choose exactly one id from this list for the requested final deliverable: ${asked}. Available: ${JSON.stringify(playbookMenu)}. The selected playbook's detailed method loads after this choice.`,
+        prompt: `Choose exactly one id from this list for the requested final deliverable: ${asked}. Available: ${JSON.stringify(playbookMenu)}. For a list of target organizations with ICP fit and approach, choose local:outreach.prospect-list; local:research.competitor-market is for comparing competitors, not qualifying prospects. The selected playbook's detailed method loads after this choice.`,
         output: z.object({ id: z.enum(playbookIds) }),
         timeout: "30 minutes",
       });
@@ -322,7 +314,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
 
     let guidance = "";
     let written: z.infer<typeof reportSchema> = reportSchema.parse({});
-    const isProspect = selectedPlaybook!.id === "local:outreach.prospect-list";
+    const isProspect = selectedPlaybook!.id === "local:outreach.prospect-list" || requestsVerifiedProspectRows(asked);
     const prospectCount = isProspect ? requestedProspectCount(asked) : 1;
     for (let round = 0; round < 3; round += 1) {
       const result = await step.prompt(round === 0 ? "execute" : `continue-${round}`, {

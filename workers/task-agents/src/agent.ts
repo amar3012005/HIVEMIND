@@ -247,6 +247,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const status = action === "status" ? current.status : (await this.getWorkflowStatus("TASK_LIFECYCLE", id)).status;
     this.finishWorkRuntime(work.runId, status);
     const checkpoints = this.sql`SELECT stage, completed_at FROM workrun_checkpoints WHERE run_id = ${work.runId} ORDER BY completed_at ASC`;
+    if (status === "errored" && this.state.envelope?.runId === work.runId) {
+      const events = this.state.events ?? [];
+      const lastUser = events.map((event) => event.step).lastIndexOf("user");
+      if (!events.slice(lastUser + 1).some((event) => event.step === "completion")) {
+        this.markAwaiting("");
+        this.note("report", "I could not finish this run (workflow_failed). You can resume it from WorkRun recovery.");
+        this.note("completion", "workflow_failed");
+      }
+    }
     if (action !== "status") this.note("workrun-recovery", `${action}: ${status}; ${checkpoints.length} checkpoints retained`);
     return { runId: work.runId, workflowId: id, status, checkpoints };
   }

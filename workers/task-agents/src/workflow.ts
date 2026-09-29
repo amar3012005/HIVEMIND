@@ -184,9 +184,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
       return result;
     } catch (error) {
-      let stopped = false;
-      try { stopped = this.agent.isStopRequested(event.payload.runId); } catch { /* preserve original failure */ }
-      const code = stopped ? "workrun_stopped" : workflowErrorCode(error);
+      const failureCode = workflowErrorCode(error);
+      let stopped = failureCode === "workrun_stopped";
+      // Only an otherwise unclassified failure may be reclassified from the
+      // authoritative runtime stop flag. Never hide a model/tool protocol
+      // failure behind a stale or racing stop observation.
+      if (failureCode === "workflow_failed") {
+        try { stopped = this.agent.isStopRequested(event.payload.runId); } catch { /* preserve original failure */ }
+      }
+      const code = stopped ? "workrun_stopped" : failureCode;
       console.error(JSON.stringify({ event: "company_workflow_failed", runId: event.payload.runId, code }));
       // The room DO may itself be unavailable. Preserve the original Workflow
       // failure; controlWorkRun reconciles the visible terminal state later.
@@ -337,7 +343,34 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
         return await requestPlan("operating-plan");
       } catch (error) {
         console.warn(JSON.stringify({ event: "operating_plan_retry", code: workflowErrorCode(error) }));
-        return requestPlan("operating-plan-retry");
+        try {
+          return await requestPlan("operating-plan-retry");
+        } catch (retryError) {
+          // An explicitly authorized company-mode packet already fixes the
+          // route and deliverable boundary. Keep the durable run moving when
+          // both routing-model attempts violate the structured-output
+          // protocol; execution still selects a versioned playbook and must
+          // satisfy normal evidence, artifact, and completion receipts.
+          if (work.modePreference !== "company") throw retryError;
+          console.warn(JSON.stringify({ event: "operating_plan_fallback", code: workflowErrorCode(retryError) }));
+          return planSchema.parse({
+            mode: "company",
+            decision: "Execute the authorized company task packet and verify its requested deliverable.",
+            plan: "Use the task packet as the durable execution contract.",
+            tasks: [
+              "Load the relevant company context, operating learnings, and approved method",
+              "Gather and verify the evidence required by the task packet",
+              "Synthesize the requested decision-ready deliverable",
+              "Save the requested artifact and verify its receipt",
+            ],
+            reply: "",
+            groups: [],
+            localPlaybookId: "",
+            resolvedRequest: asked,
+            outputKind: requestsArtifact(asked) ? "document" : "none",
+            memoryIntent: "none",
+          });
+        }
       }
     })();
     if (!quickRoute && !work.continuation) plan.localPlaybookId = "";

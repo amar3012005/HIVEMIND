@@ -1660,6 +1660,15 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.assertTool("browser_markdown");
         const target = new URL(url);
         if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
+        // A continuation is the same logical job. Serve an exact page already
+        // read by this job from its durable source ledger before doing I/O.
+        const saved = this.sourceReadReceiptsForWorkRun().find((receipt) => receipt.url === target.href);
+        if (saved) {
+          this.recordSourceRead(target.href, saved.excerpt);
+          this.rememberSources({ url: target.href });
+          this.note("browser_markdown", `${target.href}: reused saved source receipt`);
+          return { url: target.href, markdown: sourceContext(saved.excerpt, focus || this.state.envelope?.task || "", 5000), fullLength: saved.excerpt.length };
+        }
         const browser = this.gatewayEnv().BROWSER;
         if (!browser) throw new Error("browser_binding_missing");
         const markdown = await readBrowserPage(browser, target.href, 35000);
@@ -2198,6 +2207,22 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!envelope) return [];
     ensureCompanyTables(this.sql.bind(this));
     return this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE run_id = ${envelope.runId} AND org_id = ${envelope.orgId} AND user_id = ${envelope.userId} ORDER BY read_at DESC LIMIT 12`.map((row) => ({ url: String(row.url), excerpt: String(row.excerpt), readAt: String(row.read_at) }));
+  }
+
+  sourceReadReceiptsForWorkRun(): Array<{ url: string; excerpt: string; readAt: string }> {
+    const envelope = this.state.envelope;
+    if (!envelope) return [];
+    ensureCompanyTables(this.sql.bind(this));
+    const predecessor = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId;
+    const rows = predecessor
+      ? this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id IN (${envelope.runId}, ${predecessor}) ORDER BY read_at DESC LIMIT 24`
+      : this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id = ${envelope.runId} ORDER BY read_at DESC LIMIT 12`;
+    const byUrl = new Map<string, { url: string; excerpt: string; readAt: string }>();
+    for (const row of rows) {
+      const url = String(row.url);
+      if (!byUrl.has(url)) byUrl.set(url, { url, excerpt: String(row.excerpt), readAt: String(row.read_at) });
+    }
+    return [...byUrl.values()];
   }
 
   sourceReadUrlsForWorkRun(): string[] {

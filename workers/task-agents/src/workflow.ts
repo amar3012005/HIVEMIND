@@ -138,7 +138,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
     }
     const receiptStarted = Date.now();
-    const receipts = (await this.agent.sourceReadReceipts()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
+    const receipts = (await this.agent.sourceReadReceiptsForWorkRun()).slice(0, 16).map(({ url, excerpt }: { url: string; excerpt: string }) =>
       `${url}: ${sourceEvidenceWindows(excerpt, 1100)}`).join("\n");
     const receiptSchema = executionReceiptSchema(options);
     const receiptPrompt = `Return exactly one JSON object, no Markdown fences or tool calls, matching this schema: ${JSON.stringify(z.toJSONSchema(receiptSchema))}. Classify only the completed work visible in the finished response and saved receipts; do not invent completed plan IDs or source passages. If a necessary fact or authorization is missing, set needsInput and a concrete question. The report artifact is saved only after the Workflow validates it.\n\nTask and plan: ${prompt.slice(0, 3800)}\n\nFinished response: ${report.slice(0, 12000)}\n\nSource receipts: ${receipts || "None."}`;
@@ -377,7 +377,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       throw new Error("workrun_recovery_snapshot_unavailable");
     }
     if (recovery) await durable.do("show-continuation-state", async () => this.agent.note("workrun-recovery",
-      `Continuing ${recovery.runId}: ${recovery.plan!.tasks.filter((task: OperatingPlan["tasks"][number]) => task.status === "completed").length}/${recovery.plan!.tasks.length} steps completed; ${recovery.sourceCount} source and ${recovery.artifactCount} artifact receipts.`));
+      `Continuing ${recovery.runId}: ${recovery.plan!.tasks.filter((task: OperatingPlan["tasks"][number]) => task.status === "completed").length}/${recovery.plan!.tasks.length} steps completed; ${recovery.sourceCount} source and ${recovery.artifactCount} artifact receipts. Saved source URLs: ${this.agent.sourceReadUrlsForWorkRun().slice(0, 12).join(", ") || "none"}. browser_markdown reuses exact saved pages; source_excerpt retrieves another passage without network I/O.`));
 
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
     const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));
@@ -719,7 +719,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       if (executedDocument) written = { ...written, report: executedDocument };
     }
     if (artifactRequested && !deckRequested && !reportDocumentReady(written.report)) {
-      const sources = (await this.agent.sourceReadReceipts()).slice(0, 12)
+      const sources = (await this.agent.sourceReadReceiptsForWorkRun()).slice(0, 12)
         .map(({ url, excerpt }: { url: string; excerpt: string }) => `${url}: ${sourceEvidenceWindows(excerpt, 900)}`).join("\n");
       const finalReport = await durable.do("synthesize-final-report", async () => this.agent.streamNarrative(
         `Write the finished Markdown report for the current operator task, not a progress update. Start with a descriptive H1 and include at least two substantive H2 sections. Complete every requested comparison, decision, and deliverable section now. Separate facts from inference and cite only URLs in the saved read receipts. Do not claim the artifact is already saved; the Workflow saves it after this turn. Do not use tools or ask for internal method choices.\n\nTask: ${asked}\nPlan: ${plan.tasks.map((task, index) => `${index + 1}. ${task}`).join(" ")}\nWork already done: ${written.report.slice(0, 4000)}\nVerified page receipts: ${sources || "None"}`));
@@ -747,7 +747,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     }
     if (isProspect) {
       if (written.prospects.length < prospectCount) {
-        const receipts = (await this.agent.sourceReadReceipts() as Array<{ url: string; excerpt: string }>).slice(0, 12);
+        const receipts = (await this.agent.sourceReadReceiptsForWorkRun() as Array<{ url: string; excerpt: string }>).slice(0, 12);
         if (receipts.length) {
           await this.agent.note("model-recovery", "Synthesizing the unfinished prospect contract from saved source receipts without more tools");
           const raw = await this.agent.recoverStructuredWithoutTool(
@@ -760,7 +760,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       // omit its companion structured rows. Recover only that projection from
       // existing source-read receipts; the binder below remains authoritative.
       if (written.prospects.length < prospectCount && written.report.trim().length > 200) {
-          const receipts = (await this.agent.sourceReadReceipts() as Array<{ url: string; excerpt: string }>).slice(0, 12);
+          const receipts = (await this.agent.sourceReadReceiptsForWorkRun() as Array<{ url: string; excerpt: string }>).slice(0, 12);
         if (receipts.length) {
           await this.agent.note("model-recovery", "Recovering missing prospect rows from the finished draft and saved source receipts");
           const rows = await this.structuredPrompt(step, "recover-prospect-rows",
@@ -884,7 +884,7 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
             const reportQuotes = [...written.report.matchAll(/[“"]([^”"]{8,220})[”"]/g)].map((match) => match[1]);
             return `${page.url} (freshly fetched, excerpted for review): ${sourceExcerptForQuoteRepair(page.excerpt, reportQuotes)}`;
           })
-        : (await this.agent.sourceReadReceipts()).map((receipt: { url: string; readAt: string; excerpt: string }) => `${receipt.url} (read ${receipt.readAt}): ${receipt.excerpt}`),
+        : (await this.agent.sourceReadReceiptsForWorkRun()).map((receipt: { url: string; readAt: string; excerpt: string }) => `${receipt.url} (read ${receipt.readAt}): ${receipt.excerpt}`),
     }));
     if (review.verdict === "caution" && review.note) {
       written.report += `\n\n## Review note\n${review.note}`;

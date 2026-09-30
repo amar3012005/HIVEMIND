@@ -76,3 +76,44 @@ Authenticated Chrome canary at `https://next.singulancelabs.com/hivemind/app/set
 shows the Dreaming section, company Flashbacks consent copy, and enabled admin
 switch with `aria-checked=false`. Anonymous access returns JSON 401, not SPA HTML.
 No toggle was enabled and no production-model dreaming run was started.
+
+## Automation tasks visibility and embedded toolbar
+
+Native source `009b2f522f6a43929441293f9dd5b8f1e144a35d` is pushed on
+`codex/dreaming-automation-visibility`. The existing authenticated settings GET
+accepts `view=activity` and projects the existing Cloudflare occurrence schedule
+plus the latest ten tenant-scoped durable run receipts. Automation tasks renders
+this projection through `schedule.manager.external`; it never creates a second
+reminder. Settings remains the sole On/Off control. Dispatcher trigger versions
+are independent of the settings revision; do not compare these counters.
+
+Each nightly occurrence owns a new Dreamer session pair. Retry and recovery
+reuse that occurrence's session/checkpoint. Cross-night continuity comes from
+run history and Flashbacks, not an indefinitely growing conversation.
+
+Embedded schedule utilities, mode label, team action, environment and preview
+controls now occupy one flex row. Removed the separate fixed utility row and
+hardcoded 328px width that could overlap the HIVE-MIND chat label.
+
+Validation: full host/client pre-push typecheck passed; 276 focused tests passed
+(one optional live Cloudflare test skipped), then 25 focused conversation/card
+checks passed after the toolbar fix. Production switch was observed On before
+release; this update preserves the tenant preference.
+
+Runner deployed as `hivemind/harness-chat:sha-009b2f522f`, image ID
+`sha256:34e295a2a1b39d80aeecb5184a187af893c318e2cdbee53fabf51de27bcff58d`.
+Canonical Compose image-only cutover completed with 60-second graceful timeout;
+all sibling container identities unchanged. Rollback/live manifest record:
+`/root/releases/manifests/hyperagents/dreaming-automation-009b2f522f`.
+Runner healthy, restart count zero; public health returned HTTP 200.
+
+Authenticated Automation tasks canary shows On, next run `2026-10-01 02:00
+Europe/Berlin`, status scheduled, and expanded empty history. No setting was
+changed and no model run triggered. Existing separately configured task titled
+`Nightly HIVE-MIND Dreamer — memory consolidation` remains in the native catalog;
+this release neither created nor modified it. Screenshot:
+`/tmp/dreaming-automation-live.png` on the release Mac.
+Authenticated HIVE-MIND toolbar verification: clock, menu, mode label and preview
+control share top=70px (label vertically centered), with roughly 8px gaps and no
+intersections. Screenshot `/tmp/hive-toolbar-fixed.png`. No production-model
+canary request was sent by this release check.

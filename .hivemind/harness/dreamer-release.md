@@ -50,3 +50,21 @@ memory residency stays unavailable rather than querying a different tenant store
 - Production ledger verification: zero enabled tenants. No real dreaming run
   has been triggered. Finish drain verification, runner cutover and authenticated
   live settings/memory canary before claiming complete production availability.
+
+## Runner cutover completed / main Settings placement
+
+User requested deployment after the unsupported drain endpoint was reported.
+Used the canonical versioned Compose chain with graceful shutdown (60-second
+stop timeout), immutable source checks, and rollback record; no Docker exec or
+live code patch. Runner `sha-1f01b7456e` is healthy, restart count zero, and every
+sibling container retained its identity. Digest:
+`sha256:250d9575c73bf41860eac6d0ad01c6dd0e26625221067e3e8ff956ae2d291cd4`.
+Rollback chain is recorded under
+`/root/releases/manifests/hyperagents/dreamer-1f01b7456e-graceful`.
+
+The Dreaming switch belongs on `/hivemind/app/settings`, per user clarification,
+not a new native toolbar control. Da-vinci `c3518ea0` reuses native admission,
+forwards only the exact Dreamer settings endpoint, and exposes the server-derived
+admin switch without mounting another Harness runtime. Focused Worker checks: 9
+passed. The broader pre-existing Day 0 test expects the old flag key and fails
+independently of this change; its feature was not altered.

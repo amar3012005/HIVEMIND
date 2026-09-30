@@ -30,6 +30,7 @@ Choose one skill with `ROUTING.json`:
 For HyperAgents work, read the project playbooks that match the boundary before editing:
 [`playbooks/cloudflare-think-harness.md`](playbooks/cloudflare-think-harness.md) for the Agent/Workflow,
 and [`playbooks/task-room-streaming.md`](playbooks/task-room-streaming.md) for the room UI.
+For native DeepSeek Harness packages, start with [`harness/SKILL.md`](harness/SKILL.md); it points to the current frontend file map, fast development playbook, and tenant Schedule checks in the Harness checkout.
 
 ## Deploy through the Ops Gateway
 

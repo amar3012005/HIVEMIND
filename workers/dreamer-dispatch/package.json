@@ -1,0 +1,17 @@
+{
+  "name": "hivemind-dreamer-dispatch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "types": "wrangler types",
+    "dry-run": "wrangler deploy --env preview --dry-run"
+  },
+  "dependencies": {
+    "cron-parser": "^5.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "wrangler": "^4.140.0"
+  }
+}

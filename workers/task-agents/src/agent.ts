@@ -9,6 +9,7 @@ import { generateText, streamText, tool, type ToolSet } from "ai";
 import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
 import { browserTargetAllowed, linkedPageUrls } from "./source-discovery";
 import { sourceContext } from "./source-context";
+import { taskPlaybookSnapshot } from "./playbook-snapshot";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -1006,15 +1007,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!runId) throw new Error("task_not_bound");
     ensureCompanyTables(this.sql.bind(this));
     const pinned = this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${runId} LIMIT 1`[0];
-    if (pinned && String(pinned.playbook_id) !== id) throw new Error("run_playbook_conflict");
     const continuation = (this.state.envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation;
     const previous = continuation && !pinned
       ? this.sql`SELECT playbook_id, playbook_snapshot FROM company_runs WHERE id = ${continuation.previousRunId} LIMIT 1`[0]
       : null;
-    if (continuation && (!previous || String(previous.playbook_id) !== id || !previous.playbook_snapshot)) throw new Error("continuation_playbook_unavailable");
-    const snapshot = pinned?.playbook_snapshot ? String(pinned.playbook_snapshot)
-      : previous?.playbook_snapshot ? String(previous.playbook_snapshot)
-      : `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`;
+    const snapshot = taskPlaybookSnapshot(id,
+      pinned ? { playbookId: String(pinned.playbook_id), snapshot: String(pinned.playbook_snapshot || "") } : null,
+      previous ? { playbookId: String(previous.playbook_id), snapshot: String(previous.playbook_snapshot || "") } : null,
+      Boolean(continuation), `Local playbook ${id} version ${localPlaybookVersion(id)}.\n${body}`);
     const version = Number(snapshot.match(/^Local playbook \S+ version (\d+)\./)?.[1] || localPlaybookVersion(id));
     this.setState({ ...this.state, activePlaybookId: id });
     if (!pinned) this.sql`INSERT INTO company_runs (id, employee_slug, goal, status, playbook_id, playbook_snapshot, created_at) VALUES (${runId}, ${this.state.employee?.slug || "unassigned"}, ${this.state.operatingPlan?.summary || ""}, ${"active"}, ${id}, ${snapshot}, ${new Date().toISOString()})`;

@@ -1,4 +1,5 @@
 import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflows";
+import { NonRetryableError } from "cloudflare:workflows";
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
@@ -635,7 +636,16 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       await this.agent.setOperatingPlan(work.runId, plan.plan || asked, plan.tasks, recovery?.plan ?? undefined);
       await this.agent.note("operating-plan", (plan.plan || asked).slice(0, 2000));
     });
-    const playbookBody = await durable.do("load-local-playbook", async () => this.agent.loadTaskPlaybook(selectedPlaybook!.id));
+    const playbookBody = await durable.do("load-local-playbook", async () => {
+      try { return await this.agent.loadTaskPlaybook(selectedPlaybook!.id); }
+      catch (error) {
+        const code = error instanceof Error ? error.message : "";
+        if (["continuation_playbook_unavailable", "pinned_playbook_unavailable", "run_playbook_conflict", "company_playbook_not_found", "task_not_bound"].includes(code)) {
+          throw new NonRetryableError(code);
+        }
+        throw error;
+      }
+    });
 
     const companyContext = await durable.do("recall-company-context", async () =>
       this.agent.recallTaskContext(work.orgId, work.userId, asked.slice(0, 1200)));

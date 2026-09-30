@@ -1673,7 +1673,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
           this.recordSourceRead(target.href, saved.excerpt);
           this.rememberSources({ url: target.href });
           this.note("browser_markdown", `${target.href}: reused saved source receipt`);
-          return { url: target.href, markdown: sourceContext(saved.excerpt, focus || this.state.envelope?.task || "", 5000), fullLength: saved.excerpt.length };
+          return { url: target.href, markdown: sourceContext(saved.excerpt, focus || this.state.envelope?.task || "", 2400), fullLength: saved.excerpt.length };
         }
         const browser = this.gatewayEnv().BROWSER;
         if (!browser) throw new Error("browser_binding_missing");
@@ -1683,7 +1683,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.recordSourceRead(target.href, markdown);
         this.rememberSources({ url: target.href });
         this.note("browser_markdown", `${target.href}: ${markdown.length} characters`);
-        return { url: target.href, markdown: sourceContext(markdown, focus || this.state.envelope?.task || "", 5000), fullLength: markdown.length };
+        return { url: target.href, markdown: sourceContext(markdown, focus || this.state.envelope?.task || "", 2400), fullLength: markdown.length };
       },
     });
     const sourceExcerpt = tool({
@@ -1695,7 +1695,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         const saved = this.sourceReadReceiptsForWorkRun().find((receipt) => receipt.url === url);
         if (!saved) throw new Error("source_receipt_missing");
         const page = saved.excerpt;
-        return { url, excerpt: sourceContext(page, query, 3600), fullLength: page.length };
+        return { url, excerpt: sourceContext(page, query, 1600), fullLength: page.length };
       },
     });
     const updatePlanTask = tool({

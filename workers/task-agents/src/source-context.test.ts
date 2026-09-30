@@ -17,3 +17,10 @@ test("source context retains both ends when a query has no match", () => {
   assert.match(view, /End of source/);
   assert.ok(view.length <= 1400);
 });
+
+test("a small ledger view keeps a matching source passage", () => {
+  const page = `# Insurer\n${"Navigation and investor links.\n".repeat(400)}\nRegistered office: Hannover. We provide commercial insurance.\n${"Other content.\n".repeat(400)}`;
+  const view = sourceContext(page, "Hannover commercial insurance", 1600);
+  assert.match(view, /Registered office: Hannover\. We provide commercial insurance\./);
+  assert.ok(view.length <= 1600);
+});

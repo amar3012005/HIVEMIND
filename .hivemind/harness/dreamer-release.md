@@ -137,3 +137,29 @@ changed. BRAIN right-pane geometry: history right=498px, transcript left=524px,
 transcript right=1131px, right pane left=1173px. Header contains one Automation
 entry plus More actions and Preview toggle. Screenshot:
 `/tmp/automation-layout-fixed.png`. No model request was sent.
+
+## Automation task history visibility — 2026-10-01
+
+Native source `a171784c11dc1f6441e0d93525fc02ebc33e3c1a` hides the floating BRAIN
+session rail throughout Automation tasks and selected task details, and hides
+OS's portaled history under the same markers. Returning to chat restores history.
+Task views remove the conversation rail inset. 356 focused UI checks and full
+host/client typecheck passed. Source pushed; release verification follows below.
+
+HQ calendar is a separate local-preview release at `0e3caf9a2f`, documented in
+Codex task `Hq-runtime`, not the live production runner. Read-only probe confirms
+preview `/api/hivemind/session/establish` returns 405 for an empty ticket;
+production returns expected JSON 401. Calendar promotion must start by merging
+its native plugin onto the current runner source, then fix selective Worker-first
+API routing on the latest preview Worker without replacing unrelated assets.
+The HQ record also lists unfinished cross-member projection, run correlation,
+owner inbox, and real-model artifact review; resolving routing alone is not E2E.
+
+Deployed `sha-a171784c11`; immutable image ID
+`sha256:c7dda631e1b489ce75d400ae2a377e175afccad59963d2c28333036733db6971`.
+Profile validation passed. Runner healthy, zero restarts, public health 200;
+all sibling container IDs unchanged. Rollback record:
+`/root/releases/manifests/hyperagents/automation-history-a171784c11`.
+Authenticated BRAIN canary: task list and selected Vercel detail both hide
+history; Back to conversation restores it. OS Automation tasks canary: zero
+visible session navigation lists. Screenshot `/tmp/automation-history-hidden.png`.

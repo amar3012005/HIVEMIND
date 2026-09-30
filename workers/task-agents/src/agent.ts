@@ -8,6 +8,7 @@ import type { ContextConfig } from "agents/context";
 import { generateText, streamText, tool, type ToolSet } from "ai";
 import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
 import { browserTargetAllowed, linkedPageUrls } from "./source-discovery";
+import { sourceContext } from "./source-context";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -1638,9 +1639,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       },
     });
     const browserRead = tool({
-      description: "Read Markdown from an exact public HTTPS URL supplied by the operator, returned by search, or linked from a page already read in this turn. Discover an official URL before reading; never guess paths. You can follow exact same-site links in returned Markdown without searching again. Returns bounded page text and a source receipt. No connected-app grant is needed.",
-      inputSchema: z.object({ url: z.url() }),
-      execute: async ({ url }): Promise<{ url: string; markdown: string }> => {
+      description: "Read an exact public HTTPS URL supplied by the operator, search, or a page already read. The full page is saved in this WorkRun's source ledger; this tool returns a bounded, verbatim view focused on the task. Use source_excerpt for another passage from that saved page, without refetching. Never guess URL paths.",
+      inputSchema: z.object({ url: z.url(), focus: z.string().max(160).optional() }),
+      execute: async ({ url, focus }): Promise<{ url: string; markdown: string; fullLength: number }> => {
         this.assertTool("browser_markdown");
         const target = new URL(url);
         if (target.protocol !== "https:" || target.username || target.password || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?)/i.test(target.hostname)) throw new Error("public_https_url_required");
@@ -1652,7 +1653,24 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.recordSourceRead(target.href, markdown);
         this.rememberSources({ url: target.href });
         this.note("browser_markdown", `${target.href}: ${markdown.length} characters`);
-        return { url: target.href, markdown: markdown.slice(0, 12000) };
+        return { url: target.href, markdown: sourceContext(markdown, focus || this.state.envelope?.task || "", 5000), fullLength: markdown.length };
+      },
+    });
+    const sourceExcerpt = tool({
+      description: "Read another exact passage from a page already saved in this WorkRun's source ledger. Give the original URL and a focused subject or phrase. This does not call the browser, and returns verbatim source text for quoting or verification.",
+      inputSchema: z.object({ url: z.url(), query: z.string().min(3).max(160) }),
+      execute: async ({ url, query }): Promise<{ url: string; excerpt: string; fullLength: number }> => {
+        this.assertTool("source_excerpt");
+        const envelope = this.state.envelope;
+        if (!envelope) throw new Error("workrun_required");
+        ensureCompanyTables(this.sql.bind(this));
+        const predecessor = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId || "";
+        const row = predecessor
+          ? this.sql`SELECT excerpt FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND url = ${url} AND run_id IN (${envelope.runId}, ${predecessor}) ORDER BY read_at DESC LIMIT 1`[0]
+          : this.sql`SELECT excerpt FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND url = ${url} AND run_id = ${envelope.runId} ORDER BY read_at DESC LIMIT 1`[0];
+        if (!row) throw new Error("source_receipt_missing");
+        const page = String(row.excerpt);
+        return { url, excerpt: sourceContext(page, query, 3600), fullLength: page.length };
       },
     });
     const updatePlanTask = tool({
@@ -2141,6 +2159,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never, maxChars: 16000 })
         : {}),
       browser_markdown: browserRead,
+      source_excerpt: sourceExcerpt,
     };
   }
 

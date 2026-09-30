@@ -1685,15 +1685,10 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       inputSchema: z.object({ url: z.url(), query: z.string().min(3).max(160) }),
       execute: async ({ url, query }): Promise<{ url: string; excerpt: string; fullLength: number }> => {
         this.assertTool("source_excerpt");
-        const envelope = this.state.envelope;
-        if (!envelope) throw new Error("workrun_required");
-        ensureCompanyTables(this.sql.bind(this));
-        const predecessor = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId || "";
-        const row = predecessor
-          ? this.sql`SELECT excerpt FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND url = ${url} AND run_id IN (${envelope.runId}, ${predecessor}) ORDER BY read_at DESC LIMIT 1`[0]
-          : this.sql`SELECT excerpt FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND url = ${url} AND run_id = ${envelope.runId} ORDER BY read_at DESC LIMIT 1`[0];
-        if (!row) throw new Error("source_receipt_missing");
-        const page = String(row.excerpt);
+        if (!this.state.envelope) throw new Error("workrun_required");
+        const saved = this.sourceReadReceiptsForWorkRun().find((receipt) => receipt.url === url);
+        if (!saved) throw new Error("source_receipt_missing");
+        const page = saved.excerpt;
         return { url, excerpt: sourceContext(page, query, 3600), fullLength: page.length };
       },
     });
@@ -2213,27 +2208,36 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const envelope = this.state.envelope;
     if (!envelope) return [];
     ensureCompanyTables(this.sql.bind(this));
-    const predecessor = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId;
-    const rows = predecessor
-      ? this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id IN (${envelope.runId}, ${predecessor}) ORDER BY read_at DESC LIMIT 24`
-      : this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id = ${envelope.runId} ORDER BY read_at DESC LIMIT 12`;
     const byUrl = new Map<string, { url: string; excerpt: string; readAt: string }>();
-    for (const row of rows) {
-      const url = String(row.url);
-      if (!byUrl.has(url)) byUrl.set(url, { url, excerpt: String(row.excerpt), readAt: String(row.read_at) });
+    for (const runId of this.sourceRunLineage()) {
+      const rows = this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id = ${runId} ORDER BY read_at DESC LIMIT 12`;
+      for (const row of rows) {
+        const url = String(row.url);
+        if (!byUrl.has(url)) byUrl.set(url, { url, excerpt: String(row.excerpt), readAt: String(row.read_at) });
+      }
     }
     return [...byUrl.values()];
   }
 
   sourceReadUrlsForWorkRun(): string[] {
+    return this.sourceReadReceiptsForWorkRun().map((receipt) => receipt.url);
+  }
+
+  private sourceRunLineage(): string[] {
     const envelope = this.state.envelope;
     if (!envelope) return [];
-    ensureCompanyTables(this.sql.bind(this));
-    const predecessor = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId;
-    const rows = predecessor
-      ? this.sql`SELECT url FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id IN (${envelope.runId}, ${predecessor})`
-      : this.sql`SELECT url FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id = ${envelope.runId}`;
-    return [...new Set(rows.map((row) => String(row.url)))];
+    const ids = [envelope.runId];
+    let previous = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId || "";
+    while (previous && ids.length < 8 && !ids.includes(previous)) {
+      const row = this.sql`SELECT work FROM workrun_runtime WHERE run_id = ${previous} LIMIT 1`[0];
+      if (!row) break;
+      let prior: TaskEnvelope & { continuation?: { previousRunId: string } };
+      try { prior = JSON.parse(String(row.work)); } catch { break; }
+      if (prior.orgId !== envelope.orgId || prior.userId !== envelope.userId || prior.runId !== previous) break;
+      ids.push(previous);
+      previous = prior.continuation?.previousRunId || "";
+    }
+    return ids;
   }
 
   verifiedSourceUrls(): string[] {

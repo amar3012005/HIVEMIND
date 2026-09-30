@@ -49,6 +49,10 @@ model User {
   entityIdentityLinks       UserEntityIdentityLink[] @relation("UserEntityIdentityLinks")
 
   @@map("users")
+  dreamSettings HarnessDreamSettings[]
+  dreamRuns HarnessDreamRun[]
+  dreamDue HarnessDreamDue[]
+
 }
 
 model UserIdentity {
@@ -232,6 +236,11 @@ model Organization {
   webhookDeliveries           WebhookDelivery[]
 
   @@map("organizations")
+  dreamSettings HarnessDreamSettings?
+  dreamRuns HarnessDreamRun[]
+  dreamOutputs HarnessDreamOutput[]
+  dreamDue HarnessDreamDue?
+
 }
 
 /// Junction table for user-organization many-to-many relationship
@@ -509,6 +518,9 @@ model Project {
   @@index([teamId])
   @@index([status])
   @@map("projects")
+  dreamSettings HarnessDreamSettings[]
+  dreamRuns HarnessDreamRun[]
+
 }
 
 /// Optional explicit project membership. If empty, all team members can access.
@@ -1544,6 +1556,8 @@ model Memory {
   // 20260606000000_l2_principles_tier). The WHERE filter is not expressible in
   // the Prisma DSL, so it is migration-only and intentionally absent here.
   @@map("memories")
+  dreamOutputs HarnessDreamOutput[]
+
 }
 
 /// WorkingSet — rolling spotlight on what user cares about NOW.
@@ -5908,4 +5922,81 @@ model VisualGenerationEvent {
   @@unique([jobId, eventKey])
   @@index([jobId, id])
   @@map("visual_generation_events")
+}
+
+/// Tenant-owned opt-in for the native autonomous Dreamer. OFF until administrator consent.
+model HarnessDreamSettings {
+  orgId String @id @map("org_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  enabled Boolean @default(false)
+  revision Int @default(1)
+  projectId String? @map("project_id") @db.Uuid
+  syncedRevision Int @default(0) @map("synced_revision")
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  org Organization @relation(fields:[orgId],references:[id],onDelete:Cascade,onUpdate:NoAction)
+  user User @relation(fields:[userId],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  project Project? @relation(fields:[projectId],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  @@map("harness_dream_settings")
+}
+
+/// Durable occurrence, child-session identity, checkpoint, fenced lease and callback receipt.
+model HarnessDreamRun {
+  id String @id @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+  revision Int
+  occurrenceKey String @map("occurrence_key") @db.Text
+  occurrenceId String @map("occurrence_id") @db.Text
+  triggerId String @map("trigger_id") @db.Text
+  parentId String @map("parent_id") @db.Text
+  childId String @map("child_id") @db.Text
+  status String @default("queued") @db.Text
+  checkpoint Json @default("{}") @db.JsonB
+  outputIds String[] @default([]) @map("output_ids") @db.Text
+  leaseToken String? @map("lease_token") @db.Text
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  attempts Int @default(0)
+  errorCode String? @map("error_code") @db.Text
+  receiptId String? @map("receipt_id") @db.Text
+  callbackPending Boolean @default(false) @map("callback_pending")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  org Organization @relation(fields:[orgId],references:[id],onDelete:Cascade,onUpdate:NoAction)
+  user User @relation(fields:[userId],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  project Project @relation(fields:[projectId],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  outputs HarnessDreamOutput[]
+  @@unique([orgId,occurrenceKey],map:"harness_dream_runs_org_id_occurrence_key_key")
+  @@index([orgId,status,createdAt],map:"harness_dream_runs_pending_idx")
+  @@map("harness_dream_runs")
+}
+
+/// Candidate ledger prevents repeated writes; receipt is recorded only after destination proof.
+model HarnessDreamOutput {
+  orgId String @map("org_id") @db.Uuid
+  idempotencyKey String @map("idempotency_key") @db.Text
+  runId String @map("run_id") @db.Uuid
+  candidate Json @db.JsonB
+  memoryId String? @map("memory_id") @db.Uuid
+  receipt Json? @db.JsonB
+  org Organization @relation(fields:[orgId],references:[id],onDelete:Cascade,onUpdate:NoAction)
+  run HarnessDreamRun @relation(fields:[runId],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  memory Memory? @relation(fields:[memoryId],references:[id],onDelete:SetNull,onUpdate:NoAction)
+  @@id([orgId,idempotencyKey])
+  @@map("harness_dream_outputs")
+}
+
+/// Host scheduler index contains tenant identity and leases, never memory content.
+model HarnessDreamDue {
+  orgId String @id @map("org_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  needsSync Boolean @default(false) @map("needs_sync")
+  hasWork Boolean @default(false) @map("has_work")
+  hasCallbacks Boolean @default(false) @map("has_callbacks")
+  lastAdmittedAt DateTime? @map("last_admitted_at") @db.Timestamptz(6)
+  leaseToken String? @map("lease_token") @db.Text
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  org Organization @relation(fields:[orgId],references:[id],onDelete:Cascade,onUpdate:NoAction)
+  user User @relation(fields:[userId],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  @@map("harness_dream_due")
 }

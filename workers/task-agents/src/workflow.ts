@@ -3,7 +3,7 @@ import { NonRetryableError } from "cloudflare:workflows";
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, canonicalizeReadCitationAliases, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, unreadReportSources } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, canonicalizeReadCitationAliases, citedSourceReceipts, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, unreadReportSources } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds, planTaskSourceRequirements, sourceReadPlanTaskVerified } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -904,15 +904,12 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
       report: written.report,
       companyContext,
       sources: isProspect
-        ? verifiedProspectPages.map((page) => {
+        ? citedSourceReceipts(written.report, verifiedProspectPages).map((page) => {
             const reportQuotes = [...written.report.matchAll(/[“"]([^”"]{8,220})[”"]/g)].map((match) => match[1]);
             return `${page.url} (freshly fetched, excerpted for review): ${sourceExcerptForQuoteRepair(page.excerpt, reportQuotes)}`;
           })
-        : (await this.agent.sourceReadReceiptsForWorkRun()).map((receipt: { url: string; readAt: string; excerpt: string }) => `${receipt.url} (read ${receipt.readAt}): ${receipt.excerpt}`),
+        : citedSourceReceipts(written.report, await this.agent.sourceReadReceiptsForWorkRun() as Array<{ url: string; readAt: string; excerpt: string }>).map((receipt) => `${receipt.url} (read ${receipt.readAt}): ${sourceEvidenceWindows(receipt.excerpt, 2400)}`),
     }));
-    if (review.verdict === "caution" && review.note) {
-      written.report += `\n\n## Review note\n${review.note}`;
-    }
     if (packetFallbackPlan) await durable.do("packet-stage-deliverable-ready", async () => this.agent.updateOperatingTask(3, "completed", true));
 
     const prepared = await durable.do("complete", async () => {

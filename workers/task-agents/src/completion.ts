@@ -309,6 +309,14 @@ export function unreadReportSources(report: string, sourceReadUrls: readonly str
     .filter((key) => key && !receipts.has(key)))];
 }
 
+/** Give advisory review the same cited source set used by the deterministic
+ * deliverable gate. Truncating a chronological receipt list can make an older,
+ * valid citation appear unsupported to the reviewer. */
+export function citedSourceReceipts<T extends { url: string }>(report: string, receipts: readonly T[]): T[] {
+  const cited = new Set([...report.matchAll(/https?:\/\/[^\s<>)\]]+/g)].map((match) => sourceKey(match[0])).filter(Boolean));
+  return receipts.filter((receipt) => cited.has(sourceKey(receipt.url)));
+}
+
 export function directReplyComplete(report: string): CompletionResult {
   if (report.trim().length < 2) return { complete: false, reason: "reply_missing" };
   return { complete: true, reason: "direct_reply" };

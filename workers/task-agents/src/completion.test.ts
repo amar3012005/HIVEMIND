@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+import { bindProspectSourcePassages, citedSourceReceipts, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, previousReport, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsImageCapture, requestsMemorySave, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, sourceQuoteCandidates, sourceReceiptCoversQuotes } from "./completion.ts";
+
+test("governance receives every cited read receipt, including older sources", () => {
+  const receipts = Array.from({ length: 20 }, (_, index) => ({ url: `https://source.example/page-${index}`, excerpt: `Evidence ${index}` }));
+  const report = `# Report\n\nhttps://source.example/page-0 and https://source.example/page-19`;
+  assert.deepEqual(citedSourceReceipts(report, receipts).map((item) => item.url), [receipts[0].url, receipts[19].url]);
+});
 
 test("a persisted page receipt covers only exact normalized source passages", () => {
   const page = `Hannover Re is a reinsurer. ${"Other text. ".repeat(50)} Registered office: Karl-Wiechert-Allee 50, 30625 Hannover.`;

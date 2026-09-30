@@ -2347,7 +2347,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
             task: input.task.slice(0, 2000), plan: input.plan.slice(0, 6), report: input.report.slice(0, 16000),
             authenticatedProfile: (this.state.profileBrief ?? "").slice(0, 2400),
             companyContext: JSON.stringify(input.companyContext ?? null).slice(0, 2500),
-            sourceReceipts: input.sources.slice(-8).map((source) => source.slice(0, 12500)),
+            sourceReceipts: input.sources.map((source) => source.slice(0, 3000)),
           }),
           maxOutputTokens: 512,
           abortSignal: AbortSignal.timeout(10_000),

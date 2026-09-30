@@ -1,0 +1,9 @@
+# Narrow overlay on the exact currently deployed Control artifact. No Core,
+# dependencies, schema or sibling runtime changes enter this release.
+FROM hivemind/control-plane:sha-fb118fb7
+ARG SOURCE_SHA
+ARG CONTROL_BASE_ID
+LABEL org.opencontainers.image.revision=$SOURCE_SHA \
+      com.singulance.control.base-image=$CONTROL_BASE_ID
+COPY --chown=nodejs:nodejs core/src/routes/harness-chat.js /app/src/routes/harness-chat.js
+COPY --chown=nodejs:nodejs core/src/hyperagents/dsh-task-memory.js /app/src/hyperagents/dsh-task-memory.js

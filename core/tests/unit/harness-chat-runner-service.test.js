@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { taskPacket } from './dsh-task-memory.test.js';
 import { verifyHarnessRunnerServiceToken } from '../../src/harness-chat/runner-service-token.js';
 import { handleHarnessChatBootstrapRoute } from '../../src/routes/harness-chat.js';
 
@@ -452,4 +453,30 @@ test('terminal no-tool reconciliation does not debit a turn with an admitted Com
   assert.deepEqual(res.body, { admitted: true, duplicate: true, service: 'composio_tool_call' });
   assert.equal(queries.length, 1);
   assert.equal(queries[0].args.at(-1), '3');
+});
+
+test('private DSH completion derives tenancy from runner claims and never accepts model-controlled status or tenant', async () => {
+  const otherOrg = '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
+  for (const organization of [orgId, otherOrg]) {
+    const calls = [];
+    const body = taskPacket();
+    const prisma = {
+      userOrganization: { findUnique: async ({ where }) => { assert.equal(where.userId_orgId.orgId, organization); return { isActive: true }; } },
+      project: { upsert: async ({ where }) => { assert.equal(where.orgId_slug.orgId, organization); return { id: 'b79673b4-4578-4fc2-8144-05056983f4e1', name: 'Hyper Agents', policy: 'private' }; } },
+      projectMember: { upsert: async () => ({}) },
+      $queryRawUnsafe: async (sql, ...args) => { calls.push(args); return [{ id: crypto.randomUUID(), project_slug: 'hyper-agents', kind: args[3], status: args[4], agent_slug: args[5], title: args[10], summary: args[11], run_id: args[8], context: JSON.parse(args[12]), created_at: new Date() }]; },
+    };
+    const run = async input => {
+      const res = {};
+      await handleHarnessChatBootstrapRoute({ req: { method: 'POST', headers: { authorization: `Bearer ${token({ org_id: organization })}` } }, res, pathname: '/internal/v1/harness-chat/core/v1/hyperagents/operating-memory', prisma, parseBody: async () => input, jsonResponse: (r, b, status = 200) => Object.assign(r, { body: b, status }), redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, fetchImpl: fetch });
+      return res;
+    };
+    const saved = await run(body);
+    assert.equal(saved.status, 200); assert.equal(saved.body.memory.kind, 'task_status'); assert.equal(saved.body.memory.status, 'completed');
+    assert.equal(calls[0][0], organization); assert.equal(calls[0][6], userId);
+    assert.equal((await run({ ...body, org_id: otherOrg })).status, 400);
+    assert.equal((await run({ ...body, status: 'completed' })).status, 400);
+    assert.equal((await run({ ...body, action: 'save', kind: 'task_status' })).status, 400);
+    assert.equal(calls.length, 1);
+  }
 });

@@ -14,6 +14,7 @@ import {
 import { getInternalApiKey } from '../security/internal-auth.js';
 import { TeamStore } from '../teams/team-store.js';
 import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
+import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
 import { recallOperatingMemory, saveOperatingMemory } from '../hyperagents/operating-memory.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -359,14 +360,16 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       ? new Set(['action', 'query', 'agent_slug', 'kind', 'room_id', 'run_id', 'limit'])
       : action === 'save'
         ? new Set(['action', 'agent_slug', 'kind', 'title', 'summary', 'idempotency_key', 'room_id', 'run_id', 'trigger_id', 'context', 'supersedes_id'])
-        : null;
+        : action === 'record_task'
+          ? new Set(['action', 'agent_slug', 'title', 'summary', 'idempotency_key', 'run_id', 'context'])
+          : null;
     if (!allowed || Object.keys(input).some(key => !allowed.has(key))) {
       jsonResponse(res, { error: 'invalid_operating_memory_input' }, 400); return true;
     }
     try {
       const result = action === 'recall'
         ? await recallOperatingMemory(prisma, claims.org_id, input)
-        : await saveOperatingMemory(prisma, input, { orgId: claims.org_id, userId: claims.sub }, { source: 'agent' });
+        : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' ? 'runtime' : 'agent' });
       jsonResponse(res, result, 200);
     } catch (error) {
       const known = /^(invalid_|reserved_|runtime_|superseded_|memory_idempotency_conflict)/.test(String(error?.message || ''));

@@ -13,3 +13,9 @@ test("unfinished native plan steps cannot be projected as completed", () => {
   assert.equal(verifiedExecutionReceipt("# Draft", [1], []), null);
   assert.equal(verifiedExecutionReceipt("# Draft", [1, 2], [1, 2], [3], false), null);
 });
+
+test("an unplanned action uses native answer only when its deliverable is ready", () => {
+  assert.deepEqual(verifiedExecutionReceipt("Completed answer", [], [], [], true, true),
+    { report: "Completed answer", completedTaskIds: [] });
+  assert.equal(verifiedExecutionReceipt("# Unfinished draft", [], [], [], false, true), null);
+});

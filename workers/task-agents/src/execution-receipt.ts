@@ -7,8 +7,9 @@ export function verifiedExecutionReceipt(
   requiredTaskIds: readonly number[],
   deferredTaskIds: readonly number[] = [],
   deliverableReady = true,
+  allowUnplanned = false,
 ): { report: string; completedTaskIds: number[] } | null {
-  if (!report.trim() || !requiredTaskIds.length || !deliverableReady) return null;
+  if (!report.trim() || (!requiredTaskIds.length && !allowUnplanned) || !deliverableReady) return null;
   const completed = new Set(completedTaskIds);
   if (!requiredTaskIds.every((id) => completed.has(id))) return null;
   // Deferred IDs are only projected into the pending receipt. The Workflow

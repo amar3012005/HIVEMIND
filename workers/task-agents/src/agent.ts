@@ -21,7 +21,7 @@ import { parseGovernanceVerdict, type GovernanceVerdict } from "./governor-verdi
 import { partialToolText } from "./draft-stream";
 import { routeWithJev, type JevRoute } from "./jev-route";
 import { buildPostRunJevRequest, ineligiblePostRunJev, parsePostRunJevResponse, postRunJevSummary, verifiedPostRunLearnings, POST_RUN_JEV_POLICY_VERSION, type LocalPlaybookSnapshot, type PostRunJevInput, type PostRunJevReview, type PostRunReviewPacket } from "./post-run-jev";
-import { completedPlanTaskIds, continuedPlan, finalPlanStepReady, updatePlanTask } from "./operating-plan";
+import { completedPlanTaskIds, continuedPlan, finalPlanStepReady, sourceReadPlanTaskVerified, updatePlanTask } from "./operating-plan";
 import { operatingMemoryBrief, operatingWorkStatusKey } from "./operating-memory-context";
 import { privateMemoryReceiptId, sessionMemoryEvidence, verifiedPrivateLearning } from "./session-memory";
 import { HYPERAGENT_INSTRUCTION } from "./employee";
@@ -1346,7 +1346,11 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   updateOperatingTask(id: number, status: "active" | "completed" | "blocked", verified = false): { updated: boolean; awaitingReport?: boolean } {
-    const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status, verified);
+    const task = this.state.operatingPlan?.tasks.find((item) => item.id === id);
+    const sourceVerified = !verified && status === "completed" && task
+      && id !== this.state.operatingPlan?.tasks.at(-1)?.id
+      && sourceReadPlanTaskVerified(task.title, this.sourceReadReceipts().map((receipt) => receipt.url));
+    const plan = updatePlanTask(this.state.operatingPlan, this.state.envelope?.runId, id, status, verified || !!sourceVerified);
     if (!plan) return { updated: false };
     const previous = this.state.operatingPlan?.tasks.find((task) => task.id === id)?.status;
     const current = plan.tasks.find((task) => task.id === id)?.status;

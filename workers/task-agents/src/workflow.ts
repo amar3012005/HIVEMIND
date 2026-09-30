@@ -3,7 +3,7 @@ import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
 import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, unreadReportSources } from "./completion";
-import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
+import { currentTurnTasks, missingPlanTaskIds, planTaskSourceRequirements, sourceReadPlanTaskVerified } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
 import { ineligiblePostRunJev, type PostRunJevReview, type PostRunReviewPacket } from "./post-run-jev";
@@ -495,8 +495,15 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const artifactTaskIds = artifactRequested
       ? plan.tasks.flatMap((task, index) => isArtifactPlanTask(task) ? [index + 1] : [])
       : [];
-    const completedContentTasks = async (completed: readonly number[]) =>
-      [...new Set([...completed, ...await this.agent.completedOperatingTaskIds()])];
+    const completedContentTasks = async (completed: readonly number[]) => {
+      const sourceReceipts = await this.agent.sourceReadUrlsForWorkRun();
+      return [...new Set([...completed, ...await this.agent.completedOperatingTaskIds()])]
+        .filter((id) => {
+          const title = plan.tasks[id - 1];
+          return title && (!planTaskSourceRequirements(title).length
+            || sourceReadPlanTaskVerified(title, sourceReceipts));
+        });
+    };
     const missingContentTasks = async (completed: readonly number[]) =>
       missingPlanTaskIds(plan.tasks.length, [...await completedContentTasks(completed), ...artifactTaskIds]);
 

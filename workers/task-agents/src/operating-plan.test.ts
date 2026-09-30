@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { completedPlanTaskIds, continuedPlan, currentTurnTasks, finalPlanStepReady, missingPlanTaskIds, updatePlanTask } from "./operating-plan.ts";
+import { completedPlanTaskIds, continuedPlan, currentTurnTasks, finalPlanStepReady, missingPlanTaskIds, planTaskSourceRequirements, sourceReadPlanTaskVerified, updatePlanTask } from "./operating-plan.ts";
 
 test("final synthesis mode begins only after prior tasks have receipts in this run", () => {
   const plan = { runId: "run-1", summary: "Brief", tasks: [
@@ -27,9 +27,18 @@ test("final task stays active until validated report is saved", () => {
     { id: 1, title: "Research", status: "pending" as const },
     { id: 2, title: "Write campaign", status: "pending" as const },
   ] };
-  assert.equal(updatePlanTask(plan, "run-1", 1, "completed")?.tasks[0].status, "completed");
+  assert.equal(updatePlanTask(plan, "run-1", 1, "completed")?.tasks[0].status, "active");
+  assert.equal(updatePlanTask(plan, "run-1", 1, "completed", true)?.tasks[0].status, "completed");
   assert.equal(updatePlanTask(plan, "run-1", 2, "completed")?.tasks[1].status, "active");
   assert.equal(updatePlanTask(plan, "run-1", 2, "completed", true)?.tasks[1].status, "completed");
+});
+
+test("source-read plan completion needs exact current-run page receipts", () => {
+  assert.deepEqual(planTaskSourceRequirements("Read https://www.deepset.ai/ and compare"), ["deepset.ai"]);
+  assert.equal(sourceReadPlanTaskVerified("Read https://www.deepset.ai/ and compare", ["https://deepset.ai/"]), true);
+  assert.equal(sourceReadPlanTaskVerified("Read https://www.deepset.ai/ and compare", ["https://deepset.ai/other"]), false);
+  assert.equal(sourceReadPlanTaskVerified("Read https://a.example/ and https://b.example/", ["https://a.example/"]), false);
+  assert.equal(sourceReadPlanTaskVerified("Analyze the market", ["https://a.example/"]), false);
 });
 
 test("keeps a plan open while any planned task lacks completion evidence", () => {

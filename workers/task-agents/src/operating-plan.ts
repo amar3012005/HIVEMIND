@@ -2,8 +2,31 @@ import type { OperatingPlan, OperatingTask } from "./types";
 
 export function updatePlanTask(plan: OperatingPlan | null | undefined, runId: string | undefined, id: number, status: OperatingTask["status"], verified = false): OperatingPlan | null {
   if (!plan || plan.runId !== runId || !plan.tasks.some((task) => task.id === id)) return null;
-  if (status === "completed" && id === plan.tasks.at(-1)?.id && !verified) status = "active";
+  if (status === "completed" && !verified) status = "active";
   return { ...plan, tasks: plan.tasks.map((task) => task.id === id ? { ...task, status } : task) };
+}
+
+function sourceIdentity(value: string): string {
+  try {
+    const url = new URL(value.replace(/[.,;:!?"'`]+$/u, ""));
+    if (url.protocol !== "https:" && url.protocol !== "http:") return "";
+    return `${url.hostname.replace(/^www\./, "").toLowerCase()}${url.pathname.replace(/\/$/, "")}`;
+  } catch { return ""; }
+}
+
+/** A model may finish a source-read step only when every explicit URL in that
+ * step has a current WorkRun page receipt. Other plan steps remain active until
+ * the Workflow verifies their deliverable or tool receipt. */
+export function planTaskSourceRequirements(title: string): string[] {
+  return [...title.matchAll(/https?:\/\/[^\s<>)\]]+/g)]
+    .map((match) => sourceIdentity(match[0])).filter(Boolean);
+}
+
+export function sourceReadPlanTaskVerified(title: string, receiptUrls: readonly string[]): boolean {
+  const targets = planTaskSourceRequirements(title);
+  if (!targets.length) return false;
+  const receipts = new Set(receiptUrls.map(sourceIdentity).filter(Boolean));
+  return targets.every((target) => receipts.has(target));
 }
 
 export function missingPlanTaskIds(taskCount: number, completedTaskIds: readonly number[]): number[] {

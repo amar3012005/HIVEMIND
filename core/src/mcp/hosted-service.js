@@ -21,6 +21,7 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import Redis from 'ioredis';
 import { getOpsToolsManifest, invokeOpsTool, isOpsTool } from './ops-release-gateway.js';
+import { recallOperatingMemory, saveOperatingMemory } from '../hyperagents/operating-memory.js';
 
 // ==========================================
 // Configuration
@@ -505,6 +506,29 @@ function generateToolsManifest(userId, orgId, options = {}) {
   const isOpsOperator = options.isMaster === true || scopeSet.has('ops:deploy');
 
   const tools = [
+    {
+      name: 'hyperagents_memory',
+      description: `Read and write private Hyper Agents operating memory for the authenticated tenant. This is a separate lane from HIVE-MIND company memory: it is never included in hivemind_recall, company profiles, or the approval-gated company memory graph. Agents may save their own reusable learnings, decision notes, and handoffs without company-memory approval. Use action="recall" to retrieve notes from any agent in the tenant; optionally filter by agent_slug. Use action="save" only for durable agent operating knowledge, not transient user/company facts. Tenant and author identity come from the authenticated credential; never pass or infer org/user IDs. Supply a stable idempotency_key for retries.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['recall', 'save'], description: 'Read private agent memory or save a durable agent note.' },
+          agent_slug: { type: 'string', description: 'Required for save; on recall, optionally filter to this agent. Use a stable slug such as "researcher".' },
+          kind: { type: 'string', enum: ['learning', 'decision_note', 'handoff'], description: 'Required for save; categorizes the private operating note.' },
+          title: { type: 'string', description: 'Required for save; short searchable heading.' },
+          summary: { type: 'string', description: 'Required for save; concise durable note, up to 2400 characters.' },
+          idempotency_key: { type: 'string', description: 'Required for save; stable key for this logical note so tool retries do not duplicate it.' },
+          query: { type: 'string', description: 'Optional terms to search in recall.' },
+          status: { type: 'string', enum: ['recorded'], description: 'Save-only. Agent writes are always recorded; runtime status receipts are server-authored.' },
+          room_id: { type: 'string', description: 'Optional UUID of the originating room.' },
+          run_id: { type: 'string', description: 'Optional ID of the originating run.' },
+          context: { type: 'object', description: 'Optional small structured context for the note.' },
+          supersedes_id: { type: 'string', description: 'Optional prior private-memory UUID superseded by this note.' },
+          limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum recall results (default 10).' },
+        },
+        required: ['action'],
+      },
+    },
     {
       name: 'hivemind_save_memory',
       description: `Persist a durable fact, preference, decision, or synthesis to HIVE-MIND memory.
@@ -2500,6 +2524,49 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
 
   try {
     switch (name) {
+      case 'hyperagents_memory': {
+        if (!userId || !orgId) {
+          return formatToolContent({ ok: false, error: 'authenticated_tenant_identity_required' });
+        }
+        const { getPrismaClient } = await import('../db/prisma.js');
+        const prisma = getPrismaClient();
+        const action = String(args?.action || '');
+        if (action === 'recall') {
+          const result = await recallOperatingMemory(prisma, orgId, {
+            agent_slug: args.agent_slug,
+            kind: args.kind,
+            status: args.status,
+            room_id: args.room_id,
+            run_id: args.run_id,
+            query: args.query,
+            limit: args.limit,
+          });
+          return formatToolContent(result);
+        }
+        if (action === 'save') {
+          const scopes = Array.isArray(options.scopes) ? options.scopes : [];
+          const hasWriteAccess = options.isMaster === true || scopes.length === 0
+            || scopes.includes('*') || scopes.includes('memory:write') || scopes.includes('memory.write');
+          if (!hasWriteAccess) {
+            return formatToolContent({ ok: false, error: 'memory_write_scope_required', message: 'This API credential can recall private agent memory but does not allow writes.' });
+          }
+          const result = await saveOperatingMemory(prisma, {
+            kind: args.kind,
+            status: 'recorded',
+            agent_slug: args.agent_slug,
+            title: args.title,
+            summary: args.summary,
+            idempotency_key: args.idempotency_key,
+            room_id: args.room_id,
+            run_id: args.run_id,
+            context: args.context,
+            supersedes_id: args.supersedes_id,
+          }, { orgId, userId }, { source: 'agent' });
+          return formatToolContent(result);
+        }
+        return formatToolContent({ ok: false, error: 'invalid_action', allowed: ['recall', 'save'] });
+      }
+
       case 'hivemind_save_memory': {
         const title = normalizeMemoryText(args.title);
         const content = normalizeMemoryText(args.content);

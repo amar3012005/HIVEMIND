@@ -535,7 +535,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       this.agent.loadTaskOperatingMemory(asked));
 
     if (plan.mode === "direct") {
-      const reply = plan.reply.trim() || plan.decision.trim();
+      // The structured planner chooses the route; it must not publish its
+      // draft `reply` as the employee's final answer. A native Think turn
+      // carries the bound persona and streams the response to the room.
+      const reply = quickDirect || await durable.do("direct-synthesis", async () =>
+        this.agent.streamNarrative(`Answer only this current operator request in your active employee persona: ${asked}. Earlier room turns are context, not tasks to repeat. Use the authenticated room identity and current request. Do not invoke tools or claim unverified work. Reply directly.`));
       return durable.do("complete", async () => {
         const verdict = directReplyComplete(reply);
         await this.agent.note("completion", verdict.complete ? "complete" : verdict.reason);

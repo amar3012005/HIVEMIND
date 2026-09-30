@@ -117,3 +117,23 @@ Authenticated HIVE-MIND toolbar verification: clock, menu, mode label and previe
 control share top=70px (label vertically centered), with roughly 8px gaps and no
 intersections. Screenshot `/tmp/hive-toolbar-fixed.png`. No production-model
 canary request was sent by this release check.
+
+## Duplicate automation icon and history overlap fix — 2026-10-01
+
+Native source `774bdf370faf2a75a891b2966a2aa7c6d28f2e04` pushed and deployed.
+Embedded BRAIN/OS now retain one Automation tasks manager clock; the redundant
+current-session catalog clock is suppressed only on embedded routes. Native
+standalone catalog behavior remains available. When the right panel opens and
+the native floating history rail is present, the center column reserves rail
+space. OS history is in the outer sidebar, so it does not add this inset.
+
+74 focused UI checks and full host/client typecheck passed. Image/profile
+validation passed. Runner image ID:
+`sha256:5dae774b8fb94230508ec110afc05d39ff23ec5452fd79a7239e57baf540c4cf`.
+Healthy, restart count zero, public health 200, sibling container IDs unchanged.
+Rollback record: `/root/releases/manifests/hyperagents/automation-overlap-774bdf370f`.
+Authenticated canary opened the Vercel task in Automation tasks; task data was not
+changed. BRAIN right-pane geometry: history right=498px, transcript left=524px,
+transcript right=1131px, right pane left=1173px. Header contains one Automation
+entry plus More actions and Preview toggle. Screenshot:
+`/tmp/automation-layout-fixed.png`. No model request was sent.

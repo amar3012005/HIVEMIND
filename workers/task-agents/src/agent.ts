@@ -6,7 +6,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
-import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
+import { getControl, mapsPlaces, parallelSearch, postControl, postMeta, readCompanyProfile, readCompactProfile, readMetaEntities, readMetaRecall, readMetaSaveStatus, recallCompany, recallOperatingMemory, saveOperatingMemory, saveCompanyMemory as writeHivemindMemory, type GatewayEnv } from "./gateway";
 import { ensureCompanyTables, type StoredArtifact } from "./company-store";
 import { companyWorkComplete } from "./completion";
 import { CompanyGovernor } from "./governor";
@@ -347,7 +347,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
   }
 
   async applyGroups(groups: readonly string[], action = false): Promise<string[]> {
-    const tools = [...new Set([...toolsForGroups(groups), "hivemind_meta"])];
+    const tools = [...new Set([...toolsForGroups(groups), "hivemind_meta", "hyperagents_memory"])];
     this.setState({ ...this.state, toolGroups: [...groups], tools, catalogStage: action ? "action" : this.state.catalogStage, companyContextRequired: !action });
     this.note("reset_tools", groups.join(", "));
     return tools;
@@ -357,7 +357,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.draftCalls.clear();
     const profile = await readCompactProfile(this.gatewayEnv(), envelope.orgId, envelope.userId).catch(() => ({ error: "profile_context_unavailable" }));
     const profileBrief = "context" in profile ? profile.context : "Authenticated HIVEMIND profile unavailable. Do not infer user or organization facts.";
-    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, "hivemind_meta"])], profileBrief, catalogStage: "global", selectedGlobals: [], companyContextLoaded: "context" in profile && Boolean(profile.context.trim()), companyContextRequired: false });
+    this.setState({ ...this.state, envelope, role, tools: [...new Set([...tools, "hivemind_meta", "hyperagents_memory"])], profileBrief, catalogStage: "global", selectedGlobals: [], companyContextLoaded: "context" in profile && Boolean(profile.context.trim()), companyContextRequired: false });
     await this.context.refreshSystemPrompt();
   }
 
@@ -613,6 +613,45 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         return writeHivemindMemory(this.gatewayEnv(), identity.orgId, identity.userId, input.title, input.content, { scope: input.scope, project: input.project, idempotencyKey });
       },
     });
+    const operatingMemory = tool({
+      description: "Private HyperAgents operating memory, separate from company HIVEMIND. Recall task-relevant agent learnings, decision notes and handoffs across sessions; save durable reusable agent knowledge without company-memory approval. Never use this for company facts or as proof of task completion. Company memory remains on hivemind_meta and its approval flow.",
+      inputSchema: z.object({
+        operation: z.enum(["recall", "save"]),
+        query: z.string().max(500).optional(),
+        kind: z.enum(["learning", "decision_note", "handoff"]).optional(),
+        agentSlug: z.string().max(120).optional(),
+        title: z.string().max(180).optional(),
+        summary: z.string().max(2400).optional(),
+        idempotencyKey: z.string().max(200).optional(),
+        supersedesId: z.string().uuid().optional(),
+        limit: z.number().int().min(1).max(20).optional(),
+      }),
+      execute: async (input): Promise<unknown> => {
+        const identity = this.assertTool("hyperagents_memory");
+        if (input.operation === "recall") {
+          this.note("hyperagents_memory", "recall private operating notes");
+          return recallOperatingMemory(this.gatewayEnv(), identity.orgId, identity.userId, {
+            query: input.query, kind: input.kind, agent_slug: input.agentSlug, limit: input.limit,
+          });
+        }
+        if (!input.kind || !input.title?.trim() || !input.summary?.trim()) {
+          return { ok: false, error: "save_requires_kind_title_and_summary" };
+        }
+        const agentSlug = input.agentSlug || "hyperagent";
+        const runId = this.state.envelope?.runId || "session";
+        const contentKey = `${identity.orgId}:${identity.userId}:${runId}:${agentSlug}:${input.kind}:${input.title.trim()}:${input.summary.trim()}`;
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(contentKey));
+        const generatedKey = `agent-${Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+        this.note("hyperagents_memory", `save ${input.kind}: ${input.title.trim()}`);
+        return saveOperatingMemory(this.gatewayEnv(), identity.orgId, identity.userId, {
+          kind: input.kind, status: "recorded", agent_slug: agentSlug,
+          title: input.title.trim(), summary: input.summary.trim(),
+          idempotency_key: input.idempotencyKey?.trim() || generatedKey,
+          ...(input.supersedesId ? { supersedes_id: input.supersedesId } : {}),
+          ...(runId !== "session" && /^[0-9a-f-]{36}$/i.test(runId) ? { run_id: runId } : {}),
+        });
+      },
+    });
     const discover = tool({
       description: "Discover read-only Composio tools for one connected toolkit.",
       inputSchema: z.object({ toolkit: z.string().min(1).max(80), useCase: z.string().min(1).max(1200) }),
@@ -807,6 +846,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       check_receipt: check,
       hivemind_recall: recall,
       hivemind_meta: meta,
+      hyperagents_memory: operatingMemory,
       hivemind_get_memory: memory,
       hivemind_list_memories: memories,
       hivemind_list_projects: projects,

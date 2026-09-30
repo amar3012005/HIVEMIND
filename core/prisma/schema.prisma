@@ -502,6 +502,7 @@ model Project {
   team              Team?           @relation(fields: [teamId], references: [id], onDelete: Cascade)
   members           ProjectMember[]
   memories          MemoryProject[]
+  hyperAgentOperatingMemories HyperAgentOperatingMemory[]
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -540,6 +541,33 @@ model MemoryProject {
   @@index([memoryId])
   @@index([projectId])
   @@map("memory_projects")
+}
+
+/// Private Hyper Agents operating memory. Isolated from company memory and recall.
+model HyperAgentOperatingMemory {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  projectId      String   @map("project_id") @db.Uuid
+  projectSlug    String   @default("hyper-agents") @map("project_slug") @db.VarChar(120)
+  idempotencyKey String   @map("idempotency_key") @db.VarChar(200)
+  kind           String   @db.VarChar(40)
+  status         String   @db.VarChar(24)
+  agentSlug      String   @map("agent_slug") @db.VarChar(120)
+  authorUserId   String   @map("author_user_id") @db.Uuid
+  roomId         String?  @map("room_id") @db.Uuid
+  runId          String?  @map("run_id") @db.VarChar(80)
+  triggerId      String?  @map("trigger_id") @db.Uuid
+  title          String   @db.VarChar(180)
+  summary        String
+  context        Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, idempotencyKey], map: "hyper_agent_operating_memories_org_key")
+  @@index([orgId, createdAt(sort: Desc), id(sort: Desc)], map: "hyper_agent_operating_memories_recent_idx")
+  @@index([orgId, kind, agentSlug, createdAt(sort: Desc)], map: "hyper_agent_operating_memories_filter_idx")
+  @@index([orgId, runId], map: "hyper_agent_operating_memories_run_idx")
+  @@map("hyper_agent_operating_memories")
 }
 
 /// Cross-platform authentication with AI platforms (ChatGPT, Claude, etc.)

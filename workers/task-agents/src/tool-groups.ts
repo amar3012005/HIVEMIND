@@ -8,7 +8,7 @@ export const TOOL_GROUPS = {
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
 
-export const BASIC_TOOLS = ["playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"] as const;
+export const BASIC_TOOLS = ["hyperagents_memory", "playbook_list", "playbook_list_local", "playbook_get", "refine_local_playbook", "reset_tools"] as const;
 
 export function toolsForGroups(groups: readonly string[]): string[] {
   const names = new Set<string>(BASIC_TOOLS);

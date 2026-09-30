@@ -13,6 +13,33 @@ export interface GatewayEnv {
   BROWSER?: unknown;
 }
 
+export type OperatingMemoryKind = "learning" | "decision_note" | "handoff" | "task_status" | "trigger_status";
+
+export interface OperatingMemoryWrite {
+  kind: OperatingMemoryKind;
+  status: "recorded" | "active" | "completed" | "incomplete" | "errored" | "paused";
+  agent_slug: string;
+  title: string;
+  summary: string;
+  idempotency_key: string;
+  room_id?: string;
+  run_id?: string;
+  trigger_id?: string;
+  supersedes_id?: string;
+  context?: Record<string, unknown>;
+  writer?: "runtime";
+}
+
+export async function saveOperatingMemory(env: GatewayEnv, orgId: string, userId: string, memory: OperatingMemoryWrite): Promise<unknown> {
+  return postControl(env, "/internal/hyper/operating-memory", { action: "save", org_id: orgId, user_id: userId, ...memory });
+}
+
+export async function recallOperatingMemory(env: GatewayEnv, orgId: string, userId: string, filter: {
+  kind?: OperatingMemoryKind; agent_slug?: string; status?: string; room_id?: string; run_id?: string; query?: string; limit?: number;
+} = {}): Promise<unknown> {
+  return postControl(env, "/internal/hyper/operating-memory", { action: "recall", org_id: orgId, user_id: userId, ...filter });
+}
+
 export async function getControl(env: GatewayEnv, path: string): Promise<unknown> {
   const base = env.HIVEMIND_CONTROL_URL?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
@@ -33,6 +60,7 @@ export async function postControl(
   env: GatewayEnv,
   path: string,
   body: Record<string, unknown>,
+  timeoutMs = 20_000,
 ): Promise<unknown> {
   const base = env.HIVEMIND_CONTROL_URL?.replace(/\/$/, "");
   const key = env.HIVEMIND_MASTER_API_KEY;
@@ -41,7 +69,7 @@ export async function postControl(
     method: "POST",
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload: unknown = await response.json().catch(() => ({ error: "invalid_control_response" }));
   if (!response.ok) {

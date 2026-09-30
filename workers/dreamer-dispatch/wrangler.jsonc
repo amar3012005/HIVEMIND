@@ -3,7 +3,9 @@
   "name": "hivemind-dreamer-dispatch",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-30",
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true
+  },
   "vars": {
     "ENVIRONMENT": "local",
     "DISPATCH_ENABLED": "false",
@@ -11,20 +13,39 @@
     "DSH_STATUS_BASE_URL": ""
   },
   "durable_objects": {
-    "bindings": [{ "name": "TENANT_SCHEDULES", "class_name": "TenantSchedules" }]
+    "bindings": [
+      {
+        "name": "TENANT_SCHEDULES",
+        "class_name": "TenantSchedules"
+      }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantSchedules"] }],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "TenantSchedules"
+      ]
+    }
+  ],
   "queues": {
-    "producers": [{ "binding": "DREAMER_QUEUE", "queue": "hivemind-dreamer-dispatch-local" }],
-    "consumers": [{
-      "queue": "hivemind-dreamer-dispatch-local",
-      "max_batch_size": 10,
-      "max_batch_timeout": 5,
-      "max_retries": 8,
-      "dead_letter_queue": "hivemind-dreamer-dispatch-dlq-local",
-      "max_concurrency": 5,
-      "retry_delay": 30
-    }]
+    "producers": [
+      {
+        "binding": "DREAMER_QUEUE",
+        "queue": "hivemind-dreamer-dispatch-local"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "hivemind-dreamer-dispatch-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 8,
+        "dead_letter_queue": "hivemind-dreamer-dispatch-dlq-local",
+        "max_concurrency": 5,
+        "retry_delay": 30
+      }
+    ]
   },
   "env": {
     "preview": {
@@ -36,21 +57,85 @@
         "DSH_STATUS_BASE_URL": ""
       },
       "durable_objects": {
-        "bindings": [{ "name": "TENANT_SCHEDULES", "class_name": "TenantSchedules" }]
+        "bindings": [
+          {
+            "name": "TENANT_SCHEDULES",
+            "class_name": "TenantSchedules"
+          }
+        ]
       },
-      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantSchedules"] }],
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "TenantSchedules"
+          ]
+        }
+      ],
       "queues": {
-        "producers": [{ "binding": "DREAMER_QUEUE", "queue": "hivemind-dreamer-dispatch-preview" }],
-        "consumers": [{
-          "queue": "hivemind-dreamer-dispatch-preview",
-          "max_batch_size": 10,
-          "max_batch_timeout": 5,
-          "max_retries": 8,
-          "dead_letter_queue": "hivemind-dreamer-dispatch-dlq-preview",
-          "max_concurrency": 5,
-          "retry_delay": 30
-        }]
+        "producers": [
+          {
+            "binding": "DREAMER_QUEUE",
+            "queue": "hivemind-dreamer-dispatch-preview"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "hivemind-dreamer-dispatch-preview",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 8,
+            "dead_letter_queue": "hivemind-dreamer-dispatch-dlq-preview",
+            "max_concurrency": 5,
+            "retry_delay": 30
+          }
+        ]
       }
+    },
+    "production": {
+      "name": "hivemind-dreamer-dispatch",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "DISPATCH_ENABLED": "true",
+        "DSH_TRIGGER_URL": "https://harness-chat-origin.singulancelabs.com/hivemind/dreamer/trigger",
+        "DSH_STATUS_BASE_URL": "https://harness-chat-origin.singulancelabs.com/hivemind/dreamer/runs"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "TENANT_SCHEDULES",
+            "class_name": "TenantSchedules"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "TenantSchedules"
+          ]
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "DREAMER_QUEUE",
+            "queue": "hivemind-dreamer-dispatch-production"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "hivemind-dreamer-dispatch-production",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 8,
+            "dead_letter_queue": "hivemind-dreamer-dispatch-dlq-production",
+            "max_concurrency": 5,
+            "retry_delay": 30
+          }
+        ]
+      },
+      "account_id": "0dc6b9186b5a9b8985613b10c1c59f4f"
     }
   }
 }

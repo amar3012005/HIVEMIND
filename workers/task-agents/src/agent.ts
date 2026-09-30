@@ -776,7 +776,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       return;
     }
     if (clientRequestId && clientRequestId === this.state.lastClientRequestId && this.state.envelope?.userId === userId) {
-      connection.send(JSON.stringify({ type: "room-start-accepted", clientRequestId, runId: this.state.envelope.runId }));
+      try { connection.send(JSON.stringify({ type: "room-start-accepted", clientRequestId, runId: this.state.envelope.runId })); }
+      catch { /* Client reconnects and replays the same accepted request. */ }
       return;
     }
     const orgId = match[1];
@@ -836,12 +837,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       });
       if (clientRequestId) {
         this.setState({ ...this.state, lastClientRequestId: clientRequestId });
-        connection.send(JSON.stringify({ type: "room-start-accepted", clientRequestId, runId }));
+        try { connection.send(JSON.stringify({ type: "room-start-accepted", clientRequestId, runId })); }
+        catch { /* WorkRun admission succeeded; socket delivery is best-effort. */ }
       }
     } catch (error) {
       this.note("report", `I could not start this turn: ${error instanceof Error ? error.message : "unknown error"}.`);
       this.note("completion", "start_failed");
-      connection.send(JSON.stringify({ type: "workrun-control-result", operation: "room-start", error: "Could not start this turn." }));
+      try { connection.send(JSON.stringify({ type: "workrun-control-result", operation: "room-start", error: "Could not start this turn." })); }
+      catch { /* Reconnected clients inspect durable state. */ }
     }
   }
 

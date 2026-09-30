@@ -376,8 +376,11 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     if (work.continuation && (!recovery?.plan || !recovery.playbookId || recovery.playbookId !== work.continuation.playbookId)) {
       throw new Error("workrun_recovery_snapshot_unavailable");
     }
-    if (recovery) await durable.do("show-continuation-state", async () => this.agent.note("workrun-recovery",
-      `Continuing ${recovery.runId}: ${recovery.plan!.tasks.filter((task: OperatingPlan["tasks"][number]) => task.status === "completed").length}/${recovery.plan!.tasks.length} steps completed; ${recovery.sourceCount} source and ${recovery.artifactCount} artifact receipts. Saved source URLs: ${this.agent.sourceReadUrlsForWorkRun().slice(0, 12).join(", ") || "none"}. browser_markdown reuses exact saved pages; source_excerpt retrieves another passage without network I/O.`));
+    if (recovery) await durable.do("show-continuation-state", async () => {
+      const savedSourceUrls = await this.agent.sourceReadUrlsForWorkRun();
+      await this.agent.note("workrun-recovery",
+        `Continuing ${recovery.runId}: ${recovery.plan!.tasks.filter((task: OperatingPlan["tasks"][number]) => task.status === "completed").length}/${recovery.plan!.tasks.length} steps completed; ${recovery.sourceCount} source and ${recovery.artifactCount} artifact receipts. Saved source URLs: ${savedSourceUrls.slice(0, 12).join(", ") || "none"}. browser_markdown reuses exact saved pages; source_excerpt retrieves another passage without network I/O.`);
+    });
 
     const playbookNames = localCatalog(globalCatalog().map((item) => item.id));
     const globalMenu = globalCatalog().map(({ id, name, description }) => ({ id, name, description }));

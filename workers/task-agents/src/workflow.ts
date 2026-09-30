@@ -127,6 +127,10 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
     const report = await durable.do(`${name}-native-turn`, async () => this.agent.streamTaskTurn(
       `${prompt}\n\nWork as the assigned employee. Narrate meaningful progress in your own words while tools run. Finish with the requested Markdown response in plain text. Keep plan IDs and control fields out of the user-facing answer; the Workflow derives them separately from receipts. Never call think_final_answer; the Workflow checks receipts and saves artifacts after this turn. Do not claim an artifact was saved before its receipt.`, Boolean(options.finalSynthesisFollows)));
     console.log(JSON.stringify({ event: "company_stage_timing", stage: "native_turn", name, elapsedMs: Date.now() - turnStarted, reportChars: report.length }));
+    if (!report.trim()) {
+      await this.agent.note("workrun-turn-boundary", "The bounded model turn saved tool receipts; continuing from those receipts without replaying tools");
+      return reportSchema.parse({ report: "", completedTaskIds: [] });
+    }
     // The native plan ledger is already verified by tool/source receipts. A
     // finished non-prospect turn does not need another model to describe it.
     if (!options.prospects && !options.privateLearnings) {

@@ -204,7 +204,8 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       const latest = promptIndex < 0 ? null : messages.slice(promptIndex + 1).reverse().find((message) => message.role === "assistant");
       const report = latest?.parts.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
         .at(-1)?.text.trim() || "";
-      if (!report) throw new Error("execution_turn_empty");
+      // A bounded native turn may end immediately after a tool call. Its
+      // receipts are still durable; the Workflow will continue in a new turn.
       return report;
     } finally {
       this.setState({ ...this.state, executionTurn: false, workflowDirective: undefined });
@@ -1459,7 +1460,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
       ...(this.state.executionTurn ? { messages: ctx.messages.slice(-1) } : {}),
       activeTools: this.activeExecutionTools(),
-      maxSteps: this.state.catalogStage === "action" ? 14 : 10,
+      maxSteps: this.state.executionTurn ? 5 : this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
       providerOptions: { "workers-ai": { reasoning_effort: "low" } },
       repairToolCall,

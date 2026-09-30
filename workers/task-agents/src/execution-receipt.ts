@@ -5,9 +5,13 @@ export function verifiedExecutionReceipt(
   report: string,
   completedTaskIds: readonly number[],
   requiredTaskIds: readonly number[],
+  deferredTaskIds: readonly number[] = [],
+  deliverableReady = true,
 ): { report: string; completedTaskIds: number[] } | null {
-  if (!report.trim() || !requiredTaskIds.length) return null;
+  if (!report.trim() || !requiredTaskIds.length || !deliverableReady) return null;
   const completed = new Set(completedTaskIds);
   if (!requiredTaskIds.every((id) => completed.has(id))) return null;
-  return { report, completedTaskIds: [...completed] };
+  // Deferred IDs are only projected into the pending receipt. The Workflow
+  // still validates the report and saves the artifact before marking them.
+  return { report, completedTaskIds: [...new Set([...completed, ...deferredTaskIds])] };
 }

@@ -1401,7 +1401,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         system: fastDirect
           ? `${directIdentity}\nAnswer the current operator request directly and briefly. Use only the current request and authenticated room identity; do not claim a tool or artifact result.\n${this.state.workflowDirective || ""}`
           : currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
-        ...(fastDirect ? { messages: ctx.messages.slice(-1) } : {}),
+        // Workflow supplies the current stage directive and scoped receipts;
+        // old room prose remains durable but must not become this run's evidence.
+        messages: ctx.messages.slice(-1),
         activeTools: [],
         maxSteps: 1,
         maxOutputTokens: fastDirect ? 512 : 8000,
@@ -1430,6 +1432,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     }
     return {
       system: currentSystem ? `${ctx.system}\n\n## Current run\n${currentSystem}` : ctx.system,
+      ...(this.state.executionTurn ? { messages: ctx.messages.slice(-1) } : {}),
       activeTools: this.activeExecutionTools(),
       maxSteps: this.state.catalogStage === "action" ? 14 : 10,
       maxOutputTokens: 4096,
@@ -2156,6 +2159,17 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     if (!envelope) return [];
     ensureCompanyTables(this.sql.bind(this));
     return this.sql`SELECT url, excerpt, read_at FROM source_read_receipts WHERE run_id = ${envelope.runId} AND org_id = ${envelope.orgId} AND user_id = ${envelope.userId} ORDER BY read_at DESC LIMIT 12`.map((row) => ({ url: String(row.url), excerpt: String(row.excerpt), readAt: String(row.read_at) }));
+  }
+
+  sourceReadUrlsForWorkRun(): string[] {
+    const envelope = this.state.envelope;
+    if (!envelope) return [];
+    ensureCompanyTables(this.sql.bind(this));
+    const predecessor = (envelope as TaskEnvelope & { continuation?: { previousRunId: string } }).continuation?.previousRunId;
+    const rows = predecessor
+      ? this.sql`SELECT url FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id IN (${envelope.runId}, ${predecessor})`
+      : this.sql`SELECT url FROM source_read_receipts WHERE org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND run_id = ${envelope.runId}`;
+    return [...new Set(rows.map((row) => String(row.url)))];
   }
 
   verifiedSourceUrls(): string[] {

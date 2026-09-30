@@ -2,6 +2,7 @@ export interface CompletionInput {
   report: string;
   recalled: boolean;
   prospectSources?: string[];
+  sourceReadUrls?: readonly string[];
   companyWebsite?: string;
 }
 
@@ -295,10 +296,17 @@ function canonicalPassage(text: string): string {
 
 function sourceKey(value: string): string {
   try {
-    const url = new URL(value);
+    const url = new URL(value.replace(/[.,;:!?"'`]+$/u, ""));
     if (!["http:", "https:"].includes(url.protocol)) return "";
     return `${url.hostname.replace(/^www\./, "").toLowerCase()}${url.pathname.replace(/\/$/, "")}`;
   } catch { return ""; }
+}
+
+export function unreadReportSources(report: string, sourceReadUrls: readonly string[]): string[] {
+  const receipts = new Set(sourceReadUrls.map(sourceKey).filter(Boolean));
+  return [...new Set([...report.matchAll(/https?:\/\/[^\s<>)\]]+/g)]
+    .map((match) => sourceKey(match[0]))
+    .filter((key) => key && !receipts.has(key)))];
 }
 
 export function directReplyComplete(report: string): CompletionResult {
@@ -399,6 +407,9 @@ export function companyWorkComplete(input: CompletionInput): CompletionResult {
   const report = input.report.trim();
   if (!report) return { complete: false, reason: "report_missing" };
   if (!input.recalled) return { complete: false, reason: "company_context_missing" };
+  if (input.sourceReadUrls) {
+    if (unreadReportSources(report, input.sourceReadUrls).length) return { complete: false, reason: "report_sources_missing" };
+  }
   if (input.prospectSources) {
     const receipts = new Set(input.prospectSources.map(sourceKey).filter(Boolean));
     const companyHost = hostname(input.companyWebsite || "");

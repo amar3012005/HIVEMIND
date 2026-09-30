@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, unreadReportSources } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -831,10 +831,16 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "playbook_proposal_missing", report: reply };
     }
     if (companyProposal) written.report = `# Playbook revision proposal\n\nProposal ID: ${companyProposal.id}. Status: pending_review. Not applied.\n\n## Proposed change\n${companyProposal.instruction}`;
-    const finalVerdict = companyWorkComplete({ report: written.report, recalled: await this.agent.hasCompanyContext(), prospectSources, companyWebsite: work.website });
+    const finalVerdict = companyWorkComplete({ report: written.report, recalled: await this.agent.hasCompanyContext(), prospectSources,
+      sourceReadUrls: await this.agent.sourceReadUrlsForWorkRun(), companyWebsite: work.website });
     if (!finalVerdict.complete) {
       const reason = finalVerdict.reason;
-      const reply = `${reason === "prospect_sources_missing" ? "Prospect citations lack matching external tool receipts. Draft below is unverified; no artifact was saved. Plan remains open." : `I could not complete this work: ${reason}.`}\n\n${written.report.trim()}`.trim();
+      if (reason === "report_sources_missing") {
+        const receipts = await this.agent.sourceReadUrlsForWorkRun();
+        console.warn(JSON.stringify({ event: "report_source_receipts_missing", runId: work.runId,
+          citedWithoutReceipt: unreadReportSources(written.report, receipts), receiptCount: receipts.length }));
+      }
+      const reply = `${["prospect_sources_missing", "report_sources_missing"].includes(reason) ? "Report citations lack source-read receipts for this WorkRun. Draft below is unverified; no artifact was saved. Plan remains open." : `I could not complete this work: ${reason}.`}\n\n${written.report.trim()}`.trim();
       await durable.do("incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", reason); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason, report: reply };
     }
@@ -858,7 +864,9 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
 
     const prepared = await durable.do("complete", async () => {
       const recalled = await this.agent.hasCompanyContext();
-      const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources, companyWebsite: work.website });
+      const verdict = companyWorkComplete({ report: written.report, recalled, prospectSources,
+        sourceReadUrls: await this.agent.sourceReadUrlsForWorkRun(), companyWebsite: work.website });
+      if (!verdict.complete) throw new Error(verdict.reason);
       let artifactId = "";
       if (artifactRequested) {
         const saved = await this.agent.saveCompanyArtifact({

@@ -234,6 +234,14 @@ test("accepts a finished campaign without competitor vocabulary", () => {
   });
 });
 
+test("a cited company report needs source reads from its WorkRun", () => {
+  const report = "# Positioning\n\nOfficial page: https://www.deepset.ai/ . Decision: compare the platform offer.";
+  assert.equal(companyWorkComplete({ report, recalled: true, sourceReadUrls: [] }).reason, "report_sources_missing");
+  assert.equal(companyWorkComplete({ report, recalled: true, sourceReadUrls: ["https://www.deepset.ai/"] }).complete, true);
+  assert.equal(companyWorkComplete({ report: "# Positioning\n\nSource: https://www.deepset.ai/.", recalled: true,
+    sourceReadUrls: ["https://www.deepset.ai/"] }).complete, true);
+});
+
 test("accepts a short reply to a greeting", () => {
   assert.deepEqual(directReplyComplete("Hi. What should I work on?"), {
     complete: true,

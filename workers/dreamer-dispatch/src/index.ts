@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CronExpressionParser } from "cron-parser";
 
-type DispatchMessage = { tenantId: string; occurrenceId: string };
+type DispatchMessage = { tenantId: string; occurrenceId: string; kind: "start" | "reconcile" };
 type TriggerSchedule =
   | { kind: "once"; runAt: string }
   | { kind: "cron"; expression: string; timezone: string };
@@ -14,6 +14,7 @@ interface AppEnv {
   ENVIRONMENT: string;
   DISPATCH_ENABLED: string;
   DSH_TRIGGER_URL: string;
+  DSH_STATUS_BASE_URL: string;
   SCHEDULER_ADMIN_TOKEN: string;
   DSH_DISPATCH_TOKEN: string;
   DSH_CALLBACK_TOKEN: string;
@@ -50,7 +51,7 @@ type OccurrenceRow = {
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const ALARM_BATCH = 100;
-const RECONCILE_AFTER_MS = 24 * 60 * 60 * 1000;
+const RECONCILE_AFTER_MS = 15 * 60 * 1000;
 const MAX_QUEUE_ATTEMPTS = 8;
 
 function json(data: unknown, status = 200): Response {
@@ -117,7 +118,10 @@ async function doCall(env: AppEnv, tenantId: string, path: string, method: strin
 }
 
 export class TenantSchedules extends DurableObject<AppEnv> {
+  private schemaReady = false;
+
   private ensureSchema(): void {
+    if (this.schemaReady) return;
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS tenant_identity (id TEXT PRIMARY KEY)`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS triggers (
       trigger_id TEXT PRIMARY KEY, kind TEXT NOT NULL, run_at TEXT, expression TEXT, timezone TEXT,
@@ -129,9 +133,15 @@ export class TenantSchedules extends DurableObject<AppEnv> {
       id TEXT PRIMARY KEY, trigger_id TEXT NOT NULL, due_at INTEGER NOT NULL,
       payload_json TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0, lease_token TEXT, lease_until INTEGER,
-      dsh_run_id TEXT, error TEXT, receipt_json TEXT, accepted_at INTEGER, updated_at INTEGER NOT NULL
+      dsh_run_id TEXT, error TEXT, receipt_json TEXT, accepted_at INTEGER,
+      reconcile_after INTEGER, updated_at INTEGER NOT NULL
     )`);
+    const columns = [...this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(occurrences)")];
+    if (!columns.some((column) => column.name === "reconcile_after")) {
+      this.ctx.storage.sql.exec("ALTER TABLE occurrences ADD COLUMN reconcile_after INTEGER");
+    }
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS occurrences_pending ON occurrences(status, due_at)`);
+    this.schemaReady = true;
   }
 
   private tenant(tenantId: string): void {
@@ -151,7 +161,11 @@ export class TenantSchedules extends DurableObject<AppEnv> {
     const stale = this.ctx.storage.sql.exec<{ due: number | null }>(
       "SELECT MIN(accepted_at) AS due FROM occurrences WHERE status = 'accepted'",
     ).one()?.due;
-    const candidates = [due, pending ? Date.now() + 10_000 : null, stale === null || stale === undefined ? null : stale + RECONCILE_AFTER_MS]
+    const reconcile = this.ctx.storage.sql.exec<{ due: number | null }>(
+      "SELECT MIN(reconcile_after) AS due FROM occurrences WHERE status = 'needs_reconciliation'",
+    ).one()?.due;
+    const candidates = [due, pending ? Date.now() + 10_000 : null,
+      stale === null || stale === undefined ? null : stale + RECONCILE_AFTER_MS, reconcile]
       .filter((value): value is number => value !== null && value !== undefined);
     if (candidates.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, Math.min(...candidates)));
     else await this.ctx.storage.deleteAlarm();
@@ -166,8 +180,8 @@ export class TenantSchedules extends DurableObject<AppEnv> {
       }
       const now = Date.now();
       this.ctx.storage.sql.exec(
-        "UPDATE occurrences SET status = 'needs_reconciliation', updated_at = ? WHERE status = 'accepted' AND accepted_at <= ?",
-        now, now - RECONCILE_AFTER_MS,
+        "UPDATE occurrences SET status = 'needs_reconciliation', reconcile_after = ?, updated_at = ? WHERE status = 'accepted' AND accepted_at <= ?",
+        now, now, now - RECONCILE_AFTER_MS,
       );
       for (let i = 0; i < ALARM_BATCH; i++) {
         const row = this.ctx.storage.sql.exec<ScheduleRow>(
@@ -193,8 +207,19 @@ export class TenantSchedules extends DurableObject<AppEnv> {
           "SELECT * FROM occurrences WHERE status = 'pending' ORDER BY due_at LIMIT ?", ALARM_BATCH,
         )];
         for (const row of pending) {
-          await this.env.DREAMER_QUEUE.send({ tenantId, occurrenceId: row.id });
+          await this.env.DREAMER_QUEUE.send({ tenantId, occurrenceId: row.id, kind: "start" });
           this.ctx.storage.sql.exec("UPDATE occurrences SET status = 'queued', updated_at = ? WHERE id = ? AND status = 'pending'", Date.now(), row.id);
+        }
+        const uncertain = [...this.ctx.storage.sql.exec<OccurrenceRow>(
+          "SELECT * FROM occurrences WHERE status = 'needs_reconciliation' AND reconcile_after <= ? ORDER BY reconcile_after LIMIT ?",
+          now, ALARM_BATCH,
+        )];
+        for (const row of uncertain) {
+          await this.env.DREAMER_QUEUE.send({ tenantId, occurrenceId: row.id, kind: "reconcile" });
+          this.ctx.storage.sql.exec(
+            "UPDATE occurrences SET reconcile_after = ? WHERE id = ? AND status = 'needs_reconciliation'",
+            Date.now() + RECONCILE_AFTER_MS, row.id,
+          );
         }
       }
       await this.arm();
@@ -292,6 +317,12 @@ export class TenantSchedules extends DurableObject<AppEnv> {
         );
         return json({ recorded: true });
       }
+      if (path === "/reconcile" && request.method === "POST") {
+        const id = String(body.occurrenceId || "");
+        const row = this.ctx.storage.sql.exec<OccurrenceRow>("SELECT * FROM occurrences WHERE id = ?", id).toArray()[0];
+        if (!row || row.status !== "needs_reconciliation" || !row.dsh_run_id) return json({ state: "done" });
+        return json({ state: "pending", runId: row.dsh_run_id });
+      }
       if (path === "/terminal" && request.method === "POST") {
         const id = String(body.occurrenceId || "");
         const input = body.input as TerminalInput;
@@ -363,6 +394,37 @@ async function dispatch(env: AppEnv, message: Message<DispatchMessage>): Promise
   }
 }
 
+async function reconcile(env: AppEnv, message: Message<DispatchMessage>): Promise<void> {
+  const { tenantId, occurrenceId } = message.body;
+  try {
+    const rowResponse = await doCall(env, tenantId, "/reconcile", "POST", { occurrenceId });
+    if (!rowResponse.ok) throw new Error("reconciliation_lookup_failed");
+    const row = await rowResponse.json() as { state: string; runId?: string };
+    if (row.state !== "pending" || !row.runId) { message.ack(); return; }
+    const base = new URL(env.DSH_STATUS_BASE_URL);
+    if (base.protocol !== "https:" && !(env.ENVIRONMENT === "local" && base.hostname === "127.0.0.1")) throw new Error("dsh_status_url_invalid");
+    if (!env.DSH_DISPATCH_TOKEN) throw new Error("dsh_dispatch_token_missing");
+    const url = new URL(`${base.pathname.replace(/\/$/, "")}/${encodeURIComponent(row.runId)}`, base);
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${env.DSH_DISPATCH_TOKEN}`, "x-hivemind-tenant-id": tenantId },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) throw new Error(`dsh_status_http_${response.status}`);
+    const status = await response.json() as { status?: string; receiptId?: string };
+    if (status.status === "completed" || status.status === "failed") {
+      const result = await doCall(env, tenantId, "/terminal", "POST", {
+        occurrenceId, input: { status: status.status, runId: row.runId, receiptId: status.receiptId },
+      });
+      if (!result.ok) throw new Error("reconciliation_terminal_write_failed");
+    } else if (status.status !== "running" && status.status !== "queued") {
+      throw new Error("dsh_status_invalid");
+    }
+    message.ack();
+  } catch {
+    message.retry({ delaySeconds: Math.min(300, 15 * 2 ** Math.min(message.attempts, 4)) });
+  }
+}
+
 export default {
   async fetch(request: Request, env: AppEnv): Promise<Response> {
     const url = new URL(request.url);
@@ -392,7 +454,8 @@ export default {
   },
   async queue(batch: MessageBatch<DispatchMessage>, env: AppEnv): Promise<void> {
     for (let i = 0; i < batch.messages.length; i += 3) {
-      await Promise.all(batch.messages.slice(i, i + 3).map((message) => dispatch(env, message)));
+      await Promise.all(batch.messages.slice(i, i + 3).map((message) =>
+        message.body?.kind === "reconcile" ? reconcile(env, message) : dispatch(env, message)));
     }
   },
 } satisfies ExportedHandler<AppEnv, DispatchMessage>;

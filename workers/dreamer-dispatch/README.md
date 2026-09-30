@@ -49,8 +49,12 @@ DSH calls `POST /v1/tenants/{tenantId}/occurrences/{occurrenceId}/terminal`
 with `Authorization: Bearer $DSH_CALLBACK_TOKEN` and
 `{"status":"completed","runId":"...","receiptId":"..."}` (or
 `"failed"`). The callback carries an identifier, not report or memory content.
-The occurrence remains `accepted` until this callback; after 24 hours it
-becomes `needs_reconciliation`, which can still be completed by a late callback.
+The occurrence remains `accepted` until this callback. After 15 minutes without
+a callback, Cloudflare queries `GET {DSH_STATUS_BASE_URL}/{runId}` with the
+dispatch Bearer token and tenant header. DSH returns
+`{"status":"running"}` or `{"status":"completed","receiptId":"..."}`
+(or `"failed"`). Cloudflare repeats that read while the run is unresolved.
+A late callback is still accepted.
 The DSH `runId` must match the accepted run if one was recorded.
 
 ## Durability and scope
@@ -64,6 +68,8 @@ The DSH `runId` must match the accepted run if one was recorded.
   or terminal occurrences are acknowledged. Failed dispatches retry and go to
   the configured dead-letter queue after the retry limit; the occurrence records
   `dispatch_failed`. A late DSH callback can still reconcile that outcome.
+  Completion reconciliation uses a read-only DSH status request and never
+  starts another Dreamer workflow.
 - An accepted DSH workflow's internal entity batches, reasoning, validation,
   and memory writes are DSH's responsibility. Cloudflare only stores its dispatch
   and completion receipts.
@@ -74,7 +80,8 @@ Create the primary and dead-letter Queues named in `wrangler.jsonc` for the
 chosen environment. Set `SCHEDULER_ADMIN_TOKEN`, `DSH_DISPATCH_TOKEN`, and
 `DSH_CALLBACK_TOKEN` as Worker secrets; each should be a distinct random value
 of at least 24 characters. Set the fixed HTTPS `DSH_TRIGGER_URL` through the
-deployment configuration and enable `DISPATCH_ENABLED` only after the DSH
+deployment configuration, plus the HTTPS `DSH_STATUS_BASE_URL` for the
+read-only run-status endpoint. Enable `DISPATCH_ENABLED` only after the DSH
 endpoint implements the contract. The preview environment uses separate Queue
 names and Durable Object instances. There is no production deployment in this
 change.

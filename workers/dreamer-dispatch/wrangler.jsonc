@@ -7,7 +7,8 @@
   "vars": {
     "ENVIRONMENT": "local",
     "DISPATCH_ENABLED": "false",
-    "DSH_TRIGGER_URL": ""
+    "DSH_TRIGGER_URL": "",
+    "DSH_STATUS_BASE_URL": ""
   },
   "durable_objects": {
     "bindings": [{ "name": "TENANT_SCHEDULES", "class_name": "TenantSchedules" }]
@@ -31,7 +32,8 @@
       "vars": {
         "ENVIRONMENT": "preview",
         "DISPATCH_ENABLED": "false",
-        "DSH_TRIGGER_URL": ""
+        "DSH_TRIGGER_URL": "",
+        "DSH_STATUS_BASE_URL": ""
       },
       "durable_objects": {
         "bindings": [{ "name": "TENANT_SCHEDULES", "class_name": "TenantSchedules" }]

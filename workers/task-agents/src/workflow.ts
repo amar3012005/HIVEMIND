@@ -2,7 +2,7 @@ import { ThinkWorkflow, type ThinkWorkflowStep } from "@cloudflare/think/workflo
 import type { AgentWorkflowEvent } from "agents/workflows";
 import { z } from "zod";
 import { HivemindTaskAgent, reportTitle } from "./agent";
-import { artifactCreationForbidden, bindProspectSourcePassages, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, unreadReportSources } from "./completion";
+import { artifactCreationForbidden, bindProspectSourcePassages, canonicalizeReadCitationAliases, claimsArtifactApprovalPending, companyWorkComplete, directReplyComplete, extractReportDocument, isArtifactPlanTask, pdfReportReady, planRequestsArtifact, prospectEvidenceComplete, prospectQuotesVerified, reportDocumentReady, requestedLocationHint, requestedProspectCount, requestsArtifact, requestsPdf, requestsPreviousReportPdf, requestsSlideDeck, requestsVerifiedProspectRows, singlePageCaptureUrl, slideDeckReady, sourceEvidenceWindows, sourceExcerptForQuoteRepair, unreadReportSources } from "./completion";
 import { currentTurnTasks, missingPlanTaskIds, planTaskSourceRequirements, sourceReadPlanTaskVerified } from "./operating-plan";
 import { isNonblockingExecutionChoice, READ_TOOL_FALLBACK } from "./execution-choice";
 import { globalCatalog, globalPlaybookBody, localCatalog, localPlaybook } from "./playbooks";
@@ -738,6 +738,7 @@ export class TaskLifecycleWorkflow extends ThinkWorkflow<HivemindTaskAgent, Comp
       }
     }
 
+    written = { ...written, report: canonicalizeReadCitationAliases(written.report, await this.agent.sourceReadUrlsForWorkRun()) };
     let prospectSources: string[] | undefined;
     let verifiedProspectPages: Array<{ url: string; excerpt: string }> = [];
     if (claimsArtifactApprovalPending(written.report)) {

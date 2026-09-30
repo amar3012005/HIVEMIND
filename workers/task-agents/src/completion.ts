@@ -394,6 +394,29 @@ export function reportDocumentReady(report: string): boolean {
   return title === 0 && sections >= 2 && body.length >= 200;
 }
 
+/** A host-wide wildcard is a model citation shorthand, not a fetched page.
+ * Resolve it only when this WorkRun has exactly one page receipt on that host;
+ * otherwise leave it for the normal source-verification gate to reject. */
+export function canonicalizeReadCitationAliases(report: string, receiptUrls: readonly string[]): string {
+  const byHost = new Map<string, string[]>();
+  for (const value of receiptUrls) {
+    try {
+      const url = new URL(value);
+      const host = url.hostname.replace(/^www\./, "");
+      byHost.set(host, [...new Set([...(byHost.get(host) ?? []), url.href])]);
+    } catch { /* malformed receipts cannot authorize a citation */ }
+  }
+  return report.replace(/https?:\/\/[^\s<>"')\]]+/g, (value) => {
+    const candidate = value.replace(/[.,;]+$/, "");
+    try {
+      const url = new URL(candidate);
+      if (url.search || url.hash || !["/*", "/**"].includes(url.pathname)) return value;
+      const receipts = byHost.get(url.hostname.replace(/^www\./, "")) ?? [];
+      return receipts.length === 1 ? `${receipts[0]}${value.slice(candidate.length)}` : value;
+    } catch { return value; }
+  });
+}
+
 /** Keep the complete document when a model prefaces it with conversation. */
 export function extractReportDocument(output: string): string | null {
   const heading = /^#\s+\S/m.exec(output);

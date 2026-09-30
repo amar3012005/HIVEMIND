@@ -8,7 +8,6 @@ import type { ContextConfig } from "agents/context";
 import { generateText, streamText, tool, type ToolSet } from "ai";
 import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
 import { browserTargetAllowed, linkedPageUrls } from "./source-discovery";
-import { sourceExcerpt, sourcePreview } from "./source-preview";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
 import { authorizeCall } from "./capability";
@@ -1653,23 +1652,7 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         this.recordSourceRead(target.href, markdown);
         this.rememberSources({ url: target.href });
         this.note("browser_markdown", `${target.href}: ${markdown.length} characters`);
-        return { url: target.href, markdown: sourcePreview(markdown, this.state.envelope?.task ?? "") };
-      },
-    });
-    const savedSourceExcerpt = tool({
-      description: "Read an exact passage around a phrase from a page already opened with browser_markdown in this WorkRun. Uses the saved source receipt; does not fetch or invent text. Use when the bounded page view omitted evidence you need to quote.",
-      inputSchema: z.object({ url: z.url(), query: z.string().min(2).max(200) }),
-      execute: async ({ url, query }): Promise<{ url: string; excerpt?: string; error?: string }> => {
-        this.assertTool("source_excerpt");
-        const target = new URL(url).href;
-        const envelope = this.state.envelope;
-        if (!envelope) return { url: target, error: "source_not_read_in_workrun" };
-        const receipt = this.sql`SELECT excerpt FROM source_read_receipts WHERE run_id = ${envelope.runId} AND org_id = ${envelope.orgId} AND user_id = ${envelope.userId} AND url = ${target} LIMIT 1`[0];
-        if (!receipt) return { url: target, error: "source_not_read_in_workrun" };
-        const excerpt = sourceExcerpt(String(receipt.excerpt), query);
-        if (!excerpt) return { url: target, error: "phrase_not_found_in_source" };
-        this.note("source_excerpt", `${target}: ${query.slice(0, 60)}`);
-        return { url: target, excerpt };
+        return { url: target.href, markdown: markdown.slice(0, 12000) };
       },
     });
     const updatePlanTask = tool({
@@ -2158,7 +2141,6 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         ? createQuickActionTools({ browser: this.gatewayEnv().BROWSER as never, maxChars: 16000 })
         : {}),
       browser_markdown: browserRead,
-      source_excerpt: savedSourceExcerpt,
     };
   }
 

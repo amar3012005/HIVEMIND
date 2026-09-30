@@ -826,7 +826,7 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
     }
     const missingPlanIds = await missingContentTasks(written.completedTaskIds);
     if (missingPlanIds.length) {
-      const reply = `${written.report.trim()}\n\nI could not finish planned tasks ${missingPlanIds.join(", ")}. The plan remains open.`.trim();
+      const reply = `I could not finish planned tasks ${missingPlanIds.join(", ")}. The plan and saved evidence remain available to continue this WorkRun; no final deliverable was published.`;
       await durable.do("plan-incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", "plan_incomplete"); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason: "plan_incomplete", report: reply };
     }
@@ -847,7 +847,9 @@ Report:\n${written.report.slice(0, 15000)}\nSaved receipts:\n${receipts.map(({ u
         console.warn(JSON.stringify({ event: "report_source_receipts_missing", runId: work.runId,
           citedWithoutReceipt: unreadReportSources(written.report, receipts), receiptCount: receipts.length }));
       }
-      const reply = `${["prospect_sources_missing", "report_sources_missing"].includes(reason) ? "Report citations lack source-read receipts for this WorkRun. Draft below is unverified; no artifact was saved. Plan remains open." : `I could not complete this work: ${reason}.`}\n\n${written.report.trim()}`.trim();
+      const reply = ["prospect_sources_missing", "report_sources_missing"].includes(reason)
+        ? "Report citations lack source-read receipts for this WorkRun. The saved evidence remains available to continue; no artifact was published."
+        : `I could not complete this WorkRun: ${reason}. The plan remains open and no final deliverable was published.`;
       await durable.do("incomplete", async () => { await this.agent.note("report", reply); await this.agent.note("completion", reason); });
       return { runId: work.runId, orgId: work.orgId, complete: false, reason, report: reply };
     }

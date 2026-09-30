@@ -675,9 +675,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
 
   async onMessage(_connection: unknown, message: unknown): Promise<void> {
     const text = typeof message === "string" ? message : "";
-    let parsed: { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown; modePreference?: unknown } | null = null;
+    let parsed: { type?: unknown; id?: unknown; clientRequestId?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown; modePreference?: unknown } | null = null;
     try {
-      parsed = JSON.parse(text) as { type?: unknown; id?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown; modePreference?: unknown };
+      parsed = JSON.parse(text) as { type?: unknown; id?: unknown; clientRequestId?: unknown; decision?: unknown; answer?: unknown; userId?: unknown; task?: unknown; company?: unknown; website?: unknown; market?: unknown; modePreference?: unknown };
     } catch {
       return;
     }
@@ -766,11 +766,17 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       return;
     }
     if (parsed?.type !== "room-start") return;
+    const clientRequestId = typeof parsed.clientRequestId === "string" && /^[0-9a-f-]{36}$/i.test(parsed.clientRequestId)
+      ? parsed.clientRequestId : "";
     const named = String((this as { name?: string }).name ?? "");
     const match = /^session-([0-9a-f-]{36})-[0-9a-f-]{36}$/i.exec(named) || /^day1-([0-9a-f-]{36})-flow$/i.exec(named);
     const userId = typeof parsed.userId === "string" ? parsed.userId : "";
     if (!match || !/^[0-9a-f-]{36}$/i.test(userId) || userId !== authenticated.userId || match[1] !== authenticated.orgId) {
       this.note("workrun", "room start rejected");
+      return;
+    }
+    if (clientRequestId && clientRequestId === this.state.lastClientRequestId && this.state.envelope?.userId === userId) {
+      connection.send(JSON.stringify({ type: "room-start-accepted", clientRequestId, runId: this.state.envelope.runId }));
       return;
     }
     const orgId = match[1];
@@ -812,8 +818,9 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
       }
       const profile = await readCompanyProfile(this.gatewayEnv(), orgId, userId).catch(() => null);
       const facts = companyFacts(profile, supplied);
+      const runId = crypto.randomUUID();
       await this.startCompanyWork({
-        runId: crypto.randomUUID(),
+        runId,
         orgId,
         userId,
         taskType: "room_task",
@@ -827,9 +834,14 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
         ...facts,
         task,
       });
+      if (clientRequestId) {
+        this.setState({ ...this.state, lastClientRequestId: clientRequestId });
+        connection.send(JSON.stringify({ type: "room-start-accepted", clientRequestId, runId }));
+      }
     } catch (error) {
       this.note("report", `I could not start this turn: ${error instanceof Error ? error.message : "unknown error"}.`);
       this.note("completion", "start_failed");
+      connection.send(JSON.stringify({ type: "workrun-control-result", operation: "room-start", error: "Could not start this turn." }));
     }
   }
 

@@ -71,6 +71,7 @@ export interface OperatingPlan {
 }
 
 export interface TaskAgentState {
+  lastClientRequestId?: string;
   envelope: TaskEnvelope | null;
   role: SpecialistRole | null;
   employee?: EmployeeIdentity | null;

@@ -1453,12 +1453,13 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     this.firstVisibleChunkLogged = false;
     this.stepNumber = ctx.stepNumber;
     if (this.state.narrativeTurn || this.state.catalogStage === "planning") return;
-    const activeTools = this.activeExecutionTools();
-    // The final plan task is delivery/receipt reconciliation. Earlier steps
-    // keep the model's reasoning; final prose can stream without hidden
-    // reasoning tokens while the Workflow still validates the artifact.
+    // Think's per-step tool scope follows the durable plan. Once the earlier
+    // tasks are complete, let the model stream the deliverable without sending
+    // the research tool schemas again; Workflow still verifies source and
+    // artifact receipts before recording completion.
     const finalPlanStep = this.state.executionTurn
       && finalPlanStepReady(this.state.operatingPlan, this.state.envelope?.runId);
+    const activeTools = finalPlanStep ? [] : this.activeExecutionTools();
     const synthesis = finalPlanStep ? { providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } } } : {};
     if (!this.recoveryStepPending || this.recoveryStepUsed) return { activeTools, ...synthesis };
     this.recoveryStepPending = false;

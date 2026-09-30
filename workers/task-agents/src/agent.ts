@@ -7,6 +7,7 @@ import { getAgentByName, type Connection } from "agents";
 import type { ContextConfig } from "agents/context";
 import { generateText, streamText, tool, type ToolSet } from "ai";
 import { mayRepairBrowserExtract, repairBrowserExtractCall } from "./tool-recovery";
+import { compactStepSourceMessages } from "./step-context";
 import { browserTargetAllowed, linkedPageUrls } from "./source-discovery";
 import { z } from "zod";
 import MarkdownIt from "markdown-it";
@@ -1460,11 +1461,18 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const finalPlanStep = this.state.executionTurn
       && finalPlanStepReady(this.state.operatingPlan, this.state.envelope?.runId);
     const activeTools = finalPlanStep ? [] : this.activeExecutionTools();
+    const compacted = this.state.executionTurn && ctx.stepNumber > 0
+      ? compactStepSourceMessages(ctx.messages, this.state.envelope?.task ?? "")
+      : null;
+    if (compacted) console.log(JSON.stringify({ event: "think_step_context", runId: this.state.envelope?.runId,
+      step: ctx.stepNumber, inputChars: JSON.stringify(ctx.messages).length,
+      compactedChars: JSON.stringify(compacted).length }));
+    const messages = compacted ? { messages: compacted } : {};
     const synthesis = finalPlanStep ? { providerOptions: { openrouter: { reasoning: { enabled: false, effort: "none" } } } } : {};
-    if (!this.recoveryStepPending || this.recoveryStepUsed) return { activeTools, ...synthesis };
+    if (!this.recoveryStepPending || this.recoveryStepUsed) return { activeTools, ...messages, ...synthesis };
     this.recoveryStepPending = false;
     this.recoveryStepUsed = true;
-    return { model: recoveryModel(this.gatewayEnv()), activeTools, ...synthesis };
+    return { model: recoveryModel(this.gatewayEnv()), activeTools, ...messages, ...synthesis };
   }
 
   onStepEnd(ctx: StepContext): void {

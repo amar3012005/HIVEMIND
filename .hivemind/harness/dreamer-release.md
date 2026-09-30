@@ -68,3 +68,11 @@ forwards only the exact Dreamer settings endpoint, and exposes the server-derive
 admin switch without mounting another Harness runtime. Focused Worker checks: 9
 passed. The broader pre-existing Day 0 test expects the old flag key and fails
 independently of this change; its feature was not altered.
+
+Cloudflare production Settings deployment completed: Worker version
+`533aacff-a09d-447c-b02f-3f5d5a7891f3`, frontend source `c3518ea0`.
+Prior Worker version for rollback: `3efc1b82-3a57-4a6f-8508-cb1427c1f0df`.
+Authenticated Chrome canary at `https://next.singulancelabs.com/hivemind/app/settings`
+shows the Dreaming section, company Flashbacks consent copy, and enabled admin
+switch with `aria-checked=false`. Anonymous access returns JSON 401, not SPA HTML.
+No toggle was enabled and no production-model dreaming run was started.

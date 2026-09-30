@@ -1309,10 +1309,12 @@ export class HivemindTaskAgent extends Think<Env, TaskAgentState> {
     const brief = cachedBrief || (await this.loadProfileBrief(envelope.orgId, envelope.userId)).brief;
     const recoveryBrief = this.priorRunBrief(envelope.orgId, envelope.userId, envelope.runId);
     const companyContextLoaded = !brief.startsWith("Authenticated profile unavailable.");
-    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, catalogStage: "global", narrativeTurn: false, executionTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "", privateMemoryWritesAllowed: false });
+    this.setState({ ...this.state, envelope, role, employee: envelope.employee ?? null, tools: [...new Set([...tools, ...toolsForGroups([])])], sources: [], profileBrief: brief, operatingMemoryBrief: "", recoveryBrief, sourceReceiptBrief: "", catalogStage: "global", narrativeTurn: false, executionTurn: false, selectedGlobals: [], activePlaybookId: null, operatingPlan: null, companyContextLoaded, companyContextRequired: false, companyMemoryIntent: false, companyMemoryReceiptId: "", privateMemoryWritesAllowed: false });
     // A resumed or continued WorkRun has already discovered these exact
     // source URLs. They remain authorized through its scoped source ledger.
-    for (const url of this.sourceReadUrlsForWorkRun()) this.discoveredUrls.add(url);
+    const savedSourceUrls = this.sourceReadUrlsForWorkRun();
+    for (const url of savedSourceUrls) this.discoveredUrls.add(url);
+    if (savedSourceUrls.length) this.setState({ ...this.state, sourceReceiptBrief: savedSourceUrls.slice(0, 12).join(", ") });
     if (recoveryBrief) this.note("workrun-recovery-context", recoveryBrief);
     if (envelope.employee) this.note("employee-assigned", `${envelope.employee.name} (${envelope.employee.slug})`);
     await this.context.refreshSystemPrompt();

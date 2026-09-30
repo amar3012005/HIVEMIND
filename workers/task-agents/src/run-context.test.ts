@@ -53,3 +53,12 @@ test("prior WorkRun status is visible but cannot become the new turn's plan", ()
   assert.match(context, /current request controls whether to continue/);
   assert.doesNotMatch(context, /Current run old/);
 });
+
+test("resumed execution sees exact saved source URLs without inheriting another plan", () => {
+  const context = runContext(state({
+    sourceReceiptBrief: "https://www.talanx.com/en/talanx-group, https://www.hannover-re.com/en/",
+  }));
+  assert.match(context, /Current WorkRun saved source URLs: https:\/\/www\.talanx\.com\/en\/talanx-group/);
+  assert.match(context, /source_excerpt/);
+  assert.doesNotMatch(context, /Old step/);
+});

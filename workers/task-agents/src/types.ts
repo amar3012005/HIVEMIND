@@ -95,6 +95,7 @@ export interface TaskAgentState {
   profileBrief?: string;
   operatingMemoryBrief?: string;
   recoveryBrief?: string;
+  sourceReceiptBrief?: string;
   awaiting: "" | "input" | "memory";
   operatingPlan?: OperatingPlan | null;
   activePlaybookId?: string | null;

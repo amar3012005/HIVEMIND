@@ -1,3 +1,4 @@
+import { runTriggers, receiveTriggerEvent } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
 import fs from 'fs';
 import os from 'os';
@@ -8058,6 +8059,21 @@ const server = http.createServer(async (req, res) => {
     result.push(buildWhatsAppConnectorStatus(whatsappStatus));
 
     return jsonResponse(res, { connectors: result });
+  }
+
+  if (pathname === '/v1/hivemind/triggers/webhook' && req.method === 'POST') {
+    try {
+      const { raw } = await parseBodyWithRaw(req, 512 * 1024);
+      return jsonResponse(res, await receiveTriggerEvent(raw, req.headers, prisma));
+    } catch (error) { return jsonResponse(res, { error: 'Connected activity delivery could not be accepted.' }, error.status || 400); }
+  }
+  if (pathname === '/v1/hivemind/triggers' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    try {
+      const { parsed } = await parseBodyWithRaw(req, 64 * 1024);
+      return jsonResponse(res, await runTriggers(parsed, { prisma, userId: current.session.userId, orgId: current.session.orgId || current.session.org_id }));
+    } catch (error) { return jsonResponse(res, { error: error.status ? error.message : 'HIVEMIND connected activity is temporarily unavailable.' }, error.status || 502); }
   }
 
   // POST /v1/connectors/composio/:toolkit/connect — start a Composio

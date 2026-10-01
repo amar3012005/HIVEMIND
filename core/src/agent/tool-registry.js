@@ -1,3 +1,4 @@
+import { runTriggers } from '../connectors/composio/hivemind-triggers.js';
 /**
  * Tool registry for Talk-to-HIVE ReAct agent.
  *
@@ -225,6 +226,7 @@ function restrictEvidenceToTemporalSnapshot(result, { validAt = null, knownAt = 
 // ── Dispatch handlers ────────────────────────────────────────────────────────
 
 const TOOL_HANDLERS = {
+  hivemind_triggers: (args, ctx) => runTriggers(args, ctx),
   /**
    * Exact counting by SCAN, not sample.
    *

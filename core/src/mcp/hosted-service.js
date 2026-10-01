@@ -1,3 +1,4 @@
+import { triggerTool, runTriggers } from '../connectors/composio/hivemind-triggers.js';
 /**
  * Hosted MCP Service
  * "Context-as-a-Service" - Cloud-hosted MCP server for cross-platform AI memory
@@ -506,6 +507,7 @@ function generateToolsManifest(userId, orgId, options = {}) {
   const isOpsOperator = options.isMaster === true || scopeSet.has('ops:deploy');
 
   const tools = [
+    triggerTool,
     {
       name: 'hyperagents_memory',
       description: `Read and write private Hyper Agents operating memory for the authenticated tenant. This is a separate lane from HIVE-MIND company memory: it is never included in hivemind_recall, company profiles, or the approval-gated company memory graph. Agents may save their own reusable learnings, decision notes, and handoffs without company-memory approval. Use action="recall" to retrieve notes from any agent in the tenant; optionally filter by agent_slug. Use action="save" only for durable agent operating knowledge, not transient user/company facts. Tenant and author identity come from the authenticated credential; never pass or infer org/user IDs. Supply a stable idempotency_key for retries.`,
@@ -2403,6 +2405,15 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
     } catch (error) {
       return formatToolContent({ ok: false, error: `Ops Gateway request failed: ${error.message}` });
     }
+  }
+
+  if (name === 'hivemind_triggers') {
+    const read = ['discover', 'inspect', 'list', 'deliveries', 'suggestions'].includes(args?.operation);
+    const scopes = options.scopes || [];
+    if (!read && !isMaster && scopes.length && !scopes.some(scope => ['*', 'memory:write', 'memory.write'].includes(scope))) return formatToolContent({ error: 'Full access is required to manage connected activity.' });
+    const { getPrismaClient } = await import('../db/prisma.js');
+    try { return formatToolContent(await runTriggers(args || {}, { userId, orgId, prisma: getPrismaClient() })); }
+    catch (error) { return formatToolContent({ successful: false, error: error.status ? error.message : 'HIVEMIND Triggers is temporarily unavailable.' }); }
   }
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

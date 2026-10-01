@@ -1033,3 +1033,8 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
   });
   return { id: data?.id, status: data?.status };
 }
+
+// Trigger writes have an unknown outcome on transport failure; never retry them blindly.
+export function triggerRequest(method, path, body) {
+  return _composioRequest(method, `/api/v3.1${path}`, body, { retries: method === 'GET' ? 2 : 0 });
+}

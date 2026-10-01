@@ -1,6 +1,8 @@
+import { triggerTool } from '../connectors/composio/hivemind-triggers.js';
 import { CANONICAL_MEMORY_TYPES } from '../memory/memory-taxonomy.js';
 
 export const TOOL_SCHEMAS = [
+  { type: 'function', function: { name: triggerTool.name, description: triggerTool.description, parameters: triggerTool.inputSchema } },
   {
     type: 'function',
     function: {

@@ -1,3 +1,4 @@
+import { classifyPendingActivity } from './activity-relevance.js';
 import { createHmac, timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
@@ -34,6 +35,7 @@ export async function ensureTriggerStore(db) {
       id text PRIMARY KEY, subscription_id uuid NOT NULL REFERENCES hivemind_trigger_subscriptions(id),
       org_id text NOT NULL, user_id text NOT NULL, data jsonb NOT NULL,
       occurred_at timestamptz, received_at timestamptz NOT NULL DEFAULT now())`);
+    await db.$executeRawUnsafe("ALTER TABLE hivemind_trigger_events ADD COLUMN IF NOT EXISTS relevance_status text NOT NULL DEFAULT 'pending', ADD COLUMN IF NOT EXISTS relevance_decision jsonb, ADD COLUMN IF NOT EXISTS evaluated_at timestamptz");
     await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS hivemind_trigger_events_owner_date ON hivemind_trigger_events(org_id,user_id,received_at DESC)');
   })().catch(error => { initializations.delete(db); throw error; }));
   return initializations.get(db);
@@ -120,11 +122,12 @@ export async function runTriggers(args, ctx) {
   const visible = subscriptions.filter(s => allowed.has(s.account_id) && s.status !== 'deleted');
   if (args.operation === 'list') return { subscriptions: visible.map(view) };
   if (args.operation === 'deliveries' || args.operation === 'suggestions') {
-    if (args.operation === 'suggestions') reconcileActivity(ctx, owned, subscriptions);
+    if (args.operation === 'suggestions') { reconcileActivity(ctx, owned, subscriptions); classifyPendingActivity({ ...ctx, allowedAccountIds: [...allowed] }); }
     const events = await db.$queryRawUnsafe(`SELECT e.*,s.toolkit,s.slug FROM hivemind_trigger_events e
       JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
       WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
-      AND e.received_at > now()-interval '7 days' ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12);
+      AND e.received_at > now()-interval '7 days'
+      AND ($5::boolean=false OR e.relevance_status='approved') ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12, args.operation === 'suggestions');
     return args.operation === 'deliveries' ? { events } : { suggestions: [...new Map(events.slice().reverse().map(eventSuggestion).filter(Boolean).map(item => [`${item.source}:${item.topic}`, item])).values()].reverse() };
   }
   const row = visible.find(s => s.id === args.subscription_id);
@@ -181,6 +184,7 @@ export async function receiveTriggerEvent(raw, headers, db) {
     const occurredAt = date && Number.isFinite(parsedDate.getTime()) ? parsedDate.toISOString() : null;
     await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events (id,subscription_id,org_id,user_id,data,occurred_at)
       VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`, eventId, row.id, row.org_id, row.user_id, JSON.stringify({ ...payload.data, _hivemind: display }), occurredAt);
+    classifyPendingActivity({ orgId: row.org_id, userId: row.user_id, prisma: db, allowedAccountIds: active.map(account => account.id) });
   }
   return { accepted: true };
 }

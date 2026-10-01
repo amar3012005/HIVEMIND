@@ -67,3 +67,20 @@ A Remote namespace being mounted elsewhere does not grant a child context access
 Every child using `remote.agentPresets` must explicitly inject that service.
 Compiler and component tests did not catch this runtime guard; the authenticated
 Create HQ Runtime browser check did. Keep that check in the release gate.
+
+## Calendar visual simplification — 2026-10-01
+
+Production source `508623250e327cfb713695f806bccd13f0cdc7f1` replaces the dense
+workspace layout with a familiar React calendar: compact date toolbar, mini
+month navigation, calendar filters, highlighted today, current-time line,
+colored event cards, on-demand Create dialog and selected-item details. Existing
+native HQ contracts and execution semantics are unchanged.
+
+Image: `hivemind/harness-chat:sha-508623250e`.
+Image ID: `sha256:cff99482c673de9f20c5c4289e9095d52d798dd9f628e570b667405c275aae00`.
+Manifest: `/root/releases/manifests/hyperagents/hq-calendar-508623250e`.
+Typecheck and six focused UI tests passed. Authenticated production browser
+verified calendar navigation, empty uncluttered week, and Create dialog open/close.
+Screenshot: `/tmp/hq-calendar-redesign-production.png`. Runner healthy, zero
+restarts; sibling container identities unchanged. HQ remains paused. Immediate
+rollback is `sha-1849a12804`, recorded by the versioned release helper.

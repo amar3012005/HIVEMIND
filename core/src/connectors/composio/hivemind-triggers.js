@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import { triggerRequest, listConnectedAccounts, composioConnectionSubject } from './composio-service.js';
+import { triggerRequest, listConnectedAccounts, composioConnectionSubject, getToolkitTools } from './composio-service.js';
 
 export const triggerTool = {
   name: 'hivemind_triggers',
@@ -125,7 +125,7 @@ export async function runTriggers(args, ctx) {
       JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
       WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
       AND e.received_at > now()-interval '7 days' ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12);
-    return args.operation === 'deliveries' ? { events } : { suggestions: events.map(eventSuggestion).filter(Boolean) };
+    return args.operation === 'deliveries' ? { events } : { suggestions: [...new Map(events.map(eventSuggestion).filter(Boolean).map(item => [`${item.source}:${item.topic}`, item])).values()] };
   }
   const row = visible.find(s => s.id === args.subscription_id);
   if (!row?.remote_id) fail('Subscription not found in your connected accounts.', 404);
@@ -171,11 +171,16 @@ export async function receiveTriggerEvent(raw, headers, db) {
     if (!active.some(a => a.id === row.account_id)) continue;
     const check = ajv.compile(row.payload_schema);
     if (!check(payload.data)) fail('Event does not match the subscribed schema.', 422);
-    const date = payload.data?.message_timestamp || payload.data?.timestamp || null;
-    const parsedDate = typeof date === 'number' ? new Date(date < 1e12 ? date * 1000 : date) : new Date(date);
+    const eventId = `${payload.id || m.log_id || id}:${row.id}`;
+    const duplicate = await db.$queryRawUnsafe('SELECT id FROM hivemind_trigger_events WHERE id=$1', eventId);
+    if (duplicate.length) continue;
+    const display = await eventDisplay(payload.data, row);
+    const date = payload.data?.message_timestamp || payload.data?.timestamp || payload.data?.ts || payload.data?.updated_at || payload.data?.modified_time || null;
+    const numeric = typeof date === 'number' || /^\d+(?:\.\d+)?$/.test(String(date)) ? Number(date) : null;
+    const parsedDate = numeric !== null ? new Date(numeric < 1e12 ? numeric * 1000 : numeric) : new Date(date);
     const occurredAt = date && Number.isFinite(parsedDate.getTime()) ? parsedDate.toISOString() : null;
     await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events (id,subscription_id,org_id,user_id,data,occurred_at)
-      VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`, `${payload.id || m.log_id || id}:${row.id}`, row.id, row.org_id, row.user_id, JSON.stringify(payload.data), occurredAt);
+      VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`, eventId, row.id, row.org_id, row.user_id, JSON.stringify({ ...payload.data, _hivemind: display }), occurredAt);
   }
   return { accepted: true };
 }
@@ -183,7 +188,7 @@ function eventSuggestion(event) {
   const data = event.data || {};
   if (event.toolkit === 'gmail' && ((data.label_ids || []).some(label => ['SPAM', 'TRASH', 'CATEGORY_PROMOTIONS'].includes(label)) || /(?:no[-_]?reply|mailer-daemon|notifications)@/i.test(String(data.sender || '')))) return null;
   if (data.bot_id || data.message?.bot_id) return null;
-  const topic = String(data.subject || data.message?.subject || data.title || data.issue?.title || data.pull_request?.title || data.file?.name || data.message?.text || (typeof data.message === 'string' ? data.message : '') || data.text || data.message_text || '').replace(/\s+/g,' ').trim().slice(0,140);
+  const topic = String(data._hivemind?.title || data.subject || data.message?.subject || data.document?.title || data.document?.name || data.title || data.issue?.title || data.pull_request?.title || data.file?.name || data.message?.text || (typeof data.message === 'string' ? data.message : '') || data.text || data.message_text || (event.toolkit === 'googledrive' && data.file_id ? 'a recently updated Drive file' : '')).replace(/\s+/g,' ').trim().slice(0,140);
   if (!topic) return null;
   return { id: event.id, topic, source: event.toolkit, trigger_slug: event.slug, timestamp: event.occurred_at || event.received_at,
     query: event.toolkit === 'gmail' && event.slug === 'GMAIL_NEW_GMAIL_MESSAGE'
@@ -191,25 +196,51 @@ function eventSuggestion(event) {
       : `Help me understand the recent ${event.toolkit} activity about “${topic}”, connect it with relevant memories, and suggest what I could do next.`, evidence: { event_id: event.id, subscription_id: event.subscription_id }, kind: 'connected_event' };
 }
 
-// Provision only event types with a complete provider-default configuration.
-// A paused/deleted subscription is an explicit opt-out and is never re-enabled.
+// Exact event slugs verified against the provider catalog. Prefer account-wide
+// activity over events requiring an invented channel/repository/document ID.
+const activityTypes = {
+  gmail: ['GMAIL_NEW_GMAIL_MESSAGE'],
+  slack: ['SLACK_RECEIVE_MESSAGE'],
+  github: ['GITHUB_ISSUE_ASSIGNED_TO_ME_TRIGGER', 'GITHUB_PULL_REQUEST_CREATED'],
+  googledrive: ['GOOGLEDRIVE_FILE_UPDATED_TRIGGER'],
+  googledocs: ['GOOGLEDOCS_DOCUMENT_UPDATED_TRIGGER'],
+};
 function reconcileActivity(ctx, owned, existing) {
   const key = `${ctx.orgId}:${ctx.userId}`;
   const previous = reconciliations.get(key);
   if (previous && Date.now() - previous < 15 * 60 * 1000) return;
   reconciliations.set(key, Date.now());
   (async () => {
-    const catalog = await runTriggers({ operation: 'discover' }, ctx);
     for (const account of owned) {
-      const event = catalog.events.find(item => item.toolkit === account.toolkit && !item.requires_setup &&
-        /(?:NEW_GMAIL_MESSAGE|NEW_MESSAGE|NEW_EMAIL|NEW_COMMIT|NEW_ISSUE|FILE_UPDATED|NEW_EVENT)/.test(item.slug) &&
-        !/(?:SENT|DELETE|REACTION|BOT)/.test(item.slug));
-      if (!event || existing.some(row => row.account_id === account.id && row.slug === event.slug)) continue;
-      const inspected = await runTriggers({ operation: 'inspect', trigger_slug: event.slug }, ctx);
-      const config = Object.fromEntries(Object.entries(inspected.config_schema.properties || {})
-        .filter(([,spec]) => spec.default !== undefined).map(([name,spec]) => [name,spec.default]));
-      if (!ajv.compile(inspected.config_schema)(config)) continue;
-      await runTriggers({ operation: 'create', trigger_slug: event.slug, connected_account_id: account.id, config }, ctx);
+      for (const slug of activityTypes[account.toolkit] || []) {
+        // A paused/deleted local subscription is an explicit opt-out.
+        if (existing.some(row => row.account_id === account.id && row.slug === slug && ['active', 'paused', 'deleted'].includes(row.status))) continue;
+        try {
+          const inspected = await runTriggers({ operation: 'inspect', trigger_slug: slug }, ctx);
+          const config = Object.fromEntries(Object.entries(inspected.config_schema.properties || {})
+            .filter(([,spec]) => spec.default !== undefined).map(([name,spec]) => [name,spec.default]));
+          if (!ajv.compile(inspected.config_schema)(config)) continue;
+          await runTriggers({ operation: 'create', trigger_slug: slug, connected_account_id: account.id, config }, ctx);
+        } catch {
+          // Isolate one unavailable account/event; other apps still reconcile.
+          // Retry on the next bounded reconciliation, never loop blindly.
+        }
+      }
     }
   })().catch(() => { reconciliations.delete(key); });
+}
+async function eventDisplay(data, row) {
+  if (row.toolkit !== 'googledrive' || !data.file_id) return {};
+  try {
+    const tool = (await getToolkitTools('googledrive')).find(item => item._composio.slug === 'GOOGLEDRIVE_GET_FILE_METADATA');
+    const args = { fileId: data.file_id, fields: 'id,name,webViewLink', supportsAllDrives: true };
+    if (!tool?._composio.version || !ajv.compile(tool.function.parameters)(args)) return {};
+    const receipt = await triggerRequest('POST', '/tools/execute/GOOGLEDRIVE_GET_FILE_METADATA', {
+      connected_account_id: row.account_id, user_id: row.subject,
+      version: tool._composio.version, arguments: args,
+    });
+    if (!receipt.successful) return {};
+    const file = receipt.data?.file || receipt.data;
+    return typeof file?.name === 'string' ? { title: file.name.slice(0, 240) } : {};
+  } catch { return {}; }
 }

@@ -224,7 +224,7 @@ export async function getToolkitTools(toolkitSlug) {
     // Kept alongside the OpenAI-shaped fields (ignored by the LLM, read by
     // executeTool's caller) so dispatch doesn't need to re-derive the real
     // Composio slug from the namespaced function name.
-    _composio: { toolkit: toolkitSlug, slug: tool.slug },
+    _composio: { toolkit: toolkitSlug, slug: tool.slug, version: tool.version },
   }));
   TOOL_SCHEMA_CACHE.set(toolkitSlug, { at: Date.now(), tools });
   return tools;

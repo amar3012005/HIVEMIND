@@ -106,7 +106,7 @@ export async function runTriggers(args, ctx) {
     return { successful: true, subscription: view(saved[0]) };
   }
   const subscriptions = await db.$queryRawUnsafe('SELECT * FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 100', ctx.orgId, ctx.userId);
-  const visible = subscriptions.filter(s => allowed.has(s.account_id));
+  const visible = subscriptions.filter(s => allowed.has(s.account_id) && s.status !== 'deleted');
   if (args.operation === 'list') return { subscriptions: visible.map(view) };
   if (args.operation === 'deliveries' || args.operation === 'suggestions') {
     const events = await db.$queryRawUnsafe(`SELECT e.*,s.toolkit,s.slug FROM hivemind_trigger_events e
@@ -162,7 +162,7 @@ export async function receiveTriggerEvent(raw, headers, db) {
 }
 function eventSuggestion(event) {
   const data = event.data || {};
-  const topic = String(data.subject || data.message?.subject || data.title || data.message?.text || data.text || data.message_text || '').replace(/\s+/g,' ').trim().slice(0,140);
+  const topic = String(data.subject || data.message?.subject || data.title || data.issue?.title || data.pull_request?.title || data.file?.name || data.message?.text || (typeof data.message === 'string' ? data.message : '') || data.text || data.message_text || '').replace(/\s+/g,' ').trim().slice(0,140);
   if (!topic) return null;
   return { id: event.id, topic, source: event.toolkit, trigger_slug: event.slug, timestamp: event.occurred_at || event.received_at,
     query: event.toolkit === 'gmail' && event.slug === 'GMAIL_NEW_GMAIL_MESSAGE'

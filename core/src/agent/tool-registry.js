@@ -2042,6 +2042,7 @@ export function normalizeAgentRecallMode(mode) {
 // Source: ai-boost/awesome-harness-engineering 2026 recommendations +
 // observed P95 latencies in HIVEMIND production.
 const TOOL_TIMEOUTS_MS = {
+  hivemind_triggers: 45_000,
   hivemind_find_entities: 3_000,
   hivemind_aggregate_entities: 5_000,
   // A filtered COUNT is a single indexed aggregate — far cheaper than recall's

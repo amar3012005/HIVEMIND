@@ -95,7 +95,10 @@ export async function runTriggers(args, ctx) {
     if (!type.version) fail('The provider did not return an event schema version.', 502);
     const check = ajv.compile(configSchema);
     if (!check(args.config || {})) fail(`Invalid event configuration: ${ajv.errorsText(check.errors)}`);
-    const inserted = await db.$queryRawUnsafe(`INSERT INTO hivemind_trigger_subscriptions
+    return db.$transaction(async tx => {
+      const lock = `trigger:${ctx.orgId}:${account.id}:${args.trigger_slug}:${createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex')}`;
+      await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', lock);
+    const inserted = await tx.$queryRawUnsafe(`INSERT INTO hivemind_trigger_subscriptions
       (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key,subject)
       VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12)
       ON CONFLICT(org_id,user_id,account_id,slug,config_key) DO UPDATE SET updated_at=now() RETURNING *`,
@@ -108,8 +111,9 @@ export async function runTriggers(args, ctx) {
       trigger_config: row.config, toolkit_versions: { [toolkit]: row.version },
     });
     if (!remote.trigger_id) fail('Subscription outcome could not be confirmed; inspect before retrying.', 502);
-    const saved = await db.$queryRawUnsafe('UPDATE hivemind_trigger_subscriptions SET remote_id=$1,status=\'active\',updated_at=now() WHERE id=$2::uuid RETURNING *', remote.trigger_id, row.id);
+    const saved = await tx.$queryRawUnsafe('UPDATE hivemind_trigger_subscriptions SET remote_id=$1,status=\'active\',updated_at=now() WHERE id=$2::uuid RETURNING *', remote.trigger_id, row.id);
     return { successful: true, subscription: view(saved[0]) };
+    }, { timeout: 45000 });
   }
   const subscriptions = await db.$queryRawUnsafe('SELECT * FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 100', ctx.orgId, ctx.userId);
   const visible = subscriptions.filter(s => allowed.has(s.account_id) && s.status !== 'deleted');
@@ -123,18 +127,21 @@ export async function runTriggers(args, ctx) {
   }
   const row = visible.find(s => s.id === args.subscription_id);
   if (!row?.remote_id) fail('Subscription not found in your connected accounts.', 404);
+  await db.$transaction(async tx => {
+    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `trigger:${ctx.orgId}:${row.account_id}:${row.slug}:${row.config_key}`);
   if (args.operation === 'delete' || args.operation === 'pause') {
     const next = args.operation === 'delete' ? 'deleted' : 'paused';
-    await db.$executeRawUnsafe('UPDATE hivemind_trigger_subscriptions SET status=$1,updated_at=now() WHERE id=$2::uuid', next, row.id);
-    const peers = await db.$queryRawUnsafe("SELECT status FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND remote_id=$2 AND status!='deleted'", ctx.orgId, row.remote_id);
+    await tx.$executeRawUnsafe('UPDATE hivemind_trigger_subscriptions SET status=$1,updated_at=now() WHERE id=$2::uuid', next, row.id);
+    const peers = await tx.$queryRawUnsafe("SELECT status FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND remote_id=$2 AND status!='deleted'", ctx.orgId, row.remote_id);
     if (!peers.some(peer => peer.status === 'active')) {
       if (!peers.length && args.operation === 'delete') await triggerRequest('DELETE', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`);
       else await triggerRequest('PATCH', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`, { status: 'disable' });
     }
   } else {
     await triggerRequest('PATCH', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`, { status: 'enable' });
-    await db.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='active',updated_at=now() WHERE id=$1::uuid", row.id);
+    await tx.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='active',updated_at=now() WHERE id=$1::uuid", row.id);
   }
+  }, { timeout: 45000 });
   return { successful: true, operation: args.operation, subscription_id: row.id };
 }
 export async function receiveTriggerEvent(raw, headers, db) {
@@ -170,6 +177,8 @@ export async function receiveTriggerEvent(raw, headers, db) {
 }
 function eventSuggestion(event) {
   const data = event.data || {};
+  if (event.toolkit === 'gmail' && ((data.label_ids || []).some(label => ['SPAM', 'TRASH', 'CATEGORY_PROMOTIONS'].includes(label)) || /(?:no[-_]?reply|mailer-daemon|notifications)@/i.test(String(data.sender || '')))) return null;
+  if (data.bot_id || data.message?.bot_id) return null;
   const topic = String(data.subject || data.message?.subject || data.title || data.issue?.title || data.pull_request?.title || data.file?.name || data.message?.text || (typeof data.message === 'string' ? data.message : '') || data.text || data.message_text || '').replace(/\s+/g,' ').trim().slice(0,140);
   if (!topic) return null;
   return { id: event.id, topic, source: event.toolkit, trigger_slug: event.slug, timestamp: event.occurred_at || event.received_at,

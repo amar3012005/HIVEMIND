@@ -21,3 +21,9 @@ User clarified that event provisioning must be automatic, without a configuratio
 - Read-only production subscription check confirmed active Gmail incoming-message subscription after opening the new-session page; no app event content was read by this check.
 - Frontend dd4d8fbe adds refresh replay for unchanged generated text, preserving edited user drafts, and explicit suggestion clicks replace composer drafts without sending.
 - Final frontend release version: a3ed3e3b-8ac9-4f0f-b530-338cf3b6111f, exact source dd4d8fbe. Live browser verified click-to-replace using an existing generated draft; no message submitted. Setup section absent.
+
+## Completed account-wide activity coverage
+
+Backend ff3f5312 selects verified account-wide provider types for Gmail incoming messages, Slack messages, GitHub assigned issues and new pull requests, Drive file updates, and Docs document updates. All configuration comes from the exact live schema defaults; no guessed channel/repository IDs. Each account/event failure is isolated and pending subscriptions can retry on the bounded reconciliation cadence. Explicit paused/deleted subscriptions are preserved. Tool metadata retains provider versions; Drive updates resolve a file name using only the exact-account read-only metadata tool and partial fields, with schema validation and version pinning. Slack numeric timestamps and app update timestamps are normalized; repeated topics retain their newest event. Unknown apps with no supported event type are not represented as covered.
+
+Provider metadata verified live: Slack message version 20260929_00, GitHub assigned issue 20260924_00, Drive update and metadata tool 20261001_00, Docs update 20260826_00. No user message/document body was fetched for this metadata verification.

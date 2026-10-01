@@ -20,6 +20,7 @@ const ajv = new Ajv({ strict: false, allErrors: true });
 addFormats(ajv);
 const validateInput = ajv.compile(triggerTool.inputSchema);
 const initializations = new WeakMap();
+const reconciliations = new Map();
 export async function ensureTriggerStore(db) {
   if (!initializations.has(db)) initializations.set(db, (async () => {
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_trigger_subscriptions (
@@ -119,6 +120,7 @@ export async function runTriggers(args, ctx) {
   const visible = subscriptions.filter(s => allowed.has(s.account_id) && s.status !== 'deleted');
   if (args.operation === 'list') return { subscriptions: visible.map(view) };
   if (args.operation === 'deliveries' || args.operation === 'suggestions') {
+    if (args.operation === 'suggestions') reconcileActivity(ctx, owned, subscriptions);
     const events = await db.$queryRawUnsafe(`SELECT e.*,s.toolkit,s.slug FROM hivemind_trigger_events e
       JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
       WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
@@ -163,7 +165,9 @@ export async function receiveTriggerEvent(raw, headers, db) {
   if (!rows.length) return { ignored: true };
   for (const row of rows) {
     if (m.user_id !== (row.subject || composioConnectionSubject(row.org_id, { userId: row.user_id }))) continue;
-    const active = await accounts({ orgId: row.org_id, userId: row.user_id, prisma: db });
+    let active;
+    try { active = await accounts({ orgId: row.org_id, userId: row.user_id, prisma: db }); }
+    catch (error) { if (error.status === 403) continue; throw error; }
     if (!active.some(a => a.id === row.account_id)) continue;
     const check = ajv.compile(row.payload_schema);
     if (!check(payload.data)) fail('Event does not match the subscribed schema.', 422);
@@ -185,4 +189,27 @@ function eventSuggestion(event) {
     query: event.toolkit === 'gmail' && event.slug === 'GMAIL_NEW_GMAIL_MESSAGE'
       ? `Help me draft a reply to the recent Gmail message about “${topic}”, using relevant context from my memories. Keep it as a draft for me to review.`
       : `Help me understand the recent ${event.toolkit} activity about “${topic}”, connect it with relevant memories, and suggest what I could do next.`, evidence: { event_id: event.id, subscription_id: event.subscription_id }, kind: 'connected_event' };
+}
+
+// Provision only event types with a complete provider-default configuration.
+// A paused/deleted subscription is an explicit opt-out and is never re-enabled.
+function reconcileActivity(ctx, owned, existing) {
+  const key = `${ctx.orgId}:${ctx.userId}`;
+  const previous = reconciliations.get(key);
+  if (previous && Date.now() - previous < 15 * 60 * 1000) return;
+  reconciliations.set(key, Date.now());
+  (async () => {
+    const catalog = await runTriggers({ operation: 'discover' }, ctx);
+    for (const account of owned) {
+      const event = catalog.events.find(item => item.toolkit === account.toolkit && !item.requires_setup &&
+        /(?:NEW_GMAIL_MESSAGE|NEW_MESSAGE|NEW_EMAIL|NEW_COMMIT|NEW_ISSUE|FILE_UPDATED|NEW_EVENT)/.test(item.slug) &&
+        !/(?:SENT|DELETE|REACTION|BOT)/.test(item.slug));
+      if (!event || existing.some(row => row.account_id === account.id && row.slug === event.slug)) continue;
+      const inspected = await runTriggers({ operation: 'inspect', trigger_slug: event.slug }, ctx);
+      const config = Object.fromEntries(Object.entries(inspected.config_schema.properties || {})
+        .filter(([,spec]) => spec.default !== undefined).map(([name,spec]) => [name,spec.default]));
+      if (!ajv.compile(inspected.config_schema)(config)) continue;
+      await runTriggers({ operation: 'create', trigger_slug: event.slug, connected_account_id: account.id, config }, ctx);
+    }
+  })().catch(() => { reconciliations.delete(key); });
 }

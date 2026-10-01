@@ -24,10 +24,11 @@ export async function ensureTriggerStore(db) {
   if (!initializations.has(db)) initializations.set(db, (async () => {
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_trigger_subscriptions (
       id uuid PRIMARY KEY, org_id text NOT NULL, user_id text NOT NULL, account_id text NOT NULL,
-      toolkit text NOT NULL, slug text NOT NULL, remote_id text, config_key text NOT NULL, config jsonb NOT NULL,
+      toolkit text NOT NULL, slug text NOT NULL, subject text NOT NULL, remote_id text, config_key text NOT NULL, config jsonb NOT NULL,
       config_schema jsonb NOT NULL, payload_schema jsonb NOT NULL, version text NOT NULL,
       status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(org_id,user_id,account_id,slug,config_key))`);
+    await db.$executeRawUnsafe("ALTER TABLE hivemind_trigger_subscriptions ADD COLUMN IF NOT EXISTS subject text");
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_trigger_events (
       id text PRIMARY KEY, subscription_id uuid NOT NULL REFERENCES hivemind_trigger_subscriptions(id),
       org_id text NOT NULL, user_id text NOT NULL, data jsonb NOT NULL,
@@ -54,7 +55,12 @@ function schema(value = {}) {
   return { type: 'object', properties, required, additionalProperties: false };
 }
 async function accounts(ctx) {
-  return (await listConnectedAccounts(ctx.orgId, { userId: ctx.userId })).filter(a => a.status === 'ACTIVE');
+  const membership = await ctx.prisma.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { isActive: true } });
+  if (!membership?.isActive) fail('Active organization membership required.', 403);
+  const subject = composioConnectionSubject(ctx.orgId, { userId: ctx.userId });
+  const userAccounts = (await listConnectedAccounts(ctx.orgId, { userId: ctx.userId })).map(account => ({ ...account, scope: subject === ctx.orgId ? 'organization' : 'personal', subject }));
+  const sharedAccounts = subject === ctx.orgId ? [] : (await listConnectedAccounts(ctx.orgId, { connectionScope: 'org' })).map(account => ({ ...account, scope: 'organization', subject: ctx.orgId }));
+  return [...new Map([...userAccounts, ...sharedAccounts].filter(a => a.status === 'ACTIVE').map(a => [a.id, a])).values()];
 }
 function view(row) { return { id: row.id, toolkit: row.toolkit, trigger_slug: row.slug, connected_account_id: row.account_id, status: row.status, config: row.config, version: row.version, updated_at: row.updated_at }; }
 export async function runTriggers(args, ctx) {
@@ -72,7 +78,7 @@ export async function runTriggers(args, ctx) {
       const result = await triggerRequest('GET', `/triggers_types?toolkit_slugs=${encodeURIComponent(toolkit)}&limit=25`);
       items.push(...(result.items || []).map(type => ({ slug: type.slug, name: type.name, description: type.description, toolkit: type.toolkit?.slug || toolkit, version: type.version, requires_setup: Boolean(type.requires_webhook_endpoint_setup) })));
     }
-    return { toolkit: 'HIVEMIND Triggers', accounts: owned, events: items };
+    return { toolkit: 'HIVEMIND Triggers', accounts: owned.map(({ subject, ...account }) => account), events: items };
   }
   if (args.operation === 'inspect' || args.operation === 'create') {
     if (!args.trigger_slug) fail('trigger_slug is required; choose an event returned by discover.');
@@ -81,7 +87,7 @@ export async function runTriggers(args, ctx) {
     if (!owned.some(a => a.toolkit === toolkit)) fail('This event does not belong to an allowed connected app.', 403);
     const configSchema = schema(type.config);
     const payloadSchema = schema(type.payload);
-    if (args.operation === 'inspect') return { slug: args.trigger_slug, toolkit, version: type.version, config_schema: configSchema, payload_schema: payloadSchema, accounts: owned.filter(a => a.toolkit === toolkit) };
+    if (args.operation === 'inspect') return { slug: args.trigger_slug, toolkit, version: type.version, config_schema: configSchema, payload_schema: payloadSchema, accounts: owned.filter(a => a.toolkit === toolkit).map(({ subject, ...account }) => account) };
     if (!process.env.COMPOSIO_WEBHOOK_SECRET) fail('Connected activity delivery is not configured yet.', 503);
     const account = owned.find(a => a.id === args.connected_account_id && a.toolkit === toolkit);
     if (!account) fail('Choose the exact connected account returned by inspect.', 403);
@@ -90,15 +96,15 @@ export async function runTriggers(args, ctx) {
     const check = ajv.compile(configSchema);
     if (!check(args.config || {})) fail(`Invalid event configuration: ${ajv.errorsText(check.errors)}`);
     const inserted = await db.$queryRawUnsafe(`INSERT INTO hivemind_trigger_subscriptions
-      (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key)
-      VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
+      (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key,subject)
+      VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12)
       ON CONFLICT(org_id,user_id,account_id,slug,config_key) DO UPDATE SET updated_at=now() RETURNING *`,
       randomUUID(), ctx.orgId, ctx.userId, account.id, toolkit, args.trigger_slug,
-      JSON.stringify(args.config || {}), JSON.stringify(configSchema), JSON.stringify(payloadSchema), type.version, createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex'));
+      JSON.stringify(args.config || {}), JSON.stringify(configSchema), JSON.stringify(payloadSchema), type.version, createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex'), account.subject);
     const row = inserted[0];
     if (row.status === 'active' && row.remote_id) return { successful: true, subscription: view(row), reused: true };
     const remote = await triggerRequest('POST', `/trigger_instances/${encodeURIComponent(args.trigger_slug)}/upsert`, {
-      connected_account_id: account.id, user_id: composioConnectionSubject(ctx.orgId, { userId: ctx.userId }),
+      connected_account_id: account.id, user_id: account.subject,
       trigger_config: row.config, toolkit_versions: { [toolkit]: row.version },
     });
     if (!remote.trigger_id) fail('Subscription outcome could not be confirmed; inspect before retrying.', 502);
@@ -117,15 +123,17 @@ export async function runTriggers(args, ctx) {
   }
   const row = visible.find(s => s.id === args.subscription_id);
   if (!row?.remote_id) fail('Subscription not found in your connected accounts.', 404);
-  if (args.operation === 'delete') {
-    // Retain local history; disable first so a late delivery cannot reappear.
-    await db.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='deleted',updated_at=now() WHERE id=$1::uuid", row.id);
-    await triggerRequest('DELETE', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`);
+  if (args.operation === 'delete' || args.operation === 'pause') {
+    const next = args.operation === 'delete' ? 'deleted' : 'paused';
+    await db.$executeRawUnsafe('UPDATE hivemind_trigger_subscriptions SET status=$1,updated_at=now() WHERE id=$2::uuid', next, row.id);
+    const peers = await db.$queryRawUnsafe("SELECT status FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND remote_id=$2 AND status!='deleted'", ctx.orgId, row.remote_id);
+    if (!peers.some(peer => peer.status === 'active')) {
+      if (!peers.length && args.operation === 'delete') await triggerRequest('DELETE', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`);
+      else await triggerRequest('PATCH', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`, { status: 'disable' });
+    }
   } else {
-    const status = args.operation === 'pause' ? 'paused' : 'active';
-    if (status === 'paused') await db.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='paused',updated_at=now() WHERE id=$1::uuid", row.id);
-    await triggerRequest('PATCH', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`, { status: status === 'paused' ? 'disable' : 'enable' });
-    if (status === 'active') await db.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='active',updated_at=now() WHERE id=$1::uuid", row.id);
+    await triggerRequest('PATCH', `/trigger_instances/manage/${encodeURIComponent(row.remote_id)}`, { status: 'enable' });
+    await db.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='active',updated_at=now() WHERE id=$1::uuid", row.id);
   }
   return { successful: true, operation: args.operation, subscription_id: row.id };
 }
@@ -147,8 +155,8 @@ export async function receiveTriggerEvent(raw, headers, db) {
   const rows = await db.$queryRawUnsafe("SELECT * FROM hivemind_trigger_subscriptions WHERE remote_id=$1 AND account_id=$2 AND slug=$3 AND status='active'", m.trigger_id || '', m.connected_account_id || '', m.trigger_slug || '');
   if (!rows.length) return { ignored: true };
   for (const row of rows) {
-    if (m.user_id !== composioConnectionSubject(row.org_id, { userId: row.user_id })) continue;
-    const active = await accounts({ orgId: row.org_id, userId: row.user_id });
+    if (m.user_id !== (row.subject || composioConnectionSubject(row.org_id, { userId: row.user_id }))) continue;
+    const active = await accounts({ orgId: row.org_id, userId: row.user_id, prisma: db });
     if (!active.some(a => a.id === row.account_id)) continue;
     const check = ajv.compile(row.payload_schema);
     if (!check(payload.data)) fail('Event does not match the subscribed schema.', 422);

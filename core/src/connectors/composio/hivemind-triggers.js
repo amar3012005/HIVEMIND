@@ -97,7 +97,7 @@ export async function runTriggers(args, ctx) {
     if (!check(args.config || {})) fail(`Invalid event configuration: ${ajv.errorsText(check.errors)}`);
     return db.$transaction(async tx => {
       const lock = `trigger:${ctx.orgId}:${account.id}:${args.trigger_slug}:${createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex')}`;
-      await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', lock);
+      await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS locked', lock);
     const inserted = await tx.$queryRawUnsafe(`INSERT INTO hivemind_trigger_subscriptions
       (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key,subject)
       VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12)
@@ -128,7 +128,7 @@ export async function runTriggers(args, ctx) {
   const row = visible.find(s => s.id === args.subscription_id);
   if (!row?.remote_id) fail('Subscription not found in your connected accounts.', 404);
   await db.$transaction(async tx => {
-    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `trigger:${ctx.orgId}:${row.account_id}:${row.slug}:${row.config_key}`);
+    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS locked', `trigger:${ctx.orgId}:${row.account_id}:${row.slug}:${row.config_key}`);
   if (args.operation === 'delete' || args.operation === 'pause') {
     const next = args.operation === 'delete' ? 'deleted' : 'paused';
     await tx.$executeRawUnsafe('UPDATE hivemind_trigger_subscriptions SET status=$1,updated_at=now() WHERE id=$2::uuid', next, row.id);

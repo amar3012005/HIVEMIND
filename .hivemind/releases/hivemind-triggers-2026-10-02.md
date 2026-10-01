@@ -20,3 +20,4 @@ User clarified that event provisioning must be automatic, without a configuratio
 - Autonomous backend release succeeded: Core and Control healthy on 9c62c84b; manifest /root/releases/manifests/9c62c84b/20261001T220750Z/RELEASE_MANIFEST.json.
 - Read-only production subscription check confirmed active Gmail incoming-message subscription after opening the new-session page; no app event content was read by this check.
 - Frontend dd4d8fbe adds refresh replay for unchanged generated text, preserving edited user drafts, and explicit suggestion clicks replace composer drafts without sending.
+- Final frontend release version: a3ed3e3b-8ac9-4f0f-b530-338cf3b6111f, exact source dd4d8fbe. Live browser verified click-to-replace using an existing generated draft; no message submitted. Setup section absent.

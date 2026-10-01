@@ -16,3 +16,7 @@
 ## Autonomous follow-up
 
 User clarified that event provisioning must be automatic, without a configuration section. Backend 9c62c84b reconciles supported read event subscriptions from connected accounts, uses provider schema defaults only, preserves paused/deleted opt-outs, and reuses provider upsert identity. Reconciliation is background and throttled per authenticated user; suggestions still read stored events. Frontend 49a009b2 removes setup controls from the composer and retains the three contextual query rows. Apps requiring a channel/repository or custom webhook setup are not guessed or claimed covered. Native Harness unchanged.
+
+- Autonomous backend release succeeded: Core and Control healthy on 9c62c84b; manifest /root/releases/manifests/9c62c84b/20261001T220750Z/RELEASE_MANIFEST.json.
+- Read-only production subscription check confirmed active Gmail incoming-message subscription after opening the new-session page; no app event content was read by this check.
+- Frontend dd4d8fbe adds refresh replay for unchanged generated text, preserving edited user drafts, and explicit suggestion clicks replace composer drafts without sending.

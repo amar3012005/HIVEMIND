@@ -37,8 +37,8 @@ export async function decideActivityRelevance({ event, context, env = process.en
     labels: (Array.isArray(data.label_ids) ? data.label_ids : []).slice(0, 8),
   };
   const text = `${projection.title} ${projection.preview}`;
-  if (projection.bot || projection.labels.some(label => ['SPAM','TRASH','CATEGORY_PROMOTIONS'].includes(label)) ||
-      /\b(?:password reset|verification code|one.time (?:password|code)|sign.in code|unsubscribe to stop receiving|limited.time offer|promo code)\b/i.test(text)) {
+  if (projection.labels.some(label => ['SPAM','TRASH'].includes(label)) ||
+      /\b(?:password reset|verification code|one.time (?:password|code)|sign.in code)\b/i.test(text)) {
     return { status: 'rejected', choice: 'noise_or_sensitive', source: 'rules', policy: POLICY };
   }
   const config = decisionGatewayProviderConfig(env);

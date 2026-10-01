@@ -190,8 +190,7 @@ export async function receiveTriggerEvent(raw, headers, db) {
 }
 function eventSuggestion(event) {
   const data = event.data || {};
-  if (event.toolkit === 'gmail' && ((data.label_ids || []).some(label => ['SPAM', 'TRASH', 'CATEGORY_PROMOTIONS'].includes(label)) || /(?:no[-_]?reply|mailer-daemon|notifications)@/i.test(String(data.sender || '')))) return null;
-  if (data.bot_id || data.message?.bot_id) return null;
+  if (event.toolkit === 'gmail' && (data.label_ids || []).some(label => ['SPAM', 'TRASH'].includes(label))) return null;
   const topic = String(data._hivemind?.title || data.subject || data.message?.subject || data.document?.title || data.document?.name || data.title || data.issue?.title || data.pull_request?.title || data.file?.name || data.message?.text || (typeof data.message === 'string' ? data.message : '') || data.text || data.message_text || (event.toolkit === 'googledrive' && data.file_id ? 'a recently updated Drive file' : '')).replace(/\s+/g,' ').trim().slice(0,140);
   if (!topic) return null;
   return { id: event.id, topic, source: event.toolkit, trigger_slug: event.slug, timestamp: event.occurred_at || event.received_at,

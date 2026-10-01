@@ -12,3 +12,7 @@
 - Suggestions use deterministic templates, saved memories, Flashbacks and permitted stored events. No model calls for preparing suggestions; no automatic chat submission or agent dispatch.
 - Actual user-event delivery remains dependent on explicit subscription activation. No real app event claimed as received in this release.
 - Rollback Worker: 952bcf62-dce3-42c1-ac31-dace5fea5bf1. Previous Core digest sha256:f0737613f43b9d771c95094a8ad48b5c4503bc215a8db0f40ebc9cd76b60e141; previous Control digest sha256:2f6d75a6a85773ccb72469aac22a9a6193fc11e7743db9f4efad405224182aaa.
+
+## Autonomous follow-up
+
+User clarified that event provisioning must be automatic, without a configuration section. Backend 9c62c84b reconciles supported read event subscriptions from connected accounts, uses provider schema defaults only, preserves paused/deleted opt-outs, and reuses provider upsert identity. Reconciliation is background and throttled per authenticated user; suggestions still read stored events. Frontend 49a009b2 removes setup controls from the composer and retains the three contextual query rows. Apps requiring a channel/repository or custom webhook setup are not guessed or claimed covered. Native Harness unchanged.

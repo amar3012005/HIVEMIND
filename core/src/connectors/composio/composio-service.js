@@ -1035,6 +1035,7 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
 }
 
 // Trigger writes have an unknown outcome on transport failure; never retry them blindly.
-export function triggerRequest(method, path, body) {
-  return _composioRequest(method, `/api/v3.1${path}`, body, { retries: method === 'GET' ? 2 : 0 });
+export async function triggerRequest(method, path, body) {
+  try { return await _composioRequest(method, `/api/v3.1${path}`, body, { retries: method === 'GET' ? 2 : 0 }); }
+  catch (cause) { const error = new Error('HIVEMIND connected activity provider could not complete this request.'); error.status = cause.status || 502; throw error; }
 }

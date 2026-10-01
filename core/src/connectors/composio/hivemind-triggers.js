@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
+import { createHmac, timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import { triggerRequest, listConnectedAccounts, composioConnectionSubject } from './composio-service.js';
@@ -24,10 +24,10 @@ export async function ensureTriggerStore(db) {
   if (!initializations.has(db)) initializations.set(db, (async () => {
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_trigger_subscriptions (
       id uuid PRIMARY KEY, org_id text NOT NULL, user_id text NOT NULL, account_id text NOT NULL,
-      toolkit text NOT NULL, slug text NOT NULL, remote_id text, config jsonb NOT NULL,
+      toolkit text NOT NULL, slug text NOT NULL, remote_id text, config_key text NOT NULL, config jsonb NOT NULL,
       config_schema jsonb NOT NULL, payload_schema jsonb NOT NULL, version text NOT NULL,
       status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(org_id,user_id,account_id,slug,config))`);
+      updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(org_id,user_id,account_id,slug,config_key))`);
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_trigger_events (
       id text PRIMARY KEY, subscription_id uuid NOT NULL REFERENCES hivemind_trigger_subscriptions(id),
       org_id text NOT NULL, user_id text NOT NULL, data jsonb NOT NULL,
@@ -35,6 +35,11 @@ export async function ensureTriggerStore(db) {
     await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS hivemind_trigger_events_owner_date ON hivemind_trigger_events(org_id,user_id,received_at DESC)');
   })().catch(error => { initializations.delete(db); throw error; }));
   return initializations.get(db);
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  return value;
 }
 function fail(message, status = 400) { const error = new Error(message); error.status = status; throw error; }
 function schema(value = {}) {
@@ -85,15 +90,16 @@ export async function runTriggers(args, ctx) {
     const check = ajv.compile(configSchema);
     if (!check(args.config || {})) fail(`Invalid event configuration: ${ajv.errorsText(check.errors)}`);
     const inserted = await db.$queryRawUnsafe(`INSERT INTO hivemind_trigger_subscriptions
-      (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version)
-      VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10)
-      ON CONFLICT(org_id,user_id,account_id,slug,config) DO UPDATE SET updated_at=now() RETURNING *`,
+      (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key)
+      VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
+      ON CONFLICT(org_id,user_id,account_id,slug,config_key) DO UPDATE SET updated_at=now() RETURNING *`,
       randomUUID(), ctx.orgId, ctx.userId, account.id, toolkit, args.trigger_slug,
-      JSON.stringify(args.config || {}), JSON.stringify(configSchema), JSON.stringify(payloadSchema), type.version);
+      JSON.stringify(args.config || {}), JSON.stringify(configSchema), JSON.stringify(payloadSchema), type.version, createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex'));
     const row = inserted[0];
+    if (row.status === 'active' && row.remote_id) return { successful: true, subscription: view(row), reused: true };
     const remote = await triggerRequest('POST', `/trigger_instances/${encodeURIComponent(args.trigger_slug)}/upsert`, {
       connected_account_id: account.id, user_id: composioConnectionSubject(ctx.orgId, { userId: ctx.userId }),
-      trigger_config: row.config, toolkit_versions: { [toolkit]: type.version },
+      trigger_config: row.config, toolkit_versions: { [toolkit]: row.version },
     });
     if (!remote.trigger_id) fail('Subscription outcome could not be confirmed; inspect before retrying.', 502);
     const saved = await db.$queryRawUnsafe('UPDATE hivemind_trigger_subscriptions SET remote_id=$1,status=\'active\',updated_at=now() WHERE id=$2::uuid RETURNING *', remote.trigger_id, row.id);
@@ -146,15 +152,20 @@ export async function receiveTriggerEvent(raw, headers, db) {
     if (!active.some(a => a.id === row.account_id)) continue;
     const check = ajv.compile(row.payload_schema);
     if (!check(payload.data)) fail('Event does not match the subscribed schema.', 422);
-    await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events (id,subscription_id,org_id,user_id,data)
-      VALUES ($1,$2::uuid,$3,$4,$5::jsonb) ON CONFLICT(id) DO NOTHING`, `${id}:${row.id}`, row.id, row.org_id, row.user_id, JSON.stringify(payload.data));
+    const date = payload.data?.message_timestamp || payload.data?.timestamp || null;
+    const parsedDate = typeof date === 'number' ? new Date(date < 1e12 ? date * 1000 : date) : new Date(date);
+    const occurredAt = date && Number.isFinite(parsedDate.getTime()) ? parsedDate.toISOString() : null;
+    await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events (id,subscription_id,org_id,user_id,data,occurred_at)
+      VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`, `${payload.id || m.log_id || id}:${row.id}`, row.id, row.org_id, row.user_id, JSON.stringify(payload.data), occurredAt);
   }
   return { accepted: true };
 }
 function eventSuggestion(event) {
   const data = event.data || {};
-  const topic = String(data.subject || data.message?.subject || data.title || data.message?.text || data.text || '').replace(/\s+/g,' ').trim().slice(0,140);
+  const topic = String(data.subject || data.message?.subject || data.title || data.message?.text || data.text || data.message_text || '').replace(/\s+/g,' ').trim().slice(0,140);
   if (!topic) return null;
-  return { id: event.id, topic, source: event.toolkit, trigger_slug: event.slug, timestamp: event.received_at,
-    query: `Help me understand the recent ${event.toolkit} activity about “${topic}”, connect it with relevant memories, and suggest what I could do next.`, evidence: { event_id: event.id, subscription_id: event.subscription_id }, kind: 'connected_event' };
+  return { id: event.id, topic, source: event.toolkit, trigger_slug: event.slug, timestamp: event.occurred_at || event.received_at,
+    query: event.toolkit === 'gmail' && event.slug === 'GMAIL_NEW_GMAIL_MESSAGE'
+      ? `Help me draft a reply to the recent Gmail message about “${topic}”, using relevant context from my memories. Keep it as a draft for me to review.`
+      : `Help me understand the recent ${event.toolkit} activity about “${topic}”, connect it with relevant memories, and suggest what I could do next.`, evidence: { event_id: event.id, subscription_id: event.subscription_id }, kind: 'connected_event' };
 }

@@ -1,4 +1,4 @@
-import { classifyPendingActivity } from './activity-relevance.js';
+import { classifyPendingActivity, ACTIVITY_RELEVANCE_POLICY } from './activity-relevance.js';
 import { createHmac, timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
@@ -127,7 +127,7 @@ export async function runTriggers(args, ctx) {
       JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
       WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
       AND e.received_at > now()-interval '7 days'
-      AND ($5::boolean=false OR e.relevance_status='approved') ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12, args.operation === 'suggestions');
+      AND ($5::boolean=false OR (e.relevance_status='approved' AND e.relevance_decision->>'policy'=$6)) ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12, args.operation === 'suggestions', ACTIVITY_RELEVANCE_POLICY);
     return args.operation === 'deliveries' ? { events } : { suggestions: [...new Map(events.slice().reverse().map(eventSuggestion).filter(Boolean).map(item => [`${item.source}:${item.topic}`, item])).values()].reverse() };
   }
   const row = visible.find(s => s.id === args.subscription_id);

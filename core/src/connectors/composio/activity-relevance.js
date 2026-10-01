@@ -1,7 +1,8 @@
 import { createOpenRouterJevProvider } from '../../agent/decision-gateway.js';
 import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-service.js';
 
-const POLICY = 'company_activity_relevance_v1';
+export const ACTIVITY_RELEVANCE_POLICY = 'company_activity_relevance_v2';
+const POLICY = ACTIVITY_RELEVANCE_POLICY;
 const workers = new Map();
 const contexts = new Map();
 const clip = (value, n) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
@@ -76,9 +77,10 @@ export function classifyPendingActivity(ctx) {
         WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
         AND e.received_at > now()-interval '7 days'
         AND ((e.relevance_status='pending' AND (e.evaluated_at IS NULL OR e.evaluated_at < now()-interval '5 minutes'))
-          OR (e.relevance_status='evaluating' AND e.evaluated_at < now()-interval '10 minutes'))
+          OR (e.relevance_status='evaluating' AND e.evaluated_at < now()-interval '10 minutes')
+          OR (e.relevance_status IN ('approved','rejected') AND e.relevance_decision->>'policy' IS DISTINCT FROM $4))
         ORDER BY e.received_at DESC LIMIT 6 FOR UPDATE OF e SKIP LOCKED)
-      RETURNING *`, ctx.orgId, ctx.userId, ctx.allowedAccountIds);
+      RETURNING *`, ctx.orgId, ctx.userId, ctx.allowedAccountIds, POLICY);
     if (!rows.length) return;
     let context;
     try { context = await companyContext(ctx); }

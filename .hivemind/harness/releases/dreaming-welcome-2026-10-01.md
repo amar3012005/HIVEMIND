@@ -52,3 +52,10 @@ Previous Worker: `73a9a581-fd24-4baf-a0af-0b1b96b1fb0f`.
 Reset restoration is separate from binary rollback; preserve the archive.
 No first-time model greeting has been triggered for the user: enabling remains
 an explicit user action on the banner.
+
+Authenticated browser proof: the live Dreaming route displays the first-time
+banner, real Sofia/Elena/Ravi portraits and an unchecked enable switch. The new
+BRAIN chat renders the connected-account list; all five logos loaded, the More
+apps route points to Connectors, and its environment panel confirms 0 settled
+credits for the new session. Screenshots: `/tmp/hivemind-dreaming-welcome.png`
+and `/tmp/hivemind-chat-connected-apps.png` on the operator workstation.

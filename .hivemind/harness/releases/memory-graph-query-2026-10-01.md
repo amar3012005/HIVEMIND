@@ -1,12 +1,12 @@
 # Memory Graph query release
 
-- Frontend: `cbc31b4957c78739fab2466ee49f9aa3bcc992a8` (Da-vinci main).
-- Parent gitlink promotion: `5f57c98a`.
+- Frontend: `dd04b30305f22ef66b3f90306bafe9b52ceabbba` (Da-vinci main).
+- Parent gitlink promotion: `c8dd6a15`.
 - Production Worker: `hivemind-web`.
-- Active version: `59c5fd99-742c-4b9a-ade7-35f405c2fea8`.
-- Previous version: `9cdbf945-8264-4522-b535-aa78f205580a`.
+- Active version: `5098c78a-bc12-479c-be23-76e854451c78`.
+- Previous version: `59c5fd99-742c-4b9a-ade7-35f405c2fea8`.
 - Before this feature: `87a41d94-3854-47a6-a568-014d29695db6`.
-- Bundle: `main.85fd5179.js`.
+- Bundle: `main.cc8b8bf7.js`.
 
 The graph has a floating query input and one send button, directly over the
 canvas with no bottom strip or reserved footer. It calls the existing
@@ -15,6 +15,11 @@ connector retrieval disabled. It highlights returned memories, dims unrelated
 nodes, frames up to five matches, and exposes clickable titles for those matches.
 Recalled memories outside the current node budget are merged into the graph;
 only updates, extends, derives, and contradictions are drawn.
+
+The query box stays centered across the full page, independently of inspector
+visibility. The inspector leaves 160px bottom clearance so it cannot cover the
+composer or its result row. Browser screenshots confirmed the composer position
+is unchanged when opening and closing the inspector.
 
 The bottom timeline is presentation-disabled by `SHOW_GRAPH_TIMELINE`; its
 controls and temporal implementation remain in source.

@@ -125,7 +125,7 @@ export async function runTriggers(args, ctx) {
       JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
       WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
       AND e.received_at > now()-interval '7 days' ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12);
-    return args.operation === 'deliveries' ? { events } : { suggestions: [...new Map(events.map(eventSuggestion).filter(Boolean).map(item => [`${item.source}:${item.topic}`, item])).values()] };
+    return args.operation === 'deliveries' ? { events } : { suggestions: [...new Map(events.slice().reverse().map(eventSuggestion).filter(Boolean).map(item => [`${item.source}:${item.topic}`, item])).values()].reverse() };
   }
   const row = visible.find(s => s.id === args.subscription_id);
   if (!row?.remote_id) fail('Subscription not found in your connected accounts.', 404);

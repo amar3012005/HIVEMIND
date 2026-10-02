@@ -113,7 +113,7 @@ export async function storeConnectedAppReceipt({ prisma, owner, input, env = pro
 }
 
 export async function readConnectedAppReceipt({ prisma, owner, receiptId, sessionId, requestedFields, env = process.env, now = new Date() }) {
-  if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId) || !UUID_RE.test(receiptId) || !SESSION_ID_RE.test(sessionId)) fail('invalid_receipt_read');
+  if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId) || !UUID_RE.test(receiptId) || !(SESSION_ID_RE.test(sessionId) || UUID_RE.test(sessionId))) fail('invalid_receipt_read');
   const requested = fields(requestedFields);
   if (requested.length === 0) fail('receipt_fields_required');
   return scoped(prisma, owner, async (tx) => {

@@ -79,7 +79,7 @@ async function scoped(prisma, owner, action) {
 export async function storeConnectedAppReceipt({ prisma, owner, input, env = process.env, now = new Date() }) {
   if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId)) fail('invalid_receipt_owner');
   const sessionId = text(input.session_id, 180, 'invalid_receipt_session');
-  if (!SESSION_ID_RE.test(sessionId)) fail('invalid_receipt_session');
+  if (!(SESSION_ID_RE.test(sessionId) || UUID_RE.test(sessionId))) fail('invalid_receipt_session');
   const callId = text(input.call_id, 180, 'invalid_receipt_call');
   const allowedFields = fields(input.allowed_fields || []);
   const projection = object(input.approved_projection || {}, 'invalid_receipt_projection');

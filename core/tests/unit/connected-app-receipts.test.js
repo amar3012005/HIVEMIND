@@ -71,3 +71,12 @@ test('same call is idempotent and changed provider output conflicts', async () =
     prisma: db.prisma, owner, input: { ...input(), raw_receipt: { changed: true } }, env,
   }), /receipt_call_conflict/);
 });
+
+
+test('native employee receipt keeps UUID identity and enforces session isolation', async () => {
+  const db = database(); const sessionId = crypto.randomUUID();
+  const stored = await storeConnectedAppReceipt({ prisma: db.prisma, owner, input: { ...input(), session_id: sessionId }, env });
+  assert.equal(stored.sessionId, sessionId);
+  assert.deepEqual(await readConnectedAppReceipt({ prisma: db.prisma, owner, receiptId: stored.id, sessionId, requestedFields: ['body'], env }), { body: 'private full body' });
+  await assert.rejects(() => readConnectedAppReceipt({ prisma: db.prisma, owner, receiptId: stored.id, sessionId: crypto.randomUUID(), requestedFields: ['body'], env }), /receipt_not_found/);
+});

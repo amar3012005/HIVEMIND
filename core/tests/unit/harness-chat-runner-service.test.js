@@ -397,7 +397,7 @@ test('runner admits a turn without debiting and blocks exhausted credits before 
 
   const exhausted = await invoke({ plan: 'free', included: 500, used: 500, reserved: 0, remaining: 0, unlimited: false });
   assert.equal(exhausted.status, 402);
-  assert.equal(exhausted.body.code, 'plan_limit_exceeded');
+  assert.equal(exhausted.body.code, 'credits_exhausted');
   assert.equal(exhausted.body.resource, 'credits');
   assert.equal(calls.length, 0);
 });
@@ -452,4 +452,37 @@ test('terminal no-tool reconciliation does not debit a turn with an admitted Com
   assert.deepEqual(res.body, { admitted: true, duplicate: true, service: 'composio_tool_call' });
   assert.equal(queries.length, 1);
   assert.equal(queries[0].args.at(-1), '3');
+});
+
+
+test('native employee UUID credit admission preserves identity and rejects malformed IDs', async () => {
+  for (const [sessionId, expected] of [[crypto.randomUUID(), 200], ['session-12345678', 200], ['bad/session', 400], ['', 400]]) {
+    const res = {};
+    await handleHarnessChatBootstrapRoute({
+      req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: '/internal/v1/harness-chat/credit-operations',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => ({ session_id: sessionId, turn_id: 1, call_id: 'admission', kind: 'turn_admission' }),
+      jsonResponse: (r, b, status = 200) => Object.assign(r, { body: b, status }),
+      redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+      creditService: { getSummary: async () => ({ remaining: 1, unlimited: false }) },
+    });
+    assert.equal(res.status, expected);
+  }
+});
+
+test('private operating memory rejects caller-provided tenant and company-brain fields', async () => {
+  for (const input of [{ action: 'recall', org_id: orgId }, { action: 'save', project_id: crypto.randomUUID() }]) {
+    const res = {};
+    await handleHarnessChatBootstrapRoute({
+      req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: '/internal/v1/harness-chat/core/v1/hyperagents/operating-memory',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => input,
+      jsonResponse: (r, b, status = 200) => Object.assign(r, { body: b, status }),
+      redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_operating_memory_input');
+  }
 });

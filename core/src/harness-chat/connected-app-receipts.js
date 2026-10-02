@@ -3,7 +3,10 @@ import crypto from 'node:crypto';
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024;
 const MAX_FIELDS = 32;
 const FIELD_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/;
-const SESSION_ID_RE = /^session-[A-Za-z0-9-]{8,160}$/;
+const SESSION_ID_RE = /^(?:session-[A-Za-z0-9-]{8,160}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/** Native Team children use UUIDs; ordinary Harness rooms retain prefixed ids. */
+export function isHarnessSessionId(value) { return typeof value === 'string' && SESSION_ID_RE.test(value); }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class ConnectedAppReceiptError extends Error {
@@ -79,7 +82,7 @@ async function scoped(prisma, owner, action) {
 export async function storeConnectedAppReceipt({ prisma, owner, input, env = process.env, now = new Date() }) {
   if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId)) fail('invalid_receipt_owner');
   const sessionId = text(input.session_id, 180, 'invalid_receipt_session');
-  if (!SESSION_ID_RE.test(sessionId)) fail('invalid_receipt_session');
+  if (!isHarnessSessionId(sessionId)) fail('invalid_receipt_session');
   const callId = text(input.call_id, 180, 'invalid_receipt_call');
   const allowedFields = fields(input.allowed_fields || []);
   const projection = object(input.approved_projection || {}, 'invalid_receipt_projection');
@@ -113,7 +116,7 @@ export async function storeConnectedAppReceipt({ prisma, owner, input, env = pro
 }
 
 export async function readConnectedAppReceipt({ prisma, owner, receiptId, sessionId, requestedFields, env = process.env, now = new Date() }) {
-  if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId) || !UUID_RE.test(receiptId) || !SESSION_ID_RE.test(sessionId)) fail('invalid_receipt_read');
+  if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId) || !UUID_RE.test(receiptId) || !isHarnessSessionId(sessionId)) fail('invalid_receipt_read');
   const requested = fields(requestedFields);
   if (requested.length === 0) fail('receipt_fields_required');
   return scoped(prisma, owner, async (tx) => {

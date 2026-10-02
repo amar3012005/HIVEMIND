@@ -71,3 +71,13 @@ test('same call is idempotent and changed provider output conflicts', async () =
     prisma: db.prisma, owner, input: { ...input(), raw_receipt: { changed: true } }, env,
   }), /receipt_call_conflict/);
 });
+
+// Native employee sessions must retain the same authenticated encrypted receipt contract.
+test('native UUID sessions can store and read receipts without widening their owner scope', async () => {
+  const db = database();
+  const packet = { ...input(), session_id: '618703e8-3867-4bf9-ba71-1d6bd674dad5' };
+  const stored = await storeConnectedAppReceipt({ prisma: db.prisma, owner, input: packet, env });
+  const result = await readConnectedAppReceipt({ prisma: db.prisma, owner, receiptId: stored.id, sessionId: packet.session_id, requestedFields: ['sender'], env });
+  assert.equal(result.sender, 'rama@example.com');
+  await assert.rejects(() => readConnectedAppReceipt({ prisma: db.prisma, owner: { ...owner, userId: '3e10b102-8472-4c6b-8b60-c28179049932' }, receiptId: stored.id, sessionId: packet.session_id, requestedFields: ['sender'], env }), /receipt_not_found/);
+});

@@ -8,6 +8,7 @@ import { evaluateHarnessChatFlag } from '../harness-chat/flag-client.js';
 import { verifyHarnessRunnerServiceToken } from '../harness-chat/runner-service-token.js';
 import {
   ConnectedAppReceiptError,
+  isHarnessSessionId,
   readConnectedAppReceipt,
   storeConnectedAppReceipt,
 } from '../harness-chat/connected-app-receipts.js';
@@ -191,8 +192,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     const turnId = Number.isSafeInteger(input?.turn_id) && input.turn_id >= 0 ? input.turn_id : -1;
     const kind = input?.kind;
     const tool = typeof input?.tool === 'string' ? input.tool : '';
-    const validSessionId = /^session-[A-Za-z0-9-]{8,160}$/.test(sessionId)
-      || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId);
+    const validSessionId = isHarnessSessionId(sessionId);
     if (!validSessionId || !/^[A-Za-z0-9._:-]{1,180}$/.test(callId) || turnId < 0) {
       jsonResponse(res, { error: 'Invalid credit operation identity' }, 400); return true;
     }

@@ -26,6 +26,9 @@
 
 import path from 'path';
 
+export const TEXT_CHARACTERS_PER_PAGE = 3000;
+const TEXT_FORMATS = new Set(['txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm']);
+
 const OOXML = new Set(['pptx', 'ppt', 'docx', 'doc', 'xlsx', 'xls']);
 
 function extOf(filename) {
@@ -40,6 +43,13 @@ function extOf(filename) {
 export async function countPages(buffer, filename) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
   const ext = extOf(filename);
+
+  // Text has no physical pagination. Count Unicode characters (including spaces),
+  // excluding a UTF-8 BOM, in explicit 3,000-character usage equivalents.
+  if (TEXT_FORMATS.has(ext)) {
+    const text = buffer.toString('utf8').replace(/^\uFEFF/, '');
+    return Math.max(1, Math.ceil(Array.from(text).length / TEXT_CHARACTERS_PER_PAGE));
+  }
 
   if (ext === 'pdf') {
     try {

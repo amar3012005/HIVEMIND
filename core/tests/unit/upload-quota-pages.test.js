@@ -27,15 +27,15 @@ test('image is always exactly 1 page regardless of byte size', async () => {
   }
 });
 
-test('large text/document is not billed as many pages from bytes', async () => {
+test('text uses 3,000 Unicode characters per page equivalent', async () => {
   const svc = makeService();
-  // The old heuristic billed this ~6MB markdown as ~124 pages.
-  const pages = await svc._estimatePages(
-    { filename: 'notes.md', contentType: 'text/markdown', data: Buffer.alloc(6 * 1024 * 1024) },
-    { kind: 'document', ext: 'md' },
-  );
-  // Unknown pre-parse page count at admit: must not false-block, so a floor of 1.
-  assert.equal(pages, 1, `expected 1 (unmeasurable-at-admit) for md, got ${pages}`);
+  for (const [text, expected] of [['a'.repeat(3000), 1], ['a'.repeat(3001), 2], ['😀'.repeat(3000), 1], ['\uFEFF' + 'a'.repeat(6000), 2]]) {
+    const pages = await svc._estimatePages(
+      { filename: 'notes.md', contentType: 'text/markdown', data: Buffer.from(text) },
+      { kind: 'document', ext: 'md' },
+    );
+    assert.equal(pages, expected);
+  }
 });
 
 test('image via application/octet-stream with image filename is still 1 page', async () => {

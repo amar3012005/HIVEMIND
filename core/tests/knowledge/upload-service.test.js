@@ -308,6 +308,7 @@ test('page quota rejection keeps limits intact and returns the canonical contrac
     resource: 'kbPages', plan: 'free', limit: 20, current: 19, remaining: null,
     suggested_plan: 'pro', upgrade_url: '/hivemind/app/billing', metric: 'kbPages', current_usage: 19,
     remaining_capacity: null, estimated_pages: 1, ingest_mode: 'both',
+    referral_trial: false, commercial_action: null,
   });
   assert.equal(deps.created.length, 0);
 });
@@ -340,6 +341,7 @@ test('credit exhaustion returns the canonical quota contract without changing th
     resource: 'credits', plan: 'pro', limit: 100, current: 100, remaining: 0,
     suggested_plan: 'scale', upgrade_url: '/hivemind/app/billing', metric: 'credits', current_usage: 100,
     remaining_capacity: 0, estimated_pages: 1, ingest_mode: 'both',
+    referral_trial: false, commercial_action: null,
   });
   assert.equal(deps.created.length, 1);
 });

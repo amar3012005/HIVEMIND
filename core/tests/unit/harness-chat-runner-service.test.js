@@ -480,3 +480,25 @@ test('private DSH completion derives tenancy from runner claims and never accept
     assert.equal(calls.length, 1);
   }
 });
+
+
+test('native Team UUID credit identities retain admission and tenant accounting', async () => {
+  for (const sessionId of ['d5769377-703d-4515-b97b-008aab5591ce', 'session-12345678', 'not-a-session', '../other']) {
+    const res = {}; let checked = 0;
+    await handleHarnessChatBootstrapRoute({
+      req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+      pathname: '/internal/v1/harness-chat/credit-operations',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => ({ session_id: sessionId, turn_id: 1, call_id: 'turn-1-admission', kind: 'turn_admission' }),
+      jsonResponse: (r, body, status = 200) => Object.assign(r, { body, status }),
+      redisConfig: {}, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+      creditService: { getSummary: async (org, user) => {
+        assert.equal(org, orgId); assert.equal(user, userId); checked++;
+        return { remaining: 10, unlimited: false, plan: 'test' };
+      } },
+    });
+    const valid = sessionId === 'session-12345678' || sessionId === 'd5769377-703d-4515-b97b-008aab5591ce';
+    assert.equal(res.status, valid ? 200 : 400);
+    assert.equal(checked, valid ? 1 : 0);
+  }
+});

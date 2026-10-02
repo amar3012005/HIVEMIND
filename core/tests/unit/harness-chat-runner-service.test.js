@@ -398,7 +398,7 @@ test('runner admits a turn without debiting and blocks exhausted credits before 
 
   const exhausted = await invoke({ plan: 'free', included: 500, used: 500, reserved: 0, remaining: 0, unlimited: false });
   assert.equal(exhausted.status, 402);
-  assert.equal(exhausted.body.code, 'plan_limit_exceeded');
+  assert.equal(exhausted.body.code, 'credits_exhausted');
   assert.equal(exhausted.body.resource, 'credits');
   assert.equal(calls.length, 0);
 });

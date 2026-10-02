@@ -13,6 +13,7 @@
  */
 
 import { chatCompletion, getDefaultModel } from './enterprise/litellm-client.js';
+import { retryableChatError } from './enterprise/chat-contract.js';
 import { memoryLLMRoute } from '../llm/groq-fallback.js';
 import { orgIsRemote } from '../vector/mneme/driver.js';
 
@@ -191,6 +192,7 @@ export class EntityExtractor {
       try {
         raw = await chatCompletion({
           model: this.model,
+          feature: 'entity-extraction',
           json_mode: true,
           temperature: 0.1,
           // 800 was self-defeating. The system prompt demands "extract EVERY
@@ -211,7 +213,7 @@ export class EntityExtractor {
         });
         break;
       } catch (err) {
-        if (attempt === 1) {
+        if (attempt === 1 || !retryableChatError(err)) {
           this.logger?.warn?.(`[entity-extractor] LLM exhausted retries: ${err.message}`);
           return [];
         }

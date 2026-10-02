@@ -19,6 +19,7 @@ import {
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
+import { retryableChatError } from './enterprise/chat-contract.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete, amrKbDocDetail } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
@@ -5390,11 +5391,16 @@ Every item must include a non-empty content field and one or more valid support_
     }
     const memories = (promoted?.memories || []).filter((memory) => memory?.id);
     onProgress?.({ stage: 'linking_provenance', progress: 92 });
+    const measure = async (stage, operation) => {
+      const started = Date.now();
+      try { return await operation(); }
+      finally { this.logger.info?.('[kb-stage-timing]', JSON.stringify({ documentId: document.id, orgId, stage, elapsedMs: Date.now() - started })); }
+    };
     await Promise.all([
-      this._extractPromotedEntitiesAsync({
+      measure('entity-enrichment', () => this._extractPromotedEntitiesAsync({
         memories, userId: document.userId || userId, orgId, documentId: document.id,
-      }),
-      this._structureClaimsAsync({ memories, orgId }),
+      })),
+      measure('claim-structuring', () => this._structureClaimsAsync({ memories, orgId })),
     ]);
     await this._projectPromotedCanonicalKnowledge({
       memories, userId: document.userId || userId, orgId, documentId: document.id,
@@ -5739,8 +5745,8 @@ Every item must include a non-empty content field and one or more valid support_
         // If you need document->summary traceability, add the evidence link — do not add a
         // second generator.
         const _msCurate = Date.now() - _tCurate;
-        ingestDiagnostic.info(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
-          + `windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
+        this.logger.info?.(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
+          + `documentId=${documentId} orgId=${orgId} windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
         const uFacts = [];
         let _docRelWritten = 0; // P5 coverage: doc-level relationship edges written
         const extraEvidenceLinks = [];
@@ -5852,7 +5858,7 @@ Every item must include a non-empty content field and one or more valid support_
         await Promise.all(Array.from({ length: Math.min(_persistPool, curated.length) }, async () => {
           while (_ci < curated.length) { const c = curated[_ci++]; await _persistOne(c); }
         }));
-        ingestDiagnostic.info(`[kb-persist] n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
+        this.logger.info?.(`[kb-persist] documentId=${documentId} orgId=${orgId} n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
 
         // ── 5b: DOCUMENT-LEVEL SEMANTIC RELATIONS ──────────────────────────────
         // Intra-window rels only see facts that shared one 2500-char window, so a
@@ -5863,6 +5869,7 @@ Every item must include a non-empty content field and one or more valid support_
         // edge itself is validated by index + type allow-list. Derives is INFERRED —
         // metadata.inferred=true, confidence 0.6, never citable, never supersedes.
         if (uFacts.length >= 2 && String(process.env.KB_DOC_RELATIONS ?? 'true').toLowerCase() !== 'false') {
+          const relationStarted = Date.now();
           try {
             const _relList = uFacts.map((m, idx) => `${idx}: ${String(m.content || '').slice(0, 200)}`).join('\n');
             // P5 explicit retry: the relations proposer is the one relationship
@@ -5885,7 +5892,7 @@ Every item must include a non-empty content field and one or more valid support_
                 });
                 break;
               } catch (e) {
-                if (_relTry === 1) throw e;
+                if (_relTry === 1 || !retryableChatError(e)) throw e;
                 ingestDiagnostic.warn(`[kb-relations] proposer transient failure — retrying once: ${e.message}`);
               }
             }
@@ -5914,6 +5921,8 @@ Every item must include a non-empty content field and one or more valid support_
             ingestDiagnostic.info(`[kb-relations] doc=${String(documentId).slice(0, 8)} facts=${uFacts.length} proposed=${Array.isArray(_relParsed?.edges) ? _relParsed.edges.length : 0} valid=${_edges.length} written=${_written}`);
           } catch (error) {
             ingestDiagnostic.warn(`[kb-relations] 5b pass failed (non-fatal): ${error.message}`);
+          } finally {
+            this.logger.info?.('[kb-stage-timing]', JSON.stringify({ documentId, orgId, stage: 'document-relations', elapsedMs: Date.now() - relationStarted }));
           }
         }
         if (extraEvidenceLinks.length && orgIsRemote(orgId)) {
@@ -5964,7 +5973,9 @@ Every item must include a non-empty content field and one or more valid support_
         if (uFacts.length >= 2 && String(process.env.KB_CONSOLIDATE || '1') !== '0') {
           try {
             const before = uFacts.length;
+            const consolidationStarted = Date.now();
             const removed = await this._consolidateDocFacts(uFacts, { docTitle, documentId });
+            this.logger.info?.('[kb-stage-timing]', JSON.stringify({ documentId, orgId, stage: 'consolidation', elapsedMs: Date.now() - consolidationStarted }));
             // Log unconditionally. This previously logged only when removed > 0, so
             // a consolidator that silently caught NOTHING was indistinguishable from
             // one that was never called — which is exactly the state it was in.

@@ -8,6 +8,7 @@
  */
 
 import fetch from 'node-fetch';
+import { gatewayGeminiModel, ChatProviderError } from './chat-contract.js';
 import { cloudflareGatewayEnabled, cloudflareGatewayConfig, gatewayFirstFetch, gatewayProviderForUrl } from '../../llm/cloudflare-gateway.js';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
@@ -199,7 +200,7 @@ function pickRoute(model) {
         base: `${base}/v1/${encodeURIComponent(config.accountId)}/${encodeURIComponent(config.gatewayId)}/compat`,
         key: config.token,
         provider: 'cf-gateway-compat',
-        wireModel: `google-ai-studio/${model}`,
+        wireModel: gatewayGeminiModel(model),
       };
     }
   }
@@ -318,6 +319,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
     body.reasoning = { enabled: false };
   }
 
+  const requestStarted = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -328,6 +330,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
       headers: {
         'Content-Type': 'application/json',
         ...(route.key ? { Authorization: `Bearer ${route.key}` } : {}),
+        ...(route.provider === 'cf-gateway-compat' ? { 'cf-aig-skip-cache': 'true' } : {}),
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -368,24 +371,33 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
           headers: {
             'Content-Type': 'application/json',
             ...(route.key ? { Authorization: `Bearer ${route.key}` } : {}),
+            ...(route.provider === 'cf-gateway-compat' ? { 'cf-aig-skip-cache': 'true' } : {}),
           },
           body: JSON.stringify(bodyNoReasoning),
           signal: ctrl2.signal,
         }, { fetchImpl: fetch });
         if (res2.ok) { res = res2; } else {
           const t2 = await res2.text();
-          throw new Error(`[enterprise-extract] LiteLLM chat error ${res2.status} (after reasoning retry): ${t2}`);
+          throw new ChatProviderError(res2.status, `[enterprise-extract] LiteLLM chat error ${res2.status} (after reasoning retry): ${t2}`);
         }
       } finally {
         clearTimeout(timer2);
       }
     } else {
-      throw new Error(`[enterprise-extract] LiteLLM chat error ${res.status}: ${text}`);
+      console.warn('[ingest-llm-receipt]', JSON.stringify({ orgId: currentOrg() || null, feature, provider: route.provider, model, status: res.status, elapsedMs: Date.now() - requestStarted }));
+      throw new ChatProviderError(res.status, `[enterprise-extract] LiteLLM chat error ${res.status}: ${text}`);
     }
   }
 
   const json = await res.json();
   const usage = json.usage;
+  // Bounded metrics stay visible without verbose prompt/source diagnostics.
+  console.info('[ingest-llm-receipt]', JSON.stringify({
+    orgId: currentOrg() || null, feature, provider: route.provider, model,
+    status: res.status, elapsedMs: Date.now() - requestStarted,
+    promptTokens: usage?.prompt_tokens ?? null, completionTokens: usage?.completion_tokens ?? null,
+    totalTokens: usage?.total_tokens ?? null, finishReason: json.choices?.[0]?.finish_reason || null,
+  }));
   // gpt-oss-* reasoning models put visible output in reasoning_content (Groq)
   // or content; coalesce both.
   const msg = json.choices?.[0]?.message || {};

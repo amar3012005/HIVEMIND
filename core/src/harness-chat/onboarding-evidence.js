@@ -11,11 +11,18 @@ export async function readRuntimeOnboarding({ prisma, claims, sourceId, dataDir 
   if (sourceId === 'homepage-screenshot') {
     const root = path.join(dataDir, 'hyper-screenshots');
     let bytes;
-    try { bytes = await fs.readFile(path.join(root, `${claims.org_id}.jpg`)); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    let visualPath = path.join(root, `${claims.org_id}.jpg`);
+    let visualType = 'homepage_screenshot';
+    try { bytes = await fs.readFile(visualPath); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      visualPath = path.join(root, `${claims.org_id}.image`);
+      visualType = 'official_website_visual';
+      try { bytes = await fs.readFile(visualPath); } catch (fallback) { if (fallback.code !== 'ENOENT') throw fallback; }
+    }
     if (!bytes) return { status: 404, body: { error: 'retained_screenshot_unavailable' } };
     if (bytes.length > 1400 * 1024) return { status: 413, body: { error: 'retained_screenshot_too_large' } };
-    return { status: 200, body: { ok: true, source_id: sourceId, media_type: bytes[0] === 0x89 && bytes[1] === 0x50 ? 'image/png' : bytes.toString('ascii', 0, 4) === 'RIFF' ? 'image/webp' : 'image/jpeg', base64: bytes.toString('base64'), title: 'Day-0 homepage capture', captured_at: (await fs.stat(path.join(root, `${claims.org_id}.jpg`))).mtime.toISOString() } };
+    return { status: 200, body: { ok: true, source_id: sourceId, media_type: bytes[0] === 0x89 && bytes[1] === 0x50 ? 'image/png' : bytes.toString('ascii', 0, 4) === 'RIFF' ? 'image/webp' : 'image/jpeg', base64: bytes.toString('base64'), title: visualType === 'homepage_screenshot' ? 'Day-0 homepage capture' : 'Day-0 retained official website visual', visual_type: visualType, captured_at: (await fs.stat(visualPath)).mtime.toISOString() } };
   }
   if (sourceId) {
     if (!UUID.test(sourceId)) return { status: 400, body: { error: 'invalid_source_id' } };
@@ -36,6 +43,10 @@ export async function readRuntimeOnboarding({ prisma, claims, sourceId, dataDir 
   }
   const artifacts = await prisma.sourceArtifact.findMany({ where: { orgId: claims.org_id, sourcePlatform: ONBOARDING_WEB_SOURCE }, select: { id: true, sourceUrl: true, createdAt: true, metadata: true }, orderBy: { createdAt: 'desc' }, take: 12 });
   let screenshotAvailable = false;
-  try { await fs.access(path.join(dataDir, 'hyper-screenshots', `${claims.org_id}.jpg`)); screenshotAvailable = true; } catch { /* unavailable is explicit */ }
-  return { status: 200, body: { ok: true, contract: 'hivemind.runtime-onboarding.v1', facts, sources: artifacts.map(item => ({ id: item.id, source_url: item.sourceUrl, captured_at: item.createdAt, kind: 'webpage' })), screenshot: { id: 'homepage-screenshot', available: screenshotAvailable, kind: 'image' } } };
+  let visualType = 'homepage_screenshot';
+  try { await fs.access(path.join(dataDir, 'hyper-screenshots', `${claims.org_id}.jpg`)); screenshotAvailable = true; }
+  catch {
+    try { await fs.access(path.join(dataDir, 'hyper-screenshots', `${claims.org_id}.image`)); screenshotAvailable = true; visualType = 'official_website_visual'; } catch { /* unavailable is explicit */ }
+  }
+  return { status: 200, body: { ok: true, contract: 'hivemind.runtime-onboarding.v1', facts, sources: artifacts.map(item => ({ id: item.id, source_url: item.sourceUrl, captured_at: item.createdAt, kind: 'webpage' })), screenshot: { id: 'homepage-screenshot', available: screenshotAvailable, kind: 'image', visual_type: visualType } } };
 }

@@ -4,12 +4,13 @@ import { createHash } from 'node:crypto';
 // remain learning/decision/handoff writes through the existing agent contract.
 export function dshTaskMemory(input) {
   const context = input.context;
-  const keys = ['source', 'completionScope', 'sessionId', 'turn', 'ownerName', 'requestedAt', 'completedAt', 'requestSeqs', 'responseSeq', 'completionSeq', 'toolReceipts'];
+  const keys = ['source', 'completionScope', 'sessionId', 'turn', 'ownerName', 'requestedAt', 'completedAt', 'requestSeqs', 'responseSeq', 'completionSeq', 'toolReceipts', 'taskId'];
   const integer = value => Number.isSafeInteger(value) && value >= 0;
   if (!context || Array.isArray(context) || typeof context !== 'object'
     || Object.keys(context).some(key => !keys.includes(key))
     || context.source !== 'dsh-turn' || context.completionScope !== 'response'
-    || !/^session-[0-9a-f-]{36}$/i.test(context.sessionId || '')
+    || !/^session-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(context.sessionId || '')
+    || (context.taskId !== undefined && (typeof context.taskId !== 'string' || context.taskId.length > 64 || !/^task-[1-9]\d*$/.test(context.taskId)))
     || !integer(context.turn) || context.turn < 1
     || typeof context.ownerName !== 'string' || !context.ownerName.trim() || context.ownerName.length > 180
     || !integer(context.responseSeq) || !integer(context.completionSeq) || context.responseSeq >= context.completionSeq

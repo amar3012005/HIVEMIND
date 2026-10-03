@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto';
 import { dshTaskMemory } from '../../src/hyperagents/dsh-task-memory.js';
 import { validateOperatingMemory } from '../../src/hyperagents/operating-memory.js';
 
-export function taskPacket() {
-  const context = { source: 'dsh-turn', completionScope: 'response', sessionId: 'session-d292efdd-4b56-4053-b61c-9cd63a7cd8ff', turn: 1, ownerName: 'Elena', requestedAt: '2026-09-30T17:00:00.000Z', completedAt: '2026-09-30T17:01:00.000Z', requestSeqs: [2], responseSeq: 5, completionSeq: 6, toolReceipts: [{ name: 'research', callId: 'call-1', resultSeq: 4, isError: false }] };
+export function taskPacket(sessionId = 'session-d292efdd-4b56-4053-b61c-9cd63a7cd8ff') {
+  const context = { source: 'dsh-turn', completionScope: 'response', sessionId, turn: 1, ownerName: 'Elena', requestedAt: '2026-09-30T17:00:00.000Z', completedAt: '2026-09-30T17:01:00.000Z', requestSeqs: [2], responseSeq: 5, completionSeq: 6, toolReceipts: [{ name: 'research', callId: 'call-1', resultSeq: 4, isError: false }] };
   const key = `dsh-task:${context.sessionId}:${context.turn}:${context.completionSeq}`;
   const hash = createHash('sha256').update(key).digest('hex');
   return { action: 'record_task', agent_slug: 'elena', title: 'Completed campaign blueprint', summary: 'Requested blueprint. Delivered response; external actions require receipts.', idempotency_key: key, run_id: `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`, context };
@@ -33,5 +33,22 @@ test('completion rejects forged identity, invalid chronology and unbounded or in
   ]) {
     const packet = taskPacket(); change(packet);
     assert.throws(() => dshTaskMemory(packet), /invalid_task_memory/);
+  }
+});
+
+
+test('compact native session identity and bounded shared task reference persist unchanged', () => {
+  const packet = taskPacket('session-53b532a88506a556516f902fa4b256ca');
+  packet.context.taskId = 'task-3';
+  const saved = dshTaskMemory(packet);
+  assert.equal(saved.context.sessionId, packet.context.sessionId);
+  assert.equal(saved.context.taskId, 'task-3');
+  assert.equal(saved.run_id, packet.run_id);
+  for (const invalid of ['task-0', 'task-x', 'task-' + '1'.repeat(65), 3]) {
+    packet.context.taskId = invalid;
+    assert.throws(() => dshTaskMemory(packet), /invalid_task_memory_receipt/);
+  }
+  for (const invalid of ['session-' + '-'.repeat(36), 'session-short', 'session-' + 'g'.repeat(32)]) {
+    assert.throws(() => dshTaskMemory(taskPacket(invalid)), /invalid_task_memory_receipt/);
   }
 });

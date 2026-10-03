@@ -7,6 +7,8 @@
  */
 
 import http from 'http';
+import { readRuntimeOnboarding } from './harness-chat/onboarding-evidence.js';
+import { verifyHarnessRunnerServiceToken } from './harness-chat/runner-service-token.js';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -4581,6 +4583,23 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+  // Retained Day-0 media belongs to Core's durable data volume. This narrow
+  // read boundary uses the same scoped runner identity, never browser input.
+  const runtimeOnboarding = pathname.match(/^\/internal\/v1\/harness-chat\/core\/v1\/hyperagents\/onboarding(?:\/([A-Za-z0-9-]+))?$/);
+  if (runtimeOnboarding) {
+    if (req.method !== 'GET') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    let claims;
+    try {
+      claims = verifyHarnessRunnerServiceToken(String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim(), {
+        secret: process.env.HIVE_HARNESS_RUNNER_SERVICE_SECRET,
+      });
+    } catch { return jsonResponse(res, { error: 'Unauthorized' }, 401); }
+    try {
+      const result = await readRuntimeOnboarding({ prisma, claims, sourceId: runtimeOnboarding[1] });
+      return jsonResponse(res, result.body, result.status);
+    } catch { return jsonResponse(res, { error: 'retained_onboarding_unavailable' }, 503); }
+  }
+
 
   // Local-only Cloudflare Workflow control surface. The Worker carries no
   // tenant data or database credentials: it presents the dedicated service

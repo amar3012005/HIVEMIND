@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import { readRuntimeOnboarding } from '../harness-chat/onboarding-evidence.js';
 import { getRedisClient } from '../control-plane/session-store.js';
 import {
   mintHarnessAdmissionTicket,
@@ -340,12 +339,6 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     } catch {
       jsonResponse(res, { error: 'Project creation unavailable' }, 503);
     }
-    return true;
-  }
-  const onboardingSource = corePath.match(/^\/v1\/hyperagents\/onboarding(?:\/([A-Za-z0-9-]+))?$/);
-  if (onboardingSource && req.method === 'GET') {
-    const result = await readRuntimeOnboarding({ prisma, claims, sourceId: onboardingSource[1] });
-    jsonResponse(res, result.body, result.status);
     return true;
   }
   if (corePath === '/v1/hyperagents/profiles' && req.method === 'GET') {

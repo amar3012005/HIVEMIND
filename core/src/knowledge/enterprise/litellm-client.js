@@ -171,7 +171,7 @@ export function isQwenIngestModel(model) {
   return String(model || '').trim() === (process.env.QWEN_INGEST_MODEL || 'singulance/qwen3-ingest');
 }
 
-function pickRoute(model) {
+export function pickRoute(model) {
   if (isQwenIngestModel(model)) {
     if (!cloudflareGatewayEnabled()) {
       throw new Error('[enterprise-extract] qwen ingestion requires enabled Cloudflare AI Gateway');
@@ -181,17 +181,12 @@ function pickRoute(model) {
       key: '', provider: 'qwen-ingest', wireModel: process.env.QWEN_INGEST_WIRE_MODEL || 'qwen3-ingest',
     };
   }
-  // Cloudflare AI Gateway first (verified live 2026-09-19): Groq-family models
-  // route through the gateway's Groq provider — gatewayFirstFetch rewrites the
-  // api.groq.com URL onto the gateway and the gateway serves its own BYOK
-  // origin key, so an exhausted/direct provider key on this box is irrelevant.
-  // Gemini routes through the gateway compat endpoint pinned to the
-  // google-ai-studio backend (measured cheapest; see PROVIDER_PREFERENCE).
-  // This branch outranks LLM_PRIMARY=openrouter so extraction no longer dies
-  // on OpenRouter 403 key-limit errors.
+  // Gateway-owned OpenRouter fallback: never select the direct Groq account
+  // for ingestion when Gateway routing is enabled. OpenRouter owns provider
+  // admission/billing; gatewayFirstFetch keeps transport on Cloudflare.
   if (cloudflareGatewayEnabled()) {
     if (FORCE_GROQ_FOR_MODELS.test(model || '')) {
-      return { base: GROQ_BASE_URL, key: GROQ_KEY, provider: 'groq' };
+      return { base: OPENROUTER_BASE_URL, key: OPENROUTER_KEY, provider: 'openrouter' };
     }
     if (/gemini/i.test(model || '')) {
       const config = cloudflareGatewayConfig();

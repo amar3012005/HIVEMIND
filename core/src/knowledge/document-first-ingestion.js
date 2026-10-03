@@ -11,6 +11,7 @@
  */
 
 import crypto from 'crypto';
+import { sourceWindows, joinSourceSegments, windowSegments } from './source-windows.js';
 import { buildDocumentParseProvenance } from './document-parse-provenance.js';
 import {
   captureDocumentProjection,
@@ -833,6 +834,35 @@ export function splitDenseExtractionContent(value, minPartChars = 320) {
   return left.length >= minPartChars && right.length >= minPartChars ? [left, right] : [];
 }
 
+export function resolveEvidenceSupport(sourceQuote, segments, fallbackId = null) {
+  const map = joinSourceSegments(segments);
+  const match = locateSourceQuote(map.text, String(sourceQuote || '').trim());
+  if (match.start >= 0 && match.quote) {
+    const end = match.start + match.quote.length;
+    const support = map.ranges.filter(range => range.start < end && range.end > match.start)
+      .map(range => ({ id: range.segment.id,
+        quote: map.text.slice(Math.max(range.start, match.start), Math.min(range.end, end)).trim() }))
+      .filter(item => item.id && item.quote);
+    if (support.length) return { segmentId: support[0].id,
+      support_segment_ids: support.map(item => item.id), support_quotes: support.map(item => item.quote) };
+  }
+  const id = resolveEvidenceSegment(sourceQuote, segments, fallbackId);
+  return { segmentId: id, support_segment_ids: id ? [id] : [], support_quotes: id ? [sourceQuote] : [] };
+}
+
+function mergedEvidenceSupports(candidates) {
+  const byId = new Map();
+  for (const item of candidates) {
+    const ids = item.support_segment_ids?.length ? item.support_segment_ids : [item.segmentId];
+    const quotes = item.support_quotes?.length ? item.support_quotes : [item.source_quote];
+    ids.forEach((id, index) => {
+      const quote = quotes[index];
+      if (id && (!byId.has(id) || String(quote || '').length > String(byId.get(id) || '').length)) byId.set(id, quote);
+    });
+  }
+  return { support_segment_ids: [...byId.keys()], support_quotes: [...byId.values()] };
+}
+
 export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null) {
   const quote = String(sourceQuote || '').trim();
   if (!quote) return fallbackId;
@@ -931,8 +961,7 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
       source_quote: primary.source_quote,
       source_start: primary.source_start,
       source_end: primary.source_end,
-      support_segment_ids: [...new Set(supports.map((item) => item.segmentId))],
-      support_quotes: supports.map((item) => item.source_quote),
+      ...mergedEvidenceSupports(supports),
       source_window_content: primary.source_window_content || null,
     });
   }
@@ -2360,7 +2389,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         // because the tables were central-only and hard-FK'd to hivemind.memories; the .amr agents
         // now carry the same two tables in their own schema, so the rows are written next to the
         // memories they describe (see the flush below, which routes central vs agent).
-        evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
+        evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.support_quotes?.[0] || fact.source_quote });
         derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
     }
@@ -2743,8 +2772,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       .slice(0, cap)
       .map((candidate) => ({
         ...candidate,
-        support_segment_ids: [candidate.segmentId],
-        support_quotes: [candidate.source_quote],
+        ...mergedEvidenceSupports([candidate]),
         rels: [],
       }));
 
@@ -4724,7 +4752,6 @@ Every item must include a non-empty content field and one or more valid support_
       if (src && src.trim().length >= 40) {
         let chunks = [];
         try {
-          const { chunkText } = await import('./document-chunker.js');
           // 1500 sized the segment to the EMBEDDING WINDOW (~512 BGE-M3 tokens),
           // not to a unit of meaning — and fitting the window is a ceiling, not a
           // target. Measured on a real 54-page deck: the parser handed us 53
@@ -4741,8 +4768,7 @@ Every item must include a non-empty content field and one or more valid support_
           // overlapSize was 0, so a claim straddling a boundary was cut in half and
           // NEITHER side held it whole. Carry roughly a sentence across the seam.
           const OVERLAP = Number(process.env.KB_SEGMENT_OVERLAP_CHARS || 120);
-          chunks = (chunkText(src, { targetSize: TARGET, maxSize: Math.round(TARGET * 1.5), minSize: 200, overlapSize: OVERLAP }) || [])
-            .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 20);
+          chunks = sourceWindows(src, { targetSize: TARGET, maxSize: Math.round(TARGET * 1.5), minSize: 200, overlapSize: OVERLAP });
         } catch (e) { ingestDiagnostic.warn(`[segments] semantic chunk failed: ${e.message}`); }
         if (chunks.length) {
           const segments = [];
@@ -4832,11 +4858,10 @@ Every item must include a non-empty content field and one or more valid support_
             if (page === null && off < _pageMarks[0].at) page = _pageMarks[0].page;
             return page;
           };
-          // running cursor so repeated text does not resolve to the first occurrence
-          let _cursor = 0;
           // heading stack -> full hierarchy path, not just the nearest heading
           const _hstack = [];
-          for (const text of chunks) {
+          for (const sourceChunk of chunks) {
+            const text = sourceChunk.text;
             const contentHash = crypto.createHash('sha256').update(text).digest('hex');
             const hm = text.match(/^(#{1,6})\s+(.+)$/m);
             let heading = hm ? hm[2].slice(0, 500) : null;
@@ -4906,15 +4931,10 @@ Every item must include a non-empty content field and one or more valid support_
             // .trim() means indexOf(fullChunk) MISSES. Measured: 90 of 93 segments got no
             // offset and therefore no page. Anchor on a PREFIX instead: the chunk's interior
             // is a verbatim substring of src, only its edges were trimmed.
-            const _anchor = text.slice(0, 60);
-            let found = _anchor.length >= 12 ? String(src).indexOf(_anchor, _cursor) : -1;
-            if (found < 0 && _anchor.length >= 12) found = String(src).indexOf(_anchor); // wrap once
-            if (found < 0) found = String(src).indexOf(text.slice(0, 24), _cursor);
-            const startOffset = found >= 0 ? found : null;
-            const endOffset = startOffset != null ? startOffset + text.length : null;
-            if (found >= 0) _cursor = found + Math.max(1, text.length - 250); // allow for overlap
+            const startOffset = sourceChunk.startOffset;
+            const endOffset = sourceChunk.endOffset;
             const startPage = _pageAt(startOffset);
-            const endPage = _pageAt(endOffset);
+            const endPage = _pageAt(Math.max(startOffset, endOffset - 1));
 
             // HONEST segment_type, matching the enum the schema documents.
             const _lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -4992,6 +5012,7 @@ Every item must include a non-empty content field and one or more valid support_
             depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
             startOffset: null, endOffset: null,
             wordCount: text.split(/\s+/).length,
+            startPage: hc.page || null, endPage: hc.page || null,
             metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, headingPath: hc.headings, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform }),
             createdAt: new Date().toISOString(),
           };
@@ -5011,7 +5032,8 @@ Every item must include a non-empty content field and one or more valid support_
                 depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
                 startOffset: null, endOffset: null,
                 wordCount: text.split(/\s+/).length,
-                metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, headingPath: hc.headings, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform }),
+                startPage: hc.page || null, endPage: hc.page || null,
+            metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, headingPath: hc.headings, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform }),
               },
             });
             segments.push(segment);
@@ -5515,29 +5537,22 @@ Every item must include a non-empty content field and one or more valid support_
       // COVERAGE from the evidence chunker: a doc that arrived as one giant segment or many tiny
       // fragments both get ~WIN-sized windows spanning the whole doc, so the tail (metrics/timeline)
       // isn't starved by a single front-loaded window.
-      const fullText = promotableSegments.map((s) => (s.content || '').trim()).filter(Boolean).join('\n\n');
-      let winChunks = [];
-      try {
-        const { chunkText } = await import('./document-chunker.js');
-        winChunks = (chunkText(fullText, { targetSize: WIN, maxSize: Math.round(WIN * 1.6), minSize: 200, overlapSize: 0 }) || [])
-          .map((c) => (c && c.text ? c.text : '')).filter((t) => t && t.trim().length >= 40);
-      } catch (e) {
-        this.logger.warn?.(`[kb-facts-only] re-window failed, using segments: ${e.message}`);
-      }
-      if (!winChunks.length) winChunks = promotableSegments.map((s) => s.content).filter(Boolean);
-      const targets = winChunks.map((content, i) => ({
-        segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
-        content,
-        // The SECOND of the "TWO places" the comment below refers to: still hardcoded null, so any
-        // document taking this fallback path lost its headings entirely.
-        heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
-        page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
-        maxFacts: Math.max(3, Math.min(12, Math.round((content.length / 1000) * FACTS_PER_K))),
-        scope: metadata.scope,
-        visibility: metadata.visibility,
-        primary_team_id: metadata.primary_team_id || null,
-        project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-      }));
+      // Read every persisted section; sampling may bound output, never source coverage.
+      const sourceMap = joinSourceSegments(segments);
+      const fullText = sourceMap.text;
+      const targets = sourceWindows(fullText, { targetSize: WIN, maxSize: Math.round(WIN * 1.6), minSize: 200, overlapSize: 0 }).map((chunk) => {
+        const sources = windowSegments(chunk, sourceMap.ranges);
+        return {
+          segmentId: sources[0]?.id || null,
+          content: chunk.text,
+          heading: [...new Set(sources.map(segmentHeading).filter(Boolean))].join(' › ').slice(0, 500) || null,
+          page: sources[0]?.startPage || null,
+          maxFacts: Math.max(3, Math.min(12, Math.round((chunk.text.length / 1000) * FACTS_PER_K))),
+          scope: metadata.scope, visibility: metadata.visibility,
+          primary_team_id: metadata.primary_team_id || null,
+          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+        };
+      });
       // Canonical path: one structured LLM call per window emits facts,
       // entities, evidence spans, and intra-window relationships together.
       // Set KB_UNIFIED_EXTRACT=false only for an emergency rollback.
@@ -5595,19 +5610,18 @@ Every item must include a non-empty content field and one or more valid support_
         const UWHARD = Number(process.env.KB_UNIFIED_WINDOW_HARD_MAX_FACTS || 24);
         let uWindows = targets;
         try {
-          const { chunkText } = await import('./document-chunker.js');
           // overlapSize was 0: a claim whose subject sat in window N and predicate in N+1
           // was seen whole by NEITHER window. 200 chars of overlap fixes that.
-          const uc = (chunkText(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 200 }) || [])
-            .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 40);
-          if (uc.length) uWindows = uc.map((content, i) => ({
-            segmentId: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.id || null,
+          const uc = sourceWindows(fullText, { targetSize: UWIN, maxSize: Math.round(UWIN * 1.6), minSize: 250, overlapSize: 200 });
+          if (uc.length) uWindows = uc.map((chunk) => {
+            const sources = windowSegments(chunk, sourceMap.ranges);
+            const content = chunk.text;
+            return {
+            segmentId: sources[0]?.id || null,
+            sourceSegmentIds: sources.map(s => s.id),
             content,
-            // was `heading: null, page: null` — hardcoded, in TWO places, so the extractor
-            // saw window text + filename only. Subject-less claims and ungrounded
-            // importance both trace back to here.
-            heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
-            page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
+            heading: [...new Set(sources.map(segmentHeading).filter(Boolean))].join(' › ').slice(0, 500) || null,
+            page: sources[0]?.startPage || null,
             // Floor the ask at the window's MEASURED fact count, not just its length.
             // Measured live: a 735-char doc with ~12 fact-bearing sentences across 3
             // sections was assigned maxFacts=5 by the flat rate and the model returned
@@ -5619,8 +5633,9 @@ Every item must include a non-empty content field and one or more valid support_
             scope: metadata.scope, visibility: metadata.visibility,
             primary_team_id: metadata.primary_team_id || null,
             project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          }));
-        } catch { /* keep targets */ }
+          };
+          });
+        } catch (error) { throw new Error(`Cannot construct complete source windows: ${error.message}`); }
         const extractedCandidates = [];
         let wi = 0;
         // RESERVE the budget synchronously BEFORE each window's async call. The old code clamped
@@ -5671,19 +5686,14 @@ Every item must include a non-empty content field and one or more valid support_
             }
             const got = Array.isArray(claims) ? claims.length : 0;
             if (got) {
-              extractedCandidates.push(...claims.map((claim) => ({
-                ...claim,
-                segmentId: resolveEvidenceSegment(claim.source_quote, promotableSegments, w.segmentId),
-                // THE ACTUAL ROOT CAUSE of the missing «filename : heading» prefix. The window knows
-                // its heading and the segments carry it, but the claim never inherited it here — so
-                // `claim.heading` was undefined by the time _persistOne built the prefix, which then
-                // degraded silently to «filename» for every fact. Measured 2/30, then 1/25; the one
-                // that did have a heading was the summary, stamped on a different path.
-                // I first "fixed" this by widening the segment→heading fallback. That was the wrong
-                // layer: the value was already available and simply never copied onto the claim.
-                heading: claim.heading || w.heading || null,
-                source_window_content: w.content,
-              })));
+              extractedCandidates.push(...claims.map((claim) => {
+                const support = resolveEvidenceSupport(claim.source_quote, segments, w.segmentId);
+                const evidence = segments.find(segment => segment.id === support.segmentId);
+                return { ...claim, ...support,
+                  heading: segmentHeading(evidence) || null,
+                  page: evidence?.startPage || null,
+                  source_window_content: w.content };
+              }));
             }
             factBudget += Math.max(0, grant - got); // return the unused part of the reservation
           }
@@ -5744,9 +5754,16 @@ Every item must include a non-empty content field and one or more valid support_
         // NO row in memory_evidence_links, so a join on document_id shows zero summaries.
         // If you need document->summary traceability, add the evidence link — do not add a
         // second generator.
+        for (const claim of curated) {
+          const evidence = segments.find(segment => segment.id === claim.segmentId);
+          if (evidence) {
+            claim.heading = segmentHeading(evidence);
+            claim.page = evidence.startPage || evidence.metadata?.page || null;
+          }
+        }
         const _msCurate = Date.now() - _tCurate;
-        this.logger.info?.(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
-          + `documentId=${documentId} orgId=${orgId} windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
+        console.info(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
+          + `documentId=${documentId} orgId=${orgId} source_sections=${sourceMap.ranges.length} source_chars=${fullText.length} windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
         const uFacts = [];
         let _docRelWritten = 0; // P5 coverage: doc-level relationship edges written
         const extraEvidenceLinks = [];

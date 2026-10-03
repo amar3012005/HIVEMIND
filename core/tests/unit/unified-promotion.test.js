@@ -7,6 +7,7 @@ import {
   normalizeUnifiedClaims,
   materializeClaimEntities,
   resolveEvidenceSegment,
+  resolveEvidenceSupport,
   splitDenseExtractionContent,
 } from '../../src/knowledge/document-first-ingestion.js';
 
@@ -444,4 +445,13 @@ test('unified promotion replaces language-code titles and rejects value entities
   }], source, 5, 0.65);
   assert.match(claim.t, /^FOREST approved/);
   assert.deepEqual(claim.entities, ['FOREST']);
+});
+
+
+test('cross-section evidence retains aligned exact fragments', () => {
+  const segments = [{ id: 'a', content: 'Ravi approved the plan' }, { id: 'b', content: 'only after Sofia verified the figures.' }];
+  const result = resolveEvidenceSupport('Ravi approved the plan\n\nonly after Sofia verified the figures.', segments, 'wrong');
+  assert.deepEqual(result.support_segment_ids, ['a', 'b']);
+  assert.deepEqual(result.support_quotes, segments.map(s => s.content));
+  assert.equal(result.segmentId, 'a');
 });

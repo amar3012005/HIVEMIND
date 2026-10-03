@@ -2751,18 +2751,24 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     // quote was lost with no log line, and the loss was indistinguishable from the
     // curator exercising judgement. Log the breakdown so "N candidates -> M
     // memories" can be attributed rather than guessed at.
-    const pool = incoming
-      .filter((candidate) => candidate?.segmentId && candidate?.f && candidate?.source_quote)
-      .slice(0, 48);
+    const eligible = incoming.filter((candidate) => candidate?.segmentId && candidate?.f && candidate?.source_quote);
+    // Consult every candidate before the final salience cap. Truncating the first
+    // 48 made later source windows invisible to curation even after full extraction.
+    if (eligible.length > 48) {
+      const reduced = [];
+      for (let start = 0; start < eligible.length; start += 48) {
+        reduced.push(...await this._curateDocumentClaims(eligible.slice(start, start + 48),
+          { docTitle, maxMemories: Math.min(12, Number(maxMemories) || 6) }));
+      }
+      return this._curateDocumentClaims(reduced, { docTitle, maxMemories });
+    }
+    const pool = eligible;
     const droppedNoQuote = incoming.filter((c) => c?.segmentId && c?.f && !c?.source_quote).length;
     const droppedMalformed = incoming.length - pool.length - droppedNoQuote;
     if (droppedNoQuote || droppedMalformed) {
       ingestDiagnostic.warn(`[kb-curate] prefilter dropped ${droppedNoQuote + droppedMalformed} of `
         + `${incoming.length} candidates (no_source_quote=${droppedNoQuote}, `
         + `malformed=${droppedMalformed}) — these never reached the curator`);
-    }
-    if (incoming.length > 48) {
-      ingestDiagnostic.warn(`[kb-curate] pool truncated ${incoming.length} → 48 before curation`);
     }
     if (!pool.length) return [];
 

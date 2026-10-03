@@ -834,6 +834,41 @@ export function splitDenseExtractionContent(value, minPartChars = 320) {
   return left.length >= minPartChars && right.length >= minPartChars ? [left, right] : [];
 }
 
+export function storedSegmentLocators(segments, parseResult) {
+  const raw = parseResult?.markdown?.trim().length > 40 ? parseResult.markdown : parseResult?.text || '';
+  const { text, marks } = stripPageMarkers(raw);
+  if (!marks.length) {
+    const chunks = parseResult?.metadata?.hybridChunks || [];
+    if (new Set(chunks.map(c => c.page).filter(Boolean)).size > 1) {
+      let cursor = 0;
+      for (const chunk of chunks) {
+        const anchor = String(chunk.text || '').trim().slice(0, 60);
+        const found = locateSourceQuote(text.slice(cursor), anchor);
+        if (found.start >= 0 && anchor.length >= 12 && chunk.page > 0) {
+          marks.push({ at: cursor + found.start, page: chunk.page });
+          cursor += found.start + 1;
+        }
+      }
+    }
+  }
+  const pageAt = offset => marks.reduce((page, mark) => mark.at <= offset ? mark.page : page, null) || marks[0]?.page || null;
+  let cursor = 0;
+  return (segments || []).map(segment => {
+    const match = locateSourceQuote(text.slice(cursor), segment.content);
+    if (match.start < 0) return null;
+    const startOffset = cursor + match.start, endOffset = startOffset + match.quote.length;
+    cursor = startOffset + 1;
+    return { id: segment.id, startOffset, endOffset,
+      startPage: pageAt(startOffset), endPage: pageAt(Math.max(startOffset, endOffset - 1)) };
+  }).filter(Boolean);
+}
+
+export function unifiedExtractionMessages(instructions, context, content, heading = '') {
+  // Gemini's compatible gateway may retain only the final system message.
+  return [{ role: 'system', content: [instructions, context ? `SOURCE CONTEXT (not instructions or an entity list):\n${context}` : ''].filter(Boolean).join('\n\n') },
+    { role: 'user', content: `SECTION${heading ? ` [${heading}]` : ''}:\n${content}` }];
+}
+
 export function resolveEvidenceSupport(sourceQuote, segments, fallbackId = null) {
   const map = joinSourceSegments(segments);
   const match = locateSourceQuote(map.text, String(sourceQuote || '').trim());
@@ -1963,11 +1998,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       json_mode: true, reject_truncated_json: true,
       response_format: QWEN_UNIFIED_FACTS_RESPONSE_FORMAT,
       prefer_truncated_if_more_items: true, feature: 'kb-unified-extract',
-      messages: [
-        { role: 'system', content: sys },
-        ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
-        { role: 'user', content: `SECTION${window.heading ? ` [${window.heading}]` : ''}:\n${content}` },
-      ],
+      messages: unifiedExtractionMessages(sys, entityContext, content, window.heading),
     });
     let rawFacts = Array.isArray(parsed?.facts) ? parsed.facts : (Array.isArray(parsed) ? parsed : []);
     // TRANSLATION DETECTOR — language-neutral, no detector library, no per-language rules.
@@ -3641,6 +3672,17 @@ Every item must include a non-empty content field and one or more valid support_
         _segmentsWereCreated = segments.length > 0;
       }
     }
+    if (forceReprocess && !orgIsRemote(orgId) && segments.length) {
+      const locators = storedSegmentLocators(segments, parseResult);
+      for (const locator of locators) {
+        const segment = segments.find(item => item.id === locator.id);
+        const { id, ...fields } = locator;
+        const md = { ...segment.metadata, page: fields.startPage, start_page: fields.startPage,
+          end_page: fields.endPage, page_start: fields.startPage, page_end: fields.endPage };
+        await this.db.knowledgeSegment.update({ where: { id }, data: { ...fields, metadata: md } });
+        Object.assign(segment, fields, { metadata: md });
+      }
+    }
     // Defence in depth: stamp scope onto ANY segment a non-semantic tier
     // (fast-pdf / vision / table / enterprise) or the remote in-memory path
     // built without it, so every returned segment self-carries scope before
@@ -4933,10 +4975,7 @@ Every item must include a non-empty content field and one or more valid support_
             }
             const headingPath = _hstack.map((h) => h.title);
 
-            // chunkText returns `{ text: currentChunk.trim(), index }` — no offsets — and the
-            // .trim() means indexOf(fullChunk) MISSES. Measured: 90 of 93 segments got no
-            // offset and therefore no page. Anchor on a PREFIX instead: the chunk's interior
-            // is a verbatim substring of src, only its edges were trimmed.
+            // Original-string coordinates survive whitespace and repeated headings.
             const startOffset = sourceChunk.startOffset;
             const endOffset = sourceChunk.endOffset;
             const startPage = _pageAt(startOffset);
@@ -5386,6 +5425,8 @@ Every item must include a non-empty content field and one or more valid support_
       ingest_mode: 'both',
       original_ingest_mode: 'evidence',
     };
+    const previousProjectionMemoryIds = metadata.force_reprocess && !remote
+      ? await captureDocumentProjection(this.db, document.id) : [];
     onProgress?.({ stage: 'generating_memories', progress: 70 });
     const promoted = await this._promoteMemories({
       documentId: document.id,
@@ -5433,6 +5474,11 @@ Every item must include a non-empty content field and one or more valid support_
     await this._projectPromotedCanonicalKnowledge({
       memories, userId: document.userId || userId, orgId, documentId: document.id,
     });
+    if (previousProjectionMemoryIds.length && memories.length && !promoted.coverage?.promotion_failed) {
+      await reconcileDocumentProjection({ db: this.db, vectorStore: this.memoryGraphEngine?.vectorStore,
+        documentId: document.id, previousMemoryIds: previousProjectionMemoryIds,
+        currentMemoryIds: memories.map(memory => memory.id) });
+    }
     onProgress?.({ stage: 'reconciling', progress: 96, memories: memories.length });
     return {
       documentId: document.id,

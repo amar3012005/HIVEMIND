@@ -3,13 +3,19 @@ function uniqueIds(values = []) {
 }
 
 /** Capture the currently active document-backed projection before a forced run. */
-export async function captureDocumentProjection(db, documentId) {
+export async function captureDocumentProjection(db, documentId, { userId, orgId } = {}) {
   if (!db?.memoryEvidenceLink || !documentId) return [];
   const rows = await db.memoryEvidenceLink.findMany({
     where: { documentId },
     select: { memoryId: true },
   });
-  return uniqueIds(rows.map((row) => row.memoryId));
+  // Older document summaries carried a document tag but no evidence link.
+  // Include only the verified owner scope, so reprocessing cannot leave a stale
+  // summary active or retire another user's tagged memory.
+  const tagged = userId && orgId && db.memory?.findMany
+    ? await db.memory.findMany({ where: { userId, orgId, deletedAt: null,
+      tags: { has: `doc-id:${documentId}` } }, select: { id: true } }) : [];
+  return uniqueIds([...rows.map((row) => row.memoryId), ...tagged.map(row => row.id)]);
 }
 
 /**

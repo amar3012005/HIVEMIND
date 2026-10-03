@@ -94,3 +94,15 @@ test('cleans a same-run citation whose memory was removed by consolidation', asy
   assert.deepEqual(result, { stale: 1, retired: 1, detached: 0 });
   assert.deepEqual(deleted, ['same-run-retired']);
 });
+
+
+test('captures legacy summaries only in the verified document owner scope', async () => {
+  let where;
+  const db = { memoryEvidenceLink: { findMany: async () => [{ memoryId: 'fact' }] },
+    memory: { findMany: async args => { where = args.where; return [{ id: 'summary' }]; } } };
+  assert.deepEqual(await captureDocumentProjection(db, 'doc', { userId: 'owner', orgId: 'org' }), ['fact', 'summary']);
+  assert.deepEqual(where, { userId: 'owner', orgId: 'org', deletedAt: null, tags: { has: 'doc-id:doc' } });
+  where = null;
+  assert.deepEqual(await captureDocumentProjection(db, 'doc'), ['fact']);
+  assert.equal(where, null);
+});

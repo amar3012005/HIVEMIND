@@ -3904,7 +3904,7 @@ Every item must include a non-empty content field and one or more valid support_
     // Capture the old projection before a forced replacement. It remains live
     // until the new projection, citations, entities, and claims are durable.
     const previousProjectionMemoryIds = forceReprocess && !orgIsRemote(orgId)
-      ? await captureDocumentProjection(this.db, knowledgeDoc.id)
+      ? await captureDocumentProjection(this.db, knowledgeDoc.id, { userId, orgId })
       : [];
 
     // Step 6: Promote candidate memories
@@ -5426,7 +5426,7 @@ Every item must include a non-empty content field and one or more valid support_
       original_ingest_mode: 'evidence',
     };
     const previousProjectionMemoryIds = metadata.force_reprocess && !remote
-      ? await captureDocumentProjection(this.db, document.id) : [];
+      ? await captureDocumentProjection(this.db, document.id, { userId: document.userId || userId, orgId }) : [];
     onProgress?.({ stage: 'generating_memories', progress: 70 });
     const promoted = await this._promoteMemories({
       documentId: document.id,

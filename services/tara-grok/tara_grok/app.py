@@ -150,6 +150,10 @@ def _capability_from_subprotocols(protocols: Iterable[str]) -> str:
     return ""
 
 
+def _native_call_interrupted(reason: str) -> bool:
+    return reason not in {"user_ended", "time_limit"}
+
+
 def _provider_error_code(event: dict) -> str:
     """Only protocol-safe code; never log provider text, prompts or credentials."""
     code = str((event.get("error") or {}).get("code") or "xai_provider_error")
@@ -483,13 +487,14 @@ async def voice(ws: WebSocket, session_id: str):
                         return
                     payload = json.loads(message["text"])
                     if snapshot.get("native_session_id") and payload.get("type") == "runtime_end":
-                        native_end_reason = "ended"
+                        native_end_reason = "user_ended"
+                        log.info("native voice terminal reason=user_ended")
                         return
                     if payload.get("type") not in {"input_audio_buffer.commit", "input_audio_buffer.clear", "response.cancel"}:
                         continue
                     await xai.send(json.dumps(payload))
-        except WebSocketDisconnect:
-            pass
+        except WebSocketDisconnect as error:
+            log.info("native voice browser disconnect code=%s", error.code)
 
     pending_tool_calls: list[dict] = []
     tool_batch_task: asyncio.Task | None = None
@@ -537,12 +542,19 @@ async def voice(ws: WebSocket, session_id: str):
                     continue
                 event = json.loads(message)
                 _etype = event.get("type")
+                if _etype in {"session.updated", "input_audio_buffer.speech_started", "input_audio_buffer.timeout_triggered", "response.done"}:
+                    log.info("native voice protocol event=%s", _etype)
+                if _etype == "session.updated":
+                    idle = (event.get("session") or {}).get("turn_detection") or {}
+                    value = idle.get("idle_timeout_ms")
+                    log.info("native voice idle acknowledgement enabled=%s timeout_ms=%s", value is not None, value if isinstance(value, (int, float)) else "unset")
                 if _etype == "error":
                     code = _provider_error_code(event)
                     log.warning("xAI browser protocol error code=%s", code)
                     terminal_event = {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"provider": "grok", "failure_code": code}}
                 silence_update = silence_check_in.disable_for(_etype, snapshot)
                 if silence_update:
+                    log.info("native voice disabling initial silence check-in event=%s", _etype)
                     await xai.send(json.dumps(silence_update))
                 # Caller speech → held until the assistant reply completes the turn.
                 if _etype == "conversation.item.input_audio_transcription.completed":
@@ -570,6 +582,9 @@ async def voice(ws: WebSocket, session_id: str):
                 browser_event = _browser_event(event)
                 if browser_event:
                     await ws.send_text(json.dumps(browser_event))
+        except websockets.ConnectionClosed as error:
+            log.warning("native voice provider disconnect code=%s", error.code)
+            terminal_event = {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"provider": "grok", "failure_code": "xai_connection_closed"}}
         except Exception:
             log.exception("xAI realtime session failed")
             terminal_event = {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"provider": "grok", "failure_code": "xai_session_failed"}}
@@ -577,9 +592,10 @@ async def voice(ws: WebSocket, session_id: str):
             if tool_batch_task and not tool_batch_task.done():
                 tool_batch_task.cancel()
             if snapshot.get("native_session_id"):
+                log.info("native voice terminal reason=%s provider_close_code=%s", native_end_reason, xai.close_code)
                 if browser_turn_state.get("user"):
                     await _record_browser_turn("")
-                terminal_event["payload"]["interrupted"] = native_end_reason != "ended"
+                terminal_event["payload"]["interrupted"] = _native_call_interrupted(native_end_reason)
             await emit_event(session_id, terminal_event)
 
     async def end_at_runtime_limit():
@@ -604,7 +620,8 @@ async def voice(ws: WebSocket, session_id: str):
             except websockets.ConnectionClosed:
                 return
         await asyncio.sleep(min(closing_window, max_duration_seconds))
-        native_end_reason = "ended"
+        native_end_reason = "time_limit"
+        log.info("native voice terminal reason=time_limit")
         await ws.close(code=1000, reason="runtime_time_limit")
 
     tasks = [asyncio.create_task(browser_to_xai()), asyncio.create_task(xai_to_browser())]

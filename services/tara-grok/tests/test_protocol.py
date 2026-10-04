@@ -1,6 +1,6 @@
 import unittest
 
-from tara_grok.app import _provider_error_code, _InitialSilenceCheckIn, _browser_event, _capability_from_subprotocols, _opening_events, _session_update
+from tara_grok.app import _native_call_interrupted, _provider_error_code, _InitialSilenceCheckIn, _browser_event, _capability_from_subprotocols, _opening_events, _session_update
 
 
 class TaraGrokProtocolTests(unittest.TestCase):
@@ -85,3 +85,11 @@ class ProviderErrorDiagnosticTests(unittest.TestCase):
         self.assertEqual(_provider_error_code({"error": {"code": "invalid_request_error", "message": "private prompt"}}), "invalid_request_error")
         self.assertEqual(_provider_error_code({"error": {"code": "token=secret\nprivate"}}), "xai_provider_error")
         self.assertEqual(_provider_error_code({"error": {"message": "private prompt"}}), "xai_provider_error")
+
+
+class TerminalReasonTests(unittest.TestCase):
+    def test_only_explicit_end_or_native_deadline_is_uninterrupted(self):
+        self.assertFalse(_native_call_interrupted("user_ended"))
+        self.assertFalse(_native_call_interrupted("time_limit"))
+        self.assertTrue(_native_call_interrupted("interrupted"))
+        self.assertTrue(_native_call_interrupted("provider_closed"))

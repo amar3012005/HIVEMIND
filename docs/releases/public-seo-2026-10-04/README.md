@@ -50,3 +50,49 @@ All nine initial public HTTP documents returned 200 with one H1/canonical/descri
 - Backlink strategy is docs/seo/public-search-plan.md in the frontend worktree. No outreach or paid links were sent.
 
 The strategy's earlier AVIF-preload note is superseded by the final responsive WebP preload. Homepage metadata and initial summaries are delivered at the edge for users and bots alike; these summaries are not full server rendering of every research article.
+
+## Continuation: public startup and image delivery
+
+- Frontend source: f468054efe091b3f575184887d7664c8aa1b6e18, pushed to Da-vinci main.
+- Parent promotion: c6c03bc2, pushed to singulance-main.
+- Current Worker: b5484742-94fc-4de5-b0bf-376549b80d2c, 100% traffic.
+- Immediate rollback: df344def-012c-4192-bb73-93162929aa79. Previous baseline: 8ef69375-d7ce-4066-a4ba-53ac048fc509.
+- Both continuation builds passed the guarded production build and asset verification. Source and current Worker were checked before each cutover. No Core, Harness, Control Plane, database, or security rule was changed.
+- Optional PostHog initialization is dynamically loaded only after analytics consent. Consent revocation is rechecked during SDK initialization. Consent preferences and rejection were verified in the live research page.
+- Consent-banner entry animation now uses CSS and respects reduced motion. The acceptance button contrast was improved.
+- Main JS compressed size fell from 239.65 KB to 132.03 KB (about 45%).
+- Responsive AVIF mobile hero variants retain WebP fallback. The 750px hero falls from 80,600 bytes to 50,196 bytes. The matching AVIF preload prevents fetching the WebP unnecessarily in supporting browsers.
+- Responsive thesis images reduce the 750px transfer to 65,076 bytes from the 185,942-byte 1080px original. Desktop artwork and motion behavior are retained.
+- Nine public initial documents passed H1/canonical/description/schema/indexability checks. Public sitemap XML parsed with nine URLs; robots returned 200. Unknown page and JS probes returned real 404s; app Profile retained noindex. See continuation-http-audit.json. New AVIF asset returns 200 image/avif, and the public HTML advertises the AVIF preload.
+
+### Crawler and Search Console evidence
+
+Cloudflare's verified Search Engine Crawler logs show Googlebot, ASN 15169 Google LLC, requesting public /sitemap.xml at 2026-10-04 02:24:25 CEST and /robots.txt at 02:23:59. The expanded sitemap record reports Not mitigated and cache Hit. This confirms a real Googlebot request and absence of security mitigation for that request; this UI does not expose its HTTP response code, so it does not prove successful sitemap parsing.
+
+Search Console accepted the sitemap resubmission with its success dialog. The report still says Couldn't fetch / Unknown / zero discovered pages. Do not claim successful Google processing. Public XML is valid and reachable; no security protections were weakened. The existing verified domain property was used.
+
+### Continuation lab measurement before the image refinement
+
+https://pagespeed.web.dev/analysis/https-singulancelabs-com/thq3jw08og?form_factor=mobile
+
+Mobile: Performance 75, Accessibility 100, Best Practices 100, SEO 100; FCP 1.7s, LCP 6.2s, TBT 20ms, CLS 0.078, Speed Index 2.7s. No field data. Desktop measurement returned RPC deadline exceeded. LCP is still poor; this is not a passing field Core Web Vitals result. The final image-release measurement is recorded below when complete.
+
+### Final desktop-scene isolation release
+
+- Frontend source: e4bc75cf6edfbb953ae5b6194358297026e16d84, pushed to Da-vinci main.
+- Parent promotion: 9409833e, pushed to singulance-main.
+- Current Worker: 9aa20e1e-9340-45d1-afea-ba8b1bfb2b4c, 100% traffic. Immediate rollback: b5484742-94fc-4de5-b0bf-376549b80d2c.
+- Desktop-only scenes, the field picker, and desktop About content now load through React lazy boundaries only when desktop mode renders. Mobile retains its hero, thesis, navigation and footer; desktop retains its original components. Breakpoint changes still load desktop components on demand.
+- Focused ESLint, guarded production compilation, source-head checks and asset verification passed. Live Worker identity was unchanged between baseline and cutover. Main compressed JS remains approximately 132 KB; the optimization removes desktop-only scene dependencies from the mobile route's eager import graph.
+- Final HTTP checks passed for all nine canonical pages, one initial H1/title/description/schema per page, sitemap XML, robots, HTTP-to-HTTPS 308, real unknown-page/chunk 404s and private app noindex. See final-http-audit.json.
+- Live authenticated Profile reload and public Research navigation rendered after this cutover. No authenticated app, Harness, Core, Control Plane, database or security-rule source changed in this continuation.
+
+Final mobile PageSpeed report, 2026-10-04 03:20 CEST:
+https://pagespeed.web.dev/analysis/https-singulancelabs-com/5lzu011rvo?form_factor=mobile
+
+Performance 76; Accessibility 100; Best Practices 100; SEO 100. FCP 1.7s, LCP 5.8s, TBT 90ms, CLS 0.078, Speed Index 2.4s. Exact calculator values: FCP 1703ms, LCP 5803ms, TBT 86ms. These are synthetic runs and vary; compared with the initial run, blocking improved greatly, while LCP remains poor and a passing Core Web Vitals result is not established. No field data is available.
+
+The previous image-release measurement was Performance 76, LCP 6.3s, TBT 60ms:
+https://pagespeed.web.dev/analysis/https-singulancelabs-com/qj4e9ayt9v?form_factor=mobile
+
+Remaining external outcome: Search Console sitemap parsing is unconfirmed despite accepted resubmission and a verified Googlebot request with no security mitigation. Do not claim guaranteed rankings or that all nine URLs are indexed. Backlink outreach is not performed; the strategy is recorded in the frontend's docs/seo/public-search-plan.md.

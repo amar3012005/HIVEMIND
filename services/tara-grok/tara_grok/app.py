@@ -150,6 +150,12 @@ def _capability_from_subprotocols(protocols: Iterable[str]) -> str:
     return ""
 
 
+def _provider_error_code(event: dict) -> str:
+    """Only protocol-safe code; never log provider text, prompts or credentials."""
+    code = str((event.get("error") or {}).get("code") or "xai_provider_error")
+    return code if len(code) <= 80 and all(c.isalnum() or c in "_-" for c in code) else "xai_provider_error"
+
+
 class _InitialSilenceCheckIn:
     """One provider-native check-in; no local timer or repeat question loop."""
 
@@ -531,6 +537,10 @@ async def voice(ws: WebSocket, session_id: str):
                     continue
                 event = json.loads(message)
                 _etype = event.get("type")
+                if _etype == "error":
+                    code = _provider_error_code(event)
+                    log.warning("xAI browser protocol error code=%s", code)
+                    terminal_event = {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"provider": "grok", "failure_code": code}}
                 silence_update = silence_check_in.disable_for(_etype, snapshot)
                 if silence_update:
                     await xai.send(json.dumps(silence_update))

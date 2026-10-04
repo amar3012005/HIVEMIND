@@ -1,6 +1,6 @@
 import unittest
 
-from tara_grok.app import _InitialSilenceCheckIn, _browser_event, _capability_from_subprotocols, _opening_events, _session_update
+from tara_grok.app import _provider_error_code, _InitialSilenceCheckIn, _browser_event, _capability_from_subprotocols, _opening_events, _session_update
 
 
 class TaraGrokProtocolTests(unittest.TestCase):
@@ -78,3 +78,10 @@ class RuntimeInitialSilenceTests(unittest.TestCase):
         for snapshot in [{}, {"native_session_id": "session-room", "initial_check_in": False}]:
             self.assertNotIn("idle_timeout_ms", _session_update(snapshot)["session"]["turn_detection"])
             self.assertIsNone(_InitialSilenceCheckIn(snapshot).disable_for("input_audio_buffer.timeout_triggered", snapshot))
+
+
+class ProviderErrorDiagnosticTests(unittest.TestCase):
+    def test_diagnostics_keep_only_safe_error_code(self):
+        self.assertEqual(_provider_error_code({"error": {"code": "invalid_request_error", "message": "private prompt"}}), "invalid_request_error")
+        self.assertEqual(_provider_error_code({"error": {"code": "token=secret\nprivate"}}), "xai_provider_error")
+        self.assertEqual(_provider_error_code({"error": {"message": "private prompt"}}), "xai_provider_error")

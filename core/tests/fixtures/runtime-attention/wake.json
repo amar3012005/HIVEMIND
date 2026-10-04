@@ -1,0 +1,12 @@
+{
+  "id": "synthetic-runtime-attention-wake",
+  "sender": "synthetic-test@invalid.example",
+  "to": "synthetic-recipient@invalid.example",
+  "subject": "SYNTHETIC TEST ONLY \u2014 user-requested Runtime integration verification",
+  "message_text": "The human user explicitly authorized making the Composio-to-Runtime integration work and testing it live now. This synthetic fixture tests that authorized wake only. Runtime: acknowledge receipt of this integration-test event, preserve all accepted tasks and the existing next wake, and return to the previous handoff. Do not research, create tasks, publish company memory, send email, or invent company findings. This is not a real email or customer communication.",
+  "label_ids": [
+    "INBOX"
+  ],
+  "thread_id": "synthetic-wake",
+  "attachment_list": []
+}

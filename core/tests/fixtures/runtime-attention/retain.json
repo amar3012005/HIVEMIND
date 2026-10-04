@@ -1,0 +1,12 @@
+{
+  "id": "synthetic-runtime-attention-retain",
+  "sender": "synthetic-test@invalid.example",
+  "to": "synthetic-recipient@invalid.example",
+  "subject": "SYNTHETIC TEST ONLY \u2014 irrelevant promotional newsletter",
+  "message_text": "Synthetic irrelevant newsletter used only to verify quiet retention. No real sender, customer or company finding. No action requested.",
+  "label_ids": [
+    "SPAM"
+  ],
+  "thread_id": "synthetic-retain",
+  "attachment_list": []
+}

@@ -1,0 +1,12 @@
+{
+  "id": "synthetic-runtime-attention-notify",
+  "sender": "synthetic-test@invalid.example",
+  "to": "synthetic-recipient@invalid.example",
+  "subject": "SYNTHETIC TEST ONLY \u2014 integration test progress FYI",
+  "message_text": "Synthetic FYI from the authorized integration test. The test fixture has reached the existing signed receiver. No company finding or external action is asserted. Keep this as a contextual notification; no immediate Runtime work is needed.",
+  "label_ids": [
+    "INBOX"
+  ],
+  "thread_id": "synthetic-notify",
+  "attachment_list": []
+}

@@ -14,6 +14,7 @@ export const triggerTool = {
     connected_account_id: { type: 'string', maxLength: 180 },
     subscription_id: { type: 'string', format: 'uuid' },
     config: { type: 'object' },
+    runtime_attention: { type: 'boolean', description: 'Explicitly requested routing of future relevant events to the company Runtime. Default off; Runtime permissions and autonomy still apply.' },
     limit: { type: 'integer', minimum: 1, maximum: 25 },
   }, required: ['operation'] },
 };
@@ -31,6 +32,7 @@ export async function ensureTriggerStore(db) {
       status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(org_id,user_id,account_id,slug,config_key))`);
     await db.$executeRawUnsafe("ALTER TABLE hivemind_trigger_subscriptions ADD COLUMN IF NOT EXISTS subject text");
+    await db.$executeRawUnsafe("ALTER TABLE hivemind_trigger_subscriptions ADD COLUMN IF NOT EXISTS runtime_attention boolean NOT NULL DEFAULT false, ADD COLUMN IF NOT EXISTS runtime_attention_revision integer NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS runtime_attention_enabled_at timestamptz");
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_trigger_events (
       id text PRIMARY KEY, subscription_id uuid NOT NULL REFERENCES hivemind_trigger_subscriptions(id),
       org_id text NOT NULL, user_id text NOT NULL, data jsonb NOT NULL,
@@ -65,7 +67,7 @@ async function accounts(ctx) {
   const sharedAccounts = subject === ctx.orgId ? [] : (await listConnectedAccounts(ctx.orgId, { connectionScope: 'org' })).map(account => ({ ...account, scope: 'organization', subject: ctx.orgId }));
   return [...new Map([...userAccounts, ...sharedAccounts].filter(a => a.status === 'ACTIVE').map(a => [a.id, a])).values()];
 }
-function view(row) { return { id: row.id, toolkit: row.toolkit, trigger_slug: row.slug, connected_account_id: row.account_id, status: row.status, config: row.config, version: row.version, updated_at: row.updated_at }; }
+function view(row) { return { id: row.id, toolkit: row.toolkit, trigger_slug: row.slug, connected_account_id: row.account_id, status: row.status, config: row.config, version: row.version, runtime_attention: row.runtime_attention === true, updated_at: row.updated_at }; }
 export async function runTriggers(args, ctx) {
   if (!ctx.orgId || !ctx.userId || !ctx.prisma) fail('Authenticated account required.', 401);
   if (!validateInput(args)) fail(`Invalid HIVEMIND Triggers input: ${ajv.errorsText(validateInput.errors)}`);
@@ -102,11 +104,14 @@ export async function runTriggers(args, ctx) {
       const lock = `trigger:${ctx.orgId}:${account.id}:${args.trigger_slug}:${createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex')}`;
       await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS locked', lock);
     const inserted = await tx.$queryRawUnsafe(`INSERT INTO hivemind_trigger_subscriptions
-      (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key,subject)
-      VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12)
-      ON CONFLICT(org_id,user_id,account_id,slug,config_key) DO UPDATE SET updated_at=now() RETURNING *`,
+      (id,org_id,user_id,account_id,toolkit,slug,config,config_schema,payload_schema,version,config_key,subject,runtime_attention,runtime_attention_revision,runtime_attention_enabled_at)
+      VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12,COALESCE($13::boolean,false),CASE WHEN $13::boolean THEN 1 ELSE 0 END,CASE WHEN $13::boolean THEN now() END)
+      ON CONFLICT(org_id,user_id,account_id,slug,config_key) DO UPDATE SET updated_at=now(),
+      runtime_attention=COALESCE($13::boolean,hivemind_trigger_subscriptions.runtime_attention),
+      runtime_attention_revision=hivemind_trigger_subscriptions.runtime_attention_revision+CASE WHEN $13::boolean IS NOT NULL AND $13::boolean IS DISTINCT FROM hivemind_trigger_subscriptions.runtime_attention THEN 1 ELSE 0 END,
+      runtime_attention_enabled_at=CASE WHEN $13::boolean AND NOT hivemind_trigger_subscriptions.runtime_attention THEN now() ELSE hivemind_trigger_subscriptions.runtime_attention_enabled_at END RETURNING *`,
       randomUUID(), ctx.orgId, ctx.userId, account.id, toolkit, args.trigger_slug,
-      JSON.stringify(args.config || {}), JSON.stringify(configSchema), JSON.stringify(payloadSchema), type.version, createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex'), account.subject);
+      JSON.stringify(args.config || {}), JSON.stringify(configSchema), JSON.stringify(payloadSchema), type.version, createHash('sha256').update(JSON.stringify(canonical(args.config || {}))).digest('hex'), account.subject, args.runtime_attention ?? null);
     const row = inserted[0];
     if (row.status === 'active' && row.remote_id) return { successful: true, subscription: view(row), reused: true };
     const remote = await triggerRequest('POST', `/trigger_instances/${encodeURIComponent(args.trigger_slug)}/upsert`, {
@@ -127,7 +132,8 @@ export async function runTriggers(args, ctx) {
       JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
       WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
       AND e.received_at > now()-interval '7 days'
-      AND ($5::boolean=false OR (e.relevance_status='approved' AND e.relevance_decision->>'policy'=$6)) ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12, args.operation === 'suggestions', ACTIVITY_RELEVANCE_POLICY);
+      AND ($5::boolean=false OR (e.relevance_status='approved' AND e.relevance_decision->>'policy'=$6
+        AND COALESCE(e.relevance_decision->'runtimeAttention'->>'action','notify')='notify')) ORDER BY e.received_at DESC LIMIT $4`, ctx.orgId, ctx.userId, [...allowed], args.limit || 12, args.operation === 'suggestions', ACTIVITY_RELEVANCE_POLICY);
     return args.operation === 'deliveries' ? { events } : { suggestions: [...new Map(events.slice().reverse().map(eventSuggestion).filter(Boolean).map(item => [`${item.source}:${item.topic}`, item])).values()].reverse() };
   }
   const row = visible.find(s => s.id === args.subscription_id);

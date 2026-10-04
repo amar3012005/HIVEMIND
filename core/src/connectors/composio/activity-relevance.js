@@ -1,5 +1,7 @@
 import { createOpenRouterJevProvider } from '../../agent/decision-gateway.js';
 import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-service.js';
+import { assessRuntimeAttention } from './runtime-attention.js';
+import { createRuntimeAttentionBridge } from './runtime-attention-bridge.js';
 
 export const ACTIVITY_RELEVANCE_POLICY = 'company_activity_relevance_v2';
 const POLICY = ACTIVITY_RELEVANCE_POLICY;
@@ -89,11 +91,60 @@ export function classifyPendingActivity(ctx) {
       return;
     }
     for (const row of rows) {
-      const sub = await db.$queryRawUnsafe("SELECT toolkit FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND status='active'", row.subscription_id);
+      const sub = await db.$queryRawUnsafe("SELECT toolkit,runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])", row.subscription_id, ctx.orgId, ctx.userId, ctx.allowedAccountIds);
       if (!sub.length) continue;
-      const receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit }, context });
+      const bridge = ctx.runtimeAttention || createRuntimeAttentionBridge();
+      // Reconcile a previous outcome-unknown attempt before asking Jev again.
+      // The same event identity either has a durable admission, or is still gated
+      // by the native current consent/context. Never blindly resend a new identity.
+      if (bridge && row.relevance_decision?.runtimeAttention?.action === 'wake' && !row.relevance_decision.runtimeDelivery) {
+        try {
+          const delivery = await bridge.deliver(row);
+          await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='approved',relevance_decision=jsonb_set(relevance_decision,'{runtimeDelivery}',$1::jsonb),evaluated_at=now() WHERE id=$2", JSON.stringify(delivery), row.id);
+          continue;
+        } catch { /* No confirmed receipt: reassess current context under the same event identity. */ }
+      }
+      const optedIn = sub[0].runtime_attention === true && bridge && sub[0].runtime_attention_enabled_at
+        && new Date(row.received_at) >= new Date(sub[0].runtime_attention_enabled_at);
+      let consent, native;
+      if (optedIn) {
+        try {
+          consent = await bridge.readConsent(row);
+          native = consent?.enabled === true ? await bridge.readSnapshot(row) : undefined;
+        } catch { /* Preserve the event; unavailable native context cannot authorize a wake. */ }
+      }
+      const receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit },
+        context: native ? { ...context, runtime: native } : context });
+      // Optional native bridge contract. Existing suggestions-only installations
+      // do not opt in and never start Runtime work. Consent and snapshot readers
+      // must be authoritative, owner-scoped and supplied by the native bridge.
+      // Persist the attention receipt here; delivery is deliberately not assumed
+      // successful from an inbox enqueue or a classifier result.
+      if (receipt.status === 'approved' && optedIn) {
+        try {
+          const snapshot = native && { ...native, company: context };
+          const config = decisionGatewayProviderConfig();
+          const provider = createOpenRouterJevProvider({ ...config, timeoutMs: 5000, siteName: 'HIVEMIND Runtime Attention' });
+          receipt.runtimeAttention = await assessRuntimeAttention({ event: { ...row, toolkit: sub[0].toolkit },
+            consent, snapshot, provider });
+        } catch {
+          receipt.runtimeAttention = { action: 'retain', reason: 'context_unavailable' };
+        }
+        if (['context_unavailable', 'decision_unavailable'].includes(receipt.runtimeAttention?.reason)) receipt.status = 'pending';
+      }
       await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status=$1,relevance_decision=$2::jsonb,evaluated_at=now() WHERE id=$3`, receipt.status, JSON.stringify(receipt), row.id);
+      if (receipt.runtimeAttention?.action === 'wake' && bridge) {
+        try {
+          const delivery = await bridge.deliver({ ...row, relevance_decision: receipt });
+          await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_decision=jsonb_set(relevance_decision,'{runtimeDelivery}',$1::jsonb),evaluated_at=now() WHERE id=$2", JSON.stringify(delivery), row.id);
+        } catch {
+          // Outcome unknown stays pending for existing classifier reconciliation.
+          // Native admission deduplication uses this exact persisted event identity.
+          await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='pending',evaluated_at=now() WHERE id=$1", row.id);
+        }
+      }
     }
   })().catch(() => {}).finally(() => workers.delete(key));
   workers.set(key, job);
+  return job;
 }

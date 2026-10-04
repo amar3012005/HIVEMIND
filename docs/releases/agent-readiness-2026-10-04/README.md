@@ -40,3 +40,7 @@ Remaining authentication findings:
 Separate verified backend issue: https://core.singulancelabs.com/v1/chatgpt/openapi.yaml returns 500 because /app/chatgpt-adapter/openapi.yaml is missing. It is not advertised as a working OpenAPI integration by this release. Core was not changed.
 
 No claim is made that every experimental protocol is supported, that the private app should be crawled, or that agent discovery guarantees traffic/rankings. Earlier SEO and current authenticated app behavior remain included.
+
+## Crawl preview clarification
+
+Frontend 7957adb8 and parent 1e8c6ebf are pushed. Worker a379ffc4-b893-4a6f-8297-8e844ed1ed35 is deployed at 100%; rollback d3fc49ce-4dac-4081-8ddc-02743b9ca945. Build and live-version guards passed. The raw live homepage now explicitly says the workspace is at next.singulancelabs.com, links it near the top, and explains public website versus authenticated app. Fallback spacing and heading size improved. workspace-fallback.png renders the extracted live fallback locally without React, illustrating the content an HTML-only crawler receives; it is not the full interactive website. This does not force embedded viewers to execute JavaScript or redirect the public canonical homepage. Python urllib's default agent received 403; curl successfully received and verified the changed response. No security rules changed.

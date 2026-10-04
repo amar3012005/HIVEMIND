@@ -26,7 +26,7 @@ test('disposable PostgreSQL proves persistence, immutable versions, approval and
     },
   });
   try {
-    await pool.query('CREATE SCHEMA hivemind');
+    await pool.query('CREATE SCHEMA IF NOT EXISTS hivemind');
     await pool.query('CREATE TABLE hivemind.test_advisory_members (user_id uuid,org_id uuid,role text,"isActive" boolean)');
     await pool.query('INSERT INTO hivemind.test_advisory_members VALUES ($1,$2,\'admin\',true),($1,$3,\'admin\',true)', [userId, orgId, otherOrg]);
     await pool.query(await readFile(new URL('../../prisma/migrations/20261004140000_advisory_playbook_revisions/migration.sql', import.meta.url), 'utf8'));

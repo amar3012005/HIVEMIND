@@ -96,3 +96,5 @@ The previous image-release measurement was Performance 76, LCP 6.3s, TBT 60ms:
 https://pagespeed.web.dev/analysis/https-singulancelabs-com/qj4e9ayt9v?form_factor=mobile
 
 Remaining external outcome: Search Console sitemap parsing is unconfirmed despite accepted resubmission and a verified Googlebot request with no security mitigation. Do not claim guaranteed rankings or that all nine URLs are indexed. Backlink outreach is not performed; the strategy is recorded in the frontend's docs/seo/public-search-plan.md.
+
+Final desktop PageSpeed measurement returned RPC::DEADLINE_EXCEEDED / context deadline exceeded. No desktop score or passing desktop performance result is claimed.

@@ -166,15 +166,18 @@ class _InitialSilenceCheckIn:
     def __init__(self, snapshot: dict):
         self.enabled = bool(snapshot.get("native_session_id") and snapshot.get("initial_check_in"))
 
-    def disable_for(self, event_type: str, snapshot: dict) -> dict | None:
+    def disable_for(self, event_type: str, snapshot: dict) -> list[dict] | None:
         if not self.enabled or event_type not in {
-            "input_audio_buffer.timeout_triggered", "input_audio_buffer.speech_started",
+            "input_audio_buffer.timeout_triggered", "conversation.item.input_audio_transcription.completed",
         }:
             return None
         self.enabled = False
         detection = dict(_session_update(snapshot)["session"]["turn_detection"])
-        detection["idle_timeout_ms"] = None
-        return {"type": "session.update", "session": {"turn_detection": detection}}
+        detection.pop("idle_timeout_ms", None)
+        # A partial null is acknowledged but did not cancel the live xAI timer.
+        # Reset the native detector after a completed utterance, then restore VAD.
+        return [{"type": "session.update", "session": {"turn_detection": None}},
+                {"type": "session.update", "session": {"turn_detection": detection}}]
 
 
 def _session_update(snapshot: dict, media: str = "browser") -> dict:
@@ -555,7 +558,8 @@ async def voice(ws: WebSocket, session_id: str):
                 silence_update = silence_check_in.disable_for(_etype, snapshot)
                 if silence_update:
                     log.info("native voice disabling initial silence check-in event=%s", _etype)
-                    await xai.send(json.dumps(silence_update))
+                    for update in silence_update:
+                        await xai.send(json.dumps(update))
                 # Caller speech → held until the assistant reply completes the turn.
                 if _etype == "conversation.item.input_audio_transcription.completed":
                     browser_turn_state["user"] = (

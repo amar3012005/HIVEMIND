@@ -64,14 +64,16 @@ class RuntimeInitialSilenceTests(unittest.TestCase):
         snapshot = {"native_session_id": "session-room", "initial_check_in": True}
         state = _InitialSilenceCheckIn(snapshot)
         update = state.disable_for("input_audio_buffer.timeout_triggered", snapshot)
-        self.assertIsNone(update["session"]["turn_detection"]["idle_timeout_ms"])
-        self.assertEqual(update["session"]["turn_detection"]["type"], "server_vad")
+        self.assertIsNone(update[0]["session"]["turn_detection"])
+        self.assertNotIn("idle_timeout_ms", update[1]["session"]["turn_detection"])
+        self.assertEqual(update[1]["session"]["turn_detection"]["type"], "server_vad")
         self.assertIsNone(state.disable_for("input_audio_buffer.timeout_triggered", snapshot))
 
     def test_human_speech_disables_initial_reprompt(self):
         snapshot = {"native_session_id": "session-room", "initial_check_in": True}
         state = _InitialSilenceCheckIn(snapshot)
-        self.assertIsNotNone(state.disable_for("input_audio_buffer.speech_started", snapshot))
+        self.assertIsNone(state.disable_for("input_audio_buffer.speech_started", snapshot))
+        self.assertIsNotNone(state.disable_for("conversation.item.input_audio_transcription.completed", snapshot))
         self.assertIsNone(state.disable_for("input_audio_buffer.timeout_triggered", snapshot))
 
     def test_ordinary_tara_and_later_calls_keep_existing_behavior(self):

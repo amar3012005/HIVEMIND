@@ -1,0 +1,34 @@
+[
+  {
+    "url": "https://singulancelabs.com/hivemind.txt",
+    "response": "200 text/plain; charset=utf-8 13540 https://singulancelabs.com/hivemind.txt",
+    "robots": []
+  },
+  {
+    "url": "https://singulancelabs.com/tara.md",
+    "response": "200 text/markdown; charset=utf-8 1661 https://singulancelabs.com/tara.md",
+    "robots": []
+  },
+  {
+    "url": "https://singulancelabs.com/hyperagents/index.txt",
+    "response": "200 text/plain; charset=utf-8 1867 https://singulancelabs.com/hyperagents/index.txt",
+    "robots": []
+  },
+  {
+    "url": "https://next.singulancelabs.com/index.md",
+    "response": "200 text/markdown; charset=utf-8 13540 https://singulancelabs.com/hivemind/index.md",
+    "robots": []
+  },
+  {
+    "url": "https://next.singulancelabs.com/llms.txt",
+    "response": "403 text/html; charset=UTF-8 4578 https://next.singulancelabs.com/llms.txt",
+    "robots": []
+  },
+  {
+    "url": "https://next.singulancelabs.com/hivemind/app/profile",
+    "response": "200 text/html 3296 https://next.singulancelabs.com/hivemind/app/profile",
+    "robots": [
+      "x-robots-tag: noindex, nofollow, noarchive, nosnippet"
+    ]
+  }
+]

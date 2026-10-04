@@ -1,0 +1,86 @@
+[
+  {
+    "url": "https://singulancelabs.com/tara",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 11113,
+    "markdownCharacters": 1656
+  },
+  {
+    "url": "https://singulancelabs.com/hyperagents",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 11570,
+    "markdownCharacters": 1862
+  },
+  {
+    "url": "https://singulancelabs.com/",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 62810,
+    "markdownCharacters": 6192
+  },
+  {
+    "url": "https://singulancelabs.com/hivemind",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 497191,
+    "markdownCharacters": 13216
+  },
+  {
+    "url": "https://singulancelabs.com/research",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 38809,
+    "markdownCharacters": 5261
+  },
+  {
+    "url": "https://singulancelabs.com/research/icarus",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 41776,
+    "markdownCharacters": 7487
+  },
+  {
+    "url": "https://singulancelabs.com/research/cognitive-swarm-intelligence",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 35344,
+    "markdownCharacters": 8015
+  },
+  {
+    "url": "https://singulancelabs.com/research/post-quantum-cryptography",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 37635,
+    "markdownCharacters": 7397
+  },
+  {
+    "url": "https://singulancelabs.com/benchmark",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 24207,
+    "markdownCharacters": 3950
+  },
+  {
+    "url": "https://singulancelabs.com/privacy",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 33856,
+    "markdownCharacters": 8976
+  },
+  {
+    "url": "https://singulancelabs.com/security",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 17337,
+    "markdownCharacters": 2800
+  },
+  {
+    "url": "https://singulancelabs.com/cookies",
+    "status": 200,
+    "h1": 1,
+    "htmlBytes": 14002,
+    "markdownCharacters": 2209
+  }
+]

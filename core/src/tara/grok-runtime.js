@@ -231,7 +231,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const interactionProfile = requestedMode === 'internal' && body.interaction_profile === 'runtime_operator'
         ? 'runtime_operator'
         : null;
-      const provider = interactionProfile ? RUNTIME_OPERATOR_PROVIDER : current.defaultProvider;
+      const provider = nativeRuntimeContext || interactionProfile ? RUNTIME_OPERATOR_PROVIDER : current.defaultProvider;
       if (!PROVIDERS.has(provider)) return reply(res, { error: 'invalid_provider' }, 400);
       let providerConfig;
       try { providerConfig = provider === 'grok' ? validatedGrokConfig(current.grokConfig) : current.deepgramConfig || {}; }

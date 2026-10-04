@@ -184,7 +184,7 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
         "type": "session.update",
         "session": {
             "instructions": "\n\n".join(part for part in [
-                SYSTEM_PROMPT,
+                "" if snapshot.get("native_session_id") else SYSTEM_PROMPT,
                 snapshot.get("instructions", ""),
                 # Same org brief the phone leg gets, from the session snapshot core
                 # minted — so a browser conversation is grounded identically.
@@ -212,7 +212,7 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
                 },
             },
             "replace": snapshot.get("pronunciation_replacements", {}),
-            "tools": TOOL_SCHEMAS,
+            "tools": ([tool for tool in TOOL_SCHEMAS if tool.get("name") == "hivemind_recall"] if snapshot.get("native_session_id") else TOOL_SCHEMAS),
             # Explicit not implicit: measured 4 realtime text inputs across 37 calls —
             # tools were registered but never chosen. Bar lowered in prompt.py; auto here.
             "tool_choice": "auto",
@@ -395,7 +395,7 @@ async def voice(ws: WebSocket, session_id: str):
     # resumption cache can never be steered by client input.
     principal = (str(session.get("org_id") or ""), str(session.get("user_id") or ""))
     try:
-        xai = await _xai_connect(snapshot, _resume_conversation_id(principal))
+        xai = await _xai_connect(snapshot, None if snapshot.get("native_session_id") else _resume_conversation_id(principal))
         await xai.send(json.dumps(_session_update(snapshot)))
     except Exception as exc:
         log.exception("xAI realtime connection failed")
@@ -434,11 +434,17 @@ async def voice(ws: WebSocket, session_id: str):
     max_duration_seconds = int(snapshot.get("max_duration_seconds") or 0)
     closing_phrase = str(snapshot.get("closing_phrase") or "").strip()
 
+    native_end_reason = "interrupted"
+    native_closing = False
+
     async def browser_to_xai():
+        nonlocal native_end_reason
         try:
             while True:
                 message = await ws.receive()
                 if message.get("bytes") is not None:
+                    if native_closing:
+                        continue
                     if len(message["bytes"]) > MAX_BINARY_FRAME_BYTES:
                         await ws.close(code=1009)
                         return
@@ -448,6 +454,9 @@ async def voice(ws: WebSocket, session_id: str):
                         await ws.close(code=1009)
                         return
                     payload = json.loads(message["text"])
+                    if snapshot.get("native_session_id") and payload.get("type") == "runtime_end":
+                        native_end_reason = "ended"
+                        return
                     if payload.get("type") not in {"input_audio_buffer.commit", "input_audio_buffer.clear", "response.cancel"}:
                         continue
                     await xai.send(json.dumps(payload))
@@ -509,7 +518,8 @@ async def voice(ws: WebSocket, session_id: str):
                     await _record_browser_turn(str(event.get("transcript") or ""))
                 if event.get("type") == "conversation.created":
                     # Capture the id so the NEXT connection can resume this conversation.
-                    _remember_conversation(principal, (event.get("conversation") or {}).get("id"))
+                    if not snapshot.get("native_session_id"):
+                        _remember_conversation(principal, (event.get("conversation") or {}).get("id"))
                 if event.get("type") == "session.updated" and not opening_sent:
                     opening_sent = True
                     for opening_event in _opening_events(snapshot):
@@ -531,26 +541,35 @@ async def voice(ws: WebSocket, session_id: str):
         finally:
             if tool_batch_task and not tool_batch_task.done():
                 tool_batch_task.cancel()
+            if snapshot.get("native_session_id"):
+                if browser_turn_state.get("user"):
+                    await _record_browser_turn("")
+                terminal_event["payload"]["interrupted"] = native_end_reason != "ended"
             await emit_event(session_id, terminal_event)
 
     async def end_at_runtime_limit():
         """Close the Runtime-admin check-in on the server even if the tab stalls."""
+        nonlocal native_end_reason, native_closing
         if max_duration_seconds <= 0:
             return
-        await asyncio.sleep(max(max_duration_seconds - 6, 0))
-        if closing_phrase:
+        closing_window = 15 if snapshot.get("native_session_id") else 6
+        await asyncio.sleep(max(max_duration_seconds - closing_window, 0))
+        if snapshot.get("native_session_id"):
+            native_closing = True
+        if closing_phrase or snapshot.get("native_session_id"):
             try:
                 await xai.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {"type": "message", "role": "user", "content": [{
                         "type": "input_text",
-                        "text": f"The internal check-in ends now. Say exactly: {closing_phrase}",
+                        "text": ("The conversation ends in fifteen seconds. Stop asking questions. Summarize only what the administrator confirmed, state remaining uncertainty, and close warmly as Runtime. The time limit does not confirm the baseline." if snapshot.get("native_session_id") else f"The internal check-in ends now. Say exactly: {closing_phrase}"),
                     }]},
                 }))
                 await xai.send(json.dumps({"type": "response.create"}))
             except websockets.ConnectionClosed:
                 return
-        await asyncio.sleep(min(6, max_duration_seconds))
+        await asyncio.sleep(min(closing_window, max_duration_seconds))
+        native_end_reason = "ended"
         await ws.close(code=1000, reason="runtime_time_limit")
 
     tasks = [asyncio.create_task(browser_to_xai()), asyncio.create_task(xai_to_browser())]
@@ -561,6 +580,7 @@ async def voice(ws: WebSocket, session_id: str):
     finally:
         for task in [*tasks, *([deadline_task] if deadline_task else [])]: task.cancel()
         await xai.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 @app.post("/webhooks/telnyx")
 async def telnyx_webhook():

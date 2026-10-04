@@ -43,3 +43,9 @@ class TaraGrokProtocolTests(unittest.TestCase):
         self.assertEqual(events[0]["item"]["role"], "user")
         self.assertIn("Speak first", events[0]["item"]["content"][0]["text"])
         self.assertEqual(events[1], {"type": "response.create"})
+
+    def test_native_runtime_persona_replaces_tara_sales_doctrine(self):
+        instructions = _session_update({"native_session_id": "session-native-room", "instructions": "You are Runtime, our AI Chief of Staff."})["session"]["instructions"]
+        self.assertIn("You are Runtime", instructions)
+        self.assertNotIn("You are TARA", instructions)
+        self.assertNotIn("ACT ON THRESHOLDS", instructions)

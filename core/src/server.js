@@ -8,6 +8,7 @@
 
 import http from 'http';
 import { readRuntimeOnboarding } from './harness-chat/onboarding-evidence.js';
+import { handleNativeRuntimeVoice } from './tara/native-runtime-voice.js';
 import { verifyHarnessRunnerServiceToken } from './harness-chat/runner-service-token.js';
 import fs from 'fs';
 import path from 'path';
@@ -4583,6 +4584,8 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+  if (await handleNativeRuntimeVoice({ req, res, pathname, prisma, parseBody, jsonResponse,
+    handler: taraGrokRuntime, secret: process.env.HIVE_HARNESS_RUNNER_SERVICE_SECRET })) return;
   // Retained Day-0 media belongs to Core's durable data volume. This narrow
   // read boundary uses the same scoped runner identity, never browser input.
   const runtimeOnboarding = pathname.match(/^\/internal\/v1\/harness-chat\/core\/v1\/hyperagents\/onboarding(?:\/([A-Za-z0-9-]+))?$/);

@@ -206,7 +206,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
     return { default_provider: row.defaultProvider, revision: row.revision, deepgram: row.deepgramConfig || {}, grok: row.grokConfig || {} };
   }
 
-  return async function handle({ pathname, method, body, url, req, res, userId, orgId, jsonResponse, accessContext }) {
+  return async function handle({ pathname, method, body, url, req, res, userId, orgId, jsonResponse, accessContext, nativeRuntimeContext }) {
     const reply = (...args) => { jsonResponse(...args); return true; };
     if (pathname === '/api/tara/runtime-config') {
       if (!orgId) return reply(res, { error: 'org_required' }, 401);
@@ -239,7 +239,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const mode = requestedMode;
       const taraConfig = await getTaraConfig?.({ userId, orgId }).catch(() => null);
       const selectedSkillId = mode === 'internal' ? taraConfig?.selected_internal_skill_id : taraConfig?.selected_external_skill_id;
-      const configuredPrompt = interactionProfile === 'runtime_operator'
+      const configuredPrompt = nativeRuntimeContext ? nativeRuntimeContext.instructions : interactionProfile === 'runtime_operator'
         ? RUNTIME_OPERATOR_PROMPT
         : mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
       let runtimeContextRef = null;
@@ -290,9 +290,10 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         mode,
         goal: boundedString(body.goal, 300) || '',
         skill_id: interactionProfile === 'runtime_operator' ? 'runtime_operator.v1' : selectedSkillId || null,
-        interaction_profile: interactionProfile,
+        interaction_profile: nativeRuntimeContext ? 'native_runtime' : interactionProfile,
+        ...(nativeRuntimeContext ? { native_session_id: nativeRuntimeContext.session_id, initial_check_in: nativeRuntimeContext.initial_check_in } : {}),
         config_revision: current.revision,
-        instructions: boundedString([configuredPrompt, runtimeEvidenceContext].filter(Boolean).join('\n\n'), 20_000) || '',
+        instructions: boundedString([configuredPrompt, runtimeEvidenceContext].filter(Boolean).join('\n\n'), (nativeRuntimeContext ? 60_000 : 20_000)) || '',
         runtime_context_ref: runtimeContextRef,
         runtime_evidence_context: runtimeEvidenceContext,
         profile_context: boundedString(profileContext, 2_000) || '',
@@ -300,21 +301,21 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         // first instruction already says who this workspace is. profile_context is
         // the operator's personal profile — it is not a description of the org.
         org_brief: boundedString(await buildOrgBrief(prisma, orgId, { userId }), 600) || '',
-        opening_instruction: boundedString(buildOpeningInstruction({
+        opening_instruction: boundedString(nativeRuntimeContext?.opening_instruction || buildOpeningInstruction({
           mode,
           goal: boundedString(body.goal, 300) || '',
           language: effectiveProviderConfig.language || body.language || 'en',
           skillPrompt: configuredPrompt,
           profileContext,
         }), 3_000) || '',
-        max_duration_seconds: interactionProfile ? RUNTIME_OPERATOR_MAX_DURATION_SECONDS : null,
+        max_duration_seconds: nativeRuntimeContext ? (nativeRuntimeContext.initial_check_in ? 180 : 600) : interactionProfile ? RUNTIME_OPERATOR_MAX_DURATION_SECONDS : null,
         closing_phrase: interactionProfile ? 'Noted! Boss, good luck see you soon.' : '',
       };
       const jti = crypto.randomUUID();
       const expiresAt = new Date(Date.now() + (interactionProfile ? 5 * 60_000 : 90_000));
       const session = await prisma.taraVoiceSession.create({ data: { orgId, userId, provider, mode: snapshot.mode, capabilityJti: jti, configSnapshot: snapshot, expiresAt } });
       const token = capability({ iss: 'hivemind-core', aud: `tara-${provider}`, sub: userId, org_id: orgId, session_id: session.id, jti, exp: expiresAt.getTime(), operations: ['voice'] }, capabilitySecret);
-      return reply(res, { session_id: session.id, provider, ws_url: provider === 'grok' ? grokPublicWs : `${(process.env.TARA_DEEPGRAM_PUBLIC_WS_URL || 'wss://core.singulancelabs.com/voice2/voice')}`, capability: token, expires_at: expiresAt.toISOString(), config_revision: current.revision, audio_format: { type: 'pcm16', sample_rate: 16000 } });
+      return reply(res, { session_id: session.id, provider, ws_url: provider === 'grok' ? grokPublicWs : `${(process.env.TARA_DEEPGRAM_PUBLIC_WS_URL || 'wss://core.singulancelabs.com/voice2/voice')}`, capability: token, expires_at: expiresAt.toISOString(), config_revision: current.revision, ...(nativeRuntimeContext?.initial_check_in ? { closing_after_ms: 165000 } : {}), audio_format: { type: 'pcm16', sample_rate: 16000 } });
     }
 
     if (pathname === '/api/tara/voices' && method === 'GET') {
@@ -404,6 +405,22 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         }
       };
 
+      if (snapshot.native_session_id) {
+        if (body.type === 'turn') {
+          const p = body.payload || {};
+          const seq = Number(p.seq);
+          if (!Number.isSafeInteger(seq) || seq < 1) return reply(res, { error: 'invalid_turn_sequence' }, 400);
+          await prisma.taraTurn.upsert({ where: { callId_seq: { callId: call.id, seq } }, update: {}, create: {
+            callId: call.id, orgId: session.orgId, userId: session.userId, seq,
+            userText: boundedString(p.user_text, 8000), agentText: boundedString(p.agent_text, 8000),
+          } });
+        } else if (['completed', 'failed'].includes(body.type)) {
+          await prisma.taraCall.update({ where: { id: call.id }, data: {
+            status: body.type, endedAt: new Date(), failureCode: body.type === 'failed' ? boundedString(body.payload?.failure_code, 120) : null,
+          } });
+        }
+        return reply(res, { ok: true });
+      }
       if (body.type === 'turn') {
         const p = body.payload || {};
         await relay('/api/tara/calls/turn', {

@@ -1,6 +1,6 @@
 import unittest
 
-from tara_grok.app import _browser_event, _capability_from_subprotocols, _opening_events, _session_update
+from tara_grok.app import _InitialSilenceCheckIn, _browser_event, _capability_from_subprotocols, _opening_events, _session_update
 
 
 class TaraGrokProtocolTests(unittest.TestCase):
@@ -49,3 +49,32 @@ class TaraGrokProtocolTests(unittest.TestCase):
         self.assertIn("You are Runtime", instructions)
         self.assertNotIn("You are TARA", instructions)
         self.assertNotIn("ACT ON THRESHOLDS", instructions)
+
+
+class RuntimeInitialSilenceTests(unittest.TestCase):
+    def test_native_first_checkin_uses_provider_timeout_and_preserves_limit(self):
+        snapshot = {"native_session_id": "session-room", "initial_check_in": True, "max_duration_seconds": 180}
+        session = _session_update(snapshot)["session"]
+        self.assertEqual(session["turn_detection"]["idle_timeout_ms"], 20_000)
+        self.assertIn("Do not restart the interview", session["instructions"])
+        self.assertIn("infer consent or facts from silence", session["instructions"])
+        self.assertEqual(snapshot["max_duration_seconds"], 180)
+
+    def test_timeout_is_disabled_after_first_provider_event(self):
+        snapshot = {"native_session_id": "session-room", "initial_check_in": True}
+        state = _InitialSilenceCheckIn(snapshot)
+        update = state.disable_for("input_audio_buffer.timeout_triggered", snapshot)
+        self.assertIsNone(update["session"]["turn_detection"]["idle_timeout_ms"])
+        self.assertEqual(update["session"]["turn_detection"]["type"], "server_vad")
+        self.assertIsNone(state.disable_for("input_audio_buffer.timeout_triggered", snapshot))
+
+    def test_human_speech_disables_initial_reprompt(self):
+        snapshot = {"native_session_id": "session-room", "initial_check_in": True}
+        state = _InitialSilenceCheckIn(snapshot)
+        self.assertIsNotNone(state.disable_for("input_audio_buffer.speech_started", snapshot))
+        self.assertIsNone(state.disable_for("input_audio_buffer.timeout_triggered", snapshot))
+
+    def test_ordinary_tara_and_later_calls_keep_existing_behavior(self):
+        for snapshot in [{}, {"native_session_id": "session-room", "initial_check_in": False}]:
+            self.assertNotIn("idle_timeout_ms", _session_update(snapshot)["session"]["turn_detection"])
+            self.assertIsNone(_InitialSilenceCheckIn(snapshot).disable_for("input_audio_buffer.timeout_triggered", snapshot))

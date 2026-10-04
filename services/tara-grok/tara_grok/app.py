@@ -150,6 +150,23 @@ def _capability_from_subprotocols(protocols: Iterable[str]) -> str:
     return ""
 
 
+class _InitialSilenceCheckIn:
+    """One provider-native check-in; no local timer or repeat question loop."""
+
+    def __init__(self, snapshot: dict):
+        self.enabled = bool(snapshot.get("native_session_id") and snapshot.get("initial_check_in"))
+
+    def disable_for(self, event_type: str, snapshot: dict) -> dict | None:
+        if not self.enabled or event_type not in {
+            "input_audio_buffer.timeout_triggered", "input_audio_buffer.speech_started",
+        }:
+            return None
+        self.enabled = False
+        detection = dict(_session_update(snapshot)["session"]["turn_detection"])
+        detection["idle_timeout_ms"] = None
+        return {"type": "session.update", "session": {"turn_detection": detection}}
+
+
 def _session_update(snapshot: dict, media: str = "browser") -> dict:
     """Session config. `media` selects the audio profile:
 
@@ -180,12 +197,16 @@ def _session_update(snapshot: dict, media: str = "browser") -> dict:
             "silence_duration_ms": snapshot.get("vad_silence_duration_ms", 650),
             "prefix_padding_ms": snapshot.get("vad_prefix_padding_ms", 333),
         }
+    if snapshot.get("native_session_id") and snapshot.get("initial_check_in") and media == "browser":
+        vad["idle_timeout_ms"] = 20_000
     return {
         "type": "session.update",
         "session": {
             "instructions": "\n\n".join(part for part in [
                 "" if snapshot.get("native_session_id") else SYSTEM_PROMPT,
                 snapshot.get("instructions", ""),
+                ("If the provider signals an idle timeout before the caller speaks, offer one gentle, short check-in about the current question. Do not restart the interview, imply a reply was received, or infer consent or facts from silence. Then leave room for the caller."
+                 if snapshot.get("native_session_id") and snapshot.get("initial_check_in") else ""),
                 # Same org brief the phone leg gets, from the session snapshot core
                 # minted — so a browser conversation is grounded identically.
                 (f"[ORG] Who you work for:\n{str(snapshot.get('org_brief') or '')[:600]}"
@@ -436,6 +457,7 @@ async def voice(ws: WebSocket, session_id: str):
 
     native_end_reason = "interrupted"
     native_closing = False
+    silence_check_in = _InitialSilenceCheckIn(snapshot)
 
     async def browser_to_xai():
         nonlocal native_end_reason
@@ -509,6 +531,9 @@ async def voice(ws: WebSocket, session_id: str):
                     continue
                 event = json.loads(message)
                 _etype = event.get("type")
+                silence_update = silence_check_in.disable_for(_etype, snapshot)
+                if silence_update:
+                    await xai.send(json.dumps(silence_update))
                 # Caller speech → held until the assistant reply completes the turn.
                 if _etype == "conversation.item.input_audio_transcription.completed":
                     browser_turn_state["user"] = (

@@ -1,0 +1,90 @@
+{
+  "version": "9aa20e1e-9340-45d1-afea-ba8b1bfb2b4c",
+  "pages": [
+    {
+      "path": "/",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/",
+      "title": "SINGULANCE | AI Workforce, Memory and Voice Agents",
+      "description": "Discover HIVEMIND organizational memory, HyperAgents digital teammates and TARA voice agents. Explore SINGULANCE research and AI workforce tools.",
+      "schema": true
+    },
+    {
+      "path": "/research",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research",
+      "title": "AI Memory and Agent Research | SINGULANCE",
+      "description": "Explore SINGULANCE research on agent memory, cognitive swarm intelligence and post-quantum cryptography, with published methods and benchmarks.",
+      "schema": true
+    },
+    {
+      "path": "/research/icarus",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research/icarus",
+      "title": "ICARUS: Agent Memory Filesystem | SINGULANCE Research",
+      "description": "Explore ICARUS, SINGULANCE\u2019s agent memory filesystem combining vector, entity, temporal and graph retrieval in one file. Read the research and methods.",
+      "schema": true
+    },
+    {
+      "path": "/research/cognitive-swarm-intelligence",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research/cognitive-swarm-intelligence",
+      "title": "Cognitive Swarm Intelligence | SINGULANCE Research",
+      "description": "Read SINGULANCE research on cognitive swarm intelligence: shared organizational memory, coordinated agents and the architecture behind HIVEMIND.",
+      "schema": true
+    },
+    {
+      "path": "/research/post-quantum-cryptography",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research/post-quantum-cryptography",
+      "title": "Post-Quantum Cryptography | SINGULANCE Research",
+      "description": "Explore SINGULANCE\u2019s research on hybrid post-quantum transport, signed memory writes and tamper-evident audit chains for organizational AI systems.",
+      "schema": true
+    },
+    {
+      "path": "/benchmark",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/benchmark",
+      "title": "HIVEMIND Memory Benchmarks | SINGULANCE",
+      "description": "Review HIVEMIND memory retrieval benchmarks, evaluation methods and published results. Explore the evidence behind SINGULANCE\u2019s memory research.",
+      "schema": true
+    },
+    {
+      "path": "/privacy",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/privacy",
+      "title": "Privacy Policy | SINGULANCE",
+      "description": "Read SINGULANCE\u2019s privacy policy, including information about personal data, connected services, data protection and your privacy rights.",
+      "schema": true
+    },
+    {
+      "path": "/security",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/security",
+      "title": "Security | SINGULANCE",
+      "description": "Learn about SINGULANCE security practices and data protection for organizational memory and AI agents. Review the published security information.",
+      "schema": true
+    },
+    {
+      "path": "/cookies",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/cookies",
+      "title": "Cookie Policy | SINGULANCE",
+      "description": "Read SINGULANCE\u2019s cookie policy and learn about essential storage, optional analytics and how to manage your privacy and cookie preferences.",
+      "schema": true
+    }
+  ],
+  "sitemap_urls": 9,
+  "robots": "User-agent: *\nAllow: /\nDisallow: /hivemind/\nDisallow: /enterprise/\nDisallow: /prometheus/\nDisallow: /invite/\nDisallow: /underprogress\nDisallow: /api/\nDisallow: /__hivemind/\nDisallow: /plugins/\n# Content preferences: search and AI input allowed; AI training not authorized.\n\nSitemap: https://singulancelabs.com/sitemap.xml\n",
+  "https_upgrade": "HTTP/1.1 308 Permanent Redirect\r\nDate: Sun, 04 Oct 2026 01:21:39 GMT\r\nConnection: keep-alive\r\nLocation: https://singulancelabs.com/\r\nReport-To: {\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=hk2Grcwn57dH4Nya3x6vTaLUzSeA%2BZKwL%2B3pzpimzVefKaozhk4iuUMAQhZIfizQNnrE44q%2F5D7l9MzEkXszWlsNvgYKTnJQJq4h5svyerRslRcqlAx1%2Fg%2FfRcc0kjqGAw8eEsBwJ0GB01IYcQ1%2FGxc%3D\"}]}\r\nNel: {\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}\r\nServer: cloudflare\r\nCF-RAY: a4505eff7cdf57df-FRA\r\nalt-svc: h3=\":443\"; ma=86400\r\n\r\n",
+  "private_noindex": true
+}

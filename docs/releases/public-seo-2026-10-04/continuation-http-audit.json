@@ -1,0 +1,166 @@
+{
+  "pages": [
+    {
+      "url": "https://singulancelabs.com/",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/"
+      ],
+      "description": [
+        "Discover HIVEMIND organizational memory, HyperAgents digital teammates and TARA voice agents. Explore SINGULANCE research and AI workforce tools."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/research",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/research"
+      ],
+      "description": [
+        "Explore SINGULANCE research on agent memory, cognitive swarm intelligence and post-quantum cryptography, with published methods and benchmarks."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/research/icarus",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/research/icarus"
+      ],
+      "description": [
+        "Explore ICARUS, SINGULANCE\u2019s agent memory filesystem combining vector, entity, temporal and graph retrieval in one file. Read the research and methods."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/research/cognitive-swarm-intelligence",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/research/cognitive-swarm-intelligence"
+      ],
+      "description": [
+        "Read SINGULANCE research on cognitive swarm intelligence: shared organizational memory, coordinated agents and the architecture behind HIVEMIND."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/research/post-quantum-cryptography",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/research/post-quantum-cryptography"
+      ],
+      "description": [
+        "Explore SINGULANCE\u2019s research on hybrid post-quantum transport, signed memory writes and tamper-evident audit chains for organizational AI systems."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/benchmark",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/benchmark"
+      ],
+      "description": [
+        "Review HIVEMIND memory retrieval benchmarks, evaluation methods and published results. Explore the evidence behind SINGULANCE\u2019s memory research."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/privacy",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/privacy"
+      ],
+      "description": [
+        "Read SINGULANCE\u2019s privacy policy, including information about personal data, connected services, data protection and your privacy rights."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/security",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/security"
+      ],
+      "description": [
+        "Learn about SINGULANCE security practices and data protection for organizational memory and AI agents. Review the published security information."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    },
+    {
+      "url": "https://singulancelabs.com/cookies",
+      "status": 200,
+      "h1": 1,
+      "canonical": [
+        "https://singulancelabs.com/cookies"
+      ],
+      "description": [
+        "Read SINGULANCE\u2019s cookie policy and learn about essential storage, optional analytics and how to manage your privacy and cookie preferences."
+      ],
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ],
+      "schema": 1
+    }
+  ],
+  "sitemapStatus": 200,
+  "checks": [
+    {
+      "url": "https://singulancelabs.com/robots.txt",
+      "status": 200,
+      "contentType": "text/plain",
+      "xRobots": null
+    },
+    {
+      "url": "https://singulancelabs.com/not-a-real-page",
+      "status": 404,
+      "contentType": "text/html; charset=utf-8",
+      "xRobots": "noindex"
+    },
+    {
+      "url": "https://singulancelabs.com/static/js/not-a-real-chunk.js",
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "xRobots": null
+    },
+    {
+      "url": "https://next.singulancelabs.com/hivemind/app/profile",
+      "status": 200,
+      "contentType": "text/html",
+      "xRobots": "noindex, nofollow, noarchive, nosnippet"
+    }
+  ]
+}

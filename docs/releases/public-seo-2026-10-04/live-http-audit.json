@@ -1,0 +1,109 @@
+{
+  "pages": [
+    {
+      "url": "https://singulancelabs.com/",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/research",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/research/icarus",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research/icarus",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/research/cognitive-swarm-intelligence",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research/cognitive-swarm-intelligence",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/research/post-quantum-cryptography",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/research/post-quantum-cryptography",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/benchmark",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/benchmark",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/privacy",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/privacy",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/security",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/security",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    },
+    {
+      "url": "https://singulancelabs.com/cookies",
+      "status": 200,
+      "h1": 1,
+      "canonical": "https://singulancelabs.com/cookies",
+      "description_count": 1,
+      "schema_count": 1,
+      "robots": [
+        "index, follow, max-image-preview:large"
+      ]
+    }
+  ],
+  "sitemap_count": 9,
+  "version": "8ef69375-d7ce-4066-a4ba-53ac048fc509",
+  "private_app": {
+    "status": 200,
+    "robots": "noindex, nofollow, noarchive, nosnippet"
+  }
+}

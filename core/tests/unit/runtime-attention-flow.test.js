@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyPendingActivity } from '../../src/connectors/composio/activity-relevance.js';
 let sequence = 0;
-async function run({ optIn = true, attention = 'wake', prior, failDelivery = false } = {}) {
+async function run({ optIn = true, attention = 'wake', prior, failDelivery = false, eventData } = {}) {
   const orgId = `org-${++sequence}`, userId = 'user', calls = [], writes = [], row = { id: 'event', subscription_id: 'sub', org_id: orgId, user_id: userId,
-    received_at: '2026-10-04T12:00:00Z', data: { text: 'Customer deadline changed.' }, relevance_decision: prior };
+    received_at: '2026-10-04T12:00:00Z', data: eventData || { text: 'Customer deadline changed.' }, relevance_decision: prior };
   const ctx = { orgId, userId, allowedAccountIds: ['account'], prisma: {
     userOrganization: { findUnique: async () => ({ isActive: true }) }, organization: { findUnique: async () => ({ name: 'Company', companyProfile: {} }) },
     $queryRawUnsafe: async sql => sql.includes('SELECT title,tags') ? [] : sql.includes('UPDATE hivemind_trigger_events') ? [row]
@@ -56,4 +56,13 @@ test('unknown delivery is pending and reconciliation precedes new classification
   const recovered = await run({ prior: { runtimeAttention: { action: 'wake' } } });
   assert.deepEqual(recovered.calls, ['deliver']);
   assert.ok(recovered.writes[0].sql.includes('runtimeDelivery'));
+});
+
+test('real Gmail preview object preserves message text through both Jev projections', async () => {
+  const body = 'Synthetic owner-approved test. No actual customer claim.';
+  const result = await run({ eventData: { subject: 'Test only', preview: { body: 'Short preview', subject: 'Test only', credentials: 'secret' }, message_text: body } });
+  assert.equal(result.calls[0].state.event.preview, body);
+  assert.equal(result.calls[1].state.event.preview, body);
+  assert.ok(!JSON.stringify(result.calls).includes('[object Object]'));
+  assert.ok(!JSON.stringify(result.calls).includes('secret'));
 });

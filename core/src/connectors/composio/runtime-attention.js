@@ -1,3 +1,4 @@
+import { connectedEventPreview } from './event-preview.js';
 // Attention policy only. The existing signed receiver and event ledger own
 // admission/deduplication; native Cordis owns delivery and all resulting work.
 export const RUNTIME_ATTENTION_POLICY = 'runtime_attention_v1';
@@ -21,7 +22,7 @@ export async function assessRuntimeAttention({ event, snapshot, consent, provide
     policy: RUNTIME_ATTENTION_POLICY,
     event: { app: clip(event.toolkit, 80), occurredAt: clip(event.occurred_at || event.received_at, 80),
       title: clip(data._hivemind?.title || data.subject || data.title, 200),
-      preview: clip(data.preview || data.message_text || data.text || data.body, 900) },
+      preview: connectedEventPreview(data, 900) },
     runtime: { revision: clip(snapshot.revision, 160), autonomyEnabled: snapshot.enabled === true,
       goals: clip(JSON.stringify(snapshot.goals || []), 1800),
       tasks: clip(JSON.stringify(snapshot.tasks || []), 2200),

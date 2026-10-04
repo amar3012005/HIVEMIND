@@ -1,3 +1,4 @@
+import { connectedEventPreview } from './event-preview.js';
 import { createOpenRouterJevProvider } from '../../agent/decision-gateway.js';
 import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-service.js';
 import { assessRuntimeAttention } from './runtime-attention.js';
@@ -34,7 +35,7 @@ export async function decideActivityRelevance({ event, context, env = process.en
     app: event.toolkit,
     title: clip(data._hivemind?.title || data.subject || data.title || data.document?.title || data.document?.name, 200),
     sender: clip(data.sender || data.user?.login || (typeof data.user === 'string' ? data.user : ''), 120),
-    preview: clip(data.preview || data.message_text || data.text || data.body, 900),
+    preview: connectedEventPreview(data, 900),
     repository: clip(data.repository?.full_name, 120),
     bot: Boolean(data.bot_id),
     labels: (Array.isArray(data.label_ids) ? data.label_ids : []).slice(0, 8),

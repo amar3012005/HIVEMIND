@@ -6000,3 +6000,24 @@ model HarnessDreamDue {
   user User @relation(fields:[userId],references:[id],onDelete:NoAction,onUpdate:NoAction)
   @@map("harness_dream_due")
 }
+
+/// Immutable company-local advisory proposal body; only status and human decision fields change.
+model AdvisoryPlaybookRevision {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  proposedByUserId String @map("proposed_by_user_id") @db.Uuid
+  methodId String @map("method_id") @db.VarChar(160)
+  priorVersion Int @map("prior_version")
+  version Int
+  body Json @db.JsonB
+  rationale String
+  evidenceRefs Json @map("evidence_refs") @db.JsonB
+  contentHash String @map("content_hash") @db.Char(64)
+  status String @default("pending") @db.VarChar(20)
+  approvedByUserId String? @map("approved_by_user_id") @db.Uuid
+  decidedAt DateTime? @map("decided_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  @@unique([organizationId, proposedByUserId, contentHash])
+  @@index([organizationId, status])
+  @@map("advisory_playbook_revisions")
+}

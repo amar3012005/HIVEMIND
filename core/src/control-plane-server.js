@@ -1,3 +1,4 @@
+import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
 import { runTriggers, receiveTriggerEvent } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
 import fs from 'fs';
@@ -3657,6 +3658,8 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  if (await handleAdvisoryMethodApproval({ req, res, pathname, prisma, requireSession, requireOrgAdmin, parseBody, jsonResponse })) return;
 
   if (await handleHarnessChatBootstrapRoute({
     req,

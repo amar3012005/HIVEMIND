@@ -1,3 +1,4 @@
+import { proposeAdvisoryMethod, readAdvisoryMethods } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
 import { getRedisClient } from '../control-plane/session-store.js';
 import {
@@ -180,6 +181,21 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (pathname === `${INTERNAL_PREFIX}/advisory-methods`) {
+    try {
+      const principal = { userId: claims.sub, orgId: claims.org_id, kind: 'runner-service' };
+      if (req.method === 'GET') {
+        jsonResponse(res, { methods: await readAdvisoryMethods(prisma, principal) });
+      } else if (req.method === 'POST') {
+        const row = await proposeAdvisoryMethod(prisma, principal, await parseBody(req));
+        jsonResponse(res, { id: row.id, status: row.status, version: row.version, content_hash: row.content_hash,
+          approval_path: `/api/advisory-methods/${row.id}`,
+          approval_url: `${String(env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.singulancelabs.com').replace(/\/$/, '')}/api/advisory-methods/${row.id}`,
+          method_id: row.method_id });
+      } else jsonResponse(res, { error: 'Method not allowed' }, 405);
+    } catch (error) { jsonResponse(res, { error: error.code || 'Advisory method unavailable' }, error.status || 500); }
+    return true;
+  }
   if (claims.project_id) {
     const project = await prisma?.project?.findFirst?.({ where: { id: claims.project_id, orgId: claims.org_id }, select: { id: true } });
     if (!project) { jsonResponse(res, { error: 'Project not found' }, 404); return true; }

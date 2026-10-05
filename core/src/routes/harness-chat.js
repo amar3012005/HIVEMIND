@@ -329,6 +329,35 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     return true;
   }
+  // Native media remains in the existing signed runner authority boundary.
+  // Gateway credentials never leave Core; this is not a second job engine.
+  if (corePath === '/media/muse-image' && ['GET', 'POST'].includes(req.method)) {
+    const membership = await prisma.userOrganization.findUnique({
+      where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
+    });
+    if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+    const { cloudflareGatewayEnabled, gatewayByokAlias } = await import('../llm/cloudflare-gateway.js');
+    const ready = cloudflareGatewayEnabled() && Boolean(gatewayByokAlias('openrouter') || process.env.OPENROUTER_API_KEY);
+    if (req.method === 'GET') { jsonResponse(res, { ready }, 200); return true; }
+    if (!ready) { jsonResponse(res, { error: 'Image gateway unavailable' }, 503); return true; }
+    const input = await parseBody(req).catch(() => null);
+    const refs = input?.references ?? [];
+    if (!input || Object.keys(input).some(key => !['prompt', 'aspect_ratio', 'references'].includes(key))
+      || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 30000
+      || !['auto', '1:1', '3:2', '2:3', '4:5', '5:4'].includes(input.aspect_ratio)
+      || !Array.isArray(refs) || refs.length > 4 || refs.some(ref => typeof ref !== 'string'
+        || ref.length > 4000100 || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(ref))) {
+      jsonResponse(res, { error: 'Invalid native image request' }, 400); return true;
+    }
+    try {
+      const { generateCampaignImage } = await import('../campaigns/image-provider.js');
+      const generated = await generateCampaignImage({ prompt: input.prompt, aspectRatio: input.aspect_ratio,
+        model: 'meta/muse-image', inputReferences: refs, signal: AbortSignal.timeout(180000) });
+      if (!generated.bytes?.length || generated.bytes.length > 30000000) throw new Error('invalid_image_size');
+      jsonResponse(res, { data: [{ b64_json: generated.bytes.toString('base64'), media_type: generated.contentType }] }, 200);
+    } catch { jsonResponse(res, { error: 'Native image provider failed; outcome requires reconciliation' }, 502); }
+    return true;
+  }
   if (corePath === '/projects' && req.method === 'GET') {
     try {
       const result = await scopedProjects(prisma, claims);

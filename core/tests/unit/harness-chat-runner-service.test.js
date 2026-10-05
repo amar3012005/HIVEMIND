@@ -515,3 +515,61 @@ test('generic signed service cannot publish a local method by claiming Runtime i
     assert.equal(res.status, 403);
   }
 });
+
+
+test('native Muse bridge readiness requires signed tenant membership and rejects absent gateway', async () => {
+  const old = process.env.CLOUDFLARE_AI_GATEWAY_ENABLED;
+  process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+  try {
+    for (const [active, method, expected] of [[true, 'GET', 200], [false, 'GET', 403], [true, 'POST', 503]]) {
+      const res = {};
+      await handleHarnessChatBootstrapRoute({
+        req: { method, headers: { authorization: `Bearer ${token()}` } }, res,
+        pathname: '/internal/v1/harness-chat/core/media/muse-image',
+        prisma: { userOrganization: { findUnique: async ({ where }) => {
+          assert.equal(where.userId_orgId.userId, userId); assert.equal(where.userId_orgId.orgId, orgId);
+          return { isActive: active };
+        } } }, parseBody: async () => ({}),
+        jsonResponse: (r, b, status = 200) => Object.assign(r, { body: b, status }),
+        redisConfig: { coreApiBaseUrl: 'http://core.test' }, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+        fetchImpl: async () => { throw new Error('must not forward arbitrary Core operations'); },
+      });
+      assert.equal(res.status, expected);
+      if (expected === 200) assert.deepEqual(res.body, { ready: false });
+    }
+  } finally { if (old === undefined) delete process.env.CLOUDFLARE_AI_GATEWAY_ENABLED; else process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = old; }
+});
+
+test('native Muse bridge preserves exact image bytes and rejects external or owner-bearing input', async () => {
+  const names = ['CLOUDFLARE_AI_GATEWAY_ENABLED', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_AI_GATEWAY_ID', 'CLOUDFLARE_AI_GATEWAY_TOKEN', 'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS'];
+  const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  const priorFetch = globalThis.fetch;
+  const calls = [];
+  for (const name of names) process.env[name] = name === names[0] ? 'true' : 'fixture';
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(init.body) });
+    return new Response(JSON.stringify({ data: [{ b64_json: 'YWJj', media_type: 'image/png' }] }));
+  };
+  try {
+    const reference = 'data:image/png;base64,YWJj';
+    for (const [extra, expected] of [[{ references: [reference] }, 200], [{ references: ['https://example.com/image.png'] }, 400], [{ org_id: orgId }, 400]]) {
+      const res = {};
+      await handleHarnessChatBootstrapRoute({
+        req: { method: 'POST', headers: { authorization: `Bearer ${token()}` } }, res,
+        pathname: '/internal/v1/harness-chat/core/media/muse-image',
+        prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+        parseBody: async () => ({ prompt: 'Exact approved brief', aspect_ratio: '4:5', ...extra }),
+        jsonResponse: (r, b, status = 200) => Object.assign(r, { body: b, status }),
+        redisConfig: { coreApiBaseUrl: 'http://core.test' }, env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+      });
+      assert.equal(res.status, expected);
+    }
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /^https:\/\/gateway.ai.cloudflare.com\//);
+    assert.equal(calls[0].body.model, 'meta/muse-image');
+    assert.equal(calls[0].body.input_references[0].image_url.url, reference);
+  } finally {
+    globalThis.fetch = priorFetch;
+    for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+  }
+});

@@ -1,3 +1,4 @@
+import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
 import { getRedisClient } from '../control-plane/session-store.js';
@@ -181,6 +182,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (pathname === `${INTERNAL_PREFIX}/administrator-message`) {
+    if(req.method !== 'POST') { jsonResponse(res,{error:'Method not allowed'},405); return true; }
+    try {
+      const input=await parseBody(req);
+      const { sendRenderedSystemEmail }=await import('../email/email-service.js');
+      jsonResponse(res,await messageAdministrator({db:prisma,claims,input,send:sendRenderedSystemEmail,publicBase:env.HIVEMIND_FRONTEND_URL,portraitBase:env.HIVE_HARNESS_EMBED_URL ? new URL(env.HIVE_HARNESS_EMBED_URL).origin : undefined}));
+    } catch(error) {jsonResponse(res,{error:error.status ? error.message : 'Administrator message unavailable'},error.status || 503);}
+    return true;
+  }
   if (pathname === `${INTERNAL_PREFIX}/advisory-methods`) {
     try {
       const principal = { userId: claims.sub, orgId: claims.org_id, kind: 'runner-service' };

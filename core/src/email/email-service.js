@@ -509,11 +509,12 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 }
 
 /** Send a fully rendered branded message through the canonical delivery path. */
-export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification, providerAttempts = 2, providerFallback = true } = {}) {
+export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification, providerAttempts = 2, providerFallback = true, requiredProvider } = {}) {
   if (!to || !validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
   const providers = configuredProviders();
-  const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
+  if (requiredProvider === 'cloudflare' && !providers.cloudflare) return { ok: false, skipped: true, error: 'cloudflare_email_unavailable' };
+  const gmail = requiredProvider === 'cloudflare' ? null : connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
   if (!providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
   if (providers.cloudflare) {
     const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {}, maxAttempts: providerAttempts });

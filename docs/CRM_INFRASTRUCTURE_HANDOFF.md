@@ -82,3 +82,9 @@ The optional plugin passed a focused strict TypeScript no-emit compilation using
 peer declarations. These are static checks, not live API or database verification. No tests were added
 or run, no migration was applied, and no package was mounted or deployed. Prisma schema validation
 still requires a Prisma CLI; the existing checkouts did not provide one during preparation.
+
+The Core foundation is committed as `57da48a7`. The Harness package is staged on
+`codex/crm-builder-infrastructure`; its commit hook passed lint, whitespace and vendor checks,
+but the repository-wide third-party-notices check could not resolve `react/jsx-runtime` from the
+fresh worktree's existing client locale package. The hook was not bypassed. Restore the workspace
+dependencies and rerun that check before committing the optional package.

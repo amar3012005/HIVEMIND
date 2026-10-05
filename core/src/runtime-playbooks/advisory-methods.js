@@ -67,8 +67,8 @@ export async function readAdvisoryMethods(db, principal, id) {
 export async function decideAdvisoryMethod(db, principal, id, hash, approved) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) fail('advisory_invalid_id');
   if (typeof approved !== 'boolean') fail('advisory_invalid_decision');
-  // Native model answers/service tickets cannot claim human publication authority.
-  if (principal?.kind !== 'human-session') fail('advisory_human_session_required', 403);
+  // Publication is authorized by a human session or authenticated persistent Runtime; generic service tickets cannot publish.
+  if (principal?.kind !== 'human-session' && !(principal?.kind === 'runtime-session' && /^session-[a-z0-9-]{1,120}$/.test(principal.runtimeSessionId || ''))) fail('advisory_publication_authority_required', 403);
   await membership(db, principal, true);
   return db.$transaction(async tx => {
     const row = (await tx.$queryRawUnsafe('SELECT * FROM hivemind.advisory_playbook_revisions WHERE organization_id=$1::uuid AND id=$2::uuid FOR UPDATE', principal.orgId, id))[0];

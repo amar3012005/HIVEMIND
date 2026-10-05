@@ -36,7 +36,7 @@ test('disposable PostgreSQL proves persistence, immutable versions, approval and
     const first = await proposeAdvisoryMethod(db, who, input);
     assert.equal((await proposeAdvisoryMethod(db, who, input)).id, first.id);
     assert.deepEqual(await readAdvisoryMethods(db, who), []);
-    await assert.rejects(decideAdvisoryMethod(db, { ...who, kind: 'runner-service' }, first.id, first.content_hash, true), /human_session/);
+    await assert.rejects(decideAdvisoryMethod(db, { ...who, kind: 'runner-service' }, first.id, first.content_hash, true), /publication_authority/);
     await assert.rejects(decideAdvisoryMethod(db, who, first.id, 'changed', true), /hash_mismatch/);
     assert.equal(await readAdvisoryMethods(db, { ...who, orgId: otherOrg }, first.id), null);
     await decideAdvisoryMethod(db, who, first.id, first.content_hash, true);

@@ -502,3 +502,16 @@ test('native Team UUID credit identities retain admission and tenant accounting'
     assert.equal(checked, valid ? 1 : 0);
   }
 });
+
+test('generic signed service cannot publish a local method by claiming Runtime in its body', async () => {
+  for (const claims of [{}, { operating_role: 'runtime', operating_session: 'invalid' }]) {
+    const res = {};
+    await handleHarnessChatBootstrapRoute({ req: { method: 'POST', headers: { authorization: `Bearer ${token(claims)}` } }, res,
+      pathname: '/internal/v1/harness-chat/core/advisory-methods',
+      prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+      parseBody: async () => ({ operation: 'publish_revision', operating_role: 'runtime' }),
+      jsonResponse: (r, body, status = 200) => Object.assign(r, { body, status }),
+      env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret }, redisConfig: {}, });
+    assert.equal(res.status, 403);
+  }
+});

@@ -44,7 +44,7 @@ test('only a human organization administrator can approve; exact hash/version ar
   await assert.rejects(decideAdvisoryMethod(f.db, principal, 'bad-id', row.content_hash, true), /invalid_id/);
   await assert.rejects(decideAdvisoryMethod(f.db, principal, row.id, row.content_hash, 'approve'), /invalid_decision/);
   for (const kind of ['runner-service', 'api-key', undefined])
-    await assert.rejects(decideAdvisoryMethod(f.db, { ...principal, kind }, row.id, row.content_hash, true), /human_session/);
+    await assert.rejects(decideAdvisoryMethod(f.db, { ...principal, kind }, row.id, row.content_hash, true), /publication_authority/);
   await assert.rejects(decideAdvisoryMethod(fixture('member').db, principal, row.id, row.content_hash, true), /not_authorized/);
   await assert.rejects(decideAdvisoryMethod(f.db, principal, row.id, 'changed', true), /hash_mismatch/);
   f.setVersion(1); await assert.rejects(decideAdvisoryMethod(f.db, principal, row.id, row.content_hash, true), /prior_version_conflict/);
@@ -62,4 +62,11 @@ test('tenant reads and approval cannot retrieve another tenant proposal; rejecti
   await assert.rejects(decideAdvisoryMethod(f.db, { ...principal, orgId: 'other' }, row.id, row.content_hash, true), /not_found/);
   await decideAdvisoryMethod(f.db, principal, row.id, row.content_hash, false);
   assert.deepEqual(await readAdvisoryMethods(f.db, principal), []);
+});
+
+test('Runtime can publish the exact reviewed revision; generic services cannot', async () => {
+  const f = fixture(); const row = await proposeAdvisoryMethod(f.db, principal, input);
+  await assert.rejects(decideAdvisoryMethod(f.db, { ...principal, kind: 'runtime-session' }, row.id, row.content_hash, true), /publication_authority/);
+  const result = await decideAdvisoryMethod(f.db, { ...principal, kind: 'runtime-session', runtimeSessionId: 'session-runtime-test' }, row.id, row.content_hash, true);
+  assert.equal(result.status, 'approved');
 });

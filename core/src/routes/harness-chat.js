@@ -1,4 +1,4 @@
-import { proposeAdvisoryMethod, readAdvisoryMethods } from '../runtime-playbooks/advisory-methods.js';
+import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
 import { getRedisClient } from '../control-plane/session-store.js';
 import {
@@ -187,7 +187,20 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       if (req.method === 'GET') {
         jsonResponse(res, { methods: await readAdvisoryMethods(prisma, principal) });
       } else if (req.method === 'POST') {
-        const row = await proposeAdvisoryMethod(prisma, principal, await parseBody(req));
+        const input = await parseBody(req);
+        if (input.operation === 'inspect_revision') {
+          const row = await readAdvisoryMethods(prisma, principal, input.revision_id);
+          if (!row) { jsonResponse(res, { error: 'Not found' }, 404); return true; }
+          jsonResponse(res, { revision: row }); return true;
+        }
+        if (input.operation === 'publish_revision') {
+          if (claims.operating_role !== 'runtime' || !/^session-[a-z0-9-]{1,120}$/.test(claims.operating_session || '')) {
+            jsonResponse(res, { error: 'Runtime publication authority required' }, 403); return true;
+          }
+          const row = await decideAdvisoryMethod(prisma, { ...principal, kind: 'runtime-session', runtimeSessionId: claims.operating_session }, input.revision_id, input.content_hash, true);
+          jsonResponse(res, { id: row.id, status: row.status, version: row.version, content_hash: row.content_hash, method_id: row.method_id, reviewed_by: 'runtime', review_session: claims.operating_session }); return true;
+        }
+        const row = await proposeAdvisoryMethod(prisma, principal, input);
         jsonResponse(res, { id: row.id, status: row.status, version: row.version, content_hash: row.content_hash,
           approval_path: `/api/advisory-methods/${row.id}`,
           approval_url: `${String(env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.singulancelabs.com').replace(/\/$/, '')}/api/advisory-methods/${row.id}`,

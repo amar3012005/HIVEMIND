@@ -191,7 +191,9 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
         if (input.operation === 'inspect_revision') {
           const row = await readAdvisoryMethods(prisma, principal, input.revision_id);
           if (!row) { jsonResponse(res, { error: 'Not found' }, 404); return true; }
-          jsonResponse(res, { revision: row }); return true;
+          const approved = (await readAdvisoryMethods(prisma, principal)).find(method => method.method_id === row.method_id) || null;
+          jsonResponse(res, { revision: row, current_approved_revision: approved, current_approved_version: approved?.version ?? 0,
+            instructions: 'Use current_approved_version as the proposal baseline. A pending draft version is not approved. On conflict, reconcile the current approved record and prepare a new immutable draft only if its change still applies.' }); return true;
         }
         if (input.operation === 'publish_revision') {
           if (claims.operating_role !== 'runtime' || !/^session-[a-z0-9-]{1,120}$/.test(claims.operating_session || '')) {

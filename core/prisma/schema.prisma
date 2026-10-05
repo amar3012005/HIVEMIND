@@ -6021,3 +6021,82 @@ model AdvisoryPlaybookRevision {
   @@index([organizationId, status])
   @@map("advisory_playbook_revisions")
 }
+
+/// Opt-in App Runtime. Composite tenant FKs, RLS, CHECKs and immutable-history
+/// triggers are authoritative in its SQL migration; no runtime mounts this yet.
+model AppRuntimeApp {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  createdBy String @map("created_by") @db.Uuid
+  currentVersion Int @map("current_version")
+  publishedVersion Int? @map("published_version")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  @@unique([orgId,id])
+  @@map("app_runtime_apps")
+}
+model AppRuntimeVersion {
+  orgId String @map("org_id") @db.Uuid
+  appId String @map("app_id") @db.Uuid
+  version Int
+  spec Json @db.JsonB
+  createdBy String @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  @@id([orgId,appId,version])
+  @@map("app_runtime_versions")
+}
+model AppRuntimeEntity {
+  orgId String @map("org_id") @db.Uuid
+  appId String @map("app_id") @db.Uuid
+  entityId String @map("entity_id") @db.VarChar(80)
+  @@id([orgId,appId,entityId])
+  @@map("app_runtime_entities")
+}
+model AppRuntimeRecord {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  appId String @map("app_id") @db.Uuid
+  entityId String @map("entity_id") @db.VarChar(80)
+  version Int @default(1)
+  data Json @db.JsonB
+  createdBy String @map("created_by") @db.Uuid
+  updatedBy String @map("updated_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  @@unique([orgId,appId,id])
+  @@index([orgId,appId,entityId,id],map:"app_runtime_records_page_idx")
+  @@map("app_runtime_records")
+}
+model AppRuntimeRecordRelation {
+  orgId String @map("org_id") @db.Uuid
+  appId String @map("app_id") @db.Uuid
+  fromRecordId String @map("from_record_id") @db.Uuid
+  fieldId String @map("field_id") @db.VarChar(80)
+  toRecordId String @map("to_record_id") @db.Uuid
+  @@id([orgId,appId,fromRecordId,fieldId])
+  @@index([orgId,appId,toRecordId],map:"app_runtime_relations_target_idx")
+  @@map("app_runtime_record_relations")
+}
+model AppRuntimeOperation {
+  orgId String @map("org_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  operationId String @map("operation_id") @db.VarChar(180)
+  requestHash String @map("request_hash") @db.Char(64)
+  result Json @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  @@id([orgId,userId,operationId])
+  @@map("app_runtime_operations")
+}
+model AppRuntimeAudit {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  appId String @map("app_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  operationId String @map("operation_id") @db.VarChar(180)
+  action String @db.VarChar(40)
+  subjectId String @map("subject_id") @db.VarChar(180)
+  details Json @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  @@index([orgId,appId,createdAt],map:"app_runtime_audit_app_idx")
+  @@map("app_runtime_audit")
+}

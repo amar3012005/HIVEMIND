@@ -18,7 +18,7 @@ Verified paths include session/event/lease isolation, cookie RPC admission revoc
 
 Connector records are dummy provider data. The memory-save boundary is a fake Core adapter that supplies a dummy saved destination/receipt; no external provider or live company memory was used. This validates runner SQL compatibility and boundary handling, not an end-to-end external connector or live memory-provider write.
 
-The fixture's minimal authority-table schema is source-derived. Before production activation, use the live schema metadata and an isolated clone of current schema to verify column types/defaults/extensions, sequence privileges, and migration compatibility. No production roles, credentials, table grants or service configuration changed during this proof.
+The fixture's minimal authority-table schema is source-derived. A second bounded fixture reconstructed the current schema from read-only metadata only: 23 tables including the teams dependency, 292 columns, actual enum values/defaults/constraints/standalone unique indexes and native RLS policies. Seven native DreamStore checks passed against that shape under the exact staged role: reserved project/membership creation, acceptance/claim/heartbeat, memory read/recent/traversal filtering, billing sum, connector evidence/revocation, output receipt idempotency, and inactive-member denial. Only dummy rows were inserted; no tenant data was exported. This is a target-table schema clone, not a full application schema/trigger reproduction. Managed dedicated secret/login and runner configuration activation are still required; no role activation was performed. No production roles, credentials, table grants or service configuration changed during this proof.
 
 ## Scope compatibility
 

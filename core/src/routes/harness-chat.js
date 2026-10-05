@@ -551,9 +551,9 @@ export async function handleHarnessChatBootstrapRoute({
     }
     const membership = await prisma?.userOrganization?.findUnique?.({
       where: { userId_orgId: { userId, orgId } },
-      select: { userId: true },
+      select: { userId: true, isActive: true },
     });
-    if (!membership) {
+    if (!membership?.isActive) {
       jsonResponse(res, { error: 'Organization membership required' }, 403);
       return true;
     }
@@ -577,9 +577,9 @@ export async function handleHarnessChatBootstrapRoute({
   }
   const membership = await prisma?.userOrganization?.findUnique?.({
     where: { userId_orgId: { userId, orgId } },
-    select: { userId: true },
+    select: { userId: true, isActive: true },
   });
-  if (!membership) {
+  if (!membership?.isActive) {
     jsonResponse(res, { error: 'Organization membership required' }, 403);
     return true;
   }

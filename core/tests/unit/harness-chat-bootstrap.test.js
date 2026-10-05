@@ -20,7 +20,7 @@ test('permanent session deletion is authenticated and tenant scoped', async () =
   const handled = await handleHarnessChatBootstrapRoute({
     req: { method: 'DELETE' }, res, pathname: '/v1/harness-chat/sessions/session-delete-me',
     prisma: {
-      userOrganization: { findUnique: async () => ({ userId }) },
+      userOrganization: { findUnique: async () => ({ userId, isActive: true }) },
       harnessSession: { deleteMany: async (args) => { calls.push(args); return { count: 1 }; } },
     },
     requireSession: async () => ({ session: { orgId, userId } }),
@@ -36,7 +36,7 @@ test('session deletion never reports success outside the authenticated tenant', 
   await handleHarnessChatBootstrapRoute({
     req: { method: 'DELETE' }, res, pathname: '/v1/harness-chat/sessions/session-other-user',
     prisma: {
-      userOrganization: { findUnique: async () => ({ userId }) },
+      userOrganization: { findUnique: async () => ({ userId, isActive: true }) },
       harnessSession: { deleteMany: async () => ({ count: 0 }) },
     },
     requireSession: async () => ({ session: { orgId, userId } }),
@@ -61,7 +61,7 @@ test('bootstrap derives tenant scope, mints admission, and never creates a sessi
   const res = responseCapture();
   const redisValues = new Map();
   const prisma = {
-    userOrganization: { findUnique: async () => ({ userId }) },
+    userOrganization: { findUnique: async () => ({ userId, isActive: true }) },
     harnessSession: new Proxy({}, { get() { throw new Error('bootstrap must not access session persistence'); } }),
   };
   await handleHarnessChatBootstrapRoute({
@@ -94,7 +94,7 @@ test('bootstrap fails closed to legacy without a ticket when edge evaluation fai
   const res = responseCapture();
   await handleHarnessChatBootstrapRoute({
     req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap',
-    prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
+    prisma: { userOrganization: { findUnique: async () => ({ userId, isActive: true }) } },
     requireSession: async () => ({ session: { orgId, userId } }), parseBody: async () => ({}), jsonResponse,
     env: { HIVE_HARNESS_EDGE_EVAL_SECRET: 'edge-secret', HIVE_HARNESS_FLAG_URL: 'https://edge.example/flag' },
     fetchImpl: async () => { throw new Error('flagship unavailable'); },
@@ -109,7 +109,7 @@ test('a Harness flag never becomes a legacy selection when ticket admission fail
   const res = responseCapture();
   await handleHarnessChatBootstrapRoute({
     req: { method: 'POST' }, res, pathname: '/v1/harness-chat/bootstrap',
-    prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
+    prisma: { userOrganization: { findUnique: async () => ({ userId, isActive: true }) } },
     requireSession: async () => ({ session: { orgId, userId} }), parseBody: async () => ({}), jsonResponse,
     env: {
       HIVE_HARNESS_TICKET_SECRET: 'not-distinct-but-otherwise-long-enough-ticket-secret',
@@ -160,3 +160,24 @@ test('retired or unknown rollout modes fail closed to the legacy orchestrator', 
   assert.equal(res.json.embed_url, '/hivemind/app/chat');
   assert.equal(res.json.ticket, undefined);
 });
+
+for (const pathname of ['/v1/harness-chat/bootstrap', '/v1/harness-chat/new-session', '/v1/harness-chat/sessions/session-fixture']) {
+  test(`inactive organization membership denies ${pathname} before any effect`, async () => {
+    const res = responseCapture();
+    await handleHarnessChatBootstrapRoute({
+      req: { method: pathname.includes('/sessions/') ? 'DELETE' : 'POST' }, res, pathname,
+      prisma: {
+        userOrganization: { findUnique: async ({ select }) => {
+          assert.equal(select.isActive, true);
+          return { userId, isActive: false };
+        } },
+        harnessSession: { deleteMany: async () => { throw new Error('inactive member must not delete'); } },
+      },
+      requireSession: async () => ({ session: { orgId, userId } }),
+      parseBody: async () => { throw new Error('inactive member must not begin admission'); },
+      jsonResponse,
+    });
+    assert.equal(res.status, 403);
+    assert.deepEqual(res.json, { error: 'Organization membership required' });
+  });
+}

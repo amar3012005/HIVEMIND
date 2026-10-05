@@ -194,7 +194,8 @@ services:
       NODE_ENV: production
       PORT: "3080"
       DSH_HOME: /tmp/dsh
-      DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}
+      # Optional dedicated runtime identity; managed .env owns the secret. Core remains unchanged.
+      DATABASE_URL: ${HIVE_HARNESS_DATABASE_URL:-postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}}
       PGOPTIONS: -c search_path=hivemind,public
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVE_HARNESS_PROFILE: hivemind-chat

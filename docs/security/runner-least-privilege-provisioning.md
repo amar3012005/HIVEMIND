@@ -25,3 +25,9 @@ The fixture's minimal authority-table schema is source-derived. A second bounded
 Live native policies use `app.hivemind_org_id` and `app.hivemind_user_id`. Requested authority tables exist in `hivemind`, with RLS disabled. There is no live `app.current_*` policy requiring an alias correction. Schedule's trusted metadata index permits its scheduler flag. Dreamer's trusted due index contains identities/lease flags only; content queries run under owner scope and active membership validation.
 
 Security readiness is not signed off by this staging artifact.
+
+## Startup and migration boundary
+
+The current-schema fixture additionally ran the actual native SessionPersistence, PostgreSQL Schedule and HQ ownership `Service.init` methods under the staged restricted role. Initialization passed without CREATE, ALTER or ownership privileges; the HQ service registration port was a fixture stub. DreamStore construction and native operations also passed. Dreamer plugin source creates its pool and native background operations without startup DDL. The runner deployment README assigns canonical migrations to Core and validates existing tables at startup.
+
+Future schema migrations must keep the existing operator/migration identity separate from the restricted runtime connection. Do not grant DDL or ownership to make runtime startup pass, and do not run canonical migrations with the restricted runtime URL. Missing or incompatible migrations should fail startup clearly rather than silently widen grants. This check covers provider initialization, not a full production process boot or external providers.

@@ -81,3 +81,12 @@ test('native UUID sessions can store and read receipts without widening their ow
   assert.equal(result.sender, 'rama@example.com');
   await assert.rejects(() => readConnectedAppReceipt({ prisma: db.prisma, owner: { ...owner, userId: '3e10b102-8472-4c6b-8b60-c28179049932' }, receiptId: stored.id, sessionId: packet.session_id, requestedFields: ['sender'], env }), /receipt_not_found/);
 });
+
+test('denies the same user in another organization before decrypting the receipt', async () => {
+  const db = database();
+  const stored = await storeConnectedAppReceipt({ prisma: db.prisma, owner, input: input(), env });
+  await assert.rejects(() => readConnectedAppReceipt({
+    prisma: db.prisma, owner: { ...owner, orgId: '93a0d213-30e7-4d8e-b88a-6704f3ccf120' },
+    receiptId: stored.id, sessionId: input().session_id, requestedFields: ['body'], env,
+  }), /receipt_not_found/);
+});

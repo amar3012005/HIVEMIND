@@ -15,7 +15,10 @@ function fixture(role = 'admin') {
         return [row];
       }
       if (sql.includes('MAX(version)')) return [{ version: current }];
-      if (sql.includes('pg_advisory')) return [{}];
+      if (sql.includes('pg_advisory')) {
+        assert.match(sql, /\)::text AS lock_result$/, 'Prisma cannot deserialize PostgreSQL void results');
+        return [{ lock_result: '' }];
+      }
       if (sql.startsWith('UPDATE')) { const row = rows.find(r => r.organization_id === args[0] && r.id === args[1]); row.status = args[2]; row.approved_by_user_id = args[3]; if (row.status === 'approved') current = row.version; return [row]; }
       if (sql.includes('DISTINCT ON')) return rows.filter(r => r.organization_id === args[0] && r.status === 'approved');
       return rows.filter(r => r.organization_id === args[0] && r.id === args[1]);

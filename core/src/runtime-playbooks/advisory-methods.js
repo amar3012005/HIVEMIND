@@ -78,7 +78,7 @@ export async function decideAdvisoryMethod(db, principal, id, hash, approved) {
       if (row.status === (approved ? 'approved' : 'rejected')) return row;
       fail('advisory_already_decided', 409);
     }
-    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${principal.orgId}:${row.method_id}`);
+    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS lock_result', `${principal.orgId}:${row.method_id}`);
     if (approved && await latest(tx, principal.orgId, row.method_id) !== row.prior_version)
       fail('advisory_prior_version_conflict', 409);
     return (await tx.$queryRawUnsafe(`UPDATE hivemind.advisory_playbook_revisions SET status=$3,approved_by_user_id=$4::uuid,decided_at=now()

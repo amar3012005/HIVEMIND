@@ -34,7 +34,7 @@ export async function nativePluginProof({admin,db,principal,checks,manageNativeE
   await ctx.plugin(Loop,{agents:[]});await ctx.plugin(Subagent);
   ctx.provide('agentPresets',{composedPreset:()=>undefined,composeFrom:()=>undefined,serviceFor:(_agent,name)=>ctx.get(name)});
   await ctx.plugin(Team);
-  ctx.llm.registerAdapter(['mock'],new MockAdapter([toolCallResponse('fixture-generate','hivemind_generate',{format:'markdown_report',title:'Isolated native brief',content:'# Isolated native brief\n\nThis is isolated fixture verification.'}),textResponse('Fixture scheduled work completed with saved brief.')]));
+  const mockRegistration=ctx.llm.registerAdapter(['mock'],new MockAdapter([toolCallResponse('fixture-generate','hivemind_generate',{format:'markdown_report',title:'Isolated native brief',content:'# Isolated native brief\n\nThis is isolated fixture verification.'}),textResponse('Fixture scheduled work completed with saved brief.')]));
   const chief=await ctx.agentLoop.create(SessionId('session-native-plugin-chief'),{provider:'mock',model:'mock'});
   chief.session.append('agent-preset/selected',{agentPreset:'hivemind-hq'});
   chief.session.append('hivemind/session-owner',{id:null,slug:'runtime',name:'Runtime',role:'Chief'});
@@ -89,7 +89,8 @@ export async function nativePluginProof({admin,db,principal,checks,manageNativeE
   assert.equal(archived.employee.policyRules.native_lifecycle.phase,'archived');
   const retained=await ctx.sessionPersistence.open(worker.id,'read');await retained.read();await retained.close();
   checks.push('Core archives actual native accepted task plus recorded private handoff while preserving employee history');
+  mockRegistration();
   const {nativeSetupProof}=await import('/source/native-employee-setup.pg.mjs');
-  await nativeSetupProof({ctx,scope,principal,db,chief,checks,manageNativeEmployee,nativeLifecycleHostProof,assert});
+  await nativeSetupProof({ctx,scope,principal,db,chief,checks,manageNativeEmployee,nativeLifecycleHostProof,assert,documents:inspected.documents});
  }); } finally {await ctx.fiber.dispose();delete process.env.FIXTURE_LOCAL_DB;}
 }

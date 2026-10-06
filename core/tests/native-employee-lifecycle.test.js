@@ -61,3 +61,29 @@ test('profile refinement preserves lifecycle authority, appearance and permissio
   row.archivedAt=new Date();
   await assert.rejects(manageNativeEmployee(db,principal,input),/employee_profile_not_active/);
 });
+
+test('responsibility proposal requires Chief confirmation and freezes the first joining profile', async () => {
+  const row={id:'11111111-1111-4111-8111-111111111111',name:'Alex',roleArchetype:'Specialist',status:'draft',tools:[],enabledConnectors:[],policyRules:{native_lifecycle:{version:1,phase:'active',kind:'durable',revision:1,profile_revision:1}}};
+  const tx={$queryRawUnsafe:async(sql)=>{
+    if(sql.includes('information_schema')) return [{table_schema:'hivemind'}];
+    if(sql.includes('SELECT header')) return [{header:{agentPreset:'hivemind-hq'}}];
+    if(sql.includes('SELECT event_type')) return [{event_type:'hivemind/session-owner',payload:{data:{id:null,slug:'runtime'}}}];
+    return [];
+  },digitalEmployee:{findFirst:async()=>row,update:async({data})=>Object.assign(row,data)}};
+  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$transaction:async fn=>fn(tx)};
+  const principal={orgId:'org',userId:'admin'};
+  await manageNativeEmployee(db,principal,{operation:'configure',employee_id:row.id,expected_profile_revision:1,role:'Research',persona:'Agreed research responsibilities.'});
+  assert.equal(row.policyRules.native_lifecycle.profile_stage,'runtime_review');
+  assert.equal(row.policyRules.native_lifecycle.onboarding_required,true);
+  assert.equal(row.policyRules.native_lifecycle.joining_profile,undefined);
+  const approved={operation:'configure',employee_id:row.id,expected_profile_revision:2,role:'Research',persona:'Company-relevant bounded instructions.'};
+  await manageNativeEmployee(db,{...principal,runtimeSessionId:'chief'},approved);
+  assert.equal(row.policyRules.native_lifecycle.profile_stage,'ready');
+  assert.equal(row.policyRules.native_lifecycle.onboarding_required,false);
+  const first=structuredClone(row.policyRules.native_lifecycle.joining_profile);
+  assert.equal(first.role,'Research');assert.equal(first.profileRevision,3);
+  assert.equal((await manageNativeEmployee(db,{...principal,runtimeSessionId:'chief'},approved)).replayed,true);
+  await manageNativeEmployee(db,{...principal,runtimeSessionId:'chief'},{...approved,expected_profile_revision:3,persona:'Updated relevant instructions.'});
+  assert.deepEqual(row.policyRules.native_lifecycle.joining_profile,first);
+  assert.deepEqual(row.tools,[]);assert.deepEqual(row.enabledConnectors,[]);
+});

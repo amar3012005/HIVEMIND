@@ -1,0 +1,28 @@
+{
+  "database": "PostgreSQL",
+  "serverVersion": "15.7",
+  "migration": "20261005100000_app_runtime_infrastructure",
+  "origin": "http://127.0.0.1:43565",
+  "checks": [
+    "Actual App Runtime SQL migration applied to PostgreSQL",
+    "Application pool is non-superuser and cannot bypass RLS",
+    "Two artificial organizations have distinct applications; draft retry returns the same receipt",
+    "Validate/publish succeeds; tenant crossing is denied by HTTP service",
+    "Record/reference writes persist; cross-tenant references and stale edits are denied; replay does not duplicate",
+    "Revocation blocks receipt replay; viewer reads only; member writes records but cannot publish",
+    "Concurrent expected-version edits admit exactly one winner; published listing stays on reviewed v2 while current draft is v3",
+    "Compatible metadata version published without data loss; destructive schema mutation rejected",
+    "Database RLS isolates organization rows; version history rejects mutation",
+    "Persisted synthetic HQ workflow receipt links to the correct app/tenant; this is projection verification, not workflow execution",
+    "Native runner token verification + narrow gateway rejects wrong signatures/project scope and ignores spoofed tenant headers"
+  ],
+  "receipts": {
+    "operations": 12,
+    "audit_events": 12
+  },
+  "apps": {
+    "a": "aa9e5aba-3773-44b0-9a1a-a831d491a06a",
+    "b": "bdf9fc5c-b2ce-414e-bc96-85fe2dd803d4"
+  },
+  "scope": "Artificial local fixtures; minimal identity table fixture; real CRM migration and service; no production authentication, UI, connector or workflow execution claim"
+}

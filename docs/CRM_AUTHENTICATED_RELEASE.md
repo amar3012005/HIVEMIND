@@ -80,3 +80,12 @@ V1 permissions are organization-wide. Connector synchronization, workflow execut
 title resolution, and backfills require their existing governed integration boundaries. The CRM
 page renders receipts; it is not a new workflow executor. Production cutover remains coordinated
 with the main release owner and its Runtime/employee fixes.
+
+## Pushed candidates
+
+- Core: `codex/crm-authenticated-release-20261006`; combined behavioral proof at `72fafd3a4`, includes employee `0ab3b28c` and `488e4637` changes.
+- Native: `codex/crm-native-employee-combined-20261006`, `04fdf7ce39703118f78f1fce5c23f64295d70ca8`; preserves employee/pager `e2562e725c` as an ancestor. Normal full host build/client typecheck push guard passed; combined focused tests passed 14/14.
+- Da Vinci: `codex/crm-authenticated-fe-20261006`, `71a891aff1453661b2901d6814dee57760c485a9`; parent gitlink matches it. Full CRA build and five focused tests passed.
+
+These are pushed candidates, not production deployment identities. The main release owner must
+reconcile any newer hydration/greeting changes before the coordinated immutable artifact freeze.

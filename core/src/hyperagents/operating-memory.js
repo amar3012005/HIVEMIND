@@ -44,8 +44,8 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
     const states = kind === 'user_agenda' ? ['confirmed', 'superseded'] : ['open', 'resolved', 'superseded'];
     if (!states.includes(context.state)) throw new Error('invalid_runtime_memory_state');
     if (!Number.isInteger(context.priority) || context.priority < 0 || context.priority > 100) throw new Error('invalid_runtime_memory_priority');
-    if (typeof context.impact !== 'string' || !context.impact.trim() || context.impact.length > 500) throw new Error('invalid_runtime_memory_impact');
-    if (!Array.isArray(context.evidence) || !context.evidence.length || context.evidence.length > 8 || context.evidence.some(ref => typeof ref !== 'string' || !ref.trim() || ref.length > 300)) throw new Error('invalid_runtime_memory_evidence');
+    if (context.impact !== undefined && (typeof context.impact !== 'string' || context.impact.length > 500)) throw new Error('invalid_runtime_memory_impact');
+    if (context.evidence !== undefined && (!Array.isArray(context.evidence) || context.evidence.length > 8 || context.evidence.some(ref => typeof ref !== 'string' || !ref.trim() || ref.length > 300))) throw new Error('invalid_runtime_memory_evidence');
     if (kind === 'user_agenda' && !/^(?:event:[0-9]+|call:[a-zA-Z0-9_-]{1,120})$/.test(context.confirmationRef || '')) throw new Error('invalid_agenda_confirmation');
     if (kind === 'uncertainty' && context.confirmationRef !== undefined) throw new Error('invalid_runtime_memory_metadata');
     if (context.state !== (kind === 'user_agenda' ? 'confirmed' : 'open') && !supersedesId) throw new Error('invalid_runtime_memory_resolution');

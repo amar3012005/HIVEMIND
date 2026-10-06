@@ -25,3 +25,12 @@ test('Ordinary retrieval excludes special records; Runtime supports filtered que
  assert.ok(calls[1].args.includes('open'));
  assert.ok(!calls[1].sql.includes('to_tsquery'));
 });
+
+test('Private Runtime saves accept omitted evidence and impact without approval',()=>{
+ const {evidence,impact,...minimal}=note.context;
+ assert.equal(validateOperatingMemory({...note,context:minimal},identity).kind,'uncertainty');
+ assert.equal(validateOperatingMemory({...note,context:{...minimal,evidence:[],impact:''}},identity).kind,'uncertainty');
+ assert.equal(validateOperatingMemory({...note,kind:'user_agenda',context:{...minimal,state:'confirmed',confirmationRef:'event:7'}},identity).kind,'user_agenda');
+ assert.throws(()=>validateOperatingMemory({...note,context:{...minimal,evidence:['']}},identity),/invalid_runtime_memory_evidence/);
+ assert.throws(()=>validateOperatingMemory({...note,context:{...minimal,impact:42}},identity),/invalid_runtime_memory_impact/);
+});

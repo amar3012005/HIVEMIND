@@ -1,3 +1,25 @@
+# Current implementation status — 2026-10-07
+
+The first-slice notes below are historical. Registered hosted OAuth lifecycle code now exists: persisted owner-bound PKCE/state/nonce attempts, one-time callback consumption, RSA/EC JWKS verification, account catalog, rotating refresh, local/remote disconnect, status, selection and native automatic root-Brain routing. Connection controls and the native bridge are being integrated by the release owner. No HIVEMIND billing-system integration, checkout, usage ledger or subscription changes were added.
+
+The real hosted client registration and production activation remain absent. All successful provider tests use explicitly fake grants and loopback HTTP providers; there is no successful real ChatGPT plan request or Cloudflare canary.
+
+## Current verification and boundaries
+
+14 Core tests pass, including fixture HTTP OAuth/JWKS/catalog/refresh/revocation, cross-owner and replay denial, expiry/member revocation, malformed identity and native root-room eligibility. Native tests cover selected-model routing and opt-in fallback with no splice after visible output, denied-owner refusal and recursion protection. PostgreSQL schemas validate with Prisma 5.22; two migrations are staged and unexecuted. Mock transactions serialize fixture calls but do not prove PostgreSQL locking.
+
+OAuth configuration requires the issued HIVE_CHATGPT_PLAN_CLIENT_ID, exact HTTPS HIVE_CHATGPT_PLAN_REDIRECT_URI, registered HIVE_CHATGPT_PLAN_AUTHORIZATION_URL/TOKEN_URL/JWKS_URL/REVOCATION_URL on auth.openai.com, HIVE_CHATGPT_PLAN_TOKEN_AUTH_METHOD (none or client_secret_post), optional required client secret, separate vault secret and explicit approval/enabled gates. No dynamic local client is accepted for hosted deployment.
+
+Core service-authenticated API prefix: /internal/v1/harness-chat/core/chatgpt-plan/connection. GET status; POST start, callback {state,code}, models, select {model,platform_fallback}, disconnect, and route {session_id}. Browser requests use the native same-origin bridge; it derives ownership from the authenticated session and never accepts owner IDs or credentials from the browser. The callback URI must be the configured Brain overview URL handled by that authenticated UI. Token callbacks return only connection/model metadata.
+
+Core status distinguishes disabled approval, missing endpoints/client/auth configuration and active connection. Native provider discovery advertises actual account models plus auto; automatic dispatch checks the persisted exact-owner root Brain preset. Runtime, employee, child, scheduled and unauthenticated execution do not gain plan credentials. Those future routes require explicit sponsor ownership and permission propagation.
+
+Platform fallback requires the user's stored opt-in and a configured existing native platform route. It is limited to eligible provider failures before any streamed output, never owner/member/session denial, cancellation or already emitted tool blocks. No automatic token retry or cross-provider replay of executed tools occurs. A late failure after visible text remains an explicit failed turn rather than duplicating output with another provider. Media, voice, Dreamer and Core's other model consumers are untouched.
+
+Remaining activation work: issued hosted contract/config; real OAuth consent and account-specific catalog; gateway/provider completed inference and limit behavior; PostgreSQL migrations and actual lock/race verification; guarded deployment and authenticated browser canary. No production configuration or existing Codex grants were touched.
+
+---
+
 # Gated ChatGPT-plan Brain integration
 
 This is an implemented first slice, not an enabled connection or a complete OAuth feature. OpenAI hosted-plan approval is confirmed absent. No production settings, existing Codex grants or provider accounts were touched.

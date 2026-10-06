@@ -1,5 +1,5 @@
 /** Actual native services in the same disposable PostgreSQL fixture; no external model calls. */
-export async function nativePluginProof({admin,db,principal,checks,manageNativeEmployee,assert}) {
+export async function nativePluginProof({admin,db,principal,checks,manageNativeEmployee,nativeLifecycleHostProof,assert}) {
  const repo='/opt/deepseek-harness';
  const load=async(path)=>import(`${repo}/${path}`);
  const {Context}=await load('vendor/cordis/lib/index.js');
@@ -89,5 +89,7 @@ export async function nativePluginProof({admin,db,principal,checks,manageNativeE
   assert.equal(archived.employee.policyRules.native_lifecycle.phase,'archived');
   const retained=await ctx.sessionPersistence.open(worker.id,'read');await retained.read();await retained.close();
   checks.push('Core archives actual native accepted task plus recorded private handoff while preserving employee history');
+  const {nativeSetupProof}=await import('/source/native-employee-setup.pg.mjs');
+  await nativeSetupProof({ctx,scope,principal,db,chief,checks,manageNativeEmployee,nativeLifecycleHostProof,assert});
  }); } finally {await ctx.fiber.dispose();delete process.env.FIXTURE_LOCAL_DB;}
 }

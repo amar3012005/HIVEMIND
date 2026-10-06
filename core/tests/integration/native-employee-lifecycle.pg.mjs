@@ -122,5 +122,5 @@ await assert.rejects(nativeLifecycleHostProof(db,p,employee.id),/administrator_m
 await roomA.close();await roomB.close();
 await writer.close();await pool.end();
 const {nativePluginProof}=await import('/source/native-employee-plugins.pg.mjs');
-await nativePluginProof({admin,db,principal:a,checks,manageNativeEmployee,assert});
+await nativePluginProof({admin,db,principal:a,checks,manageNativeEmployee,nativeLifecycleHostProof,assert});
 await admin.end();console.log(JSON.stringify({passed:checks.length,checks}));

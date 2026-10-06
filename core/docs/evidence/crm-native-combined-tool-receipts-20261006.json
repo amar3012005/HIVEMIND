@@ -1,0 +1,417 @@
+[
+  {
+    "name": "hivemind_app_create_draft",
+    "args": {
+      "spec": {
+        "schemaVersion": 1,
+        "name": "Native tool CRM proof",
+        "entities": [
+          {
+            "id": "company",
+            "name": "Companies",
+            "fields": [
+              {
+                "id": "name",
+                "name": "Name",
+                "type": "text",
+                "required": true
+              }
+            ]
+          }
+        ],
+        "views": [
+          {
+            "id": "companies",
+            "name": "Companies",
+            "type": "table",
+            "entityId": "company"
+          }
+        ]
+      },
+      "operation_id": "native-combined-control-proof-create-20261006"
+    },
+    "result": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 1,
+        "publishedVersion": null,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.040Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_get",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56"
+    },
+    "result": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 1,
+        "publishedVersion": null,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.040Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_patch",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+      "expected_version": 1,
+      "spec": {
+        "schemaVersion": 1,
+        "name": "Native tool CRM proof",
+        "entities": [
+          {
+            "id": "company",
+            "name": "Companies",
+            "fields": [
+              {
+                "id": "name",
+                "name": "Name",
+                "type": "text",
+                "required": true
+              }
+            ]
+          }
+        ],
+        "views": [
+          {
+            "id": "companies",
+            "name": "Companies",
+            "type": "table",
+            "entityId": "company"
+          }
+        ],
+        "description": "Actual native gateway proof"
+      },
+      "operation_id": "native-combined-control-proof-patch-20261006"
+    },
+    "result": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 2,
+        "publishedVersion": null,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "description": "Actual native gateway proof",
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.145Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_validate",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56"
+    },
+    "result": {
+      "valid": true,
+      "spec": {
+        "name": "Native tool CRM proof",
+        "views": [
+          {
+            "id": "companies",
+            "name": "Companies",
+            "type": "table",
+            "entityId": "company",
+            "fieldIds": [
+              "name"
+            ]
+          }
+        ],
+        "entities": [
+          {
+            "id": "company",
+            "name": "Companies",
+            "fields": [
+              {
+                "id": "name",
+                "name": "Name",
+                "type": "text",
+                "source": {
+                  "type": "local"
+                },
+                "required": true
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "description": "Actual native gateway proof",
+        "schemaVersion": 1
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_preview",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56"
+    },
+    "result": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 2,
+        "publishedVersion": null,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "description": "Actual native gateway proof",
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.145Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_publish",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+      "expected_version": 2,
+      "operation_id": "native-combined-control-proof-publish-20261006"
+    },
+    "result": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 2,
+        "publishedVersion": 2,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "description": "Actual native gateway proof",
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.252Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_create_record",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+      "entity_id": "company",
+      "data": {
+        "name": "Native fixture company"
+      },
+      "operation_id": "native-combined-control-proof-record-20261006"
+    },
+    "result": {
+      "record": {
+        "id": "92bddc1b-3820-4a30-b699-475ad0a61e53",
+        "appId": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "entityId": "company",
+        "version": 1,
+        "data": {
+          "name": "Native fixture company"
+        },
+        "createdAt": "2026-10-06T18:36:57.285Z",
+        "updatedAt": "2026-10-06T18:36:57.285Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_update_record",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+      "record_id": "92bddc1b-3820-4a30-b699-475ad0a61e53",
+      "expected_version": 1,
+      "data": {
+        "name": "Native updated fixture"
+      },
+      "operation_id": "native-combined-control-proof-update-20261006"
+    },
+    "result": {
+      "record": {
+        "id": "92bddc1b-3820-4a30-b699-475ad0a61e53",
+        "appId": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "entityId": "company",
+        "version": 2,
+        "data": {
+          "name": "Native updated fixture"
+        },
+        "createdAt": "2026-10-06T18:36:57.285Z",
+        "updatedAt": "2026-10-06T18:36:57.320Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_query_records",
+    "args": {
+      "app_id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+      "entity_id": "company"
+    },
+    "result": {
+      "records": [
+        {
+          "id": "92bddc1b-3820-4a30-b699-475ad0a61e53",
+          "appId": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+          "entityId": "company",
+          "version": 2,
+          "data": {
+            "name": "Native updated fixture"
+          },
+          "createdAt": "2026-10-06T18:36:57.285Z",
+          "updatedAt": "2026-10-06T18:36:57.320Z"
+        }
+      ],
+      "nextCursor": null
+    }
+  }
+]

@@ -99,4 +99,7 @@ await assert.rejects(nativeLifecycleHostProof(db,{orgId:b.orgId,userId:b.userId}
 await admin.query('UPDATE fixture_memberships SET is_active=false WHERE org_id=$1 AND user_id=$2',[a.orgId,a.userId]);
 await assert.rejects(nativeLifecycleHostProof(db,p,employee.id),/administrator_membership_required/);checks.push('revoked administrator cannot issue room cleanup attestation');
 await roomA.close();await roomB.close();
-await writer.close();await pool.end();await admin.end();console.log(JSON.stringify({passed:checks.length,checks}));
+await writer.close();await pool.end();
+const {nativePluginProof}=await import('/source/native-employee-plugins.pg.mjs');
+await nativePluginProof({admin,db,principal:a,checks,manageNativeEmployee,assert});
+await admin.end();console.log(JSON.stringify({passed:checks.length,checks}));

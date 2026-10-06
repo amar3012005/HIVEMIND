@@ -55,3 +55,30 @@ Current DSH documentation revision `639ed015397290b3745d163aafe02ffee4aa3f84` co
 The reviewed branch adds fail-closed malformed lifecycle validation, bounded private closeout arguments, first owner and scheduled work checks, and a persistent reviewed Teams path for registry-native employees. Legacy explicit-ID executor selection excludes any reserved lifecycle policy, including malformed values. Native child session ancestry is included in open-turn/task closeout and exact room cleanup, within the attested organization only.
 
 Latest isolated PostgreSQL proof passes 16 checks with restricted native Session writes, including an active descendant and unfinished descendant Team task blocking archive. These events are persisted through native Session persistence; they are not a full live LLM/Teams execution canary. Native focused service tests pass separately. No production change was made. The complete real Teams + PostgreSQL Schedule + human/Runtime creation-through-archive canary remains required before end-to-end signoff.
+
+
+### Full native-plugin fixture result
+
+The reviewed isolated fixture now passes **20 checks**. Its additional four
+checks mount actual Cordis TeamService, PostgreSQL Schedule, Session persistence,
+AgentLoop and artifact generation. A scripted in-process mock adapter issues the
+real generation tool call (no external provider). The future assignment dispatches
+at its saved time into the persistent employee room. Runtime inspects the saved
+content; native completion is denied before the current accepted review. After
+acceptance and a recorded private handoff, Core archives while retaining history.
+
+Repeatable sources: `core/tests/integration/native-employee-lifecycle.pg.mjs`
+and `native-employee-plugins.pg.mjs`. The bounded disposable runner mounts these
+as `/source`, alongside `native-lifecycle.js` and the exact native Session baseline,
+hardening and Schedule SQL migrations. It uses the compatible cb14 runner image,
+restricted fixture role, no network except the disposable PostgreSQL namespace,
+read-only files, nonroot execution and explicit CPU/memory/PID/disk/wall limits.
+The original fixture import location under native Session persistence is retained
+so native dependency resolution uses the image's own package graph.
+
+This proves plugin integration with scripted model responses and dummy registry
+adapters, not human browser UX or business-model reasoning. Activation/archive
+callbacks against the newly built host, revoked-room-owner cleanup, and live
+administrator/Runtime UI canaries remain release checks. Revoked owner cleanup
+may correctly stay pending when native Schedule authorization denies the owner;
+it must never be reported as successful or bypass that authorization.

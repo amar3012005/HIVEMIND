@@ -1,0 +1,112 @@
+[
+  {
+    "preset": "hivemind-hq",
+    "enabled": true,
+    "mounted": true,
+    "skill": "create-crm",
+    "receipt": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 2,
+        "publishedVersion": 2,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "description": "Actual native gateway proof",
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.252Z"
+      }
+    }
+  },
+  {
+    "preset": "hivemind-hyperagents",
+    "enabled": true,
+    "mounted": true,
+    "skill": "create-crm",
+    "receipt": {
+      "app": {
+        "id": "6008748d-ad21-4596-9e10-269ca1eb3c56",
+        "version": 2,
+        "publishedVersion": 2,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "description": "Actual native gateway proof",
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T18:36:57.040Z",
+        "updatedAt": "2026-10-06T18:36:57.252Z"
+      }
+    }
+  },
+  {
+    "preset": "hivemind-hyperagents",
+    "enabled": false,
+    "mounted": false,
+    "skill": null
+  },
+  {
+    "preset": "hivemind-chat",
+    "enabled": true,
+    "mounted": false,
+    "skill": null
+  }
+]

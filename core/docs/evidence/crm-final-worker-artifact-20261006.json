@@ -1,0 +1,19 @@
+{
+  "sourceSha": "9e3de64049752bdff8f4a82f0d7acf5d0d96d4ea",
+  "baseSha": "135a5dae5e604a548cec1596dda4ef34270edb88",
+  "buildCommand": "REACT_APP_HIVE_APP_RUNTIME_ENABLED=true node scripts/build-cloudflare.mjs",
+  "productionOrigins": {
+    "controlPlane": "https://api.singulancelabs.com",
+    "core": "https://core.singulancelabs.com",
+    "siteHost": "next.singulancelabs.com"
+  },
+  "flags": {
+    "REACT_APP_HIVE_APP_RUNTIME_ENABLED": "true"
+  },
+  "buildPath": "/Users/amar/Documents/ChatGPT/Da-vinci-crm-final-20261006/build",
+  "workerPath": "/Users/amar/Documents/ChatGPT/Da-vinci-crm-final-20261006/cloudflare/worker.mjs",
+  "configPath": "/Users/amar/Documents/ChatGPT/Da-vinci-crm-final-20261006/wrangler.jsonc",
+  "assetCount": 1105,
+  "assetBytes": 103671079,
+  "deploymentStatus": "not deployed; source guard must be verified after origin/main promotion"
+}

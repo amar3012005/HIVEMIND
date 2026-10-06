@@ -1,0 +1,25 @@
+{
+  "checks": [
+    {
+      "name": "CRM credential cannot UPDATE users",
+      "sqlstate": "42501"
+    },
+    {
+      "name": "CRM credential cannot UPDATE organizations",
+      "sqlstate": "42501"
+    },
+    {
+      "name": "CRM credential cannot UPDATE user_organizations",
+      "sqlstate": "42501"
+    },
+    {
+      "name": "Membership revoke waits for admitted CRM transaction lock",
+      "sqlstate": "57014"
+    },
+    {
+      "name": "Membership revoke succeeds after lock release",
+      "status": "passed"
+    }
+  ],
+  "productionMutations": false
+}

@@ -8,7 +8,7 @@
 
 import http from 'http';
 import { createAppRuntimeHandler, APP_RUNTIME_PREFIX } from './app-runtime/routes.js';
-import { createPrismaAppRuntimeTransactionRunner } from './app-runtime/prisma-transaction.js';
+import { getAppRuntimeTransactionRunner } from './app-runtime/postgres-runtime.js';
 import { assertAppRuntimePrincipal } from './app-runtime/access.js';
 import { readRuntimeOnboarding } from './harness-chat/onboarding-evidence.js';
 import { handleNativeRuntimeVoice } from './tara/native-runtime-voice.js';
@@ -10070,11 +10070,11 @@ exit \$RC
       enterOrgContext(principal.orgId, principal.keyId || null, principal.userId || null);
       const orgId = principal.orgId || DEFAULT_ORG;
 
-      // Explicit opt-in: same authenticated user authority and native DB lifecycle.
+      // Explicit opt-in: existing authenticated authority, direct PostgreSQL CRM storage.
       if (pathname === APP_RUNTIME_PREFIX || pathname.startsWith(`${APP_RUNTIME_PREFIX}/`)) {
         if (process.env.HIVE_APP_RUNTIME_ENABLED !== 'true') return jsonResponse(res, {error:{code:'not_found',message:'CRM is not enabled',details:{}}},404);
         const handleAppRuntime = createAppRuntimeHandler({
-          transactionRunner: createPrismaAppRuntimeTransactionRunner(prisma),
+          transactionRunner: getAppRuntimeTransactionRunner(),
           resolvePrincipal: async () => {
             if (req.headers['x-hm-container']) return assertAppRuntimePrincipal({...principal,containerTags:['request-scope']},req.method);
             return assertAppRuntimePrincipal(principal,req.method);

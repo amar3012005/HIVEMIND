@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { createHmac, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { createAppRuntimeHandler } from '../src/app-runtime/routes.js';
+import { createPostgresAppRuntimeTransactionRunner } from '../src/app-runtime/postgres-transaction.js';
 import { EXAMPLE_CRM_SPEC } from '../src/app-runtime/contract.js';
 import { assertAppRuntimePrincipal } from '../src/app-runtime/access.js';
 import { forwardAppRuntimeRequest } from '../src/app-runtime/gateway.js';
@@ -55,7 +56,7 @@ try {
   const fixtureMaster='artificial-crm-demo-master';
   const jsonResponse=(res,value,status=200)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(value));};
   const parseBody=async req=>{const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>300*1024)throw new Error('Fixture request too large');chunks.push(chunk);}return JSON.parse(Buffer.concat(chunks).toString()||'{}');};
-  const handle = createAppRuntimeHandler({pool,resolvePrincipal:async req=>{
+  const handle = createAppRuntimeHandler({transactionRunner:createPostgresAppRuntimeTransactionRunner(pool),resolvePrincipal:async req=>{
     const actor=req.headers.authorization===`Bearer ${fixtureMaster}`
       ? [A,B].find(candidate=>candidate.orgId===req.headers['x-hm-org-id']&&candidate.userId===req.headers['x-hm-user-id'])
       : ({a:A,b:B})[req.headers['x-crm-demo-actor']];

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assertAppRuntimePrincipal,isAllowedAppRuntimeOperation } from '../../src/app-runtime/access.js';
-import { createPrismaAppRuntimeTransactionRunner } from '../../src/app-runtime/prisma-transaction.js';
+import { createPostgresAppRuntimeTransactionRunner } from '../../src/app-runtime/postgres-transaction.js';
 import { forwardAppRuntimeRequest } from '../../src/app-runtime/gateway.js';
 const app='11111111-1111-4111-8111-111111111111';
 const org='22222222-2222-4222-8222-222222222222';
@@ -21,11 +21,17 @@ test('Gateway only allows explicit methods/UUID routes',()=>{
   assert.equal(isAllowedAppRuntimeOperation(`/api/app-runtime/apps/${app}/workflows`,'GET'),true);
   for(const [path,method] of [['/api/app-runtime/apps/../../memories','GET'],[`/api/app-runtime/apps/${app}`,'DELETE'],[`/api/app-runtime/apps/${app}/workflows`,'POST']]) assert.equal(isAllowedAppRuntimeOperation(path,method),false);
 });
-test('Prisma adapter reuses one transaction and parameterized fixed SQL',async()=>{
+test('PostgreSQL adapter bounds transactions and rejects RLS bypass roles',async()=>{
   const calls=[];
-  const run=createPrismaAppRuntimeTransactionRunner({$transaction:async(fn,options)=>{assert.equal(options.timeout,20000);return fn({$queryRawUnsafe:async(...args)=>{calls.push(args);return [{n:1}];},$executeRawUnsafe:async(...args)=>{calls.push(args);return 1;}});}});
-  await run(principal,async db=>{assert.deepEqual(await db.query('SELECT $1::int AS n',[1]),{rows:[{n:1}]});await db.query('INSERT INTO fixed_table(value) VALUES($1)',[2]);await assert.rejects(()=>db.query('DROP TABLE unsafe'),/Unsupported/);});
-  assert.deepEqual(calls,[['SELECT $1::int AS n',1],['INSERT INTO fixed_table(value) VALUES($1)',2]]);
+  let releases=0;
+  let bypass=false;
+  const run=createPostgresAppRuntimeTransactionRunner({connect:async()=>({query:async(sql,values)=>{calls.push([sql,values]);return {rows:sql.includes('pg_roles')?[{rolsuper:false,rolbypassrls:bypass}]:[{n:1}]};},release:()=>{releases++;}})});
+  await run(principal,async db=>{assert.deepEqual(await db.query('SELECT $1::int AS n',[1]),{rows:[{n:1}]});});
+  assert.equal(calls[0][0],'BEGIN');assert.equal(calls.at(-1)[0],'COMMIT');
+  assert.ok(calls.some(([sql,values])=>sql==='SELECT $1::int AS n'&&values[0]===1));
+  bypass=true;
+  await assert.rejects(()=>run(principal,()=>assert.fail('Must reject bypass role')),e=>e.code==='unavailable');
+  assert.equal(calls.at(-1)[0],'ROLLBACK');assert.equal(releases,2);
 });
 test('Gateway forwards only verified claims, preserves result and does not retry writes',async()=>{
   let output;let request;let calls=0;

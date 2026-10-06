@@ -45,3 +45,13 @@ test('Gateway cancels an oversized upstream stream before buffering it all',asyn
   await forwardAppRuntimeRequest({req:{method:'GET',url:'/internal/v1/harness-chat/core/api/app-runtime/apps'},res:{},corePath:'/api/app-runtime/apps',claims:{sub:user,org_id:org},env:{HIVE_APP_RUNTIME_ENABLED:'true'},coreApiBaseUrl:'http://127.0.0.1:55555',internalApiKey:'fixture-only',jsonResponse:(_r,value,status)=>{output={value,status};},fetchImpl:async()=>new Response(new ReadableStream({start(controller){controller.enqueue(new Uint8Array(1024*1024+1));},cancel(){cancelled=true;}}))});
   assert.equal(cancelled,true);assert.equal(output.status,503);
 });
+
+test('Locked app reads refresh the immutable version snapshot after acquiring the row lock', async () => {
+  const {AppRuntimeStore}=await import('../../src/app-runtime/store.js');
+  const queries=[];const row={id:'10000000-0000-4000-8000-000000000001',current_version:2,published_version:1,spec:{name:'Updated'}};
+  const db={query:async(sql)=>{queries.push(sql);return {rows:[queries.length===1?{id:row.id}:row]};}};
+  const store=new AppRuntimeStore({transactionRunner:async()=>{}});
+  assert.equal((await store.readApp(db,{orgId:row.id},row.id,{lock:true})).current_version,2);
+  assert.match(queries[0],/FOR UPDATE$/);assert.doesNotMatch(queries[0],/JOIN/);
+  assert.match(queries[1],/JOIN hivemind.app_runtime_versions/);assert.doesNotMatch(queries[1],/FOR UPDATE/);
+});

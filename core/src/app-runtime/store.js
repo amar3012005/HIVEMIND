@@ -58,7 +58,15 @@ export class AppRuntimeStore {
   }
   async readApp(db,p,appId,{lock=false,published=false}={}) {
     uuid(appId,'appId');
-    const {rows:[row]} = await db.query(`SELECT a.*,v.spec FROM hivemind.app_runtime_apps a JOIN hivemind.app_runtime_versions v ON v.org_id=a.org_id AND v.app_id=a.id AND v.version=${published?'a.published_version':'a.current_version'} WHERE a.org_id=$1::uuid AND a.id=$2::uuid${lock?' FOR UPDATE OF a':''}`,[p.orgId,appId]);
+    // Acquire the app lock before reading its immutable version. Under READ
+    // COMMITTED, a joined SELECT FOR UPDATE can recheck an updated app pointer
+    // after waiting while its original snapshot cannot see the new version row.
+    // A second statement gets the post-lock snapshot and reports version_conflict.
+    if (lock) {
+      const {rows:[locked]} = await db.query('SELECT id FROM hivemind.app_runtime_apps WHERE org_id=$1::uuid AND id=$2::uuid FOR UPDATE',[p.orgId,appId]);
+      if (!locked) fail('not_found','Application not found');
+    }
+    const {rows:[row]} = await db.query(`SELECT a.*,v.spec FROM hivemind.app_runtime_apps a JOIN hivemind.app_runtime_versions v ON v.org_id=a.org_id AND v.app_id=a.id AND v.version=${published?'a.published_version':'a.current_version'} WHERE a.org_id=$1::uuid AND a.id=$2::uuid`,[p.orgId,appId]);
     if (row && published) row.current_version = row.published_version;
     if (!row) fail('not_found',published?'Published application not found':'Application not found'); return row;
   }

@@ -44,6 +44,7 @@ try {
   const role = `crm_demo_app_${Date.now()}`;
   await admin.query(`CREATE ROLE ${role} LOGIN PASSWORD 'artificial-demo-only' NOSUPERUSER NOBYPASSRLS;
     GRANT USAGE ON SCHEMA hivemind TO ${role};
+    GRANT EXECUTE ON FUNCTION hivemind.app_runtime_lock_membership(uuid,uuid) TO ${role};
     GRANT SELECT ON hivemind.users,hivemind.organizations,hivemind.user_organizations TO ${role};
     GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA hivemind TO ${role};
     GRANT USAGE ON ALL SEQUENCES IN SCHEMA hivemind TO ${role};`);

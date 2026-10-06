@@ -1,3 +1,4 @@
+import { manageNativeEmployee } from '../employees/native-lifecycle.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
@@ -185,6 +186,21 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   if (pathname === `${INTERNAL_PREFIX}/principal`) {
     if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     jsonResponse(res, { active: true }); return true;
+  }
+  if (pathname === `${INTERNAL_PREFIX}/employee-lifecycle`) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    if (claims.operating_role !== 'runtime' || !claims.operating_session) {
+      jsonResponse(res, { error: 'Runtime session required' }, 403); return true;
+    }
+    try {
+      const input = await parseBody(req);
+      jsonResponse(res, await manageNativeEmployee(prisma, {
+        userId: claims.sub, orgId: claims.org_id, runtimeSessionId: claims.operating_session,
+      }, input));
+    } catch (error) {
+      jsonResponse(res, { error: error.status ? error.message : 'Employee lifecycle unavailable' }, error.status || 503);
+    }
+    return true;
   }
   if (pathname === `${INTERNAL_PREFIX}/administrator-message`) {
     if(req.method !== 'POST') { jsonResponse(res,{error:'Method not allowed'},405); return true; }

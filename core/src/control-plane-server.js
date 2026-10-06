@@ -10640,6 +10640,21 @@ Write the persona now.`;
     return passthrough();
   }
 
+  // Human and Chief requests share one registry lifecycle authority.
+  if (pathname === '/v1/employees/native-lifecycle' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    try {
+      const { manageNativeEmployee } = await import('./employees/native-lifecycle.js');
+      const input = await parseBody(req);
+      return jsonResponse(res, await manageNativeEmployee(prisma, {
+        userId: current.session.userId, orgId: current.session.orgId,
+      }, input));
+    } catch (error) {
+      return jsonResponse(res, { error: error.status ? error.message : 'Employee lifecycle unavailable' }, error.status || 503);
+    }
+  }
+
   // POST /v1/employees — create (org_admin only)
   if (pathname === '/v1/employees' && req.method === 'POST') {
     const current = await requireSession(req, res);
@@ -10649,6 +10664,9 @@ Write the persona now.`;
     const store = await _getEmployeeStore();
     if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const body = await parseBody(req);
+    if (body.policy_rules?.native_lifecycle || body.policyRules?.native_lifecycle) {
+      return jsonResponse(res, { error: 'Native lifecycle metadata is reserved' }, 400);
+    }
     if (!body.name || !body.persona) {
       return jsonResponse(res, { error: 'name and persona are required' }, 400);
     }
@@ -11357,6 +11375,7 @@ Write the persona now.`;
 
       const out = [];
       for (const r of rows) {
+        if (r.policyRules?.native_lifecycle) continue;
         let apiKey = null;
         if (r.scopedApiKeyEncrypted) {
           try { apiKey = decryptToken(r.scopedApiKeyEncrypted); } catch {}
@@ -11420,6 +11439,7 @@ Write the persona now.`;
     try {
       const r = await store.findBySlugForChat(slug, { orgId });
       if (!r) return jsonResponse(res, { error: 'employee not found' }, 404);
+      if (r.policyRules?.native_lifecycle) return jsonResponse(res, { error: 'Native employee requires its persistent Harness room' }, 409);
       const { decryptToken, encryptToken } = await import('./connectors/framework/connector-store.js');
       const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
       let apiKey = null;
@@ -11596,6 +11616,11 @@ Write the persona now.`;
 
     const emp = await store.getById({ id: empId, orgId });
     if (!emp) return jsonResponse(res, { error: 'Employee not found' }, 404);
+
+    // Native employees never enter legacy credential provisioning or sidecar dispatch.
+    if (emp.policyRules?.native_lifecycle && req.method !== 'GET') {
+      return jsonResponse(res, { error: 'Use the native employee lifecycle endpoint' }, 409);
+    }
 
     // GET /v1/employees/:id
     if (!sub && req.method === 'GET') {
@@ -11832,12 +11857,13 @@ Write the persona now.`;
     try {
       const rows = await prisma.digitalEmployee.findMany({
         where: { orgId: targetOrgId, scopedApiKeyEncrypted: null },
-        select: { id: true, name: true, createdBy: true },
+        select: { id: true, name: true, createdBy: true, policyRules: true },
       });
       const crypto = await import('node:crypto');
       const { encryptToken } = await import('./connectors/framework/connector-store.js');
       const results = [];
       for (const r of rows) {
+        if (r.policyRules?.native_lifecycle) continue;
         try {
           const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
           const keyHash = crypto.createHash('sha256').update(raw).digest('hex');

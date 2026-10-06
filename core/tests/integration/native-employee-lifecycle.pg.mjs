@@ -56,6 +56,27 @@ const ctx=new Context();const scope=new ExecutionScope(ctx);const store=new Post
 let seq=0;const writer=await scope.run(a,()=>store.create({version:SESSION_FORMAT_VERSION,id:SessionId('session-dummy-chief'),createdAt:1,isSeeded:false,agentPreset:'hivemind-hq'}));
 const append=async(type,data)=>writer.append([{type,seq:SessionSeq(seq++),time:Date.now(),data}]);
 await append('hivemind/session-owner',{id:null,slug:'runtime',name:'Runtime',role:'AI Chief of Staff'});
+const setupAppearance={version:1,provider:'humation',template:'humation-1',asset_version:'1.0.1',seed:'dummy-setup',
+ selections:{head:'hm1-p-000001',body:'hm1-p-000025',bottom:'hm1-p-000033',item:'hm1-p-000041',glasses:'hm1-p-000056'},
+ colors:{stroke:'000000',hair:'000000',skin:'FFFFFF',clothes:'FFFFFF',bottom:'000000'},background:'transparent',crop:'avatar'};
+const setup=(await manageNativeEmployee(db,p,{operation:'create',creation_key:'dummy-setup',name:'Dummy Setup',appearance:setupAppearance},{now:0})).employee;
+const setupRoom=await scope.run(a,()=>store.create({version:SESSION_FORMAT_VERSION,id:SessionId('session-dummy-setup'),createdAt:1,isSeeded:false,agentPreset:'hivemind-hyperagents'}));
+await setupRoom.append([{type:'hivemind/session-owner',seq:SessionSeq(0),time:Date.now(),data:{id:setup.id,slug:setup.slug,name:setup.name,role:setup.roleArchetype}}]);
+const configure={operation:'configure',employee_id:setup.id,expected_profile_revision:1,role:'Evidence Research',persona:'Own agreed evidence research; existing permissions remain unchanged.'};
+const ownPrincipal={...p,employeeSessionId:'session-dummy-setup',employeeId:setup.id};
+const refined=await manageNativeEmployee(db,ownPrincipal,configure);
+assert.equal(refined.employee.roleArchetype,'Evidence Research');assert.equal(refined.employee.policyRules.native_lifecycle.profile_revision,2);
+assert.equal(refined.employee.policyRules.native_lifecycle.revision,1);assert.equal(refined.employee.policyRules.native_lifecycle.onboarding_required,false);
+assert.deepEqual(refined.employee.policyRules.appearance,setupAppearance);
+const persistedSetup=(await admin.query('SELECT data FROM digital_employees WHERE id=$1',[setup.id])).rows[0].data;
+assert.deepEqual(persistedSetup.tools,[]);assert.deepEqual(persistedSetup.enabledConnectors,[]);
+checks.push('actual persisted own employee room saves bounded responsibilities and canonical appearance without permission expansion');
+assert.equal((await manageNativeEmployee(db,ownPrincipal,configure)).replayed,true);
+await assert.rejects(()=>manageNativeEmployee(db,{...ownPrincipal,employeeSessionId:'session-dummy-chief'},configure),/employee_profile_scope_required/);
+await assert.rejects(()=>manageNativeEmployee(db,ownPrincipal,{...configure,employee_id:employee.id}),/employee_profile_scope_required/);
+checks.push('actual saved-room refinement replay and Chief/other-employee denial');
+await setupRoom.close();
+
 await append('hivemind/hq-employee-assignment',{taskId:'task-1',employeeId:employee.id,memberName:employee.slug,sessionId:'session-dummy-employee',personaSha256:'dummy'});
 await append('team/task',{version:2,teamId:'session-dummy-chief',task:{id:'task-1',revision:2,subject:'Dummy work',description:'Isolated task',status:'in_progress',blockedBy:[],writeScopes:[],ownerName:employee.slug}});
 let close=await manageNativeEmployee(db,p,{operation:'inspect_closeout',employee_id:employee.id});assert.equal(close.closeout.ready,false);checks.push('actual persisted native pending task blocks archive');

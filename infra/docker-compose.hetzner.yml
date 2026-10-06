@@ -78,6 +78,7 @@ services:
     environment:
       <<: *common-env
       HOSTNAME: hm-core
+      HIVEMIND_EMPLOYEE_LIFECYCLE_URL: ${HIVEMIND_EMPLOYEE_LIFECYCLE_URL:-}
       DOCLING_URL: http://docling:5001
       # Container-to-container traffic must use Nango's listening port (8080).
       # NANGO_URL in the host .env is the public/host-bound endpoint and is not
@@ -149,6 +150,7 @@ services:
       HIVE_HARNESS_EDGE_EVAL_SECRET: ${HIVE_HARNESS_EDGE_EVAL_SECRET:-}
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}
+      HIVEMIND_EMPLOYEE_LIFECYCLE_URL: ${HIVEMIND_EMPLOYEE_LIFECYCLE_URL:-}
       # Base64-encoded 32-byte AES-GCM key. Provider receipts fail closed when absent.
       HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY: ${HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-}
       HIVE_HARNESS_EMBED_URL: ${HIVE_HARNESS_EMBED_URL:-https://chat.singulancelabs.com/embed}

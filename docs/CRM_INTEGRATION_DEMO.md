@@ -5,7 +5,7 @@ This task adds opt-in integration to the prepared AppSpec infrastructure. Produc
 ## Source branches
 
 - Core: `codex/crm-integration-demo-20261006` in HIVEMIND.
-- Harness: `codex/crm-native-integration-20261006`, commit `abab8cf6c2`.
+- Harness: `codex/crm-native-integration-20261006`, commit `ad2b73390d` (integration plus complete fixture configuration).
 - Da Vinci: `codex/crm-workspace-demo-20261006`, commit `c82bdc29` (recorded by the parent gitlink).
 
 ## Implemented
@@ -49,6 +49,7 @@ existing objects. They must not be pointed at production.
 
 Full production-server authentication, production database grants, scheduled-agent authority
 restoration and the complete authenticated application shell were not proven by the local fixture.
-Full repository production builds remain release checks. V1 permissions are organization-wide;
+Harness's normal pre-push gate passed the host build and client type check. Frontend production
+builds and deployment artifact checks remain release checks. V1 permissions are organization-wide;
 team, record-owner and field privacy are not implemented. Connector synchronization, workflow
 execution, relationship title resolution/drilldown and dedicated `@create CRM` UI remain future work.

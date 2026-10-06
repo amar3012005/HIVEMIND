@@ -13,6 +13,7 @@ datasource db {
 /// User accounts with ZITADEL IAM integration and HYOK encryption keys
 /// GDPR-ready with soft delete (deleted_at) for right to erasure
 model User {
+  chatgptPlanConnections ChatgptPlanConnection[]
   id                   String                @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
   zitadelUserId        String                @unique @map("zitadel_user_id") @db.VarChar(255)
   email                String                @unique @db.VarChar(255)
@@ -144,6 +145,7 @@ model AuthIdentityEvent {
 /// Multi-tenant organizations with EU data residency settings
 /// Supports GDPR, NIS2, DORA compliance flags
 model Organization {
+  chatgptPlanConnections ChatgptPlanConnection[]
   id                           String             @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
   zitadelOrgId                 String             @unique @map("zitadel_org_id") @db.VarChar(255)
   name                         String             @db.VarChar(255)
@@ -6099,4 +6101,19 @@ model AppRuntimeAudit {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   @@index([orgId,appId,createdAt],map:"app_runtime_audit_app_idx")
   @@map("app_runtime_audit")
+}
+
+/// Dedicated tenant/user plan grant vault. Never shared with connector credentials.
+model ChatgptPlanConnection {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  encryptedGrant String @map("encrypted_grant") @db.Text
+  status String @default("active") @db.VarChar(24)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([orgId, userId])
+  @@map("chatgpt_plan_connections")
 }

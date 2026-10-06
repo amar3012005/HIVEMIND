@@ -111,8 +111,20 @@ export function gatewayHeaders(provider) {
   };
 }
 
-export function gatewayRequestHeaders(inputHeaders = {}, provider) {
+export function gatewayRequestHeaders(inputHeaders = {}, provider, { billingMode = 'platform' } = {}) {
   const headers = new Headers(inputHeaders || {});
+  if (billingMode === 'user-plan') {
+    if (provider !== 'openai' || !/^Bearer \S+$/.test(headers.get('authorization') || '')) {
+      throw new Error('user_plan_provider_credential_required');
+    }
+    const { enabled, token } = cloudflareGatewayConfig();
+    if (!enabled || !token) throw new Error('user_plan_gateway_required');
+    headers.delete('cf-aig-byok-alias');
+    headers.set('cf-aig-authorization', `Bearer ${token}`);
+    headers.set('cf-aig-skip-cache', 'true');
+    return headers;
+  }
+  if (billingMode !== 'platform') throw new Error('invalid_gateway_billing_mode');
   // Stored BYOK keys are preferred. When an account has not migrated a
   // provider key yet, Cloudflare's documented provider-passthrough contract
   // accepts that provider Authorization header alongside cf-aig-authorization.

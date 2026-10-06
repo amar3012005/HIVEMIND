@@ -1,3 +1,4 @@
+import { serveBrainPlan } from '../chatgpt-plan/brain-broker.js';
 import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
@@ -184,6 +185,9 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (pathname === `${INTERNAL_PREFIX}/chatgpt-plan/brain/responses`) {
+    await serveBrainPlan({ req, res, prisma, claims, parseBody, env, fetchImpl, jsonResponse }); return true;
+  }
   if (pathname === `${INTERNAL_PREFIX}/principal`) {
     if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     jsonResponse(res, { active: true }); return true;

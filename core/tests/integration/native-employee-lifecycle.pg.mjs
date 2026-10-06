@@ -66,7 +66,7 @@ const configure={operation:'configure',employee_id:setup.id,expected_profile_rev
 const ownPrincipal={...p,employeeSessionId:'session-dummy-setup',employeeId:setup.id};
 const refined=await manageNativeEmployee(db,ownPrincipal,configure);
 assert.equal(refined.employee.roleArchetype,'Evidence Research');assert.equal(refined.employee.policyRules.native_lifecycle.profile_revision,2);
-assert.equal(refined.employee.policyRules.native_lifecycle.revision,1);assert.equal(refined.employee.policyRules.native_lifecycle.onboarding_required,false);
+assert.equal(refined.employee.policyRules.native_lifecycle.revision,1);assert.equal(refined.employee.policyRules.native_lifecycle.onboarding_required,true);
 assert.deepEqual(refined.employee.policyRules.appearance,setupAppearance);
 const persistedSetup=(await admin.query('SELECT data FROM digital_employees WHERE id=$1',[setup.id])).rows[0].data;
 assert.deepEqual(persistedSetup.tools,[]);assert.deepEqual(persistedSetup.enabledConnectors,[]);
@@ -75,6 +75,15 @@ assert.equal((await manageNativeEmployee(db,ownPrincipal,configure)).replayed,tr
 await assert.rejects(()=>manageNativeEmployee(db,{...ownPrincipal,employeeSessionId:'session-dummy-chief'},configure),/employee_profile_scope_required/);
 await assert.rejects(()=>manageNativeEmployee(db,ownPrincipal,{...configure,employee_id:employee.id}),/employee_profile_scope_required/);
 checks.push('actual saved-room refinement replay and Chief/other-employee denial');
+const confirmed=await manageNativeEmployee(db,{...p,runtimeSessionId:'session-dummy-chief'}, {...configure,expected_profile_revision:2,persona:'Company-specific bounded research instructions.'});
+assert.equal(confirmed.employee.policyRules.native_lifecycle.profile_stage,'ready');
+assert.equal(confirmed.employee.policyRules.native_lifecycle.onboarding_required,false);
+assert.equal(confirmed.employee.policyRules.native_lifecycle.joining_profile.profileRevision,3);
+const joining=structuredClone(confirmed.employee.policyRules.native_lifecycle.joining_profile);
+await manageNativeEmployee(db,{...p,runtimeSessionId:'session-dummy-chief'}, {...configure,expected_profile_revision:3,persona:'Later bounded revision.'});
+const afterRevision=(await admin.query('SELECT data FROM digital_employees WHERE id=$1',[setup.id])).rows[0].data;
+assert.deepEqual(afterRevision.policyRules.native_lifecycle.joining_profile,joining);
+checks.push('actual native Chief confirmation required and first joining snapshot stable');
 await setupRoom.close();
 
 await append('hivemind/hq-employee-assignment',{taskId:'task-1',employeeId:employee.id,memberName:employee.slug,sessionId:'session-dummy-employee',personaSha256:'dummy'});

@@ -10649,7 +10649,7 @@ Write the persona now.`;
       const input = await parseBody(req);
       const principal = {userId:current.session.userId,orgId:current.session.orgId};
       const result = await manageNativeEmployee(prisma, principal, input);
-      if (input.operation === 'create' || input.operation === 'archive') {
+      if (['create','configure','archive'].includes(input.operation)) {
         const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee);
       }

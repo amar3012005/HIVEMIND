@@ -82,7 +82,9 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
         scope: 'organization', status: 'draft', model: 'native-harness', llmProvider: 'native-harness',
         tools: [], enabledConnectors: [],
         policyRules: { ...(value.appearance ? {appearance:value.appearance} : {}), native_lifecycle: { version: VERSION, kind: value.lifecycle, phase: 'active',
-          revision: 1, profile_revision:1, onboarding_required: input.persona == null, expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
+          revision: 1, profile_revision:1, onboarding_required: !principal.runtimeSessionId || input.persona == null,
+          profile_stage: principal.runtimeSessionId && input.persona != null ? 'ready' : 'responsibilities',
+          ...(principal.runtimeSessionId && input.persona != null ? {profile_ready_at:new Date(now).toISOString(),joining_profile:{name:value.name,role:value.role,profileRevision:1,at:new Date(now).toISOString()}} : {}), expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
           ...(principal.runtimeSessionId ? { runtime_session: principal.runtimeSessionId } : {}) } },
       } });
       return { employee: publicEmployee(employee), replayed: false };
@@ -108,13 +110,15 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       if (input.role !== undefined) update.roleArchetype = text(input.role,'role',40);
       if (input.name !== undefined) update.name = text(input.name,'name',100);
       if (!Object.keys(update).length) lifecycleError('empty_employee_configuration',400);
-      const hash = createHash('sha256').update(JSON.stringify(update)).digest('hex');
+      const stage = principal.runtimeSessionId && (update.persona || update.roleArchetype) ? 'ready' : 'runtime_review';
+      const hash = createHash('sha256').update(JSON.stringify({update,stage})).digest('hex');
       if (lifecycle.profile_hash === hash) return {employee:publicEmployee(row),replayed:true};
       const revision = lifecycle.profile_revision ?? 1;
       if (input.expected_profile_revision !== revision) lifecycleError('employee_profile_revision_conflict');
       const updated = await tx.digitalEmployee.update({where:{id:row.id},data:{...update,
         policyRules:{...row.policyRules,native_lifecycle:{...lifecycle,profile_revision:revision+1,profile_hash:hash,
-          ...((update.persona || update.roleArchetype) ? {onboarding_required:false} : {})}}}});
+          profile_stage:stage,onboarding_required:stage !== 'ready',
+          ...(stage === 'ready' ? {profile_ready_at:lifecycle.profile_ready_at ?? new Date(now).toISOString(),joining_profile:lifecycle.joining_profile ?? {name:update.name ?? row.name,role:update.roleArchetype ?? row.roleArchetype,profileRevision:revision+1,at:new Date(now).toISOString()}} : {})}}}});
       return {employee:publicEmployee(updated),replayed:false};
     }
     if (input.operation === 'begin_closeout') {
@@ -271,6 +275,10 @@ export async function nativeLifecycleHostProof(db, principal, employeeId) {
     if (rooms.length > 1000 || chiefs.length > 1000) lifecycleError('native_room_enumeration_limit', 503);
     const chief = chiefs.find(row => row.user_id === principal.userId);
     return { employeeId, revision: lifecycle.revision, kind: lifecycle.kind, phase: lifecycle.phase,
-      expiresAt: lifecycle.expires_at, ...(lifecycle.onboarding_required && lifecycle.phase === 'active' ? { onboarding: {name:employee.name,role:employee.roleArchetype,creationHash:lifecycle.creation_hash} } : {}), rooms, chiefs: chiefs.map(row => ({sessionId:row.id,userId:row.user_id})), chief: chief ? { sessionId: chief.id, userId: chief.user_id } : null };
+      expiresAt: lifecycle.expires_at,
+      ...(lifecycle.onboarding_required && lifecycle.profile_stage !== 'runtime_review' && lifecycle.phase === 'active' ? { onboarding: {name:employee.name,role:employee.roleArchetype,creationHash:lifecycle.creation_hash} } : {}),
+      ...(lifecycle.profile_stage === 'runtime_review' && lifecycle.phase === 'active' ? {profileReview:{name:employee.name,role:employee.roleArchetype,persona:employee.persona,profileRevision:lifecycle.profile_revision,creationHash:lifecycle.creation_hash}} : {}),
+      ...(lifecycle.profile_stage === 'ready' && lifecycle.phase === 'active' && lifecycle.joining_profile ? {joined:{...lifecycle.joining_profile,creationHash:lifecycle.creation_hash}} : {}),
+      rooms, chiefs: chiefs.map(row => ({sessionId:row.id,userId:row.user_id})), chief: chief ? { sessionId: chief.id, userId: chief.user_id } : null };
   });
 }

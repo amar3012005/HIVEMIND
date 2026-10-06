@@ -1,0 +1,131 @@
+{
+  "source": "actual Core and Control Plane processes; native persisted keys, native signed Redis sessions, actual runner JWT verification; synthetic isolated full-schema Postgres",
+  "checks": [
+    {
+      "name": "Core missing key",
+      "status": 401
+    },
+    {
+      "name": "Core invalid key",
+      "status": 401
+    },
+    {
+      "name": "Core unrelated scoped key",
+      "status": 403
+    },
+    {
+      "name": "Core project key denied",
+      "status": 403
+    },
+    {
+      "name": "Control missing cookie",
+      "status": 401
+    },
+    {
+      "name": "Control invalid signed cookie",
+      "status": 401
+    },
+    {
+      "name": "Native key creates draft",
+      "status": 200
+    },
+    {
+      "name": "Idempotent draft replay",
+      "status": 200
+    },
+    {
+      "name": "Idempotency payload conflict",
+      "status": 409
+    },
+    {
+      "name": "Draft validates",
+      "status": 200
+    },
+    {
+      "name": "Draft publishes",
+      "status": 200
+    },
+    {
+      "name": "Company record creates",
+      "status": 200
+    },
+    {
+      "name": "Typed same-app reference",
+      "status": 200
+    },
+    {
+      "name": "Record partial update",
+      "status": 200
+    },
+    {
+      "name": "Record optimistic conflict",
+      "status": 409
+    },
+    {
+      "name": "Foreign key app hidden",
+      "status": 404
+    },
+    {
+      "name": "Native signed cookie published workspace",
+      "status": 200
+    },
+    {
+      "name": "Foreign signed cookie app hidden",
+      "status": 404
+    },
+    {
+      "name": "Browser identity headers ignored",
+      "status": 404
+    },
+    {
+      "name": "Native runner JWT gateway",
+      "status": 200
+    },
+    {
+      "name": "Invalid runner signature",
+      "status": 401
+    },
+    {
+      "name": "Runner project scope denied",
+      "status": 403
+    },
+    {
+      "name": "Runner foreign app hidden",
+      "status": 404
+    },
+    {
+      "name": "Revoked member persisted key denied",
+      "status": 403
+    },
+    {
+      "name": "Revoked member cookie denied",
+      "status": 403
+    },
+    {
+      "name": "Revoked member runner denied",
+      "status": 403
+    },
+    {
+      "name": "Concurrent draft patch admits one current revision",
+      "statuses": [
+        200,
+        409
+      ]
+    },
+    {
+      "name": "Published list keeps immutable name",
+      "status": 200
+    },
+    {
+      "name": "Revoked persisted API key denied",
+      "status": 401
+    },
+    {
+      "name": "Provisioned role has no identity updates",
+      "status": "passed"
+    }
+  ],
+  "appId": "2fac6669-8875-4f76-bd39-5b6f56ed8872",
+  "organizationId": "10000000-0000-4000-8000-000000000001",
+  "productionMutations": false
+}

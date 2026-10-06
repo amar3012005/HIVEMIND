@@ -142,11 +142,13 @@ export async function inspectNativeCloseout(tx, principal, employee) {
   // Core's existing authority pool can read these records; the restricted runner cannot.
   const roles = await tx.$queryRawUnsafe('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user');
   if (!roles[0]?.rolsuper && !roles[0]?.rolbypassrls) lifecycleError('organization_closeout_read_authority_required', 503);
-  const events = await tx.$queryRawUnsafe(`SELECT session_id,event_type,payload,sequence FROM ${schema}.harness_session_events WHERE org_id=$1::uuid AND event_type IN ('hivemind/hq-employee-assignment','team/task','hivemind/hq-task-review','hivemind/employee-delegation-start','hivemind/employee-delegation-end') ORDER BY session_id,sequence`, principal.orgId);
+  const events = await tx.$queryRawUnsafe(`SELECT session_id,event_type,payload,sequence FROM ${schema}.harness_session_events WHERE org_id=$1::uuid AND event_type IN ('hivemind/hq-employee-assignment','team/task','hivemind/hq-task-review','hivemind/employee-delegation-start','hivemind/employee-delegation-end','hivemind/session-owner','turn/start','turn/end') ORDER BY session_id,sequence`, principal.orgId);
   const assignments = new Map(); const tasks = new Map(); const reviews = new Map();
-  const delegations = new Map(); let lastAssignmentAt = 0;
+  const delegations = new Map(), owners = new Map(), turns = new Map(); let lastAssignmentAt = 0;
   for (const event of events) {
     const data = event.payload.data ?? event.payload;
+    if (event.event_type === 'hivemind/session-owner') owners.set(event.session_id, data.id);
+    if (event.event_type === 'turn/start' || event.event_type === 'turn/end') turns.set(event.session_id, event.event_type);
     const taskData = event.event_type === 'team/task' ? data.task : data;
     const key = `${event.session_id}:${taskData?.taskId ?? taskData?.id}`;
     if (event.event_type === 'hivemind/hq-employee-assignment') {
@@ -160,6 +162,7 @@ export async function inspectNativeCloseout(tx, principal, employee) {
     if (event.event_type === 'hivemind/employee-delegation-end' && data.employeeId === employee.id) delegations.set(`${event.session_id}:${data.delegationId}`, true);
   }
   const blockers = [];
+  if ([...turns].some(([sessionId, boundary]) => owners.get(sessionId) === employee.id && boundary === 'turn/start')) blockers.push('employee_active_turn_requires_closeout');
   if ([...delegations.values()].some(done => !done)) blockers.push('employee_child_work_requires_closeout');
   for (const [key] of assignments) {
     const task = tasks.get(key); const review = reviews.get(key);
@@ -178,10 +181,10 @@ export async function inspectNativeCloseout(tx, principal, employee) {
 /** Administrator-only attestation for the existing native host's limited lifecycle effects. */
 export async function nativeLifecycleHostProof(db, principal, employeeId) {
   await requireLifecycleAdministrator(db, principal);
-  const employee = await db.digitalEmployee.findFirst({ where: { id: employeeId, orgId: principal.orgId } });
-  const lifecycle = nativeLifecycle(employee);
-  if (!employee || !lifecycle) lifecycleError('native_employee_not_found', 404);
   return db.$transaction(async tx => {
+    const employee = await tx.digitalEmployee.findFirst({ where: { id: employeeId, orgId: principal.orgId } });
+    const lifecycle = nativeLifecycle(employee);
+    if (!employee || !lifecycle) lifecycleError('native_employee_not_found', 404);
     const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
     if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable', 503);
     const schema = schemas[0].table_schema;
@@ -199,6 +202,7 @@ export async function nativeLifecycleHostProof(db, principal, employeeId) {
     const chiefs = sessions.filter(row => !row.header.parentSession
       && (presets.get(row.id) ?? row.header.agentPreset) === 'hivemind-hq'
       && owners.get(row.id)?.slug === 'runtime' && owners.get(row.id)?.id === null);
+    if (rooms.length > 1000 || chiefs.length > 1000) lifecycleError('native_room_enumeration_limit', 503);
     const chief = chiefs.find(row => row.user_id === principal.userId);
     return { employeeId, revision: lifecycle.revision, kind: lifecycle.kind, phase: lifecycle.phase,
       expiresAt: lifecycle.expires_at, rooms, chiefs: chiefs.map(row => ({sessionId:row.id,userId:row.user_id})), chief: chief ? { sessionId: chief.id, userId: chief.user_id } : null };

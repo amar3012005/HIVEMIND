@@ -1,0 +1,12 @@
+{
+  "driver": "5.22.0",
+  "database": "isolated PostgreSQL loopback",
+  "checks": [
+    "Actual Prisma 5.22 non-superuser transaction adapter: draft + durable replay + operation conflict",
+    "Actual driver: publish, typed records, reference integrity, partial update, query, optimistic record conflict",
+    "Actual driver: immutable published projection, compatible spec update, HQ receipt query, foreign-tenant denial",
+    "Actual driver: concurrent expected-version updates admit exactly one winner"
+  ],
+  "appId": "421d9d66-3688-4fe4-a987-dd34eb4d2a8a",
+  "scope": "Actual generated Prisma client and real service adapter. Synthetic identity fixtures only; no production server or connector execution."
+}

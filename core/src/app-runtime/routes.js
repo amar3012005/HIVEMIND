@@ -1,4 +1,4 @@
-/** Deliberately unmounted native HTTP handler. Integration must authenticate first. */
+/** Native HTTP handler. Integration must authenticate before resolving principal. */
 import { AppRuntimeStore } from './store.js';
 import { AppRuntimeError } from './contract.js';
 export const APP_RUNTIME_PREFIX = '/api/app-runtime/apps';
@@ -23,9 +23,9 @@ function respond(res,value,status=200) {res.writeHead(status,{'Content-Type':'ap
  * scoped service authority. This module intentionally grants no unauthenticated gateway.
  * Returns false for unrelated paths; true when a request was handled.
  */
-export function createAppRuntimeHandler({pool,resolvePrincipal,parseBody=readBody,jsonResponse=respond}) {
+export function createAppRuntimeHandler({pool,transactionRunner,resolvePrincipal,parseBody=readBody,jsonResponse=respond}) {
   if(typeof resolvePrincipal!=='function') throw new TypeError('Verified principal resolver is required');
-  const store=new AppRuntimeStore({pool});
+  const store=new AppRuntimeStore({pool,transactionRunner});
   return async function handle({req,res,pathname}) {
     const url=new URL(req.url??pathname,'http://app-runtime.internal');
     const path=pathname??url.pathname;
@@ -40,11 +40,16 @@ export function createAppRuntimeHandler({pool,resolvePrincipal,parseBody=readBod
         input=await parseBody(req);
         if(Buffer.byteLength(JSON.stringify(input)??'','utf8')>MAX_BODY_BYTES) error('invalid_arguments','Request body is too large');
       }
-      if(url.searchParams.size&&!(method==='GET'&&parts.length===2&&parts[1]==='records')) error('invalid_arguments','Query arguments are not accepted for this operation');
-      if(!parts.length&&method==='GET') result=await store.list(principal);
+      if(url.searchParams.size&&!(method==='GET'&&((parts.length===2&&parts[1]==='records')||parts.length===0))) error('invalid_arguments','Query arguments are not accepted for this operation');
+      if(!parts.length&&method==='GET') {
+        for(const key of url.searchParams.keys()) if(key!=='published'||url.searchParams.getAll(key).length!==1||url.searchParams.get(key)!=='true') error('invalid_arguments','Only published=true is accepted on the app list');
+        result=await store.list(principal,{published:url.searchParams.get('published')==='true'});
+      }
       else if(!parts.length&&method==='POST') result=await store.createDraft(principal,fields(input,['spec','operationId'],['spec','operationId']));
       else if(parts.length===1&&method==='GET') result=await store.get(principal,parts[0]);
       else if(parts.length===1&&method==='PATCH') result=await store.patch(principal,parts[0],fields(input,['expectedVersion','spec','operationId'],['expectedVersion','spec','operationId']));
+      else if(parts.length===2&&parts[1]==='published'&&method==='GET') result=await store.getPublished(principal,parts[0]);
+      else if(parts.length===2&&parts[1]==='workflows'&&method==='GET') result=await store.queryWorkflowReceipts(principal,parts[0]);
       else if(parts.length===2&&parts[1]==='validate'&&method==='POST') {fields(input,[]);result=await store.validate(principal,parts[0]);}
       else if(parts.length===2&&parts[1]==='publish'&&method==='POST') result=await store.publish(principal,parts[0],fields(input,['expectedVersion','operationId'],['expectedVersion','operationId']));
       else if(parts.length===2&&parts[1]==='records'&&method==='GET') {

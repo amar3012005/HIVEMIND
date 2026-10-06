@@ -1,5 +1,8 @@
 # CRM infrastructure: integration boundary
 
+For the subsequent opt-in integration and isolated-demo evidence, see
+[CRM_INTEGRATION_DEMO.md](CRM_INTEGRATION_DEMO.md). The preparation status below records the earlier foundation stage.
+
 This change prepares a shared, metadata-driven application runtime for CRM workspaces.
 It does not activate a new agent persona, profile, command, route, schedule, or deployed service.
 

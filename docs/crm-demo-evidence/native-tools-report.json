@@ -1,0 +1,263 @@
+[
+  {
+    "name": "hivemind_app_create_draft",
+    "args": {
+      "spec": {
+        "schemaVersion": 1,
+        "name": "Native tool CRM proof",
+        "entities": [
+          {
+            "id": "company",
+            "name": "Companies",
+            "fields": [
+              {
+                "id": "name",
+                "name": "Name",
+                "type": "text",
+                "required": true
+              }
+            ]
+          }
+        ],
+        "views": [
+          {
+            "id": "companies",
+            "name": "Companies",
+            "type": "table",
+            "entityId": "company"
+          }
+        ]
+      },
+      "operation_id": "native-proof-create-20261006"
+    },
+    "result": {
+      "app": {
+        "id": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+        "version": 1,
+        "publishedVersion": null,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T00:04:53.203Z",
+        "updatedAt": "2026-10-06T00:04:53.203Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_validate",
+    "args": {
+      "app_id": "7b4a30d2-ae56-4285-a21a-9b36b7777940"
+    },
+    "result": {
+      "valid": true,
+      "spec": {
+        "name": "Native tool CRM proof",
+        "views": [
+          {
+            "id": "companies",
+            "name": "Companies",
+            "type": "table",
+            "entityId": "company",
+            "fieldIds": [
+              "name"
+            ]
+          }
+        ],
+        "entities": [
+          {
+            "id": "company",
+            "name": "Companies",
+            "fields": [
+              {
+                "id": "name",
+                "name": "Name",
+                "type": "text",
+                "source": {
+                  "type": "local"
+                },
+                "required": true
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "schemaVersion": 1
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_preview",
+    "args": {
+      "app_id": "7b4a30d2-ae56-4285-a21a-9b36b7777940"
+    },
+    "result": {
+      "app": {
+        "id": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+        "version": 1,
+        "publishedVersion": null,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T00:04:53.203Z",
+        "updatedAt": "2026-10-06T00:04:53.203Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_publish",
+    "args": {
+      "app_id": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+      "expected_version": 1,
+      "operation_id": "native-proof-publish-20261006"
+    },
+    "result": {
+      "app": {
+        "id": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+        "version": 1,
+        "publishedVersion": 1,
+        "spec": {
+          "name": "Native tool CRM proof",
+          "views": [
+            {
+              "id": "companies",
+              "name": "Companies",
+              "type": "table",
+              "entityId": "company",
+              "fieldIds": [
+                "name"
+              ]
+            }
+          ],
+          "entities": [
+            {
+              "id": "company",
+              "name": "Companies",
+              "fields": [
+                {
+                  "id": "name",
+                  "name": "Name",
+                  "type": "text",
+                  "source": {
+                    "type": "local"
+                  },
+                  "required": true
+                }
+              ]
+            }
+          ],
+          "relations": [],
+          "schemaVersion": 1
+        },
+        "createdAt": "2026-10-06T00:04:53.203Z",
+        "updatedAt": "2026-10-06T00:04:53.224Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_create_record",
+    "args": {
+      "app_id": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+      "entity_id": "company",
+      "data": {
+        "name": "Native fixture company"
+      },
+      "operation_id": "native-proof-record-20261006"
+    },
+    "result": {
+      "record": {
+        "id": "907205d0-8fcd-4165-b2b4-44f7dcde1cff",
+        "appId": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+        "entityId": "company",
+        "version": 1,
+        "data": {
+          "name": "Native fixture company"
+        },
+        "createdAt": "2026-10-06T00:04:53.231Z",
+        "updatedAt": "2026-10-06T00:04:53.231Z"
+      }
+    }
+  },
+  {
+    "name": "hivemind_app_query_records",
+    "args": {
+      "app_id": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+      "entity_id": "company"
+    },
+    "result": {
+      "records": [
+        {
+          "id": "907205d0-8fcd-4165-b2b4-44f7dcde1cff",
+          "appId": "7b4a30d2-ae56-4285-a21a-9b36b7777940",
+          "entityId": "company",
+          "version": 1,
+          "data": {
+            "name": "Native fixture company"
+          },
+          "createdAt": "2026-10-06T00:04:53.231Z",
+          "updatedAt": "2026-10-06T00:04:53.231Z"
+        }
+      ],
+      "nextCursor": null
+    }
+  }
+]

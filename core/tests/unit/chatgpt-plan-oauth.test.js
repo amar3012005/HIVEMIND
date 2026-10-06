@@ -18,8 +18,8 @@ function database() {
   const matches = (row, where) => row && row.userId === where.userId && row.orgId === where.orgId && !row.consumedAt && row.expiresAt > new Date();
   const prisma = {
     userOrganization: { findUnique: async () => ({ isActive: active }) },
-    harnessSession: { findFirst: async ({ where }) => where.id === 'brain' && where.userId === owner.userId
-      ? { profile: 'hivemind-chat', header: { agentPreset: 'hivemind-chat' } } : null },
+    harnessSession: { findFirst: async ({ where }) => ['brain', 'employee'].includes(where.id) && where.userId === owner.userId
+      ? { profile: 'hivemind-chat', header: { agentPreset: where.id === 'brain' ? 'hivemind-chat' : 'hivemind-employee' } } : null },
     chatgptPlanOAuthAttempt: { deleteMany: async () => {}, create: async ({ data }) => attempts.set(data.stateHash, data),
       findFirst: async ({ where }) => matches(attempts.get(where.stateHash), where) ? { ...attempts.get(where.stateHash) } : null,
       updateMany: async ({ where, data }) => { const row = attempts.get(where.stateHash); if (!matches(row, where)) return { count: 0 };
@@ -159,6 +159,7 @@ test('routing admits only persisted root Brain and distinct unavailable configur
     await connect(db, fixture);
     assert.equal((await brainConnectionRoute(db.prisma, owner, 'brain', env)).eligible, true);
     assert.equal((await brainConnectionRoute(db.prisma, owner, 'employee', env)).eligible, false);
+    await assert.rejects(brainConnectionRoute(db.prisma, owner, 'unowned', env), /owned_brain/);
     await assert.rejects(brainConnectionRoute(db.prisma, owner, undefined, env), /owned_brain/);
     assert.equal((await connectionStatus(db.prisma, owner, { ...env, HIVE_CHATGPT_PLAN_TOKEN_URL: '' })).reason, 'hosted_endpoints_unconfigured');
   } finally { await fixture.close(); }

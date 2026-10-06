@@ -188,8 +188,9 @@ export async function brainConnectionRoute(prisma, owner, sessionId, env) {
   ownerKey(owner);
   if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) throw new ChatgptPlanError('owned_brain_session_required');
   const status = await connectionStatus(prisma, owner, env);
-  if (!status.available || !status.connected) return { eligible: false, ...status };
   const session = await prisma.harnessSession.findFirst({ where: { id: sessionId, ...owner, status: 'active' } });
+  if (!session) throw new ChatgptPlanError('owned_brain_session_required');
+  if (!status.available || !status.connected) return { eligible: false, ...status };
   const eligible = Boolean(session && session.profile === 'hivemind-chat' && session.header?.agentPreset === 'hivemind-chat' && !session.header?.parentSession);
   return { eligible, ...status };
 }

@@ -27,7 +27,7 @@ export class AppRuntimeStore {
     uuid(principal?.orgId,'authenticated orgId'); uuid(principal?.userId,'authenticated userId');
     const execute = async (client) => {
       await client.query("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",[principal.orgId,principal.userId]);
-      const {rows:[membership]} = await client.query('SELECT m.role,m.roles,m.is_active FROM hivemind.user_organizations m JOIN hivemind.users u ON u.id=m.user_id JOIN hivemind.organizations o ON o.id=m.org_id WHERE m.org_id=$1::uuid AND m.user_id=$2::uuid AND u.deleted_at IS NULL FOR SHARE OF m,u,o',[principal.orgId,principal.userId]);
+      const {rows:[membership]} = await client.query('SELECT role,roles,is_active FROM hivemind.app_runtime_lock_membership($1::uuid,$2::uuid)',[principal.orgId,principal.userId]);
       const allowed = capability === 'manage' ? MANAGE : capability === 'write' ? WRITE : READ;
       const roles = membership?.roles??[];
       const legacyKnown = ['owner','admin','org_owner','org_admin','team_lead','member','viewer','compliance_admin'].includes(membership?.role);

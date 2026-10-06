@@ -1,4 +1,23 @@
 -- Opt-in infrastructure only. No route/composition activation is included.
+-- A row lock requires UPDATE privilege in PostgreSQL. Keep that privilege out
+-- of the CRM credential: this fixed, audited function only locks identity rows
+-- and returns membership roles. It cannot change identity or accept SQL.
+CREATE FUNCTION hivemind.app_runtime_lock_membership(target_org uuid,target_user uuid)
+RETURNS TABLE(role text,roles text[],is_active boolean)
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT m.role::text,m.roles,m.is_active
+  FROM hivemind.user_organizations m
+  JOIN hivemind.users u ON u.id=m.user_id
+  JOIN hivemind.organizations o ON o.id=m.org_id
+  WHERE m.org_id=target_org AND m.user_id=target_user AND u.deleted_at IS NULL
+    AND target_org=NULLIF(current_setting('app.hivemind_org_id',true),'')::uuid
+    AND target_user=NULLIF(current_setting('app.hivemind_user_id',true),'')::uuid
+  FOR SHARE OF m,u,o
+$$;
+REVOKE ALL ON FUNCTION hivemind.app_runtime_lock_membership(uuid,uuid) FROM PUBLIC;
+
 CREATE TABLE hivemind.app_runtime_apps (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL REFERENCES hivemind.organizations(id),

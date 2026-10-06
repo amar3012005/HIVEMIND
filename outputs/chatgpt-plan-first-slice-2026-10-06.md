@@ -26,3 +26,17 @@ Key configuration is server-only: HIVE_CHATGPT_PLAN_CLIENT_ID, HIVE_CHATGPT_PLAN
 
 7 Core tests: encryption/isolation/client binding, approval/membership/session restrictions, identity-only/expired/model rejection, request allowlist, exact gateway URL/bearer behavior, mocked refresh rotation/disconnect, malformed metadata.
 6 native tests: history/system ordering and field mapping, split CRLF/final-only text, completed tool vs failed stream, truncation/media rejection, principal transport/attribution, missing session rejection. Native web-runner TypeScript compilation passes.
+
+## Running isolated Cordis/HTTP preview
+
+The native opt-in `chatgpt-plan-http.spec.ts` starts actual loopback broker and SSE provider servers. A real Cordis Context and native LlmRuntime register the same `registerBrainPlan` helper used by web-runner. Native streaming then traverses HTTP to the Core broker and a second HTTP fixture upstream. Assertions cover service JWT signature/org/user, persisted session ownership, exact documented gateway URL, separate user/gateway bearers without BYOK alias, delayed completed response, one executable function block, usage, and an unowned session rejection before upstream access. Disabled native registration is checked first.
+
+All credentials, client approval and upstream responses in this smoke are explicitly fixtures. It does not call Cloudflare or OpenAI, does not boot the complete Redis-backed web-runner, and does not verify the production service authentication middleware or real OAuth eligibility. The broker handler and native LLM service are real source modules. In-memory storage is used; Docker is installed but its daemon is unavailable and psql is absent, so PostgreSQL migration execution and lock concurrency remain unproved.
+
+Reproduce in the native worktree (Node on PATH):
+
+```sh
+HIVE_PLAN_SMOKE_CORE_SOURCE=/private/tmp/hivemind-chatgpt-scoped-brain-20261006 node node_modules/vitest/vitest.mjs run packages/hivemind/web-runner/tests/chatgpt-plan.spec.ts packages/hivemind/web-runner/tests/chatgpt-plan-http.spec.ts
+```
+
+7 native tests pass including the running HTTP smoke; 7 Core tests pass; web-runner TypeScript and Prisma 5.22 schema validation pass. Broader Core gateway/harness suites have seven failures also reproduced by the release owner at unchanged parent baseline: six missing `@prisma/client` dependency and one existing bootstrap fixture mismatch. No broad-suite success or production integration claim is made.

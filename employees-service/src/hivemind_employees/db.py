@@ -216,6 +216,7 @@ async def list_running_employees() -> List[Dict[str, Any]]:
               role_archetype, peer_review_targets
             FROM hivemind.digital_employees
             WHERE archived_at IS NULL
+              AND NOT (COALESCE(policy_rules, '{}'::jsonb) ? 'native_lifecycle')
               AND status IN ('running', 'deploying')
             ORDER BY updated_at DESC
             """
@@ -254,6 +255,7 @@ async def list_employees_by_ids(ids: List[str], org_id: Optional[str] = None) ->
                   role_archetype, peer_review_targets
                 FROM hivemind.digital_employees
                 WHERE archived_at IS NULL
+              AND NOT (COALESCE(policy_rules, '{}'::jsonb) ? 'native_lifecycle')
                   AND status <> 'paused'
                   AND id = ANY($1::uuid[])
                   AND org_id = $2::uuid
@@ -271,6 +273,7 @@ async def list_employees_by_ids(ids: List[str], org_id: Optional[str] = None) ->
                   role_archetype, peer_review_targets
                 FROM hivemind.digital_employees
                 WHERE archived_at IS NULL
+              AND NOT (COALESCE(policy_rules, '{}'::jsonb) ? 'native_lifecycle')
                   AND status <> 'paused'
                   AND id = ANY($1::uuid[])
                 """,

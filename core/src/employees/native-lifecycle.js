@@ -15,7 +15,8 @@ export function nativeLifecycle(employee) {
 export function employeeCanDispatch(employee, now = Date.now()) {
   if (!employee || employee.archivedAt || employee.status === 'paused') return false;
   const lifecycle = nativeLifecycle(employee);
-  return !lifecycle || (lifecycle.phase === 'active' &&
+  if (Object.hasOwn(employee.policyRules || {}, 'native_lifecycle') && !lifecycle) return false;
+  return !lifecycle || (lifecycle.phase === 'active' && ['durable','temporary'].includes(lifecycle.kind) &&
     (lifecycle.kind !== 'temporary' || Date.parse(lifecycle.expires_at) > now));
 }
 export function validateNativeCreation(input, now = Date.now()) {
@@ -133,6 +134,19 @@ export async function requireNativeRuntime(db, principal) {
   });
 }
 
+/** Include native session-backed children of the exact employee roots, within this organization only. */
+function employeeSessionIds(sessions, owners, employeeId) {
+  const ids = new Set(sessions.filter(row => owners.get(row.id)?.id === employeeId).map(row => row.id));
+  for (let depth = 0; depth < 32; depth += 1) {
+    let changed = false;
+    for (const row of sessions) if (!ids.has(row.id) && ids.has(row.header?.parentSession)) {
+      ids.add(row.id); changed = true;
+    }
+    if (!changed) return ids;
+  }
+  lifecycleError('employee_session_ancestry_limit', 503);
+}
+
 /** Read current native task acceptance and successful private closeout memory, never employee prose. */
 export async function inspectNativeCloseout(tx, principal, employee) {
   const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
@@ -147,7 +161,7 @@ export async function inspectNativeCloseout(tx, principal, employee) {
   const delegations = new Map(), owners = new Map(), turns = new Map(); let lastAssignmentAt = 0;
   for (const event of events) {
     const data = event.payload.data ?? event.payload;
-    if (event.event_type === 'hivemind/session-owner') owners.set(event.session_id, data.id);
+    if (event.event_type === 'hivemind/session-owner') owners.set(event.session_id, data);
     if (event.event_type === 'turn/start' || event.event_type === 'turn/end') turns.set(event.session_id, event.event_type);
     const taskData = event.event_type === 'team/task' ? data.task : data;
     const key = `${event.session_id}:${taskData?.taskId ?? taskData?.id}`;
@@ -161,8 +175,11 @@ export async function inspectNativeCloseout(tx, principal, employee) {
     if (event.event_type === 'hivemind/employee-delegation-start' && data.employeeId === employee.id) delegations.set(`${event.session_id}:${data.delegationId}`, false);
     if (event.event_type === 'hivemind/employee-delegation-end' && data.employeeId === employee.id) delegations.set(`${event.session_id}:${data.delegationId}`, true);
   }
+  const sessions = await tx.$queryRawUnsafe(`SELECT id,header FROM ${schema}.harness_sessions WHERE org_id=$1::uuid`, principal.orgId);
+  const employeeRooms = employeeSessionIds(sessions, owners, employee.id);
   const blockers = [];
-  if ([...turns].some(([sessionId, boundary]) => owners.get(sessionId) === employee.id && boundary === 'turn/start')) blockers.push('employee_active_turn_requires_closeout');
+  if ([...turns].some(([sessionId, boundary]) => employeeRooms.has(sessionId) && boundary === 'turn/start')) blockers.push('employee_active_turn_requires_closeout');
+  if ([...tasks].some(([key, task]) => employeeRooms.has(key.slice(0, key.lastIndexOf(':'))) && !['completed','deleted'].includes(task?.status))) blockers.push('employee_child_work_requires_closeout');
   if ([...delegations.values()].some(done => !done)) blockers.push('employee_child_work_requires_closeout');
   for (const [key] of assignments) {
     const task = tasks.get(key); const review = reviews.get(key);
@@ -198,7 +215,8 @@ export async function nativeLifecycleHostProof(db, principal, employeeId) {
       if (event.event_type === 'hivemind/session-owner') owners.set(event.session_id, data);
       if (event.event_type === 'agent-preset/selected') presets.set(event.session_id, data.agentPreset);
     }
-    const rooms = sessions.filter(row => owners.get(row.id)?.id === employeeId).map(row => ({ sessionId: row.id, userId: row.user_id }));
+    const owned = employeeSessionIds(sessions, owners, employeeId);
+    const rooms = sessions.filter(row => owned.has(row.id)).map(row => ({ sessionId: row.id, userId: row.user_id }));
     const chiefs = sessions.filter(row => !row.header.parentSession
       && (presets.get(row.id) ?? row.header.agentPreset) === 'hivemind-hq'
       && owners.get(row.id)?.slug === 'runtime' && owners.get(row.id)?.id === null);

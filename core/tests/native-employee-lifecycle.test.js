@@ -20,3 +20,11 @@ test('only a current active administrator may change the registry', async () => 
     await assert.rejects(requireLifecycleAdministrator({userOrganization:{findUnique:async()=>membership}},{orgId:'a',userId:'b'}), /administrator_membership_required/);
   }
 });
+
+test('reserved malformed lifecycle policies fail closed rather than reverting to legacy', () => {
+  for (const native_lifecycle of [null, 'invalid', {version:2,phase:'active',kind:'durable'},
+    {version:1,phase:'active',kind:'unknown'}, {version:1,phase:'active',kind:'temporary',expires_at:'invalid'}]) {
+    assert.equal(employeeCanDispatch({status:'draft',policyRules:{native_lifecycle}},0),false);
+  }
+  assert.equal(employeeCanDispatch({status:'running',policyRules:{}},0),true);
+});

@@ -10668,7 +10668,7 @@ Write the persona now.`;
     const store = await _getEmployeeStore();
     if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const body = await parseBody(req);
-    if (body.policy_rules?.native_lifecycle || body.policyRules?.native_lifecycle) {
+    if (Object.hasOwn(body.policy_rules || {}, 'native_lifecycle') || Object.hasOwn(body.policyRules || {}, 'native_lifecycle')) {
       return jsonResponse(res, { error: 'Native lifecycle metadata is reserved' }, 400);
     }
     if (!body.name || !body.persona) {
@@ -11379,7 +11379,7 @@ Write the persona now.`;
 
       const out = [];
       for (const r of rows) {
-        if (r.policyRules?.native_lifecycle) continue;
+        if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')) continue;
         let apiKey = null;
         if (r.scopedApiKeyEncrypted) {
           try { apiKey = decryptToken(r.scopedApiKeyEncrypted); } catch {}
@@ -11443,7 +11443,7 @@ Write the persona now.`;
     try {
       const r = await store.findBySlugForChat(slug, { orgId });
       if (!r) return jsonResponse(res, { error: 'employee not found' }, 404);
-      if (r.policyRules?.native_lifecycle) return jsonResponse(res, { error: 'Native employee requires its persistent Harness room' }, 409);
+      if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')) return jsonResponse(res, { error: 'Native employee requires its persistent Harness room' }, 409);
       const { decryptToken, encryptToken } = await import('./connectors/framework/connector-store.js');
       const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
       let apiKey = null;
@@ -11622,7 +11622,7 @@ Write the persona now.`;
     if (!emp) return jsonResponse(res, { error: 'Employee not found' }, 404);
 
     // Native employees never enter legacy credential provisioning or sidecar dispatch.
-    if (emp.policyRules?.native_lifecycle && req.method !== 'GET') {
+    if (Object.hasOwn(emp.policyRules || {}, 'native_lifecycle') && req.method !== 'GET') {
       return jsonResponse(res, { error: 'Use the native employee lifecycle endpoint' }, 409);
     }
 
@@ -11637,7 +11637,7 @@ Write the persona now.`;
       if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
       try {
         const body = await parseBody(req);
-        if (body.policyRules?.native_lifecycle || body.policy_rules?.native_lifecycle) {
+        if (Object.hasOwn(body.policyRules || {}, 'native_lifecycle') || Object.hasOwn(body.policy_rules || {}, 'native_lifecycle')) {
           return jsonResponse(res, { error: 'Native lifecycle metadata is reserved' }, 400);
         }
         const updated = await store.update({ id: empId, data: body });
@@ -11870,7 +11870,7 @@ Write the persona now.`;
       const { encryptToken } = await import('./connectors/framework/connector-store.js');
       const results = [];
       for (const r of rows) {
-        if (r.policyRules?.native_lifecycle) continue;
+        if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')) continue;
         try {
           const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
           const keyHash = crypto.createHash('sha256').update(raw).digest('hex');

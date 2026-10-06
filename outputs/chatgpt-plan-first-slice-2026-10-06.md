@@ -62,3 +62,13 @@ HIVE_PLAN_SMOKE_CORE_SOURCE=/private/tmp/hivemind-chatgpt-scoped-brain-20261006 
 ```
 
 7 native tests pass including the running HTTP smoke; 7 Core tests pass; web-runner TypeScript and Prisma 5.22 schema validation pass. Broader Core gateway/harness suites have seven failures also reproduced by the release owner at unchanged parent baseline: six missing `@prisma/client` dependency and one existing bootstrap fixture mismatch. No broad-suite success or production integration claim is made.
+
+## Final integrated Brain connection slice — October 7
+
+The Brain overview now has a compact bottom control labeled **Connect to your ChatGPT**, with account status, model selection, explicit optional platform fallback, catalog refresh and disconnect. It is omitted from Runtime and employee pages. Browser operations traverse a same-origin authenticated native runner bridge; only Core receives provider grants. Callback material is removed from the page URL before exchange.
+
+Native commit `d7baf2c71b` includes the connection panel, composer footer extension and authenticated bridge, atop adapter commit `62345ac4b8`. Core commit `e980312a9` adds the final automatic-routing ownership denial. These changes remain task-branch source, not a production release.
+
+The release owner independently verified **31 focused checks**: 14 Core, 13 native adapter/HTTP and 4 bridge/UI. Full host-library compilation/bundling and both changed frontend package compilations passed. Guarded commits passed lint, notices, whitespace and vendor checks. HTTP tests use fixture OAuth/JWKS and fixture inference servers, not OpenAI or Cloudflare.
+
+No HIVEMIND billing subsystem was added or changed. Two migrations are staged and unexecuted. Real hosted client authorization/configuration, a real account sign-in, gateway inference, and production activation remain unverified. This slice automatically routes connected, owned root Brain requests; Runtime/employee sponsor/delegation integration and media are subsequent scope.

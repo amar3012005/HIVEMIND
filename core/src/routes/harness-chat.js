@@ -1,4 +1,4 @@
-import { manageNativeEmployee, nativeLifecycleHostProof } from '../employees/native-lifecycle.js';
+import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
@@ -20,7 +20,7 @@ import { getInternalApiKey } from '../security/internal-auth.js';
 import { TeamStore } from '../teams/team-store.js';
 import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
-import { recallOperatingMemory, saveOperatingMemory } from '../hyperagents/operating-memory.js';
+import { recallOperatingMemory, saveOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -465,7 +465,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     const action = input.action;
     const allowed = action === 'recall'
-      ? new Set(['action', 'query', 'agent_slug', 'kind', 'room_id', 'run_id', 'limit'])
+      ? new Set(['action', 'query', 'agent_slug', 'kind', 'room_id', 'run_id', 'limit', 'state'])
       : action === 'save'
         ? new Set(['action', 'agent_slug', 'kind', 'title', 'summary', 'idempotency_key', 'room_id', 'run_id', 'trigger_id', 'context', 'supersedes_id'])
         : action === 'record_task'
@@ -475,13 +475,25 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       jsonResponse(res, { error: 'invalid_operating_memory_input' }, 400); return true;
     }
     try {
+      const special = RUNTIME_MEMORY_KINDS.includes(input.kind);
+      const runtimePrincipal = { userId: claims.sub, orgId: claims.org_id, runtimeSessionId: claims.operating_session };
+      if (special) {
+        if (claims.operating_role !== 'runtime') { jsonResponse(res, { error: 'runtime_memory_required' }, 403); return true; }
+        await requireNativeRuntime(prisma, runtimePrincipal);
+        if (input.agent_slug !== 'runtime' || (action === 'save' && input.context?.sessionId !== claims.operating_session)) {
+          jsonResponse(res, { error: 'runtime_memory_scope_required' }, 403); return true;
+        }
+        if (action === 'save' && input.kind === 'user_agenda') {
+          await requireRuntimeAgendaConfirmation(prisma, runtimePrincipal, input.context?.confirmationRef);
+        }
+      }
       const result = action === 'recall'
-        ? await recallOperatingMemory(prisma, claims.org_id, input)
-        : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' ? 'runtime' : 'agent' });
+        ? await recallOperatingMemory(prisma, claims.org_id, input, special ? { runtimeUserId: claims.sub } : {})
+        : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' || special ? 'runtime' : 'agent' });
       jsonResponse(res, result, 200);
     } catch (error) {
       const known = /^(invalid_|reserved_|runtime_|superseded_|memory_idempotency_conflict)/.test(String(error?.message || ''));
-      jsonResponse(res, { error: known ? error.message : 'operating_memory_unavailable' }, known ? 400 : 503);
+      jsonResponse(res, { error: known ? error.message : 'operating_memory_unavailable' }, error.status || (known ? 400 : 503));
     }
     return true;
   }
@@ -696,4 +708,24 @@ export async function handleHarnessChatBootstrapRoute({
     }, 503);
   }
   return true;
+}
+
+// Confirmed agendas must point to actual user speech in the authenticated Chief room.
+async function requireRuntimeAgendaConfirmation(db, principal, reference) {
+  const match = /^(event:([0-9]+)|call:([a-zA-Z0-9_-]{1,120}))$/.exec(String(reference || ''));
+  if (!match) throw new Error('invalid_agenda_confirmation');
+  await db.$transaction(async tx => {
+    await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)", principal.orgId, principal.userId);
+    const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
+    if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) throw new Error('runtime_storage_unavailable');
+    const events = await tx.$queryRawUnsafe(`SELECT payload FROM ${schemas[0].table_schema}.harness_session_events
+      WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND
+      (($4::bigint IS NOT NULL AND sequence=$4::bigint AND event_type='user/message') OR
+       ($5::text IS NOT NULL AND event_type='hivemind/voice-call-ended' AND COALESCE(payload->'data',payload)->>'callId'=$5))`,
+      principal.runtimeSessionId, principal.orgId, principal.userId, match[2] || null, match[3] || null);
+    if (!events.some(event => {
+      const data = event.payload.data ?? event.payload;
+      return match[2] ? data.source?.kind === 'user' : data.hadUserSpeech === true;
+    })) throw new Error('invalid_agenda_confirmation');
+  });
 }

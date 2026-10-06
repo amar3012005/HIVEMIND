@@ -3,7 +3,7 @@ import { AppRuntimeStore } from './store.js';
 import { AppRuntimeError } from './contract.js';
 export const APP_RUNTIME_PREFIX = '/api/app-runtime/apps';
 const MAX_BODY_BYTES = 300 * 1024;
-const STATUS = {unauthorized:401,forbidden:403,not_found:404,version_conflict:409,idempotency_conflict:409,migration_required:409};
+const STATUS = {unauthorized:401,forbidden:403,not_found:404,unavailable:503,version_conflict:409,idempotency_conflict:409,migration_required:409};
 function error(code,message,details={}) {throw new AppRuntimeError(code,message,details);}
 function fields(input,allowed,required=[]) {
   if(!input||typeof input!=='object'||Array.isArray(input)) error('invalid_arguments','Body must be an object');

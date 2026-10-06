@@ -11,9 +11,22 @@ This task adds opt-in integration to the prepared AppSpec infrastructure. Produc
 ## Implemented
 
 Core mounts `/api/app-runtime/apps` behind existing authenticated identity when
-`HIVE_APP_RUNTIME_ENABLED=true`. It reuses Prisma transactions and rejects scoped project,
+`HIVE_APP_RUNTIME_ENABLED=true`. It uses direct `pg` transactions and rejects scoped project,
 team, container and service credentials for the organization-wide V1 policy. The native
 Harness gateway uses verified runner claims, live membership and an exact route allowlist.
+
+CRM storage does not require Prisma. The lazy CRM pool is capped at five connections with
+bounded checkout/query/transaction timeouts. Set `HIVE_APP_RUNTIME_DATABASE_URL` to a restricted
+credential for the same PostgreSQL database containing platform identity; absent that setting,
+it uses `DATABASE_URL`. Every CRM transaction rejects superuser/BYPASSRLS roles. Platform identity
+and other existing services retain Prisma. `prisma-transaction.js` and its driver demonstration
+are historical compatibility evidence and are no longer mounted by the CRM server route.
+
+The initial SQL migration can be applied with `psql -v ON_ERROR_STOP=1 -f
+core/prisma/migrations/20261005100000_app_runtime_infrastructure/migration.sql` against the
+approved preview database. Coordinate with the platform migration ledger to prevent applying
+the same migration twice. No Prisma generator or customer-specific migrations are needed for
+ordinary CRM fields. Do not apply this to production without the separate release approval.
 
 The optional native Cordis App Builder package registers nine typed tools and a progressive
 `create-crm` skill in the existing Runtime/HyperAgents composition. It does not create another

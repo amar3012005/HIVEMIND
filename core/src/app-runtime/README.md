@@ -4,6 +4,13 @@ AppSpec v1 defines data and approved view metadata. It does not execute generate
 Prisma per customer, register an agent profile, or activate an existing runtime composition.
 The API and Cordis package require explicit integration; this directory is infrastructure first.
 
+The opt-in server integration now uses `postgres-runtime.js` and `postgres-transaction.js` for
+direct `pg` access. Its pool is capped at five connections; `HIVE_APP_RUNTIME_DATABASE_URL`
+can supply a non-superuser/non-BYPASSRLS credential for the same platform database. Every
+transaction checks the database role before scoped application queries. Prisma remains in
+platform identity, but is not in the mounted CRM storage path. The old Prisma adapter is retained
+only for compatibility demonstrations. See `docs/CRM_INTEGRATION_DEMO.md` for activation details.
+
 ## Optional API boundary
 
 `createAppRuntimeHandler({pool, resolvePrincipal})` supplies an unmounted HTTP handler under

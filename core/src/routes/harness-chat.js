@@ -198,14 +198,16 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   }
   if (pathname === `${INTERNAL_PREFIX}/employee-lifecycle`) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
-    if (claims.operating_role !== 'runtime' || !claims.operating_session) {
-      jsonResponse(res, { error: 'Runtime session required' }, 403); return true;
+    if (!['runtime','employee-profile'].includes(claims.operating_role) || !claims.operating_session) {
+      jsonResponse(res, { error: 'Native employee authority required' }, 403); return true;
     }
     try {
       const input = await parseBody(req);
-      const principal = {userId:claims.sub,orgId:claims.org_id,runtimeSessionId:claims.operating_session};
+      const principal = {userId:claims.sub,orgId:claims.org_id,
+        ...(claims.operating_role==='runtime'?{runtimeSessionId:claims.operating_session}:
+          {employeeSessionId:claims.operating_session,employeeId:claims.operating_employee_id})};
       const result = await manageNativeEmployee(prisma, principal, input);
-      if (input.operation === 'archive' && result.employee.archivedAt) {
+      if (input.operation === 'create' || (input.operation === 'archive' && result.employee.archivedAt)) {
         const { activateNativeEmployeeLifecycle } = await import('../employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee, {env,fetchImpl});
       }

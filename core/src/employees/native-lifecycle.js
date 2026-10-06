@@ -1,5 +1,6 @@
 /** Core registry authority for native employee lifecycle; never provisions legacy credentials. */
 import { createHash, randomUUID } from 'node:crypto';
+import { validateEmployeeAppearance } from './humation-appearance.js';
 
 const VERSION = 1;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -20,12 +21,12 @@ export function employeeCanDispatch(employee, now = Date.now()) {
     (lifecycle.kind !== 'temporary' || Date.parse(lifecycle.expires_at) > now));
 }
 export function validateNativeCreation(input, now = Date.now()) {
-  const allowed = ['operation','creation_key','name','persona','role','avatar_url','lifecycle','expires_at'];
+  const allowed = ['operation','creation_key','name','persona','role','avatar_url','lifecycle','expires_at','appearance'];
   if (!input || Object.keys(input).some(key => !allowed.includes(key))) lifecycleError('invalid_employee_creation', 400);
   const key = text(input.creation_key, 'creation_key', 160);
   if (!/^[A-Za-z0-9._:-]+$/.test(key)) lifecycleError('invalid_creation_key', 400);
   const name = text(input.name, 'name', 100);
-  const persona = text(input.persona, 'persona', 12000);
+  const persona = input.persona == null ? 'You are a newly created company employee. Use your saved name and identity. Introduce yourself plainly, recall available company context, and ask the user which responsibilities they want you to own through the existing native question tool, with grounded suggestions and a free-text option. Do not invent a role, company facts or approval. Confirm the agreed responsibilities before saving your own bounded profile. Existing permissions remain unchanged.' : text(input.persona, 'persona', 12000);
   const role = text(input.role || 'Specialist', 'role', 40);
   const kind = input.lifecycle || 'durable';
   if (!['durable','temporary'].includes(kind)) lifecycleError('invalid_lifecycle', 400);
@@ -40,7 +41,7 @@ export function validateNativeCreation(input, now = Date.now()) {
     let url; try { url = new URL(avatar_url); } catch { lifecycleError('invalid_avatar_url', 400); }
     if (url.protocol !== 'https:') lifecycleError('invalid_avatar_url', 400);
   }
-  return { creation_key: key, name, persona, role, lifecycle: kind, expires_at, avatar_url };
+  return { creation_key: key, name, persona, role, lifecycle: kind, expires_at, avatar_url, appearance: validateEmployeeAppearance(input.appearance) };
 }
 export async function requireLifecycleAdministrator(db, principal) {
   const membership = await db.userOrganization.findUnique({
@@ -58,6 +59,10 @@ function publicEmployee(row) {
 export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now() } = {}) {
   await requireLifecycleAdministrator(db, principal);
   if (principal.runtimeSessionId) await requireNativeRuntime(db, principal);
+  if (principal.employeeSessionId) {
+    if (input?.operation !== 'configure' || input.employee_id !== principal.employeeId) lifecycleError('employee_profile_scope_required',403);
+    await requireNativeEmployeeProfile(db, principal);
+  }
   if (input?.operation === 'create') {
     const value = validateNativeCreation(input, -Infinity);
     const hash = createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -75,22 +80,42 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
         name: value.name, persona: value.persona, roleArchetype: value.role, avatarUrl: value.avatar_url,
         scope: 'organization', status: 'draft', model: 'native-harness', llmProvider: 'native-harness',
         tools: [], enabledConnectors: [],
-        policyRules: { native_lifecycle: { version: VERSION, kind: value.lifecycle, phase: 'active',
-          revision: 1, expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
+        policyRules: { ...(value.appearance ? {appearance:value.appearance} : {}), native_lifecycle: { version: VERSION, kind: value.lifecycle, phase: 'active',
+          revision: 1, profile_revision:1, onboarding_required: input.persona == null, expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
           ...(principal.runtimeSessionId ? { runtime_session: principal.runtimeSessionId } : {}) } },
       } });
       return { employee: publicEmployee(employee), replayed: false };
     });
   }
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);
-  if (!['begin_closeout','inspect_closeout','archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
+  if (!['configure','begin_closeout','inspect_closeout','archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
   return db.$transaction(async tx => {
     await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${principal.orgId}:${input.employee_id}`);
     const row = await tx.digitalEmployee.findFirst({ where: { id: input.employee_id, orgId: principal.orgId } });
     if (!row) lifecycleError('employee_not_found', 404);
     const lifecycle = nativeLifecycle(row);
     if (!lifecycle) lifecycleError('native_employee_required');
-    if (row.archivedAt) return { employee: publicEmployee(row), replayed: true, closeout: { ready: true, archived: true } };
+    if (row.archivedAt) {
+      if (input.operation === 'configure') lifecycleError('employee_profile_not_active');
+      return { employee: publicEmployee(row), replayed: true, closeout: { ready: true, archived: true } };
+    }
+    if (input.operation === 'configure') {
+      if (!employeeCanDispatch(row, now)) lifecycleError('employee_profile_not_active');
+      if (Object.keys(input).some(key => !['operation','employee_id','expected_profile_revision','persona','role','name'].includes(key))) lifecycleError('invalid_employee_configuration',400);
+      const update = {};
+      if (input.persona !== undefined) update.persona = text(input.persona,'persona',12000);
+      if (input.role !== undefined) update.roleArchetype = text(input.role,'role',40);
+      if (input.name !== undefined) update.name = text(input.name,'name',100);
+      if (!Object.keys(update).length) lifecycleError('empty_employee_configuration',400);
+      const hash = createHash('sha256').update(JSON.stringify(update)).digest('hex');
+      if (lifecycle.profile_hash === hash) return {employee:publicEmployee(row),replayed:true};
+      const revision = lifecycle.profile_revision ?? 1;
+      if (input.expected_profile_revision !== revision) lifecycleError('employee_profile_revision_conflict');
+      const updated = await tx.digitalEmployee.update({where:{id:row.id},data:{...update,
+        policyRules:{...row.policyRules,native_lifecycle:{...lifecycle,profile_revision:revision+1,profile_hash:hash,
+          ...((update.persona || update.roleArchetype) ? {onboarding_required:false} : {})}}}});
+      return {employee:publicEmployee(updated),replayed:false};
+    }
     if (input.operation === 'begin_closeout') {
       if (lifecycle.phase === 'closing') return { employee: publicEmployee(row), replayed: true };
       if (input.expected_revision !== lifecycle.revision) lifecycleError('lifecycle_revision_conflict');
@@ -131,6 +156,28 @@ export async function requireNativeRuntime(db, principal) {
       if (event.event_type === 'hivemind/session-owner') owner = data;
     }
     if (preset !== 'hivemind-hq' || owner?.id !== null || owner.slug !== 'runtime') lifecycleError('runtime_session_required', 403);
+  });
+}
+
+/** Self refinement is bound to an actual tenant-owned persistent employee root. */
+export async function requireNativeEmployeeProfile(db, principal) {
+  if (!UUID.test(principal.employeeId || '')) lifecycleError('employee_profile_scope_required',403);
+  await db.$transaction(async tx => {
+    await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",principal.orgId,principal.userId);
+    const schemas=await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
+    if (schemas.length!==1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable',503);
+    const schema=schemas[0].table_schema;
+    const sessions=await tx.$queryRawUnsafe(`SELECT header FROM ${schema}.harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid`,principal.employeeSessionId,principal.orgId,principal.userId);
+    const header=sessions[0]?.header;
+    if (!header || header.parentSession) lifecycleError('employee_profile_scope_required',403);
+    const events=await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('agent-preset/selected','hivemind/session-owner') ORDER BY sequence`,principal.employeeSessionId,principal.orgId,principal.userId);
+    let preset=header.agentPreset,owner;
+    for (const event of events) {
+      const data=event.payload.data??event.payload;
+      if (event.event_type==='agent-preset/selected') preset=data.agentPreset;
+      if (event.event_type==='hivemind/session-owner') owner=data;
+    }
+    if (preset!=='hivemind-hyperagents' || owner?.id!==principal.employeeId) lifecycleError('employee_profile_scope_required',403);
   });
 }
 
@@ -223,6 +270,6 @@ export async function nativeLifecycleHostProof(db, principal, employeeId) {
     if (rooms.length > 1000 || chiefs.length > 1000) lifecycleError('native_room_enumeration_limit', 503);
     const chief = chiefs.find(row => row.user_id === principal.userId);
     return { employeeId, revision: lifecycle.revision, kind: lifecycle.kind, phase: lifecycle.phase,
-      expiresAt: lifecycle.expires_at, rooms, chiefs: chiefs.map(row => ({sessionId:row.id,userId:row.user_id})), chief: chief ? { sessionId: chief.id, userId: chief.user_id } : null };
+      expiresAt: lifecycle.expires_at, ...(lifecycle.onboarding_required && lifecycle.phase === 'active' ? { onboarding: {name:employee.name,role:employee.roleArchetype,creationHash:lifecycle.creation_hash} } : {}), rooms, chiefs: chiefs.map(row => ({sessionId:row.id,userId:row.user_id})), chief: chief ? { sessionId: chief.id, userId: chief.user_id } : null };
   });
 }

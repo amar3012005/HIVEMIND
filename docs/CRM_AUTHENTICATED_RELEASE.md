@@ -62,8 +62,10 @@ versions, and revoked memberships were rejected by their actual authenticated bo
 
 Committed evidence is in `core/docs/evidence/crm-*-20261006.*`: 30 authenticated HTTP checks,
 five role/lock checks, all nine native tools, and authenticated browser views/edit/reload/tenant
-switching. Focused CRM tests passed 10/10. The full Core sweep has 124 failures on both untouched
-`740bcb7da` and the CRM candidate, with identical failing names; it is not a green full-suite gate.
+switching. Focused combined tests passed 18/18 (11 CRM and seven employee checks). The canonical Core
+baseline and combined CRM source both have 124 full-suite failures, with identical 117 top-level
+failing names; it is not a green full-suite gate. Twenty concurrent patch pairs each returned
+200/409 after the app-row locking correction, with no intermittent 404.
 The browser report separates rendered workspace proof from the follow-up Runtime-entry helper
 fix and the pending live authoring-room canary.
 
@@ -90,7 +92,7 @@ with the main release owner and its Runtime/employee fixes.
 These candidates retain the verified preview implementation and evidence. They are superseded
 for release and must not be cut over directly.
 
-## Required baseline for the next CRM combination
+## Canonical baseline preserved by the final CRM combination
 
 The main release owner supplied these newer frozen sources on 2026-10-06:
 
@@ -100,14 +102,44 @@ The main release owner supplied these newer frozen sources on 2026-10-06:
 - Native: `6c262ec39dd7765e7d20720968eaf58334a1172a`, reported pushed after the full guard,
   preserving employee, truthful session loading, mobile counters, and Brain greeting changes.
 
-The owner reported the outer deployment and immutable runner build in progress. This document
-does not assert their final deployed identities or health. Record those receipts before preparing
-the next release. Start fresh CRM combinations from these sources or their verified successors,
-replay only the CRM changes, update the matching frontend gitlink, and rerun focused and
-authenticated checks on the combined source.
+The CRM source was reconciled onto these exact canonical baselines. Current candidates:
 
-CRM remains inactive in production. The remaining release dependencies are current-baseline
-reconciliation, managed SQL migration and ledger verification, restricted role provisioning,
-secret configuration, explicit feature activation, immutable artifact releases, and a signed-in
-Runtime authoring canary. The main release owner will coordinate that later cutover; the isolated
-preview work can be closed with these limits recorded.
+- Core/Control branch `codex/crm-production-canonical-20261006`; immutable build source
+  `41d0a91ec9c586ca3de2c0b069052cafaa3b9b7c`. Later documentation commits do not alter runtime code.
+- Da Vinci branch `codex/crm-final-fe-20261006`,
+  `9e3de64049752bdff8f4a82f0d7acf5d0d96d4ea`; the parent gitlink matches it. Twenty-seven focused
+  checks and the guarded production build passed with the CRM compile flag enabled. The authenticated
+  browser proved local-field edits, refresh persistence, all three views and organization switching.
+- Native branch `codex/crm-native-release-final-20261006`,
+  `1d8cb26028498b7267cc257ce6d9e550bbb43d2b`. Fifteen focused checks include real Cordis Loader/Include
+  composition, nine authenticated tools and Schedule ownership restoration. Runtime and HyperAgents
+  load the tools/skill when enabled; disabled compositions and Brain omit them.
+
+The final runner image must additionally preserve the main owner's pending Runtime-opening
+correction and combined Brain source. The native source above is proved but is not the final
+cutover artifact until that newer source/base is frozen and incorporated.
+
+## Artifact and production readiness
+
+Core immutable image `hivemind/core-api:sha-41d0a91ec` completed with image ID
+`sha256:697c6e143f28121374c94c29b31a8d00dcfa75a5de1d669b71ac0fa79ac9ae7f` and the exact source revision
+label. Dry artifact imports passed as UID 1001, without network, writable root or source mounts.
+Control is in the serial build-only phase. Both builders use the audited detached source, two CPUs
+and 2 GiB; no production services were recreated.
+
+The final Worker archive SHA-256 is
+`e7e07d2083046cb02619de03ec16f0073d5fb76b4887e9ec9a44fad384449c4d`.
+The manifest summary and browser/Loader reports are retained under `core/docs/evidence/`.
+The normal deployment source guard and CRM compile flag must be preserved during promotion.
+
+Read-only production preflight at `2026-10-06T18:50:16.533Z` found 213 applied migrations,
+no unresolved ledger entries and only the CRM migration pending against the candidate source.
+CRM tables, restricted role and dedicated managed CRM credentials were absent. The existing platform
+role is superuser/BYPASSRLS and must not be bound to the CRM pool. This inspection changed no schema,
+credentials, feature flags, services or Worker version.
+
+CRM remains inactive in production. Remaining steps are final compatible runner build, immutable
+artifact proofs, the owner's exclusive activation window, managed SQL/role/secret configuration,
+scoped artifact deployment and a signed-in disposable Runtime authoring/published workspace canary.
+Preview receipts do not establish external SSO, autonomous model tool selection or live production
+room entry. Release completion requires those live receipts; it is not complete at build readiness.

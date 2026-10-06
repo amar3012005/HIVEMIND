@@ -4,7 +4,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 export class ChatgptPlanError extends Error {
   constructor(code, status = 403) { super(code); this.code = code; this.status = status; }
 }
-function ownerKey(owner) {
+export function ownerKey(owner) {
   if (!UUID.test(owner?.orgId || '') || !UUID.test(owner?.userId || '')) throw new ChatgptPlanError('plan_owner_required');
   return `chatgpt-plan:v1:${owner.orgId}:${owner.userId}`;
 }
@@ -19,14 +19,14 @@ export function planEnabled(env) {
   }
   if (!env.HIVE_CHATGPT_PLAN_CLIENT_ID) throw new ChatgptPlanError('hosted_client_unconfigured', 503);
 }
-function encrypt(owner, grant, env) {
+export function encrypt(owner, grant, env) {
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key(env), nonce);
   cipher.setAAD(Buffer.from(`${ownerKey(owner)}:${env.HIVE_CHATGPT_PLAN_CLIENT_ID}`));
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(grant), 'utf8'), cipher.final()]);
   return JSON.stringify({ v: 1, nonce: nonce.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') });
 }
-function decrypt(owner, encrypted, env) {
+export function decrypt(owner, encrypted, env) {
   try {
     const value = JSON.parse(encrypted);
     if (value.v !== 1) throw new Error('version');
@@ -62,6 +62,7 @@ export async function storeVerifiedPlanGrant(prisma, owner, grant, env) {
 /** No ambient credential fallback. Session and membership are verified for every model call. */
 export async function resolveBrainPlan(prisma, owner, sessionId, model, env, { refresh } = {}) {
   planEnabled(env); ownerKey(owner);
+  if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) throw new ChatgptPlanError('owned_brain_session_required');
   const member = await prisma.userOrganization.findUnique({ where: { userId_orgId: { userId: owner.userId, orgId: owner.orgId } } });
   if (!member?.isActive) throw new ChatgptPlanError('plan_membership_revoked');
   const session = await prisma.harnessSession.findFirst({ where: { id: sessionId, ...owner, status: 'active' } });
@@ -74,6 +75,7 @@ export async function resolveBrainPlan(prisma, owner, sessionId, model, env, { r
   if (grant.expiresAt <= Date.now() + 30000) {
     if (typeof refresh !== 'function') throw new ChatgptPlanError('plan_reconnect_or_refresh_required', 503);
     connection = await refreshPlanGrant(prisma, owner, env, refresh);
+    if (connection.reauthorizationRequired) throw new ChatgptPlanError('plan_reauthorization_required', 401);
     grant = decrypt(owner, connection.encryptedGrant, env);
   }
   validate(grant, env);
@@ -97,13 +99,19 @@ export async function refreshPlanGrant(prisma, owner, env, refresh) {
       throw new ChatgptPlanError('plan_reconnect_or_refresh_required', 503);
     }
     let next;
-    try { next = await refresh(current); } catch { throw new ChatgptPlanError('plan_refresh_failed', 503); }
+    try { next = await refresh(current); } catch (error) {
+      if (error?.code === 'plan_reauthorization_required') {
+        await tx.chatgptPlanConnection.update({ where: { orgId_userId: owner }, data: { status: 'revoked', encryptedGrant: '' } });
+        return { reauthorizationRequired: true };
+      }
+      throw new ChatgptPlanError('plan_refresh_failed', 503);
+    }
     validate(next, env);
     if (next.subject !== current.subject || next.issuer !== current.issuer || next.clientId !== current.clientId) {
       throw new ChatgptPlanError('plan_refresh_identity_changed');
     }
     return tx.chatgptPlanConnection.update({ where: { orgId_userId: owner }, data: { encryptedGrant: encrypt(owner, next, env) } });
-  }, { timeout: 15000 });
+  }, { timeout: 30000 });
 }
 /** Local disconnect removes grant material; remote provider revocation remains a separate registered-client operation. */
 export async function disconnectPlan(prisma, owner) {
@@ -112,4 +120,18 @@ export async function disconnectPlan(prisma, owner) {
   if (!member?.isActive) throw new ChatgptPlanError('plan_membership_revoked');
   await prisma.chatgptPlanConnection.updateMany({ where: { ...owner }, data: { status: 'revoked', encryptedGrant: '' } });
   return { disconnected: true };
+}
+
+/** Owner-scoped row lock also serializes catalog/disconnect against refresh rotation. */
+export async function modifyPlanConnection(prisma, owner, env, action) {
+  ownerKey(owner);
+  return prisma.$transaction(async tx => {
+    if (!(await tx.userOrganization.findUnique({ where: { userId_orgId: { userId: owner.userId, orgId: owner.orgId } } }))?.isActive) {
+      throw new ChatgptPlanError('plan_membership_revoked');
+    }
+    await tx.$queryRawUnsafe('SELECT id FROM hivemind.chatgpt_plan_connections WHERE org_id=$1::uuid AND user_id=$2::uuid FOR UPDATE', owner.orgId, owner.userId);
+    const row = await tx.chatgptPlanConnection.findUnique({ where: { orgId_userId: owner } });
+    const grant = row?.status === 'active' ? decrypt(owner, row.encryptedGrant, env) : null;
+    return action(tx, row, grant);
+  }, { timeout: 15000 });
 }

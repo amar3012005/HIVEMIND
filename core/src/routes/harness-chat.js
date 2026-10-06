@@ -1,3 +1,4 @@
+import { brainConnectionRoute, connectionStatus, startPlanOAuth, finishPlanOAuth, updateConnection } from '../chatgpt-plan/oauth.js';
 import { serveBrainPlan } from '../chatgpt-plan/brain-broker.js';
 import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
@@ -185,6 +186,26 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  const planConnection = pathname.match(new RegExp(`^${INTERNAL_PREFIX}/chatgpt-plan/connection/(status|start|callback|models|select|disconnect|route)$`));
+  if (planConnection) {
+    const action = planConnection[1];
+    if (req.method !== (action === 'status' ? 'GET' : 'POST')) { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    try {
+      const owner = { orgId: claims.org_id, userId: claims.sub };
+      const input = action === 'status' ? null : await parseBody(req);
+      if (input && (typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(key => !(action === 'callback' ? ['state', 'code'] : action === 'select' ? ['model', 'platform_fallback'] : action === 'route' ? ['session_id'] : []).includes(key)))) {
+        jsonResponse(res, { error: 'plan_operation_invalid' }, 400); return true;
+      }
+      const result = action === 'status' ? await connectionStatus(prisma, owner, env)
+        : action === 'route' ? await brainConnectionRoute(prisma, owner, input?.session_id, env)
+        : action === 'start' ? await startPlanOAuth(prisma, owner, env)
+        : action === 'callback' ? await finishPlanOAuth(prisma, owner, input, env, fetchImpl)
+        : await updateConnection(prisma, owner, env, action, input, fetchImpl);
+      jsonResponse(res, result);
+    } catch (error) { jsonResponse(res, { error: error.code || 'plan_connection_failed' }, error.status || 503); }
+    return true;
+  }
   if (pathname === `${INTERNAL_PREFIX}/chatgpt-plan/brain/responses`) {
     await serveBrainPlan({ req, res, prisma, claims, parseBody, env, fetchImpl, jsonResponse }); return true;
   }

@@ -1,3 +1,4 @@
+import { registeredRefresh } from './oauth.js';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { ChatgptPlanError, resolveBrainPlan } from './connections.js';
@@ -32,12 +33,12 @@ export async function serveBrainPlan({ req, res, prisma, claims, parseBody, env,
     const input = await parseBody(req);
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['session_id', 'request'].includes(key))) throw new ChatgptPlanError('plan_billing_owner_is_server_owned', 400);
     const body = validatePlanRequest(input.request);
-    const { accessToken } = await resolveBrainPlan(prisma, { orgId: claims.org_id, userId: claims.sub }, input.session_id, body.model, env);
+    const { accessToken } = await resolveBrainPlan(prisma, { orgId: claims.org_id, userId: claims.sub }, input.session_id, body.model, env, { refresh: registeredRefresh(env, fetchImpl) });
     const gateway = cloudflareGatewayConfig();
     if (!gateway.enabled) throw new ChatgptPlanError('user_plan_gateway_required', 503);
     const url = `https://gateway.ai.cloudflare.com/v1/${encodeURIComponent(gateway.accountId)}/${encodeURIComponent(gateway.gatewayId)}/openai/responses`;
     const headers = gatewayRequestHeaders({ authorization: `Bearer ${accessToken}`, 'content-type': 'application/json',
-      'user-agent': 'hivemind-chatgpt-plan/1' }, 'openai', { billingMode: 'user-plan' });
+      'user-agent': /^deepseek-harness\/[\w.+-]+ \(\+https:\/\/github\.com\/deepseek-ai\/deepseek-harness\)$/.test(req.headers?.['user-agent'] || '') ? req.headers['user-agent'] : 'hivemind-chatgpt-plan/1' }, 'openai', { billingMode: 'user-plan' });
     const upstream = await fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(body),
       redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120000)]) });
     if (!upstream.ok || !upstream.body) {

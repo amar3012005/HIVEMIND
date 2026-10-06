@@ -21,5 +21,6 @@
       "status": "passed"
     }
   ],
-  "productionMutations": false
+  "productionMutations": false,
+  "verifiedCoreSource": "72fafd3a4"
 }

@@ -10647,9 +10647,13 @@ Write the persona now.`;
     try {
       const { manageNativeEmployee } = await import('./employees/native-lifecycle.js');
       const input = await parseBody(req);
-      return jsonResponse(res, await manageNativeEmployee(prisma, {
-        userId: current.session.userId, orgId: current.session.orgId,
-      }, input));
+      const principal = {userId:current.session.userId,orgId:current.session.orgId};
+      const result = await manageNativeEmployee(prisma, principal, input);
+      if (input.operation === 'create' || input.operation === 'archive') {
+        const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');
+        result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee);
+      }
+      return jsonResponse(res, result);
     } catch (error) {
       return jsonResponse(res, { error: error.status ? error.message : 'Employee lifecycle unavailable' }, error.status || 503);
     }

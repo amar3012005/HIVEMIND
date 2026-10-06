@@ -174,3 +174,33 @@ export async function inspectNativeCloseout(tx, principal, employee) {
   return { ready: blockers.length === 0, blockers: [...new Set(blockers)],
     reviewed_task_count: assignments.size, ...(memory ? { memory_id: memory.id } : {}) };
 }
+
+/** Administrator-only attestation for the existing native host's limited lifecycle effects. */
+export async function nativeLifecycleHostProof(db, principal, employeeId) {
+  await requireLifecycleAdministrator(db, principal);
+  const employee = await db.digitalEmployee.findFirst({ where: { id: employeeId, orgId: principal.orgId } });
+  const lifecycle = nativeLifecycle(employee);
+  if (!employee || !lifecycle) lifecycleError('native_employee_not_found', 404);
+  return db.$transaction(async tx => {
+    const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
+    if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable', 503);
+    const schema = schemas[0].table_schema;
+    const roles = await tx.$queryRawUnsafe('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user');
+    if (!roles[0]?.rolsuper && !roles[0]?.rolbypassrls) lifecycleError('organization_closeout_read_authority_required', 503);
+    const sessions = await tx.$queryRawUnsafe(`SELECT id,user_id,header FROM ${schema}.harness_sessions WHERE org_id=$1::uuid ORDER BY updated_at DESC`, principal.orgId);
+    const events = await tx.$queryRawUnsafe(`SELECT session_id,event_type,payload FROM ${schema}.harness_session_events WHERE org_id=$1::uuid AND event_type IN ('agent-preset/selected','hivemind/session-owner') ORDER BY session_id,sequence`, principal.orgId);
+    const owners = new Map(), presets = new Map();
+    for (const event of events) {
+      const data = event.payload.data ?? event.payload;
+      if (event.event_type === 'hivemind/session-owner') owners.set(event.session_id, data);
+      if (event.event_type === 'agent-preset/selected') presets.set(event.session_id, data.agentPreset);
+    }
+    const rooms = sessions.filter(row => owners.get(row.id)?.id === employeeId).map(row => ({ sessionId: row.id, userId: row.user_id }));
+    const chiefs = sessions.filter(row => !row.header.parentSession
+      && (presets.get(row.id) ?? row.header.agentPreset) === 'hivemind-hq'
+      && owners.get(row.id)?.slug === 'runtime' && owners.get(row.id)?.id === null);
+    const chief = chiefs.find(row => row.user_id === principal.userId);
+    return { employeeId, revision: lifecycle.revision, kind: lifecycle.kind, phase: lifecycle.phase,
+      expiresAt: lifecycle.expires_at, rooms, chiefs: chiefs.map(row => ({sessionId:row.id,userId:row.user_id})), chief: chief ? { sessionId: chief.id, userId: chief.user_id } : null };
+  });
+}

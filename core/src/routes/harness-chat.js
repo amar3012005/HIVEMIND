@@ -1,4 +1,4 @@
-import { manageNativeEmployee } from '../employees/native-lifecycle.js';
+import { manageNativeEmployee, nativeLifecycleHostProof } from '../employees/native-lifecycle.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
@@ -187,6 +187,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     jsonResponse(res, { active: true }); return true;
   }
+  if (pathname === `${INTERNAL_PREFIX}/employee-lifecycle-proof`) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    try {
+      const input = await parseBody(req);
+      if (!input || Object.keys(input).some(key => key !== 'employee_id') || typeof input.employee_id !== 'string') throw Object.assign(new Error('Invalid lifecycle proof request'), {status:400});
+      jsonResponse(res, await nativeLifecycleHostProof(prisma, {userId:claims.sub,orgId:claims.org_id}, input.employee_id));
+    } catch(error) { jsonResponse(res, {error:error.status ? error.message : 'Lifecycle proof unavailable'}, error.status || 503); }
+    return true;
+  }
   if (pathname === `${INTERNAL_PREFIX}/employee-lifecycle`) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     if (claims.operating_role !== 'runtime' || !claims.operating_session) {
@@ -194,9 +203,13 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     try {
       const input = await parseBody(req);
-      jsonResponse(res, await manageNativeEmployee(prisma, {
-        userId: claims.sub, orgId: claims.org_id, runtimeSessionId: claims.operating_session,
-      }, input));
+      const principal = {userId:claims.sub,orgId:claims.org_id,runtimeSessionId:claims.operating_session};
+      const result = await manageNativeEmployee(prisma, principal, input);
+      if (input.operation === 'archive' && result.employee.archivedAt) {
+        const { activateNativeEmployeeLifecycle } = await import('../employees/native-lifecycle-bridge.js');
+        result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee, {env,fetchImpl});
+      }
+      jsonResponse(res, result);
     } catch (error) {
       jsonResponse(res, { error: error.status ? error.message : 'Employee lifecycle unavailable' }, error.status || 503);
     }

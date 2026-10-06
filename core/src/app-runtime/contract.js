@@ -24,7 +24,7 @@ export const APP_SPEC_JSON_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['schemaVersion', 'name', 'entities', 'views'],
   properties: {
-    schemaVersion: { const: 1 }, name: nameSchema,
+    schemaVersion: { type: 'integer', const: 1 }, name: nameSchema,
     description: { type: 'string', minLength: 1, maxLength: 4000 },
     entities: { type: 'array', minItems: 1, maxItems: 32, items: {
       type: 'object', additionalProperties: false, required: ['id', 'name', 'fields'],
@@ -80,7 +80,7 @@ export const APP_SPEC_TOOL_SCHEMA = nativeSchema(APP_SPEC_JSON_SCHEMA);
 const fieldWire = APP_SPEC_TOOL_SCHEMA.properties.entities.items.properties.fields.items;
 fieldWire.oneOf = [...fieldTypes].map(type => {
   const properties = { id: fieldWire.properties.id, name: fieldWire.properties.name,
-    type: { const: type }, required: fieldWire.properties.required, source: fieldWire.properties.source };
+    type: { type: 'string', const: type }, required: fieldWire.properties.required, source: fieldWire.properties.source };
   const required = ['id', 'name', 'type'];
   if (type === 'enum') { properties.options = fieldWire.properties.options; required.push('options'); }
   if (type === 'reference') { properties.targetEntityId = fieldWire.properties.targetEntityId; required.push('targetEntityId'); }
@@ -90,8 +90,15 @@ const sourceWire = fieldWire.properties.source;
 sourceWire.oneOf = ['local', 'derived', 'external'].map(type => ({
   type: 'object', additionalProperties: false,
   required: type === 'external' ? ['type', 'provider', 'object', 'property'] : ['type'],
-  properties: type === 'external' ? { ...sourceWire.properties, type: { const: type } } : { type: { const: type } },
+  properties: type === 'external' ? { ...sourceWire.properties, type: { type: 'string', const: type } } : { type: { type: 'string', const: type } },
 }));
+// Native DSH union nodes must consist of oneOf, not an object schema plus oneOf.
+for (const node of [fieldWire, sourceWire]) {
+  delete node.type;
+  delete node.properties;
+  delete node.required;
+  delete node.additionalProperties;
+}
 function fail(path, message, code = 'INVALID_APP_SPEC') {
   throw new AppRuntimeError(code, `${path}: ${message}`, { path });
 }

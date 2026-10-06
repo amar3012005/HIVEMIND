@@ -2,6 +2,7 @@ import { manageNativeEmployee, nativeLifecycleHostProof } from '../employees/nat
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
+import { forwardAppRuntimeRequest } from '../app-runtime/gateway.js';
 import { getRedisClient } from '../control-plane/session-store.js';
 import {
   mintHarnessAdmissionTicket,
@@ -484,6 +485,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     return true;
   }
+  if (await forwardAppRuntimeRequest({req,res,corePath,claims,env,coreApiBaseUrl:redisConfig.coreApiBaseUrl,internalApiKey:getInternalApiKey(),fetchImpl,parseBody,jsonResponse})) return true;
   const webJobStatus = corePath.match(/^\/api\/web\/jobs\/([0-9a-f-]+)$/i);
   if (!CORE_ROUTES.get(corePath)?.has(req.method) && !(webJobStatus && req.method === 'GET')) {
     jsonResponse(res, { error: 'Harness core operation not allowed' }, 404); return true;

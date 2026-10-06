@@ -7,6 +7,9 @@
  */
 
 import http from 'http';
+import { createAppRuntimeHandler, APP_RUNTIME_PREFIX } from './app-runtime/routes.js';
+import { createPrismaAppRuntimeTransactionRunner } from './app-runtime/prisma-transaction.js';
+import { assertAppRuntimePrincipal } from './app-runtime/access.js';
 import { readRuntimeOnboarding } from './harness-chat/onboarding-evidence.js';
 import { handleNativeRuntimeVoice } from './tara/native-runtime-voice.js';
 import { verifyHarnessRunnerServiceToken } from './harness-chat/runner-service-token.js';
@@ -10066,6 +10069,20 @@ exit \$RC
       // have no keyId → null → org-level (system) attribution, which is correct for those.
       enterOrgContext(principal.orgId, principal.keyId || null, principal.userId || null);
       const orgId = principal.orgId || DEFAULT_ORG;
+
+      // Explicit opt-in: same authenticated user authority and native DB lifecycle.
+      if (pathname === APP_RUNTIME_PREFIX || pathname.startsWith(`${APP_RUNTIME_PREFIX}/`)) {
+        if (process.env.HIVE_APP_RUNTIME_ENABLED !== 'true') return jsonResponse(res, {error:{code:'not_found',message:'CRM is not enabled',details:{}}},404);
+        const handleAppRuntime = createAppRuntimeHandler({
+          transactionRunner: createPrismaAppRuntimeTransactionRunner(prisma),
+          resolvePrincipal: async () => {
+            if (req.headers['x-hm-container']) return assertAppRuntimePrincipal({...principal,containerTags:['request-scope']},req.method);
+            return assertAppRuntimePrincipal(principal,req.method);
+          },
+          parseBody: async () => body, jsonResponse,
+        });
+        await handleAppRuntime({req,res,pathname}); return;
+      }
 
       // ── Container Tag (multi-tenant namespace) resolution ──
       // Priority: x-hm-container header > body.containerTag > query param > scoped key default

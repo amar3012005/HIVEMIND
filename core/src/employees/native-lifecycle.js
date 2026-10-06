@@ -68,7 +68,8 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     const hash = createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const slug = `employee-${createHash('sha256').update(`${principal.orgId}:${value.creation_key}`).digest('hex').slice(0, 24)}`;
     return db.$transaction(async tx => {
-      await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${principal.orgId}:${slug}`);
+      // PostgreSQL returns void here; Prisma raw queries need a readable column type.
+      await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS lock', `${principal.orgId}:${slug}`);
       const existing = await tx.digitalEmployee.findUnique({ where: { orgId_slug: { orgId: principal.orgId, slug } } });
       if (existing) {
         if (nativeLifecycle(existing)?.creation_hash !== hash) lifecycleError('creation_key_content_conflict');
@@ -90,7 +91,7 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);
   if (!['configure','begin_closeout','inspect_closeout','archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
   return db.$transaction(async tx => {
-    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${principal.orgId}:${input.employee_id}`);
+    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS lock', `${principal.orgId}:${input.employee_id}`);
     const row = await tx.digitalEmployee.findFirst({ where: { id: input.employee_id, orgId: principal.orgId } });
     if (!row) lifecycleError('employee_not_found', 404);
     const lifecycle = nativeLifecycle(row);

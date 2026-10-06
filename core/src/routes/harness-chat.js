@@ -208,7 +208,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
         ...(claims.operating_role==='runtime'?{runtimeSessionId:claims.operating_session}:
           {employeeSessionId:claims.operating_session,employeeId:claims.operating_employee_id})};
       const result = await manageNativeEmployee(prisma, principal, input);
-      if (input.operation === 'create' || (input.operation === 'archive' && result.employee.archivedAt)) {
+      if (['create','configure'].includes(input.operation) || (input.operation === 'archive' && result.employee.archivedAt)) {
         const { activateNativeEmployeeLifecycle } = await import('../employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee, {env,fetchImpl});
       }

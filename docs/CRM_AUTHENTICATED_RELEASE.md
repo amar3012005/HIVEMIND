@@ -81,11 +81,33 @@ title resolution, and backfills require their existing governed integration boun
 page renders receipts; it is not a new workflow executor. Production cutover remains coordinated
 with the main release owner and its Runtime/employee fixes.
 
-## Pushed candidates
+## Superseded preview candidates
 
 - Core: `codex/crm-authenticated-release-20261006`; combined behavioral proof at `72fafd3a4`, includes employee `0ab3b28c` and `488e4637` changes.
 - Native: `codex/crm-native-employee-combined-20261006`, `04fdf7ce39703118f78f1fce5c23f64295d70ca8`; preserves employee/pager `e2562e725c` as an ancestor. Normal full host build/client typecheck push guard passed; combined focused tests passed 14/14.
 - Da Vinci: `codex/crm-authenticated-fe-20261006`, `71a891aff1453661b2901d6814dee57760c485a9`; parent gitlink matches it. Full CRA build and five focused tests passed.
 
-These are pushed candidates, not production deployment identities. The main release owner must
-reconcile any newer hydration/greeting changes before the coordinated immutable artifact freeze.
+These candidates retain the verified preview implementation and evidence. They are superseded
+for release and must not be cut over directly.
+
+## Required baseline for the next CRM combination
+
+The main release owner supplied these newer frozen sources on 2026-10-06:
+
+- Parent: `17d9a9deed07b76056492351d87f31fc3bb11403`, preserving canonical employee commits
+  `90392153a` and `95a525131` plus the latest outer frontend gitlink.
+- Da Vinci: `135a5dae5e604a548cec1596dda4ef34270edb88`, verified from that parent gitlink.
+- Native: `6c262ec39dd7765e7d20720968eaf58334a1172a`, reported pushed after the full guard,
+  preserving employee, truthful session loading, mobile counters, and Brain greeting changes.
+
+The owner reported the outer deployment and immutable runner build in progress. This document
+does not assert their final deployed identities or health. Record those receipts before preparing
+the next release. Start fresh CRM combinations from these sources or their verified successors,
+replay only the CRM changes, update the matching frontend gitlink, and rerun focused and
+authenticated checks on the combined source.
+
+CRM remains inactive in production. The remaining release dependencies are current-baseline
+reconciliation, managed SQL migration and ledger verification, restricted role provisioning,
+secret configuration, explicit feature activation, immutable artifact releases, and a signed-in
+Runtime authoring canary. The main release owner will coordinate that later cutover; the isolated
+preview work can be closed with these limits recorded.

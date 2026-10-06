@@ -110,7 +110,7 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       if (input.role !== undefined) update.roleArchetype = text(input.role,'role',40);
       if (input.name !== undefined) update.name = text(input.name,'name',100);
       if (!Object.keys(update).length) lifecycleError('empty_employee_configuration',400);
-      const stage = principal.runtimeSessionId && (update.persona || update.roleArchetype) ? 'ready' : 'runtime_review';
+      const stage = principal.runtimeSessionId && update.persona ? 'ready' : 'runtime_review';
       const hash = createHash('sha256').update(JSON.stringify({update,stage})).digest('hex');
       if (lifecycle.profile_hash === hash) return {employee:publicEmployee(row),replayed:true};
       const revision = lifecycle.profile_revision ?? 1;

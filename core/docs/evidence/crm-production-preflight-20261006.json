@@ -1,0 +1,16 @@
+{
+  "checkedAt": "2026-10-06T18:50:16.533Z",
+  "source": "read-only ephemeral managed job on production PostgreSQL; no business rows or secret values returned",
+  "database": { "database": "hivemind", "role": "hivemind_user" },
+  "authority": { "rolsuper": true, "rolbypassrls": true },
+  "schema": { "ledger_present": true, "crm_present": false },
+  "ledger": {
+    "applied": 213,
+    "crmMigration": [],
+    "unresolved": [],
+    "unappliedSourceMigrations": ["20261005100000_app_runtime_infrastructure"]
+  },
+  "runtimeRole": [],
+  "managedSecretPresence": { "postgresPassword": true, "crmUrl": false, "crmPassword": false },
+  "productionMutations": false
+}

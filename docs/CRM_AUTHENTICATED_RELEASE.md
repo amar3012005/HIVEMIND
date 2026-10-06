@@ -60,6 +60,13 @@ membership locks so concurrent revocation waited until transaction release. Cros
 IDs, forged browser identity headers, project-scoped credentials, invalid signatures, stale
 versions, and revoked memberships were rejected by their actual authenticated boundaries.
 
+Committed evidence is in `core/docs/evidence/crm-*-20261006.*`: 30 authenticated HTTP checks,
+five role/lock checks, all nine native tools, and authenticated browser views/edit/reload/tenant
+switching. Focused CRM tests passed 10/10. The full Core sweep has 124 failures on both untouched
+`740bcb7da` and the CRM candidate, with identical failing names; it is not a green full-suite gate.
+The browser report separates rendered workspace proof from the follow-up Runtime-entry helper
+fix and the pending live authoring-room canary.
+
 The native Schedule PostgreSQL tests also restore org/user/profile/project ownership on cold
 delivery and prove project scope is denied before CRM credential/network access.
 

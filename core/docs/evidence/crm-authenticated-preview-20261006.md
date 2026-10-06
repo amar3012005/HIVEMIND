@@ -14,3 +14,9 @@ Reproduction uses `crm-auth-seed.mjs` (private auth fixture), `crm-authenticated
 ## Combined source retest
 
 After applying the final employee operating-instruction prerequisite (`72fafd3a4`), both actual Core and Control Plane processes were restarted. All 30 HTTP checks, five PostgreSQL role/lock checks, and 17 focused tests passed again. Core behavioral source was the exact `66e2d946b` archive plus the only two Core files changed through `72fafd3a4` (employee lifecycle implementation and its test file). No CRM storage/auth/gateway delta existed. The full-unit baseline comparison above remains from the prior CRM source; it was not rerun for the employee delta.
+
+## Fresh canonical reconciliation
+
+The production candidate starts from exact canonical `17d9a9deed07b76056492351d87f31fc3bb11403` and replays CRM-only changes. Canonical employee code and outer frontend gitlink135a remain intact. At behavioral source `1bee2b7c4`, actual HTTP30/30, role5/5, and focused18/18 (CRM11 + canonical employee7) passed. An intermittent concurrent joined-lock read returned404; acquiring the app lock before reading its immutable version fixes the READ COMMITTED snapshot race. Twenty additional pairs of actual concurrent HTTP patches each returned exactly200/409, with no write retry.
+
+Full unit comparison on the same isolated image/environment: canonical2234tests2110pass124fail; CRM2245tests2121pass124fail. All117top-level failing names match; no new failing names. This remains a non-green overall suite. No production schema/config/service changes were made during these proofs.

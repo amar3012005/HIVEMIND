@@ -1,0 +1,167 @@
+{
+  "checks": [
+    {
+      "iteration": 0,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 3
+    },
+    {
+      "iteration": 1,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 4
+    },
+    {
+      "iteration": 2,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 5
+    },
+    {
+      "iteration": 3,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 6
+    },
+    {
+      "iteration": 4,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 7
+    },
+    {
+      "iteration": 5,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 8
+    },
+    {
+      "iteration": 6,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 9
+    },
+    {
+      "iteration": 7,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 10
+    },
+    {
+      "iteration": 8,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 11
+    },
+    {
+      "iteration": 9,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 12
+    },
+    {
+      "iteration": 10,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 13
+    },
+    {
+      "iteration": 11,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 14
+    },
+    {
+      "iteration": 12,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 15
+    },
+    {
+      "iteration": 13,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 16
+    },
+    {
+      "iteration": 14,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 17
+    },
+    {
+      "iteration": 15,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 18
+    },
+    {
+      "iteration": 16,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 19
+    },
+    {
+      "iteration": 17,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 20
+    },
+    {
+      "iteration": 18,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 21
+    },
+    {
+      "iteration": 19,
+      "statuses": [
+        200,
+        409
+      ],
+      "resultVersion": 22
+    }
+  ],
+  "realHttp": true,
+  "productionMutations": false,
+  "verifiedCoreSource": "1bee2b7c4"
+}

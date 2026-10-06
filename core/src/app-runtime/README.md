@@ -11,6 +11,14 @@ transaction checks the database role before scoped application queries. Prisma r
 platform identity, but is not in the mounted CRM storage path. The old Prisma adapter is retained
 only for compatibility demonstrations. See `docs/CRM_INTEGRATION_DEMO.md` for activation details.
 
+The CRM credential cannot update platform identity. The migration-owned
+`app_runtime_lock_membership(uuid,uuid)` function holds membership/user/organization row locks
+until the CRM transaction ends, returning only roles and active status. Its SQL names every
+table explicitly, locks `search_path` to `pg_catalog`, checks transaction-local identity, and
+revokes public execution. `core/scripts/provision-app-runtime-role.mjs` grants only CRM data
+access, this function, and selected workflow receipt columns. Run it through the managed
+migration job with secret references; never reuse the platform superuser credential.
+
 ## Optional API boundary
 
 `createAppRuntimeHandler({pool, resolvePrincipal})` supplies an unmounted HTTP handler under

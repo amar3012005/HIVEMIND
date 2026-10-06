@@ -106,12 +106,12 @@ The CRM source was reconciled onto these exact canonical baselines. Current cand
 
 - Core/Control branch `codex/crm-production-canonical-20261006`; immutable build source
   `41d0a91ec9c586ca3de2c0b069052cafaa3b9b7c`. Later documentation commits do not alter runtime code.
-- Da Vinci branch `codex/crm-final-fe-20261006`,
-  `9e3de64049752bdff8f4a82f0d7acf5d0d96d4ea`; the parent gitlink matches it. Twenty-seven focused
+- Da Vinci branch `codex/crm-bridge-aligned-fe-20261006`,
+  `53b60d7f4cc945addcba080f3fa234313df5fb83`; the parent gitlink matches it. Thirty-seven focused
   checks and the guarded production build passed with the CRM compile flag enabled. The authenticated
   browser proved local-field edits, refresh persistence, all three views and organization switching.
-- Native branch `codex/crm-native-release-final-20261006`,
-  `1d8cb26028498b7267cc257ce6d9e550bbb43d2b`. Fifteen focused checks include real Cordis Loader/Include
+- Native branch `codex/crm-native-frozen-final-20261006`,
+  `e8818a39b735ee6d05b9882d480dac770b71483c`. Fifteen focused checks include real Cordis Loader/Include
   composition, nine authenticated tools and Schedule ownership restoration. Runtime and HyperAgents
   load the tools/skill when enabled; disabled compositions and Brain omit them.
 
@@ -121,14 +121,29 @@ cutover artifact until that newer source/base is frozen and incorporated.
 
 ## Artifact and production readiness
 
-Core immutable image `hivemind/core-api:sha-41d0a91ec` completed with image ID
-`sha256:697c6e143f28121374c94c29b31a8d00dcfa75a5de1d669b71ac0fa79ac9ae7f` and the exact source revision
-label. Dry artifact imports passed as UID 1001, without network, writable root or source mounts.
-Control is in the serial build-only phase. Both builders use the audited detached source, two CPUs
-and 2 GiB; no production services were recreated.
+Core/Control immutable images from `3f88c776d06ea04a23d7864d090f2e6d779923b6` completed:
+
+- Core `hivemind/core-api:sha-3f88c776d`, image ID
+  `sha256:5527719cf1eb81e977776947ff09111794a0ba88dfe771ae731ad27fb2726ecd`.
+- Control `hivemind/control-plane:sha-3f88c776d`, image ID
+  `sha256:167be327d19e491b5e01401d6a56b7377907350c9ccc4a2c11559b115306e882`.
+
+Exact image labels, read-only imports and source checksums passed. Actual-image synthetic preview
+with no source mounts passed 30 authenticated HTTP checks, five role/lock checks and 20 concurrency
+pairs. Serial builders used two CPUs and 2 GiB; no production services were recreated.
+
+The parent subsequently preserves promoted `385ac91827564318b9d6a8b5b2e41042bc256a38` as ancestry,
+while retaining CRM frontend `53b60d7f`, a verified descendant of its `248d3dc9` bridge baseline.
+Core/Control runtime code is unchanged. Their final release labels must match the next frozen parent
+source, rather than retagging these proven images with a different revision.
+
+Native `e8818a39b7` preserves exact Runtime/Brain source `5c946aab6b` and passes its normal full push
+guard and compiled Loader proof. Its complete dependency-aware image delta is prepared; compilation
+is held because the coordinator's fresh live canary still finds a Runtime room-opening race.
+Preserve the next verified correction before final native artifact creation and cutover.
 
 The final Worker archive SHA-256 is
-`e7e07d2083046cb02619de03ec16f0073d5fb76b4887e9ec9a44fad384449c4d`.
+`eb10bef61f669284c51043f934d2d35b845e84c590a3b386b672a0c5fc8b7436`.
 The manifest summary and browser/Loader reports are retained under `core/docs/evidence/`.
 The normal deployment source guard and CRM compile flag must be preserved during promotion.
 
@@ -143,3 +158,12 @@ artifact proofs, the owner's exclusive activation window, managed SQL/role/secre
 scoped artifact deployment and a signed-in disposable Runtime authoring/published workspace canary.
 Preview receipts do not establish external SSO, autonomous model tool selection or live production
 room entry. Release completion requires those live receipts; it is not complete at build readiness.
+
+## Current external release hold
+
+The main owner is completing the employee/Runtime live canaries and owns the exclusive cutover
+window. CRM migration, credential binding, activation and Worker deployment remain unexecuted.
+A final source review found no concrete blocking tenant/auth/credential/revocation/idempotency
+defect in the inspected direct-pg and native App Builder boundary; this is not production proof.
+The prepared activation bundle and canary plan are retained for continuation after the owner
+supplies its final native correction and activation window.

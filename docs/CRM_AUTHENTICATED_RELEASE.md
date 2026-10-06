@@ -1,4 +1,46 @@
-# CRM authenticated release candidate — 2026-10-06
+# CRM authenticated release — 2026-10-06
+
+## Confirmed production release
+
+This section supersedes the candidate and release-hold notes below. The main release owner
+completed managed activation and a signed-in disposable canary; this chat did not duplicate
+production model runs or writes.
+
+- Core/Control artifact source: `8cc0aa770a2589b1cefadaa6132e62fc4e742153`.
+- Native Harness source: `53a46e6d6f80a5c824ab9d1df78058f74a275e99`; image
+  `hivemind/harness-chat:sha-53a46e6d6f-crm`, ID
+  `sha256:57b4b7957bfaf1d619642ad467ab55cea5aff013daa6f459d859198d00e49ec2`.
+- Frontend source: `559d95b974975bee173ddaa27fff5ae89fb455b4`; parent gitlink promotion
+  `f8c564046de8edf909324f9dea14ae0a18035d5f`.
+- Worker version: `fc14854d-a856-468d-bf3f-8c2fe088f742`.
+- Migration ledger: 214; seven forced-RLS CRM tables and restricted role
+  `hivemind_app_runtime`. Dedicated database URL is bound only to Core; provisioning password
+  is bound to none of the three services.
+
+Native model discovery was proved through the `apps` capability lease: all nine original
+schemas were exposed before authoring. The actual signed-in Runtime published application
+`7ccb981c-ed1e-4d80-b29f-19f342c33871`, published version 1, created company record
+`b782bbc1-7d74-431e-9b74-b84f5a9a1883`, updated it to version 2 / Qualified, and queried
+that saved state again. An initial invalid Kanban spec was rejected before writing and corrected
+by the model. No connectors, automations, outreach or Company Brain writes were exercised.
+
+The production Your CRM page rendered the same saved application and record. Table, Kanban,
+Record and detail drawer were checked. Repeated `/crm/overview` suffixes recovered to canonical
+`/hivemind/app/crm` with the query retained; fullscreen and refresh remained stable with data.
+The source-proven loop mechanism was the former relative fallback redirect. The origin of the
+first malformed suffix remains unproven.
+
+Release evidence: `/root/releases/manifests/crm-managed-corrected-20261006/release.json`;
+local native receipts and live screenshot:
+`/tmp/crm-final-activation-20261006/native-live-canary-receipts.json` and
+`/tmp/crm-final-activation-20261006/your-crm-live-verified.jpg`.
+
+Verification scope remains precise: organization isolation was checked with two synthetic
+organizations in isolated authenticated preview; the production canary used one organization.
+Scheduled/background CRM lifecycle and live connector synchronization were not proved.
+The inherited Worker Day 0 test expectation mismatch remains outside this routing change.
+
+## Historical candidate and setup notes
 
 ## Storage and authoring
 

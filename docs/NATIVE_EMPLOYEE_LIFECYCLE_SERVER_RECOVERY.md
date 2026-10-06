@@ -15,9 +15,9 @@ Recovered `core/src/employees/native-lifecycle.js` from the server's existing is
 
 ## Verification completed
 - Core module/routes/server syntax.
-- Three focused lifecycle tests.
+- Three focused lifecycle tests plus a signed route test verifying general chat and revoked membership rejection before request-body parsing.
 - Existing disposable actual PostgreSQL/native persistence proof: ten checks including two organizations, concurrent creation replay, actual task/review/memory closeout and retained session history.
-- Initial Runtime and HQ package compilations passed in read-only disposable cb14 container before the final deadline/closing changes; repeat final compile must be checked.
+- Final Runtime and HQ package compilations passed in a read-only disposable cb14 container, including deadline/closing changes.
 
 ## Required before release
 - Human creation UI and native temporary deadline activation from human creation.

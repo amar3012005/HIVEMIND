@@ -11633,6 +11633,9 @@ Write the persona now.`;
       if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
       try {
         const body = await parseBody(req);
+        if (body.policyRules?.native_lifecycle || body.policy_rules?.native_lifecycle) {
+          return jsonResponse(res, { error: 'Native lifecycle metadata is reserved' }, 400);
+        }
         const updated = await store.update({ id: empId, data: body });
         _notifyEmployeesReload();
         audit({

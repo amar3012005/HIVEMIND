@@ -228,6 +228,11 @@ for s in "${SVCS[@]}"; do
   printf '  %s:\n    image: %s\n' "$s" "$TAG" >> "$OVERRIDE.tmp"
 done
 mv "$OVERRIDE.tmp" "$OVERRIDE"
+# Preserve approved feature activation independently of image defaults. The
+# credential stays Core-only in a root-private versioned release artifact.
+CRM_OVERRIDE="$STATE_ROOT/crm-activation.json"
+python3 "$REL/scripts/preserve-crm-activation.py" "$CRM_OVERRIDE" "$ENVF" "$SERVICES"
+docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" --env-file "$ENVF" config -q
 
 # Database migrations are a pre-deploy gate for Core, not an implicit startup
 # side effect. Run the guarded migrator from the newly built immutable image
@@ -306,14 +311,14 @@ fi
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
-  docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+  docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
   if [ "$s" = harness-runner ]; then
     # The tunnel is a profile-bound companion: it is never deployed without
     # the runner and has no independent image or persistence lifecycle.
     echo "[deploy] harness-tunnel"
     "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase deploying:harness-tunnel
-    docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+    docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
       --env-file "$ENVF" up -d --no-deps --force-recreate harness-tunnel >/dev/null
   fi
 done

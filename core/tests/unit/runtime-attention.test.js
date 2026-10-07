@@ -59,3 +59,11 @@ test('typed direction stays whole and decision records its private revision', as
   assert.equal(result.decisionMemoryRevision,'private-v1');
   assert.match(request.instructions,/dates alone do not establish/);
 });
+
+test('activation watermark retains old events; explicit shadow results cannot be admitted', async () => {
+ const dated={...event,received_at:'2026-10-01T00:00:00Z'};
+ const windowed={...snapshot,admissionWindow:{notBefore:'2026-10-08T00:00:00Z'}};
+ assert.equal((await evaluate('wake',{event:dated,snapshot:windowed})).reason,'before_activation');
+ const shadow=await evaluate('wake',{event:dated,snapshot:windowed,mode:'shadow'});
+ assert.equal(shadow.shadow,true);assert.equal(shadow.policy,'runtime_attention_v2_shadow');assert.equal(shadow.action,'wake');
+});

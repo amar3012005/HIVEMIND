@@ -9,13 +9,17 @@ const retained = reason => ({ policy: RUNTIME_ATTENTION_POLICY, action: 'retain'
  * No model output authorizes a subscription, company write or external action.
  * This function never sends a message or starts an agent.
  */
-export async function assessRuntimeAttention({ event, snapshot, consent, provider }) {
+export async function assessRuntimeAttention({ event, snapshot, consent, provider, mode = 'live' }) {
   if (consent?.enabled !== true) return retained('not_enabled');
   if (!event?.org_id || !event.user_id || !event.id || !event.subscription_id
     || event.org_id !== consent.orgId || event.user_id !== consent.userId
     || event.subscription_id !== consent.subscriptionId) return retained('scope_mismatch');
   if (!snapshot || snapshot.orgId !== event.org_id || snapshot.userId !== event.user_id
     || !snapshot.sessionId || !snapshot.revision) return retained('context_unavailable');
+  if (snapshot.admissionWindow && mode !== 'shadow') {
+    const received = Date.parse(event.received_at || ''), notBefore = Date.parse(snapshot.admissionWindow.notBefore || '');
+    if (!Number.isFinite(received) || !Number.isFinite(notBefore) || received < notBefore) return retained('before_activation');
+  }
   if (snapshot.decisionMemory?.ready !== true) return retained('decision_memory_unavailable');
   if (!provider || typeof provider.decideChoice !== 'function') return retained('decision_unavailable');
   const data = event.data || {};
@@ -45,7 +49,7 @@ export async function assessRuntimeAttention({ event, snapshot, consent, provide
       || !Number.isFinite(decision.probability) || !Number.isFinite(decision.margin)
       || decision.probability < 0.75 || decision.probability > 1
       || decision.margin < 0.2 || decision.margin > 1) return retained('uncertain');
-    return { policy: RUNTIME_ATTENTION_POLICY, action: decision.choice, reason: `goal_attention_${decision.choice}`,
+    return { policy: mode === 'shadow' ? `${RUNTIME_ATTENTION_POLICY}_shadow` : RUNTIME_ATTENTION_POLICY, shadow: mode === 'shadow', action: decision.choice, reason: `goal_attention_${decision.choice}`,
       decisionMemoryRevision: snapshot.decisionMemory.revision,
       probability: decision.probability, margin: decision.margin,
       contextRevision: snapshot.revision, targetSessionId: snapshot.sessionId };

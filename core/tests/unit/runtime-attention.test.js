@@ -67,3 +67,10 @@ test('activation watermark retains old events; explicit shadow results cannot be
  const shadow=await evaluate('wake',{event:dated,snapshot:windowed,mode:'shadow'});
  assert.equal(shadow.shadow,true);assert.equal(shadow.policy,'runtime_attention_v2_shadow');assert.equal(shadow.action,'wake');
 });
+
+test('shadow low confidence and provider failures stay explicitly shadow', async () => {
+ for(const provider of [{decideChoice:async()=>({choice:'wake',probability:0.54,margin:0.27})},{decideChoice:async()=>{throw Error('fixture provider down');}}]){
+  const result=await evaluate('wake',{provider,mode:'shadow'});
+  assert.equal(result.action,'retain');assert.equal(result.policy,'runtime_attention_v2_shadow');assert.equal(result.shadow,true);
+ }
+});

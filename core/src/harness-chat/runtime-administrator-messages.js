@@ -1,3 +1,4 @@
+import { nativeAgentStoragePrincipal } from './organization-agent-access.js';
 import crypto from 'node:crypto';
 import { renderRuntimeAdministratorEmail } from '../email/templates/runtime-administrator.js';
 import { resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
@@ -12,7 +13,7 @@ export function validateAdministratorMessage(input) {
  if (input.kind !== 'completion' && !input.request_call_id) fail('native_request_reference_required');
  return { message_key: input.message_key, kind: input.kind, subject: input.subject.trim(), message: input.message.trim(), ...(input.request_call_id ? { request_call_id: input.request_call_id } : {}) };
 }
-export async function messageAdministrator({ db, claims, input, send, publicBase, portraitBase }) {
+export async function messageAdministrator({ db, claims, input, send, publicBase, portraitBase, sharedOrganizationAgents = false }) {
  if (claims.operating_role !== 'runtime' || !/^session-[a-z0-9-]{1,120}$/.test(claims.operating_session || '')) fail('runtime_authority_required',403);
  const membership = await db.userOrganization.findUnique({ where:{userId_orgId:{userId:claims.sub,orgId:claims.org_id}}, select:{role:true,isActive:true} });
  if (!membership?.isActive || !['owner','admin'].includes(membership.role)) fail('administrator_membership_required',403);
@@ -26,13 +27,14 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  const schemas=await db.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
  if(schemas.length!==1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema))fail('harness_storage_unavailable',503);
  const schema=schemas[0].table_schema;
+ const storage=await nativeAgentStoragePrincipal(db,{orgId:claims.org_id,userId:claims.sub,runtimeSessionId:claims.operating_session,sharedOrganizationAgents});
  await db.$transaction(async tx=>{
-  await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",claims.org_id,claims.sub);
- const session = (await tx.$queryRawUnsafe(`SELECT id FROM ${schema}.harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid`,claims.operating_session,claims.org_id,claims.sub))[0];
+  await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",claims.org_id,storage.userId);
+ const session = (await tx.$queryRawUnsafe(`SELECT id FROM ${schema}.harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid`,claims.operating_session,claims.org_id,storage.userId))[0];
  if (!session) fail('runtime_session_not_found',403);
  if (message.request_call_id) {
   // A decision email refers to an existing native call in this exact authenticated room.
-  const events = await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('tool/call','approval/asked') ORDER BY sequence DESC LIMIT 500`,claims.operating_session,claims.org_id,claims.sub);
+  const events = await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('tool/call','approval/asked') ORDER BY sequence DESC LIMIT 500`,claims.operating_session,claims.org_id,storage.userId);
   const found = events.some(row => {
    const data=row.payload.data??row.payload;
    if(data.callId!==message.request_call_id && data.id!==message.request_call_id)return false;

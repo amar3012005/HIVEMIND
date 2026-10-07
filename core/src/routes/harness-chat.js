@@ -23,6 +23,7 @@ import { TeamStore } from '../teams/team-store.js';
 import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
 import { recallOperatingMemory, saveOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
+import { organizationAgentAccess, nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -103,7 +104,7 @@ async function readJsonBounded(response, maxBytes = 2 * 1024 * 1024) {
   try { return JSON.parse(text); } catch { throw new Error('upstream_invalid_json'); }
 }
 
-async function scopedHyperagentProfiles(prisma, claims) {
+async function scopedHyperagentProfiles(prisma, claims, adminsOnly = false) {
   const membership = await prisma.userOrganization.findUnique({
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } },
     select: { role: true, isActive: true },
@@ -113,6 +114,7 @@ async function scopedHyperagentProfiles(prisma, claims) {
     where: { userId: claims.sub, team: { orgId: claims.org_id } }, select: { teamId: true },
   }).catch(() => []);
   const admin = membership.role === 'owner' || membership.role === 'admin';
+  if (adminsOnly && !admin) return null;
   const rows = await prisma.digitalEmployee.findMany({
     where: {
       orgId: claims.org_id, archivedAt: null,
@@ -213,12 +215,21 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     jsonResponse(res, { active: true }); return true;
   }
+  if (pathname === `${INTERNAL_PREFIX}/organization-agent-access`) {
+    if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    try {
+      jsonResponse(res, await organizationAgentAccess(prisma, { userId: claims.sub, orgId: claims.org_id }));
+    } catch (error) {
+      jsonResponse(res, { error: error.code || 'organization_agent_access_unavailable' }, error.status || 503);
+    }
+    return true;
+  }
   if (pathname === `${INTERNAL_PREFIX}/employee-lifecycle-proof`) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     try {
       const input = await parseBody(req);
       if (!input || Object.keys(input).some(key => key !== 'employee_id') || typeof input.employee_id !== 'string') throw Object.assign(new Error('Invalid lifecycle proof request'), {status:400});
-      jsonResponse(res, await nativeLifecycleHostProof(prisma, {userId:claims.sub,orgId:claims.org_id}, input.employee_id));
+      jsonResponse(res, await nativeLifecycleHostProof(prisma, {userId:claims.sub,orgId:claims.org_id,sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true'}, input.employee_id));
     } catch(error) { jsonResponse(res, {error:error.status ? error.message : 'Lifecycle proof unavailable'}, error.status || 503); }
     return true;
   }
@@ -229,7 +240,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     try {
       const input = await parseBody(req);
-      const principal = {userId:claims.sub,orgId:claims.org_id,
+      const principal = {userId:claims.sub,orgId:claims.org_id,sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true',
         ...(claims.operating_role==='runtime'?{runtimeSessionId:claims.operating_session}:
           {employeeSessionId:claims.operating_session,employeeId:claims.operating_employee_id})};
       const result = await manageNativeEmployee(prisma, principal, input);
@@ -248,7 +259,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     try {
       const input=await parseBody(req);
       const { sendRenderedSystemEmail }=await import('../email/email-service.js');
-      jsonResponse(res,await messageAdministrator({db:prisma,claims,input,send:sendRenderedSystemEmail,publicBase:env.HIVEMIND_FRONTEND_URL,portraitBase:env.HIVE_HARNESS_EMBED_URL ? new URL(env.HIVE_HARNESS_EMBED_URL).origin : undefined}));
+      jsonResponse(res,await messageAdministrator({db:prisma,claims,input,sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true',send:sendRenderedSystemEmail,publicBase:env.HIVEMIND_FRONTEND_URL,portraitBase:env.HIVE_HARNESS_EMBED_URL ? new URL(env.HIVE_HARNESS_EMBED_URL).origin : undefined}));
     } catch(error) {jsonResponse(res,{error:error.status ? error.message : 'Administrator message unavailable'},error.status || 503);}
     return true;
   }
@@ -473,7 +484,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     return true;
   }
   if (corePath === '/v1/hyperagents/profiles' && req.method === 'GET') {
-    const result = await scopedHyperagentProfiles(prisma, claims);
+    const result = await scopedHyperagentProfiles(prisma, claims, env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true');
     jsonResponse(res, result || { error: 'Organization membership required' }, result ? 200 : 403);
     return true;
   }
@@ -501,7 +512,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     try {
       const special = RUNTIME_MEMORY_KINDS.includes(input.kind);
-      const runtimePrincipal = { userId: claims.sub, orgId: claims.org_id, runtimeSessionId: claims.operating_session };
+      const runtimePrincipal = { userId: claims.sub, orgId: claims.org_id, runtimeSessionId: claims.operating_session, sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true' };
       if (special) {
         if (claims.operating_role !== 'runtime') { jsonResponse(res, { error: 'runtime_memory_required' }, 403); return true; }
         await requireNativeRuntime(prisma, runtimePrincipal);
@@ -513,8 +524,8 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
         }
       }
       const result = action === 'recall'
-        ? await recallOperatingMemory(prisma, claims.org_id, input, special ? { runtimeUserId: claims.sub } : {})
-        : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' || special ? 'runtime' : 'agent' });
+        ? await recallOperatingMemory(prisma, claims.org_id, input, special ? { runtimeUserId: claims.sub, ...(runtimePrincipal.sharedOrganizationAgents ? {runtimeSessionId:claims.operating_session} : {}) } : {})
+        : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' || special ? 'runtime' : 'agent', ...(special && runtimePrincipal.sharedOrganizationAgents ? {runtimeSessionId:claims.operating_session} : {}) });
       jsonResponse(res, result, 200);
     } catch (error) {
       const known = /^(invalid_|reserved_|runtime_|superseded_|agenda_|memory_idempotency_conflict)/.test(String(error?.message || ''));
@@ -737,6 +748,7 @@ export async function handleHarnessChatBootstrapRoute({
 
 // Confirmed agendas must point to actual user speech in the authenticated Chief room.
 async function requireRuntimeAgendaConfirmation(db, principal, reference) {
+  principal = await nativeAgentStoragePrincipal(db,principal);
   const match = /^(event:([0-9]+)|call:([a-zA-Z0-9_-]{1,120}))$/.exec(String(reference || ''));
   if (!match) throw new Error('invalid_agenda_confirmation');
   await db.$transaction(async tx => {
@@ -750,6 +762,10 @@ async function requireRuntimeAgendaConfirmation(db, principal, reference) {
       principal.runtimeSessionId, principal.orgId, principal.userId, match[2] || null, match[3] || null);
     if (!events.some(event => {
       const data = event.payload.data ?? event.payload;
+      if (principal.sharedOrganizationAgents) {
+        const actor=match[2] ? data.source?.authenticatedActor : data.authenticatedActor;
+        if (actor ? actor.userId!==principal.actorUserId || actor.orgId!==principal.orgId : principal.actorUserId!==principal.userId) return false;
+      }
       return match[2] ? data.source?.kind === 'user' : data.hadUserSpeech === true;
     })) throw new Error('invalid_agenda_confirmation');
   });

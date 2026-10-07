@@ -92,26 +92,29 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
     return prisma.$transaction(tx => saveOperatingMemory(tx, input, identity, { ...options, runtimeTransaction: true }));
   }
   const row = validateOperatingMemory(input, { ...identity, source: options.source || 'agent' });
+  if (options.runtimeSessionId && RUNTIME_MEMORY_KINDS.includes(row.kind) && row.context.sessionId !== options.runtimeSessionId) throw new Error('runtime_memory_scope_required');
   if (row.kind === 'user_agenda' && row.context.agendaKey) {
-    // One explicit topic key has one active head. Independent goals use different keys.
-    // Execute rather than deserialize PostgreSQL's void advisory-lock result.
-    await prisma.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${row.orgId}:${row.userId}:agenda:${row.context.agendaKey}`);
+    const headScope=options.runtimeSessionId || row.userId;
+    await prisma.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${row.orgId}:${headScope}:agenda:${row.context.agendaKey}`);
     const current = await prisma.$queryRawUnsafe(`SELECT m.id,m.idempotency_key FROM hivemind.hyper_agent_operating_memories m
-      WHERE m.org_id=$1::uuid AND m.author_user_id=$2::uuid AND m.agent_slug='runtime' AND m.kind='user_agenda'
-        AND m.project_slug='hyper-agents' AND m.context->>'agendaKey'=$3 AND m.context->>'state'='confirmed'
+      WHERE m.org_id=$1::uuid AND ($2::uuid IS NULL OR m.author_user_id=$2::uuid)
+        AND ($4::text IS NULL OR m.context->>'sessionId'=$4)
+        AND m.agent_slug='runtime' AND m.kind='user_agenda' AND m.project_slug='hyper-agents'
+        AND m.context->>'agendaKey'=$3 AND m.context->>'state'='confirmed'
         AND NOT EXISTS (SELECT 1 FROM hivemind.hyper_agent_operating_memories successor
-          WHERE successor.org_id=m.org_id AND successor.author_user_id=m.author_user_id AND successor.kind=m.kind
-            AND successor.context->>'supersedesId'=m.id::text)`, row.orgId, row.userId, row.context.agendaKey);
-    if (current.some(prior => prior.idempotency_key !== row.idempotencyKey && prior.id !== row.context.supersedesId))
-      throw new Error('agenda_supersession_required');
+          WHERE successor.org_id=m.org_id AND successor.kind=m.kind AND successor.context->>'supersedesId'=m.id::text)`,
+      row.orgId, options.runtimeSessionId ? null : row.userId, row.context.agendaKey, options.runtimeSessionId || null);
+    if (current.some(prior => prior.idempotency_key !== row.idempotencyKey && prior.id !== row.context.supersedesId)) throw new Error('agenda_supersession_required');
   }
+
   if (row.context.supersedesId) {
     const prior = await prisma.$queryRawUnsafe(`
       SELECT id FROM hivemind.hyper_agent_operating_memories
       WHERE id = $1::uuid AND org_id = $2::uuid AND project_slug = 'hyper-agents'
         AND kind = $3 AND agent_slug = $4
-        AND ($5::uuid IS NULL OR author_user_id = $5::uuid) LIMIT 1 ${RUNTIME_MEMORY_KINDS.includes(row.kind) ? 'FOR UPDATE' : ''}`,
-    row.context.supersedesId, row.orgId, row.kind, row.agentSlug, RUNTIME_MEMORY_KINDS.includes(row.kind) ? row.userId : null);
+        AND ($5::uuid IS NULL OR author_user_id = $5::uuid)
+        AND ($6::text IS NULL OR context->>'sessionId'=$6) LIMIT 1 ${RUNTIME_MEMORY_KINDS.includes(row.kind) ? 'FOR UPDATE' : ''}`,
+    row.context.supersedesId, row.orgId, row.kind, row.agentSlug, RUNTIME_MEMORY_KINDS.includes(row.kind) && !options.runtimeSessionId ? row.userId : null, options.runtimeSessionId || null);
     if (!prior.length) throw new Error('superseded_memory_unavailable');
     if (RUNTIME_MEMORY_KINDS.includes(row.kind)) {
       const successors = await prisma.$queryRawUnsafe(`SELECT id FROM hivemind.hyper_agent_operating_memories
@@ -165,8 +168,14 @@ export async function recallOperatingMemory(prisma, orgId, input = {}, options =
   if (!options.runtimeUserId) clauses.push("m.kind NOT IN ('user_agenda', 'uncertainty')");
   else {
     if (!UUID.test(options.runtimeUserId)) throw new Error('invalid_identity');
-    args.push(options.runtimeUserId);
-    clauses.push(`(m.kind NOT IN ('user_agenda', 'uncertainty') OR m.author_user_id = $${args.length}::uuid)`);
+    if (options.runtimeSessionId) {
+      if (!/^session-[a-z0-9-]{1,120}$/.test(options.runtimeSessionId)) throw new Error('invalid_runtime_memory_session');
+      args.push(options.runtimeSessionId);
+      clauses.push(`(m.kind NOT IN ('user_agenda', 'uncertainty') OR m.context->>'sessionId'=$${args.length})`);
+    } else {
+      args.push(options.runtimeUserId);
+      clauses.push(`(m.kind NOT IN ('user_agenda', 'uncertainty') OR m.author_user_id = $${args.length}::uuid)`);
+    }
   }
   if (filter.state) { args.push(filter.state); clauses.push(`m.context->>'state' = $${args.length}`); }
   for (const [column, value, cast] of [

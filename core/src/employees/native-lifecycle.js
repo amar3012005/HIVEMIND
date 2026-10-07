@@ -1,6 +1,7 @@
 /** Core registry authority for native employee lifecycle; never provisions legacy credentials. */
 import { createHash, randomUUID } from 'node:crypto';
 import { validateEmployeeAppearance } from './humation-appearance.js';
+import { nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
 
 const VERSION = 1;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -145,6 +146,7 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
 
 /** A signed operating claim must refer to this administrator's actual persistent Chief room. */
 export async function requireNativeRuntime(db, principal) {
+  principal = await nativeAgentStoragePrincipal(db,principal);
   await db.$transaction(async tx => {
     await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)", principal.orgId, principal.userId);
     const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
@@ -166,6 +168,7 @@ export async function requireNativeRuntime(db, principal) {
 
 /** Self refinement is bound to an actual tenant-owned persistent employee root. */
 export async function requireNativeEmployeeProfile(db, principal) {
+  principal = await nativeAgentStoragePrincipal(db,principal);
   if (!UUID.test(principal.employeeId || '')) lifecycleError('employee_profile_scope_required',403);
   await db.$transaction(async tx => {
     await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",principal.orgId,principal.userId);
@@ -250,6 +253,7 @@ export async function inspectNativeCloseout(tx, principal, employee) {
 /** Administrator-only attestation for the existing native host's limited lifecycle effects. */
 export async function nativeLifecycleHostProof(db, principal, employeeId) {
   await requireLifecycleAdministrator(db, principal);
+  const storage=await nativeAgentStoragePrincipal(db,principal);
   return db.$transaction(async tx => {
     const employee = await tx.digitalEmployee.findFirst({ where: { id: employeeId, orgId: principal.orgId } });
     const lifecycle = nativeLifecycle(employee);
@@ -273,7 +277,7 @@ export async function nativeLifecycleHostProof(db, principal, employeeId) {
       && (presets.get(row.id) ?? row.header.agentPreset) === 'hivemind-hq'
       && owners.get(row.id)?.slug === 'runtime' && owners.get(row.id)?.id === null);
     if (rooms.length > 1000 || chiefs.length > 1000) lifecycleError('native_room_enumeration_limit', 503);
-    const chief = chiefs.find(row => row.user_id === principal.userId);
+    const chief = chiefs.find(row => row.user_id === storage.userId);
     return { employeeId, revision: lifecycle.revision, kind: lifecycle.kind, phase: lifecycle.phase,
       expiresAt: lifecycle.expires_at,
       ...(lifecycle.onboarding_required && lifecycle.profile_stage !== 'runtime_review' && lifecycle.phase === 'active' ? { onboarding: {name:employee.name,role:employee.roleArchetype,creationHash:lifecycle.creation_hash} } : {}),

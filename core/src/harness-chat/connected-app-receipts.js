@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { organizationAgentSessionAccess } from './organization-agent-access.js';
 
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024;
 const MAX_FIELDS = 32;
@@ -119,9 +120,10 @@ export async function readConnectedAppReceipt({ prisma, owner, receiptId, sessio
   if (!UUID_RE.test(owner.orgId) || !UUID_RE.test(owner.userId) || !UUID_RE.test(receiptId) || !isHarnessSessionId(sessionId)) fail('invalid_receipt_read');
   const requested = fields(requestedFields);
   if (requested.length === 0) fail('receipt_fields_required');
+  const shared = await organizationAgentSessionAccess(prisma,{...owner,sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true'},sessionId);
   return scoped(prisma, owner, async (tx) => {
     const row = await tx.connectedAppReceipt.findFirst({
-      where: { id: receiptId, orgId: owner.orgId, userId: owner.userId, sessionId },
+      where: { id: receiptId, orgId: owner.orgId, ...(shared ? {} : {userId:owner.userId}), sessionId },
     });
     if (!row) fail('receipt_not_found', 404);
     if (row.expiresAt <= now) fail('receipt_expired', 410);

@@ -90,3 +90,20 @@ test('denies the same user in another organization before decrypting the receipt
     receiptId: stored.id, sessionId: input().session_id, requestedFields: ['body'], env,
   }), /receipt_not_found/);
 });
+
+test('another admin reads only approved shared-room receipt fields without changing its original author',async()=>{
+  const db=database(),sharedEnv={...env,HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED:'true'};
+  const b={...owner,userId:'64f5568b-4d6a-4ae1-9a33-48cb2909d59b'};
+  const original=db.prisma.$transaction;
+  db.prisma.$transaction=work=>original(tx=>work({...tx,$queryRawUnsafe:async(sql,...args)=> {
+    if(sql.includes('set_config')) return [];
+    if(sql.includes('organization_agent_storage_scope')) return [{storage_user_id:owner.userId,runtime_session_id:input().session_id}];
+    if(sql.includes('FROM hivemind.harness_company_hq')) return [{session_id:input().session_id}];
+    return args[0]===input().session_id?[{header:{},preset:'hivemind-hq'}]:[{header:{},preset:'hivemind-chat'}];
+  }}));
+  const stored=await storeConnectedAppReceipt({prisma:db.prisma,owner,input:input(),env});
+  assert.deepEqual(await readConnectedAppReceipt({prisma:db.prisma,owner:b,receiptId:stored.id,sessionId:input().session_id,requestedFields:['body'],env:sharedEnv}),{body:'private full body'});
+  assert.equal(db.rows.get(stored.id).userId,owner.userId);
+  await assert.rejects(readConnectedAppReceipt({prisma:db.prisma,owner:b,receiptId:stored.id,sessionId:'session-privatebrain',requestedFields:['body'],env:sharedEnv}),/receipt_not_found/);
+  await assert.rejects(readConnectedAppReceipt({prisma:db.prisma,owner:b,receiptId:stored.id,sessionId:input().session_id,requestedFields:['token'],env:sharedEnv}),/receipt_field_not_allowed/);
+});

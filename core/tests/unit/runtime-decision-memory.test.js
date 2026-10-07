@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateOperatingMemory, recallOperatingMemory } from '../../src/hyperagents/operating-memory.js';
+import { validateOperatingMemory, recallOperatingMemory, saveOperatingMemory } from '../../src/hyperagents/operating-memory.js';
 const identity={orgId:'67503d34-97e9-49a8-8c52-8ee30cc7603e',userId:'54f5568b-4d6a-4ae1-9a33-48cb2909d59b',source:'runtime'};
 const note={kind:'uncertainty',agent_slug:'runtime',title:'Which customer segment?',summary:'The current evidence does not settle the segment.',idempotency_key:'decision-canary',context:{sessionId:'session-canary',state:'open',priority:90,impact:'Unblocks the next research brief.',evidence:['call:canary']}};
 test('Runtime records validate typed metadata, author and provenance',()=>{
@@ -33,4 +33,15 @@ test('Private Runtime saves accept omitted evidence and impact without approval'
  assert.equal(validateOperatingMemory({...note,kind:'user_agenda',context:{...minimal,state:'confirmed',confirmationRef:'event:7'}},identity).kind,'user_agenda');
  assert.throws(()=>validateOperatingMemory({...note,context:{...minimal,evidence:['']}},identity),/invalid_runtime_memory_evidence/);
  assert.throws(()=>validateOperatingMemory({...note,context:{...minimal,impact:42}},identity),/invalid_runtime_memory_impact/);
+});
+
+test('explicit agenda topics cannot branch without exact supersession; independent keys remain allowed',async()=>{
+ const agenda={...note,kind:'user_agenda',context:{...note.context,state:'confirmed',confirmationRef:'event:7',agendaKey:'sales'}};
+ assert.equal(validateOperatingMemory(agenda,identity).context.agendaKey,'sales');
+ assert.throws(()=>validateOperatingMemory({...agenda,context:{...agenda.context,agendaKey:'Bad topic'}},identity),/invalid_agenda_key/);
+ assert.throws(()=>validateOperatingMemory({...note,context:{...note.context,agendaKey:'sales'}},identity),/invalid_agenda_key/);
+ const prior='11111111-1111-4111-8111-111111111111';let locked=false;
+ const db={$executeRawUnsafe:async()=>{locked=true;},$queryRawUnsafe:async()=>[{id:prior,idempotency_key:'old'}]};
+ await assert.rejects(saveOperatingMemory(db,agenda,identity,{source:'runtime',runtimeTransaction:true}),/agenda_supersession_required/);
+ assert.equal(locked,true);
 });

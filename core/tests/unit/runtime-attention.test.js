@@ -4,7 +4,7 @@ import { assessRuntimeAttention } from '../../src/connectors/composio/runtime-at
 
 const event = { id: 'event', org_id: 'org', user_id: 'user', subscription_id: 'sub', toolkit: 'slack', data: { text: 'A buyer decision changed.' } };
 const consent = { enabled: true, orgId: 'org', userId: 'user', subscriptionId: 'sub' };
-const snapshot = { orgId: 'org', userId: 'user', sessionId: 'native-room', revision: 'receipt', enabled: true, goals: ['Buyer validation'] };
+const snapshot = { orgId: 'org', userId: 'user', sessionId: 'native-room', revision: 'receipt', enabled: true, goals: ['Buyer validation'], decisionMemory: { ready: true, revision: 'private-v1', userAgenda: [{ id:'agenda',title:'Buyer validation',summary:'Confirm qualified buyers',state:'confirmed' }], uncertainties: [] } };
 const evaluate = (choice, overrides = {}) => assessRuntimeAttention({ event, consent, snapshot,
   provider: { decideChoice: async () => ({ choice, probability: 0.9, margin: 0.5 }) }, ...overrides });
 
@@ -43,4 +43,19 @@ test('bounded untrusted projection excludes raw credentials and provider identif
   assert.equal(request.state.source_is_untrusted, true);
   assert.equal(request.state.event.preview.length, 900);
   assert.ok(!JSON.stringify(request).includes('secret'));
+});
+
+test('missing, conflicted or truncated private direction never reaches model', async () => {
+  for (const decisionMemory of [undefined, { ready:false,agendaConflict:true }]) {
+    let calls=0;
+    const result=await evaluate('wake',{ snapshot:{...snapshot,decisionMemory},provider:{decideChoice:()=>{calls++;}} });
+    assert.equal(result.reason,'decision_memory_unavailable'); assert.equal(calls,0);
+  }
+});
+test('typed direction stays whole and decision records its private revision', async () => {
+  let request;
+  const result=await evaluate('wake',{provider:{decideChoice:async value=>{request=value;return {choice:'wake',probability:0.9,margin:0.5};}}});
+  assert.deepEqual(request.state.runtime.decisionMemory,snapshot.decisionMemory);
+  assert.equal(result.decisionMemoryRevision,'private-v1');
+  assert.match(request.instructions,/dates alone do not establish/);
 });

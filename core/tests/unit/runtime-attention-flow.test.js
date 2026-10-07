@@ -12,14 +12,14 @@ async function run({ optIn = true, attention = 'wake', prior, failDelivery = fal
     $executeRawUnsafe: async (sql, ...args) => { writes.push({ sql, args }); },
   }, runtimeAttention: {
     readConsent: async () => ({ enabled: true, orgId, userId, subscriptionId: 'sub' }),
-    readSnapshot: async () => ({ orgId, userId, sessionId: 'native-root', revision: 'native-revision', enabled: true, tasks: [{ id: 'task', status: 'running' }] }),
+    readSnapshot: async () => ({ orgId, userId, sessionId: 'native-root', revision: 'native-revision', enabled: true, decisionMemory:{ready:true,revision:'private-v1',userAgenda:[],uncertainties:[]}, tasks: [{ id: 'task', status: 'running' }] }),
     deliver: async () => { calls.push('deliver'); if (failDelivery) throw Error('unknown'); return { status: 'accepted', reused: Boolean(prior) }; },
   } };
   const original = globalThis.fetch, oldKey = process.env.JEV_OPENROUTER_API_KEY;
   process.env.JEV_OPENROUTER_API_KEY = 'fixture-only';
   globalThis.fetch = async (_url, options) => {
     const payload = JSON.parse(options.body); calls.push(payload);
-    const index = payload.state.policy === 'runtime_attention_v1' ? { retain: 0, notify: 1, wake: 2 }[attention] : 0;
+    const index = payload.state.policy === 'runtime_attention_v2' ? { retain: 0, notify: 1, wake: 2 }[attention] : 0;
     return new Response(JSON.stringify({ answers: { decision: { type: 'choice', choice: `option_${index}`,
       probabilities: { [`option_${index}`]: 0.95, [`option_${index === 0 ? 1 : 0}`]: 0.05 } } } }));
   };
@@ -35,12 +35,13 @@ test('existing suggestions-only subscription never reads or wakes Runtime', asyn
 });
 test('opt-in uses native active context and saves exact decision before native delivery', async () => {
   const result = await run();
-  assert.equal(result.calls[0].state.company_context.runtime.tasks[0].id, 'task');
-  assert.equal(result.calls[1].state.runtime.autonomyEnabled, true);
+  assert.equal(result.calls[0].state.runtime.tasks.includes('task'), true);
+  assert.equal(result.calls[0].state.runtime.autonomyEnabled, true);
   const receipt = JSON.parse(result.writes[0].args[1]);
   assert.equal(receipt.runtimeAttention.action, 'wake');
   assert.equal(receipt.runtimeAttention.contextRevision, 'native-revision');
-  assert.equal(result.calls[2], 'deliver');
+  assert.equal(result.calls[1], 'deliver');
+  assert.equal(result.calls.filter(call=>typeof call==='object').length,1);
   assert.ok(result.writes[1].sql.includes('runtimeDelivery'));
 });
 test('notify and quiet retain produce no native wake', async () => {
@@ -58,11 +59,11 @@ test('unknown delivery is pending and reconciliation precedes new classification
   assert.ok(recovered.writes[0].sql.includes('runtimeDelivery'));
 });
 
-test('real Gmail preview object preserves message text through both Jev projections', async () => {
+test('real Gmail preview object preserves message text through one shared attention projection', async () => {
   const body = 'Synthetic owner-approved test. No actual customer claim.';
   const result = await run({ eventData: { subject: 'Test only', preview: { body: 'Short preview', subject: 'Test only', credentials: 'secret' }, message_text: body } });
   assert.equal(result.calls[0].state.event.preview, body);
-  assert.equal(result.calls[1].state.event.preview, body);
+  assert.equal(result.calls.filter(call=>typeof call==='object').length,1);
   assert.ok(!JSON.stringify(result.calls).includes('[object Object]'));
   assert.ok(!JSON.stringify(result.calls).includes('secret'));
 });

@@ -114,25 +114,28 @@ export function classifyPendingActivity(ctx) {
           native = consent?.enabled === true ? await bridge.readSnapshot(row) : undefined;
         } catch { /* Preserve the event; unavailable native context cannot authorize a wake. */ }
       }
-      const receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit },
-        context: native ? { ...context, runtime: native } : context });
-      // Optional native bridge contract. Existing suggestions-only installations
-      // do not opt in and never start Runtime work. Consent and snapshot readers
-      // must be authoritative, owner-scoped and supplied by the native bridge.
-      // Persist the attention receipt here; delivery is deliberately not assumed
-      // successful from an inbox enqueue or a classifier result.
-      if (receipt.status === 'approved' && optedIn) {
-        try {
-          const snapshot = native && { ...native, company: context };
+      // Opted-in Runtime uses one goal-aware attention judgment, not a second
+      // competing company relevance model. Suggestions-only subscriptions retain
+      // their existing behavior. Source-specific auth and sensitive noise guards
+      // remain outside model judgment.
+      let receipt;
+      if (optedIn) {
+        const preview = connectedEventPreview(row.data || {}, 900);
+        const labels = Array.isArray(row.data?.label_ids) ? row.data.label_ids : [];
+        const sensitive = labels.some(label => ['SPAM', 'TRASH'].includes(label))
+          || /\b(?:password reset|verification code|one.time (?:password|code)|sign.in code)\b/i.test(`${row.data?.subject || ''} ${row.data?.title || ''} ${preview}`);
+        let attention;
+        if (sensitive) attention = { action: 'retain', reason: 'noise_or_sensitive' };
+        else try {
           const config = decisionGatewayProviderConfig();
           const provider = createOpenRouterJevProvider({ ...config, timeoutMs: 5000, siteName: 'HIVEMIND Runtime Attention' });
-          receipt.runtimeAttention = await assessRuntimeAttention({ event: { ...row, toolkit: sub[0].toolkit },
-            consent, snapshot, provider });
-        } catch {
-          receipt.runtimeAttention = { action: 'retain', reason: 'context_unavailable' };
-        }
-        if (['context_unavailable', 'decision_unavailable'].includes(receipt.runtimeAttention?.reason)) receipt.status = 'pending';
-      }
+          attention = await assessRuntimeAttention({ event: { ...row, toolkit: sub[0].toolkit },
+            consent, snapshot: native && { ...native, company: context }, provider });
+        } catch { attention = { action: 'retain', reason: 'context_unavailable' }; }
+        const unavailable = ['context_unavailable', 'decision_unavailable', 'decision_memory_unavailable'].includes(attention.reason);
+        receipt = { policy: POLICY, status: unavailable ? 'pending' : attention.action === 'retain' ? 'rejected' : 'approved',
+          source: 'runtime_attention', runtimeAttention: attention };
+      } else receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit }, context });
       await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status=$1,relevance_decision=$2::jsonb,evaluated_at=now() WHERE id=$3`, receipt.status, JSON.stringify(receipt), row.id);
       if (receipt.runtimeAttention?.action === 'wake' && bridge) {
         try {

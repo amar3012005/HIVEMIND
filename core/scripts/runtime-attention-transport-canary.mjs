@@ -29,7 +29,7 @@ try {
   const before = await call('context');
   if (before.httpStatus !== 200 || before.receipt.snapshot?.enabled !== true) throw Error('current_native_context_required');
   const snapshot = before.receipt.snapshot;
-  const testDecision = { ...base, runtimeAttention: { policy: 'runtime_attention_v1', source: 'live_transport_canary', action: 'wake',
+  const testDecision = { ...base, runtimeAttention: { policy: 'runtime_attention_v2', source: 'live_transport_canary', action: 'wake',
     contextRevision: snapshot.revision, targetSessionId: snapshot.sessionId, probability: 1, margin: 1 } };
   // Only the new, explicitly labeled test event is changed. Genuine Jev receipts remain untouched.
   await db.$executeRawUnsafe('UPDATE hivemind.hivemind_trigger_events SET relevance_decision=$1::jsonb WHERE id=$2 AND org_id=$3 AND user_id=$4',

@@ -38,7 +38,7 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
   if (supersedesId && !UUID.test(supersedesId)) throw new Error('invalid_supersedes_id');
   if (supersedesId && !['learning', 'decision_note', 'handoff', ...RUNTIME_MEMORY_KINDS].includes(kind)) throw new Error('invalid_supersession_kind');
   if (RUNTIME_MEMORY_KINDS.includes(kind)) {
-    const permitted = new Set(['sessionId', 'state', 'priority', 'evidence', 'impact', 'confirmationRef']);
+    const permitted = new Set(['sessionId', 'state', 'priority', 'evidence', 'impact', 'confirmationRef', 'agendaKey']);
     if (Object.keys(context).some(key => !permitted.has(key))) throw new Error('invalid_runtime_memory_metadata');
     if (!/^session-[a-z0-9-]{1,120}$/.test(context.sessionId || '')) throw new Error('invalid_runtime_memory_session');
     const states = kind === 'user_agenda' ? ['confirmed', 'superseded'] : ['open', 'resolved', 'superseded'];
@@ -46,6 +46,7 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
     if (!Number.isInteger(context.priority) || context.priority < 0 || context.priority > 100) throw new Error('invalid_runtime_memory_priority');
     if (context.impact !== undefined && (typeof context.impact !== 'string' || context.impact.length > 500)) throw new Error('invalid_runtime_memory_impact');
     if (context.evidence !== undefined && (!Array.isArray(context.evidence) || context.evidence.length > 8 || context.evidence.some(ref => typeof ref !== 'string' || !ref.trim() || ref.length > 300))) throw new Error('invalid_runtime_memory_evidence');
+    if (context.agendaKey !== undefined && (kind !== 'user_agenda' || typeof context.agendaKey !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,79}$/.test(context.agendaKey))) throw new Error('invalid_agenda_key');
     if (kind === 'user_agenda' && !/^(?:event:[0-9]+|call:[a-zA-Z0-9_-]{1,120})$/.test(context.confirmationRef || '')) throw new Error('invalid_agenda_confirmation');
     if (kind === 'uncertainty' && context.confirmationRef !== undefined) throw new Error('invalid_runtime_memory_metadata');
     if (context.state !== (kind === 'user_agenda' ? 'confirmed' : 'open') && !supersedesId) throw new Error('invalid_runtime_memory_resolution');
@@ -91,6 +92,19 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
     return prisma.$transaction(tx => saveOperatingMemory(tx, input, identity, { ...options, runtimeTransaction: true }));
   }
   const row = validateOperatingMemory(input, { ...identity, source: options.source || 'agent' });
+  if (row.kind === 'user_agenda' && row.context.agendaKey) {
+    // One explicit topic key has one active head. Independent goals use different keys.
+    // Execute rather than deserialize PostgreSQL's void advisory-lock result.
+    await prisma.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${row.orgId}:${row.userId}:agenda:${row.context.agendaKey}`);
+    const current = await prisma.$queryRawUnsafe(`SELECT m.id,m.idempotency_key FROM hivemind.hyper_agent_operating_memories m
+      WHERE m.org_id=$1::uuid AND m.author_user_id=$2::uuid AND m.agent_slug='runtime' AND m.kind='user_agenda'
+        AND m.project_slug='hyper-agents' AND m.context->>'agendaKey'=$3 AND m.context->>'state'='confirmed'
+        AND NOT EXISTS (SELECT 1 FROM hivemind.hyper_agent_operating_memories successor
+          WHERE successor.org_id=m.org_id AND successor.author_user_id=m.author_user_id AND successor.kind=m.kind
+            AND successor.context->>'supersedesId'=m.id::text)`, row.orgId, row.userId, row.context.agendaKey);
+    if (current.some(prior => prior.idempotency_key !== row.idempotencyKey && prior.id !== row.context.supersedesId))
+      throw new Error('agenda_supersession_required');
+  }
   if (row.context.supersedesId) {
     const prior = await prisma.$queryRawUnsafe(`
       SELECT id FROM hivemind.hyper_agent_operating_memories

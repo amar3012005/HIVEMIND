@@ -14,7 +14,7 @@ Updated 8 October 2026. This record is implementation evidence, not store readin
 
 ## Concrete deployment blocker
 
-The runner remains on sha-40b0561a1e-anticipatory-cumulative: its authenticated idle probe reports one active turn. Earlier bounded waits declined deployment. A new bounded idle guard for 8b119aea is running; its log is /root/releases/mobile-store-runner-8b119aea/cutover.log. Deployment requires two idle observations and changes only the runner. Do not interrupt active work or enable native Runner readiness before matched admission and consent verification. Consult the log and Docker revision before treating this record as current deployment status.
+The runner remains on sha-40b0561a1e-anticipatory-cumulative: its authenticated idle probe reports one active turn. Earlier bounded waits declined deployment. The final ten-minute idle guard for 8b119aea ended with exit code 4 and no deployment; active_turns remained 1. No cutover process is running. Its log is /root/releases/mobile-store-runner-8b119aea/cutover.log. Deployment requires two idle observations and changes only the runner. Do not interrupt active work or enable native Runner readiness before matched admission and consent verification. Consult the log and Docker revision before treating this record as current deployment status.
 
 ## Remaining verification and external gates
 

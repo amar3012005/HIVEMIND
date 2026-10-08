@@ -162,7 +162,7 @@ test('original-file inventory admits only referenced personal sources without st
   for (const name of ['memory','knowledgeSegment','userProfile','platformIntegration','harnessSession','harnessSessionEvent','auditLog']) prisma[name] = { findMany: async () => [] };
   prisma.knowledgeDocument = { findMany: async () => [{ id: 'd', sourceArtifactId: 's', tags: ['scope-key:personal:self'] }] };
   let sourceQuery;
-  prisma.sourceArtifact = { findMany: async query => { sourceQuery = query; return [{ id: 's', artifactType: 'upload', sizeBytes: 42n }]; } };
+  prisma.sourceArtifact = { findMany: async query => { sourceQuery = query; return [{ id: 's', artifactType: 'upload', sizeBytes: 42n, documents: [{ tags: ['scope-key:personal:self'] }] }, { id: 'mixed', documents: [{ tags: ['scope-key:personal:self', 'scope-key:org:A'] }] }]; } };
   const result = await exportAccountRecords(prisma, 'self');
   assert.deepEqual(sourceQuery.where, { userId: 'self', id: { in: ['s'] }, documents: { every: { userId: 'self', tags: { has: 'scope-key:personal:self' } } } });
   assert.equal(sourceQuery.select.storageLocation, undefined);
@@ -170,4 +170,6 @@ test('original-file inventory admits only referenced personal sources without st
   assert.equal(result.originalFileInventory[0].bytesIncluded, false);
   assert.equal(result.originalFileInventory[0].availability, 'not_verified');
   assert.equal(result.documents[0].sourceArtifactId, undefined);
+  assert.equal(result.originalFileInventory.length, 1);
+  assert.equal(result.originalFileInventory[0].documents, undefined);
 });

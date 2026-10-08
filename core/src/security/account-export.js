@@ -25,9 +25,9 @@ export async function exportAccountRecords(prisma, userId) {
   const sourceIds = [...new Set(documentRows.map(row => row.sourceArtifactId).filter(Boolean))];
   const originalFiles = sourceIds.length ? await read('sourceArtifact', {
     where: { userId, id: { in: sourceIds }, documents: { every: { userId, tags: { has: `scope-key:personal:${userId}` } } } },
-    select: { id: true, artifactType: true, contentType: true, sizeBytes: true, checksum: true, createdAt: true },
-  }) : [];
-  const originalFileInventory = originalFiles.map(row => ({ ...row, bytesIncluded: false, availability: 'not_verified', reason: 'Stored source metadata does not establish retained original bytes; ingestion staging objects may already be removed.' }));
+    select: { id: true, artifactType: true, contentType: true, sizeBytes: true, checksum: true, createdAt: true, documents: { select: { tags: true } } },
+  }, { allowRow: row => Array.isArray(row.documents) && row.documents.length > 0 && row.documents.every(doc => (doc.tags || []).includes(`scope-key:personal:${userId}`) && !(doc.tags || []).some(tag => /^scope-key:(org|organization|project|team)(:|$)/.test(tag))) }) : [];
+  const originalFileInventory = originalFiles.map(({ documents: sourceDocuments, ...row }) => ({ ...row, bytesIncluded: false, availability: 'not_verified', reason: 'Stored source metadata does not establish retained original bytes; ingestion staging objects may already be removed.' }));
   const sections = await read('knowledgeSegment', { where: { document: { userId }, documentId: { in: documents.map(row => row.id) } } });
   const profiles = await read('userProfile', { where: { userId, orgId: null } });
   const connectors = await read('platformIntegration', { where: { userId }, select: { id: true, platformType: true, platformUserId: true, platformDisplayName: true, oauthScopes: true, isActive: true, lastSyncedAt: true, syncStatus: true } });

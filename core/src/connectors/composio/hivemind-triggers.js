@@ -1,3 +1,4 @@
+import { reconcileDelegatedConnections } from '../../harness-chat/delegated-connection-completion.js';
 import { automaticTriggerPlan } from './automatic-trigger-plan.js';
 import { classifyPendingActivity, ACTIVITY_RELEVANCE_POLICY } from './activity-relevance.js';
 import { createHmac, timingSafeEqual, randomUUID, createHash } from 'node:crypto';
@@ -221,6 +222,9 @@ export async function reconcileConnectedActivity(ctx, { force = false } = {}) {
   if (!ctx.orgId || !ctx.userId || !ctx.prisma) fail('Authenticated account required.', 401);
   const membership = await ctx.prisma.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { isActive: true, role: true } });
   if (!membership?.isActive || !['owner', 'admin'].includes(membership.role)) return { status: 'admin_required', events: [] };
+  // Recheck blocked native work before the trigger-catalog cache. A late OAuth
+  // completion is not lost merely because the first five-minute check elapsed.
+  await reconcileDelegatedConnections(ctx).catch(() => console.warn('[delegated-connection] completion reconciliation unavailable'));
   const key = `${ctx.orgId}:${ctx.userId}`;
   const previous = reconciliations.get(key);
   if (previous?.promise) return previous.promise;

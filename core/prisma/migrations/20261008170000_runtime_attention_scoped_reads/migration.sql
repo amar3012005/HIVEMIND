@@ -1,7 +1,8 @@
 -- Native attention reads only authenticated-admin evidence and the canonical
 -- Runtime's two decision types. Never grant the runner base-table access.
 CREATE VIEW hivemind.hivemind_attention_subscriptions WITH (security_barrier=true) AS
-SELECT s.id,s.org_id,s.user_id,s.account_id,s.toolkit,s.config,s.status,
+SELECT s.id,s.org_id,s.user_id,s.account_id,s.toolkit,
+ jsonb_build_object('source',s.config->>'source') AS config,s.status,
  s.runtime_attention,s.runtime_attention_revision,s.runtime_attention_enabled_at
 FROM hivemind.hivemind_trigger_subscriptions s
 JOIN hivemind.user_organizations a ON a.org_id::text=s.org_id AND a.user_id::text=s.user_id
@@ -40,7 +41,8 @@ SELECT e.id,e.subscription_id,e.org_id,e.user_id,e.data,e.occurred_at,e.received
   SELECT m.created_at FROM hivemind.memories m WHERE m.id::text=e.data->'_source'->>'memory_id' AND m.org_id::text=e.org_id
  ) ELSE NULL END AS native_source_created_at
 FROM hivemind.hivemind_trigger_events e
-JOIN hivemind.hivemind_attention_subscriptions s ON s.id=e.subscription_id AND s.org_id=e.org_id AND s.user_id=e.user_id;
+JOIN hivemind.hivemind_trigger_subscriptions s ON s.id=e.subscription_id AND s.org_id=e.org_id AND s.user_id=e.user_id
+JOIN hivemind.hivemind_attention_subscriptions admitted ON admitted.id=s.id AND admitted.org_id=s.org_id AND admitted.user_id=s.user_id;
 
 CREATE VIEW hivemind.hivemind_attention_decision_memories WITH (security_barrier=true) AS
 SELECT m.id,m.org_id,m.author_user_id,m.kind,m.title,m.summary,m.context,m.created_at,m.project_slug,m.agent_slug

@@ -10,6 +10,7 @@ test('attention exposes scoped security-barrier views without base-table grants'
   assert.match(sql, /current_setting\('app.hivemind_org_id',true\)/);
   assert.match(sql, /current_setting\('app.hivemind_user_id',true\)/);
   assert.match(sql, /a.role IN\('owner','admin'\)/);
+  assert.match(sql, /jsonb_build_object\('source',s.config->>'source'\) AS config/);
 });
 test('decision memory is limited to canonical Runtime typed records', () => {
   assert.match(sql, /m.agent_slug='runtime'/);

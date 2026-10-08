@@ -19,13 +19,14 @@ export async function organizationAgentAccess(db, { userId, orgId }, { schema = 
     JOIN ${schema}.harness_sessions s ON s.id=h.session_id AND s.org_id=h.org_id AND s.user_id=h.user_id
     WHERE h.org_id=$1::uuid AND s.status='active' LIMIT 1`, orgId);
   const root = roots[0];
+  const initial = root ? null : await nativeAgentStoragePrincipal(db,{userId,orgId,sharedOrganizationAgents:true});
 
   return {
     contract: 'hivemind.organization-agent-access.v1',
     actor: { user_id: userId, org_id: orgId, role: membership.role,
       name: typeof user.displayName === 'string' ? user.displayName.trim().slice(0, 180) : '',
       authority: 'authenticated-profile' },
-    agent: { org_id: orgId, runtime_session_id: root?.session_id ?? null, storage_user_id: root?.user_id ?? userId },
+    agent: { org_id: orgId, runtime_session_id: root?.session_id ?? null, storage_user_id: root?.user_id ?? initial.userId },
     access: 'read-write',
   };
 }

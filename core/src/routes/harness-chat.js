@@ -528,7 +528,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
         : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' || special ? 'runtime' : 'agent', ...(special && runtimePrincipal.sharedOrganizationAgents ? {runtimeSessionId:claims.operating_session} : {}) });
       jsonResponse(res, result, 200);
     } catch (error) {
-      const known = /^(invalid_|reserved_|runtime_|superseded_|agenda_|memory_idempotency_conflict)/.test(String(error?.message || ''));
+      const known = /^(invalid_|reserved_|runtime_|canonical_|organization_agent_|superseded_|agenda_|memory_idempotency_conflict)/.test(String(error?.message || ''));
       jsonResponse(res, { error: known ? error.message : 'operating_memory_unavailable' }, error.status || (known ? 400 : 503));
     }
     return true;

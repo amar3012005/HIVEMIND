@@ -1,3 +1,4 @@
+import { requireReconciledSourceErasure } from './security/account-erasure-inventory.js';
 import { exportAccountRecords, collectOwnedRecords } from './security/account-export.js';
 import { checkedVectorDelete } from './security/vector-erasure.js';
 import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
@@ -2965,6 +2966,7 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
       select: { orgId: true, org: { select: { plan: true } } },
     })).map((m) => ({ orgId: m.orgId, plan: m.org?.plan }));
 
+    await requireReconciledSourceErasure(prisma, userId);
     await purgeUserVectors(userId, userOrgs, orgIdsToDelete);
     emit(5, 'Verified vector erasure');
 

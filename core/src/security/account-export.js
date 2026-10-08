@@ -20,8 +20,14 @@ export async function exportAccountRecords(prisma, userId) {
   const profile = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, displayName: true, avatarUrl: true, timezone: true, locale: true, createdAt: true, updatedAt: true } });
   if (!profile) throw Object.assign(new Error('Account not found'), { status: 404 });
   const memories = await read('memory', { where: { userId, scope: 'personal' } });
-  const documentRows = await read('knowledgeDocument', { where: { userId, tags: { has: `scope-key:personal:${userId}` } }, select: { id: true, userId: true, title: true, documentType: true, tags: true, sourcePlatform: true, sourceId: true, sourceUrl: true, documentDate: true, language: true, wordCount: true, createdAt: true, updatedAt: true } }, { allowRow: row => (row.tags || []).includes(`scope-key:personal:${userId}`) && !(row.tags || []).some(tag => /^scope-key:(org|organization|project|team)(:|$)/.test(tag)) });
-  const documents = documentRows.map(({ tags, ...record }) => record);
+  const documentRows = await read('knowledgeDocument', { where: { userId, tags: { has: `scope-key:personal:${userId}` } }, select: { id: true, userId: true, title: true, documentType: true, sourceArtifactId: true, tags: true, sourcePlatform: true, sourceId: true, sourceUrl: true, documentDate: true, language: true, wordCount: true, createdAt: true, updatedAt: true } }, { allowRow: row => (row.tags || []).includes(`scope-key:personal:${userId}`) && !(row.tags || []).some(tag => /^scope-key:(org|organization|project|team)(:|$)/.test(tag)) });
+  const documents = documentRows.map(({ tags, sourceArtifactId, ...record }) => record);
+  const sourceIds = [...new Set(documentRows.map(row => row.sourceArtifactId).filter(Boolean))];
+  const originalFiles = sourceIds.length ? await read('sourceArtifact', {
+    where: { userId, id: { in: sourceIds }, documents: { every: { userId, tags: { has: `scope-key:personal:${userId}` } } } },
+    select: { id: true, artifactType: true, contentType: true, sizeBytes: true, checksum: true, createdAt: true },
+  }) : [];
+  const originalFileInventory = originalFiles.map(row => ({ ...row, bytesIncluded: false, availability: 'not_verified', reason: 'Stored source metadata does not establish retained original bytes; ingestion staging objects may already be removed.' }));
   const sections = await read('knowledgeSegment', { where: { document: { userId }, documentId: { in: documents.map(row => row.id) } } });
   const profiles = await read('userProfile', { where: { userId, orgId: null } });
   const connectors = await read('platformIntegration', { where: { userId }, select: { id: true, platformType: true, platformUserId: true, platformDisplayName: true, oauthScopes: true, isActive: true, lastSyncedAt: true, syncStatus: true } });
@@ -31,8 +37,8 @@ export async function exportAccountRecords(prisma, userId) {
   return {
     format: 'hivemind-account-records-v1', exported_at: new Date().toISOString(), user_id: userId,
     completeness: 'listed_record_categories',
-    included: ['profile', 'memories', 'document_metadata', 'document_sections', 'derived_profile', 'connector_metadata', 'personal_native_sessions', 'personal_native_events', 'audit'],
+    included: ['profile', 'memories', 'document_metadata', 'original_file_inventory', 'document_sections', 'derived_profile', 'connector_metadata', 'personal_native_sessions', 'personal_native_events', 'audit'],
     excluded: ['credentials_and_tokens', 'original_file_bytes', 'provider_and_backup_copies', 'organization_project_team_records', 'organization_agent_conversations', 'unlisted_record_categories'],
-    profile, memories, documents, sections, profiles, connectors, sessions, events, audit,
+    profile, memories, documents, sections, profiles, connectors, sessions, events, audit, originalFileInventory,
   };
 }

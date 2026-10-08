@@ -1,6 +1,8 @@
 # Mobile store readiness — 8 October 2026
 
-Evidence baseline: parent `a227a782f56de382e3f47121f4800df571ddc129`, frontend `18f19e69b58da58d479d8f3e78339bcbde5da182`. This is an audit of source and current public policy, **not store approval or a completed device certification**. Later implementation should attach actual artifact/device results to each gate. The mobile shell currently loads the hosted app; all reachable web routes, third-party SDKs, native permissions and generated content remain within review scope.
+Evidence baseline: parent `a227a782f56de382e3f47121f4800df571ddc129`, frontend `18f19e69b58da58d479d8f3e78339bcbde5da182`. This is an audit of source and current public policy, **not store approval or a completed device certification**. Later implementation should attach actual artifact/device results to each gate. The baseline mobile shell loads the hosted app; all reachable web routes, third-party SDKs, native permissions and generated content remain within review scope.
+
+Implementation update, 8 October 2026: native PKCE login, dedicated CP sessions, durable AI consent/report receipts, passkey-protected operator triage, no broad API key in native bootstrap and signed Runner consent revalidation now exist in source. See [SAFETY_OPERATIONS.md](SAFETY_OPERATIONS.md) for actual cookie/JWT and isolated Redis proof. The newer packaged local-shell bridge, signing, device behavior and deployed integration require their own evidence; the baseline findings below describe what prompted those changes and are not a claim that the source additions passed store review.
 
 ## Release gates
 

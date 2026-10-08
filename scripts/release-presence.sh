@@ -61,8 +61,11 @@ cleanup_stale() {
     updated="$(sed -n 's/^updated=//p' "$f" | head -1)"
     age=$(( $(now) - ${updated:-0} ))
     if [ "$age" -gt "$TTL" ]; then
+      (
       SESSION="$(sed -n 's/^session=//p' "$f" | head -1)"; SERVICES="$(sed -n 's/^services=//p' "$f" | head -1)"; SHA="$(sed -n 's/^sha=//p' "$f" | head -1)"; PHASE="stale"; SUMMARY="claim expired after ${age}s"; RESULT="expired"
-      event expired; rm -f "$f"
+      event expired
+      )
+      rm -f "$f"
     fi
   done
 }

@@ -1,3 +1,4 @@
+import { exportAccountRecords } from './security/account-export.js';
 import { checkedVectorDelete } from './security/vector-erasure.js';
 import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
@@ -2950,7 +2951,6 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
   // even when the user has 20k+ memories, and parallelising the dependent
   // tables (they don't touch each other) recovers the throughput.
   const BATCH_SIZE = 800;
-  let memoryUserTriggersDisabled = false;
   const emit = (pct, step) => {
     console.log(`[account-delete] [${pct}%] ${step}`);
     if (onProgress) onProgress(pct, step);
@@ -2980,8 +2980,6 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
       const totalBatches = Math.ceil(memoryIds.length / BATCH_SIZE);
       // Memory deletion is 5% - 70% of progress
       const memoryProgressRange = 65; // 5% to 70%
-      await prisma.$executeRawUnsafe('ALTER TABLE "memories" DISABLE TRIGGER USER');
-      memoryUserTriggersDisabled = true;
       for (let i = 0; i < memoryIds.length; i += BATCH_SIZE) {
         const batch = memoryIds.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
@@ -3009,8 +3007,6 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
 
         emit(batchPct, `Deleted memory batch ${batchNum}/${totalBatches} (${batch.length} memories)`);
       }
-      await prisma.$executeRawUnsafe('ALTER TABLE "memories" ENABLE TRIGGER USER');
-      memoryUserTriggersDisabled = false;
     } else {
       emit(70, 'No memories to delete');
     }
@@ -3122,13 +3118,6 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     console.log('[account-delete] ✅ Finished in', Date.now() - t0, 'ms for userId:', userId);
     return { ok: true };
   } catch (error) {
-    if (memoryUserTriggersDisabled) {
-      try {
-        await prisma.$executeRawUnsafe('ALTER TABLE "memories" ENABLE TRIGGER USER');
-      } catch (triggerError) {
-        console.error('[account-delete] Failed to re-enable memories user triggers:', triggerError.message);
-      }
-    }
     console.error('[account-delete] ✗ FAILED at', Date.now() - t0, 'ms:', error.message);
     console.error('[account-delete] Stack:', error.stack);
     return { ok: false, error: error.message };
@@ -9625,6 +9614,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Direct self-service download; never substitute an administrator's target identity.
+  if (pathname === '/v1/account/export' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!CONFIG.allowedOrigins.includes(req.headers.origin)) return jsonResponse(res, { error: 'Trusted origin required' }, 403);
+    try {
+      const result = await prisma.$transaction(tx => exportAccountRecords(tx, current.session.userId), { isolationLevel: 'RepeatableRead', timeout: 60000, maxWait: 5000 });
+      const bytes = JSON.stringify(result, (_, value) => typeof value === 'bigint' ? value.toString() : value);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="hivemind-account-records.json"', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(bytes);
+      return;
+    } catch (error) {
+      return jsonResponse(res, { error: error.status ? error.message : 'Account export unavailable; no export was completed' }, error.status || 503);
+    }
+  }
+
   // ── DSR: data export for a user (GDPR right to portability) ──
   // GET /v1/dsr/user/:userId/export — JSON dump of memories + audit
   const dsrExportMatch = pathname.match(/^\/v1\/dsr\/user\/([0-9a-f-]{36})\/export$/);
@@ -9675,6 +9680,7 @@ const server = http.createServer(async (req, res) => {
   if (dsrErasureMatch && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
+    if (!CONFIG.allowedOrigins.includes(req.headers.origin)) return jsonResponse(res, { error: 'Trusted origin required' }, 403);
     const targetUserId = dsrErasureMatch[1];
     const orgId = current.session.orgId;
     const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);

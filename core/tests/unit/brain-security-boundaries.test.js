@@ -7,7 +7,7 @@ test('administrative DSR cannot select personal or another organization records'
   assert.deepEqual(dsrMemoryWhere({ userId: 'target', orgId: 'A', self: false }), { userId: 'target', orgId: 'A', scope: 'organization', deletedAt: null });
   assert.deepEqual(dsrAuditWhere({ userId: 'target', orgId: 'A', self: false }), { userId: 'target', organizationId: 'A' });
 });
-test('self DSR retains personal ownership', () => assert.deepEqual(dsrMemoryWhere({ userId: 'self', orgId: 'A', self: true }), { userId: 'self', deletedAt: null }));
+test('self DSR retains personal ownership', () => assert.deepEqual(dsrMemoryWhere({ userId: 'self', orgId: 'A', self: true }), { userId: 'self', scope: 'personal', deletedAt: null }));
 test('target membership is server checked and inactive targets are denied', async () => {
   let query;
   const prisma = { userOrganization: { findFirst: async q => { query = q; return null; } } };
@@ -49,4 +49,42 @@ test('MCP absent-scope entrypoints reject instead of granting wildcard', () => {
   assert.ok(!hosted.includes("connection.scopes || ['*']"));
   assert.ok(!server.includes("connection?.scopes || ['*']"));
   assert.ok(!hosted.includes('scopes.length === 0 || hasAll'));
+});
+test('account erasure never disables shared table triggers', () => {
+  const source = readFileSync(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('async function performAccountDeletion'), source.indexOf('async function validateAccountDeletion'));
+  assert.ok(!body.includes('DISABLE TRIGGER'));
+  assert.ok(body.indexOf('await purgeUserVectors') < body.indexOf('prisma.memory.deleteMany'));
+});
+
+import { collectOwnedRecords, exportAccountRecords } from '../../src/security/account-export.js';
+test('export pages beyond a single batch without truncation and enforces byte bound', async () => {
+  const rows = [{ id: '1', content: 'first' }, { id: '2', content: 'second' }, { id: '3', content: 'third' }];
+  const model = { findMany: async q => rows.slice(q.cursor ? rows.findIndex(r => r.id === q.cursor.id) + 1 : 0, (q.cursor ? rows.findIndex(r => r.id === q.cursor.id) + 1 : 0) + q.take) };
+  assert.deepEqual(await collectOwnedRecords(model, { where: { userId: 'self' } }, { batchSize: 2 }), rows);
+  await assert.rejects(collectOwnedRecords(model, {}, { maxBytes: 1 }), { status: 413 });
+});
+test('account export uses owner predicates, personal native sessions, and excludes credentials', async () => {
+  const calls = [];
+  const prisma = { user: { findUnique: async () => ({ id: 'self', email: 'fixture@example.invalid' }) } };
+  for (const name of ['memory','knowledgeDocument','knowledgeSegment','userProfile','platformIntegration','harnessSession','harnessSessionEvent','auditLog']) prisma[name] = { findMany: async q => { calls.push({ name, query: q }); return []; } };
+  const result = await exportAccountRecords(prisma, 'self');
+  for (const { name, query } of calls) assert.equal(name === 'knowledgeSegment' ? query.where.document.userId : query.where.userId, 'self');
+  assert.equal(calls.find(c => c.name === 'harnessSession').query.where.scopeKind, 'personal');
+  assert.equal(calls.find(c => c.name === 'harnessSessionEvent').query.where.session.scopeKind, 'personal');
+  const connectorSelect = calls.find(c => c.name === 'platformIntegration').query.select;
+  assert.ok(!connectorSelect.accessTokenEncrypted && !connectorSelect.refreshTokenEncrypted && !connectorSelect.webhookSecretEncrypted);
+  assert.equal(result.completeness, 'listed_record_categories');
+  assert.ok(result.excluded.includes('original_file_bytes'));
+});
+test('personal export excludes organization/project documents even when uploaded by requester', async () => {
+  const queries = [];
+  const prisma = { user: { findUnique: async () => ({ id: 'self' }) } };
+  for (const name of ['memory','knowledgeSegment','userProfile','platformIntegration','harnessSession','harnessSessionEvent','auditLog']) prisma[name] = { findMany: async q => { queries.push({ name, q }); return []; } };
+  prisma.knowledgeDocument = { findMany: async () => [{ id: 'personal', tags: ['scope-key:personal:self'] }, { id: 'org', tags: ['scope-key:org:A'] }, { id: 'project', tags: ['scope-key:project:P'] }] };
+  const result = await exportAccountRecords(prisma, 'self');
+  assert.deepEqual(result.documents.map(r => r.id), ['personal']);
+  assert.equal(queries.find(x => x.name === 'memory').q.where.scope, 'personal');
+  assert.deepEqual(queries.find(x => x.name === 'knowledgeSegment').q.where.documentId.in, ['personal']);
+  assert.equal(queries.find(x => x.name === 'auditLog').q.where.organizationId, null);
 });

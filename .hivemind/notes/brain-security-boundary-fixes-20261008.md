@@ -13,3 +13,14 @@ Eight sandboxed focused regressions pass. OS sandbox denies network, fork, write
 Release preflight must prove configured secret presence and secure length WITHOUT values. Absent secrets deliberately disable affected signing/encryption operations. Existing scopes must be explicit; legacy scope-less connections require reauthorization.
 
 Remaining authorized work: unified complete export/download contract, durable deletion inventory/reconciliation (objects/graph/native records), broader personal Brain isolation fixtures, coordinated release and signed-in denied-access canaries. No production-complete claim yet.
+
+## Follow-on batch
+
+- Account erasure retains all shared database triggers; no table-global disabling.
+- Self DSR is personal-only; non-self administrator DSR remains organization-only.
+- Real /v1/account/export personal-record download uses repeatable-read snapshot and paginates to completion or explicitly fails at the 20-MiB response bound. It lists included categories/exclusions and never claims full portability. Organization/project/team documents are excluded even when the requester uploaded them; section reads intersect the personal document IDs. Native events intersect personal sessions. Credentials are omitted.
+- Trusted browser Origin required on new self-export and DSR-erasure cookie mutations.
+- Disconnected legacy export-storage and erasure-scheduler stubs fail explicitly rather than produce fabricated success receipts.
+- Profile UI paired branch offers actual download and explains excluded original binaries.
+
+Twelve sandbox regressions and changed-JS syntax parsing pass. Production/deployed model/schema acceptance, original-object and derived-store reconciliation, complete portability inventory and paired frontend release remain to verify.

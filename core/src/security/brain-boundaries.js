@@ -6,10 +6,10 @@ export function requiredSecret(value, name) {
   return value;
 }
 export function dsrMemoryWhere({ userId, orgId, self }) {
-  return self ? { userId, deletedAt: null } : { userId, orgId, scope: 'organization', deletedAt: null };
+  return self ? { userId, scope: 'personal', deletedAt: null } : { userId, orgId, scope: 'organization', deletedAt: null };
 }
 export function dsrAuditWhere({ userId, orgId, self }) {
-  return self ? { userId } : { userId, organizationId: orgId };
+  return self ? { userId, organizationId: null } : { userId, organizationId: orgId };
 }
 export async function requireDsrTargetMembership(prisma, { userId, orgId, self }) {
   if (self) return true;

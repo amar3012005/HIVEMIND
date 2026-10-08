@@ -454,8 +454,8 @@ async function uploadToSecureStorage(filePath, exportRequestId, format) {
   // });
   // return getSignedUrl(s3, command, { expiresIn: 24 * 60 * 60 });
 
-  // For development/local: Return placeholder URL
-  return `https://exports.hivemind.io/${exportRequestId}.${format}.gz`;
+  // Never return a download receipt without durable bytes.
+  throw new Error('Secure export storage is not configured; export is incomplete');
 }
 
 /**

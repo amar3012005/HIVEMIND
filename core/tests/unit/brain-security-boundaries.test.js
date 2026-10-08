@@ -88,3 +88,34 @@ test('personal export excludes organization/project documents even when uploaded
   assert.deepEqual(queries.find(x => x.name === 'knowledgeSegment').q.where.documentId.in, ['personal']);
   assert.equal(queries.find(x => x.name === 'auditLog').q.where.organizationId, null);
 });
+
+test('actual DSR handlers deny cross-org target and preserve personal data on admin erasure', async () => {
+  const source = readFileSync(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8');
+  const handlers = source.slice(source.indexOf('  // ── DSR:'), source.indexOf('  // ─── End Audit + DSR'));
+  const invoke = new Function('deps', `return async function(req,res,pathname) { const { requireSession, requireOrgAdmin, requireDsrTargetMembership, dsrMemoryWhere, dsrAuditWhere, prisma, audit, _reqMeta, jsonResponse, CONFIG } = deps; ${handlers} }`);
+  const actor = '00000000-0000-0000-0000-000000000001';
+  const same = '00000000-0000-0000-0000-000000000002';
+  const other = '00000000-0000-0000-0000-000000000003';
+  const records = [{ id: 'personal', userId: same, orgId: 'A', scope: 'personal', deletedAt: null }, { id: 'organization', userId: same, orgId: 'A', scope: 'organization', deletedAt: null }, { id: 'another-org', userId: same, orgId: 'B', scope: 'organization', deletedAt: null }];
+  const match = (row, where) => Object.entries(where).every(([key,value]) => row[key] === value);
+  const prisma = {
+    userOrganization: { findFirst: async ({ where }) => where.userId === same && where.orgId === 'A' && where.isActive ? { userId: same } : null },
+    memory: { findMany: async ({ where }) => records.filter(row => match(row, where)), updateMany: async ({ where, data }) => { const rows = records.filter(row => match(row, where)); rows.forEach(row => Object.assign(row,data)); return { count: rows.length }; } },
+    auditLog: { findMany: async () => [] },
+  };
+  const handler = invoke({ prisma, requireSession: async () => ({ session: { userId: actor, orgId: 'A' } }), requireOrgAdmin: async () => ({ role: 'admin' }), requireDsrTargetMembership, dsrMemoryWhere, dsrAuditWhere, audit: () => {}, _reqMeta: () => ({}), jsonResponse: (res,body,status=200) => Object.assign(res,{ body,status }), CONFIG: { allowedOrigins: ['https://fixture.invalid'] } });
+  const denied = {};
+  await handler({ method: 'GET', headers: {} }, denied, `/v1/dsr/user/${other}/export`);
+  assert.equal(denied.status,404);
+  const exported = {};
+  await handler({ method: 'GET', headers: {} }, exported, `/v1/dsr/user/${same}/export`);
+  assert.deepEqual(exported.body.memories.map(row => row.id), ['organization']);
+  const badOrigin = {};
+  await handler({ method: 'POST', headers: { origin: 'https://untrusted.invalid' } }, badOrigin, `/v1/dsr/user/${same}/erasure`);
+  assert.equal(badOrigin.status,403);
+  const erased = {};
+  await handler({ method: 'POST', headers: { origin: 'https://fixture.invalid' } }, erased, `/v1/dsr/user/${same}/erasure`);
+  assert.equal(erased.body.memories_soft_deleted,1);
+  assert.equal(records.find(row => row.id === 'personal').deletedAt,null);
+  assert.equal(records.find(row => row.id === 'another-org').deletedAt,null);
+});

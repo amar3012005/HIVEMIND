@@ -2,7 +2,7 @@ import { cp, readFile, writeFile, access, readdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 const source = process.argv[2] && resolve(process.argv[2]);
 const target = resolve('www');
-if (!source || source === target || source.startsWith(target + '/')) throw Error('Supply the compiled frontend build directory.');
+if (!source || source === target || source.startsWith(target + '/') || target.startsWith(source + '/')) throw Error('Supply the compiled frontend build directory.');
 await access(resolve(source, 'index.html'));
 const html = await readFile(resolve(source, 'index.html'), 'utf8');
 if (!/<script[^>]+src=/i.test(html)) throw Error('The frontend must contain its compiled application scripts.');

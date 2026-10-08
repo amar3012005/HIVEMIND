@@ -18,7 +18,7 @@ if (process.argv.includes('--release')) {
   assert.match(html, /<script[^>]+src=/i, 'Package the compiled frontend first.');
   const provenance = JSON.parse(await readFile('www/mobile-build.json', 'utf8'));
   assert.match(provenance.frontendSha || '', /^[a-f0-9]{40}$/, 'Pin the exact reviewed frontend SHA.');
-  const nativeConfig = JSON.parse(await readFile('android/app/src/main/assets/capacitor.config.json', 'utf8'));
+  const nativeConfig = JSON.parse(await readFile(process.argv.includes('--ios') ? 'ios/App/App/capacitor.config.json' : 'android/app/src/main/assets/capacitor.config.json', 'utf8'));
   assert.ok(!nativeConfig.server?.url, 'Sync default packaged config before release.');
   const readiness = JSON.parse(await readFile('release-evidence.json', 'utf8'));
   for (const field of ['nativeAuthentication', 'deviceMicrophone', 'oauthReturn', 'accountDeletion', 'privacyReview', 'billingReview']) {

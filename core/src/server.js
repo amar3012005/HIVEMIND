@@ -11406,28 +11406,12 @@ exit \$RC
             }
             const isAdmin = principal.scopes?.includes('admin') || principal.master;
             const memOrg = existing.org_id || existing.orgId || null;
-            const sameOrg = !memOrg || memOrg === orgId;
-            // Cross-org → hide existence (404). Same-org but not the creator →
-            // creator-only delete: surface a 403 with the owner's identity so the
-            // UI can prompt "ask <owner> to delete it" instead of silently failing.
-            // org owners/admins may still delete anything in their org.
-            if (!sameOrg && !isAdmin) {
+            const personal = existing.scope === 'personal' || (!existing.scope && existing.visibility === 'private');
+            if ((memOrg && memOrg !== orgId) || (personal && existing.user_id !== userId)) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
-            if (existing.user_id !== userId && !isAdmin) {
-              let owner = null;
-              try {
-                const u = await prisma.user.findUnique({
-                  where: { id: existing.user_id },
-                  select: { displayName: true, email: true },
-                });
-                if (u) owner = { name: u.displayName || null, email: u.email || null };
-              } catch { /* best-effort owner lookup */ }
-              return jsonResponse(res, {
-                error: 'Only the person who created this memory can delete it. Ask the owner to remove it.',
-                code: 'not_owner',
-                owner,
-              }, 403);
+            if (!personal && (!memOrg || !isAdmin)) {
+              return jsonResponse(res, { error: 'Only organization administrators can delete shared memories.' }, 403);
             }
             const hardDelete = url.searchParams.get('hard') === 'true';
             if (hardDelete && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
@@ -11508,12 +11492,17 @@ exit \$RC
             }
             const isAdmin = principal.scopes?.includes('admin') || principal.master;
             const memOrg = existing.org_id || existing.orgId || null;
-            const sameOrg = !memOrg || memOrg === orgId;
-            if ((existing.user_id !== userId || !sameOrg) && !isAdmin) {
+            const personal = existing.scope === 'personal' || (!existing.scope && existing.visibility === 'private');
+            if ((memOrg && memOrg !== orgId) || (personal && existing.user_id !== userId)) {
               return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            if (!personal && (!memOrg || !isAdmin)) {
+              return jsonResponse(res, { error: 'Only organization administrators can edit shared memories.' }, 403);
             }
             const updated = await persistentMemoryStore.updateMemory(memoryId, {
               ...validation.data,
+              user_id: existing.user_id,
+              org_id: memOrg,
               updated_at: new Date().toISOString(),
               source_metadata: {
                 source_platform: existing.source_metadata?.source_platform || 'mcp',

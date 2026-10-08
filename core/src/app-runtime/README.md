@@ -31,6 +31,15 @@ Versions, audit entries and idempotency receipts are append-only through this AP
 delete endpoint. Metadata lists are bounded and omit full specs; record queries are cursor-paged
 and bounded to a 512-KiB response data budget. Use app-get to retrieve definitions.
 
+Admin authoring discovery reuses `GET /api/app-runtime/apps` with optional `query`, `limit`
+(1–25, default 25 when discovery arguments are supplied), and `after` (the previous page's
+UUID `nextCursor`). `query` is a literal, case-insensitive name substring of 1–120 characters.
+Pages use stable UUID order and return bounded summaries, `truncated`, and `nextCursor`.
+Keep query and `published=true` filters unchanged when advancing. Active owner/admin membership
+is rechecked within each scoped transaction. Without discovery arguments, the existing read-role
+list, recent-first ordering, 100-item bound and `{apps,truncated}` response remain unchanged.
+No browser/model organization or user argument is accepted.
+
 ## Contract
 
 `contract.js` exports:

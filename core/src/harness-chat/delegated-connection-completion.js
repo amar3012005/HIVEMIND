@@ -52,7 +52,7 @@ async function reconcile({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch
     delivered+=1;
     } catch { unavailable+=1; /* Preserve this blocker; other valid workflows can still reach Runtime. */ }
   }
-  return {status:unavailable+waiting>0?'pending':'reconciled',delivered,unavailable,waiting};
+  return {status:unavailable+waiting>0 && delivered===0?'pending':'reconciled',delivered,unavailable,waiting};
 }
 
 // Coalesce only concurrent reads; a later OAuth completion always causes a new check.

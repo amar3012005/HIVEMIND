@@ -174,10 +174,16 @@ export function createOpenRouterJevProvider({
     preparedHeaders.set('content-type', 'application/json');
     preparedHeaders.set('http-referer', siteUrl);
     preparedHeaders.set('x-title', siteName);
+    const projectedState = boundedProjection(state);
+    // Native attention already supplies bounded, revision-bound records. Never
+    // silently clip confirmed direction, task evidence or handoffs a second time.
+    if (state?.policy === 'runtime_attention_v2' && JSON.stringify(projectedState) !== JSON.stringify(state)) {
+      throw new Error('attention_context_projection_loss');
+    }
     const response = await fetchWithTimeout(fetchImpl, endpoint, {
       method: 'POST',
       headers: preparedHeaders,
-      body: JSON.stringify({ model, state: boundedProjection(state), questions }),
+      body: JSON.stringify({ model, state: projectedState, questions }),
     }, timeoutMs, signal);
     if (!response.ok) throw new Error(`decision_provider_http_${response.status}:${clip(await response.text(), 240)}`);
     const payload = await response.json();

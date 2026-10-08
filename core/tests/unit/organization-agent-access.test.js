@@ -48,3 +48,12 @@ test('canonical session guard permits shared agents and refuses same-owner perso
   for(const id of ['session-canonical','session-employee','session-child']) assert.equal(await organizationAgentSessionAccess(mock,{orgId,userId:second,sharedOrganizationAgents:true},id),true);
   assert.equal(await organizationAgentSessionAccess(mock,{orgId,userId:second,sharedOrganizationAgents:true},'session-private'),false);
 });
+
+test('fresh organization uses one initial storage principal for every admin without starting Runtime',async()=>{
+  const mock=db();mock.$queryRawUnsafe=async()=>[];
+  mock.$transaction=async work=>work({$queryRawUnsafe:async sql=>sql.includes('organization_agent_storage_scope')?[{storage_user_id:first,runtime_session_id:null}]:[]});
+  const a=await organizationAgentAccess(mock,{orgId,userId:first});
+  const b=await organizationAgentAccess(mock,{orgId,userId:second});
+  assert.deepEqual(a.agent,b.agent);assert.equal(a.agent.runtime_session_id,null);
+  assert.equal(b.actor.user_id,second);assert.equal(b.agent.storage_user_id,first);
+});

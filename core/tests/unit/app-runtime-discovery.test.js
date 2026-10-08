@@ -57,3 +57,17 @@ test('existing list route forwards validated paging and refuses model-authored i
     assert.equal(output.status,400);
   }
 });
+test('existing Harness gateway preserves discovery filters and only authenticated ownership',async()=>{
+  const {forwardAppRuntimeRequest}=await import('../../src/app-runtime/gateway.js');
+  let seen;let result;let calls=0;
+  const args={req:{method:'GET',url:`/internal/v1/harness-chat/core/api/app-runtime/apps?query=CRM&limit=1&after=${ids[0]}`,headers:{'x-hm-org-id':'forged'}},res:{},
+    corePath:'/api/app-runtime/apps',claims:{sub:user,org_id:org},env:{HIVE_APP_RUNTIME_ENABLED:'true'},coreApiBaseUrl:'http://127.0.0.1:33333',internalApiKey:'fixture-only',
+    jsonResponse:(_res,value,status)=>{result={value,status};},fetchImpl:async(target,options)=>{calls++;seen={target,options};return new Response(JSON.stringify({apps:[],truncated:false,nextCursor:null}));}};
+  await forwardAppRuntimeRequest(args);
+  assert.equal(seen.target.pathname,'/api/app-runtime/apps');
+  assert.equal(seen.target.search,`?query=CRM&limit=1&after=${ids[0]}`);
+  assert.equal(seen.options.headers['x-hm-org-id'],org);assert.equal(seen.options.headers['x-hm-user-id'],user);
+  assert.equal(seen.options.method,'GET');assert.equal(seen.options.body,undefined);assert.equal(result.status,200);
+  await forwardAppRuntimeRequest({...args,claims:{...args.claims,project_id:ids[0]}});
+  assert.equal(result.status,403);assert.equal(calls,1);
+});

@@ -1,3 +1,4 @@
+import { requiredSecret } from '../security/brain-boundaries.js';
 import { triggerTool, runTriggers } from '../connectors/composio/hivemind-triggers.js';
 /**
  * Hosted MCP Service
@@ -40,7 +41,7 @@ const CONFIG = {
   serverName: 'hivemind-hosted-mcp',
   serverVersion: '2.0.0',
   bridgePackageName: process.env.HIVEMIND_MCP_BRIDGE_PACKAGE || '@amar_528/mcp-bridge',
-  tokenSecret: process.env.HIVEMIND_MCP_TOKEN_SECRET || process.env.MCP_SECRET_KEY || 'change-me-in-production',
+  tokenSecret: process.env.HIVEMIND_MCP_TOKEN_SECRET || process.env.MCP_SECRET_KEY,
   connectionTtlMs: Number(process.env.HIVEMIND_MCP_CONNECTION_TTL_MS || 24 * 60 * 60 * 1000),
   redisUrl: process.env.HIVEMIND_MCP_REDIS_URL || process.env.REDIS_URL || null,
   redisHost: process.env.REDIS_HOST || null,
@@ -219,7 +220,7 @@ function getMessageUrl(userId, token) {
 
 function signTokenPayload(encodedPayload) {
   return crypto
-    .createHmac('sha256', CONFIG.tokenSecret)
+    .createHmac('sha256', requiredSecret(CONFIG.tokenSecret, 'MCP token signing secret'))
     .update(encodedPayload)
     .digest('base64url');
 }
@@ -486,6 +487,7 @@ export function generateHostedServer(userId, orgId, apiKey) {
  */
 function generateToolsManifest(userId, orgId, options = {}) {
   const scopes = Array.isArray(options.scopes) ? options.scopes : [];
+  if (!options.isMaster && scopes.length === 0) return [];
   const scopeSet = new Set(scopes);
   // Web capabilities are explicit allow-list scopes. They spend platform
   // provider credits and can persist public findings, so an absent or empty
@@ -501,9 +503,8 @@ function generateToolsManifest(userId, orgId, options = {}) {
   // persists internalScopes): Full Access carries 'memory:write', the read-only
   // tier does not. When write is not granted, mutating tools are filtered out of
   // the manifest so a read-only consent is actually enforced, not just cosmetic.
-  // Core HIVEMIND memory tools retain their established default-access
-  // behavior. Only provider-spending Web capabilities require explicit scope.
-  const canWrite = scopes.length === 0 || hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
+  // Missing scopes fail closed for memory writes and provider-spending tools.
+  const canWrite = hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
   const isOpsOperator = options.isMaster === true || scopeSet.has('ops:deploy');
 
   const tools = [
@@ -2120,7 +2121,7 @@ export async function getHostedServerByToken(token, userId) {
       token: connection.token,
       expiresAt: connection.expiresAt
     },
-    tools: generateToolsManifest(userId, connection.orgId, { scopes: connection.scopes || ['*'], platform: connection.platform }),
+    tools: generateToolsManifest(userId, connection.orgId, { scopes: connection.scopes || [], platform: connection.platform }),
     resources: generateResourcesManifest(userId, connection.orgId),
     prompts: generatePromptsManifest(userId, connection.orgId),
     clientConfig: generateClientConfig(userId, connection.orgId, connection.token),
@@ -2392,6 +2393,7 @@ function buildRelationship(relationship, relatedTo) {
 export async function handleToolCall(params, userId, orgId, apiClient, options = {}) {
   const { name, arguments: args } = params;
   const isMaster = options.isMaster === true;
+  if (!isMaster && (!Array.isArray(options.scopes) || options.scopes.length === 0)) return formatToolContent({ error: 'explicit_scopes_required' });
   const isOpsOperator = isMaster || new Set(options.scopes || []).has('ops:deploy');
 
   if (isOpsTool(name)) {
@@ -2410,7 +2412,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   if (name === 'hivemind_triggers') {
     const read = ['discover', 'inspect', 'list', 'deliveries', 'suggestions'].includes(args?.operation);
     const scopes = options.scopes || [];
-    if (!read && !isMaster && scopes.length && !scopes.some(scope => ['*', 'memory:write', 'memory.write'].includes(scope))) return formatToolContent({ error: 'Full access is required to manage connected activity.' });
+    if (!read && !isMaster && !scopes.some(scope => ['*', 'memory:write', 'memory.write'].includes(scope))) return formatToolContent({ error: 'Full access is required to manage connected activity.' });
     const { getPrismaClient } = await import('../db/prisma.js');
     try { return formatToolContent(await runTriggers(args || {}, { userId, orgId, prisma: getPrismaClient() })); }
     catch (error) { return formatToolContent({ successful: false, error: error.status ? error.message : 'HIVEMIND Triggers is temporarily unavailable.' }); }
@@ -2556,7 +2558,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         }
         if (action === 'save') {
           const scopes = Array.isArray(options.scopes) ? options.scopes : [];
-          const hasWriteAccess = options.isMaster === true || scopes.length === 0
+          const hasWriteAccess = options.isMaster === true
             || scopes.includes('*') || scopes.includes('memory:write') || scopes.includes('memory.write');
           if (!hasWriteAccess) {
             return formatToolContent({ ok: false, error: 'memory_write_scope_required', message: 'This API credential can recall private agent memory but does not allow writes.' });

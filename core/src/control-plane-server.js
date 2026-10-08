@@ -1,3 +1,5 @@
+import { checkedVectorDelete } from './security/vector-erasure.js';
+import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
 import { runTriggers, receiveTriggerEvent } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
@@ -2902,7 +2904,7 @@ async function purgeUserVectors(userId, userOrgs = [], orgIdsToDelete = []) {
     const qdrantKey = process.env.QDRANT_API_KEY || '';
     if (!qdrantUrl || !userId) {
       console.warn('[account-delete] ⚠ Qdrant purge skipped — no URL or userId:', { qdrantUrl: !!qdrantUrl, userId: !!userId });
-      return;
+      throw Object.assign(new Error('Vector erasure is unavailable; retry required'), { code: 'VECTOR_ERASURE_INCOMPLETE' });
     }
     const { PERSONAL_COLLECTION, orgContainerName, isEnterprisePlan } = await import('./vector/container-router.js');
     const qhdr = { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) };
@@ -2917,18 +2919,18 @@ async function purgeUserVectors(userId, userOrgs = [], orgIdsToDelete = []) {
     }
 
     for (const coll of toDrop) {
-      const r = await fetch(`${qdrantUrl}/collections/${coll}`, { method: 'DELETE', headers: qhdr });
-      console.log('[account-delete] dropped collection', coll, r.status);
+      await checkedVectorDelete(fetch, `${qdrantUrl}/collections/${coll}`, { method: 'DELETE', headers: qhdr });
     }
     for (const coll of toScrub) {
-      const r = await fetch(`${qdrantUrl}/collections/${coll}/points/delete`, {
+      await checkedVectorDelete(fetch, `${qdrantUrl}/collections/${coll}/points/delete`, {
         method: 'POST', headers: qhdr,
         body: JSON.stringify({ filter: { must: [{ key: 'user_id', match: { value: userId } }] }, wait: true }),
       });
-      console.log('[account-delete] scrubbed user from', coll, r.status);
+
     }
   } catch (error) {
-    console.warn('[account-delete] ⚠ Qdrant purge failed:', error.message);
+    console.warn('[account-delete] Qdrant purge incomplete');
+    throw error;
   }
 }
 
@@ -2962,6 +2964,9 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
       where: { userId },
       select: { orgId: true, org: { select: { plan: true } } },
     })).map((m) => ({ orgId: m.orgId, plan: m.org?.plan }));
+
+    await purgeUserVectors(userId, userOrgs, orgIdsToDelete);
+    emit(5, 'Verified vector erasure');
 
     const memoryIds = (
       await prisma.memory.findMany({
@@ -3070,11 +3075,10 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     await reassignCreatedBy('project');
     emit(89, 'Detached created_by references');
 
+    // Preserve identity and membership coordinates when remote erasure needs retry.
+    emit(90, 'Vector erasure verified');
     await prisma.user.delete({ where: { id: userId } });
-    emit(90, 'Deleted user record');
-
-    await purgeUserVectors(userId, userOrgs, orgIdsToDelete);
-    emit(95, 'Purged vector embeddings');
+    emit(95, 'Deleted user record');
 
     if (Array.isArray(orgIdsToDelete) && orgIdsToDelete.length) {
       try {
@@ -9634,15 +9638,16 @@ const server = http.createServer(async (req, res) => {
       const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
       if (!admin) return;
     }
+    if (!await requireDsrTargetMembership(prisma, { userId: targetUserId, orgId, self: isSelf })) return jsonResponse(res, { error: 'Resource not found' }, 404);
     try {
       const [memories, auditRows] = await Promise.all([
         prisma.memory.findMany({
-          where: { userId: targetUserId, deletedAt: null },
+          where: dsrMemoryWhere({ userId: targetUserId, orgId, self: isSelf }),
           orderBy: { createdAt: 'asc' },
           take: 10000,
         }),
         prisma.auditLog.findMany({
-          where: { userId: targetUserId },
+          where: dsrAuditWhere({ userId: targetUserId, orgId, self: isSelf }),
           orderBy: { createdAt: 'asc' },
           take: 5000,
         }),
@@ -9674,9 +9679,11 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId;
     const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
     if (!admin) return;
+    const isSelf = targetUserId === current.session.userId;
+    if (!await requireDsrTargetMembership(prisma, { userId: targetUserId, orgId, self: isSelf })) return jsonResponse(res, { error: 'Resource not found' }, 404);
     try {
       const result = await prisma.memory.updateMany({
-        where: { userId: targetUserId, deletedAt: null },
+        where: dsrMemoryWhere({ userId: targetUserId, orgId, self: isSelf }),
         data: { deletedAt: new Date() },
       });
       audit({

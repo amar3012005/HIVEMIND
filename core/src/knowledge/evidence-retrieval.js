@@ -376,6 +376,8 @@ export class EvidenceRetrievalService {
    */
   _accessibleDocumentWhere({ userId, orgId, projectId = null, accessContext = null, scopeFilter = null }) {
     const base = { orgId, archivedAt: null };
+    if (!userId || !orgId) return { ...base, id: { in: [] } };
+    if (projectId && !accessContext?.projectIds?.includes(projectId)) return { ...base, id: { in: [] } };
     const projectTags = (accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
     const teamTags = (accessContext?.teamIds || []).map((id) => `scope-key:team:${id}`);
     // THE UPLOAD WRITER EMITS `scope-key:org:<orgId>`, NOT `scope-key:organization`.
@@ -388,7 +390,7 @@ export class EvidenceRetrievalService {
     // appendDocumentAccess on the .amr agent already does (`scope-key:org:${ORG}` OR the
     // legacy `scope-key:organization`), so central and remote now answer identically.
     const orgTags = [`scope-key:org:${orgId}`, 'scope-key:organization'];
-    const canReadOrganization = accessContext?.orgRole !== 'guest';
+    const canReadOrganization = !!accessContext && typeof accessContext.orgRole === 'string' && accessContext.orgRole !== 'guest';
 
     // An EXPLICIT lens NARROWS — it never widens. Mirrors matchesScopeFilter on the
     // memory side (persisted-retrieval.js), which does an exact scope equality check,

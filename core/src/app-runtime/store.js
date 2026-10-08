@@ -92,10 +92,24 @@ export class AppRuntimeStore {
     const {rows}=await db.query("SELECT id,title,status,graph_version,started_at,completed_at,created_at FROM hivemind.hq_workflows WHERE org_id=$1::uuid AND context->'app_runtime'->>'app_id'=$2 ORDER BY created_at DESC,id LIMIT 51",[p.orgId,appId]);
     return {workflows:rows.slice(0,50).map(row=>({id:row.id,title:row.title,status:row.status,graphVersion:row.graph_version,startedAt:row.started_at,completedAt:row.completed_at,createdAt:row.created_at})),truncated:rows.length>50};
   }); }
-  list(principal,{published=false}={}) { return this.transaction(principal,'read',async(db,p)=>{
-    const {rows}=await db.query(`SELECT a.id,a.current_version,a.published_version,a.created_at,a.updated_at,v.spec->>'name' AS name FROM hivemind.app_runtime_apps a JOIN hivemind.app_runtime_versions v ON v.org_id=a.org_id AND v.app_id=a.id AND v.version=${published?'a.published_version':'a.current_version'} WHERE a.org_id=$1::uuid ORDER BY a.updated_at DESC,a.id LIMIT 101`,[p.orgId]);
-    return {apps:rows.slice(0,100).map(row=>({id:row.id,name:row.name,version:published?row.published_version:row.current_version,publishedVersion:row.published_version,createdAt:row.created_at,updatedAt:row.updated_at})),truncated:rows.length>100};
-  }); }
+  list(principal,{published=false,limit,after=null,query}={}) {
+    const paged=limit!==undefined||after!==null||query!==undefined;
+    const size=limit??25;
+    if(paged&&(!Number.isInteger(size)||size<1||size>25)) fail('invalid_arguments','limit must be 1–25');
+    if(after!==null) uuid(after,'after');
+    if(query!==undefined&&(typeof query!=='string'||!query.trim()||query.trim().length>120)) fail('invalid_arguments','query must be 1–120 characters');
+    // Discovery is an admin authoring capability; legacy published UI lists retain read access.
+    return this.transaction(principal,paged?'manage':'read',async(db,p)=>{
+      const sql=`SELECT a.id,a.current_version,a.published_version,a.created_at,a.updated_at,v.spec->>'name' AS name FROM hivemind.app_runtime_apps a JOIN hivemind.app_runtime_versions v ON v.org_id=a.org_id AND v.app_id=a.id AND v.version=${published?'a.published_version':'a.current_version'} WHERE a.org_id=$1::uuid`;
+      const {rows}=paged
+        ? await db.query(`${sql} AND ($2::uuid IS NULL OR a.id>$2::uuid) AND ($3::text IS NULL OR strpos(lower(v.spec->>'name'),lower($3::text))>0) ORDER BY a.id LIMIT $4`,[p.orgId,after,query?.trim()??null,size+1])
+        : await db.query(`${sql} ORDER BY a.updated_at DESC,a.id LIMIT 101`,[p.orgId]);
+      const selected=rows.slice(0,paged?size:100);
+      const apps=selected.map(row=>({id:row.id,name:row.name,version:published?row.published_version:row.current_version,publishedVersion:row.published_version,createdAt:row.created_at,updatedAt:row.updated_at}));
+      const truncated=rows.length>selected.length;
+      return {apps,truncated,...(paged?{nextCursor:truncated?selected.at(-1)?.id??null:null}:{})};
+    });
+  }
   patch(principal,appId,input) {
     version(input.expectedVersion); const spec=validateAppSpec(input.spec);
     return this.mutate(principal,'manage','patch',{appId,...input,spec},async(db,p)=>{

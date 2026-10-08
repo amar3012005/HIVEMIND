@@ -42,8 +42,14 @@ export function createAppRuntimeHandler({pool,transactionRunner,resolvePrincipal
       }
       if(url.searchParams.size&&!(method==='GET'&&((parts.length===2&&parts[1]==='records')||parts.length===0))) error('invalid_arguments','Query arguments are not accepted for this operation');
       if(!parts.length&&method==='GET') {
-        for(const key of url.searchParams.keys()) if(key!=='published'||url.searchParams.getAll(key).length!==1||url.searchParams.get(key)!=='true') error('invalid_arguments','Only published=true is accepted on the app list');
-        result=await store.list(principal,{published:url.searchParams.get('published')==='true'});
+        for(const key of url.searchParams.keys()) if(!['published','limit','after','query'].includes(key)||url.searchParams.getAll(key).length!==1) error('invalid_arguments',`Unknown or repeated query argument: ${key}`);
+        if(url.searchParams.has('published')&&url.searchParams.get('published')!=='true') error('invalid_arguments','published must be true when supplied');
+        const rawLimit=url.searchParams.get('limit');
+        if(rawLimit!==null&&!/^[1-9][0-9]*$/.test(rawLimit)) error('invalid_arguments','limit must be a positive integer');
+        result=await store.list(principal,{published:url.searchParams.get('published')==='true',
+          ...(rawLimit===null?{}:{limit:Number(rawLimit)}),
+          ...(url.searchParams.has('after')?{after:url.searchParams.get('after')} :{}),
+          ...(url.searchParams.has('query')?{query:url.searchParams.get('query')} :{})});
       }
       else if(!parts.length&&method==='POST') result=await store.createDraft(principal,fields(input,['spec','operationId'],['spec','operationId']));
       else if(parts.length===1&&method==='GET') result=await store.get(principal,parts[0]);

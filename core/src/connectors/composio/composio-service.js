@@ -141,6 +141,16 @@ export async function disconnectToolkit(orgId, toolkitSlug) {
  */
 export async function listConnectedAccounts(orgId, opts = {}) {
   const subject = composioConnectionSubject(orgId, opts);
+  return listAccountsForSubject(subject);
+}
+
+/** Native Harness account identity is fixed by its authenticated session witness. */
+export async function listNativeConnectedAccounts(orgId, userId, subject) {
+  if (![String(orgId), `hivemind:${userId}`].includes(subject)) throw new Error('native_connection_subject_not_authorized');
+  return listAccountsForSubject(subject);
+}
+
+async function listAccountsForSubject(subject) {
   const items = []; const seen = new Set(); let cursor;
   do {
     const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);

@@ -4,6 +4,23 @@ import { renderRuntimeAdministratorEmail } from '../email/templates/runtime-admi
 import { resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
 
 const kinds = new Set(['completion','decision','approval']);
+export function savedAdministratorRequest(events, message, runtimeSessionId) {
+ const matching = events.filter(row => {const data=row.payload?.data??row.payload;return data?.callId===message.request_call_id || data?.id===message.request_call_id;});
+ const blocker = matching.find(row=>row.event_type==='hivemind/hq-delegated-blocker');
+ if (blocker) {
+  const data=blocker.payload?.data??blocker.payload;
+  return data.state==='blocked' && data.rootId===runtimeSessionId && typeof data.taskId==='string'
+   && typeof data.employeeSessionId==='string' && message.message_key===`${data.id}-user-request`
+   && ((data.kind==='human_input' && message.kind==='decision') || (['connection','permission'].includes(data.kind) && message.kind==='approval'));
+ }
+ return matching.some(row=>{
+  const data=row.payload?.data??row.payload;
+  if(row.event_type==='approval/asked')return message.kind==='approval';
+  if(data?.name!=='ask_user_question')return false;
+  if(message.kind==='decision')return true;
+  try {const args=typeof data.arguments==='string'?JSON.parse(data.arguments):data.arguments;return args.questions?.some(q=>q.intent?.kind==='plan-review')===true;}catch{return false;}
+ });
+}
 function fail(code, status = 400) { const e = new Error(code); e.status = status; throw e; }
 export function validateAdministratorMessage(input) {
  if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['message_key','kind','subject','message','request_call_id'].includes(k))) fail('invalid_administrator_message');
@@ -34,15 +51,8 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  if (!session) fail('runtime_session_not_found',403);
  if (message.request_call_id) {
   // A decision email refers to an existing native call in this exact authenticated room.
-  const events = await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('tool/call','approval/asked') ORDER BY sequence DESC LIMIT 500`,claims.operating_session,claims.org_id,storage.userId);
-  const found = events.some(row => {
-   const data=row.payload.data??row.payload;
-   if(data.callId!==message.request_call_id && data.id!==message.request_call_id)return false;
-   if(row.event_type==='approval/asked')return message.kind==='approval';
-   if(data.name!=='ask_user_question')return false;
-   if(message.kind==='decision')return true;
-   try {return JSON.parse(data.arguments).questions?.some(q=>q.intent?.kind==='plan-review')===true;} catch{return false;}
-  });
+  const events = await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('tool/call','approval/asked','hivemind/hq-delegated-blocker') ORDER BY sequence DESC LIMIT 500`,claims.operating_session,claims.org_id,storage.userId);
+  const found = savedAdministratorRequest(events,message,claims.operating_session);
   if (!found) fail('native_request_not_found',409);
  }
  });

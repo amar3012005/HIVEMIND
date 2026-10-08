@@ -24,6 +24,7 @@ import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
 import { recallOperatingMemory, saveOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
 import { organizationAgentAccess, nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
+import { verifyDelegatedConnection } from '../harness-chat/delegated-connection-verification.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -188,6 +189,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (pathname === `${INTERNAL_PREFIX}/delegated-connection/verify`) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    try {
+      const result = await verifyDelegatedConnection({ db: prisma, claims, input: await parseBody(req),
+        sharedOrganizationAgents: env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true' });
+      jsonResponse(res, result);
+    } catch (error) { jsonResponse(res, { error: error.status ? error.code || error.message : 'connection_verification_unavailable' }, error.status || 503); }
+    return true;
+  }
   const planConnection = pathname.match(new RegExp(`^${INTERNAL_PREFIX}/chatgpt-plan/connection/(status|start|callback|models|select|disconnect|route)$`));
   if (planConnection) {
     const action = planConnection[1];

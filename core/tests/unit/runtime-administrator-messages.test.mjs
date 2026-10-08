@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { messageAdministrator, validateAdministratorMessage } from '../../src/harness-chat/runtime-administrator-messages.js';
+import { messageAdministrator, validateAdministratorMessage, savedAdministratorRequest } from '../../src/harness-chat/runtime-administrator-messages.js';
 import { renderRuntimeAdministratorEmail } from '../../src/email/templates/runtime-administrator.js';
 const claims={sub:'11111111-1111-4111-8111-111111111111',org_id:'22222222-2222-4222-8222-222222222222',operating_role:'runtime',operating_session:'session-test'};
 const input={message_key:'task-result-1',kind:'completion',subject:'Your review is ready',message:'I checked Sofia’s review. It is ready to view.'};
@@ -43,4 +43,17 @@ test('unknown provider outcome stays unknown and is never blindly resent',async(
 test('disabled preference and nonexistent native question do not send',async()=>{
  assert.equal((await messageAdministrator({db:database({enabled:false}),claims,input,send:()=>{throw Error('not allowed');}})).status,'disabled');
  await assert.rejects(messageAdministrator({db:database(),claims,input:{...input,kind:'decision',request_call_id:'call-1'},send:()=>{throw Error('not allowed');}}),/native_request_not_found/);
+});
+
+test('asynchronous delegated blocker references require exact root, state, kind and stable key',()=>{
+ const data={id:'hq-blocker-1',state:'blocked',rootId:claims.operating_session,taskId:'task-16',employeeSessionId:'employee-room',kind:'connection'};
+ const row={event_type:'hivemind/hq-delegated-blocker',payload:{data}};
+ const msg={request_call_id:data.id,message_key:`${data.id}-user-request`,kind:'approval'};
+ assert.equal(savedAdministratorRequest([row],msg,claims.operating_session),true);
+ for(const bad of [{...msg,kind:'decision'},{...msg,message_key:'other'},{...msg,request_call_id:'invented'}])assert.equal(savedAdministratorRequest([row],bad,claims.operating_session),false);
+ assert.equal(savedAdministratorRequest([{...row,payload:{data:{...data,rootId:'other'}}}],msg,claims.operating_session),false);
+ assert.equal(savedAdministratorRequest([{...row,payload:{data:{...data,state:'resumed'}}},row],msg,claims.operating_session),false);
+ const human={...row,payload:{data:{...data,kind:'human_input'}}};
+ assert.equal(savedAdministratorRequest([human],{...msg,kind:'decision'},claims.operating_session),true);
+ assert.equal(savedAdministratorRequest([human],msg,claims.operating_session),false);
 });

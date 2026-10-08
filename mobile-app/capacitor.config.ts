@@ -18,7 +18,7 @@ const config: CapacitorConfig = {
     appStartPath: '/hivemind/m/chat',
     errorPath: 'offline.html',
   },
-  android: { allowMixedContent: false, webContentsDebuggingEnabled: false },
+  android: { allowMixedContent: false, webContentsDebuggingEnabled: false, minWebViewVersion: 90 },
   ios: { contentInset: 'never' },
   plugins: {
     Keyboard: { resize: 'native', resizeOnFullScreen: true },

@@ -13,9 +13,13 @@ import com.getcapacitor.BridgeWebViewClient;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(SingulanceNativePlugin.class);
         super.onCreate(savedInstanceState);
         Bridge bridge = getBridge();
         if (bridge == null || bridge.getWebView() == null) return;
+        // Remove the legacy all-frame JavaScript-interface fallback. Modern Capacitor
+        // uses its origin-scoped, main-frame-only WebMessageListener instead.
+        bridge.getWebView().removeJavascriptInterface("androidBridge");
         final Uri appOrigin = Uri.parse(bridge.getServerUrl() == null ? bridge.getLocalUrl() : bridge.getServerUrl());
         bridge.getWebView().setWebViewClient(new BridgeWebViewClient(bridge) {
             @Override

@@ -12,6 +12,20 @@ assert.match(manifest, /android.permission.RECORD_AUDIO/);
 assert.match(manifest, /android:host="auth" android:path="\/callback"/);
 assert.match(plist, /NSMicrophoneUsageDescription/);
 assert.doesNotMatch(plist, /NSAllowsArbitraryLoads/);
+const androidBridge = await readFile('android/app/src/main/java/com/singulancelabs/mobile/SingulanceNativePlugin.java', 'utf8');
+const iosBridge = await readFile('ios/App/App/SingulanceNativePlugin.swift', 'utf8');
+assert.match(androidBridge, /AndroidKeyStore/);
+assert.match(androidBridge, /WEB_MESSAGE_LISTENER/);
+const activity = await readFile('android/app/src/main/java/com/singulancelabs/mobile/MainActivity.java', 'utf8');
+assert.match(activity, /removeJavascriptInterface\("androidBridge"\)/);
+assert.match(activity, /registerPlugin\(SingulanceNativePlugin.class\)/);
+const scene = await readFile('ios/App/App/SceneDelegate.swift', 'utf8');
+assert.match(scene, /SingulanceViewController\(\)/);
+assert.match(androidBridge, /wss:\/\/next.singulancelabs.com\/api\/remote.mux/);
+assert.match(iosBridge, /kSecAttrAccessibleWhenUnlockedThisDeviceOnly/);
+assert.match(iosBridge, /message.frameInfo.isMainFrame/);
+assert.match(iosBridge, /completionHandler\(nil\)/);
+
 if (process.argv.includes('--release')) {
   assert.ok(!process.env.SINGULANCE_MOBILE_REMOTE_URL, 'Remote server.url must not be used for a store build.');
   const html = await readFile('www/index.html', 'utf8');

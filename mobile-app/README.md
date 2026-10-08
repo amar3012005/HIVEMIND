@@ -59,6 +59,14 @@ Remote mode is not a substitute for passing store packaging/authentication check
 - Launcher assets are rendered from the existing SINGULANCE SVG. Review the
   generated icon on devices; launcher and splash appearance still need device review.
 
+## Packaged authentication and DSH transport
+
+The local `SingulanceNative` plugin provides OS-protected credential storage,
+allowlisted HTTPS requests and the existing native DSH WebSocket protocol. See
+[NATIVE_TRANSPORT.md](NATIVE_TRANSPORT.md) for the exact contract and remaining
+device proof limits. Plugin registration and compilation do not imply store
+readiness.
+
 ## Release gates
 
 `npm run android:release` fails until the compiled frontend, exact SHA, packaged

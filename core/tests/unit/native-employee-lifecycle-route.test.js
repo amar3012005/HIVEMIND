@@ -18,3 +18,9 @@ test('native employee lifecycle rejects general chat and revoked membership befo
   assert.equal(response.status,expected);assert.equal(parsed,false);
  }
 });
+
+test('authorized native creation with missing bridge fails before any employee mutation',async()=>{
+ const response={};let wrote=false;
+ await handleHarnessChatBootstrapRoute({req:{method:'POST',headers:{authorization:`Bearer ${token({operating_role:'runtime',operating_session:'runtime-fixture'})}`}},res:response,pathname:'/internal/v1/harness-chat/core/employee-lifecycle',prisma:{userOrganization:{findUnique:async()=>({isActive:true})},digitalEmployee:{create:async()=>{wrote=true;throw Error('must not create');}}},parseBody:async()=>({operation:'create'}),jsonResponse:(r,b,status=200)=>Object.assign(r,{body:b,status}),redisConfig:{},env:{HIVE_HARNESS_RUNNER_SERVICE_SECRET:secret}});
+ assert.equal(response.status,503);assert.match(response.body.error,/native_lifecycle_host_not_configured/);assert.equal(wrote,false);
+});

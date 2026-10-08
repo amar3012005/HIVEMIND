@@ -12,7 +12,8 @@
     "android:release": "node scripts/check-native.mjs --release && cap sync android && cd android && ./gradlew bundleRelease",
     "ios:open": "cap sync ios && cap open ios",
     "icons": "node scripts/generate-icons.mjs",
-    "ios:archive": "node scripts/archive-ios.mjs"
+    "ios:archive": "node scripts/archive-ios.mjs",
+    "android:prepare": "node scripts/prepare-android.mjs"
   },
   "keywords": [],
   "author": "",

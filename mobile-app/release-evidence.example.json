@@ -1,8 +1,39 @@
 {
-  "nativeAuthentication": { "verified": false, "evidence": "" },
-  "deviceMicrophone": { "verified": false, "evidence": "" },
-  "oauthReturn": { "verified": false, "evidence": "" },
-  "accountDeletion": { "verified": false, "evidence": "" },
-  "privacyReview": { "verified": false, "evidence": "" },
-  "billingReview": { "verified": false, "evidence": "" }
+  "format": 1,
+  "frontendSha": "REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT",
+  "platform": "android",
+  "device": "",
+  "verifiedAt": "",
+  "nativeAuthentication": {
+    "verified": false,
+    "evidence": ""
+  },
+  "deviceMicrophone": {
+    "verified": false,
+    "evidence": ""
+  },
+  "oauthReturn": {
+    "verified": false,
+    "evidence": ""
+  },
+  "accountDeletion": {
+    "verified": false,
+    "evidence": ""
+  },
+  "privacyReview": {
+    "verified": false,
+    "evidence": ""
+  },
+  "billingReview": {
+    "verified": false,
+    "evidence": ""
+  },
+  "nativeStreaming": {
+    "verified": false,
+    "evidence": ""
+  },
+  "nativeFileSaving": {
+    "verified": false,
+    "evidence": ""
+  }
 }

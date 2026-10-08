@@ -13,6 +13,7 @@ test('native navigation delegates only the exact application origin to its privi
 test('release guard rejects the development placeholder', async () => {
   const source = await readFile('scripts/check-native.mjs', 'utf8');
   assert.match(source, /Package the compiled frontend first/);
-  assert.match(source, /nativeAuthentication/);
+  assert.match(source, /validateReleaseEvidence/);
+  assert.match(await readFile('scripts/release-evidence.mjs', 'utf8'), /nativeAuthentication/);
   assert.match(source, /Signing configuration missing/);
 });

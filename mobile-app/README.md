@@ -110,3 +110,7 @@ Store listings, privacy/data safety answers, supported payment model, reviewer
 account, screenshots and developer enrollment must be completed with actual
 account and business details. Do not describe this shell as ready for public
 submission until those gates and device checks pass.
+
+## Unsigned Android preparation
+
+`npm run android:prepare` compiles a packaged application into an **unsigned** release AAB, with a `PREPARATION_ONLY.txt` marker beside it. It rejects a configured signing keystore; it never supplies credentials, marks live gates as verified, or substitutes for `android:release`. The signed release command still requires physical-device evidence tied to the exact frontend SHA and platform, including native authentication, OAuth return, streaming, file saving, microphone, deletion, privacy and billing. Android evidence cannot approve an iOS release. See `release-evidence.example.json` and [iOS privacy inventory](IOS_PRIVACY_INVENTORY.md). Compilation artifacts are not published automatically.

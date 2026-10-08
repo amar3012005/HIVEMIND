@@ -21,13 +21,15 @@ async function readSaved(db, orgId, userId, sharedOrganizationAgents) {
     const schema=schemas[0].table_schema;
     const roots=await tx.$queryRawUnsafe(`SELECT session_id FROM ${schema}.harness_company_hq WHERE org_id=$1::uuid`,orgId);
     if(roots.length!==1) return [];
-    const rows=await tx.$queryRawUnsafe(`SELECT DISTINCT ON (payload->'data'->>'id') payload FROM ${schema}.harness_session_events
+    const rows=await tx.$queryRawUnsafe(`SELECT payload FROM (SELECT DISTINCT ON (payload->'data'->>'id') payload,sequence FROM ${schema}.harness_session_events
       WHERE session_id=$1 AND org_id=$2::uuid AND event_type='hivemind/hq-delegated-blocker'
-      ORDER BY payload->'data'->>'id',sequence DESC LIMIT 100`,roots[0].session_id,orgId);
+      ORDER BY payload->'data'->>'id',sequence DESC) latest
+      WHERE payload->'data'->>'kind'='connection' AND payload->'data'->>'state'='blocked' AND payload->'data'->>'rootId'=$1
+      ORDER BY sequence DESC LIMIT 100`,roots[0].session_id,orgId);
     return rows.map(row=>row.payload.data).filter(b=>b.rootId===roots[0].session_id && b.kind==='connection' && b.state==='blocked');
   });
 }
-export async function reconcileDelegatedConnections({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch,read=readSaved,verify=verifyDelegatedConnection}={}) {
+async function reconcile({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch,read=readSaved,verify=verifyDelegatedConnection}={}) {
   const membership=await prisma.userOrganization.findUnique({where:{userId_orgId:{userId,orgId}},select:{isActive:true,role:true,deactivatedAt:true}});
   if(!membership?.isActive || membership.deactivatedAt || !['owner','admin'].includes(membership.role)) return {status:'admin_required',delivered:0};
   const secret=env.HIVE_HARNESS_RUNNER_SERVICE_SECRET;
@@ -38,6 +40,7 @@ export async function reconcileDelegatedConnections({prisma,orgId,userId}, {env=
   let delivered=0;
   for(const blocker of await read(prisma,orgId,userId,env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED==='true')) {
     if(!blocker.workflowSessionId || !blocker.routerSessionId || !blocker.toolkits?.length) continue;
+    try {
     const checked=await verify({db:prisma,claims:{org_id:orgId,sub:userId,operating_role:'runtime',operating_session:blocker.rootId},
       input:{session_id:blocker.employeeSessionId,router_session_id:blocker.routerSessionId,toolkits:blocker.toolkits},sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED==='true'});
     if(checked.verified!==true) continue;
@@ -47,6 +50,16 @@ export async function reconcileDelegatedConnections({prisma,orgId,userId}, {env=
     const result=JSON.parse(raw);
     if(!response.ok || result.status!=='accepted' || result.blockerId!==blocker.id || result.rootId!==blocker.rootId) throw Error('delegated_connection_delivery_unconfirmed');
     delivered+=1;
+    } catch { /* Preserve this blocker; other valid workflows can still reach Runtime. */ }
   }
   return {status:'reconciled',delivered};
+}
+
+// Coalesce only concurrent reads; a later OAuth completion always causes a new check.
+const inFlight=new Map();
+export function reconcileDelegatedConnections(ctx,options={}) {
+  const key=`${ctx.orgId}:${ctx.userId}`;
+  if(inFlight.has(key)) return inFlight.get(key);
+  const promise=reconcile(ctx,options).finally(()=>{if(inFlight.get(key)===promise)inFlight.delete(key)});
+  inFlight.set(key,promise);return promise;
 }

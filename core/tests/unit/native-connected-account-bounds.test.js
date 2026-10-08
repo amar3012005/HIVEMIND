@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+process.env.COMPOSIO_API_KEY='synthetic-test-only';
+const {listNativeConnectedAccounts}=await import('../../src/connectors/composio/composio-service.js?native-bound-tests');
+test('native verification bounds empty pagination instead of looping indefinitely',async()=>{const original=globalThis.fetch;let calls=0;try{globalThis.fetch=async(_url,options)=>{calls++;assert(options.signal);return{ok:true,text:async()=>JSON.stringify({items:[],next_cursor:'page-'+calls})}};await assert.rejects(()=>listNativeConnectedAccounts('org','actor','hivemind:actor'),/bounded reconciliation/);assert.equal(calls,10)}finally{globalThis.fetch=original}});
+test('fresh native verification never retries a network failure',async()=>{const original=globalThis.fetch;let calls=0;try{globalThis.fetch=async()=>{calls++;throw Error('synthetic network failure')};await assert.rejects(()=>listNativeConnectedAccounts('org','actor','hivemind:actor'),/synthetic network failure/);assert.equal(calls,1)}finally{globalThis.fetch=original}});

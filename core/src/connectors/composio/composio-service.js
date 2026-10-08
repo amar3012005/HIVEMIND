@@ -147,13 +147,16 @@ export async function listConnectedAccounts(orgId, opts = {}) {
 /** Native Harness account identity is fixed by its authenticated session witness. */
 export async function listNativeConnectedAccounts(orgId, userId, subject) {
   if (![String(orgId), `hivemind:${userId}`].includes(subject)) throw new Error('native_connection_subject_not_authorized');
-  return listAccountsForSubject(subject);
+  return listAccountsForSubject(subject, { native: true });
 }
 
-async function listAccountsForSubject(subject) {
-  const items = []; const seen = new Set(); let cursor;
+async function listAccountsForSubject(subject, { native = false } = {}) {
+  const items = []; const seen = new Set(); let cursor; let pages = 0;
+  const deadline = Date.now() + 8000;
   do {
-    const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    if (native && (++pages > 10 || Date.now() >= deadline)) throw new Error('Native account verification exceeds bounded reconciliation.');
+    const path = `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const data = native ? await _composioRequest('GET', path, undefined, { retries: 0, timeoutMs: Math.max(1, Math.min(3000, deadline-Date.now())) }) : await composioGet(path);
     items.push(...(data?.items || [])); cursor = data?.next_cursor;
     if (cursor && seen.has(cursor)) throw new Error('Connected-account catalog cursor repeated.');
     if (cursor) seen.add(cursor);

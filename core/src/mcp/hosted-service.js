@@ -225,7 +225,7 @@ function signTokenPayload(encodedPayload) {
     .digest('base64url');
 }
 
-function buildConnectionPayload(userId, orgId, serverId) {
+function buildConnectionPayload(userId, orgId, serverId, scopes) {
   const issuedAt = Date.now();
   const expiresAt = issuedAt + CONFIG.connectionTtlMs;
 
@@ -233,6 +233,7 @@ function buildConnectionPayload(userId, orgId, serverId) {
     sub: userId,
     org: orgId || null,
     sid: serverId,
+    scopes: Array.isArray(scopes) ? scopes.filter(scope => typeof scope === 'string') : [],
     iat: issuedAt,
     exp: expiresAt
   };
@@ -249,7 +250,7 @@ function parseSignedConnectionToken(token) {
   }
 
   const expected = signTokenPayload(encodedPayload);
-  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+  if (Buffer.byteLength(signature) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
     return null;
   }
 
@@ -261,8 +262,8 @@ function parseSignedConnectionToken(token) {
   return payload;
 }
 
-function createSignedConnectionToken(userId, orgId, serverId) {
-  const payload = buildConnectionPayload(userId, orgId, serverId);
+function createSignedConnectionToken(userId, orgId, serverId, scopes) {
+  const payload = buildConnectionPayload(userId, orgId, serverId, scopes);
   const encodedPayload = base64UrlEncode(payload);
   const signature = signTokenPayload(encodedPayload);
   return {
@@ -400,9 +401,9 @@ function relationshipTypeToGraphTypes(relationship) {
  * @param {string} apiKey - User's API key for authentication
  * @returns {Object} Hosted MCP server configuration
  */
-export function generateHostedServer(userId, orgId, apiKey) {
+export function generateHostedServer(userId, orgId, apiKey, options = {}) {
   const serverId = uuidv4();
-  const { token: connectionToken, expiresAt } = createSignedConnectionToken(userId, orgId, serverId);
+  const { token: connectionToken, expiresAt } = createSignedConnectionToken(userId, orgId, serverId, options.scopes);
 
   const serverConfig = {
     // MCP Protocol Metadata
@@ -439,6 +440,7 @@ export function generateHostedServer(userId, orgId, apiKey) {
       serverId,
       userId,
       orgId,
+      scopes: Array.isArray(options.scopes) ? options.scopes : [],
       baseUrl: CONFIG.publicBaseUrl,
       internalBaseUrl: CONFIG.internalBaseUrl,
       endpoints: {
@@ -455,7 +457,7 @@ export function generateHostedServer(userId, orgId, apiKey) {
 
     // Available Tools (HIVE-MIND capabilities exposed as MCP tools)
     // Descriptor shows all tools; actual calls are entitlement-gated at execution time
-    tools: generateToolsManifest(userId, orgId, { scopes: ['*'] }),
+    tools: generateToolsManifest(userId, orgId, { scopes: options.scopes || [] }),
 
     // Available Resources
     resources: generateResourcesManifest(userId, orgId),
@@ -2019,6 +2021,7 @@ async function trackConnection(userId, serverConfig) {
     token: serverConfig.connection.token,
     userId: serverConfig.connection.userId,
     orgId: serverConfig.connection.orgId,
+    scopes: serverConfig.connection.scopes || [],
     createdAt: new Date().toISOString(),
     expiresAt: serverConfig.connection.expiresAt,
     revoked: false,
@@ -2055,6 +2058,7 @@ export async function getConnectionContext(token, userId) {
       token,
       userId: signedPayload.sub,
       orgId: signedPayload.org,
+      scopes: Array.isArray(signedPayload.scopes) ? signedPayload.scopes : [],
       createdAt: new Date(signedPayload.iat).toISOString(),
       expiresAt: new Date(signedPayload.exp).toISOString(),
       revoked: false,
@@ -3824,12 +3828,12 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
   // GET /api/mcp/servers/:userId - Get hosted MCP server configuration
   app.get('/api/mcp/servers/:userId', authMiddleware, async (req, res) => {
     const { userId } = req.params;
-    const orgId = req.user?.orgId || req.headers['x-org-id'];
+    const orgId = req.user?.orgId;
     const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
 
     // Verify user matches authenticated user
-    const authenticatedUserId = req.user?.id || req.headers['x-user-id'];
-    if (authenticatedUserId !== userId) {
+    const authenticatedUserId = req.user?.id;
+    if (!orgId || !authenticatedUserId || authenticatedUserId !== userId) {
       return res.status(403).json({
         error: 'Forbidden',
         message: 'User ID does not match authenticated user'
@@ -3837,7 +3841,7 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
     }
 
     try {
-      const serverConfig = generateHostedServer(userId, orgId, apiKey);
+      const serverConfig = generateHostedServer(userId, orgId, apiKey, { scopes: req.user?.scopes || [] });
       res.json(serverConfig);
     } catch (error) {
       res.status(500).json({
@@ -3942,9 +3946,9 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
   // POST /api/mcp/servers/:userId/revoke - Revoke all connections
   app.post('/api/mcp/servers/:userId/revoke', authMiddleware, async (req, res) => {
     const { userId } = req.params;
-    const authenticatedUserId = req.user?.id || req.headers['x-user-id'];
+    const authenticatedUserId = req.user?.id;
 
-    if (authenticatedUserId !== userId) {
+    if (!orgId || !authenticatedUserId || authenticatedUserId !== userId) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 

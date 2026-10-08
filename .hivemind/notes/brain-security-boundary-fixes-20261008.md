@@ -24,3 +24,7 @@ Remaining authorized work: unified complete export/download contract, durable de
 - Profile UI paired branch offers actual download and explains excluded original binaries.
 
 Twelve sandbox regressions and changed-JS syntax parsing pass. Production/deployed model/schema acceptance, original-object and derived-store reconciliation, complete portability inventory and paired frontend release remain to verify.
+
+## Signed MCP authority follow-on
+
+New hosted connection tokens carry the authenticated issuer's explicit scopes. Descriptor minting receives server-authenticated scopes; signed context and persisted state restore them. Old scope-less tokens deliberately require reauthorization. Missing connection organization no longer falls back to DEFAULT_ORG. Legacy Express adapter accepts only middleware-owned actor/organization, never identity headers. Signature-length mismatch returns invalid-token instead of throwing from timingSafeEqual. DSR export paginates rather than silently limiting to 10,000/5,000 rows. Fourteen focused sandbox regressions pass.

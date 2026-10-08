@@ -5712,6 +5712,7 @@ exit \$RC
       }, 401);
     }
 
+    if (!consumer.orgId || (!consumer.master && (!Array.isArray(consumer.scopes) || consumer.scopes.length === 0))) return jsonResponse(res, { error: 'Explicit connection scopes required' }, 401);
     const body = await parseBody(req);
     const { userId, orgId, rawKey } = consumer;
 
@@ -9672,7 +9673,8 @@ exit \$RC
         }
 
         const connection = await getConnectionContext(token, pathUserId);
-        const connectionOrgId = connection?.orgId || DEFAULT_ORG;
+        if (!connection?.orgId || (!connection.master && (!Array.isArray(connection.scopes) || connection.scopes.length === 0))) return jsonResponse(res, { error: 'Connection requires reauthorization' }, 401);
+        const connectionOrgId = connection.orgId;
         const requestApiKey = typeof req.headers['x-api-key'] === 'string'
           ? req.headers['x-api-key'].trim()
           : '';
@@ -9706,7 +9708,7 @@ exit \$RC
             result = {};
             break;
           case 'tools/list':
-            // Connection-token path: scopes stored in connection context, default to ['*'] for issued tokens
+            // Only explicit scopes from the signed, tenant-bound connection are admitted.
             result = handleToolsList(pathUserId, connectionOrgId, { scopes: connection?.scopes || [], isMaster: !!connection?.master });
             break;
           case 'tools/call':
@@ -19451,7 +19453,7 @@ exit \$RC
 
             try {
               const apiKey = req.headers['x-api-key'] || auth.principal?.rawKey || '';
-              const serverConfig = generateHostedServer(userId, orgId, apiKey);
+              const serverConfig = generateHostedServer(userId, orgId, apiKey, { scopes: auth.principal?.scopes || [] });
               return jsonResponse(res, serverConfig);
             } catch (error) {
               return jsonResponse(res, {

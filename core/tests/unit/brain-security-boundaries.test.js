@@ -92,7 +92,7 @@ test('personal export excludes organization/project documents even when uploaded
 test('actual DSR handlers deny cross-org target and preserve personal data on admin erasure', async () => {
   const source = readFileSync(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8');
   const handlers = source.slice(source.indexOf('  // ── DSR:'), source.indexOf('  // ─── End Audit + DSR'));
-  const invoke = new Function('deps', `return async function(req,res,pathname) { const { requireSession, requireOrgAdmin, requireDsrTargetMembership, dsrMemoryWhere, dsrAuditWhere, prisma, audit, _reqMeta, jsonResponse, CONFIG } = deps; ${handlers} }`);
+  const invoke = new Function('deps', `return async function(req,res,pathname) { const { requireSession, requireOrgAdmin, requireDsrTargetMembership, dsrMemoryWhere, dsrAuditWhere, prisma, audit, _reqMeta, jsonResponse, CONFIG, collectOwnedRecords } = deps; ${handlers} }`);
   const actor = '00000000-0000-0000-0000-000000000001';
   const same = '00000000-0000-0000-0000-000000000002';
   const other = '00000000-0000-0000-0000-000000000003';
@@ -103,7 +103,7 @@ test('actual DSR handlers deny cross-org target and preserve personal data on ad
     memory: { findMany: async ({ where }) => records.filter(row => match(row, where)), updateMany: async ({ where, data }) => { const rows = records.filter(row => match(row, where)); rows.forEach(row => Object.assign(row,data)); return { count: rows.length }; } },
     auditLog: { findMany: async () => [] },
   };
-  const handler = invoke({ prisma, requireSession: async () => ({ session: { userId: actor, orgId: 'A' } }), requireOrgAdmin: async () => ({ role: 'admin' }), requireDsrTargetMembership, dsrMemoryWhere, dsrAuditWhere, audit: () => {}, _reqMeta: () => ({}), jsonResponse: (res,body,status=200) => Object.assign(res,{ body,status }), CONFIG: { allowedOrigins: ['https://fixture.invalid'] } });
+  const handler = invoke({ prisma, requireSession: async () => ({ session: { userId: actor, orgId: 'A' } }), requireOrgAdmin: async () => ({ role: 'admin' }), requireDsrTargetMembership, dsrMemoryWhere, dsrAuditWhere, audit: () => {}, _reqMeta: () => ({}), jsonResponse: (res,body,status=200) => Object.assign(res,{ body,status }), CONFIG: { allowedOrigins: ['https://fixture.invalid'] }, collectOwnedRecords });
   const denied = {};
   await handler({ method: 'GET', headers: {} }, denied, `/v1/dsr/user/${other}/export`);
   assert.equal(denied.status,404);
@@ -118,4 +118,15 @@ test('actual DSR handlers deny cross-org target and preserve personal data on ad
   assert.equal(erased.body.memories_soft_deleted,1);
   assert.equal(records.find(row => row.id === 'personal').deletedAt,null);
   assert.equal(records.find(row => row.id === 'another-org').deletedAt,null);
+});
+test('hosted connection issuance preserves only explicitly authenticated scopes', () => {
+  const source = readFileSync(new URL('../../src/mcp/hosted-service.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function buildConnectionPayload(');
+  const end = source.indexOf('\nfunction parseSignedConnectionToken',start);
+  const build = new Function('CONFIG', `${source.slice(start,end)}; return buildConnectionPayload;`)({ connectionTtlMs: 1000 });
+  assert.deepEqual(build('u','A','s',['memory:read']).scopes,['memory:read']);
+  assert.deepEqual(build('u','A','s',undefined).scopes,[]);
+  assert.ok(source.includes('scopes: Array.isArray(signedPayload.scopes) ? signedPayload.scopes : []'));
+  assert.ok(source.includes('Buffer.byteLength(signature) !== Buffer.byteLength(expected)'));
+  assert.ok(!source.includes("req.user?.orgId || req.headers['x-org-id']"));
 });

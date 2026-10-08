@@ -1,4 +1,4 @@
-import { exportAccountRecords } from './security/account-export.js';
+import { exportAccountRecords, collectOwnedRecords } from './security/account-export.js';
 import { checkedVectorDelete } from './security/vector-erasure.js';
 import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
@@ -9646,16 +9646,8 @@ const server = http.createServer(async (req, res) => {
     if (!await requireDsrTargetMembership(prisma, { userId: targetUserId, orgId, self: isSelf })) return jsonResponse(res, { error: 'Resource not found' }, 404);
     try {
       const [memories, auditRows] = await Promise.all([
-        prisma.memory.findMany({
-          where: dsrMemoryWhere({ userId: targetUserId, orgId, self: isSelf }),
-          orderBy: { createdAt: 'asc' },
-          take: 10000,
-        }),
-        prisma.auditLog.findMany({
-          where: dsrAuditWhere({ userId: targetUserId, orgId, self: isSelf }),
-          orderBy: { createdAt: 'asc' },
-          take: 5000,
-        }),
+        collectOwnedRecords(prisma.memory, { where: dsrMemoryWhere({ userId: targetUserId, orgId, self: isSelf }) }),
+        collectOwnedRecords(prisma.auditLog, { where: dsrAuditWhere({ userId: targetUserId, orgId, self: isSelf }) }),
       ]);
       audit({
         organizationId: orgId, userId: current.session.userId,
@@ -9671,7 +9663,7 @@ const server = http.createServer(async (req, res) => {
         audit_logs: auditRows,
       });
     } catch (err) {
-      return jsonResponse(res, { error: err.message }, 500);
+      return jsonResponse(res, { error: err.status ? err.message : 'DSR operation unavailable' }, err.status || 503);
     }
   }
 
@@ -9706,7 +9698,7 @@ const server = http.createServer(async (req, res) => {
         note: 'Soft-deleted; permanent purge after 30 days via retention cron.',
       });
     } catch (err) {
-      return jsonResponse(res, { error: err.message }, 500);
+      return jsonResponse(res, { error: err.status ? err.message : 'DSR operation unavailable' }, err.status || 503);
     }
   }
   // ─── End Audit + DSR ─────────────────────────────────────

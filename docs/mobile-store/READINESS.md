@@ -6,7 +6,7 @@ Implementation update, 8 October 2026: native PKCE login, dedicated CP sessions,
 
 ## Current release evidence
 
-The table below retains its original baseline findings. For current status, see [PROGRESS.md](PROGRESS.md): Cloudflare frontend `12f169fe` and Control Plane `5b7f0780` are deployed. Android debug APK contains the real packaged frontend and its exact SHA; Android compilation and policy tests passed. iOS project and OS transport exist in source but have not been compiled on macOS. The checked runner image `8b119aea` awaits an idle cutover; native AI admission remains disabled until paired Runner verification.
+The table below retains its original baseline findings. For current status, see [PROGRESS.md](PROGRESS.md): Cloudflare frontend `49ac21c2` and Control Plane `5b7f0780` are deployed. Android debug APK contains the real packaged frontend and its exact SHA; Android compilation and policy tests passed. iOS project and OS transport exist in source but have not been compiled on macOS. The checked runner image `8b119aea` awaits an idle cutover; native AI admission remains disabled until paired Runner verification.
 
 Browser fixtures and signed-out public page checks are useful implementation evidence. They do not establish authenticated physical-device functionality, source-store account erasure, provider/privacy review or store eligibility. The SDK requirement references below must be rechecked against the submission date; neither an API level nor a clean build guarantees approval.
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 const sql = readFileSync(new URL('../../prisma/migrations/20261008170000_runtime_attention_scoped_reads/migration.sql', import.meta.url), 'utf8');
 test('attention exposes scoped security-barrier views without base-table grants', () => {
-  assert.equal((sql.match(/CREATE VIEW/g) || []).length, 3);
+  assert.equal((sql.match(/CREATE OR REPLACE VIEW/g) || []).length, 3);
   assert.equal((sql.match(/security_barrier=true/g) || []).length, 3);
   assert.match(sql, /REVOKE ALL ON[\s\S]*FROM PUBLIC/);
   assert.doesNotMatch(sql, /GRANT SELECT ON/);

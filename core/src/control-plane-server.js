@@ -2923,9 +2923,9 @@ async function purgeUserVectors(userId, userOrgs = [], orgIdsToDelete = []) {
       await checkedVectorDelete(fetch, `${qdrantUrl}/collections/${coll}`, { method: 'DELETE', headers: qhdr });
     }
     for (const coll of toScrub) {
-      await checkedVectorDelete(fetch, `${qdrantUrl}/collections/${coll}/points/delete`, {
+      await checkedVectorDelete(fetch, `${qdrantUrl}/collections/${coll}/points/delete?wait=true`, {
         method: 'POST', headers: qhdr,
-        body: JSON.stringify({ filter: { must: [{ key: 'user_id', match: { value: userId } }] }, wait: true }),
+        body: JSON.stringify({ filter: { must: [{ key: 'user_id', match: { value: userId } }] } }),
       });
 
     }
@@ -9695,7 +9695,7 @@ const server = http.createServer(async (req, res) => {
         target_user_id: targetUserId,
         memories_soft_deleted: result.count,
         retention_days: 30,
-        note: 'Soft-deleted; permanent purge after 30 days via retention cron.',
+        note: 'Soft-deleted; permanent multi-store purge remains pending verification.',
       });
     } catch (err) {
       return jsonResponse(res, { error: err.status ? err.message : 'DSR operation unavailable' }, err.status || 503);

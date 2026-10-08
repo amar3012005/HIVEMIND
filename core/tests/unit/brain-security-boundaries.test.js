@@ -81,7 +81,7 @@ test('personal export excludes organization/project documents even when uploaded
   const queries = [];
   const prisma = { user: { findUnique: async () => ({ id: 'self' }) } };
   for (const name of ['memory','knowledgeSegment','userProfile','platformIntegration','harnessSession','harnessSessionEvent','auditLog']) prisma[name] = { findMany: async q => { queries.push({ name, q }); return []; } };
-  prisma.knowledgeDocument = { findMany: async () => [{ id: 'personal', tags: ['scope-key:personal:self'] }, { id: 'org', tags: ['scope-key:org:A'] }, { id: 'project', tags: ['scope-key:project:P'] }] };
+  prisma.knowledgeDocument = { findMany: async () => [{ id: 'personal', tags: ['scope-key:personal:self'] }, { id: 'org', tags: ['scope-key:org:A'] }, { id: 'project', tags: ['scope-key:project:P'] }, { id: 'legacy', tags: [] }, { id: 'mixed', tags: ['scope-key:personal:self', 'scope-key:org:A'] }] };
   const result = await exportAccountRecords(prisma, 'self');
   assert.deepEqual(result.documents.map(r => r.id), ['personal']);
   assert.equal(queries.find(x => x.name === 'memory').q.where.scope, 'personal');
@@ -129,4 +129,21 @@ test('hosted connection issuance preserves only explicitly authenticated scopes'
   assert.ok(source.includes('scopes: Array.isArray(signedPayload.scopes) ? signedPayload.scopes : []'));
   assert.ok(source.includes('Buffer.byteLength(signature) !== Buffer.byteLength(expected)'));
   assert.ok(!source.includes("req.user?.orgId || req.headers['x-org-id']"));
+});
+
+ test('export query contract matches current Prisma schema', async () => {
+  const { readFileSync } = await import('node:fs');
+  const schema = readFileSync(new URL('../../prisma/schema.prisma', import.meta.url), 'utf8');
+  const model = name => schema.split(`model ${name} {`)[1]?.split('\n}')[0];
+  for (const name of ['User','Memory','KnowledgeDocument','KnowledgeSegment','UserProfile','PlatformIntegration','HarnessSession','HarnessSessionEvent','AuditLog']) assert.match(model(name) || '', /\bid\s+\w+\s+.*@id/);
+  for (const field of ['displayName','avatarUrl','timezone','locale','createdAt','updatedAt']) assert.ok(model('User').split('\n').some(line => line.trim().startsWith(field + ' ')));
+  assert.match(model('KnowledgeSegment'), /document\s+KnowledgeDocument\s+@relation/);
+  assert.match(model('HarnessSessionEvent'), /session\s+HarnessSession\s+@relation/);
+  assert.match(model('AuditLog'), /organizationId\s+String\?/);
+});
+ test('vector erase requests synchronous completion and avoids unsupported purge promises', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../src/control-plane-server.js', import.meta.url), 'utf8');
+  assert.match(source, /points\/delete\?wait=true/);
+  assert.doesNotMatch(source, /permanent purge after 30 days via retention cron/);
 });

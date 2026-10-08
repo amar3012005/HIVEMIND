@@ -15,6 +15,8 @@ assert.doesNotMatch(plist, /NSAllowsArbitraryLoads/);
 const androidBridge = await readFile('android/app/src/main/java/com/singulancelabs/mobile/SingulanceNativePlugin.java', 'utf8');
 const iosBridge = await readFile('ios/App/App/SingulanceNativePlugin.swift', 'utf8');
 assert.match(androidBridge, /AndroidKeyStore/);
+assert.match(androidBridge, /ACTION_CREATE_DOCUMENT/);
+assert.match(iosBridge, /UIDocumentPickerViewController\(forExporting/);
 assert.match(androidBridge, /WEB_MESSAGE_LISTENER/);
 const activity = await readFile('android/app/src/main/java/com/singulancelabs/mobile/MainActivity.java', 'utf8');
 assert.match(activity, /removeJavascriptInterface\("androidBridge"\)/);

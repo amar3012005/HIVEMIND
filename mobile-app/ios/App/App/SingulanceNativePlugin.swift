@@ -1,13 +1,16 @@
 import Foundation
+import UIKit
 import Security
 import WebKit
 import Capacitor
 
 @objc(SingulanceNativePlugin)
-public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate {
+public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    private var saveCall: CAPPluginCall?
+    private var saveURL: URL?
     private let service = "com.singulancelabs.mobile.credentials.v1"
     private var streams: [String: URLSessionWebSocketTask] = [:]
     private let streamLock = NSLock()
@@ -149,6 +152,30 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         } else { socket.cancel(with: .normalClosure, reason: nil) }
     }
     @objc func closeStream(_ call: CAPPluginCall) { guard trusted(), let id = call.getString("id") else { call.reject("Stream could not be closed."); return }; close(id); call.resolve() }
+    @objc func saveFile(_ call: CAPPluginCall) {
+        guard trusted(), saveCall == nil, let name = call.getString("name"), !name.isEmpty, name.count <= 160,
+              !name.contains("/"), !name.contains("\\"), name != ".", name != "..", !name.unicodeScalars.contains(where: { $0.value < 32 }),
+              let encoded = call.getString("dataBase64"), encoded.count <= 28 * 1024 * 1024,
+              let bytes = Data(base64Encoded: encoded), bytes.count <= 20 * 1024 * 1024 else { call.reject("File could not be saved. Choose a file smaller than 20 MiB."); return }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let url = folder.appendingPathComponent(name); try bytes.write(to: url, options: [.atomic, .completeFileProtection])
+            saveCall = call; saveURL = url
+            DispatchQueue.main.async {
+                let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true); picker.delegate = self
+                guard let controller = self.bridge?.viewController else { self.finishSave(false, "File picker is unavailable."); return }
+                controller.present(picker, animated: true)
+            }
+        } catch { try? FileManager.default.removeItem(at: folder); call.reject("File could not be saved.") }
+    }
+    public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { finishSave(!urls.isEmpty) }
+    public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { finishSave(false) }
+    private func finishSave(_ saved: Bool, _ error: String? = nil) {
+        let call = saveCall; let url = saveURL; saveCall = nil; saveURL = nil
+        if let url = url { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        if let error = error { call?.reject(error) } else { call?.resolve(["saved": saved]) }
+    }
     enum NativeError: Error { case denied }
 }
 

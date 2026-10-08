@@ -1,6 +1,9 @@
 package com.singulancelabs.mobile;
 
 import android.content.Context;
+import android.content.Intent;
+import android.app.Activity;
+import androidx.activity.result.ActivityResult;
 import android.content.SharedPreferences;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
@@ -12,6 +15,7 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.ActivityCallback;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -31,6 +35,7 @@ public class SingulanceNativePlugin extends Plugin {
     private final Set<String> reservedStreams = ConcurrentHashMap.newKeySet();
     private final OkHttpClient http = new OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).connectTimeout(15,TimeUnit.SECONDS).readTimeout(60,TimeUnit.SECONDS).pingInterval(30,TimeUnit.SECONDS).build();
     private SharedPreferences preferences;
+    private final java.util.concurrent.atomic.AtomicBoolean saving = new java.util.concurrent.atomic.AtomicBoolean(false);
     @Override public void load() { preferences = getContext().getSharedPreferences("singulance.secure.v1", Context.MODE_PRIVATE); }
     private void requireTrusted() {
         String url = getBridge().getWebView().getUrl();
@@ -130,5 +135,23 @@ public class SingulanceNativePlugin extends Plugin {
         });call.resolve();
     }
     @PluginMethod public void closeStream(PluginCall call){try{requireTrusted();String id=call.getString("id");reservedStreams.remove(id);WebSocket socket=streams.remove(id);if(socket!=null){socket.send("{\"type\":\"cancel\",\"streamId\":\""+id+"\"}");socket.close(1000,"cancelled");}call.resolve();}catch(Exception ignored){call.reject("Stream could not be closed.");}}
+    @PluginMethod public void saveFile(PluginCall call) {
+        try {
+            requireTrusted(); if(!saving.compareAndSet(false,true)){call.reject("A file picker is already open.");return;} String name=call.getString("name"),mime=call.getString("mimeType","application/octet-stream"),data=call.getString("dataBase64");
+            if(name==null||name.isBlank()||name.length()>160||name.contains("/")||name.contains("\\")||name.chars().anyMatch(c->c<32)||".".equals(name)||"..".equals(name)||!mime.matches("[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+")||data==null||data.length()>28*1024*1024||data.length()%4!=0)throw new IllegalArgumentException();
+            byte[] bytes=Base64.decode(data,Base64.NO_WRAP);if(bytes.length>20*1024*1024)throw new IllegalArgumentException("File is too large.");
+            Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType(mime);intent.putExtra(Intent.EXTRA_TITLE,name);
+            startActivityForResult(call,intent,"savePicked");
+        }catch(Exception ignored){saving.set(false);call.reject("File could not be saved. Choose a file smaller than 20 MiB.");}
+    }
+    @ActivityCallback private void savePicked(PluginCall call,ActivityResult result) {
+        if(call==null){saving.set(false);return;}
+        if(result.getResultCode()!=Activity.RESULT_OK||result.getData()==null||result.getData().getData()==null){JSObject status=new JSObject();status.put("saved",false);saving.set(false);call.resolve(status);return;}
+        final android.net.Uri uri=result.getData().getData();if(!"content".equals(uri.getScheme())){saving.set(false);call.reject("File picker destination is invalid.");return;}executor.execute(()->{try{
+            byte[] bytes=Base64.decode(call.getString("dataBase64"),Base64.NO_WRAP);if(bytes.length>20*1024*1024)throw new IOException();
+            try(OutputStream output=getContext().getContentResolver().openOutputStream(uri,"w")){if(output==null)throw new IOException();output.write(bytes);}
+            JSObject status=new JSObject();status.put("saved",true);call.resolve(status);
+        }catch(Exception ignored){call.reject("File could not be saved.");}finally{saving.set(false);}});
+    }
     @Override protected void handleOnDestroy(){for(WebSocket socket:streams.values())socket.cancel();streams.clear();reservedStreams.clear();executor.shutdownNow();http.dispatcher().executorService().shutdown();http.connectionPool().evictAll();}
 }

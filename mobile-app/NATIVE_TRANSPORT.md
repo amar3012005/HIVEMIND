@@ -39,6 +39,16 @@ stored using setCredential. Its lifetime/revocation remain server-owned.
   callers must serialize an actual FormData request including its generated
   boundary, then send the resulting bytes with bodyEncoding base64.
 
+## User-initiated file saving
+
+`saveFile({name,mimeType,dataBase64})` opens Android's document picker or iOS's
+export document picker. It accepts a basename and bounded file bytes, never an
+arbitrary path/URI. Android writes only to the content URI granted by the OS
+picker. iOS uses a protected temporary file and deletes it after the export or
+cancellation. No broad storage permission is requested. The decoded file cap is
+20 MiB and cancellation returns `{saved:false}`. Frontend download actions must
+invoke this method instead of relying on WebView Blob-download anchors.
+
 ## DSH streaming
 
 The active Harness source at `28f65228d8` declares

@@ -13,6 +13,8 @@ export interface SingulanceNative {
     /** Injects securely stored CP bearer only for api.singulancelabs.com. */
     authorize?: boolean;
   }): Promise<{status: number; headers: Record<string,string>; data: string; encoding?: 'text' | 'base64'}>;
+  /** User-initiated OS document picker. No filesystem path/URI accepted. Max 20 MiB. */
+  saveFile(options: {name: string; mimeType: string; dataBase64: string}): Promise<{saved:boolean}>;
   /** Opens one logical Remote stream over a fixed native WebSocket. */
   openStream(options: {id: string; endpoint: string; payload: unknown}): Promise<void>;
   closeStream(options: {id: string}): Promise<void>;

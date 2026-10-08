@@ -4,6 +4,12 @@ Evidence baseline: parent `a227a782f56de382e3f47121f4800df571ddc129`, frontend `
 
 Implementation update, 8 October 2026: native PKCE login, dedicated CP sessions, durable AI consent/report receipts, passkey-protected operator triage, no broad API key in native bootstrap and signed Runner consent revalidation now exist in source. See [SAFETY_OPERATIONS.md](SAFETY_OPERATIONS.md) for actual cookie/JWT and isolated Redis proof. The newer packaged local-shell bridge, signing, device behavior and deployed integration require their own evidence; the baseline findings below describe what prompted those changes and are not a claim that the source additions passed store review.
 
+## Current release evidence
+
+The table below retains its original baseline findings. For current status, see [PROGRESS.md](PROGRESS.md): Cloudflare frontend `12f169fe` and Control Plane `5b7f0780` are deployed. Android debug APK contains the real packaged frontend and its exact SHA; Android compilation and policy tests passed. iOS project and OS transport exist in source but have not been compiled on macOS. The checked runner image `8b119aea` awaits an idle cutover; native AI admission remains disabled until paired Runner verification.
+
+Browser fixtures and signed-out public page checks are useful implementation evidence. They do not establish authenticated physical-device functionality, source-store account erasure, provider/privacy review or store eligibility. The SDK requirement references below must be rechecked against the submission date; neither an API level nor a clean build guarantees approval.
+
 ## Release gates
 
 | Gate | Baseline evidence | Required completion evidence / owner |

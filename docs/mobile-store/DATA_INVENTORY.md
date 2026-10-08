@@ -11,7 +11,7 @@ This inventory identifies candidate data categories from baseline code and the p
 | Connected-app records and authorization tokens | User-authorized connectors | Identity/connector providers and selected connected service | Emails/contacts/calendar and other categories only as actually connected; scope, revocation, deletion |
 | Product interaction and diagnostics | Operational security/usage; optional PostHog described in policy | Cloudflare, app infrastructure; PostHog only when enabled and consented | Identifiers, app interactions, diagnostics; establish native/web consent parity |
 | Billing records | Stripe account/subscription references; no full card storage stated | Stripe and platform billing infrastructure | Purchase history; no native purchase feature until billing choice implemented |
-| Safety reports | New reporting implementation required | Developer moderation system | Content/reference submitted, retention, user linkage and access |
+| Safety reports | Authenticated user-submitted reporting with durable receipts is implemented; actual report retention and triage must be reviewed | Developer moderation system | Content/reference submitted, retention, user linkage and access |
 
 ## Required reconciliation
 

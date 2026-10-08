@@ -50,8 +50,8 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  const session = (await tx.$queryRawUnsafe(`SELECT id FROM ${schema}.harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid`,claims.operating_session,claims.org_id,storage.userId))[0];
  if (!session) fail('runtime_session_not_found',403);
  if (message.request_call_id) {
-  // A decision email refers to an existing native call in this exact authenticated room.
-  const events = await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('tool/call','approval/asked','hivemind/hq-delegated-blocker') ORDER BY sequence DESC LIMIT 500`,claims.operating_session,claims.org_id,storage.userId);
+  // Correlate the existing native call or durable blocked request in this exact room.
+  const events = await tx.$queryRawUnsafe(`SELECT event_type,payload FROM ${schema}.harness_session_events WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND event_type IN ('tool/call','approval/asked','hivemind/hq-delegated-blocker') AND (payload->'data'->>'callId'=$4 OR payload->>'callId'=$4 OR payload->'data'->>'id'=$4 OR payload->>'id'=$4) ORDER BY sequence DESC LIMIT 50`,claims.operating_session,claims.org_id,storage.userId,message.request_call_id);
   const found = savedAdministratorRequest(events,message,claims.operating_session);
   if (!found) fail('native_request_not_found',409);
  }

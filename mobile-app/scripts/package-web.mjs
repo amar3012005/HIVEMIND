@@ -1,0 +1,12 @@
+import { cp, readFile, writeFile, access, readdir, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
+const source = process.argv[2] && resolve(process.argv[2]);
+const target = resolve('www');
+if (!source || source === target || source.startsWith(target + '/')) throw Error('Supply the compiled frontend build directory.');
+await access(resolve(source, 'index.html'));
+const html = await readFile(resolve(source, 'index.html'), 'utf8');
+if (!/<script[^>]+src=/i.test(html)) throw Error('The frontend must contain its compiled application scripts.');
+for (const entry of await readdir(target)) if (!['offline.html', '.gitkeep'].includes(entry)) await rm(resolve(target, entry), { recursive: true, force: true });
+await cp(source, target, { recursive: true });
+await writeFile(resolve(target, 'mobile-build.json'), JSON.stringify({ format: 1, frontendSha: process.env.SINGULANCE_FRONTEND_SHA || null, builtAt: new Date().toISOString() }) + '\n');
+console.log('Packaged frontend assets. Native authentication and device checks remain required.');

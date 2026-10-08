@@ -1,19 +1,43 @@
 {
   "name": "mobile-app",
   "version": "1.0.0",
-  "description": "",
+  "description": "SINGULANCE Capacitor mobile shell",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "check": "node scripts/check-native.mjs",
+    "test": "node --test scripts/navigation.test.mjs",
+    "package:web": "node scripts/package-web.mjs",
+    "sync": "cap sync",
+    "android:debug": "cap sync android && cd android && ./gradlew assembleDebug",
+    "android:release": "node scripts/check-native.mjs --release && cap sync android && cd android && ./gradlew bundleRelease",
+    "ios:open": "cap sync ios && cap open ios",
+    "icons": "node scripts/generate-icons.mjs",
+    "ios:archive": "node scripts/archive-ios.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@capacitor/android": "^8.5.0",
-    "@capacitor/app": "^8.1.1",
-    "@capacitor/browser": "^8.0.4",
-    "@capacitor/cli": "^8.5.0",
-    "@capacitor/core": "^8.5.0"
+    "@capacitor/android": "8.5.3",
+    "@capacitor/app": "8.1.1",
+    "@capacitor/browser": "8.0.4",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3",
+    "@capacitor/keyboard": "8.0.6",
+    "@capacitor/network": "8.0.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3",
+    "@resvg/resvg-js": "2.6.2",
+    "typescript": "5.9.3"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
   }
 }

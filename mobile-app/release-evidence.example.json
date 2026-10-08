@@ -1,0 +1,8 @@
+{
+  "nativeAuthentication": { "verified": false, "evidence": "" },
+  "deviceMicrophone": { "verified": false, "evidence": "" },
+  "oauthReturn": { "verified": false, "evidence": "" },
+  "accountDeletion": { "verified": false, "evidence": "" },
+  "privacyReview": { "verified": false, "evidence": "" },
+  "billingReview": { "verified": false, "evidence": "" }
+}

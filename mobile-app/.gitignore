@@ -1,1 +1,10 @@
 node_modules/
+www/*
+!www/index.html
+!www/offline.html
+*.jks
+*.keystore
+release-evidence.json
+*.ipa
+*.aab
+*.apk

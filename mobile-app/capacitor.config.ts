@@ -1,24 +1,28 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
-// Remote-loaded, same pattern as electron-app/src/main.js's
-// mainWindow.loadURL(APP_URL) — the native shell wraps the existing
-// /hivemind/m/* mobile web app, no separate bundle to keep in sync.
-// OAuth connect flows must NOT run in this WebView (Google rejects
-// embedded-webview OAuth outright) — those are intercepted and opened
-// via @capacitor/browser instead, see src/main/.../MainActivity or the
-// JS-side navigation guard once added.
+// Store builds package the approved frontend. Remote loading is opt-in development only.
+const remoteUrl = process.env.SINGULANCE_MOBILE_REMOTE_URL;
+if (remoteUrl && remoteUrl !== 'https://next.singulancelabs.com/hivemind/m/chat') {
+  throw new Error('Remote development URL must be the configured HTTPS mobile application.');
+}
 const config: CapacitorConfig = {
   appId: 'com.singulancelabs.mobile',
   appName: 'SINGULANCE',
   webDir: 'www',
+  loggingBehavior: 'debug',
+  backgroundColor: '#faf9f6',
   server: {
-    url: 'https://next.singulancelabs.com/hivemind/m/chat',
+    ...(remoteUrl ? { url: remoteUrl } : {}),
     androidScheme: 'https',
     cleartext: false,
+    appStartPath: '/hivemind/m/chat',
+    errorPath: 'offline.html',
   },
-  android: {
-    allowMixedContent: false,
+  android: { allowMixedContent: false, webContentsDebuggingEnabled: false },
+  ios: { contentInset: 'never' },
+  plugins: {
+    Keyboard: { resize: 'native', resizeOnFullScreen: true },
+    SystemBars: { insetsHandling: 'css' },
   },
 };
-
 export default config;

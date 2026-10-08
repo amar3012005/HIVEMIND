@@ -84,6 +84,7 @@ test('whole native context and the complete policy reach the decision boundary',
  assert.ok(request.instructions.length<=1000,'provider cap must not remove policy');
  for(const phrase of ['fresh exact match','pending native task','Completed work','Independent agendas','Contradictory confirmed','Preserve user approval limits']) assert.ok(request.instructions.includes(phrase),phrase);
  assert.deepEqual(request.state.runtime.decisionMemory,extra.decisionMemory);
+ assert.match(request.options.find(o=>o.id==='wake').criteria,/confirmed conditional agenda and pending native task/);
 });
 
 test('attention context budget failure remains quiet and distinguishable', async()=>{

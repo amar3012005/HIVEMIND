@@ -43,7 +43,7 @@ export async function assessRuntimeAttention({ event, snapshot, consent, provide
       options: [
         { id: 'retain', criteria: 'No supported timely action; preserve source quietly for later recall.' },
         { id: 'notify', criteria: 'Concrete company relevance worth showing, without starting Runtime work.' },
-        ...(snapshot.enabled === true ? [{ id: 'wake', criteria: 'Concrete evidence of a material active-work change, time-sensitive blocker or decision requiring Runtime action.' }] : []),
+        ...(snapshot.enabled === true ? [{ id: 'wake', criteria: 'A fresh exact trigger for a current confirmed conditional agenda and pending native task, or a concrete material work change, urgent blocker or decision requiring Runtime assessment within existing permissions.' }] : []),
       ],
     });
     if (!(snapshot.enabled === true ? ['retain', 'notify', 'wake'] : ['retain', 'notify']).includes(decision?.choice)

@@ -42,6 +42,11 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
     if (Object.keys(context).some(key => !permitted.has(key))) throw new Error('invalid_runtime_memory_metadata');
     if (!/^session-[a-z0-9-]{1,120}$/.test(context.sessionId || '')) throw new Error('invalid_runtime_memory_session');
     const states = kind === 'user_agenda' ? ['confirmed', 'superseded'] : ['open', 'resolved', 'superseded'];
+    if (kind === 'uncertainty' && supersedesId && !states.includes(context.state)) {
+      const error = new Error('invalid_uncertainty_update_state');
+      error.hint = 'Set context.state explicitly to resolved, open, or superseded when updating an uncertainty. Use resolved only when the question has been answered; no memory was saved.';
+      throw error;
+    }
     if (!states.includes(context.state)) throw new Error('invalid_runtime_memory_state');
     if (!Number.isInteger(context.priority) || context.priority < 0 || context.priority > 100) throw new Error('invalid_runtime_memory_priority');
     if (context.impact !== undefined && (typeof context.impact !== 'string' || context.impact.length > 500)) throw new Error('invalid_runtime_memory_impact');

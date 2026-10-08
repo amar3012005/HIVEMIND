@@ -45,3 +45,48 @@ test('explicit agenda topics cannot branch without exact supersession; independe
  await assert.rejects(saveOperatingMemory(db,agenda,identity,{source:'runtime',runtimeTransaction:true}),/agenda_supersession_required/);
  assert.equal(locked,true);
 });
+
+test('uncertainty updates reject absent or invalid state before any memory mutation',async()=>{
+ const prior='11111111-1111-4111-8111-111111111111';
+ let writes=0;
+ const db={
+  $transaction:async fn=>fn(db),
+  $queryRawUnsafe:async()=>{writes++;throw Error('unexpected database access');},
+  project:{upsert:async()=>{writes++;}},projectMember:{upsert:async()=>{writes++;}},
+ };
+ const {state,...context}=note.context;
+ for(const value of [undefined,null,'', 'closed']) {
+  await assert.rejects(saveOperatingMemory(db,{...note,supersedes_id:prior,context:{...context,...(value===undefined?{}:{state:value})}},identity,{source:'runtime'}),error=>{
+   assert.equal(error.message,'invalid_uncertainty_update_state');
+   assert.match(error.hint,/resolved, open, or superseded/);
+   assert.match(error.hint,/no memory was saved/);
+   return true;
+  });
+ }
+ assert.equal(writes,0);
+ assert.equal(validateOperatingMemory({...note,supersedes_id:prior},identity).context.state,'open');
+});
+
+test('explicit resolved uncertainty saves directly to private memory with a resolved receipt',async()=>{
+ const prior='11111111-1111-4111-8111-111111111111';
+ const projectId='22222222-2222-4222-8222-222222222222';
+ const update={...note,supersedes_id:prior,context:{...note.context,state:'resolved'}};
+ let writes=0;
+ const db={
+  $transaction:async fn=>fn(db),
+  project:{upsert:async()=>({id:projectId,name:'Hyper Agents',policy:'private'})},
+  projectMember:{upsert:async()=>({})},
+  $queryRawUnsafe:async(sql,...args)=>{
+   if(sql.includes('FOR UPDATE'))return [{id:prior}];
+   if(sql.includes('idempotency_key<>'))return [];
+   assert.match(sql,/INSERT INTO hivemind.hyper_agent_operating_memories/);
+   writes++;
+   return [{id:'33333333-3333-4333-8333-333333333333',kind:args[3],status:args[4],agent_slug:args[5],title:args[10],summary:args[11],context:JSON.parse(args[12])}];
+  },
+ };
+ const result=await saveOperatingMemory(db,update,identity,{source:'runtime'});
+ assert.equal(writes,1);
+ assert.equal(result.ok,true);
+ assert.equal(result.memory.context.state,'resolved');
+ assert.equal(result.memory.supersedesId,prior);
+});

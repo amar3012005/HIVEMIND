@@ -141,11 +141,19 @@ export async function disconnectToolkit(orgId, toolkitSlug) {
  */
 export async function listConnectedAccounts(orgId, opts = {}) {
   const subject = composioConnectionSubject(orgId, opts);
-  const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}`);
-  return (data?.items || []).map((it) => ({
+  const items = []; const seen = new Set(); let cursor;
+  do {
+    const data = await composioGet(`/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    items.push(...(data?.items || [])); cursor = data?.next_cursor;
+    if (cursor && seen.has(cursor)) throw new Error('Connected-account catalog cursor repeated.');
+    if (cursor) seen.add(cursor);
+    if (items.length > 1000) throw new Error('Connected-account catalog exceeds safe reconciliation bound.');
+  } while (cursor);
+  return items.map((it) => ({
     id: it.id,
     toolkit: it.toolkit?.slug,
     status: it.status, // ACTIVE | INITIATED | EXPIRED | FAILED
+    managedAuth: it.auth_config?.is_composio_managed === true,
     email: it.data?.email || it.email || it.member?.email || it.metadata?.email || null,
     createdAt: it.created_at,
     updatedAt: it.updated_at,

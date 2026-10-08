@@ -1,5 +1,5 @@
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
-import { runTriggers, receiveTriggerEvent } from './connectors/composio/hivemind-triggers.js';
+import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
 import fs from 'fs';
 import os from 'os';
@@ -8023,6 +8023,7 @@ const server = http.createServer(async (req, res) => {
         if (orgId) {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
           const accounts = await composioService.listConnectedAccounts(orgId);
+          reconcileConnectedActivity({ prisma, orgId, userId: current.session.userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
             const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
@@ -11044,6 +11045,7 @@ Write the persona now.`;
     try {
       if (action === 'connection_status' || action === 'wait_connection') {
         const accounts = await composioService.listConnectedAccounts(orgId, { userId });
+        reconcileConnectedActivity({ prisma, orgId, userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
         return jsonResponse(res, { action, connections: accounts.filter((row) => !toolkit || row.toolkit === toolkit).map((row) => ({ toolkit: row.toolkit, status: row.status, updatedAt: row.updatedAt })) });
       }
       if (action === 'search') {

@@ -1,0 +1,17 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { automaticTriggerPlan } from '../../src/connectors/composio/automatic-trigger-plan.js';
+const account = { id:'account', toolkit:'slack', managedAuth:true };
+const type = {slug:'SLACK_CHANNEL_MESSAGE_RECEIVED',toolkit:{slug:'slack'},version:'20261002_00',requires_webhook_endpoint_setup:true,config:{type:'object',properties:{channel_id:{type:'string'}}}};
+const normalize = x=>x;
+const validate = (schema, config)=>(schema.required||[]).every(k=>Object.hasOwn(config,k));
+const plan=(types=[type],a=account,existing=[])=>automaticTriggerPlan(types,a,existing,normalize,validate);
+test('managed Slack account-wide schema needs no invented channel ID',()=>{assert.deepEqual(plan()[0].config,{});assert.equal(plan()[0].status,'ready')});
+test('custom OAuth needs verified ingress setup',()=>{assert.equal(plan([type],{...account,managedAuth:false})[0].status,'provider_setup_required')});
+test('unknown auth never assumed managed',()=>{assert.equal(plan([type],{...account,managedAuth:undefined})[0].status,'provider_setup_required')});
+test('required resources are reported, never fabricated',()=>{assert.equal(plan([{...type,config:{type:'object',properties:{channel_id:{type:'string'}},required:['channel_id']}}])[0].status,'resource_configuration_required')});
+test('provider defaults satisfy validated required config',()=>{assert.deepEqual(plan([{...type,config:{type:'object',properties:{interval:{type:'integer',default:2}},required:['interval']}}])[0].config,{interval:2})});
+test('pause delete and explicit routing disable survive reconciliation',()=>{for(const row of [{status:'paused'},{status:'deleted'},{status:'active',runtime_attention_opt_out:true}])assert.equal(plan([type],account,[{...row,account_id:'account',slug:type.slug}])[0].status,'disabled_by_user')});
+test('other account optout does not block current account',()=>{assert.equal(plan([type],account,[{account_id:'other',slug:type.slug,status:'paused'}])[0].status,'ready')});
+test('deprecated triggers do not double-subscribe modern messages',()=>{assert.equal(plan([{...type,description:'DEPRECATED: use newer message trigger'}])[0].status,'deprecated')});
+test('catalog toolkit isolation and version pin required',()=>{assert.equal(plan([{...type,toolkit:{slug:'gmail'}}])[0].status,'wrong_toolkit');assert.equal(plan([{...type,version:null}])[0].status,'schema_version_missing')});

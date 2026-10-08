@@ -198,7 +198,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
         jsonResponse(res, { error: 'empty_refresh_request_required' }, 400); return true;
       }
       const result = await reconcileDelegatedConnections({prisma,orgId:claims.org_id,userId:claims.sub},{env,fetchImpl});
-      jsonResponse(res, result, result.status === 'reconciled' ? 200 : 503);
+      jsonResponse(res, result, result.status === 'reconciled' ? 200 : result.status === 'admin_required' ? 403 : 503);
     } catch { jsonResponse(res, {error:'connection_refresh_unavailable'},503); }
     return true;
   }

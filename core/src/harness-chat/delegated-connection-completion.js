@@ -37,13 +37,13 @@ async function reconcile({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch
   if(!secret || Buffer.byteLength(secret)<32 || !['http:','https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
     || url.pathname!=='/internal/hivemind/employee-lifecycle') return {status:'not_configured',delivered:0};
   url.pathname='/internal/hivemind/delegated-connection';
-  let delivered=0, unavailable=0;
+  let delivered=0, unavailable=0, waiting=0;
   for(const blocker of await read(prisma,orgId,userId,env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED==='true')) {
     if(!blocker.workflowSessionId || !blocker.routerSessionId || !blocker.toolkits?.length) continue;
     try {
     const checked=await verify({db:prisma,claims:{org_id:orgId,sub:userId,operating_role:'runtime',operating_session:blocker.rootId},
       input:{session_id:blocker.employeeSessionId,router_session_id:blocker.routerSessionId,toolkits:blocker.toolkits},sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED==='true'});
-    if(checked.verified!==true) continue;
+    if(checked.verified!==true) { waiting+=1; continue; }
     const payload={orgId,userId,rootId:blocker.rootId,employeeId:blocker.employeeId,blockerId:blocker.id,workflowSessionId:blocker.workflowSessionId};
     const response=await fetchImpl(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(8000),headers:{authorization:`Bearer ${completionToken(payload,secret)}`,'content-type':'application/json'},body:JSON.stringify(payload)});
     const raw=await response.text();if(raw.length>32000) throw Error('delegated_connection_response_too_large');
@@ -52,7 +52,7 @@ async function reconcile({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch
     delivered+=1;
     } catch { unavailable+=1; /* Preserve this blocker; other valid workflows can still reach Runtime. */ }
   }
-  return {status:unavailable>0 && delivered===0?'pending':'reconciled',delivered,unavailable};
+  return {status:unavailable+waiting>0?'pending':'reconciled',delivered,unavailable,waiting};
 }
 
 // Coalesce only concurrent reads; a later OAuth completion always causes a new check.

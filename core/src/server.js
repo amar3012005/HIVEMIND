@@ -12034,48 +12034,23 @@ exit \$RC
           return jsonResponse(res, { error: 'memory engine unavailable' }, 503);
         }
         let evUserId = body.user_id;
-        let evOrgId = body.org_id || orgId;
+        let evOrgId = body.org_id || null;
         const teamId = body.team_id;
         const ev = body.event || {};
         const evType = body.event_type || ev.type || 'unknown';
         const subtype = body.event_subtype || ev.subtype || null;
 
-        // Socket-Mode bridge support: the employees-service Bolt gateway only
-        // knows the Slack team_id, not the HIVEMIND OAuth owner. Resolve the
-        // connector exactly like the control-plane events webhook does —
-        // team_id match first, most-recently-connected active Slack connector
-        // as fallback.
-        if (!evUserId && teamId && prisma?.platformIntegration) {
-          try {
-            let conn = await prisma.platformIntegration.findFirst({
-              where: {
-                platformType: 'slack',
-                isActive: true,
-                connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
-              },
-              select: { userId: true },
-            });
-            if (!conn) {
-              conn = await prisma.platformIntegration.findFirst({
-                where: { platformType: 'slack', isActive: true },
-                orderBy: { updatedAt: 'desc' },
-                select: { userId: true },
-              });
-            }
-            if (conn) {
-              evUserId = conn.userId;
-              if (!evOrgId) {
-                // PlatformIntegration has no org column — derive from membership.
-                const membership = await prisma.userOrganization?.findFirst({
-                  where: { userId: conn.userId },
-                  select: { orgId: true },
-                }).catch(() => null);
-                evOrgId = membership?.orgId || null;
-              }
-            }
-          } catch (resolveErr) {
-            console.warn('[slack-event-ingest] team_id user resolution failed:', resolveErr.message);
-          }
+        // Exact workspace ownership only. Old most-recent-account and arbitrary
+        // membership fallbacks could cross organizations; missing mappings fail.
+        if (teamId && prisma?.platformIntegration) {
+          const matches = await prisma.platformIntegration.findMany({where:{platformType:'slack',isActive:true,
+            connectorMetadata:{path:['provider_metadata','team_id'],equals:teamId}},select:{userId:true,connectorMetadata:true}});
+          if(matches.length!==1 || (evUserId && evUserId!==matches[0].userId))
+            return jsonResponse(res,{error:'slack_workspace_ambiguous'},403);
+          evUserId=matches[0].userId;
+          const boundOrg=matches[0].connectorMetadata?.attention_org_id;
+          if(boundOrg && evOrgId && boundOrg!==evOrgId)return jsonResponse(res,{error:'slack_org_mismatch'},403);
+          evOrgId=boundOrg||evOrgId;
         }
 
         if (!evUserId) return jsonResponse(res, { error: 'user_id required' }, 400);

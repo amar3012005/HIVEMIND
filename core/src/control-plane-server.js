@@ -1,3 +1,4 @@
+import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
 import { runTriggers, receiveTriggerEvent } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
@@ -16596,6 +16597,14 @@ Write the persona now.`;
   }
   // ─── End Stripe webhook ───────────────────────────────────
 
+  if (pathname === '/v1/internal/runtime-attention/signals' && req.method === 'POST') {
+    try {
+      const input = await parseBody(req);
+      verifyDreamSignalToken(req.headers.authorization,input,process.env.HIVE_HARNESS_RUNNER_SERVICE_SECRET);
+      return jsonResponse(res,await admitDreamSignal(prisma,input));
+    } catch(error) { return jsonResponse(res,{error:error.status?error.message:'signal_unavailable'},error.status||503); }
+  }
+
   // POST /v1/connectors/slack/events — Slack Events API webhook
   // Public endpoint (no session). Auth via HMAC signature over raw body.
   // Handles url_verification handshake + message/reaction/pin events.
@@ -16671,37 +16680,18 @@ Write the persona now.`;
       const event = payload.event || {};
       console.log(`[slack-events] inbound event_callback type=${event.type} subtype=${event.subtype || '-'} team=${teamId} channel=${event.channel || '-'}`);
 
-      // Respond 200 within 3s (Slack retry policy)
+      // Resolve only this verified workspace. Persist accepted attention evidence
+      // before acknowledging; retry uses the same durable Slack event identity.
+      let source;
+      try {
+        source = await resolveNativeSlackSource(prisma,payload);
+        await admitNativeSlackSignal(prisma,payload,source);
+      } catch(error) { return jsonResponse(res,{error:error.status?error.message:'slack_ingest_unavailable'},error.status||503); }
       jsonResponse(res, { ok: true });
-
-      // Background ingest (fire-and-forget)
       setImmediate(async () => {
         try {
           if (!connectorStore || !prisma) return;
-          // Resolve connector by team_id (multi-tenant fanout)
-          let conn = await prisma.platformIntegration.findFirst({
-            where: {
-              platformType: 'slack',
-              isActive: true,
-              connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
-            },
-          });
-          if (!conn) {
-            // Fallback: team_id not captured on the connection (older OAuth /
-            // Nango). Use the MOST-RECENTLY-connected active Slack connector —
-            // a fresh reconnect supersedes a stale one (whose token may be
-            // dead). Correct for a single workspace; multi-workspace needs
-            // team_id capture at OAuth time.
-            conn = await prisma.platformIntegration.findFirst({
-              where: { platformType: 'slack', isActive: true },
-              orderBy: { updatedAt: 'desc' },
-            });
-          }
-          if (!conn) {
-            console.warn(`[slack-events] no connector for team_id=${teamId}`);
-            return;
-          }
-
+          const conn = source.connection;
           // Forward to core for ingestion (master-key authed)
           const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
           if (!apiKey) {
@@ -16713,7 +16703,7 @@ Write the persona now.`;
             headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
             body: JSON.stringify({
               user_id: conn.userId,
-              org_id: conn.orgId || null,
+              org_id: source.orgId,
               team_id: teamId,
               event,
               event_type: event.type,

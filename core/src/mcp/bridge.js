@@ -1,3 +1,4 @@
+import { requiredSecret } from '../security/brain-boundaries.js';
 /**
  * Meta-MCP Bridge
  * User-Specific Endpoint Generation for Cross-App Context Synchronization
@@ -26,7 +27,7 @@ const PROJECT_ROOT = join(__dirname, '..', '..');
 
 const CONFIG = {
   endpointPrefix: process.env.MCP_ENDPOINT_PREFIX || 'hivemind',
-  endpointSecretKey: process.env.MCP_SECRET_KEY || 'default-mcp-secret-key-change-in-production',
+  endpointSecretKey: process.env.MCP_SECRET_KEY,
   endpointBaseUrl: process.env.MCP_BASE_URL || 'http://localhost:3000',
   endpointTtl: parseInt(process.env.MCP_ENDPOINT_TTL || '86400', 10), // 24 hours default
   maxEndpointsPerUser: parseInt(process.env.MCP_MAX_ENDPOINTS || '5', 10)
@@ -389,7 +390,7 @@ function _buildEndpointUrl(endpointId, secret) {
  * @returns {string} Hex-encoded secret
  */
 function _generateSecret(userId, orgId, endpointId) {
-  const input = `${userId}:${orgId}:${endpointId}:${CONFIG.endpointSecretKey}`;
+  const input = `${userId}:${orgId}:${endpointId}:${requiredSecret(CONFIG.endpointSecretKey, 'MCP endpoint secret')}`;
   return crypto.createHash('sha256').update(input).digest('hex').substring(0, 32);
 }
 

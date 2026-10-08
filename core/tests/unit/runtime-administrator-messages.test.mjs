@@ -4,7 +4,7 @@ import { messageAdministrator, validateAdministratorMessage, savedAdministratorR
 import { renderRuntimeAdministratorEmail } from '../../src/email/templates/runtime-administrator.js';
 const claims={sub:'11111111-1111-4111-8111-111111111111',org_id:'22222222-2222-4222-8222-222222222222',operating_role:'runtime',operating_session:'session-test'};
 const input={message_key:'task-result-1',kind:'completion',subject:'Your review is ready',message:'I checked Sofia’s review. It is ready to view.'};
-function database({role='admin',active=true,enabled=true}={}) {
+function database({role='admin',active=true,enabled=true,events=[]}={}) {
  let row; const db={
   userOrganization:{findUnique:async()=>({role,isActive:active})},user:{findUnique:async()=>({email:'admin@example.com',displayName:'Amar'})},organization:{findUnique:async()=>({name:'SINGULANCE'})},hqRuntime:{findUnique:async()=>({ownerUserId:claims.sub,emailUpdatesEnabled:enabled})},
   $transaction:async fn=>fn(db),
@@ -12,7 +12,7 @@ function database({role='admin',active=true,enabled=true}={}) {
    if(sql.includes('set_config'))return [];
    if(sql.includes('information_schema'))return[{table_schema:'harness'}];
    if(sql.includes('harness_sessions'))return[{id:claims.operating_session}];
-   if(sql.includes('harness_session_events'))return [];
+   if(sql.includes('harness_session_events'))return events;
    if(sql.startsWith('INSERT')) {row??={id:'33333333-3333-4333-8333-333333333333',content_hash:args[4],status:'pending',message:JSON.parse(args[5])};return[{id:row.id}];}
    if(sql.startsWith('SELECT *'))return[{...row}];
    if(sql.includes("status='dispatching'")){row.status='dispatching';return[{id:row.id}];}
@@ -56,4 +56,16 @@ test('asynchronous delegated blocker references require exact root, state, kind 
  const human={...row,payload:{data:{...data,kind:'human_input'}}};
  assert.equal(savedAdministratorRequest([human],{...msg,kind:'decision'},claims.operating_session),true);
  assert.equal(savedAdministratorRequest([human],msg,claims.operating_session),false);
+});
+
+test('typed delegated blocker email is deduplicated and does not grant or resume work',async()=>{
+ const blocker={id:'hq-blocker-1',state:'blocked',rootId:claims.operating_session,taskId:'task-16',employeeSessionId:'employee-room',kind:'connection'};
+ const db=database({events:[{event_type:'hivemind/hq-delegated-blocker',payload:{data:blocker}}]});
+ const request={...input,message_key:`${blocker.id}-user-request`,kind:'approval',request_call_id:blocker.id};
+ let sent=0;const send=async()=>{sent++;return{ok:true,provider:'cloudflare',messageId:'cf-blocker'};};
+ assert.equal((await messageAdministrator({db,claims,input:request,send})).status,'accepted');
+ assert.equal((await messageAdministrator({db,claims,input:request,send})).replayed,true);
+ assert.equal(sent,1);assert.equal(blocker.state,'blocked');
+ await assert.rejects(messageAdministrator({db,claims,input:{...request,message_key:'other-key'},send}),/native_request_not_found/);
+ assert.equal(sent,1);
 });

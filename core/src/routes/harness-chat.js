@@ -24,6 +24,7 @@ import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
 import { recallOperatingMemory, saveOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
 import { organizationAgentAccess, nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
+import { reconcileDelegatedConnections } from '../harness-chat/delegated-connection-completion.js';
 import { verifyDelegatedConnection } from '../harness-chat/delegated-connection-verification.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -189,6 +190,18 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (pathname === `${INTERNAL_PREFIX}/delegated-connection/refresh`) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    try {
+      const input = await parseBody(req);
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) {
+        jsonResponse(res, { error: 'empty_refresh_request_required' }, 400); return true;
+      }
+      const result = await reconcileDelegatedConnections({prisma,orgId:claims.org_id,userId:claims.sub},{env,fetchImpl});
+      jsonResponse(res, result, result.status === 'reconciled' ? 200 : 503);
+    } catch { jsonResponse(res, {error:'connection_refresh_unavailable'},503); }
+    return true;
+  }
   if (pathname === `${INTERNAL_PREFIX}/delegated-connection/verify`) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     try {

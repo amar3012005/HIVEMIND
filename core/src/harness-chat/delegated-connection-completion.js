@@ -37,7 +37,7 @@ async function reconcile({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch
   if(!secret || Buffer.byteLength(secret)<32 || !['http:','https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
     || url.pathname!=='/internal/hivemind/employee-lifecycle') return {status:'not_configured',delivered:0};
   url.pathname='/internal/hivemind/delegated-connection';
-  let delivered=0;
+  let delivered=0, unavailable=0;
   for(const blocker of await read(prisma,orgId,userId,env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED==='true')) {
     if(!blocker.workflowSessionId || !blocker.routerSessionId || !blocker.toolkits?.length) continue;
     try {
@@ -50,9 +50,9 @@ async function reconcile({prisma,orgId,userId}, {env=process.env,fetchImpl=fetch
     const result=JSON.parse(raw);
     if(!response.ok || result.status!=='accepted' || result.blockerId!==blocker.id || result.rootId!==blocker.rootId) throw Error('delegated_connection_delivery_unconfirmed');
     delivered+=1;
-    } catch { /* Preserve this blocker; other valid workflows can still reach Runtime. */ }
+    } catch { unavailable+=1; /* Preserve this blocker; other valid workflows can still reach Runtime. */ }
   }
-  return {status:'reconciled',delivered};
+  return {status:unavailable>0 && delivered===0?'pending':'reconciled',delivered,unavailable};
 }
 
 // Coalesce only concurrent reads; a later OAuth completion always causes a new check.

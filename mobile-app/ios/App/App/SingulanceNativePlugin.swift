@@ -120,8 +120,8 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
               let endpoint = call.getString("endpoint"), endpoint.range(of: "^[A-Za-z0-9_$.-]+(/[A-Za-z0-9_$.-]+)*$", options: .regularExpression) != nil else { call.reject("Stream is not allowed."); return }
         var request = URLRequest(url: URL(string: "wss://next.singulancelabs.com/api/remote.mux")!)
         request.setValue("https://next.singulancelabs.com", forHTTPHeaderField: "Origin")
-        let cookies = cookies?.cookies(for: URL(string: "https://next.singulancelabs.com/api/remote.mux")!) ?? []
-        for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) { request.setValue(value, forHTTPHeaderField: name) }
+        let runnerCookies = cookies?.cookies(for: URL(string: "https://next.singulancelabs.com/api/remote.mux")!) ?? []
+        for (name, value) in HTTPCookie.requestHeaderFields(with: runnerCookies) { request.setValue(value, forHTTPHeaderField: name) }
         streamLock.lock(); guard streams[id] == nil && streams.count < 32 else { streamLock.unlock(); call.reject("Stream already exists."); return }
         let socket = session.webSocketTask(with: request); streams[id] = socket; streamLock.unlock()
         let open: [String: Any] = ["type": "open", "streamId": id, "endpoint": endpoint, "payload": call.options["payload"] ?? NSNull()]

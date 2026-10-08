@@ -391,3 +391,24 @@ test('Harness and Legacy adapters share decisions while translating their native
   assert.equal(harness.translated.sort, 'date_desc');
   assert.equal(legacy.translated.sort, 'date_desc');
 });
+
+
+test('attention records cannot silently lose strings, fields or budget at the actual provider boundary',async()=>{
+ let calls=0;
+ const provider=createOpenRouterJevProvider({apiKey:'test-key',fetchImpl:async()=>{calls++;throw Error('must not fetch clipped context')}});
+ for(const state of [{policy:'runtime_attention_v2',runtime:{decisionMemory:{userAgenda:[{summary:'x'.repeat(1401)}]}}},
+   {policy:'runtime_attention_v2',runtime:{pendingDecisions:Array.from({length:25},(_,i)=>({id:String(i)}))}},
+   {policy:'runtime_attention_v2',runtime:{decisionMemory:{userAgenda:Array.from({length:20},(_,i)=>({id:String(i),summary:'x'.repeat(800)}))}}}]) {
+  await assert.rejects(provider.decideChoice({state,options:[{id:'retain',criteria:'quiet'},{id:'wake',criteria:'action'}],instructions:'classify'}),/attention_context_projection_loss|decision_state_exceeds_budget/);
+ }
+ assert.equal(calls,0);
+});
+
+test('actual attention provider preserves structured records and complete compact policy',async()=>{
+ let sent;
+ const provider=createOpenRouterJevProvider({apiKey:'test-key',fetchImpl:async(_url,init)=>{sent=JSON.parse(init.body);return new Response(JSON.stringify({answers:{decision:{type:'choice',choice:'option_0',probabilities:{option_0:.9,option_1:.1}}}}))}});
+ const state={policy:'runtime_attention_v2',runtime:{tasks:[{id:'task',status:'pending'}],pendingDecisions:[{summary:'s'.repeat(600),nextSteps:['n'.repeat(180)]}],decisionMemory:{ready:true,userAgenda:[{id:'agenda',state:'confirmed',summary:'source backed'}]}}};
+ const instructions='Complete policy '+ 'x'.repeat(960);
+ await provider.decideChoice({state,options:[{id:'retain',criteria:'quiet'},{id:'wake',criteria:'action'}],instructions});
+ assert.deepEqual(sent.state,state);assert.equal(sent.questions.decision.instructions,instructions);
+});

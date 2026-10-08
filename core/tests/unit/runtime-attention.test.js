@@ -74,3 +74,21 @@ test('shadow low confidence and provider failures stay explicitly shadow', async
   assert.equal(result.action,'retain');assert.equal(result.policy,'runtime_attention_v2_shadow');assert.equal(result.shadow,true);
  }
 });
+
+
+test('whole native context and the complete policy reach the decision boundary', async () => {
+ let request;
+ const extra={...snapshot,goals:[{id:'g',objective:'known direction'}],tasks:[{id:'t',status:'pending',description:'q'.repeat(250)}],pendingDecisions:[{summary:'s'.repeat(600),nextSteps:['n'.repeat(180),'n'.repeat(180)],blockers:['b'.repeat(180)]}],company:{name:'Isolated example'}};
+ await evaluate('wake',{snapshot:extra,provider:{decideChoice:async value=>{request=value;return {choice:'retain',probability:.9,margin:.5};}}});
+ for(const key of ['goals','tasks','pendingDecisions','company']) assert.deepEqual(request.state.runtime[key],extra[key]);
+ assert.ok(request.instructions.length<=1000,'provider cap must not remove policy');
+ for(const phrase of ['fresh exact match','pending native task','Completed work','Independent agendas','Contradictory confirmed','Preserve user approval limits']) assert.ok(request.instructions.includes(phrase),phrase);
+ assert.deepEqual(request.state.runtime.decisionMemory,extra.decisionMemory);
+});
+
+test('attention context budget failure remains quiet and distinguishable', async()=>{
+ for(const message of ['attention_context_projection_loss','decision_state_exceeds_budget']) {
+  const result=await evaluate('wake',{provider:{decideChoice:async()=>{throw Error(message)}}});
+  assert.equal(result.action,'retain');assert.equal(result.reason,'decision_context_unavailable');
+ }
+});

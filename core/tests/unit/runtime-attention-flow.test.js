@@ -35,7 +35,7 @@ test('existing suggestions-only subscription never reads or wakes Runtime', asyn
 });
 test('opt-in uses native active context and saves exact decision before native delivery', async () => {
   const result = await run();
-  assert.equal(result.calls[0].state.runtime.tasks.includes('task'), true);
+  assert.deepEqual(result.calls[0].state.runtime.tasks, [{id:'task',status:'running'}]);
   assert.equal(result.calls[0].state.runtime.autonomyEnabled, true);
   const receipt = JSON.parse(result.writes[0].args[1]);
   assert.equal(receipt.runtimeAttention.action, 'wake');

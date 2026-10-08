@@ -20,7 +20,8 @@ export async function exportAccountRecords(prisma, userId) {
   const profile = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, displayName: true, avatarUrl: true, timezone: true, locale: true, createdAt: true, updatedAt: true } });
   if (!profile) throw Object.assign(new Error('Account not found'), { status: 404 });
   const memories = await read('memory', { where: { userId, scope: 'personal' } });
-  const documents = await read('knowledgeDocument', { where: { userId } }, { allowRow: row => !(row.tags || []).some(tag => /^scope-key:(org|organization|project|team)(:|$)/.test(tag)) });
+  const documentRows = await read('knowledgeDocument', { where: { userId, tags: { has: `scope-key:personal:${userId}` } }, select: { id: true, userId: true, title: true, documentType: true, tags: true, sourcePlatform: true, sourceId: true, sourceUrl: true, documentDate: true, language: true, wordCount: true, createdAt: true, updatedAt: true } }, { allowRow: row => (row.tags || []).includes(`scope-key:personal:${userId}`) && !(row.tags || []).some(tag => /^scope-key:(org|organization|project|team)(:|$)/.test(tag)) });
+  const documents = documentRows.map(({ tags, ...record }) => record);
   const sections = await read('knowledgeSegment', { where: { document: { userId }, documentId: { in: documents.map(row => row.id) } } });
   const profiles = await read('userProfile', { where: { userId, orgId: null } });
   const connectors = await read('platformIntegration', { where: { userId }, select: { id: true, platformType: true, platformUserId: true, platformDisplayName: true, oauthScopes: true, isActive: true, lastSyncedAt: true, syncStatus: true } });

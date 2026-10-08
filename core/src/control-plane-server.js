@@ -6,6 +6,11 @@ import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './sec
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
 import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
+import { handleMobilePrivacyRoutes } from './mobile/privacy-routes.js';
+import { handleMobileAuthRoutes } from './mobile/auth-routes.js';
+import { MobileAuthStore } from './mobile/auth-store.js';
+import { checkNativeAiConsent, nativeAiProtectedPath, nativeBootstrapApiKey } from './mobile/consent-guard.js';
+import { handleMobileSafetyTriage } from './mobile/safety-triage.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -877,6 +882,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
 }
 
 const sessionStore = new ControlPlaneSessionStore(CONFIG);
+const mobileAuthStore = new MobileAuthStore(CONFIG);
 
 // HyperAgents onboarding jobs — one Polsia-style company-genesis pipeline per
 // org, in-memory (FE polls /v1/hyper/onboarding/status; refresh re-attaches).
@@ -2848,7 +2854,7 @@ async function buildAnonymousBootstrapPayload(req) {
   };
 }
 
-async function buildBootstrapPayload(user, req, preferredOrgId = null) {
+async function buildBootstrapPayload(user, req, preferredOrgId = null, session = null) {
   const { org, role } = await resolveCurrentOrg(user.id, preferredOrgId);
   const effectivePlan = org ? (await getEffectivePlan(prisma, org.id)).plan : null;
   const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
@@ -2886,8 +2892,8 @@ async function buildBootstrapPayload(user, req, preferredOrgId = null) {
     },
     client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],
     // Session key: frontend uses this to call core API without manual key setup.
-    // Auto-creates one if user has an org but no keys yet.
-    session_api_key: org ? await getOrCreateSessionKey(user.id, org.id) : null,
+    // Browser sessions can auto-create a key; native sessions never receive or mint one.
+    session_api_key: await nativeBootstrapApiKey(session, org, getOrCreateSessionKey, user.id),
   };
 }
 
@@ -3646,6 +3652,22 @@ const server = http.createServer(async (req, res) => {
     };
   }
 
+  const mobileUrl = new URL(req.url, `http://${req.headers.host}`);
+  if (await handleMobileAuthRoutes({ req, res, pathname: mobileUrl.pathname, url: mobileUrl,
+    store: mobileAuthStore, sessionStore, getCurrentSession, parseBody, jsonResponse,
+    allowedOrigins: [...CONFIG.allowedOrigins, process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL].filter(Boolean),
+    frontendBase: defaultFrontendBaseUrl,
+    publicBaseUrl: process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.singulancelabs.com',
+    membershipActive: async ({ userId, orgId }) => {
+      if (!isCanonicalUuid(userId) || !prisma) return false;
+      const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true } });
+      if (!user) return false;
+      if (!orgId) return true;
+      const membership = await getOrgMembership(userId, orgId);
+      return membership?.isActive === true;
+    },
+  })) return;
+
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
@@ -3654,6 +3676,14 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  if (await handleMobilePrivacyRoutes({req,res,pathname,prisma,requireSession,parseBody,jsonResponse})) return;
+  if (await handleMobileSafetyTriage({req,res,pathname,url,prisma,getPlatformAdminSession,parseBody,jsonResponse})) return;
+  if (nativeAiProtectedPath(pathname, req.method)) {
+    const nativeCurrent = await getCurrentSession(req);
+    const consent = await checkNativeAiConsent(prisma, nativeCurrent?.session);
+    if (!consent.allowed) return jsonResponse(res, {error:'Explicit AI sharing permission required',code:consent.code},consent.status);
+  }
 
   if (await handleAdvisoryMethodApproval({ req, res, pathname, prisma, requireSession, requireOrgAdmin, parseBody, jsonResponse })) return;
 
@@ -5900,7 +5930,7 @@ const server = http.createServer(async (req, res) => {
     if (!user) {
       return jsonResponse(res, await buildAnonymousBootstrapPayload(req));
     }
-    return jsonResponse(res, await buildBootstrapPayload(user, req, current.session.orgId));
+    return jsonResponse(res, await buildBootstrapPayload(user, req, current.session.orgId, current.session));
   }
 
   // Reissue the authenticated browser session without loading the full

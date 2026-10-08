@@ -243,6 +243,10 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       const principal = {userId:claims.sub,orgId:claims.org_id,sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true',
         ...(claims.operating_role==='runtime'?{runtimeSessionId:claims.operating_session}:
           {employeeSessionId:claims.operating_session,employeeId:claims.operating_employee_id})};
+      if(input.operation==='create') {
+        const { assertNativeEmployeeLifecycleConfigured } = await import('../employees/native-lifecycle-bridge.js');
+        assertNativeEmployeeLifecycleConfigured(env);
+      }
       const result = await manageNativeEmployee(prisma, principal, input);
       if (['create','configure'].includes(input.operation) || (input.operation === 'archive' && result.employee.archivedAt)) {
         const { activateNativeEmployeeLifecycle } = await import('../employees/native-lifecycle-bridge.js');

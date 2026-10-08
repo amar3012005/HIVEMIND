@@ -8,6 +8,16 @@ export function lifecycleCallbackToken(payload, secret, now = Date.now()) {
   const input = `${encode({alg:'HS256',typ:'JWT'})}.${encode(claims)}`;
   return `${input}.${createHmac('sha256',secret).update(input).digest('base64url')}`;
 }
+export function assertNativeEmployeeLifecycleConfigured(env=process.env) {
+  const configured=env.HIVEMIND_EMPLOYEE_LIFECYCLE_URL,secret=env.HIVE_HARNESS_RUNNER_SERVICE_SECRET;
+  let url; try {url=new URL(configured);} catch {}
+  if(!url || !['http:','https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
+    || url.pathname!='/internal/hivemind/employee-lifecycle' || !secret || Buffer.byteLength(secret)<32) {
+    const error=new Error('native_lifecycle_host_not_configured: Employee onboarding is unavailable; configure the native lifecycle bridge before creating an employee.');
+    error.status=503;throw error;
+  }
+  return url;
+}
 export async function activateNativeEmployeeLifecycle(principal, employee, { env=process.env, fetchImpl=fetch }={}) {
   const secret=env.HIVE_HARNESS_RUNNER_SERVICE_SECRET, configured=env.HIVEMIND_EMPLOYEE_LIFECYCLE_URL;
   if (!configured || !secret || Buffer.byteLength(secret)<32) return {status:'pending',reason:'native_lifecycle_host_not_configured'};

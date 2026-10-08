@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { activateNativeEmployeeLifecycle } from '../src/employees/native-lifecycle-bridge.js';
+import { activateNativeEmployeeLifecycle, assertNativeEmployeeLifecycleConfigured } from '../src/employees/native-lifecycle-bridge.js';
 const principal={orgId:'org',userId:'admin'}, employee={id:'employee'};
 const env={HIVE_HARNESS_RUNNER_SERVICE_SECRET:'x'.repeat(32),HIVEMIND_EMPLOYEE_LIFECYCLE_URL:'https://runner.example/internal/hivemind/employee-lifecycle'};
 test('missing or incorrect callback configuration never sends',async()=>{
@@ -22,4 +22,11 @@ test('callback binds the administrator and exact body to a purpose separated rec
 test('unknown delivery never claims activation succeeded',async()=>{
  const result=await activateNativeEmployeeLifecycle(principal,employee,{env,fetchImpl:async()=>({ok:true,text:async()=>JSON.stringify({status:'ready',employeeId:'other'})})});
  assert.equal(result.status,'pending');assert.equal(result.reason,'native_lifecycle_host_unconfirmed');
+});
+
+test('creation prerequisite rejects missing endpoint, invalid URL and short secret before mutation',()=>{
+ for(const configuration of [{},{...env,HIVE_HARNESS_RUNNER_SERVICE_SECRET:'short'},{...env,HIVEMIND_EMPLOYEE_LIFECYCLE_URL:'https://runner.example/wrong'},{...env,HIVEMIND_EMPLOYEE_LIFECYCLE_URL:'https://user:password@runner.example/internal/hivemind/employee-lifecycle'}]) {
+  let created=false;assert.throws(()=>{assertNativeEmployeeLifecycleConfigured(configuration);created=true;},error=>error.status===503&&error.message.includes('native_lifecycle_host_not_configured'));assert.equal(created,false);
+ }
+ assert.equal(assertNativeEmployeeLifecycleConfigured(env).pathname,'/internal/hivemind/employee-lifecycle');
 });

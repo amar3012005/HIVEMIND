@@ -10655,6 +10655,10 @@ Write the persona now.`;
       const { manageNativeEmployee } = await import('./employees/native-lifecycle.js');
       const input = await parseBody(req);
       const principal = {userId:current.session.userId,orgId:current.session.orgId};
+      if(input.operation==='create') {
+        const { assertNativeEmployeeLifecycleConfigured } = await import('./employees/native-lifecycle-bridge.js');
+        assertNativeEmployeeLifecycleConfigured();
+      }
       const result = await manageNativeEmployee(prisma, principal, input);
       if (['create','configure','archive'].includes(input.operation)) {
         const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');

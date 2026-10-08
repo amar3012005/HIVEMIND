@@ -8,7 +8,7 @@ import android.content.SharedPreferences;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
-import android.webkit.CookieManager;
+
 import androidx.webkit.WebViewFeature;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -33,7 +33,8 @@ public class SingulanceNativePlugin extends Plugin {
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final Map<String,WebSocket> streams = new ConcurrentHashMap<>();
     private final Set<String> reservedStreams = ConcurrentHashMap.newKeySet();
-    private final OkHttpClient http = new OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).connectTimeout(15,TimeUnit.SECONDS).readTimeout(60,TimeUnit.SECONDS).pingInterval(30,TimeUnit.SECONDS).build();
+    private final RunnerCookieJar runnerCookies = new RunnerCookieJar();
+    private final OkHttpClient http = new OkHttpClient.Builder().cookieJar(runnerCookies).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).connectTimeout(15,TimeUnit.SECONDS).readTimeout(60,TimeUnit.SECONDS).pingInterval(30,TimeUnit.SECONDS).build();
     private SharedPreferences preferences;
     private final java.util.concurrent.atomic.AtomicBoolean saving = new java.util.concurrent.atomic.AtomicBoolean(false);
     @Override public void load() { preferences = getContext().getSharedPreferences("singulance.secure.v1", Context.MODE_PRIVATE); }
@@ -73,7 +74,7 @@ public class SingulanceNativePlugin extends Plugin {
         catch(Exception ignored){call.reject("Credential could not be read.");}
     }
     @PluginMethod public void removeCredential(PluginCall call) {
-        try { String key=key(call); if(!preferences.edit().remove(key).commit())throw new IOException(); if("cpToken".equals(key)){CookieManager.getInstance().removeAllCookies(null);for(WebSocket socket:streams.values())socket.cancel();streams.clear();reservedStreams.clear();http.dispatcher().cancelAll();} call.resolve(); }
+        try { String key=key(call); if(!preferences.edit().remove(key).commit())throw new IOException(); if("cpToken".equals(key)){runnerCookies.clear();for(WebSocket socket:streams.values())socket.cancel();streams.clear();reservedStreams.clear();http.dispatcher().cancelAll();} call.resolve(); }
         catch(Exception ignored){call.reject("Credential could not be removed.");}
     }
     private Request requestOptions(PluginCall call) throws Exception {
@@ -90,7 +91,6 @@ public class SingulanceNativePlugin extends Plugin {
         }
         if("next.singulancelabs.com".equals(uri.getHost())){
             request.header("Origin","https://next.singulancelabs.com");
-            String cookie=CookieManager.getInstance().getCookie(uri.toString());if(cookie!=null)request.header("Cookie",cookie);
         }
         String body=call.getString("body"),encoding=call.getString("bodyEncoding","utf8");
         if(!Set.of("utf8","base64").contains(encoding))throw new IllegalArgumentException();
@@ -103,10 +103,6 @@ public class SingulanceNativePlugin extends Plugin {
     }
     private JSObject responseHeaders(Response response){
         JSObject result=new JSObject();for(String name:new String[]{"Content-Type","Content-Length","Content-Disposition","Retry-After"}){String value=response.header(name);if(value!=null)result.put(name.toLowerCase(Locale.ROOT),value);}
-        if("next.singulancelabs.com".equals(response.request().url().host())){
-            for(String cookie:response.headers("Set-Cookie"))CookieManager.getInstance().setCookie(response.request().url().toString(),cookie);
-            CookieManager.getInstance().flush();
-        }
         return result;
     }
     @PluginMethod public void request(PluginCall call){
@@ -126,7 +122,6 @@ public class SingulanceNativePlugin extends Plugin {
         JSObject open=new JSObject();open.put("type","open");open.put("streamId",id);open.put("endpoint",endpoint);open.put("payload",call.getData().opt("payload")==null?JSONObject.NULL:call.getData().opt("payload"));
         if(open.toString().getBytes(StandardCharsets.UTF_8).length>8*1024*1024){reservedStreams.remove(id);call.reject("Stream payload is too large.");return;}
         Request.Builder request=new Request.Builder().url("wss://next.singulancelabs.com/api/remote.mux").header("Origin","https://next.singulancelabs.com");
-        String cookie=CookieManager.getInstance().getCookie("https://next.singulancelabs.com/api/remote.mux");if(cookie!=null)request.header("Cookie",cookie);
         http.newWebSocket(request.build(),new WebSocketListener(){
             @Override public void onOpen(WebSocket socket,Response response){if(!reservedStreams.contains(id)){socket.cancel();return;}streams.put(id,socket);responseHeaders(response);socket.send(open.toString());event(id,"open",null);}
             @Override public void onMessage(WebSocket socket,String text){if(text.length()>8*1024*1024){socket.cancel();event(id,"error","Native stream frame is too large.");return;}event(id,"frame",text);}

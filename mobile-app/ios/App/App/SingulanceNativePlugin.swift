@@ -18,7 +18,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = cookies
-        configuration.httpShouldSetCookies = true
+        configuration.httpShouldSetCookies = false
         configuration.timeoutIntervalForRequest = 60
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
@@ -88,7 +88,12 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             guard url.host == "api.singulancelabs.com", let token = try read("cpToken") else { throw NativeError.denied }
             request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         }
-        if url.host == "next.singulancelabs.com" { request.setValue("https://next.singulancelabs.com", forHTTPHeaderField: "Origin") }
+        request.httpShouldHandleCookies = false
+        if url.host == "next.singulancelabs.com" {
+            request.setValue("https://next.singulancelabs.com", forHTTPHeaderField: "Origin")
+            let runnerCookies = cookies?.cookies(for: url) ?? []
+            for (name, value) in HTTPCookie.requestHeaderFields(with: runnerCookies) { request.setValue(value, forHTTPHeaderField: name) }
+        }
         if let body = call.getString("body") {
             let encoding = call.getString("bodyEncoding") ?? "utf8"
             guard ["utf8", "base64"].contains(encoding), body.utf8.count <= 12 * 1024 * 1024 else { throw NativeError.denied }
@@ -106,6 +111,11 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             let request = try makeRequest(call)
             session.dataTask(with: request) { data, response, error in
                 guard error == nil, let response = response as? HTTPURLResponse, let data = data, data.count <= 20 * 1024 * 1024 else { call.reject("Native request failed."); return }
+                if let url = response.url, url.host == "next.singulancelabs.com" {
+                    var fields: [String: String] = [:]
+                    for (key, value) in response.allHeaderFields { if let key = key as? String, let value = value as? String { fields[key] = value } }
+                    for cookie in HTTPCookie.cookies(withResponseHeaderFields: fields, for: url) where cookie.domain == "next.singulancelabs.com" || cookie.domain == ".next.singulancelabs.com" { self.cookies?.setCookie(cookie) }
+                }
                 var headers: [String: String] = [:]
                 for name in ["Content-Type", "Content-Length", "Content-Disposition", "Retry-After"] { if let value = response.value(forHTTPHeaderField: name) { headers[name.lowercased()] = value } }
                 let responseType = call.getString("responseType") ?? "text"
@@ -122,6 +132,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         guard trusted(), let id = call.getString("id"), id.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil,
               let endpoint = call.getString("endpoint"), endpoint.range(of: "^[A-Za-z0-9_$.-]+(/[A-Za-z0-9_$.-]+)*$", options: .regularExpression) != nil else { call.reject("Stream is not allowed."); return }
         var request = URLRequest(url: URL(string: "wss://next.singulancelabs.com/api/remote.mux")!)
+        request.httpShouldHandleCookies = false
         request.setValue("https://next.singulancelabs.com", forHTTPHeaderField: "Origin")
         let runnerCookies = cookies?.cookies(for: URL(string: "https://next.singulancelabs.com/api/remote.mux")!) ?? []
         for (name, value) in HTTPCookie.requestHeaderFields(with: runnerCookies) { request.setValue(value, forHTTPHeaderField: name) }

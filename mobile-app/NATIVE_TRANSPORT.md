@@ -84,3 +84,9 @@ permission/OAuth return, WebSocket cookies or iframe rejection on a device.
 Swift is added to the Xcode target and inspected against the installed Capacitor
 interfaces; iOS compilation still requires macOS/Xcode. Both platform device
 checks and the packaged frontend/API end-to-end flow remain release gates.
+
+### Cookie isolation
+
+Core HTTP calls never read or write cookies: their only credential is the explicitly injected OS-protected Bearer token. Runner cookies are held in a separate native memory jar and accepted only from `next.singulancelabs.com` with that exact cookie domain. Ancestor-domain cookies are rejected, so a Core response cannot shadow a fresh Bearer token or supply a Runner session. The same Runner jar authenticates its HTTPS calls and WebSocket. Signing out clears the jar; restarting the application requires establishing a fresh Runner session.
+
+Android debug instrumentation includes a test-only packaged page for real Keystore round trips, sandbox iframe denial, and system document picker cancellation. This fixture is under the debug source set and is excluded from release APKs. Emulator evidence supplements physical-device and iOS checks; it does not establish OAuth, microphone, signing, or store readiness.

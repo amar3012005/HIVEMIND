@@ -1,4 +1,5 @@
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
+import { requireReconciledSourceErasure } from './security/account-erasure-inventory.js';
 import { exportAccountRecords, collectOwnedRecords } from './security/account-export.js';
 import { checkedVectorDelete } from './security/vector-erasure.js';
 import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
@@ -2966,6 +2967,7 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
       select: { orgId: true, org: { select: { plan: true } } },
     })).map((m) => ({ orgId: m.orgId, plan: m.org?.plan }));
 
+    await requireReconciledSourceErasure(prisma, userId);
     await purgeUserVectors(userId, userOrgs, orgIdsToDelete);
     emit(5, 'Verified vector erasure');
 
@@ -7794,6 +7796,13 @@ const server = http.createServer(async (req, res) => {
       });
     }
     console.log('[account-delete] ✓ User found:', user.email, '(id:', user.id, ')');
+
+    // Reject before ownership transfers, streaming headers or cookie changes.
+    try {
+      await requireReconciledSourceErasure(prisma, user.id);
+    } catch (error) {
+      return jsonResponse(res, { error: 'Durable source-store erasure is pending reconciliation; account remains active.', code: error.code || 'SOURCE_ERASURE_RECONCILIATION_REQUIRED', status: 'pending' }, error.status || 503);
+    }
 
     const deletionCheck = await validateAccountDeletion(user.id);
     console.log('[account-delete] Validation result:', JSON.stringify(deletionCheck));

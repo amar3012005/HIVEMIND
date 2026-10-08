@@ -147,3 +147,29 @@ test('hosted connection issuance preserves only explicitly authenticated scopes'
   assert.match(source, /points\/delete\?wait=true/);
   assert.doesNotMatch(source, /permanent purge after 30 days via retention cron/);
 });
+
+test('erasure preserves identity until durable source inventory is reconciled', async () => {
+  const { requireReconciledSourceErasure } = await import('../../src/security/account-erasure-inventory.js');
+  const queries = [];
+  const database = count => Object.fromEntries(['knowledgeDocument','sourceArtifact','knowledgeIngestJob'].map(name => [name, { count: async query => { queries.push(query); return count; } }]));
+  await assert.rejects(requireReconciledSourceErasure(database(1), 'self'), { code: 'SOURCE_ERASURE_RECONCILIATION_REQUIRED' });
+  await requireReconciledSourceErasure(database(0), 'self');
+  for (const query of queries) assert.deepEqual(query.where, { userId: 'self' });
+});
+
+test('original-file inventory admits only referenced personal sources without storage locations', async () => {
+  const prisma = { user: { findUnique: async () => ({ id: 'self' }) } };
+  for (const name of ['memory','knowledgeSegment','userProfile','platformIntegration','harnessSession','harnessSessionEvent','auditLog']) prisma[name] = { findMany: async () => [] };
+  prisma.knowledgeDocument = { findMany: async () => [{ id: 'd', sourceArtifactId: 's', tags: ['scope-key:personal:self'] }] };
+  let sourceQuery;
+  prisma.sourceArtifact = { findMany: async query => { sourceQuery = query; return [{ id: 's', artifactType: 'upload', sizeBytes: 42n, documents: [{ tags: ['scope-key:personal:self'] }] }, { id: 'mixed', documents: [{ tags: ['scope-key:personal:self', 'scope-key:org:A'] }] }]; } };
+  const result = await exportAccountRecords(prisma, 'self');
+  assert.deepEqual(sourceQuery.where, { userId: 'self', id: { in: ['s'] }, documents: { every: { userId: 'self', tags: { has: 'scope-key:personal:self' } } } });
+  assert.equal(sourceQuery.select.storageLocation, undefined);
+  assert.equal(sourceQuery.select.payload, undefined);
+  assert.equal(result.originalFileInventory[0].bytesIncluded, false);
+  assert.equal(result.originalFileInventory[0].availability, 'not_verified');
+  assert.equal(result.documents[0].sourceArtifactId, undefined);
+  assert.equal(result.originalFileInventory.length, 1);
+  assert.equal(result.originalFileInventory[0].documents, undefined);
+});

@@ -1,3 +1,4 @@
+import { requiredSecret } from '../../security/brain-boundaries.js';
 /**
  * Connector Store
  *
@@ -24,8 +25,7 @@ import crypto from 'crypto';
 
 const ENCRYPTION_KEY = process.env.HIVEMIND_CONNECTOR_ENCRYPTION_KEY
   || process.env.HIVEMIND_MCP_TOKEN_SECRET
-  || process.env.SESSION_SECRET
-  || 'default-dev-key-change-in-production-32b';
+  || process.env.SESSION_SECRET;
 
 function deriveKey(secret) {
   return crypto.createHash('sha256').update(secret).digest();
@@ -52,7 +52,7 @@ function readConnectorMetadata(record) {
 
 export function encryptToken(plaintext) {
   if (!plaintext) return null;
-  const key = deriveKey(ENCRYPTION_KEY);
+  const key = deriveKey(requiredSecret(ENCRYPTION_KEY, 'Connector encryption secret'));
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
@@ -64,7 +64,7 @@ export function decryptToken(ciphertext) {
   if (!ciphertext) return null;
   try {
     const [ivHex, tagHex, encHex] = ciphertext.split(':');
-    const key = deriveKey(ENCRYPTION_KEY);
+    const key = deriveKey(requiredSecret(ENCRYPTION_KEY, 'Connector encryption secret'));
     const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
     decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
     return decipher.update(Buffer.from(encHex, 'hex')) + decipher.final('utf8');

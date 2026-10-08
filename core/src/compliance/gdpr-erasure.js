@@ -67,7 +67,7 @@ export async function requestDataErasure(userId, { confirmation, categories = []
     const cancellation_token = crypto.randomBytes(32).toString('hex');
 
     // Queue erasure job (async - non-blocking)
-    queueErasureJob(erasureRequest.id, userId, categories, cancellation_token).catch(error => {
+    queueErasureJob(erasureRequest.id, userId, categories, cancellation_token, reason).catch(error => {
       logger.error('Erasure job failed', { erasureRequestId: erasureRequest.id, error });
     });
 
@@ -117,7 +117,7 @@ async function checkForLegalHold(userId) {
 /**
  * Queue and process erasure job
  */
-async function queueErasureJob(erasureRequestId, userId, categories, cancellation_token) {
+async function queueErasureJob(erasureRequestId, userId, categories, cancellation_token, reason = '') {
   const prisma = new PrismaClient();
 
   try {
@@ -215,11 +215,7 @@ async function schedulePermanentDeletion(userId, date, cancellation_token) {
   //   delay: date.getTime() - Date.now(),
   // });
 
-  logger.info('Permanent deletion scheduled', {
-    userId,
-    date,
-    cancellation_token_hash: crypto.createHash('sha256').update(cancellation_token).digest('hex'),
-  });
+  throw new Error('Permanent deletion scheduler is not configured; erasure is incomplete');
 }
 
 /**

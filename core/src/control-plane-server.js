@@ -7796,6 +7796,13 @@ const server = http.createServer(async (req, res) => {
     }
     console.log('[account-delete] ✓ User found:', user.email, '(id:', user.id, ')');
 
+    // Reject before ownership transfers, streaming headers or cookie changes.
+    try {
+      await requireReconciledSourceErasure(prisma, user.id);
+    } catch (error) {
+      return jsonResponse(res, { error: 'Durable source-store erasure is pending reconciliation; account remains active.', code: error.code || 'SOURCE_ERASURE_RECONCILIATION_REQUIRED', status: 'pending' }, error.status || 503);
+    }
+
     const deletionCheck = await validateAccountDeletion(user.id);
     console.log('[account-delete] Validation result:', JSON.stringify(deletionCheck));
     if (!deletionCheck.ok) {

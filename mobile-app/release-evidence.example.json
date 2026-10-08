@@ -35,5 +35,29 @@
   "nativeFileSaving": {
     "verified": false,
     "evidence": ""
+  },
+  "nativeAttachments": {
+    "verified": false,
+    "evidence": ""
+  },
+  "privateArtifactPreview": {
+    "verified": false,
+    "evidence": ""
+  },
+  "approvalAnswers": {
+    "verified": false,
+    "evidence": ""
+  },
+  "reconnectRecovery": {
+    "verified": false,
+    "evidence": ""
+  },
+  "longHistoryPaging": {
+    "verified": false,
+    "evidence": ""
+  },
+  "credentialIsolation": {
+    "verified": false,
+    "evidence": ""
   }
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-export const gates = ['nativeAuthentication', 'deviceMicrophone', 'oauthReturn', 'nativeStreaming', 'nativeFileSaving', 'accountDeletion', 'privacyReview', 'billingReview'];
+export const gates = ['nativeAuthentication', 'deviceMicrophone', 'oauthReturn', 'nativeStreaming', 'nativeFileSaving', 'nativeAttachments', 'privateArtifactPreview', 'approvalAnswers', 'reconnectRecovery', 'longHistoryPaging', 'credentialIsolation', 'accountDeletion', 'privacyReview', 'billingReview'];
 export function validateReleaseEvidence(value, sha, platform) {
   assert.equal(value.format, 1, 'Unsupported evidence format.');
   assert.equal(value.frontendSha, sha, 'Evidence must match the packaged frontend.');

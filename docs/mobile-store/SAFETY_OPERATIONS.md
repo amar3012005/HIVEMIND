@@ -19,3 +19,11 @@ The operator should investigate the reported output, distinguish policy violatio
 ## Remaining proof boundary
 
 The CP guard blocks new native admissions and proxy calls. **Already-issued Runner cookie grants do not carry a mobile-consent marker in the current Harness ticket/connection contract.** Therefore immediate withdrawal enforcement for a previously established Runner gateway requires a native-specific transport/principal check or scoped grant revocation in Runner. Do not claim complete withdrawal enforcement until that seam and the physical-device tests pass. Grant/session/permission changes must preserve web tenant behavior and native deliberate-Stop/approval boundaries.
+
+## Signed Runner consent seam implemented in source
+
+The previous cookie-marker gap is addressed by optional `native_session_hash` admission claims. CP derives the hash from the authenticated native session; clients cannot select it. The signed cookie principal and Runner service JWT retain that binding without putting a raw CP session token into tickets. Existing Runner RPC guard revalidates the signed principal through the existing CP service boundary on every request, with no positive cache. CP checks the hash-indexed live native session, exact user/org and current durable consent before allowing the signed principal or any downstream signed Core proxy request. Native ticket exchange and boot additionally use this check. Web principals without the marker remain unchanged.
+
+Withdrawal, logout/revoke, session expiration and organization switch therefore deny subsequent commands from an old native Runner cookie. Root's native organization mutation preserves the CP token and its Redis TTL while updating authoritative membership scope; old-org cookies are denied. Requests already admitted and data already transmitted cannot be recalled; this change does not claim forced cancellation of an in-flight external operation. Full device/Runner rollout and transport verification remain pending.
+
+Focused source evidence: signed marker validation, consent withdrawal after a previously valid grant, revoked session, changed org, actor mismatch, Redis outage and unchanged web behavior. Runner's standalone boundary checks passed using Node22 type stripping; full package compilation/release remains an integration gate.

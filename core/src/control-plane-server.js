@@ -1,3 +1,4 @@
+import { changeSessionOrganization } from './mobile/session-organization.js';
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
 import { requireReconciledSourceErasure } from './security/account-erasure-inventory.js';
 import { exportAccountRecords, collectOwnedRecords } from './security/account-export.js';
@@ -6356,11 +6357,7 @@ const server = http.createServer(async (req, res) => {
         );
     }
 
-    await sessionStore.destroySession(current.sessionId);
-    const sessionId = await sessionStore.createSession({
-      ...current.session,
-      orgId: org.id
-    });
+    const sessionId = await changeSessionOrganization({ current, orgId: org.id, sessionStore, mobileAuthStore });
     await startSignupActivation({
       prisma, email: current.session.email, userId: current.session.userId,
       metadata: { activation_source: 'organization_creation' },
@@ -7195,11 +7192,7 @@ const server = http.createServer(async (req, res) => {
       dedupeKey: `invite-accepted:${invite.id}`,
     }).catch(() => null);
 
-    await sessionStore.destroySession(current.sessionId);
-    const sessionId = await sessionStore.createSession({
-      ...current.session,
-      orgId: invite.orgId,
-    });
+    const sessionId = await changeSessionOrganization({ current, orgId: invite.orgId, sessionStore, mobileAuthStore });
 
     return jsonResponse(res, {
       success: true,

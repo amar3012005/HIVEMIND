@@ -30,5 +30,6 @@ export function verifyHarnessRunnerServiceToken(token, { secret, nowMs = Date.no
   if (!Number.isInteger(claims.iat) || !Number.isInteger(claims.exp) || claims.iat > now + 5
       || claims.exp <= now || claims.exp - claims.iat > 30) fail('expired_runner_service_token');
   if (claims.project_id !== undefined && !UUID_RE.test(claims.project_id)) fail('invalid_runner_service_claims');
+  if (claims.native_session_hash !== undefined && !/^[0-9a-f]{64}$/.test(claims.native_session_hash)) fail('invalid_runner_service_claims');
   return claims;
 }

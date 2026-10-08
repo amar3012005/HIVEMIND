@@ -42,6 +42,7 @@ export function mintHarnessAdmissionTicket({
   userId,
   orgId,
   projectId = null,
+  nativeSessionHash = undefined,
   variation,
   nowMs = Date.now(),
   ttlSeconds = HIVE_HARNESS_TICKET_TTL_SECONDS,
@@ -50,6 +51,7 @@ export function mintHarnessAdmissionTicket({
   if (!secret) fail('ticket_secret_unavailable');
   if (Buffer.byteLength(secret, 'utf8') < 32) fail('ticket_secret_too_short');
   if (!UUID_RE.test(userId) || !UUID_RE.test(orgId) || (projectId && !UUID_RE.test(projectId))) fail('invalid_ticket_scope');
+  if (nativeSessionHash !== undefined && !/^[0-9a-f]{64}$/.test(nativeSessionHash)) fail('invalid_native_session_hash');
   if (!VARIATIONS.has(variation)) fail('invalid_ticket_variation');
   const iat = Math.floor(nowMs / 1000);
   const exp = iat + Math.min(HIVE_HARNESS_TICKET_TTL_SECONDS, Math.max(1, Number(ttlSeconds) || HIVE_HARNESS_TICKET_TTL_SECONDS));
@@ -61,6 +63,7 @@ export function mintHarnessAdmissionTicket({
     profile: HIVE_HARNESS_TICKET_PROFILE,
     ...(projectId ? { project_id: projectId } : {}),
     variation,
+    ...(nativeSessionHash === undefined ? {} : {native_session_hash:nativeSessionHash}),
     jti,
     iat,
     exp,
@@ -93,6 +96,7 @@ export function verifyHarnessAdmissionTicket(ticket, {
   const now = Math.floor(nowMs / 1000);
   if (!Number.isInteger(claims.iat) || !Number.isInteger(claims.exp) || claims.exp <= now || claims.iat > now + 5
       || claims.exp - claims.iat > HIVE_HARNESS_TICKET_TTL_SECONDS) fail('expired_ticket');
+  if (claims.native_session_hash !== undefined && !/^[0-9a-f]{64}$/.test(claims.native_session_hash)) fail('invalid_ticket_scope');
   if (expectedOrgId && claims.org_id !== expectedOrgId) fail('ticket_org_scope_mismatch');
   if (expectedUserId && claims.sub !== expectedUserId) fail('ticket_user_scope_mismatch');
   return claims;

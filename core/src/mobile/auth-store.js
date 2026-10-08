@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { nativeSessionHash } from './native-principal.js';
 import { getRedisClient } from '../control-plane/session-store.js';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -34,7 +35,9 @@ rec.browserUserId=ARGV[1];local bound=cjson.encode(rec);redis.call('SET',KEYS[1]
   }
   async createNativeSession(payload) {
     const token = randomUUID();
-    await (await this.client()).set(`cp:session:${token}`, JSON.stringify({ ...payload, nativeMobile: true, createdAt: new Date(this.now()).toISOString() }), 'EX', 3600);
+    const redis = await this.client();
+    await redis.set(`cp:session:${token}`, JSON.stringify({ ...payload, nativeMobile: true, createdAt: new Date(this.now()).toISOString() }), 'EX', 3600);
+    await redis.set(`cp:mobile-native-index:${nativeSessionHash(token)}`, token, 'EX', 3600);
     return token;
   }
   async consume(kind, token, expected) {

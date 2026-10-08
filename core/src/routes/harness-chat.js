@@ -1,3 +1,4 @@
+import { nativeSessionHash, nativeRunnerPrincipalAllowed } from '../mobile/native-principal.js';
 import { brainConnectionRoute, connectionStatus, startPlanOAuth, finishPlanOAuth, updateConnection } from '../chatgpt-plan/oauth.js';
 import { serveBrainPlan } from '../chatgpt-plan/brain-broker.js';
 import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
@@ -190,6 +191,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     where: { userId_orgId: { userId: claims.sub, orgId: claims.org_id } }, select: { isActive: true },
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
+  if (!await nativeRunnerPrincipalAllowed({claims,prisma,redisConfig})) { jsonResponse(res,{error:'Native session or AI consent unavailable'},403); return true; }
   if (pathname === `${INTERNAL_PREFIX}/delegated-connection/refresh`) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     try {
@@ -751,6 +753,7 @@ export async function handleHarnessChatBootstrapRoute({
       orgId,
       projectId,
       variation: evaluation.mode,
+      ...(current.session.nativeMobile ? {nativeSessionHash:nativeSessionHash(current.sessionId)} : {}),
     });
     const redis = await getRedis(redisConfig || {});
     await registerHarnessTicketNonce(redis, minted.ticket, minted.claims);

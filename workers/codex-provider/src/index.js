@@ -19,16 +19,26 @@ export default {
     if (request.method==='POST' && request.headers.get('content-type')?.split(';')[0]!=='application/json') return json(400,'Use application/json')
     if (Number(request.headers.get('content-length')||0)>100000) return json(413,'Request is too large')
     const target=new URL(env.RUNNER_BASE_URL)
-    if (target.protocol!=='https:' || target.host!=='next.singulancelabs.com' || target.pathname!=='/api/hivemind/provider/v1') return json(503,'Provider configuration unavailable')
+    if (target.protocol!=='https:' || target.host!=='harness-chat-origin.singulancelabs.com' || target.pathname!=='/api/hivemind/provider/v1') return json(503,'Provider configuration unavailable')
     target.pathname+=url.pathname.slice(3)
     const headers=new Headers({'authorization':`Bearer ${env.RUNNER_API_KEY}`,'content-type':'application/json'})
     const nonce=request.headers.get('idempotency-key'); if(nonce) headers.set('idempotency-key',nonce)
     let size=0
     const stream=request.body?.pipeThrough(new TransformStream({transform(chunk,controller){size+=chunk.byteLength;if(size>100000)throw new Error('request_too_large');controller.enqueue(chunk)}}))
     try {
-      const response=await fetch(target,{method:request.method,headers,body:stream,redirect:'error',signal:request.signal})
+      const response=await fetch(target,{method:request.method,headers,body:stream,redirect:'manual',signal:request.signal})
+      if(response.status>=300 && response.status<400) {
+        const location=response.headers.get('location'); let host='unknown'; let path='unknown'; try {const redirect=new URL(location,target); host=redirect.hostname; path=redirect.pathname} catch {}
+        console.warn('provider-upstream-redirect',{status:response.status,host,path}); return json(503,'Provider upstream routing unavailable')
+      }
       const outgoing=new Headers({'cache-control':'no-store','content-type':response.headers.get('content-type')||'application/json'})
       return new Response(response.body,{status:response.status,headers:outgoing})
-    } catch { return json(503,'Provider request could not complete') }
+    } catch (error) {
+      const name=error instanceof Error ? error.name : 'Unknown'
+      const message=error instanceof Error ? error.message.toLowerCase() : ''
+      const category=message.includes('redirect') ? 'redirect' : message.includes('1042') ? 'same-zone' : message.includes('signal') ? 'signal' : 'transport'
+      console.warn('provider-upstream-failure',{name,category})
+      return json(503,'Provider request could not complete')
+    }
   }
 }

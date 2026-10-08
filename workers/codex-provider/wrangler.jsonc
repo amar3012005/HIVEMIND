@@ -1,1 +1,24 @@
-{"name":"singulance-codex-provider","main":"src/index.js","compatibility_date":"2026-10-07","workers_dev":true,"routes":[{"pattern":"codex-api.singulancelabs.com","custom_domain":true}],"vars":{"RUNNER_BASE_URL":"https://next.singulancelabs.com/api/hivemind/provider/v1"},"observability":{"enabled":true,"traces":{"enabled":true}}}
+{
+  "name": "singulance-codex-provider",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-07",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "codex-api.singulancelabs.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "RUNNER_BASE_URL": "https://harness-chat-origin.singulancelabs.com/api/hivemind/provider/v1"
+  },
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  },
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ]
+}

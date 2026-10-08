@@ -11,6 +11,7 @@ import { handleMobilePrivacyRoutes } from './mobile/privacy-routes.js';
 import { handleMobileAuthRoutes } from './mobile/auth-routes.js';
 import { MobileAuthStore } from './mobile/auth-store.js';
 import { checkNativeAiConsent, nativeAiProtectedPath, nativeBootstrapApiKey } from './mobile/consent-guard.js';
+import { nativeRunnerAdmissionGate } from './mobile/runner-readiness.js';
 import { handleMobileSafetyTriage } from './mobile/safety-triage.js';
 import fs from 'fs';
 import os from 'os';
@@ -3682,6 +3683,8 @@ const server = http.createServer(async (req, res) => {
   if (await handleMobileSafetyTriage({req,res,pathname,url,prisma,getPlatformAdminSession,parseBody,jsonResponse})) return;
   if (nativeAiProtectedPath(pathname, req.method)) {
     const nativeCurrent = await getCurrentSession(req);
+    const readiness = nativeRunnerAdmissionGate({pathname,method:req.method,session:nativeCurrent?.session});
+    if (!readiness.allowed) return jsonResponse(res, {error:'Native Runner is not ready',code:readiness.code},readiness.status);
     const consent = await checkNativeAiConsent(prisma, nativeCurrent?.session);
     if (!consent.allowed) return jsonResponse(res, {error:'Explicit AI sharing permission required',code:consent.code},consent.status);
   }

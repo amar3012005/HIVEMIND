@@ -38,3 +38,20 @@ test('broadcast denied administrator has no recipient query or dispatch',async()
   assert.equal(result,undefined);
 });
 
+
+test('Control rendered email honors rejection and sender-header policy',async()=>{
+  const {sendRenderedSystemEmail}=await import('../../src/email/email-service.js');
+  const keys=['CLOUDFLARE_EMAIL_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','SYSTEM_EMAIL_NANGO_CONNECTION_ID'];
+  const saved=global.fetch;
+  const env=Object.fromEntries(keys.map(k=>[k,process.env[k]]));
+  try {
+    process.env.CLOUDFLARE_EMAIL_API_TOKEN='isolated-token';process.env.CLOUDFLARE_ACCOUNT_ID='isolated-account';process.env.SYSTEM_EMAIL_NANGO_CONNECTION_ID='isolated-fallback';
+    let requests=0;
+    global.fetch=async url=>{requests++;assert.match(url,/api.cloudflare.com.*email\/sending\/send$/);return new Response(JSON.stringify({errors:[{code:'E_RECIPIENT_SUPPRESSED'}]}),{status:400});};
+    const rendered={subject:'Account notice',html:'<p>Notice</p>',text:'Notice'};
+    const rejected=await sendRenderedSystemEmail({to:'a@example.test',rendered});
+    assert.equal(rejected.ok,false);assert.equal(rejected.permanent,true);assert.equal(requests,1);
+    const malformed=await sendRenderedSystemEmail({to:'a@example.test',rendered,from:'Support <support@example.test>\r\nBcc: victim@example.test'});
+    assert.equal(malformed.error,'invalid_sender');assert.equal(requests,1);
+  }finally{global.fetch=saved;for(const k of keys){if(env[k]===undefined)delete process.env[k];else process.env[k]=env[k];}}
+});

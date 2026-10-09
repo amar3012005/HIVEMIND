@@ -8062,20 +8062,27 @@ exit \$RC
           if (org?.name) orgName = org.name;
         } catch { /* default name */ }
         let sent = 0;
+        let failed = 0;
         try {
-          const { sendEmail } = await import('./services/email-sender.js');
+          const { sendEmail, escapeEmailHtml } = await import('./services/email-sender.js');
           await Promise.all(externals.map(async (p) => {
             const safeName = String(p.name || 'there').slice(0, 80);
             const subject = `You've been added to a meeting: ${mtitle}`;
             const text = `Hi ${safeName},\n\nYou've been added as a participant in "${mtitle}" on ${orgName} (HIVEMIND).\nThe meeting notes and action items will be shared with you afterwards.\n\n— ${orgName}`;
-            const html = `<p>Hi ${safeName},</p><p>You've been added as a participant in <b>${mtitle}</b> on ${orgName} (HIVEMIND).</p><p>The meeting notes and action items will be shared with you afterwards.</p><p>— ${orgName}</p>`;
-            try { await sendEmail({ to: p.email, subject, text, html }); sent += 1; }
-            catch (e) { console.warn('[meeting-invite] send failed:', p.email, e.message); }
+            const html = `<p>Hi ${escapeEmailHtml(safeName)},</p><p>You've been added as a participant in <b>${escapeEmailHtml(mtitle)}</b> on ${escapeEmailHtml(orgName)} (HIVEMIND).</p><p>The meeting notes and action items will be shared with you afterwards.</p><p>— ${escapeEmailHtml(orgName)}</p>`;
+            try {
+              const receipt = await sendEmail({ to: p.email, subject, text, html });
+              if (receipt.ok === true) sent += 1;
+              else failed += 1;
+            } catch {
+              failed += 1;
+              console.warn('[meeting-invite] send failed');
+            }
           }));
         } catch (e) {
           return jsonResponse(res, { ok: false, error: 'email_unavailable', message: e.message }, 200);
         }
-        return jsonResponse(res, { ok: true, sent, externals: externals.length });
+        return jsonResponse(res, { ok: failed === 0, sent, failed, delivery_status: sent ? 'accepted' : 'not_accepted', externals: externals.length });
       }
 
       // GET /api/meetings/:id — full meeting detail (the list endpoint stays
@@ -12932,8 +12939,7 @@ exit \$RC
             where: { id: inviteId },
             data: {
               expiresAt: newExpiresAt,
-              lastSentAt: new Date(),
-              sendCount: { increment: 1 },
+              ...(dispatch.ok === true ? { lastSentAt: new Date(), sendCount: { increment: 1 } } : {}),
             },
           });
           await writeAuditLog(prisma, {
@@ -19670,7 +19676,7 @@ exit \$RC
 
               // Optional email dispatch — fires only when an explicit email
               // address is set on the invite AND a mail provider is
-              // configured (RESEND_API_KEY or SMTP_*). Failures are
+              // configured through the canonical system transport. Failures are
               // captured into the response, never block the invite.
               let emailReport = { attempted: false };
               if (email) {

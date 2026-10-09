@@ -1,4 +1,5 @@
 import { nativeSessionHash, nativeRunnerPrincipalAllowed } from '../mobile/native-principal.js';
+import { runtimeSupportReport, nightlyRoutineContext } from '../harness-chat/runtime-support-report.js';
 import { brainConnectionRoute, connectionStatus, startPlanOAuth, finishPlanOAuth, updateConnection } from '../chatgpt-plan/oauth.js';
 import { serveBrainPlan } from '../chatgpt-plan/brain-broker.js';
 import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
@@ -281,6 +282,16 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     } catch (error) {
       jsonResponse(res, { error: error.status ? error.message : 'Employee lifecycle unavailable' }, error.status || 503);
     }
+    return true;
+  }
+  if (pathname === `${INTERNAL_PREFIX}/runtime-support-report` || pathname === `${INTERNAL_PREFIX}/nightly-routine-context`) {
+    const contextOnly=pathname.endsWith('/nightly-routine-context');
+    if(req.method !== (contextOnly?'GET':'POST')) {jsonResponse(res,{error:'Method not allowed'},405);return true;}
+    try {
+      const shared={db:prisma,claims,env,sharedOrganizationAgents:env.HIVE_SHARED_ORGANIZATION_AGENTS_ENABLED === 'true'};
+      const {sendRenderedSystemEmail}=await import('../email/email-service.js');
+      jsonResponse(res,contextOnly?await nightlyRoutineContext(shared):await runtimeSupportReport({...shared,input:await parseBody(req),send:sendRenderedSystemEmail}));
+    } catch(error) {jsonResponse(res,{error:error.status?error.message:'Runtime support report unavailable'},error.status||503);}
     return true;
   }
   if (pathname === `${INTERNAL_PREFIX}/administrator-message`) {

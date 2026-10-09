@@ -6,7 +6,7 @@ const cpSource = readFileSync(new URL('../../src/control-plane-server.js', impor
 const broadcastSource = cpSource.slice(cpSource.indexOf("  if (pathname === '/v1/notifications/broadcast'"), cpSource.indexOf("  if (pathname === '/v1/orgs' && req.method === 'POST')"));
 const broadcast = new AsyncFunction('bindings', `const {pathname,req,res,requireSession,requireOrgAdmin,parseBody,prisma,jsonResponse,sendSystemEmailBatch}=bindings; ${broadcastSource}`);
 
-for (const dryRun of [true, false]) test(`broadcast scopes ${dryRun ? 'dry run' : 'live dispatch'} to active organization members`, async () => {
+for (const dryRun of [true, false]) test(`broadcast scopes ${dryRun ? 'dry run' : 'live dispatch'} to active, non-deleted organization members`, async () => {
   let query;
   let recipients;
   const result = await broadcast({
@@ -15,13 +15,14 @@ for (const dryRun of [true, false]) test(`broadcast scopes ${dryRun ? 'dry run' 
     requireOrgAdmin: async () => ({}), parseBody: async () => ({subject:'Account notice',body:'Expected notice',dryRun}),
     prisma:{user:{findMany:async input=>{
       query=input;
-      const rows=[{email:'a@example.test',displayName:'A',orgId:'org-a',active:true},{email:'b@example.test',displayName:'B',orgId:'org-b',active:true},{email:'inactive@example.test',orgId:'org-a',active:false}];
+      const rows=[{email:'a@example.test',displayName:'A',orgId:'org-a',active:true},{email:'b@example.test',displayName:'B',orgId:'org-b',active:true},{email:'inactive@example.test',orgId:'org-a',active:false},{email:'deleted@example.test',orgId:'org-a',active:true,deletedAt:new Date()}];
       const scope=input.where.organizations.some;
-      return rows.filter(row=>row.orgId===scope.orgId && row.active===scope.isActive);
+      return rows.filter(row=>row.orgId===scope.orgId && row.active===scope.isActive && (row.deletedAt??null)===input.where.deletedAt);
     }}}, jsonResponse:(_res,data,status=200)=>({data,status}),
     sendSystemEmailBatch:async rows=>{recipients=rows;return {total:rows.length,sent:rows.length,failed:0,skipped:0};},
   });
   assert.deepEqual(query.where.organizations,{some:{orgId:'org-a',isActive:true}});
+  assert.equal(query.where.deletedAt,null,'soft-deleted users must be excluded even with active membership');
   assert.equal(query.where.email,undefined,'nonnullable User.email rejects not:null in real Prisma');
   assert.equal(result.status,200);
   if(dryRun) {assert.equal(result.data.recipientCount,1);assert.deepEqual(result.data.sample,['a@example.test']);assert.equal(recipients,undefined);}

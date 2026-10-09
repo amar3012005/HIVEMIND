@@ -7,7 +7,7 @@ const payload=()=>({operation:'submit',occurrence:'2026-10-09T02:00:00.000Z',cov
 function fixture(){
  let saved,sendCount=0;const calls=[];
  const db={userOrganization:{findUnique:async()=>({role:'admin',isActive:true})},user:{findUnique:async()=>({deletedAt:null})},organization:{findUnique:async()=>({companyProfile:{timezone:'Europe/Berlin'}})},
-  $queryRawUnsafe:async(sql,...args)=>{calls.push({sql,args});if(sql.includes('set_config'))return [];if(sql.includes('JOIN hivemind.harness_sessions'))return [{session_id:'session-chief'}];
+  $queryRawUnsafe:async(sql,...args)=>{calls.push({sql,args});if(sql.includes('set_config'))return [];if(sql.includes('organization_agent_storage_scope'))return [{storage_user_id:user,runtime_session_id:'session-chief'}];if(sql.includes('JOIN hivemind.harness_sessions'))return [{session_id:'session-chief'}];
    if(sql.startsWith('INSERT')){saved??={id:'33333333-3333-4333-8333-333333333333',status:'pending',content_hash:args[4],message:JSON.parse(args[5])};return [];}
    if(sql.startsWith('SELECT *'))return saved?[saved]:[];
    if(sql.includes("SET status='dispatching'")){saved.status='dispatching';return [];}
@@ -43,4 +43,11 @@ test('nightly context attests canonical room, validates organization zone, and n
  const f=fixture();const r=await nightlyRoutineContext(f);assert.deepEqual(r,{org_id:org,session_id:'session-chief',time_zone:'Europe/Berlin',time_zone_source:'organization',support_configured:true});
  f.db.organization.findUnique=async()=>({companyProfile:{timezone:'invalid'}});assert.equal((await nightlyRoutineContext(f)).time_zone_source,'default_utc');
  const query=f.db.$queryRawUnsafe;f.db.$queryRawUnsafe=(sql,...args)=>sql.includes('JOIN hivemind.harness_sessions')?[]:query(sql,...args);await assert.rejects(nightlyRoutineContext(f),/canonical_runtime/);
+});
+
+test('shared admins dedupe on canonical storage identity; status never creates or sends a report',async()=>{
+ const f=fixture();const empty=await runtimeSupportReport({...f,input:{operation:'status',occurrence:payload().occurrence},sharedOrganizationAgents:true});assert.equal(empty.status,'not_found');assert.equal(f.saved,undefined);assert.equal(f.sends,0);
+ await runtimeSupportReport({...f,input:payload(),sharedOrganizationAgents:true});
+ f.claims.sub='44444444-4444-4444-8444-444444444444';const second=await runtimeSupportReport({...f,input:payload(),sharedOrganizationAgents:true});assert.equal(second.replayed,true);assert.equal(f.sends,1);
+ for(const insert of f.calls.filter(c=>c.sql?.startsWith('INSERT')))assert.equal(insert.args[1],user);
 });

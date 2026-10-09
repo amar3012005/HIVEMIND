@@ -514,6 +514,7 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 /** Send a fully rendered branded message through the canonical delivery path. */
 export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification, providerAttempts = 2, providerFallback = true, requiredProvider } = {}) {
   if (!to || !validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
+  if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
   if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
   const providers = configuredProviders();
   if (requiredProvider === 'cloudflare' && !providers.cloudflare) return { ok: false, skipped: true, error: 'cloudflare_email_unavailable' };

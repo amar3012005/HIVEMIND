@@ -77,3 +77,29 @@ The prepared follow-up now addresses the three concrete delivery boundaries:
 Verification: all three changed JavaScript files pass `node --check`; `git diff --check` passes. Twenty isolated tests pass in the existing immutable Core image with source/tests mounted read-only and `--network none`: eight new boundary checks plus twelve existing system-email provider checks. The new route checks execute the extracted actual handler code against in-memory organization/provider dependencies; this verifies query construction, dry-run/live separation, missing/denied organization authority and acceptance counting, **not** PostgreSQL row isolation or live authenticated HTTP behavior. Provider tests use fake addresses and mocked fetch; no network mail occurred.
 
 No Runtime notification idempotency code, schemas, provider settings, DNS or live service was modified. No release has occurred. Proposed rollout: review and push the exact source SHA, then use the canonical scoped release path for **Control Plane and Core** (broadcast is Control-owned; legacy invite/meeting handlers are Core-owned), retaining each old image for rollback. Before release, add two-organization authenticated/database verification; after authorized release, check scoped API responses and a separately authorized controlled mail receipt. Existing Gmail category/reputation and marketing-provider operator actions remain.
+
+### Compatibility review and release instructions
+
+A follow-up restores the legacy wrapper's bounded, never-throws contract even if unexpected rendering/configuration code throws; the receipt returns `email_dispatch_failed` without exception details. Rendered dispatch now uses the same sender header safety check as named-template dispatch; valid explicit From overrides still pass through unchanged, while CR/LF injection is rejected before fetch. Compatibility `id` aliases `messageId`; failed `reason` aliases the canonical error; existing `ok`, provider and delivery status are retained. No Resend/SMTP credential fallback remains in the legacy wrapper by design: this closes the deployed unconfigured transport split, rather than adding a second sender.
+
+The focused suite now has **22 passing tests**, including safe explicit sender override, malformed From rejection and unexpected rendering failure. This remains isolated mock-provider evidence, not live delivery or database isolation.
+
+Root owns promotion and deployment. After review/cherry-pick and normal push to the canonical branch, use the exact promoted SHA (not this unmerged task SHA):
+
+```bash
+# Set this to the full SHA confirmed on github/singulance-main after promotion.
+EMAIL_RELEASE_SHA=<full-promoted-sha>
+RELEASE_SESSION_ID=email-correctness-dryrun-20261009 scripts/release-canonical.sh \
+  --sha "$EMAIL_RELEASE_SHA" --services core,control-plane \
+  --service-scoped --skip-migrations --dry-run
+RELEASE_SESSION_ID=email-correctness-20261009 scripts/release-canonical.sh \
+  --sha "$EMAIL_RELEASE_SHA" --services core,control-plane \
+  --service-scoped --skip-migrations \
+  --canary-url https://api.singulancelabs.com/health
+```
+
+Run these from the clean promoted parent worktree. The helper resolves canonical GitHub if `origin` is local, creates immutable source/images and preserves managed `/root/hivemind/.env`; it invokes `preserve-crm-activation.py` rather than discarding Control's live `crm-activation.json`. No migration is introduced here. Confirm current source/metadata immediately before running. Recorded prior image identities for rollback: Core `hivemind/core-api:sha-ad0ed9b9a`, Control `hivemind/control-plane:sha-5b7f0780`. The helper records exact image IDs and rollback names in its release manifest; retain that manifest and verify unchanged sibling services after cutover. Do not restart Harness for this release.
+
+The public health canary is necessary but insufficient: add authenticated org-A dry-run verification excluding org-B/inactive users, denied ordinary-member verification, and existing receipt API checks. Do not invoke a live broadcast or invitation just to obtain a success result without explicit mail-test authorization.
+
+**Opt-in risk remains:** organization scoping fixes recipient authorization, not campaign consent. The generic announcement path still lacks dedicated marketing opt-in/unsubscribe enforcement and can carry arbitrary copy. Use only expected transactional organization notices; marketing activation requires the separate consent/unsubscribe/transport work described above. This release does not claim complete marketing readiness or inbox-category control.

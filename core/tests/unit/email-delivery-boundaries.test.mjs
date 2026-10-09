@@ -44,10 +44,10 @@ test('legacy sender uses Cloudflare receipt and does not escape suppressed reque
     let calls=0;
     global.fetch=async(url,init)=>{
       calls++;assert.match(url,/api.cloudflare.com.*email\/sending\/send$/);
-      const body=JSON.parse(init.body);assert.equal(body.text,'Plaintext');
+      const body=JSON.parse(init.body);assert.equal(body.text,'Plaintext');assert.equal(body.from,'Support <support@example.test>');
       return new Response(JSON.stringify({result:{queued:['a@example.test'],message_id:'receipt-a'}}),{status:200});
     };
-    const accepted=await sendEmail({to:'a@example.test',subject:'Account notice',html:'<p>Plaintext</p>',text:'Plaintext'});
+    const accepted=await sendEmail({to:'a@example.test',subject:'Account notice',html:'<p>Plaintext</p>',text:'Plaintext',from:'Support <support@example.test>'});
     assert.equal(accepted.ok,true);assert.equal(accepted.id,'receipt-a');assert.equal(accepted.deliveryStatus,'queued');assert.equal(calls,1);
     global.fetch=async()=>{calls++;return new Response(JSON.stringify({errors:[{code:'E_RECIPIENT_SUPPRESSED'}]}),{status:400});};
     const rejected=await sendEmail({to:'a@example.test',subject:'Account notice',html:'<p>Plaintext</p>',text:'Plaintext'});
@@ -85,4 +85,19 @@ test('legacy sender reports disabled configuration without counting acceptance',
     const receipt=await sendEmail({to:'a@example.test',subject:'Invite',text:'Plaintext'});
     assert.equal(receipt.ok,false);assert.equal(receipt.reason,'no_email_provider');assert.equal(receipt.skipped,true);
   }finally{global.fetch=saved;for(const k of keys){if(env[k]===undefined)delete process.env[k];else process.env[k]=env[k];}}
+});
+
+test('legacy wrapper returns a bounded failure for unexpected rendering exceptions',async()=>{
+  const receipt=await sendEmail({to:'a@example.test',subject:'Invite',text:{toString(){throw new Error('private configuration');}}});
+  assert.deepEqual(receipt,{ok:false,reason:'email_dispatch_failed',error:'email_dispatch_failed'});
+  assert.equal((await sendEmail()).reason,'invalid_args');
+});
+
+test('rendered sender rejects header injection before transport',async()=>{
+  const saved=global.fetch;
+  try {
+    global.fetch=()=>assert.fail('must not send');
+    const receipt=await sendEmail({to:'a@example.test',subject:'Invite',html:'<p>Invite</p>',text:'Invite',from:'Support <support@example.test>\r\nBcc: victim@example.test'});
+    assert.equal(receipt.ok,false);assert.equal(receipt.reason,'invalid_sender');
+  }finally{global.fetch=saved;}
 });

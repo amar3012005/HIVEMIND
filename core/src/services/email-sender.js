@@ -9,14 +9,20 @@ export function escapeEmailHtml(value) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-export async function sendEmail({ to, subject, html, text, from }) {
+export async function sendEmail({ to, subject, html, text, from } = {}) {
   if (!to || !subject || (!html && !text)) return { ok: false, reason: 'invalid_args' };
-  const result = await sendRenderedSystemEmail({
-    to, from, templateId: 'legacy_transactional_notice',
-    rendered: { subject, html: html || `<p>${escapeEmailHtml(text)}</p>`, text: text || '' },
-  });
-  return { ...result, ...(result.messageId ? { id: result.messageId } : {}),
-    ...(!result.ok && result.error ? { reason: result.error } : {}) };
+  try {
+    const result = await sendRenderedSystemEmail({
+      to, from, templateId: 'legacy_transactional_notice',
+      rendered: { subject, html: html || `<p>${escapeEmailHtml(text)}</p>`, text: text || '' },
+    });
+    return { ...result, ...(result.messageId ? { id: result.messageId } : {}),
+      ...(!result.ok && result.error ? { reason: result.error } : {}) };
+  } catch {
+    // Legacy callers expect a receipt, not a rejected promise. Do not expose
+    // unexpected provider/configuration details in an authenticated response.
+    return { ok: false, reason: 'email_dispatch_failed', error: 'email_dispatch_failed' };
+  }
 }
 
 /**

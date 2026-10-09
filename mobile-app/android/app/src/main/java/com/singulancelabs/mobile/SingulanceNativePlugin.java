@@ -47,6 +47,20 @@ public class SingulanceNativePlugin extends Plugin {
         if (!"pendingAuth".equals(key) && !"cpToken".equals(key)) throw new IllegalArgumentException("Unknown credential key.");
         return key;
     }
+    @PluginMethod public void getAppearance(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            try {
+                requireTrusted();
+                boolean motionEnabled = android.os.Build.VERSION.SDK_INT >= 26
+                    ? android.animation.ValueAnimator.areAnimatorsEnabled()
+                    : android.provider.Settings.Global.getFloat(getContext().getContentResolver(), android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f;
+                JSObject result = new JSObject();
+                result.put("platform", "android");
+                result.put("reduceMotion", !motionEnabled);
+                call.resolve(result);
+            } catch (Exception ignored) { call.reject("Appearance settings could not be read."); }
+        });
+    }
     private synchronized javax.crypto.SecretKey encryptionKey() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
         if (!store.containsAlias(KEY_ALIAS)) {

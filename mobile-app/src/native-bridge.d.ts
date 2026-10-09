@@ -1,5 +1,7 @@
 /** Register with Capacitor.registerPlugin<SingulanceNative>('SingulanceNative'). */
 export interface SingulanceNative {
+  /** OS accessibility hints, read on launch/resume; unsupported fields are omitted. */
+  getAppearance(): Promise<{platform: 'ios' | 'android'; reduceMotion: boolean; reduceTransparency?: boolean; increaseContrast?: boolean}>;
   setCredential(options: {key: 'pendingAuth' | 'cpToken'; value: string}): Promise<void>;
   getCredential(options: {key: 'pendingAuth' | 'cpToken'}): Promise<{value: string | null}>;
   removeCredential(options: {key: 'pendingAuth' | 'cpToken'}): Promise<void>;

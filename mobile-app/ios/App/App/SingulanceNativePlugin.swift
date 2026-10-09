@@ -8,7 +8,7 @@ import Capacitor
 public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
     private var saveCall: CAPPluginCall?
     private var saveURL: URL?
     private let service = "com.singulancelabs.mobile.credentials.v1"
@@ -31,6 +31,19 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         return key
     }
     private func query(_ key: String) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key] }
+    @objc func getAppearance(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.trusted() else {
+                call.reject("Appearance settings require the packaged application."); return
+            }
+            call.resolve([
+                "platform": "ios",
+                "reduceMotion": UIAccessibility.isReduceMotionEnabled,
+                "reduceTransparency": UIAccessibility.isReduceTransparencyEnabled,
+                "increaseContrast": UIAccessibility.isDarkerSystemColorsEnabled
+            ])
+        }
+    }
     private func read(_ key: String) throws -> String? {
         var q = query(key); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?; let status = SecItemCopyMatching(q as CFDictionary, &result)

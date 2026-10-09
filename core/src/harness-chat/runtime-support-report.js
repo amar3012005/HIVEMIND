@@ -57,12 +57,15 @@ export function savedNightlyOccurrence(events,sessionId,occurrence){
  return events.some(row=>{
   if(row.event_type!=='user/message')return false;
   const message=row.payload?.data??row.payload;
-  if(message?.source?.kind!=='schedule'||message.source.occurrenceAt!==occurrence)return false;
+  if(message?.source?.kind!=='schedule'||typeof message.source.occurrenceAt!=='string')return false;
   const text=Array.isArray(message.content)?message.content.filter(block=>block.type==='text').map(block=>block.text).join('\n'):'';
   for(const line of text.split('\n')){
    if(!line.startsWith('reminders_json: '))continue;
    try{const reminders=JSON.parse(line.slice('reminders_json: '.length));
-    if(Array.isArray(reminders)&&reminders.some(reminder=>reminder?.schedule_id===id&&reminder.occurrence_at===occurrence
+    const validMember=reminder=>typeof reminder?.schedule_id==='string'&&/^schedule-[a-f0-9]{64}$/.test(reminder.schedule_id)
+     &&typeof reminder.occurrence_at==='string'&&Number.isFinite(Date.parse(reminder.occurrence_at))&&new Date(reminder.occurrence_at).toISOString()===reminder.occurrence_at;
+    if(Array.isArray(reminders)&&reminders.some(reminder=>validMember(reminder)&&reminder.occurrence_at===message.source.occurrenceAt)
+     &&reminders.some(reminder=>validMember(reminder)&&reminder?.schedule_id===id&&reminder.occurrence_at===occurrence
      &&typeof reminder.reminder_prompt==='string'&&reminder.reminder_prompt.startsWith('Load hivemind-nightly-routine-check.')))return true;
    }catch{}
   }
@@ -72,7 +75,8 @@ export function savedNightlyOccurrence(events,sessionId,occurrence){
 async function requireScheduledOccurrence(db,claims,storage,occurrence){
  await db.$transaction(async tx=>{
   await scope(tx,claims.org_id,storage.userId);
-  const events=await tx.$queryRawUnsafe(`SELECT event_type,payload FROM hivemind.harness_session_events WHERE org_id=$1::uuid AND user_id=$2::uuid AND session_id=$3 AND event_type='user/message' AND payload->'data'->'source'->>'kind'='schedule' AND payload->'data'->'source'->>'occurrenceAt'=$4 ORDER BY sequence DESC LIMIT 8`,claims.org_id,storage.userId,claims.operating_session,occurrence);
+  const events=await tx.$queryRawUnsafe(`SELECT event_type,payload FROM hivemind.harness_session_events WHERE org_id=$1::uuid AND user_id=$2::uuid AND session_id=$3 AND event_type='user/message' AND payload->'data'->'source'->>'kind'='schedule' AND payload::text LIKE '%' || $4 || '%' ORDER BY sequence DESC LIMIT 8`,claims.org_id,storage.userId,claims.operating_session,
+   'schedule-'+crypto.createHash('sha256').update(claims.operating_session+'\0nightly-routine-check-v1').digest('hex'));
   if(!savedNightlyOccurrence(events,claims.operating_session,occurrence))fail('native_nightly_occurrence_required',409);
  });
 }

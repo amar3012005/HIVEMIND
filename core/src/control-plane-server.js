@@ -6035,6 +6035,7 @@ const server = http.createServer(async (req, res) => {
     }
     const users = await prisma.user.findMany({
       where: {
+        deletedAt: null,
         NOT: { email: { endsWith: '@local.hivemind.dev' } },
         organizations: { some: { orgId: current.session.orgId, isActive: true } },
       },

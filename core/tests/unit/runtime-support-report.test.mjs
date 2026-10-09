@@ -16,7 +16,7 @@ function fixture(){
   $transaction:async fn=>fn(db)};
  const claims={sub:user,org_id:org,operating_role:'runtime',operating_session:'session-chief'};
  const send=async args=>{sendCount++;calls.push({mail:args});return {ok:true,provider:'cloudflare',messageId:'provider-message',deliveryStatus:'accepted'};};
- return {db,claims,send,env:{SYSTEM_EMAIL_SUPPORT:'support@example.invalid'},now,calls,get sends(){return sendCount;},get saved(){return saved;}};
+ return {db,claims,send,env:{SYSTEM_EMAIL_SUPPORT:'support@example.invalid',RUNTIME_NIGHTLY_SUPPORT_ORG_IDS:org},now,calls,get sends(){return sendCount;},get saved(){return saved;}};
 }
 test('strict sanitized vocabulary rejects company text, identity, oversized counts and future occurrence',()=>{
  for(const mutate of [p=>p.message='customersecret',p=>p.issues[0].details='raw logs',p=>p.issues[0].capability='customer name',p=>p.coverage.expected=2000,p=>p.occurrence='2026-10-10T02:00:00.000Z']){const p=payload();mutate(p);assert.throws(()=>validateSupportReport(p,now));}
@@ -34,7 +34,7 @@ test('configured support recipient is server-only; exact occurrence sends once, 
  const status=await runtimeSupportReport({...f,input:{operation:'status',occurrence:payload().occurrence}});assert.equal(status.delivery_status,'delivered');assert.equal(f.sends,1);
 });
 test('missing configuration safely keeps unsent pending report; no alternate transport',async()=>{
- const f=fixture();f.env={};const r=await runtimeSupportReport({...f,input:payload()});assert.equal(r.status,'unavailable');assert.equal(f.sends,0);assert.equal(f.saved.status,'pending');
+ const f=fixture();f.env={RUNTIME_NIGHTLY_SUPPORT_ORG_IDS:org};const r=await runtimeSupportReport({...f,input:payload()});assert.equal(r.status,'unavailable');assert.equal(f.sends,0);assert.equal(f.saved.status,'pending');
 });
 test('uncertain provider outcome prevents automatic duplicate retry',async()=>{
  const f=fixture();let attempts=0;f.send=async()=>{attempts++;throw Error('token should never be copied');};const r=await runtimeSupportReport({...f,input:payload()});assert.equal(r.status,'unknown');assert.ok(!JSON.stringify(r).includes('token'));await runtimeSupportReport({...f,input:payload()});assert.equal(attempts,1);
@@ -51,3 +51,5 @@ test('shared admins dedupe on canonical storage identity; status never creates o
  f.claims.sub='44444444-4444-4444-8444-444444444444';const second=await runtimeSupportReport({...f,input:payload(),sharedOrganizationAgents:true});assert.equal(second.replayed,true);assert.equal(f.sends,1);
  for(const insert of f.calls.filter(c=>c.sql?.startsWith('INSERT')))assert.equal(insert.args[1],user);
 });
+
+test('nightly activation requires explicit organization allowlist for context and submit',async()=>{const f=fixture();f.env={SYSTEM_EMAIL_SUPPORT:'support@example.invalid'};await assert.rejects(nightlyRoutineContext(f),/nightly_not_enabled/);await assert.rejects(runtimeSupportReport({...f,input:payload()}),/nightly_not_enabled/);assert.equal(f.sends,0);});

@@ -39,8 +39,13 @@ async function authority(db,claims,sharedOrganizationAgents){
  return storage;
 }
 async function scope(tx,org,user){await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",org,user);}
+function requireEnabled(env,claims){
+ const allowed=typeof env.RUNTIME_NIGHTLY_SUPPORT_ORG_IDS==='string'?env.RUNTIME_NIGHTLY_SUPPORT_ORG_IDS.split(',').map(value=>value.trim()):[];
+ if(!allowed.includes(claims.org_id))fail('runtime_nightly_not_enabled',403);
+}
 function configured(env){return typeof env.SYSTEM_EMAIL_SUPPORT==='string'&&/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(env.SYSTEM_EMAIL_SUPPORT);}
 export async function nightlyRoutineContext({db,claims,sharedOrganizationAgents=false,env=process.env}){
+ requireEnabled(env,claims);
  await authority(db,claims,sharedOrganizationAgents);
  const org=await db.organization.findUnique({where:{id:claims.org_id},select:{companyProfile:true}});
  let timeZone=org?.companyProfile?.timezone;let source='organization';
@@ -52,6 +57,7 @@ function projection(row,delivery){
  return {report_id:row?.id??null,status:row?.status==='dispatching'?'unknown':row?.status??'not_found',sent:row?.status==='accepted',delivery_status:delivery?.delivery_status??receipt.deliveryStatus??null,read_status:'not_tracked'};
 }
 export async function runtimeSupportReport({db,claims,input,send,sharedOrganizationAgents=false,env=process.env,now=Date.now()}){
+ requireEnabled(env,claims);
  const report=validateSupportReport(input,now);const storage=await authority(db,claims,sharedOrganizationAgents);
  const key='support:'+crypto.createHash('sha256').update(JSON.stringify([claims.org_id,claims.operating_session,report.occurrence])).digest('hex');
  const hash=crypto.createHash('sha256').update(JSON.stringify({...report,operation:'submit'})).digest('hex');

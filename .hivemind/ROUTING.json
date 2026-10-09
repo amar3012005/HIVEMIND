@@ -2,14 +2,106 @@
   "version": 1,
   "default": "memory-platform",
   "rules": [
-    {"match": ["memory", "evidence", "ingestion", "recall", "entity", "mcp"], "skill": "memory-platform"},
-    {"match": ["login", "user", "organization", "project", "usage", "billing", "lifecycle", "admission"], "skill": "identity-platform"},
-    {"match": ["harness", "cordis", "chat", "composio", "connected app", "hyperagent"], "skill": "cordis-harness-platform"},
-    {"match": ["tara", "voice", "deepgram", "grok voice"], "skill": "tara-voice-platform"},
-    {"match": ["ops gateway", "deploy_cloudflare_frontend", "deploy_core_services", "deploy_harness_runner", "get_release_status"], "skill": "ops-gateway"},
-    {"match": ["deploy", "release", "container", "cloudflare", "migration", "rollback"], "skill": "platform-release"},
-    {"match": ["security", "access", "tunnel", "jwt", "waf", "secret", "tenant isolation"], "skill": "platform-security-audit"},
-    {"match": ["eval", "canary", "fixture", "replay", "resume", "regression"], "skill": "platform-evals"}
+    {
+      "match": [
+        "mobile ui",
+        "responsive",
+        "ios",
+        "android",
+        "capacitor",
+        "safe area",
+        "keyboard layout"
+      ],
+      "skill": "mobile-platform-ui"
+    },
+    {
+      "match": [
+        "memory",
+        "evidence",
+        "ingestion",
+        "recall",
+        "entity",
+        "mcp"
+      ],
+      "skill": "memory-platform"
+    },
+    {
+      "match": [
+        "login",
+        "user",
+        "organization",
+        "project",
+        "usage",
+        "billing",
+        "lifecycle",
+        "admission"
+      ],
+      "skill": "identity-platform"
+    },
+    {
+      "match": [
+        "harness",
+        "cordis",
+        "chat",
+        "composio",
+        "connected app",
+        "hyperagent"
+      ],
+      "skill": "cordis-harness-platform"
+    },
+    {
+      "match": [
+        "tara",
+        "voice",
+        "deepgram",
+        "grok voice"
+      ],
+      "skill": "tara-voice-platform"
+    },
+    {
+      "match": [
+        "ops gateway",
+        "deploy_cloudflare_frontend",
+        "deploy_core_services",
+        "deploy_harness_runner",
+        "get_release_status"
+      ],
+      "skill": "ops-gateway"
+    },
+    {
+      "match": [
+        "deploy",
+        "release",
+        "container",
+        "cloudflare",
+        "migration",
+        "rollback"
+      ],
+      "skill": "platform-release"
+    },
+    {
+      "match": [
+        "security",
+        "access",
+        "tunnel",
+        "jwt",
+        "waf",
+        "secret",
+        "tenant isolation"
+      ],
+      "skill": "platform-security-audit"
+    },
+    {
+      "match": [
+        "eval",
+        "canary",
+        "fixture",
+        "replay",
+        "resume",
+        "regression"
+      ],
+      "skill": "platform-evals"
+    }
   ],
   "selection": "Choose the narrowest matching skill. For a true cross-boundary task, choose the owning skill first and name the one additional skill required."
 }

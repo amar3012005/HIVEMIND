@@ -20,6 +20,7 @@ task name), never `singulance-main`.
 
 Choose one skill with `ROUTING.json`:
 
+- `mobile-platform-ui` for responsive iOS/Android layouts, keyboard behavior, accessible materials and Preview.
 - `memory-platform` for HIVE ingestion, recall, evidence, entities, and MCP.
 - `identity-platform` for users, organizations, projects, usage, billing, and lifecycle.
 - `cordis-harness-platform` for HIVE chat, HyperAgents, Cordis, Composio, and Harness.

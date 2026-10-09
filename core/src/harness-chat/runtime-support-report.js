@@ -62,7 +62,7 @@ export function savedNightlyOccurrence(events,sessionId,occurrence){
   for(const line of text.split('\n')){
    if(!line.startsWith('reminders_json: '))continue;
    try{const reminders=JSON.parse(line.slice('reminders_json: '.length));
-    const validMember=reminder=>typeof reminder?.schedule_id==='string'&&/^schedule-[a-f0-9]{64}$/.test(reminder.schedule_id)
+    const validMember=reminder=>typeof reminder?.schedule_id==='string'&&/^schedule-(?:[a-f0-9]{64}|[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/.test(reminder.schedule_id)
      &&typeof reminder.occurrence_at==='string'&&Number.isFinite(Date.parse(reminder.occurrence_at))&&new Date(reminder.occurrence_at).toISOString()===reminder.occurrence_at;
     if(Array.isArray(reminders)&&reminders.some(reminder=>validMember(reminder)&&reminder.occurrence_at===message.source.occurrenceAt)
      &&reminders.some(reminder=>validMember(reminder)&&reminder?.schedule_id===id&&reminder.occurrence_at===occurrence

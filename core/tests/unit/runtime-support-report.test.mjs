@@ -69,7 +69,7 @@ test('only exact persisted native nightly occurrence can authorize a support rep
 test('batched native occurrence is the nightly member, not necessarily the first source occurrence',()=>{
  const row=witness();const data=row.payload.data;const reminders=JSON.parse(data.content[0].text.slice('reminders_json: '.length));
  const first='2026-10-09T01:00:00.000Z';data.source.occurrenceAt=first;
- reminders.unshift({schedule_id:'schedule-'+ 'a'.repeat(64),occurrence_at:first,reminder_prompt:'Another scheduled native task'});
+ reminders.unshift({schedule_id:'schedule-55555555-5555-4555-8555-555555555555',occurrence_at:first,reminder_prompt:'Another scheduled native task'});
  data.content[0].text='reminders_json: '+JSON.stringify(reminders);
  assert.equal(savedNightlyOccurrence([row],'session-chief',payload().occurrence),true);
  data.source.occurrenceAt='2026-10-09T04:00:00.000Z';assert.equal(savedNightlyOccurrence([row],'session-chief',payload().occurrence),false);

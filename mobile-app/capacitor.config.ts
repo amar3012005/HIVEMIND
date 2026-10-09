@@ -15,7 +15,6 @@ const config: CapacitorConfig = {
     ...(remoteUrl ? { url: remoteUrl } : {}),
     androidScheme: 'https',
     cleartext: false,
-    appStartPath: '/hivemind/m/chat',
     errorPath: 'offline.html',
   },
   android: { allowMixedContent: false, webContentsDebuggingEnabled: false, minWebViewVersion: 90 },

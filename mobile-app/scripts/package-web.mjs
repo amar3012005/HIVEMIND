@@ -8,5 +8,7 @@ const html = await readFile(resolve(source, 'index.html'), 'utf8');
 if (!/<script[^>]+src=/i.test(html)) throw Error('The frontend must contain its compiled application scripts.');
 for (const entry of await readdir(target)) if (!['offline.html', '.gitkeep'].includes(entry)) await rm(resolve(target, entry), { recursive: true, force: true });
 await cp(source, target, { recursive: true });
+// Capacitor must load a real index file; initialize the SPA route before React loads.
+await writeFile(resolve(target, 'index.html'), html.replace('<head>', '<head><script>if(location.pathname === "/" || location.pathname === "/index.html") history.replaceState(null, "", "/hivemind/m/chat");</script>'));
 await writeFile(resolve(target, 'mobile-build.json'), JSON.stringify({ format: 1, frontendSha: process.env.SINGULANCE_FRONTEND_SHA || null, builtAt: new Date().toISOString() }) + '\n');
 console.log('Packaged frontend assets. Native authentication and device checks remain required.');

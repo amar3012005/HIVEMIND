@@ -3,12 +3,35 @@ import UIKit
 import Security
 import WebKit
 import Capacitor
+import AuthenticationServices
 
 @objc(SingulanceNativePlugin)
-public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate {
+public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    private var authenticationSession: ASWebAuthenticationSession?
+    public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        return bridge!.viewController!.view.window!
+    }
+    @objc func authenticate(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard self.trusted(), self.authenticationSession == nil,
+                  let url = try? self.allowedURL(call.getString("url")),
+                  url.host == "api.singulancelabs.com", url.path == "/auth/mobile/start",
+                  self.bridge?.viewController?.view.window != nil else {
+                call.reject("Sign-in could not start."); return
+            }
+            let authentication = ASWebAuthenticationSession(url: url, callbackURLScheme: "singulance") { callback, error in
+                self.authenticationSession = nil
+                guard error == nil, let callback = callback else { call.reject("Sign-in was cancelled or failed."); return }
+                call.resolve(["url": callback.absoluteString])
+            }
+            authentication.presentationContextProvider = self
+            self.authenticationSession = authentication
+            if !authentication.start() { self.authenticationSession = nil; call.reject("Sign-in could not start.") }
+        }
+    }
     private var saveCall: CAPPluginCall?
     private var saveURL: URL?
     private let service = "com.singulancelabs.mobile.credentials.v1"
@@ -23,6 +46,9 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
     private func trusted() -> Bool {
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync { self.trusted() }
+        }
         guard let url = bridge?.webView?.url else { return false }
         return bridge?.config.serverURL == bridge?.config.localURL && url.scheme == "capacitor" && url.host == "localhost" && url.port == nil && url.user == nil && url.password == nil
     }
@@ -84,7 +110,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
               let host = url.host, ["api.singulancelabs.com", "next.singulancelabs.com"].contains(host),
               let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               !path.contains("%"), !path.contains("\\"), !path.contains(".."), !path.contains("//"),
-              host == "api.singulancelabs.com" ? (path.hasPrefix("/auth/mobile/") || path.hasPrefix("/v1/")) : (path.hasPrefix("/api/") || path.hasPrefix("/plugins/") || path.hasPrefix("/assets/")) else { throw NativeError.denied }
+              host == "api.singulancelabs.com" ? (path.hasPrefix("/auth/mobile/") || path == "/auth/session" || path == "/auth/email/config" || path.hasPrefix("/v1/")) : (path.hasPrefix("/api/") || path.hasPrefix("/plugins/") || path.hasPrefix("/assets/")) else { throw NativeError.denied }
         return url
     }
     private func makeRequest(_ call: CAPPluginCall) throws -> URLRequest {

@@ -51,13 +51,13 @@ export async function handleMobileAuthRoutes({ req, res, pathname, url, store, s
       if(!current) {
         if(req.method==='POST') return send({error:'Unauthorized'},401);
         const returnTo=`${publicBase}/auth/mobile/authorize?intent=${encodeURIComponent(intent)}`;
-        res.writeHead(303,{Location:`${frontendBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`,'Cache-Control':'no-store'}); res.end(); return true;
+        res.writeHead(303,{Location:`${frontendBase}/hivemind/login?mobile_return_to=${encodeURIComponent(returnTo)}`,'Cache-Control':'no-store'}); res.end(); return true;
       }
       if(req.method==='GET') {
         if(!await store.bindUser(intent,current.session.userId)) return send({error:'Authorization account changed'},403);
         // A browser explicitly confirms mobile-session creation; no code issued by link scanners.
         const page=`<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect SINGULANCE</title><body><h1>Connect your SINGULANCE app</h1><p>Continue as ${html(current.session.email || 'your signed-in account')}?</p><form method="post" action="/auth/mobile/authorize"><input type="hidden" name="intent" value="${html(intent)}"><input type="hidden" name="nonce" value="${html(record.nonce)}"><button type="submit">Connect app</button></form><p>Close this page to cancel.</p></body></html>`;
-        res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"});res.end(page);return true;
+        res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'same-origin','Content-Security-Policy':"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"});res.end(page);return true;
       }
       if(origin!==publicBase || body.nonce!==record.nonce || record.browserUserId!==current.session.userId) return send({error:'Authorization confirmation denied'},403);
       if(!await membershipActive(current.session)) return send({error:'Account or membership unavailable'},403);

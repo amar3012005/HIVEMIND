@@ -1,0 +1,67 @@
+# Platform email deliverability audit — 9 October 2026
+
+## Observed deployment
+
+Read-only Docker configuration inspection, public DNS resolution and Cloudflare limits API were used. No email was sent; no DNS, suppression entry, provider setting or container was changed.
+
+- Core: `hivemind/core-api:sha-ad0ed9b9a`.
+- Control: `hivemind/control-plane:sha-5b7f0780`.
+- Canonical system sender: Cloudflare Email Sending REST. Account/token present in both services; Gmail-over-Nango system fallback absent.
+- Managed environment contains legacy `Singulance <welcome@admin.singulancelabs.com>`. Current source maps it to `Amar at SINGULANCE <amar@admin.singulancelabs.com>`. This is the effective canonical source identity, not proof of the visible From header of every historical message.
+- Account quota API: 1,000/day, 7 sent, `over_quota=false` at inspection.
+- Legacy Core meeting/organization invite handlers still import `services/email-sender.js`, which selects Resend then SMTP. Neither provider is configured in live Core/Control. Those paths cannot be assumed to deliver through Cloudflare. A meeting-invite handler increments `sent` without examining `sendEmail().ok`; this is a separate receipt correctness defect requiring a focused follow-up.
+
+## Authentication evidence
+
+For the actual sending subdomain `admin.singulancelabs.com`:
+
+| Record | Public resolver observation |
+| --- | --- |
+| `cf-bounce.admin.singulancelabs.com` TXT | `v=spf1 include:_spf.mx.cloudflare.net ~all` |
+| `cf-bounce._domainkey.admin.singulancelabs.com` TXT | DKIM1 RSA key present, 420 characters |
+| `cf-bounce.admin.singulancelabs.com` MX | Cloudflare route1/route2/route3 servers |
+| `_dmarc.admin.singulancelabs.com` TXT | `v=DMARC1; p=reject;` |
+| `_dmarc.singulancelabs.com` TXT | `p=none; rua=mailto:support@singulancelabs.com` |
+
+Absence of a TXT record directly on `admin.singulancelabs.com` is not a missing Sending SPF: Sending uses the `cf-bounce` envelope domain. Do not add a second SPF record or copy Routing records into Sending.
+
+These records establish publication, not actual per-message SPF/DKIM/DMARC pass. Confirm Authentication-Results on a real existing recipient message and the domain's Email Sending settings. The guessed account-domain listing API returned 404 and was not used as verification.
+
+## Source correction prepared
+
+`sendWithCloudflare()` now marks a non-transient HTTP rejection as terminal for this send. Both canonical template and rendered-message dispatchers already stop fallback when `permanent` is set. Consequently a recipient suppression rejection cannot bypass Cloudflare through a future configured Gmail fallback. This flag describes the attempt: it does not mean a temporary suppression should be deleted or its expiry ignored. Existing successful receipt projection, Runtime idempotency and transient retry/fallback contracts are unchanged.
+
+This change is source only and undeployed. `node --check core/src/email/email-service.js` and `git diff --check` pass. No tests were run or added for this delegated request. Static review confirms both dispatcher boundaries inspect `permanent` before invoking Gmail; provider acceptance, receipt projection and Runtime request deduplication were not modified.
+
+## Content and separation
+
+- Canonical templates carry HTML and plaintext; the sign-in code message is focused on authentication and its expiry, without upgrade promotions.
+- Current account and Runtime messages share `admin.singulancelabs.com`; there is no confirmed independently onboarded marketing sender.
+- The generic `announcement` template and `/v1/notifications/broadcast` route can emit arbitrary content through the transactional transport. There is no evident marketing unsubscribe/opt-in enforcement in that route. Do not use it for marketing campaigns until a dedicated marketing provider, consent records and working one-click unsubscribe are implemented.
+- Important boundary finding: the broadcast route requires an organization admin but selects all platform users. Scope the recipient query to the caller's organization or require actual platform administrator authority before enabling any broadcast. Do not send a broadcast to verify this.
+- Current receipt ledger is useful for send acceptance; it is not proof of inbox placement or complete delayed delivery/complaint monitoring.
+
+## Operator actions
+
+1. Keep the already authenticated `admin` Sending domain for account mail. Changing to `notify` is optional, not an immediate deliverability fix; onboard/verify its exact Cloudflare-managed records before changing the managed From identity.
+2. If campaigns are needed, use a separate marketing provider and `news.singulancelabs.com`, authenticated with that provider's exact records. Do not repurpose Cloudflare's transactional sender for campaigns.
+3. In Cloudflare Email Sending settings confirm current domain readiness and suppression behavior. Monitor aggregate delivery failures, hard bounces and complaints; do not remove provider suppressions merely to retry mail.
+4. Confirm Google Postmaster Tools ownership for the actual sending domain and inspect available reputation/authentication data. Account setup and useful volume-dependent metrics are not verified by this audit.
+5. Consider a monitored DMARC reporting address for the `admin` domain, with mailbox ownership/processing confirmed before adding `rua`. Do not weaken its existing `p=reject` policy blindly.
+6. After focused regression checks and an authorized scoped Control/Core release, verify a controlled message's raw headers and delivery receipt. Gmail Primary placement cannot be guaranteed; Promotions/Updates classification is separate from spam.
+
+## Exact follow-up boundaries
+
+1. **Cross-organization broadcast:** `core/src/control-plane-server.js:6025` handles POST `/v1/notifications/broadcast`; line 6028 authorizes via `requireOrgAdmin`, while lines 6035–6037 query `prisma.user.findMany` with email-only filters. `requireOrgAdmin` begins at line 2540 and accepts organization membership authority, not a platform administrator decision. Even the default dry run returns recipient counts and a sample from this globally selected set. Narrow fix: require a nonempty authenticated session org and add `organizations: { some: { orgId: current.session.orgId, isActive: true } }` to the User query (the relation is `User.organizations`, schema line 36). Scope live sends and dry-run samples identically. If platform-wide announcements are an intentional separate operation, require the existing actual platform-administrator boundary in a separately named endpoint; do not retain organization-admin authority for it. Verify a two-organization case and missing/denied session before deployment.
+2. **False meeting delivery count:** `core/src/server.js:8072` calls `await sendEmail(...)` and unconditionally increments `sent`. The sender explicitly returns `{ ok: false, reason: 'disabled' }` when Resend/SMTP are absent (`core/src/services/email-sender.js`), so no exception reaches the handler's catch. Narrow fix: retain the returned receipt; increment accepted count only for `receipt.ok === true`, expose failed/disabled counts separately without recipient or provider-secret leakage. Do not describe transport acceptance as inbox delivery. Reuse canonical Cloudflare `sendRenderedSystemEmail` if migrating this route, including HTML escaping of user-controlled names/title, rather than configuring a second provider just to conceal the result handling bug.
+3. **Legacy invite provider split:** `core/src/server.js:12906` (resend) and `:19679` (new invite) import the Resend/SMTP sender. Unlike the meeting count, their dispatch receipt handling should be retained when connecting the canonical transport. Change only the shared transport seam, preserve generated invite URL, org/project/team authorization and dispatch receipt fields, and verify failure as well as success. This audit does not claim those invite handlers fabricate success.
+4. **Marketing dispatch:** broadcast's arbitrary subject/body and `announcement` template are not an approved marketing stream. Separate account notices from campaigns by intended purpose, not by a subject-line keyword heuristic. Add verified opt-in and working one-click unsubscribe on a dedicated marketing transport before using campaigns; no unsubscribe header should point to an unimplemented endpoint.
+
+## Primary documentation consulted
+
+- [Cloudflare domain configuration](https://developers.cloudflare.com/email-service/configuration/domains/)
+- [Cloudflare authentication](https://developers.cloudflare.com/email-service/concepts/email-authentication/)
+- [Cloudflare deliverability](https://developers.cloudflare.com/email-service/concepts/deliverability/)
+- [Cloudflare suppression enforcement](https://developers.cloudflare.com/email-service/concepts/suppressions/)
+
+Public DNS and quota observations are a point-in-time check, not a reputation or inbox-placement guarantee.

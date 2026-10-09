@@ -6,6 +6,23 @@ const STATE = /^[A-Za-z0-9_-]{32,128}$/;
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 const html = (text) => String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+export async function mobileOAuthIntent(store, returnTo, publicBase) {
+  try {
+    const target = new URL(returnTo);
+    if (target.origin !== new URL(publicBase).origin || target.pathname !== '/auth/mobile/authorize' || target.hash || target.username || target.password) return null;
+    const intent = target.searchParams.get('intent');
+    const record = await store.get('intent', intent);
+    return record?.oauthOnly === true ? intent : null;
+  } catch { return null; }
+}
+export async function completeMobileOAuth(store, intent, identity) {
+  const record = await store.consume('intent', intent, { oauthOnly: true, callback: MOBILE_CALLBACK });
+  if (!record) throw new Error('Native sign-in expired. Please start again.');
+  const code = await store.put('code', { callback: record.callback, state: record.state, challenge: record.challenge, ...identity }, 60);
+  const callback = new URL(MOBILE_CALLBACK);
+  callback.searchParams.set('code', code); callback.searchParams.set('state', record.state);
+  return callback.toString();
+}
 async function readBody(req) {
   const chunks=[];let size=0;
   for await(const chunk of req) { size+=Buffer.byteLength(chunk);if(size>8192) throw Object.assign(new Error('Request too large'),{status:413});chunks.push(Buffer.from(chunk)); }
@@ -39,14 +56,16 @@ export async function handleMobileAuthRoutes({ req, res, pathname, url, store, s
       const challenge=url.searchParams.get('code_challenge'); const method=url.searchParams.get('code_challenge_method');
       if (callback !== MOBILE_CALLBACK || !STATE.test(state || '') || !CHALLENGE.test(challenge || '') || method !== 'S256') return send({error:'Invalid native authorization request'},400);
       const nonce=randomBytes(32).toString('base64url');
-      const intent=await store.put('intent',{callback,state,challenge,nonce},300);
+      const oauthOnly = url.searchParams.get('flow') === 'native';
+      const intent=await store.put('intent',{callback,state,challenge,nonce,oauthOnly},300);
       const target=`${publicBase}/auth/mobile/authorize?intent=${encodeURIComponent(intent)}`;
-      res.writeHead(303,{Location:target,'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}); res.end(); return true;
+      res.writeHead(303,{Location:oauthOnly ? `${publicBase}/auth/google?return_to=${encodeURIComponent(target)}` : target,'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}); res.end(); return true;
     }
     if (pathname === '/auth/mobile/authorize' && ['GET','POST'].includes(req.method)) {
       const body=req.method === 'POST' ? await readBody(req) : {};
       const intent=req.method === 'POST' ? body.intent : url.searchParams.get('intent');
       const record=await store.get('intent',intent); if(!record) return send({error:'Authorization expired'},400);
+      if (record.oauthOnly) return send({error:'Please restart sign-in from the SINGULANCE app.'},400);
       const current=await getCurrentSession(req);
       if(!current) {
         if(req.method==='POST') return send({error:'Unauthorized'},401);

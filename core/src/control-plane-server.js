@@ -8,7 +8,7 @@ import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-metho
 import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
 import { handleMobilePrivacyRoutes } from './mobile/privacy-routes.js';
-import { handleMobileAuthRoutes } from './mobile/auth-routes.js';
+import { handleMobileAuthRoutes, mobileOAuthIntent, completeMobileOAuth } from './mobile/auth-routes.js';
 import { MobileAuthStore } from './mobile/auth-store.js';
 import { checkNativeAiConsent, nativeAiProtectedPath, nativeBootstrapApiKey } from './mobile/consent-guard.js';
 import { nativeRunnerAdmissionGate } from './mobile/runner-readiness.js';
@@ -5236,12 +5236,14 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Google OAuth not configured' }, 503);
     }
     const returnToValue = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+    const nativeIntent = await mobileOAuthIntent(mobileAuthStore, returnToValue, process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.singulancelabs.com');
     const admission = signupAdmissionFromRequest(url);
     const workspaceInvite = await workspaceInviteAdmissionFromRequest(url);
     if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
     if (url.searchParams.get('workspace_invite') && !workspaceInvite) return jsonResponse(res, { error: 'Workspace invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
       returnTo: returnToValue,
+      mobileIntent: nativeIntent,
       provider: 'google',
       signupAdmission: admission,
       workspaceInviteToken: workspaceInvite?.token || null,
@@ -5263,7 +5265,7 @@ const server = http.createServer(async (req, res) => {
       response_type: 'code',
       scope: 'openid email profile',
       access_type: 'offline',
-      prompt: 'consent',
+      prompt: nativeIntent ? 'select_account' : 'consent',
       state: compositeState,
     });
     return redirect(res, `https://accounts.google.com/o/oauth2/v2/auth?${googleParams}`);
@@ -5382,6 +5384,14 @@ const server = http.createServer(async (req, res) => {
         for (const activation of activations) scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] google signup scheduling failed:', error.message));
       }
       console.log('[google-auth] Session created');
+
+      if (authState.mobileIntent) {
+        if (org?.id && (await getOrgMembership(user.id, org.id))?.isActive !== true) {
+          return jsonResponse(res, { error: 'Account or membership unavailable' }, 403);
+        }
+        const callback = await completeMobileOAuth(mobileAuthStore, authState.mobileIntent, { userId: user.id, email: user.email, orgId: org?.id || null });
+        return redirect(res, callback, [makeSessionCookie(sessionId)]);
+      }
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
       console.log(`[google-auth] Preparing redirect - initial finalRedirect: ${finalRedirect}`);

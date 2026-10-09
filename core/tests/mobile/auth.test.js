@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { MobileAuthStore } from '../../src/mobile/auth-store.js';
-import { handleMobileAuthRoutes, MOBILE_CALLBACK } from '../../src/mobile/auth-routes.js';
+import { handleMobileAuthRoutes, MOBILE_CALLBACK, mobileOAuthIntent, completeMobileOAuth } from '../../src/mobile/auth-routes.js';
 const verifier='v'.repeat(43); const state='s'.repeat(43);
 const challenge=createHash('sha256').update(verifier).digest('base64url');
 // Deterministic atomic Redis adapter. Real Redis Lua verification is a separate integration gate.
@@ -44,3 +44,21 @@ test('Redis unavailable fails closed, local origins allowed only on exchange/rev
 test('existing verified account without organization can obtain onboarding session',async()=>{const f=fixture();f.setUser({sessionId:'browser',session:{userId:'user-a',email:'a@example.test',orgId:null}});const code=await grant(f);const response=await f.request('/auth/mobile/exchange','POST',exchange(code),'https://localhost');assert.equal(response.status,200);assert.equal(response.data.org_id,null);assert.equal(JSON.parse(await f.redis.get(`cp:session:${response.data.session_token}`)).orgId,null);});
 
 test('browser consent form is accepted as urlencoded and emits no raw token',async()=>{const f=fixture();const intent=await f.store.put('intent',{callback:MOBILE_CALLBACK,state,challenge,nonce:'nonce'},300);await f.request(`/auth/mobile/authorize?intent=${intent}`);const response=await f.request('/auth/mobile/authorize','POST',{intent,nonce:'nonce'},'https://api.example.test','application/x-www-form-urlencoded');assert.equal(response.status,303);assert.equal(new URL(response.headers.Location).searchParams.get('token'),null);assert.ok(new URL(response.headers.Location).searchParams.get('code'));});
+
+test('native OAuth returns directly through a single-use PKCE grant without a confirmation page', async () => {
+  const f = fixture();
+  const start = await f.request(`/auth/mobile/start?callback=${encodeURIComponent(MOBILE_CALLBACK)}&state=${state}&code_challenge=${challenge}&code_challenge_method=S256&flow=native`);
+  const oauth = new URL(start.headers.Location);
+  assert.equal(oauth.pathname, '/auth/google');
+  const returnTo = oauth.searchParams.get('return_to');
+  const intent = await mobileOAuthIntent(f.store, returnTo, 'https://api.example.test');
+  assert.ok(intent);
+  assert.equal((await f.request(new URL(returnTo).pathname + new URL(returnTo).search)).status, 400);
+  assert.equal(await mobileOAuthIntent(f.store, returnTo.replace('api.example.test', 'evil.test'), 'https://api.example.test'), null);
+  const callback = new URL(await completeMobileOAuth(f.store, intent, {userId:'user-a',email:'a@example.test',orgId:'org-a'}));
+  assert.equal(callback.protocol, 'singulance:');
+  assert.equal(callback.searchParams.get('state'), state);
+  const result = await f.request('/auth/mobile/exchange', 'POST', exchange(callback.searchParams.get('code')), 'capacitor://localhost');
+  assert.equal(result.status, 200);
+  await assert.rejects(() => completeMobileOAuth(f.store, intent, {userId:'user-a'}));
+});

@@ -25,6 +25,7 @@ for (const dryRun of [true, false]) test(`broadcast scopes ${dryRun ? 'dry run' 
     sendSystemEmailBatch:async rows=>{recipients=rows;return {total:rows.length,sent:rows.length,failed:0,skipped:0};},
   });
   assert.deepEqual(query.where.organizations,{some:{orgId:'org-a',isActive:true}});
+  assert.equal(query.where.email,undefined,'nonnullable User.email rejects not:null in real Prisma');
   assert.equal(result.status,200);
   if(dryRun) {assert.equal(result.data.recipientCount,1);assert.deepEqual(result.data.sample,['a@example.test']);assert.equal(recipients,undefined);}
   else assert.deepEqual(recipients.map(row=>row.email),['a@example.test']);

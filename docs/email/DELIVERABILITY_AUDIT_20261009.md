@@ -65,3 +65,15 @@ This change is source only and undeployed. `node --check core/src/email/email-se
 - [Cloudflare suppression enforcement](https://developers.cloudflare.com/email-service/concepts/suppressions/)
 
 Public DNS and quota observations are a point-in-time check, not a reputation or inbox-placement guarantee.
+
+## Follow-up implementation — 9 October 2026
+
+The prepared follow-up now addresses the three concrete delivery boundaries:
+
+- Broadcast requires an authenticated organization and filters recipients by `User.organizations.some` with that organization and `isActive: true`; the same query feeds dry-run count/sample and actual dispatch. No platform-wide recipient selection remains in this route.
+- Meeting notices count successful transport acceptance separately from rejected/thrown attempts. The response retains `sent`, adds `failed` and `delivery_status`, and sets `ok=false` when any attempt fails. Names, titles and organization strings are escaped in HTML; failure logging avoids raw recipient/error data.
+- Legacy `services/email-sender.js` now delegates to canonical `sendRenderedSystemEmail`, retaining `ok`, provider receipts and compatibility `id`/`reason` fields. Invitation URL generation and scope checks remain in the existing Core handlers. Invitation HTML escapes organization, inviter, role, project/team names and URL attributes while preserving original subject/plaintext values. Resend `lastSentAt` and `sendCount` advance only on accepted dispatch; extending the invite expiry remains independent of mail acceptance.
+
+Verification: all three changed JavaScript files pass `node --check`; `git diff --check` passes. Twenty isolated tests pass in the existing immutable Core image with source/tests mounted read-only and `--network none`: eight new boundary checks plus twelve existing system-email provider checks. The new route checks execute the extracted actual handler code against in-memory organization/provider dependencies; this verifies query construction, dry-run/live separation, missing/denied organization authority and acceptance counting, **not** PostgreSQL row isolation or live authenticated HTTP behavior. Provider tests use fake addresses and mocked fetch; no network mail occurred.
+
+No Runtime notification idempotency code, schemas, provider settings, DNS or live service was modified. No release has occurred. Proposed rollout: review and push the exact source SHA, then use the canonical scoped release path for **Control Plane and Core** (broadcast is Control-owned; legacy invite/meeting handlers are Core-owned), retaining each old image for rollback. Before release, add two-organization authenticated/database verification; after authorized release, check scoped API responses and a separately authorized controlled mail receipt. Existing Gmail category/reputation and marketing-provider operator actions remain.

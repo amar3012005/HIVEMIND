@@ -6017,7 +6017,7 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { ok: true, template: templateId });
   }
 
-  // Admin broadcast — send a templated notification to ALL platform users
+  // Organization broadcast — send a templated notification to active organization members
   // (real emails only; placeholder @local.hivemind.dev accounts excluded).
   // Admin/owner-gated. dryRun is the DEFAULT — a live send requires explicit
   // { dryRun: false }. Sender is the single SYSTEM_EMAIL connection; recipients
@@ -6025,6 +6025,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/v1/notifications/broadcast' && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
+    if (!current.session.orgId) return jsonResponse(res, { error: 'organization_required' }, 400);
     const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
     if (!admin) return;
     const body = (await parseBody(req)) || {};
@@ -6033,7 +6034,10 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'subject_and_body_required' }, 400);
     }
     const users = await prisma.user.findMany({
-      where: { email: { not: null }, NOT: { email: { endsWith: '@local.hivemind.dev' } } },
+      where: {
+        email: { not: null }, NOT: { email: { endsWith: '@local.hivemind.dev' } },
+        organizations: { some: { orgId: current.session.orgId, isActive: true } },
+      },
       select: { email: true, displayName: true },
     });
     const seen = new Set();

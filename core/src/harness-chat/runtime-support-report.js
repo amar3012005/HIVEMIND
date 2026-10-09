@@ -52,6 +52,30 @@ export async function nightlyRoutineContext({db,claims,sharedOrganizationAgents=
  try{if(typeof timeZone!=='string'||timeZone.length>80)throw new Error();new Intl.DateTimeFormat('en',{timeZone});}catch{timeZone='UTC';source='default_utc';}
  return {org_id:claims.org_id,session_id:claims.operating_session,time_zone:timeZone,time_zone_source:source,support_configured:configured(env)};
 }
+export function savedNightlyOccurrence(events,sessionId,occurrence){
+ const id='schedule-'+crypto.createHash('sha256').update(sessionId+'\0nightly-routine-check-v1').digest('hex');
+ return events.some(row=>{
+  if(row.event_type!=='user/message')return false;
+  const message=row.payload?.data??row.payload;
+  if(message?.source?.kind!=='schedule'||message.source.occurrenceAt!==occurrence)return false;
+  const text=Array.isArray(message.content)?message.content.filter(block=>block.type==='text').map(block=>block.text).join('\n'):'';
+  for(const line of text.split('\n')){
+   if(!line.startsWith('reminders_json: '))continue;
+   try{const reminders=JSON.parse(line.slice('reminders_json: '.length));
+    if(Array.isArray(reminders)&&reminders.some(reminder=>reminder?.schedule_id===id&&reminder.occurrence_at===occurrence
+     &&typeof reminder.reminder_prompt==='string'&&reminder.reminder_prompt.startsWith('Load hivemind-nightly-routine-check.')))return true;
+   }catch{}
+  }
+  return false;
+ });
+}
+async function requireScheduledOccurrence(db,claims,storage,occurrence){
+ await db.$transaction(async tx=>{
+  await scope(tx,claims.org_id,storage.userId);
+  const events=await tx.$queryRawUnsafe(`SELECT event_type,payload FROM hivemind.harness_session_events WHERE org_id=$1::uuid AND user_id=$2::uuid AND session_id=$3 AND event_type='user/message' AND payload->'data'->'source'->>'kind'='schedule' AND payload->'data'->'source'->>'occurrenceAt'=$4 ORDER BY sequence DESC LIMIT 8`,claims.org_id,storage.userId,claims.operating_session,occurrence);
+  if(!savedNightlyOccurrence(events,claims.operating_session,occurrence))fail('native_nightly_occurrence_required',409);
+ });
+}
 function projection(row,delivery){
  const receipt=row?.receipt||{};
  return {report_id:row?.id??null,status:row?.status==='dispatching'?'unknown':row?.status??'not_found',sent:row?.status==='accepted',delivery_status:delivery?.delivery_status??receipt.deliveryStatus??null,read_status:'not_tracked'};
@@ -59,6 +83,7 @@ function projection(row,delivery){
 export async function runtimeSupportReport({db,claims,input,send,sharedOrganizationAgents=false,env=process.env,now=Date.now()}){
  requireEnabled(env,claims);
  const report=validateSupportReport(input,now);const storage=await authority(db,claims,sharedOrganizationAgents);
+ await requireScheduledOccurrence(db,claims,storage,report.occurrence);
  const key='support:'+crypto.createHash('sha256').update(JSON.stringify([claims.org_id,claims.operating_session,report.occurrence])).digest('hex');
  const hash=crypto.createHash('sha256').update(JSON.stringify({...report,operation:'submit'})).digest('hex');
  const saved=await db.$transaction(async tx=>{

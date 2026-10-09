@@ -1,13 +1,16 @@
+import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runtimeSupportReport,nightlyRoutineContext,validateSupportReport} from '../../src/harness-chat/runtime-support-report.js';
+import {runtimeSupportReport,nightlyRoutineContext,validateSupportReport,savedNightlyOccurrence} from '../../src/harness-chat/runtime-support-report.js';
 const org='22222222-2222-4222-8222-222222222222',user='11111111-1111-4111-8111-111111111111';
 const now=Date.parse('2026-10-09T05:00:00.000Z');
 const payload=()=>({operation:'submit',occurrence:'2026-10-09T02:00:00.000Z',coverage:{expected:11,inspected:10,missing:1},issues:[{capability:'crm',code:'invalid_identifier',severity:'high',count:2,cause:'confirmed'}]});
+function witness(session='session-chief',occurrence=payload().occurrence){return {event_type:'user/message',payload:{data:{source:{kind:'schedule',occurrenceAt:occurrence},content:[{type:'text',text:'reminders_json: '+JSON.stringify([{schedule_id:'schedule-'+crypto.createHash('sha256').update(session+'\0nightly-routine-check-v1').digest('hex'),occurrence_at:occurrence,reminder_prompt:'Load hivemind-nightly-routine-check. Execute authorized inspection.'}])}]}}};}
 function fixture(){
  let saved,sendCount=0;const calls=[];
  const db={userOrganization:{findUnique:async()=>({role:'admin',isActive:true})},user:{findUnique:async()=>({deletedAt:null})},organization:{findUnique:async()=>({companyProfile:{timezone:'Europe/Berlin'}})},
   $queryRawUnsafe:async(sql,...args)=>{calls.push({sql,args});if(sql.includes('set_config'))return [];if(sql.includes('organization_agent_storage_scope'))return [{storage_user_id:user,runtime_session_id:'session-chief'}];if(sql.includes('JOIN hivemind.harness_sessions'))return [{session_id:'session-chief'}];
+   if(sql.includes('FROM hivemind.harness_session_events'))return [witness()];
    if(sql.startsWith('INSERT')){saved??={id:'33333333-3333-4333-8333-333333333333',status:'pending',content_hash:args[4],message:JSON.parse(args[5])};return [];}
    if(sql.startsWith('SELECT *'))return saved?[saved]:[];
    if(sql.includes("SET status='dispatching'")){saved.status='dispatching';return [];}
@@ -53,3 +56,12 @@ test('shared admins dedupe on canonical storage identity; status never creates o
 });
 
 test('nightly activation requires explicit organization allowlist for context and submit',async()=>{const f=fixture();f.env={SYSTEM_EMAIL_SUPPORT:'support@example.invalid'};await assert.rejects(nightlyRoutineContext(f),/nightly_not_enabled/);await assert.rejects(runtimeSupportReport({...f,input:payload()}),/nightly_not_enabled/);assert.equal(f.sends,0);});
+
+test('only exact persisted native nightly occurrence can authorize a support report',async()=>{
+ const row=witness();assert.equal(savedNightlyOccurrence([row],'session-chief',payload().occurrence),true);
+ for(const mutate of [r=>r.payload.data.source.kind='user',r=>r.payload.data.source.occurrenceAt='2026-10-09T03:00:00.000Z',r=>r.payload.data.content[0].text=r.payload.data.content[0].text.replace('schedule-','other-'),r=>r.payload.data.content[0].text='reminders_json: invalid']){const changed=structuredClone(row);mutate(changed);assert.equal(savedNightlyOccurrence([changed],'session-chief',payload().occurrence),false);}
+ assert.equal(savedNightlyOccurrence([row],'session-other',payload().occurrence),false);
+ const f=fixture();const query=f.db.$queryRawUnsafe;f.db.$queryRawUnsafe=(sql,...args)=>sql.includes('FROM hivemind.harness_session_events')?[]:query(sql,...args);
+ await assert.rejects(runtimeSupportReport({...f,input:payload()}),/native_nightly_occurrence_required/);assert.equal(f.saved,undefined);assert.equal(f.sends,0);
+ await assert.rejects(runtimeSupportReport({...f,input:{operation:'status',occurrence:payload().occurrence}}),/native_nightly_occurrence_required/);
+});

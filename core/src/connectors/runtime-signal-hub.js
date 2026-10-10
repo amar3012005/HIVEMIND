@@ -1,3 +1,4 @@
+import { attentionEventIdentity } from './attention-event-identity.js';
 /** Source adapters share the existing durable event ledger and attention policy. */
 import {createHash,createHmac,timingSafeEqual} from 'node:crypto';
 import {ensureTriggerStore} from './composio/hivemind-triggers.js';
@@ -28,7 +29,7 @@ export async function retainAdmittedSignal(db,{source,orgId,userId,accountId,ide
  VALUES($1::uuid,$2,$3,$4,$5,$6,$3,$7,$8::jsonb,'{}','{}','native-v1','active',true,1,now()) ON CONFLICT(org_id,user_id,account_id,slug,config_key) DO NOTHING`,subId,orgId,userId,accountId,source==='native_slack'?'slack':'dreaming',source==='native_slack'?'NATIVE_SLACK_EVENT':'NATIVE_DREAM_OUTPUT',digest,JSON.stringify(config));
  const subs=await db.$queryRawUnsafe("SELECT id,status,runtime_attention FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3",subId,orgId,userId);
  if(subs[0]?.status!=='active'||subs[0]?.runtime_attention!==true)return {accepted:true,quiet:'source_paused'};
- const id='native:'+source+':'+createHash('sha256').update(identity+':'+subId).digest('hex');
+ const id=attentionEventIdentity(source==='native_slack'?'slack':source,data,orgId,userId,'native:'+source+':'+createHash('sha256').update(identity+':'+subId).digest('hex'));
  await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events(id,subscription_id,org_id,user_id,data,occurred_at)
  VALUES($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`,id,subId,orgId,userId,JSON.stringify(data),occurredAt);
  classify({prisma:db,orgId,userId,allowedAccountIds:[accountId]});return {accepted:true,eventId:id};
@@ -37,11 +38,14 @@ export async function admitNativeSlackSignal(db,payload,source,classify){
  const ev=payload.event??{};if(!source.orgId)return {accepted:true,quiet:'org_binding_required'};
  const activated=Date.parse(source.connection.connectorMetadata?.attention_enabled_at??'');
  if(!Number.isFinite(activated))return {accepted:true,quiet:'activation_window_required'};
- if(!payload.event_id||!['message','app_mention'].includes(ev.type)||ev.bot_id||ev.app_id||ev.subtype)return {accepted:true,quiet:'unsupported_or_noise'};
- if(typeof ev.text!=='string'||!ev.channel)return {accepted:true,quiet:'empty_event'};
+ if(!payload.event_id||!['message','app_mention','reaction_added','reaction_removed','pin_added','pin_removed'].includes(ev.type))return {accepted:true,quiet:'unsupported_or_noise'};
+ if(ev.metadata?.event_type==='hivemind_runtime_output')return {accepted:true,quiet:'runtime_output_loop'};
+ const channel=ev.channel??ev.item?.channel;
+ if(!channel)return {accepted:true,quiet:'empty_event'};
+ const text=typeof ev.text==='string'?ev.text:`Slack ${ev.type} activity${ev.reaction?' ('+String(ev.reaction).slice(0,80)+')':''}`;
  const ts=Number(ev.event_ts??ev.ts);const occurredAt=Number.isFinite(ts)?new Date(ts*1000).toISOString():null;
  if(!occurredAt||Date.parse(occurredAt)<activated)return {accepted:true,quiet:'before_activation'};
- return retainAdmittedSignal(db,{source:'native_slack',orgId:source.orgId,userId:source.connection.userId,accountId:source.accountId,identity:payload.team_id+':'+payload.event_id,occurredAt,data:{text:ev.text.slice(0,12000),channel:ev.channel,user:ev.user??null,team_id:payload.team_id,event_id:payload.event_id,thread_ts:ev.thread_ts??null,_source:{integration_id:source.connection.id,team_id:source.teamId},_hivemind:{title:'Slack activity',source_is_untrusted:true}}},classify);
+ return retainAdmittedSignal(db,{source:'native_slack',orgId:source.orgId,userId:source.connection.userId,accountId:source.accountId,identity:payload.team_id+':'+payload.event_id,occurredAt,data:{text:text.slice(0,12000),activity_type:ev.type,subtype:ev.subtype??null,reaction:ev.reaction??null,channel:channel,user:ev.user??null,team_id:payload.team_id,ts:ev.item?.ts??ev.ts,event_id:payload.event_id,thread_ts:ev.thread_ts??null,_source:{integration_id:source.connection.id,team_id:source.teamId},_hivemind:{title:'Slack activity',source_is_untrusted:true}}},classify);
 }
 export function verifyDreamSignalToken(token,input,secret,now=Date.now()){
  if(!secret||Buffer.byteLength(secret)<32)fail('signal_auth_unavailable',503);

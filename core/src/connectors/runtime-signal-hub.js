@@ -34,6 +34,18 @@ export async function retainAdmittedSignal(db,{source,orgId,userId,accountId,ide
  VALUES($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`,id,subId,orgId,userId,JSON.stringify(data),occurredAt);
  classify({prisma:db,orgId,userId,allowedAccountIds:[accountId]});return {accepted:true,eventId:id};
 }
+/** OAuth proves the installing Slack identity only; it never identifies other message authors. */
+export async function nativeSlackSender(db, source, event) {
+ const slackUserId = event.user;
+ const oauthUserId = source.connection.connectorMetadata?.provider_metadata?.authed_user_id;
+ if (!slackUserId || slackUserId !== oauthUserId || event.bot_id || event.app_id)
+  return {verified:false,providerUserId:slackUserId??null};
+ const member = await db.userOrganization.findUnique({where:{userId_orgId:{userId:source.connection.userId,orgId:source.orgId}},select:{role:true,isActive:true,deactivatedAt:true}});
+ const user = await db.user.findUnique({where:{id:source.connection.userId},select:{displayName:true,deletedAt:true}});
+ if(!member?.isActive||member.deactivatedAt||!['owner','admin'].includes(member.role)||!user||user.deletedAt)
+  return {verified:false,providerUserId:slackUserId};
+ return {verified:true,providerUserId:slackUserId,userId:source.connection.userId,orgId:source.orgId,role:member.role,name:user.displayName??null,verification:'slack_oauth_subject'};
+}
 export async function admitNativeSlackSignal(db,payload,source,classify){
  const ev=payload.event??{};if(!source.orgId)return {accepted:true,quiet:'org_binding_required'};
  const activated=Date.parse(source.connection.connectorMetadata?.attention_enabled_at??'');
@@ -45,7 +57,8 @@ export async function admitNativeSlackSignal(db,payload,source,classify){
  const text=typeof ev.text==='string'?ev.text:`Slack ${ev.type} activity${ev.reaction?' ('+String(ev.reaction).slice(0,80)+')':''}`;
  const ts=Number(ev.event_ts??ev.ts);const occurredAt=Number.isFinite(ts)?new Date(ts*1000).toISOString():null;
  if(!occurredAt||Date.parse(occurredAt)<activated)return {accepted:true,quiet:'before_activation'};
- return retainAdmittedSignal(db,{source:'native_slack',orgId:source.orgId,userId:source.connection.userId,accountId:source.accountId,identity:payload.team_id+':'+payload.event_id,occurredAt,data:{text:text.slice(0,12000),activity_type:ev.type,subtype:ev.subtype??null,reaction:ev.reaction??null,channel:channel,user:ev.user??null,team_id:payload.team_id,ts:ev.item?.ts??ev.ts,event_id:payload.event_id,thread_ts:ev.thread_ts??null,_source:{integration_id:source.connection.id,team_id:source.teamId},_hivemind:{title:'Slack activity',source_is_untrusted:true}}},classify);
+ const sender = await nativeSlackSender(db,source,ev);
+ return retainAdmittedSignal(db,{source:'native_slack',orgId:source.orgId,userId:source.connection.userId,accountId:source.accountId,identity:payload.team_id+':'+payload.event_id,occurredAt,data:{text:text.slice(0,12000),activity_type:ev.type,subtype:ev.subtype??null,reaction:ev.reaction??null,channel:channel,user:ev.user??null,team_id:payload.team_id,ts:ev.item?.ts??ev.ts,event_id:payload.event_id,thread_ts:ev.thread_ts??null,_source:{integration_id:source.connection.id,team_id:source.teamId},_hivemind:{title:'Slack activity',source_is_untrusted:true,sender}}},classify);
 }
 export function verifyDreamSignalToken(token,input,secret,now=Date.now()){
  if(!secret||Buffer.byteLength(secret)<32)fail('signal_auth_unavailable',503);

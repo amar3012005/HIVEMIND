@@ -79,57 +79,81 @@ async function deliverAttention(db,ctx,row,receipt,bridge,toolkit) {
 export function classifyPendingActivity(ctx) {
   if (!ctx.allowedAccountIds?.length) return;
   const key = `${ctx.orgId}:${ctx.userId}`;
-  if (workers.has(key)) return;
+  const running = workers.get(key);
+  if (running) {
+    for (const id of ctx.allowedAccountIds) running.accounts.add(id);
+    running.rerun = true;
+    return running.promise;
+  }
+  const worker = { accounts: new Set(ctx.allowedAccountIds), rerun: false, promise: null };
+  workers.set(key, worker);
   const job = (async () => {
     const db = ctx.prisma;
-    const membership = await db.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { isActive: true } });
-    if (!membership?.isActive) return;
-    const rows = await db.$queryRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status='evaluating',evaluated_at=now()
-      WHERE id IN (SELECT e.id FROM hivemind_trigger_events e
-        JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
-        WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
-        AND e.received_at > now()-interval '7 days'
-        AND ((e.relevance_status='pending' AND (e.evaluated_at IS NULL OR e.evaluated_at < now()-interval '5 minutes'))
-          OR (e.relevance_status='evaluating' AND e.evaluated_at < now()-interval '10 minutes')
-          OR (e.relevance_status IN ('approved','rejected') AND e.relevance_decision->>'policy' IS DISTINCT FROM $4))
-        ORDER BY e.received_at DESC LIMIT 6 FOR UPDATE OF e SKIP LOCKED)
-      RETURNING *`, ctx.orgId, ctx.userId, ctx.allowedAccountIds, POLICY);
-    if (!rows.length) return;
-    for (const row of rows) {
-      const sub = await db.$queryRawUnsafe("SELECT toolkit,runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])", row.subscription_id, ctx.orgId, ctx.userId, ctx.allowedAccountIds);
-      if (!sub.length) continue;
-      const bridge = ctx.runtimeAttention || createRuntimeAttentionBridge();
-      if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
-        && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
-        try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); continue; }
-        catch { /* Native revision and consent validation own whether reassessment is required. */ }
-      }
-      const optedIn = sub[0].runtime_attention === true && bridge && sub[0].runtime_attention_enabled_at
-        && new Date(row.received_at) >= new Date(sub[0].runtime_attention_enabled_at);
-      let receipt;
-      if (optedIn) {
-        let attention;
-        try { attention = await bridge.assess(row); }
-        catch { attention = {action:'retain',reason:'decision_unavailable'}; }
-        const unavailable = ['context_unavailable', 'decision_unavailable', 'decision_memory_unavailable'].includes(attention.reason);
-        receipt = { policy: POLICY, status: unavailable ? 'pending' : attention.action === 'retain' ? 'rejected' : 'approved',
-          source: 'runtime_attention', runtimeAttention: attention };
-      } else {
-        const context=await companyContext(ctx);
-        receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit }, context });
-      }
-      await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status=$1,relevance_decision=$2::jsonb,evaluated_at=now() WHERE id=$3`, receipt.status, JSON.stringify(receipt), row.id);
-      if (['wake','notify'].includes(receipt.runtimeAttention?.action) && bridge) {
-        try {
-          await deliverAttention(db,ctx,row,receipt,bridge,sub[0].toolkit);
-        } catch {
-          // Outcome unknown stays pending for existing classifier reconciliation.
-          // Native admission deduplication uses this exact persisted event identity.
-          await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='pending',evaluated_at=now() WHERE id=$1", row.id);
+    const membership = await db.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { isActive: true, role: true, deactivatedAt: true } });
+    if (!membership?.isActive || membership.deactivatedAt || !['owner', 'admin'].includes(membership.role)) return;
+    for (let batch = 0; batch < 8; batch++) {
+      worker.rerun = false;
+      const allowedAccountIds = [...worker.accounts];
+      const rows = await db.$queryRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status='evaluating',evaluated_at=now()
+        WHERE id IN (SELECT e.id FROM hivemind_trigger_events e
+          JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
+          WHERE e.org_id=$1 AND e.user_id=$2 AND s.status='active' AND s.account_id=ANY($3::text[])
+          AND e.received_at > now()-interval '7 days'
+          AND ((e.relevance_status='pending' AND (e.evaluated_at IS NULL OR e.evaluated_at < now()-interval '5 minutes'))
+            OR (e.relevance_status='evaluating' AND e.evaluated_at < now()-interval '10 minutes')
+            OR (e.relevance_status IN ('approved','rejected') AND e.relevance_decision->>'policy' IS DISTINCT FROM $4))
+          ORDER BY e.received_at DESC LIMIT 6 FOR UPDATE OF e SKIP LOCKED)
+        RETURNING *`, ctx.orgId, ctx.userId, allowedAccountIds, POLICY);
+      if (!rows.length) return;
+      for (const row of rows) {
+        const sub = await db.$queryRawUnsafe("SELECT toolkit,runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])", row.subscription_id, ctx.orgId, ctx.userId, allowedAccountIds);
+        if (!sub.length) continue;
+        const bridge = ctx.runtimeAttention || createRuntimeAttentionBridge();
+        if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
+          && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
+          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); continue; }
+          catch { /* Native revision and consent validation own whether reassessment is required. */ }
+        }
+        const optedIn = sub[0].runtime_attention === true && bridge && sub[0].runtime_attention_enabled_at
+          && new Date(row.received_at) >= new Date(sub[0].runtime_attention_enabled_at);
+        let receipt;
+        if (optedIn) {
+          let attention;
+          try { attention = await bridge.assess(row); }
+          catch { attention = {action:'retain',reason:'decision_unavailable'}; }
+          const unavailable = ['context_unavailable', 'decision_unavailable', 'decision_memory_unavailable'].includes(attention.reason);
+          receipt = { policy: POLICY, status: unavailable ? 'pending' : attention.action === 'retain' ? 'rejected' : 'approved',
+            source: 'runtime_attention', runtimeAttention: attention };
+        } else {
+          const context=await companyContext(ctx);
+          receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit }, context });
+        }
+        await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status=$1,relevance_decision=$2::jsonb,evaluated_at=now() WHERE id=$3`, receipt.status, JSON.stringify(receipt), row.id);
+        if (['wake','notify'].includes(receipt.runtimeAttention?.action) && bridge) {
+          try {
+            await deliverAttention(db,ctx,row,receipt,bridge,sub[0].toolkit);
+          } catch {
+            // Outcome unknown stays pending for existing classifier reconciliation.
+            // Native admission deduplication uses this exact persisted event identity.
+            await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='pending',evaluated_at=now() WHERE id=$1", row.id);
+          }
         }
       }
+      if (rows.length < 6 && !worker.rerun) break;
     }
   })().catch(() => {}).finally(() => workers.delete(key));
-  workers.set(key, job);
+  worker.promise = job;
   return job;
+}
+
+/** Recover the existing durable ledger without requiring a browser visit or new webhook. */
+export async function recoverPendingActivity(prisma, classify = classifyPendingActivity) {
+  const scopes = await prisma.$queryRawUnsafe(`SELECT e.org_id,e.user_id,array_agg(DISTINCT s.account_id) AS account_ids
+    FROM hivemind_trigger_events e JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
+    WHERE s.status='active' AND s.runtime_attention=true AND e.received_at > now()-interval '7 days'
+      AND ((e.relevance_status='pending' AND (e.evaluated_at IS NULL OR e.evaluated_at < now()-interval '5 minutes'))
+        OR (e.relevance_status='evaluating' AND e.evaluated_at < now()-interval '10 minutes'))
+    GROUP BY e.org_id,e.user_id ORDER BY min(e.received_at) LIMIT 32`);
+  for (const scope of scopes) await classify({prisma,orgId:scope.org_id,userId:scope.user_id,allowedAccountIds:scope.account_ids});
+  return {scopes:scopes.length};
 }

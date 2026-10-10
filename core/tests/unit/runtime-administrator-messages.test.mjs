@@ -22,8 +22,8 @@ function database({role='admin',active=true,enabled=true,events=[]}={}) {
  };return db;
 }
 test('Runtime overlay reuses branded shell and escapes all human text',()=>{
- const r=renderRuntimeAdministratorEmail({companyName:'SINGULANCE',administratorName:'<Amar>',subject:'Review <ready>',message:'<script>bad()</script>\nYour review is ready.',kind:'approval',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://chat.singulancelabs.com/assets/runtime-computer-c2305f5b.webp'});
- assert.ok(r.html.includes('HIVEMIND / SYSTEM MESSAGE'));assert.ok(r.html.includes('Your AI Chief of Staff'));assert.ok(!r.html.includes('<script>'));assert.ok(r.html.includes('&lt;Amar&gt;'));assert.ok(r.html.includes('Opening this email or its link does not grant approval'));assert.ok(r.text.includes('Review request:'));
+ const r=renderRuntimeAdministratorEmail({companyName:'SINGULANCE <organization>',administratorName:'<Amar>',subject:'Review <ready>',message:'<script>bad()</script>\nYour review is ready.',kind:'approval',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://chat.singulancelabs.com/assets/runtime-computer-c2305f5b.webp'});
+ assert.ok(r.html.includes('HIVEMIND / SYSTEM MESSAGE'));assert.ok(r.html.includes('Your AI Chief of Staff'));assert.ok(!r.html.includes('<script>'));assert.ok(r.html.includes('Hi admin, this is Runtime from SINGULANCE &lt;organization&gt;'));assert.ok(r.text.includes('Hi admin, this is Runtime from SINGULANCE <organization>'));assert.ok(!r.html.includes('&lt;Amar&gt;'));assert.ok(r.html.includes('Opening this email or its link does not grant approval'));assert.ok(r.text.includes('Review request:'));
 });
 test('recipient overrides and unbound decision references are rejected',()=>{
  assert.throws(()=>validateAdministratorMessage({...input,to:'someone@example.com'}));assert.throws(()=>validateAdministratorMessage({...input,kind:'decision'}));assert.throws(()=>validateAdministratorMessage({...input,subject:'Header\ninjection'}));

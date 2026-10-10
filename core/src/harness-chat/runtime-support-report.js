@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {validateTechnicalDetails,renderRuntimeSupportReport} from './runtime-support-details.js';
 import { nativeAgentStoragePrincipal } from './organization-agent-access.js';
 
 const capabilities=new Set(['crm','employee_lifecycle','delegation','memory','voice','attention','artifacts','email','schedule','authorization','runtime']);
@@ -19,8 +20,8 @@ export function validateSupportReport(input,now=Date.now()){
  if(!exact(input.coverage,['expected','inspected','missing'])||Object.keys(input.coverage).length!==3||!['expected','inspected','missing'].every(k=>count(input.coverage[k],1000))||input.coverage.inspected+input.coverage.missing!==input.coverage.expected)fail('invalid_support_coverage');
  if(!Array.isArray(input.issues)||input.issues.length>20)fail('invalid_support_issues');
  const issues=input.issues.map(issue=>{
-  if(!exact(issue,['capability','code','severity','count','cause'])||Object.keys(issue).length!==5||!capabilities.has(issue.capability)||!codes.has(issue.code)||!severities.has(issue.severity)||!causes.has(issue.cause)||!count(issue.count,1000000)||issue.count<1)fail('invalid_support_issue');
-  return {capability:issue.capability,code:issue.code,severity:issue.severity,count:issue.count,cause:issue.cause};
+  if(!exact(issue,['capability','code','severity','count','cause','details'])||![5,6].includes(Object.keys(issue).length)||!capabilities.has(issue.capability)||!codes.has(issue.code)||!severities.has(issue.severity)||!causes.has(issue.cause)||!count(issue.count,1000000)||issue.count<1)fail('invalid_support_issue');
+  return {capability:issue.capability,code:issue.code,severity:issue.severity,count:issue.count,cause:issue.cause,...(issue.details===undefined?{}:{details:validateTechnicalDetails(issue.details)})};
  });
  issues.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
  return {operation:'submit',occurrence:input.occurrence,coverage:{expected:input.coverage.expected,inspected:input.coverage.inspected,missing:input.coverage.missing},issues};
@@ -88,6 +89,8 @@ export async function runtimeSupportReport({db,claims,input,send,sharedOrganizat
  requireEnabled(env,claims);
  const report=validateSupportReport(input,now);const storage=await authority(db,claims,sharedOrganizationAgents);
  await requireScheduledOccurrence(db,claims,storage,report.occurrence);
+ const organization=await db.organization.findUnique({where:{id:claims.org_id},select:{name:true}});
+ if(typeof organization?.name!=='string'||!organization.name.trim()||organization.name.length>200||/[\u0000-\u001f]/.test(organization.name))fail('organization_name_required',403);
  const key='support:'+crypto.createHash('sha256').update(JSON.stringify([claims.org_id,claims.operating_session,report.occurrence])).digest('hex');
  const hash=crypto.createHash('sha256').update(JSON.stringify({...report,operation:'submit'})).digest('hex');
  const saved=await db.$transaction(async tx=>{
@@ -108,9 +111,8 @@ export async function runtimeSupportReport({db,claims,input,send,sharedOrganizat
  }
  if(saved.disabled)return {...await status(saved.row),status:'unavailable',sent:false,reason:'support_recipient_not_configured'};
  if(saved.replayed)return {...await status(saved.row),replayed:true};
- const lines=[`Occurrence: ${report.occurrence}`,`Coverage: ${report.coverage.inspected}/${report.coverage.expected}; missing: ${report.coverage.missing}`,...report.issues.map(i=>`${i.capability}: ${i.code}; severity=${i.severity}; count=${i.count}; cause=${i.cause}`)];
- const text=lines.join('\n');let receipt;
- try{receipt=await send({to:env.SYSTEM_EMAIL_SUPPORT,rendered:{subject:'Runtime nightly capability report',text,html:`<pre>${text}</pre>`},from:env.RUNTIME_EMAIL_FROM||'Runtime <runtime@admin.singulancelabs.com>',templateId:'runtime-support-sanitized-v1',notification:{orgId:claims.org_id,userId:storage.userId},providerAttempts:1,providerFallback:false,requiredProvider:'cloudflare'});}catch{receipt={ok:false,error:'outcome_unknown'};}
+ const rendered=renderRuntimeSupportReport(report,organization.name);let receipt;
+ try{receipt=await send({to:env.SYSTEM_EMAIL_SUPPORT,rendered,from:env.RUNTIME_EMAIL_FROM||'Runtime <runtime@admin.singulancelabs.com>',templateId:'runtime-support-sanitized-v1',notification:{orgId:claims.org_id,userId:storage.userId},providerAttempts:1,providerFallback:false,requiredProvider:'cloudflare'});}catch{receipt={ok:false,error:'outcome_unknown'};}
  const accepted=receipt.ok===true&&receipt.provider==='cloudflare'&&typeof receipt.messageId==='string'&&receipt.messageId.length>0;
  const result=accepted?'accepted':receipt.skipped||receipt.permanent?'rejected':'unknown';
  const safe={ok:accepted,provider:receipt.provider==='cloudflare'?'cloudflare':null,messageId:typeof receipt.messageId==='string'?receipt.messageId.slice(0,512):null,deliveryStatus:receipt.deliveryStatus??null,error:accepted?null:'transport_not_accepted'};

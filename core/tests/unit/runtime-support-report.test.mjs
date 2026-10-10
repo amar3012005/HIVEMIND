@@ -8,7 +8,7 @@ const payload=()=>({operation:'submit',occurrence:'2026-10-09T02:00:00.000Z',cov
 function witness(session='session-chief',occurrence=payload().occurrence){return {event_type:'user/message',payload:{data:{source:{kind:'schedule',occurrenceAt:occurrence},content:[{type:'text',text:'reminders_json: '+JSON.stringify([{schedule_id:'schedule-'+crypto.createHash('sha256').update(session+'\0nightly-routine-check-v1').digest('hex'),occurrence_at:occurrence,reminder_prompt:'Load hivemind-nightly-routine-check. Execute authorized inspection.'}])}]}}};}
 function fixture(){
  let saved,sendCount=0;const calls=[];
- const db={userOrganization:{findUnique:async()=>({role:'admin',isActive:true})},user:{findUnique:async()=>({deletedAt:null})},organization:{findUnique:async()=>({companyProfile:{timezone:'Europe/Berlin'}})},
+ const db={userOrganization:{findUnique:async()=>({role:'admin',isActive:true})},user:{findUnique:async()=>({deletedAt:null})},organization:{findUnique:async()=>({name:'Test organization',companyProfile:{timezone:'Europe/Berlin'}})},
   $queryRawUnsafe:async(sql,...args)=>{calls.push({sql,args});if(sql.includes('set_config'))return [];if(sql.includes('organization_agent_storage_scope'))return [{storage_user_id:user,runtime_session_id:'session-chief'}];if(sql.includes('JOIN hivemind.harness_sessions'))return [{session_id:'session-chief'}];
    if(sql.includes('FROM hivemind.harness_session_events'))return [witness()];
    if(sql.startsWith('INSERT')){saved??={id:'33333333-3333-4333-8333-333333333333',status:'pending',content_hash:args[4],message:JSON.parse(args[5])};return [];}
@@ -44,7 +44,7 @@ test('uncertain provider outcome prevents automatic duplicate retry',async()=>{
 });
 test('nightly context attests canonical room, validates organization zone, and never returns support address',async()=>{
  const f=fixture();const r=await nightlyRoutineContext(f);assert.deepEqual(r,{org_id:org,session_id:'session-chief',time_zone:'Europe/Berlin',time_zone_source:'organization',support_configured:true});
- f.db.organization.findUnique=async()=>({companyProfile:{timezone:'invalid'}});assert.equal((await nightlyRoutineContext(f)).time_zone_source,'default_utc');
+ f.db.organization.findUnique=async()=>({name:'Test organization',companyProfile:{timezone:'invalid'}});assert.equal((await nightlyRoutineContext(f)).time_zone_source,'default_utc');
  const query=f.db.$queryRawUnsafe;f.db.$queryRawUnsafe=(sql,...args)=>sql.includes('JOIN hivemind.harness_sessions')?[]:query(sql,...args);await assert.rejects(nightlyRoutineContext(f),/canonical_runtime/);
 });
 
@@ -74,3 +74,8 @@ test('batched native occurrence is the nightly member, not necessarily the first
  assert.equal(savedNightlyOccurrence([row],'session-chief',payload().occurrence),true);
  data.source.occurrenceAt='2026-10-09T04:00:00.000Z';assert.equal(savedNightlyOccurrence([row],'session-chief',payload().occurrence),false);
 });
+
+const technical=()=>({owner:'hyperagent',agent_index:1,tool:'hivemind_app_get',expected:'A validated application identifier is discovered before reading.',observed:'The tool rejected an invalid identifier.',recovery:'Discovery was retried with the existing app catalog.',prevention:'Validate the identifier and inspect the returned revision before reading.',evidence:[{kind:'tool_result',turn:3,sequence:42}]});
+test('bounded detailed report renders escaped technical sections, authenticated organization and preserved delivery idempotency',async()=>{const f=fixture(),p=payload();p.issues[0].details=technical();p.issues[0].details.observed='<img src=x onerror=alert(1)> was rejected as an invalid value.';await runtimeSupportReport({...f,input:p});await runtimeSupportReport({...f,input:p});assert.equal(f.sends,1);const mail=f.calls.find(c=>c.mail).mail;assert.ok(mail.rendered.text.startsWith('Hi admin, this is Runtime from Test organization'));assert.ok(mail.rendered.html.includes('&lt;img'));assert.ok(!mail.rendered.html.includes('<img'));for(const field of ['Expected','Observed','Recovery','Prevention','Evidence'])assert.ok(mail.rendered.html.includes(field));assert.equal(f.saved.message.issues[0].details.evidence[0].sequence,42);});
+test('details reject secrets, URLs, identities, control characters, malformed evidence and oversized prose',()=>{for(const text of ['Bearer secretcredential','password=secretcredential','https://internal.example','a@example.com','22222222-2222-4222-8222-222222222222','x\nrawlog','x'.repeat(1201)]){const p=payload();p.issues[0].details={...technical(),observed:text};assert.throws(()=>validateSupportReport(p,now),/support_detail/);}const p=payload();p.issues[0].details={...technical(),evidence:[{kind:'tool_result',raw:'private logs'}]};assert.throws(()=>validateSupportReport(p,now));});
+test('missing authenticated organization name cannot dispatch even a valid report',async()=>{const f=fixture();f.db.organization.findUnique=async()=>null;await assert.rejects(runtimeSupportReport({...f,input:payload()}),/organization_name_required/);assert.equal(f.sends,0);assert.equal(f.saved,undefined);});

@@ -1,3 +1,4 @@
+import { recoverPendingActivity } from './connectors/composio/activity-relevance.js';
 import { changeSessionOrganization } from './mobile/session-organization.js';
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
 import { requireReconciledSourceErasure } from './security/account-erasure-inventory.js';
@@ -1307,6 +1308,20 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
     runNightlyCycle().catch((e) => console.warn('[hyper-cycle] run failed:', e.message));
   }, 55 * 60 * 1000);
   console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day, start-email=${HYPER_CYCLE_START_EMAIL_ENABLED ? 'enabled' : 'disabled'})`);
+}
+
+// Recovery uses the same durable attention ledger; no page visit is required.
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  let recoveringAttention = false;
+  const recoverAttention = async () => {
+    if (recoveringAttention) return;
+    recoveringAttention = true;
+    try { await recoverPendingActivity(prisma); }
+    catch { console.warn('[runtime-attention] pending recovery unavailable'); }
+    finally { recoveringAttention = false; }
+  };
+  setTimeout(recoverAttention, 15000).unref();
+  setInterval(recoverAttention, 60000).unref();
 }
 
 let hqScheduler = null;

@@ -2316,3 +2316,9 @@ slides that find no unique anchor get a page instead of `null`.
   both recorded as `openrouter/meta/muse-image`; the second was generated from
   the first approved master as its reference. Core focused tests passed 9/9;
   Worker tests, TypeScript checking, and dry-run deploy passed.
+
+## 2026-10-10 — Native chat cache and app reuse candidate
+
+- Committed: pushed Da-vinci `1e7a3c19e0296b3902ede0f17be60855a14c9ad6`, descended from production `da0f97bfc8aa3ab176feba1a945b619626ce22ab`. Revisioned native scripts use browser HTTP cache; private boot/events remain live. Native-owned app/DOM/drafts survive authenticated chat route transitions and dispose on route exit.
+- Validation: focused Jest command covering service-worker policy, native seat, and HarnessSurface: `Test Suites: 3 passed, 3 total; Tests: 15 passed, 15 total`. `GENERATE_SOURCEMAP=false CI=false npm run build`: `Compiled with warnings. The build folder is ready to be deployed.` Existing lint warnings remain; no dependency source changes.
+- Accepted release: pending root-owned guarded Worker deployment and authenticated browser verification. Current Worker rollback identity: `54532afc-8fd5-4173-8f66-837c44d41bf0`. No Core, Control, or Harness replacement in this outer promotion.

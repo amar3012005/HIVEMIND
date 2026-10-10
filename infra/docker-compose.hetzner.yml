@@ -74,10 +74,11 @@ services:
     container_name: hm-core
     env_file: [../.env]
     restart: unless-stopped
-    mem_limit: 2g
-    memswap_limit: 3g
+    mem_limit: 4g
+    memswap_limit: 6g
     cpus: 2.0
     environment:
+      NODE_OPTIONS: "--max-old-space-size=3072"
       <<: *common-env
       HOSTNAME: hm-core
       HIVE_APP_RUNTIME_ENABLED: ${HIVE_APP_RUNTIME_ENABLED:-false}
@@ -132,10 +133,11 @@ services:
     container_name: hm-control
     env_file: [../.env]
     restart: unless-stopped
-    mem_limit: 768m
-    memswap_limit: 1152m
+    mem_limit: 1536m
+    memswap_limit: 2304m
     cpus: 0.75
     environment:
+      NODE_OPTIONS: "--max-old-space-size=1024"
       <<: *common-env
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
       HIVE_APP_RUNTIME_ENABLED: ${HIVE_APP_RUNTIME_ENABLED:-false}
@@ -195,10 +197,11 @@ services:
       - harness-chat-origin.singulancelabs.com
     restart: unless-stopped
     read_only: true
-    mem_limit: 2g
-    memswap_limit: 3g
+    mem_limit: 4g
+    memswap_limit: 6g
     cpus: 2.0
     environment:
+      NODE_OPTIONS: "--max-old-space-size=3072"
       NODE_ENV: production
       PORT: "3080"
       DSH_HOME: /tmp/dsh

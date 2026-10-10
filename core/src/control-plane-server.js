@@ -8840,10 +8840,9 @@ const server = http.createServer(async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
     const unreadOnly = url.searchParams.get('unread') === 'true';
     try {
-      // This endpoint powers the "Your workspace lifecycle" panel, not a
-      // generic activity feed. Only explicitly typed lifecycle events belong
-      // here; generic emails and operational updates stay out of the panel.
-      const lifecycleWhere = { orgId: current.session.orgId, userId: current.session.userId, type: { startsWith: 'lifecycle.' } };
+      // Lifecycle notices and native Runtime attention share the existing inbox.
+      // Keep exact user/org scope and exclude unrelated generic activity.
+      const lifecycleWhere = { orgId: current.session.orgId, userId: current.session.userId, OR: [{ type: { startsWith: 'lifecycle.' } }, { type: 'runtime.attention' }] };
       const where = { ...lifecycleWhere, ...(unreadOnly ? { readAt: null } : {}) };
       const [items, unread] = await Promise.all([
         prisma.workspaceNotification.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit }),

@@ -30,6 +30,7 @@ export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fe
   return {
     async readConsent(row) { const result = await call('context', row); contexts.set(row.id, result); return result.consent; },
     async readSnapshot(row) { const result = contexts.get(row.id); contexts.delete(row.id); return result?.snapshot; },
+    async assess(row) { return call('assess', row); },
     async deliver(row) { const result = await call('deliver', row); if (result.status !== 'accepted' || result.eventId !== row.id
       || result.targetSessionId !== row.relevance_decision?.runtimeAttention?.targetSessionId) throw Error('runtime_attention_delivery_unconfirmed'); return result; },
   };

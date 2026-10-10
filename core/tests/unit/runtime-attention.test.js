@@ -30,8 +30,8 @@ test('three attention choices remain distinct; notify never invokes agent delive
   for (const action of ['retain', 'notify', 'wake']) assert.equal((await evaluate(action)).action, action);
 });
 test('invalid, uncertain and failed decisions retain quietly', async () => {
-  for (const decision of [{ choice: 'execute', probability: 1, margin: 1 }, { choice: 'wake', probability: 0.74, margin: 1 },
-    { choice: 'wake', probability: NaN, margin: 1 }, { choice: 'wake', probability: 1, margin: 0.19 }]) {
+  for (const decision of [{ choice: 'execute', probability: 1, margin: 1 }, { choice: 'wake', probability: 0.44, margin: 1 },
+    { choice: 'wake', probability: NaN, margin: 1 }, { choice: 'wake', probability: 1, margin: 0.04 }]) {
     assert.equal((await evaluate('wake', { provider: { decideChoice: async () => decision } })).action, 'retain');
   }
   assert.equal((await evaluate('wake', { provider: { decideChoice: async () => { throw Error('offline'); } } })).reason, 'decision_unavailable');
@@ -69,7 +69,7 @@ test('activation watermark retains old events; explicit shadow results cannot be
 });
 
 test('shadow low confidence and provider failures stay explicitly shadow', async () => {
- for(const provider of [{decideChoice:async()=>({choice:'wake',probability:0.54,margin:0.27})},{decideChoice:async()=>{throw Error('fixture provider down');}}]){
+ for(const provider of [{decideChoice:async()=>({choice:'wake',probability:0.44,margin:0.27})},{decideChoice:async()=>{throw Error('fixture provider down');}}]){
   const result=await evaluate('wake',{provider,mode:'shadow'});
   assert.equal(result.action,'retain');assert.equal(result.policy,'runtime_attention_v2_shadow');assert.equal(result.shadow,true);
  }
@@ -92,4 +92,15 @@ test('attention context budget failure remains quiet and distinguishable', async
   const result=await evaluate('wake',{provider:{decideChoice:async()=>{throw Error(message)}}});
   assert.equal(result.action,'retain');assert.equal(result.reason,'decision_context_unavailable');
  }
+});
+
+test('broad attention admits moderate-confidence company signals and does not silence weak retain decisions', async () => {
+ for (const choice of ['wake', 'notify']) {
+  const result = await evaluate(choice, { provider: { decideChoice: async () => ({ choice, probability: 0.55, margin: 0.1 }) } });
+  assert.equal(result.action, choice);
+ }
+ const unclear = await evaluate('retain', { provider: { decideChoice: async () => ({ choice: 'retain', probability: 0.59, margin: 0.23 }) } });
+ assert.equal(unclear.action, 'wake');
+ const promotion = await evaluate('retain', { provider: { decideChoice: async () => ({ choice: 'retain', probability: 0.9, margin: 0.6 }) } });
+ assert.equal(promotion.action, 'retain');
 });

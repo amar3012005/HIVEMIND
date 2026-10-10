@@ -28,7 +28,8 @@ export class PlanStore {
       // next admission in every process. Do not retain an in-process cap cache.
       this._cache.set(orgId, { plan, expiresAt: Date.now() });
       return { ...plan, entitlement };
-    } catch {
+    } catch (error) {
+      if (error.code === 'ORGANIZATION_POLICY_UNAVAILABLE') throw error;
       return getPlan('free');
     }
   }

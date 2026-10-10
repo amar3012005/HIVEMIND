@@ -1,3 +1,4 @@
+import { latestOrganizationPolicy, materializeOrganizationPolicy } from './organization-policy.js';
 import { getPlan } from './plans.js';
 import { resolveCatalogPlan } from './plan-catalog-service.js';
 
@@ -117,7 +118,7 @@ export async function getEffectiveEntitlement(prisma, orgId, now = new Date()) {
   });
 }
 
-export async function getEffectivePlan(prisma, orgId) {
+async function getBaseEffectivePlan(prisma, orgId) {
   const fallback = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
   const fallbackPlanId = fallback?.plan || 'free';
   // Promotions are the authoritative commercial overlay. Keep the legacy
@@ -164,6 +165,13 @@ export async function getEffectivePlan(prisma, orgId) {
   if (!entitlement) return { plan: await resolveCatalogPlan(prisma, fallbackPlanId), entitlement: null };
   const basePlan = await resolveCatalogPlan(prisma, entitlement.planId);
   return { plan: mergeEntitlementPlan(entitlement.planId, entitlement.limits, basePlan), entitlement };
+}
+
+export async function getEffectivePlan(prisma, orgId) {
+  const resolved = await getBaseEffectivePlan(prisma, orgId);
+  const policy = await latestOrganizationPolicy(prisma, orgId);
+  const suspended = ['manual_review','expired','suspended','revoked'].includes(resolved.entitlement?.status);
+  return {...resolved,plan:{...materializeOrganizationPolicy(resolved.plan,suspended?null:policy),organizationPolicySuspended:suspended}};
 }
 
 // Canonical commercial read used by Billing, Usage, feature admission, and

@@ -154,7 +154,7 @@ export class PlanEnforcer {
     if (dailyRule) {
       const [limitKey, metric, unit] = dailyRule;
       const dailyLimit = limits[limitKey];
-      if (dailyLimit > 0) {
+      if (dailyLimit != null && dailyLimit >= 0) {
         const snapshot = await this.usageTracker?.getDailySnapshot?.(orgId);
         if (snapshot == null) {
           return {
@@ -182,7 +182,7 @@ export class PlanEnforcer {
 
     if (type === 'tokens') {
       const limit = limits.llmTokensPerMonth;
-      if (!limit || limit === -1) return { allowed: true }; // unlimited
+      if (limit == null || limit === -1) return { allowed: true }; // unlimited
       if (counters.tokens + amount > limit) {
         return {
           allowed: false,
@@ -196,7 +196,7 @@ export class PlanEnforcer {
 
     if (type === 'searches') {
       const limit = limits.searchQueriesPerMonth;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       const used = counters.searches + counters.graphQueries;
       if (used + amount > limit) {
         return {
@@ -212,7 +212,7 @@ export class PlanEnforcer {
     if (type === 'kbPages') {
       // Per-org page-budget guard. amount = pages in the doc about to ingest.
       const limit = limits.knowledgeBasePagesPerMonth;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       const used = counters.kbPages || 0;
       if (used + amount > limit) {
         return {
@@ -227,7 +227,7 @@ export class PlanEnforcer {
 
     if (type === 'memories') {
       const limit = limits.maxMemories;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       const liveMemories = Number((await getOrgCounts(this.prisma, orgId)).memories) || 0;
       if (liveMemories + amount > limit) {
         return {
@@ -247,7 +247,7 @@ export class PlanEnforcer {
     // 'memories', which reads its live count instead of a counter.
     if (type === 'meetingMinutes') {
       const limit = limits.meetingMinutesPerMonth;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       let usedSeconds = 0;
       try {
         const rows = await this.prisma.$queryRawUnsafe(
@@ -278,7 +278,7 @@ export class PlanEnforcer {
 
     if (type === 'deepResearch') {
       const limit = limits.deepResearchPerMonth;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       if (counters.deepResearch + amount > limit) {
         return {
           allowed: false,
@@ -294,7 +294,7 @@ export class PlanEnforcer {
 
     if (type === 'graphQueries') {
       const limit = limits.searchQueriesPerMonth;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       const used = counters.searches + counters.graphQueries;
       if (used + amount > limit) {
         return {
@@ -311,7 +311,7 @@ export class PlanEnforcer {
       const limitKey = type === 'taraSeconds' ? 'taraTalkSecondsPerMonth' : 'hyperAgentRunsPerMonth';
       const unit = type === 'taraSeconds' ? 'TARA talk seconds' : 'HyperAgents runs';
       const limit = limits[limitKey];
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       const used = counters[type] || 0;
       if (used + amount > limit) {
         return {
@@ -327,7 +327,7 @@ export class PlanEnforcer {
 
     if (type === 'connectors') {
       const limit = limits.maxConnectors;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       try {
         // PlatformIntegration is keyed by userId; for org-level counting
         // we count all active integrations belonging to users in the org.
@@ -353,7 +353,7 @@ export class PlanEnforcer {
 
     if (type === 'users') {
       const limit = limits.maxUsers;
-      if (!limit || limit === -1) return { allowed: true };
+      if (limit == null || limit === -1) return { allowed: true };
       try {
         const count = await this.prisma.userOrganization.count({ where: { orgId, isActive: true } });
         if (count + amount > limit) {

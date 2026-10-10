@@ -1,3 +1,4 @@
+import { handleOrganizationSettings } from './billing/organization-policy.js';
 import { recoverPendingActivity } from './connectors/composio/activity-relevance.js';
 import { changeSessionOrganization } from './mobile/session-organization.js';
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
@@ -539,7 +540,7 @@ async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles,
     if (!existing?.isActive) {
       const { plan } = await getEffectivePlan(tx, orgId);
       const limit = plan.limits?.maxUsers ?? -1;
-      if (limit > 0) {
+      if (limit >= 0) {
         const current = await tx.userOrganization.count({ where: { orgId, isActive: true } });
         if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
       }
@@ -561,7 +562,7 @@ async function createMembershipWithinPlan(data) {
     if (existing?.isActive) return existing;
     const { plan } = await getEffectivePlan(tx, data.orgId);
     const limit = plan.limits?.maxUsers ?? -1;
-    if (limit > 0) {
+    if (limit >= 0) {
       const current = await tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } });
       if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
     }
@@ -582,7 +583,7 @@ async function assertInviteCapacityWithinPlan({ orgId, additionalSeats = 1, now 
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
     const { plan } = await getEffectivePlan(tx, orgId);
     const limit = plan.limits?.maxUsers ?? -1;
-    if (limit <= 0) return { plan, limit, current: 0 };
+    if (limit < 0) return { plan, limit, current: 0 };
     const [activeMembers, pendingInvites] = await Promise.all([
       tx.userOrganization.count({ where: { orgId, isActive: true } }),
       tx.orgInvite.count({ where: { orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
@@ -598,7 +599,7 @@ async function createOrgInviteWithinPlan(data, now = new Date()) {
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${data.orgId}`);
     const { plan } = await getEffectivePlan(tx, data.orgId);
     const limit = plan.limits?.maxUsers ?? -1;
-    if (limit > 0) {
+    if (limit >= 0) {
       const [activeMembers, pendingInvites] = await Promise.all([
         tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } }),
         tx.orgInvite.count({ where: { orgId: data.orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
@@ -620,7 +621,7 @@ async function upsertConnectorWithinPlan(orgId, connectorInput) {
     if (!existing?.isActive) {
       const { plan } = await getEffectivePlan(tx, orgId);
       const limit = plan.limits?.maxConnectors ?? -1;
-      if (limit > 0) {
+      if (limit >= 0) {
         const current = await tx.platformIntegration.count({
           where: { user: { organizations: { some: { orgId, isActive: true } } }, isActive: true },
         });
@@ -4836,6 +4837,8 @@ const server = http.createServer(async (req, res) => {
         version: version ? { plan: version.planId, limits: version.limits, account_type: version.accountType, storage_mode: version.storageMode, number: version.version } : null };
     }) });
   }
+
+  if (await handleOrganizationSettings({req,res,pathname,prisma,getPlatformAdminSession,parseBody,jsonResponse,resolvePlan:getEffectivePlan,creditService:controlCreditService,usageTracker:controlUsageTracker,audit})) return;
 
   if (pathname === '/admin/api/platform/organizations' && req.method === 'GET') {
     const operator = getPlatformAdminSession(req);

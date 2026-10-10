@@ -43,6 +43,7 @@ import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/ema
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
+import { overlayActiveApps } from './connectors/connected-app-overlay.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { SEAM_SCHEMA_VERSION, buildWorkRoomExecutionIdentity } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
@@ -8068,6 +8069,7 @@ const server = http.createServer(async (req, res) => {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
           const accounts = await composioService.listConnectedAccounts(orgId);
           reconcileConnectedActivity({ prisma, orgId, userId: current.session.userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
+          result.splice(0, result.length, ...overlayActiveApps(result, accounts));
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
             const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
@@ -8097,6 +8099,15 @@ const server = http.createServer(async (req, res) => {
       } catch (composioErr) {
         console.warn('[v1/connectors] composio overlay failed:', composioErr.message);
       }
+    }
+
+    // Native Slack uses a user-owned platform integration rather than a Composio account.
+    if (prisma) {
+      const nativeSlack = await prisma.platformIntegration.findFirst({
+        where: { userId: current.session.userId, platformType: 'slack', isActive: true },
+        select: { id: true },
+      });
+      if (nativeSlack) result.splice(0, result.length, ...overlayActiveApps(result, [], true));
     }
 
     const whatsappStatus = await whatsappManager.getStatus(current.session.userId).catch((err) => ({

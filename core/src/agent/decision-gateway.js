@@ -103,6 +103,40 @@ function boundedProjection(value, { maxChars = 10000, maxDepth = 6, maxItems = 2
   }
 }
 
+// Attention's authenticated reader already bounds individual records and binds
+// their complete heads to a revision. Generic string shrinking would remove
+// decision evidence when the *combined* packet crosses its smaller budget.
+// Validate a separate bounded JSON packet; never partially serialize a record.
+function attentionStatePacket(state) {
+  let nodes = 0;
+  const seen = new Set();
+  const visit = (value, depth) => {
+    if (++nodes > 4096 || depth > 12) throw new Error('decision_state_exceeds_budget');
+    if (value === null || typeof value === 'boolean') return;
+    if (typeof value === 'number' && Number.isFinite(value)) return;
+    if (typeof value === 'string') {
+      if (value.length > 8192) throw new Error('decision_state_exceeds_budget');
+      return;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)
+      || (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype)) {
+      throw new Error('attention_context_projection_loss');
+    }
+    seen.add(value);
+    const entries = Array.isArray(value) ? value.map((item, i) => [String(i), item]) : Object.entries(value);
+    if (entries.length > 128) throw new Error('decision_state_exceeds_budget');
+    for (const [key, item] of entries) {
+      if (key.length > 160) throw new Error('decision_state_exceeds_budget');
+      visit(item, depth + 1);
+    }
+    seen.delete(value);
+  };
+  visit(state, 0);
+  const json = JSON.stringify(state);
+  if (Buffer.byteLength(json, 'utf8') > 65536) throw new Error('decision_state_exceeds_budget');
+  return JSON.parse(json);
+}
+
 function normalizeOptions(options) {
   if (!Array.isArray(options) || options.length < 2 || options.length > 32) {
     throw new TypeError('decision_options_must_contain_2_to_32_choices');
@@ -174,12 +208,8 @@ export function createOpenRouterJevProvider({
     preparedHeaders.set('content-type', 'application/json');
     preparedHeaders.set('http-referer', siteUrl);
     preparedHeaders.set('x-title', siteName);
-    const projectedState = boundedProjection(state);
-    // Native attention already supplies bounded, revision-bound records. Never
-    // silently clip confirmed direction, task evidence or handoffs a second time.
-    if (state?.policy === 'runtime_attention_v2' && JSON.stringify(projectedState) !== JSON.stringify(state)) {
-      throw new Error('attention_context_projection_loss');
-    }
+    const projectedState = state?.policy === 'runtime_attention_v2'
+      ? attentionStatePacket(state) : boundedProjection(state);
     const response = await fetchWithTimeout(fetchImpl, endpoint, {
       method: 'POST',
       headers: preparedHeaders,

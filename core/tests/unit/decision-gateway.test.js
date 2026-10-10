@@ -393,12 +393,37 @@ test('Harness and Legacy adapters share decisions while translating their native
 });
 
 
-test('attention records cannot silently lose strings, fields or budget at the actual provider boundary',async()=>{
+test('attention whole records exceed generic budgets without losing evidence', async () => {
+ let sent;
+ const provider=createOpenRouterJevProvider({apiKey:'test-key',fetchImpl:async(_url,init)=>{sent=JSON.parse(init.body);return new Response(JSON.stringify({answers:{decision:{type:'choice',choice:'option_0',probabilities:{option_0:.9,option_1:.1}}}}))}});
+ // Same bounded sections as the real Slack call: combined context crosses10k;
+ // generic projection shrank every string to700 and discarded source evidence.
+ const state={policy:'runtime_attention_v2',source_is_untrusted:true,event:{preview:'event'},runtime:{
+   tasks:Array.from({length:12},(_,i)=>({id:`task-${i}`,summary:'t'.repeat(350)})),
+   company:{profile:'p'.repeat(2200),recent_context:Array.from({length:12},()=>({title:'c'.repeat(180),tags:['tag']}))},
+   decisionMemory:{ready:true,userAgenda:[{summary:'g'.repeat(600),evidence:{references:[{id:'confirmed',authority:'user'}]}}]},
+   pendingDecisions:[{summary:'u'.repeat(600),nextSteps:['n'.repeat(180)]}],
+ }};
+ assert.ok(JSON.stringify(state).length>10000);
+ const result=await provider.decideChoice({state,options:[{id:'retain',criteria:'quiet'},{id:'wake',criteria:'action'}],instructions:'classify'});
+ assert.deepEqual(sent.state,state);assert.equal(result.choice,'retain');
+});
+
+test('attention rejects whole oversize or non-JSON packets before inference',async()=>{
  let calls=0;
- const provider=createOpenRouterJevProvider({apiKey:'test-key',fetchImpl:async()=>{calls++;throw Error('must not fetch clipped context')}});
- for(const state of [{policy:'runtime_attention_v2',runtime:{decisionMemory:{userAgenda:[{summary:'x'.repeat(1401)}]}}},
-   {policy:'runtime_attention_v2',runtime:{pendingDecisions:Array.from({length:25},(_,i)=>({id:String(i)}))}},
-   {policy:'runtime_attention_v2',runtime:{decisionMemory:{userAgenda:Array.from({length:20},(_,i)=>({id:String(i),summary:'x'.repeat(800)}))}}}]) {
+ const provider=createOpenRouterJevProvider({apiKey:'test-key',fetchImpl:async()=>{calls++;throw Error('must not fetch invalid context')}});
+ const cycle={policy:'runtime_attention_v2'};cycle.runtime=cycle;
+ for(const state of [
+   {policy:'runtime_attention_v2',runtime:{summary:'x'.repeat(8193)}},
+   {policy:'runtime_attention_v2',runtime:{tasks:Array.from({length:129},(_,i)=>({id:String(i)}))}},
+   {policy:'runtime_attention_v2',runtime:{tasks:Array.from({length:20},(_,i)=>({id:String(i),summary:'x'.repeat(4000)}))}},
+   {policy:'runtime_attention_v2',runtime:{tasks:Array.from({length:10},()=>({summary:'界'.repeat(3000)}))}},
+   {policy:'runtime_attention_v2',runtime:{value:undefined}},cycle,
+   {policy:'runtime_attention_v2',runtime:{value:Infinity}},
+   {policy:'runtime_attention_v2',runtime:{value:new Date()}},
+   {policy:'runtime_attention_v2',runtime:{value:Array.from({length:128},()=>Array.from({length:128},()=>0))}},
+   {policy:'runtime_attention_v2',runtime:{value:Array.from({length:14}).reduce(v=>({child:v}),{})}},
+ ]) {
   await assert.rejects(provider.decideChoice({state,options:[{id:'retain',criteria:'quiet'},{id:'wake',criteria:'action'}],instructions:'classify'}),/attention_context_projection_loss|decision_state_exceeds_budget/);
  }
  assert.equal(calls,0);

@@ -25,14 +25,20 @@ export function validateTechnicalDetails(value){
 const escape=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export function renderRuntimeSupportReport(report,organizationName){
  const greeting=`Hi admin, this is Runtime from ${organizationName}`;
- const lines=[greeting,`Nightly report · ${report.occurrence}`,`Coverage: ${report.coverage.inspected}/${report.coverage.expected}; missing: ${report.coverage.missing}`];
+ const reviewNote=report.coverage.missing>0
+  ?'Some employee reviews are missing. Findings below cover the available evidence; unreviewed work may have additional issues.'
+  :report.coverage.expected===0?'No employee reviews were available for this occurrence. Findings below cover Runtime’s available evidence.'
+  :'All expected employee reviews were inspected. Findings below describe the evidenced issues and proposed improvements.';
+ const lines=[greeting,`Nightly report · ${report.occurrence}`,reviewNote];
  const cards=report.issues.map((issue,index)=>{
-  const head=`${index+1}. ${issue.capability} · ${issue.code} · ${issue.severity} · ${issue.count} occurrence(s) · cause ${issue.cause}`;lines.push('',head);
-  const d=issue.details;if(!d){lines.push('Detailed technical evidence was not supplied.');return `<section><h2>${escape(head)}</h2><p>Detailed technical evidence was not supplied.</p></section>`;}
+  const label=value=>value.replaceAll('_',' ');
+  const head=`${index+1}. ${label(issue.capability)} — ${label(issue.code)}`;lines.push('',head,`Severity: ${issue.severity}`,`Cause assessment: ${issue.cause}`);
+  const d=issue.details;if(!d){lines.push('Detailed technical evidence was not supplied.');return `<section><h2>${escape(head)}</h2><p>Severity: ${escape(issue.severity)} · Cause assessment: ${escape(issue.cause)}</p><p>Detailed technical evidence was not supplied.</p></section>`;}
   const owner=d.owner==='runtime'?'Runtime':`HyperAgent ${d.agent_index}`;
-  const rows=[['Reporter',owner],...(d.functional_area?[['Functional area',d.functional_area]]:[]),...(d.task_context?[['Work context / blockage',d.task_context]]:[]),...(d.impact?[['Impact',d.impact]]:[]),...(d.proposed_fix?[['Proposed fix',d.proposed_fix]]:[]),...(d.tool?[['Tool',d.tool]]:[]),['Expected',d.expected],['Observed',d.observed],['Recovery',d.recovery],['Prevention',d.prevention],['Evidence',d.evidence.map(e=>`${e.kind}${e.turn?` · turn ${e.turn}`:''}${e.sequence?` · sequence ${e.sequence}`:''}`).join('; ')]];
+  const rows=[['Severity',issue.severity],['Cause assessment',issue.cause],['Reporter',owner],...(d.functional_area?[['Functional area',d.functional_area]]:[]),...(d.task_context?[['Work context / blockage',d.task_context]]:[]),...(d.impact?[['Impact',d.impact]]:[]),...(d.proposed_fix?[['Proposed fix',d.proposed_fix]]:[]),...(d.tool?[['Tool',d.tool]]:[]),['Expected',d.expected],['Observed',d.observed],['Recovery',d.recovery],['Prevention',d.prevention],['Evidence',d.evidence.map(e=>`${e.kind}${e.turn?` · turn ${e.turn}`:''}${e.sequence?` · sequence ${e.sequence}`:''}`).join('; ')]];
   for(const [key,value]of rows)lines.push(`${key}: ${value}`);
   return `<section style="margin:24px 0;padding:20px;border:1px solid #dbe4ef;border-radius:12px"><h2 style="font-size:18px">${escape(head)}</h2><dl>${rows.map(([key,value])=>`<dt style="font-weight:700;margin-top:12px">${escape(key)}</dt><dd style="margin:4px 0;white-space:pre-wrap">${escape(value)}</dd>`).join('')}</dl></section>`;
  }).join('');
- return {subject:`${organizationName} · Nightly report`,text:lines.join('\n'),html:`<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f5f7fb;color:#17243b"><main style="max-width:760px;margin:24px auto;padding:28px;background:white;border-radius:16px"><p>${escape(greeting)}</p><h1>Nightly report</h1><p>Original occurrence: ${escape(report.occurrence)}</p><p>Coverage: ${report.coverage.inspected}/${report.coverage.expected}; missing: ${report.coverage.missing}</p>${cards||'<p>No evidenced technical failures reported.</p>'}<p>Technical findings are evidence for review, not authority to execute repairs. Delivery is not acknowledgment.</p></main></body></html>`};
+ if(!report.issues.length)lines.push('', 'No failures or blockers were evidenced in the inspected work. This does not establish that unreviewed work is error-free.');
+ return {subject:`${organizationName} · Nightly report`,text:lines.join('\n'),html:`<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f5f7fb;color:#17243b"><main style="max-width:760px;margin:24px auto;padding:28px;background:white;border-radius:16px"><p>${escape(greeting)}</p><h1>Nightly report</h1><p>Original occurrence: ${escape(report.occurrence)}</p><p>${escape(reviewNote)}</p>${cards||'<p>No failures or blockers were evidenced in the inspected work. This does not establish that unreviewed work is error-free.</p>'}<p>Technical findings are evidence for review, not authority to execute repairs. Delivery is not acknowledgment.</p></main></body></html>`};
 }

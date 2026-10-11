@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {renderRuntimeSupportReport} from '../../src/harness-chat/runtime-support-details.js';
 import {runtimeSupportReport,nightlyRoutineContext,validateSupportReport,savedNightlyOccurrence} from '../../src/harness-chat/runtime-support-report.js';
 const org='22222222-2222-4222-8222-222222222222',user='11111111-1111-4111-8111-111111111111';
 const now=Date.parse('2026-10-09T05:00:00.000Z');
@@ -81,3 +82,25 @@ test('details reject secrets, URLs, identities, control characters, malformed ev
 test('missing authenticated organization name cannot dispatch even a valid report',async()=>{const f=fixture();f.db.organization.findUnique=async()=>null;await assert.rejects(runtimeSupportReport({...f,input:payload()}),/organization_name_required/);assert.equal(f.sends,0);assert.equal(f.saved,undefined);});
 
 test('functional area is enumerated and all work context fields use the same sanitized bounds',()=>{for(const patch of [{functional_area:'company-secret'},{task_context:'password=credential'},{impact:'https://private.example'},{proposed_fix:'x'.repeat(1201)}]){const p=payload();p.issues[0].details={...technical(),...patch};assert.throws(()=>validateSupportReport(p,now),/support_detail/);}});
+
+
+test('nightly email presents detailed failures instead of coverage or occurrence-count dashboards',async()=>{
+ const f=fixture(),p=payload();p.issues[0].details=technical();
+ await runtimeSupportReport({...f,input:p});
+ const mail=f.calls.find(c=>c.mail).mail;
+ for(const body of [mail.rendered.text,mail.rendered.html]){
+  assert.doesNotMatch(body,/Coverage:|10\/11|occurrence\(s\)/);
+  assert.match(body,/Some employee reviews are missing/);
+  for(const value of ['Marketing review blocked','The assigned workflow could not continue','Recover a validated reference before reading','hivemind_app_get','Cause assessment','confirmed','high'])assert.ok(body.includes(value),value);
+ }
+ assert.equal(f.saved.message.coverage.inspected,10);assert.equal(f.saved.message.issues[0].count,2);
+ assert.equal(mail.from,'Runtime <runtime@admin.singulancelabs.com>');
+});
+test('complete and empty reviews use honest plain-language notes in text and HTML',()=>{
+ for(const [coverage,note] of [[{expected:1,inspected:1,missing:0},'All expected employee reviews were inspected'],[{expected:0,inspected:0,missing:0},'No employee reviews were available'],[{expected:1,inspected:0,missing:1},'Some employee reviews are missing']]){
+  const report=renderRuntimeSupportReport({...payload(),coverage,issues:[]},'Research <Company>');
+  assert.equal(report.subject,'Research <Company> · Nightly report');
+  assert.match(report.html,/Research &lt;Company&gt;/);
+  for(const body of [report.text,report.html]){assert.ok(body.includes(note));assert.match(body,/No failures or blockers were evidenced/);assert.doesNotMatch(body,/Coverage:|occurrence\(s\)/);}
+ }
+});

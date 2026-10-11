@@ -150,6 +150,16 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             let request = try makeRequest(call)
             session.dataTask(with: request) { data, response, error in
                 guard error == nil, let response = response as? HTTPURLResponse, let data = data, data.count <= 20 * 1024 * 1024 else { call.reject("Native request failed."); return }
+                #if DEBUG
+                let diagnosticRoutes = ["/v1/bootstrap", "/v1/harness-chat/bootstrap", "/api/hivemind/session/establish", "/api/hivemind/employees", "/api/hivemind/boot"]
+                if let path = request.url?.path, diagnosticRoutes.contains(path) {
+                    let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    let mode = payload?["mode"] as? String
+                    let safeMode = mode == "harness" || mode == "legacy" ? mode! : "-"
+                    let profileCount = path == "/api/hivemind/employees" ? (payload?["profiles"] as? [Any])?.count ?? -1 : -1
+                    NSLog("[SingulanceNative] %@ status=%d type=%@ mode=%@ profiles=%d", path, response.statusCode, response.mimeType ?? "unknown", safeMode, profileCount)
+                }
+                #endif
                 if let url = response.url, url.host == "next.singulancelabs.com" {
                     var fields: [String: String] = [:]
                     for (key, value) in response.allHeaderFields { if let key = key as? String, let value = value as? String { fields[key] = value } }

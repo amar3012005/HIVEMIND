@@ -58,6 +58,7 @@ export function getOpsToolsManifest({ isOperator = false, env = process.env } = 
           },
           open_dot_image: { type: 'string', description: 'Immutable Open Dot image reference ending in @sha256:<64 hex>; required only for services=[open-dot].' },
           open_dot_source_sha: { type: 'string', description: 'Exact 40-character Open Dot source commit SHA; required only for services=[open-dot].' },
+          open_dot_mode: { type: 'string', enum: ['cloud', 'local-prototype'], description: 'Optional runtime mode for services=[open-dot]. local-prototype uses one authenticated owner and a dedicated SQLite data volume; cloud retains the PostgreSQL profile. Defaults to cloud.' },
           note: { type: 'string', description: 'Short release note.' },
         },
         required: ['sha', 'services'],
@@ -117,6 +118,9 @@ function requestFor(name, args = {}) {
       if (!hasOpenDot && hasOpenDotInputs) {
         return validationError('Open Dot image inputs require services=[open-dot]');
       }
+      if (!hasOpenDot && args.open_dot_mode !== undefined) {
+        return validationError('open_dot_mode requires services=[open-dot]');
+      }
       if (hasOpenDot) {
         const openDotImage = String(args.open_dot_image || '').trim();
         const openDotSourceSha = String(args.open_dot_source_sha || '').trim();
@@ -129,11 +133,16 @@ function requestFor(name, args = {}) {
         if (!/^[a-f0-9]{40}$/.test(openDotSourceSha)) {
           return validationError('open_dot_source_sha must be the exact 40-character Open Dot source SHA');
         }
+        const openDotMode = args.open_dot_mode === undefined ? 'cloud' : String(args.open_dot_mode);
+        if (!['cloud', 'local-prototype'].includes(openDotMode)) {
+          return validationError('open_dot_mode must be cloud or local-prototype');
+        }
         return {
           ok: true, method: 'POST', path: '/v1/release',
           body: {
             artifact: 'open-dot', sha, services, open_dot_image: openDotImage,
             open_dot_source_sha: openDotSourceSha, note: args.note,
+            open_dot_mode: openDotMode,
           },
         };
       }

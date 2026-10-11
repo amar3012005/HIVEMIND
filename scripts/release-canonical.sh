@@ -8,6 +8,7 @@
 #                        [--service-scoped] [--allow-divergence]
 #                        [--open-dot-image <registry/name@sha256:digest>]
 #                        [--open-dot-source-sha <40-char-open-dot-git-sha>]
+#                        [--open-dot-mode cloud|local-prototype]
 #
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
@@ -22,7 +23,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""; OPEN_DOT_MODE="cloud"
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --harness-image-expected-id) HARNESS_IMAGE_EXPECTED_ID="$2"; shift 2;;
   --open-dot-image) OPEN_DOT_IMAGE="$2"; shift 2;;
   --open-dot-source-sha) OPEN_DOT_SOURCE_SHA="$2"; shift 2;;
+  --open-dot-mode) OPEN_DOT_MODE="$2"; shift 2;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
@@ -86,19 +88,34 @@ if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
   done
 fi
 if [[ ",${SERVICES}," == *,open-dot,* ]]; then
+  [[ "$OPEN_DOT_MODE" = cloud || "$OPEN_DOT_MODE" = local-prototype ]] \
+    || { echo "FATAL: open-dot-mode must be cloud or local-prototype" >&2; exit 2; }
   [[ "$OPEN_DOT_IMAGE" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]] \
     || { echo "FATAL: open-dot requires --open-dot-image pinned by @sha256"; exit 2; }
   [[ "$OPEN_DOT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
     || { echo "FATAL: open-dot requires --open-dot-source-sha with the 40-character Open Dot commit"; exit 2; }
-  for required_env in OPEN_DOT_ORGANIZATION_ID OPEN_DOT_USER_ID OPEN_DOT_PUBLIC_URL OPEN_DOT_DB_PASSWORD; do
+  if [ "$OPEN_DOT_MODE" = cloud ]; then
+    for required_env in OPEN_DOT_ORGANIZATION_ID OPEN_DOT_USER_ID OPEN_DOT_PUBLIC_URL; do
+      if ! awk -F= -v key="$required_env" '$1 == key && length(substr($0, length(key) + 2)) > 0 { found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
+        echo "FATAL: open-dot requires non-empty $required_env in the managed production environment"
+        exit 1
+      fi
+    done
+    required_env=OPEN_DOT_DB_PASSWORD
     if ! awk -F= -v key="$required_env" '$1 == key && length(substr($0, length(key) + 2)) > 0 { found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
-      echo "FATAL: open-dot requires non-empty $required_env in the managed production environment"
+      echo "FATAL: open-dot cloud mode requires non-empty $required_env in the managed production environment"
       exit 1
     fi
-  done
+  else
+    # The local prototype uses a single SQLite volume. Its exact owner IDs are
+    # provisioned from the live Core authority after the immutable worktree is
+    # established below, using only the approved account/workspace binding.
+    local_public_url="https://dots.singulancelabs.com"
+  fi
 else
   [ -z "$OPEN_DOT_IMAGE$OPEN_DOT_SOURCE_SHA" ] \
     || { echo "FATAL: Open Dot image inputs require --services open-dot"; exit 2; }
+  [ "$OPEN_DOT_MODE" = cloud ] || { echo "FATAL: --open-dot-mode requires --services open-dot"; exit 2; }
 fi
 [ "$HARNESS_IMAGE_PRELOADED" = 0 ] || [[ ",${SERVICES}," == *,harness-runner,* ]] \
   || { echo "FATAL: --harness-image-preloaded requires harness-runner"; exit 2; }
@@ -189,9 +206,33 @@ fi
 [ -z "$(git -C "$REL" status --porcelain --ignore-submodules=none)" ] || { echo "FATAL: release worktree is dirty"; exit 1; }
 echo "[worktree] $REL @ $(git -C "$REL" rev-parse --short HEAD)"
 
+# Resolve the one preapproved local-prototype owner binding from the live Core
+# database, using the immutable Core image and its existing private network.
+# The helper writes only the matching IDs and fixed public URL to the managed
+# .env file, with a private backup and atomic replacement. It never prints IDs
+# or credentials and is not used by the optional cloud profile.
+if [[ ",${SERVICES}," == *,open-dot,* && "$OPEN_DOT_MODE" = local-prototype ]]; then
+  [ -f "$REL/scripts/provision-open-dot-owner-binding.py" ] \
+    || { echo "FATAL: local-prototype requires the versioned owner-binding provisioner"; exit 1; }
+  python3 "$REL/scripts/provision-open-dot-owner-binding.py" --env-file "$ENVF"
+  for required_env in OPEN_DOT_ORGANIZATION_ID OPEN_DOT_USER_ID OPEN_DOT_PUBLIC_URL; do
+    if ! awk -F= -v key="$required_env" '$1 == key && length(substr($0, length(key) + 2)) > 0 { found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
+      echo "FATAL: local-prototype owner provisioner did not populate $required_env"; exit 1
+    fi
+  done
+fi
+
 # ── compose validation ─────────────────────────────────────────────────────
 COMPOSE_PROFILES=(--profile harness-chat)
-if [[ ",${SERVICES}," == *,open-dot,* ]]; then COMPOSE_PROFILES+=(--profile open-dot); fi
+OPEN_DOT_COMPOSE_SERVICE=open-dot
+if [[ ",${SERVICES}," == *,open-dot,* ]]; then
+  if [ "$OPEN_DOT_MODE" = local-prototype ]; then
+    COMPOSE_PROFILES+=(--profile open-dot-local)
+    OPEN_DOT_COMPOSE_SERVICE=open-dot-local
+  else
+    COMPOSE_PROFILES+=(--profile open-dot)
+  fi
+fi
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 IMAGE_LABELS=(--label "org.opencontainers.image.revision=$SHA" --label "org.opencontainers.image.created=$TS")
 STATE_ROOT="${RELEASE_STATE_ROOT:-/root/releases/manifests/$SHORT/$TS}"
@@ -233,7 +274,7 @@ for s in "${SVCS[@]}"; do
     if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
     image_digest="${OPEN_DOT_IMAGE##*@}"
     {
-      printf '  %s:\n    image: %s\n    labels:\n' "$s" "$OPEN_DOT_IMAGE"
+      printf '  %s:\n    image: %s\n    labels:\n' "$OPEN_DOT_COMPOSE_SERVICE" "$OPEN_DOT_IMAGE"
       printf '      org.opencontainers.image.revision: "%s"\n' "$SHA"
       printf '      com.singulance.open-dot.source-revision: "%s"\n' "$OPEN_DOT_SOURCE_SHA"
       printf '      com.singulance.open-dot.image-digest: "%s"\n' "$image_digest"
@@ -277,7 +318,7 @@ docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --proj
 # Open Dot's database is a dedicated persistent dependency. Create or start it
 # on the first scoped release, but never force-recreate it with an app image
 # update. The named volume is independent of HIVEMIND Postgres.
-if [[ ",${SERVICES}," == *,open-dot,* ]]; then
+if [[ ",${SERVICES}," == *,open-dot,* && "$OPEN_DOT_MODE" = cloud ]]; then
   db_state=$(docker inspect hm-open-dot-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)
   if [ "$db_state" != healthy ]; then
     docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" --env-file "$ENVF" up -d --no-deps open-dot-postgres >/dev/null
@@ -369,8 +410,10 @@ fi
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
+  compose_service="$s"
+  [ "$s" != open-dot ] || compose_service="$OPEN_DOT_COMPOSE_SERVICE"
   docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
-    --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
+    --env-file "$ENVF" up -d --no-deps --force-recreate "$compose_service" >/dev/null
   if [ "$s" = harness-runner ]; then
     # The tunnel is a profile-bound companion: it is never deployed without
     # the runner and has no independent image or persistence lifecycle.
@@ -402,6 +445,32 @@ for s in "${SVCS[@]}"; do
   [ "$rev" = "$SHA" ] || { ok="$ok ✗ label=$rev≠$SHA"; FAIL=1; }
   echo "[verify] $s $c → $st  rev=${rev:0:12}  $ok"
 done
+# Publish the managed HTTPS route only after the app is healthy. The versioned
+# helper uses the existing Caddy API/config inode and refuses drift. App-level
+# Core authentication and fixed owner binding remain mandatory in local mode.
+if [[ ",${SERVICES}," == *,open-dot,* && "$OPEN_DOT_MODE" = local-prototype ]]; then
+  [ "$FAIL" = 0 ] \
+    || { echo "FATAL: local-prototype app health or immutable revision verification failed; refusing to publish ingress"; exit 1; }
+  [ -f "$REL/scripts/install-open-dot-ingress.py" ] \
+    || { echo "FATAL: local-prototype requires the versioned managed Open Dot ingress helper"; exit 1; }
+  python3 "$REL/scripts/install-open-dot-ingress.py" --state-dir "$STATE_ROOT/open-dot-ingress"
+  # This route is newly managed on the first install. Verify the public health
+  # endpoint with certificate validation enabled before accepting a canary;
+  # never use -k for the protected local service.
+  tls_code=""
+  for i in $(seq 1 24); do
+    tls_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+      "${local_public_url}/api/health" 2>/dev/null || true)
+    [ "$tls_code" = 200 ] && break
+    sleep 5
+  done
+  if [ "$tls_code" != 200 ]; then
+    echo "[canary] TLS-verified ${local_public_url}/api/health → ${tls_code:-unavailable} ✗"
+    FAIL=1
+  else
+    echo "[canary] TLS-verified ${local_public_url}/api/health → 200 ✓"
+  fi
+fi
 if [ "$SKIP_CANARY" = 0 ] && [ -n "$CANARY_URL" ]; then
   code=""; for i in $(seq 1 12); do code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$CANARY_URL" || true); case "$code" in 2*|3*|401|403) break;; esac; sleep 3; done
   echo "[canary] $CANARY_URL → $code"; case "$code" in 2*|3*|401|403);; *) FAIL=1;; esac
@@ -421,7 +490,7 @@ fi
 # ── manifest ───────────────────────────────────────────────────────────────
 {
   echo "{"; echo "  \"sha\": \"$SHA\","; echo "  \"short\": \"$SHORT\","; echo "  \"ts\": \"$TS\","
-  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; [ -z "$HARNESS_IMAGE_EXPECTED_ID" ] || echo "  \"harness_image_id\": \"$HARNESS_IMAGE_EXPECTED_ID\","; [ -z "$OPEN_DOT_IMAGE" ] || echo "  \"open_dot_image\": \"$OPEN_DOT_IMAGE\","; [ -z "$OPEN_DOT_SOURCE_SHA" ] || echo "  \"open_dot_source_sha\": \"$OPEN_DOT_SOURCE_SHA\","; echo "  \"worktree\": \"$REL\","
+  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; [ -z "$HARNESS_IMAGE_EXPECTED_ID" ] || echo "  \"harness_image_id\": \"$HARNESS_IMAGE_EXPECTED_ID\","; [ -z "$OPEN_DOT_IMAGE" ] || echo "  \"open_dot_image\": \"$OPEN_DOT_IMAGE\","; [ -z "$OPEN_DOT_SOURCE_SHA" ] || echo "  \"open_dot_source_sha\": \"$OPEN_DOT_SOURCE_SHA\","; [[ ",${SERVICES}," != *,open-dot,* ]] || echo "  \"open_dot_mode\": \"$OPEN_DOT_MODE\","; echo "  \"worktree\": \"$REL\","
   echo -n "  \"rollback\": {"; first=1; for s in "${!ROLLBACK[@]}"; do [ $first = 1 ] || echo -n ","; first=0; echo -n "\"$s\":\"${ROLLBACK[$s]}\""; done; echo "},"
   echo "  \"result\": \"$([ $FAIL = 0 ] && echo ok || echo FAILED)\""; echo "}"
 } > "$MANIFEST"

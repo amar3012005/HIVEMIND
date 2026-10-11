@@ -12,6 +12,12 @@ BRANCH="${1:-singulance-main}"
 CANON_REMOTE="${SINGULANCE_CANON_REMOTE:-https://github.com/amar3012005/HIVEMIND.git}"
 SHA=$(git ls-remote "$CANON_REMOTE" "refs/heads/$BRANCH" | awk '{print $1}')
 [ -n "$SHA" ] || { echo "FATAL: $BRANCH does not exist on $CANON_REMOTE"; exit 1; }
+if [ -n "${SINGULANCE_EXPECTED_SHA:-}" ]; then
+  [[ "$SINGULANCE_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "FATAL: SINGULANCE_EXPECTED_SHA must be a full 40-character commit SHA" >&2; exit 2; }
+  [ "$SHA" = "$SINGULANCE_EXPECTED_SHA" ] \
+    || { echo "FATAL: canonical branch moved from expected $SINGULANCE_EXPECTED_SHA to $SHA" >&2; exit 1; }
+fi
 
 git -C /root/hivemind-main \
   -c submodule.recurse=false \
@@ -54,5 +60,8 @@ echo "== canonical release $BRANCH @ $SHA services=$SERVICES"
 OPEN_DOT_ARGS=()
 if [ -n "${OPEN_DOT_IMAGE:-}" ] || [ -n "${OPEN_DOT_SOURCE_SHA:-}" ]; then
   OPEN_DOT_ARGS=(--open-dot-image "${OPEN_DOT_IMAGE:-}" --open-dot-source-sha "${OPEN_DOT_SOURCE_SHA:-}")
+fi
+if [ -n "${OPEN_DOT_MODE:-}" ]; then
+  OPEN_DOT_ARGS+=(--open-dot-mode "$OPEN_DOT_MODE")
 fi
 "$RUNNER" --sha "$SHA" --services "$SERVICES" "${RELEASE_SCOPE_ARGS[@]}" "${OPEN_DOT_ARGS[@]}"

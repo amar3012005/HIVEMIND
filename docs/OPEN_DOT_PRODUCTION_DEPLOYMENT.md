@@ -1,10 +1,19 @@
 # Open Dot production service
 
-Open Dot is a scoped container service in the canonical SINGULANCE deployment. It runs one
-organization and one authenticated user per process. The app has a private network, private data
-volume, and a dedicated PostgreSQL container and volume. It does not join or read HIVEMIND's
-PostgreSQL service. Core/control-plane remain the identity authority; Open Dot calls the existing
+Open Dot is a scoped container service in the canonical SINGULANCE deployment. The initial
+deployment is a single-user local prototype bound to the signed-in SINGULANCE workspace owner
+AMAR (`amarsai2005@gmail.com`). Core/control-plane remain the identity authority; Open Dot calls the existing
 `https://api.singulancelabs.com/auth/session` endpoint with the browser's `hm_cp_session` cookie.
+The local prototype uses a dedicated persistent data volume and requires
+`DOTS_PROTECTED_LOCAL_SERVER=1`; requests must authenticate and match the owner binding before
+pages, server actions, or APIs are served. Its no-data health endpoint and static assets do not
+grant application access. Do not copy a developer machine's local database or secrets.
+
+The prior isolated PostgreSQL deployment remains available as `cloud` mode. It uses the
+`open-dot` Compose profile and its existing dedicated database/data volumes. The local prototype
+uses the separate `open-dot-local` profile and `hivemind-open-dot-local-data`; it does not start
+or connect to PostgreSQL. These modes share the immutable Open Dot image and loopback port, so
+they are mutually exclusive for a given release.
 
 ## Immutable image input
 
@@ -20,51 +29,51 @@ revision in the release manifest. It never builds Open Dot from the HIVE-MIND wo
 
 ## Managed environment
 
-Provision these values through the production secret/configuration manager; keep them out of Git
-and deployment output:
+The versioned local-prototype setup resolves the two owner IDs from the live Core database using
+the exact verified account and active SINGULANCE owner membership. It uses the immutable running
+Core image in a disposable read-only container, writes only these non-secret binding values to the
+managed configuration with a private backup and atomic replace, and never prints IDs or credentials:
 
 ```dotenv
 OPEN_DOT_ORGANIZATION_ID=<existing SINGULANCE organization ID>
 OPEN_DOT_USER_ID=<existing authenticated user ID in that organization>
 OPEN_DOT_PUBLIC_URL=https://dots.singulancelabs.com
-OPEN_DOT_DB_PASSWORD=<unique URL-safe password using letters, digits, underscores, or hyphens>
 ```
 
-The release helper requires both identity pins and the dedicated database password before enabling
-the profile. At runtime, the auth adapter must reject a missing user/org, a mismatched pinned user
+The helper requires exactly one active, undeleted owner membership for that account and workspace;
+it refuses ambiguity or conflicting existing values. The `cloud` mode additionally requires a
+unique PostgreSQL password. At runtime,
+the auth adapter must reject a missing user/org, a mismatched pinned user
 or org, an unsigned request, an unavailable auth service, and an auth endpoint redirect. The
 process-local browser, provider credentials, and app data must never be shared between users. A
 second user requires a separately scoped process, database, data volume, and service identity; this
-initial service does not claim multiuser isolation inside one process.
+initial local prototype does not claim multiuser isolation inside one process.
 
 ## Release and proxy
 
-Before dispatch, the scoped release mechanism must support both immutable Open Dot image inputs and
-the staged proxy route. Confirm DNS/TLS and the route are installed through that approved mechanism.
-The snippet below is review material only; this scaffold does not edit the live Caddyfile. If the
-release mechanism cannot stage the route and forward the image digest plus source SHA, stop before
-dispatch; do not use direct SSH as a fallback.
+Dispatch the exact immutable Open Dot image digest, matching 40-character source SHA, and
+`open_dot_mode=local-prototype` through the scoped release gateway. Its canonical release helper
+starts only `hm-open-dot` with the local profile, waits for healthy status and matching artifact
+identity, then installs `dots.singulancelabs.com` through the versioned managed Caddy API helper.
+That helper uses the existing Caddy config and bind-mounted file, refuses drift, and does not add a
+second proxy. The release then requires a TLS-validated public `/api/health` response; it does not
+skip certificate verification. DNS must resolve to the managed host and the existing Caddy setup
+must be able to provision TLS. If health, route installation, or TLS verification fails, the
+release stops before reporting success.
 
-Once those prerequisites are met, call the canonical production release with only `open-dot`, and
-supply the immutable image plus its Open Dot source commit. Its scoped path provisions or starts only
-`hm-open-dot-postgres` when needed, leaves a healthy database and its persistent volume alone
-during app replacement, then recreates only `hm-open-dot`. The app maps to `127.0.0.1:3177`, with
-computer execution disabled until its separately scoped E2B identity is configured and verified.
+The managed setup still needs the owner IDs populated before dispatch. Once configured, the release
+recreates only `hm-open-dot`, maps it to `127.0.0.1:3177`, and leaves computer execution disabled
+until its separately scoped E2B identity is configured and verified. The default mode remains
+`cloud`; select `local-prototype` explicitly for this first single-user instance.
 
 The app health check calls the unauthenticated `GET /api/health` readiness endpoint, which returns
-only service status and a Postgres `SELECT 1` result. It exposes no identity, tenant, or session
-data. The public readiness canary verifies only service routing and app/Postgres readiness. The
-Caddy site uses existing automatic TLS; do not start a second reverse proxy. After release, run a
-separate signed-in canary that proves the configured user/org binding before treating the public
-service as live. The unauthenticated health result is not authentication proof.
+only service status. In cloud mode it also checks Postgres readiness. The public health result
+proves routing and readiness only, not authentication. After release, run a separate signed-in
+canary that proves the configured user/org binding before treating the app as live.
 
 ## State and rollback
 
-Open Dot uses the named `hivemind-open-dot-postgres-data` and `hivemind-open-dot-data` volumes on a
-private `hivemind-open-dot` network. Do not map it to `postgres-data`, `hivemind-data`, or the
-HIVEMIND Postgres container. App rollback uses the previous immutable image digest recorded by the
-canonical release manifest; the database volume is not removed or recreated during rollback. On a
-failed first install with no previous Open Dot container/image, stop and remove only `hm-open-dot`
-(`docker rm -f hm-open-dot` if Compose state cannot remove it) and remove the dots site block from
-the managed Caddyfile, then restart Caddy through its normal procedure. Preserve both Open Dot
-volumes for diagnosis; never remove the database or data volume as part of service rollback.
+Cloud mode uses the named `hivemind-open-dot-postgres-data` and `hivemind-open-dot-data` volumes;
+local-prototype mode uses only `hivemind-open-dot-local-data`. Neither mode uses HIVEMIND's shared
+Postgres or app-data volumes. App rollback uses the previous immutable image digest recorded by the
+canonical release manifest. Preserve all Open Dot volumes during diagnosis and rollback.

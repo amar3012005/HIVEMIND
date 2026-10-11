@@ -39,6 +39,7 @@ export default {
           image: body.image,
           openDotImage: body.open_dot_image,
           openDotSourceSha: body.open_dot_source_sha,
+          openDotMode: body.open_dot_mode,
           note: body.note,
           requestedBy: body.requested_by || request.headers.get('x-requested-by') || 'unknown',
         },

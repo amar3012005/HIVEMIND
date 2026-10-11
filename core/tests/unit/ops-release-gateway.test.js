@@ -57,8 +57,22 @@ test('Open Dot deployment forwards an isolated immutable image and exact source 
   assert.deepEqual(JSON.parse(calls[0].init.body), {
     artifact: 'open-dot', sha: SHA, services: ['open-dot'],
     open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA,
+    open_dot_mode: 'cloud',
     note: 'Open Dot image update', requested_by: 'mcp:test',
   });
+});
+
+test('Open Dot local-prototype mode is explicitly forwarded with the immutable artifact', async () => {
+  const calls = [];
+  const result = await invokeOpsTool('deploy_core_services', {
+    sha: SHA, services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE,
+    open_dot_source_sha: OPEN_DOT_SOURCE_SHA, open_dot_mode: 'local-prototype',
+  }, { env, requestedBy: 'mcp:test', fetchImpl: async (_url, init) => {
+    calls.push(init);
+    return new Response(JSON.stringify({ instanceId: 'open_dot_local_123' }), { status: 202 });
+  } });
+  assert.equal(result.ok, true);
+  assert.equal(JSON.parse(calls[0].body).open_dot_mode, 'local-prototype');
 });
 
 test('existing Core service deployment request remains unchanged', async () => {
@@ -83,6 +97,8 @@ test('Open Dot deployment rejects mixed services, missing or malformed image inp
     { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: 'D'.repeat(40) },
     { services: ['core'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA },
     { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA, image: DIGEST },
+    { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA, open_dot_mode: 'local' },
+    { services: ['core'], open_dot_mode: 'local-prototype' },
   ]) {
     const result = await invoke(args);
     assert.equal(result.ok, false, JSON.stringify(args));

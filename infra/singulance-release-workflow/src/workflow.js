@@ -61,7 +61,7 @@ const ARTIFACTS = {
 
 export class SingulanceProductionRelease extends WorkflowEntrypoint {
   /**
- * @param {{ payload: { artifact: Artifact, sha?: string, services?: string[], image?: string, openDotImage?: string, openDotSourceSha?: string, requestedBy?: string } }} event
+ * @param {{ payload: { artifact: Artifact, sha?: string, services?: string[], image?: string, openDotImage?: string, openDotSourceSha?: string, openDotMode?: 'cloud' | 'local-prototype', requestedBy?: string } }} event
    * @param {import('cloudflare:workers').WorkflowStep} step
    */
   async run(event, step) {
@@ -73,6 +73,13 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
     if (artifact === 'open-dot' && event.payload?.services
       && (event.payload.services.length !== 1 || event.payload.services[0] !== 'open-dot')) {
       throw new Error('open-dot releases may target only the open-dot service');
+    }
+    if (artifact === 'open-dot' && event.payload?.openDotMode !== undefined
+      && !['cloud', 'local-prototype'].includes(event.payload.openDotMode)) {
+      throw new Error('open-dot mode must be cloud or local-prototype');
+    }
+    if (artifact !== 'open-dot' && event.payload?.openDotMode !== undefined) {
+      throw new Error('open-dot mode requires the open-dot artifact');
     }
 
     const sha = await step.do('resolve-locked-ref', async () => {
@@ -103,6 +110,7 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
             ...(event.payload?.image ? { harness_image: event.payload.image } : {}),
             ...(event.payload?.openDotImage ? { open_dot_image: event.payload.openDotImage } : {}),
             ...(event.payload?.openDotSourceSha ? { open_dot_source_sha: event.payload.openDotSourceSha } : {}),
+            ...(event.payload?.openDotMode ? { open_dot_mode: event.payload.openDotMode } : {}),
             requested_by: event.payload.requestedBy || 'cloudflare-workflow',
           },
         }),

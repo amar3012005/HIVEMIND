@@ -48,8 +48,13 @@ class FakeCaddy:
         self.baseline["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"].append(
             {"handler": "file_server", "hide": ["./Caddyfile"]}
         )
+        self.baseline["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"].append(
+            {"handler": "subroute", "routes": [{"group": "group20", "handle": [{"group": "group21"}]}]}
+        )
         self.target = route(HELPER.SITE, HELPER.UPSTREAM)
         self.candidate = copy.deepcopy(self.baseline)
+        self.candidate["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][2]["routes"][0]["group"] = "group21"
+        self.candidate["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][2]["routes"][0]["handle"][0]["group"] = "group22"
         self.candidate["apps"]["http"]["servers"]["srv0"]["routes"].append(copy.deepcopy(self.target))
         self.live = copy.deepcopy(self.baseline)
         self.live["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][1]["hide"] = [
@@ -128,7 +133,7 @@ class InstallOpenDotIngressTests(unittest.TestCase):
             self.assertEqual(saved["etag"], "root-etag")
             self.assertEqual(api.post_count, 1)
 
-    def test_idempotent_retry_does_not_append_duplicate_route(self):
+    def test_idempotent_retry_tolerates_adapter_group_renumbering(self):
         api = FakeCaddy()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

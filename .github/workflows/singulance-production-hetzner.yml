@@ -31,6 +31,14 @@ on:
           - cloud
           - local-prototype
         default: cloud
+      open_dot_image_archive:
+        description: Optional private server-staged image archive for verified offline loading
+        required: false
+        type: string
+      open_dot_image_receipt:
+        description: Matching private server-staged transfer receipt
+        required: false
+        type: string
       requested_by:
         description: Who triggered the Cloudflare Workflow
         required: false
@@ -67,6 +75,8 @@ jobs:
           OPEN_DOT_IMAGE: ${{ github.event.inputs.open_dot_image }}
           OPEN_DOT_SOURCE_SHA: ${{ github.event.inputs.open_dot_source_sha }}
           OPEN_DOT_MODE: ${{ github.event.inputs.open_dot_mode }}
+          OPEN_DOT_IMAGE_ARCHIVE: ${{ github.event.inputs.open_dot_image_archive }}
+          OPEN_DOT_IMAGE_RECEIPT: ${{ github.event.inputs.open_dot_image_receipt }}
           RELEASE_SOURCE_SHA: ${{ env.RELEASE_SOURCE_SHA }}
         with:
           host: ${{ secrets.SINGULANCE_SSH_HOST }}
@@ -74,7 +84,7 @@ jobs:
           key: ${{ secrets.SINGULANCE_SSH_KEY }}
           script_stop: true
           command_timeout: 25m
-          envs: OPEN_DOT_IMAGE,OPEN_DOT_SOURCE_SHA,OPEN_DOT_MODE,RELEASE_SOURCE_SHA
+          envs: OPEN_DOT_IMAGE,OPEN_DOT_SOURCE_SHA,OPEN_DOT_MODE,OPEN_DOT_IMAGE_ARCHIVE,OPEN_DOT_IMAGE_RECEIPT,RELEASE_SOURCE_SHA
           script: |
             set -euo pipefail
             [[ "$RELEASE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]

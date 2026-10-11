@@ -8,6 +8,8 @@
 #                        [--service-scoped] [--allow-divergence]
 #                        [--open-dot-image <registry/name@sha256:digest>]
 #                        [--open-dot-source-sha <40-char-open-dot-git-sha>]
+#                        [--open-dot-image-archive <private-staged-archive>]
+#                        [--open-dot-image-receipt <private-staged-receipt>]
 #                        [--open-dot-mode cloud|local-prototype]
 #
 # Enforces the canonical parallel workflow:
@@ -23,7 +25,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""; OPEN_DOT_MODE="cloud"
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""; OPEN_DOT_MODE="cloud"; OPEN_DOT_IMAGE_ARCHIVE=""; OPEN_DOT_IMAGE_RECEIPT=""; OPEN_DOT_IMAGE_PRELOADED=0; OPEN_DOT_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE_ID=""; OPEN_DOT_ARCHIVE_SHA256=""
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -39,6 +41,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --harness-image-expected-id) HARNESS_IMAGE_EXPECTED_ID="$2"; shift 2;;
   --open-dot-image) OPEN_DOT_IMAGE="$2"; shift 2;;
   --open-dot-source-sha) OPEN_DOT_SOURCE_SHA="$2"; shift 2;;
+  --open-dot-image-archive) OPEN_DOT_IMAGE_ARCHIVE="$2"; shift 2;;
+  --open-dot-image-receipt) OPEN_DOT_IMAGE_RECEIPT="$2"; shift 2;;
   --open-dot-mode) OPEN_DOT_MODE="$2"; shift 2;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
@@ -94,6 +98,19 @@ if [[ ",${SERVICES}," == *,open-dot,* ]]; then
     || { echo "FATAL: open-dot requires --open-dot-image pinned by @sha256"; exit 2; }
   [[ "$OPEN_DOT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
     || { echo "FATAL: open-dot requires --open-dot-source-sha with the 40-character Open Dot commit"; exit 2; }
+  if [ -n "$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT" ]; then
+    [ -n "$OPEN_DOT_IMAGE_ARCHIVE" ] && [ -n "$OPEN_DOT_IMAGE_RECEIPT" ] \
+      || { echo "FATAL: preloaded Open Dot image requires both archive and receipt paths"; exit 2; }
+    [[ "$OPEN_DOT_IMAGE_ARCHIVE" =~ ^/root/releases/artifacts/open-dot/[0-9a-f]{64}/open-dot-image\.tar\.gz$ ]] \
+      || { echo "FATAL: Open Dot image archive must come from the versioned private staging path"; exit 2; }
+    [[ "$OPEN_DOT_IMAGE_RECEIPT" = "${OPEN_DOT_IMAGE_ARCHIVE%/*}/image-transfer-receipt.json" ]] \
+      || { echo "FATAL: Open Dot image receipt must be staged beside its archive"; exit 2; }
+    OPEN_DOT_IMAGE_PRELOADED=1
+    OPEN_DOT_DEPLOY_IMAGE=""
+  else
+    OPEN_DOT_IMAGE_PRELOADED=0
+    OPEN_DOT_DEPLOY_IMAGE="$OPEN_DOT_IMAGE"
+  fi
   if [ "$OPEN_DOT_MODE" = cloud ]; then
     for required_env in OPEN_DOT_ORGANIZATION_ID OPEN_DOT_USER_ID OPEN_DOT_PUBLIC_URL; do
       if ! awk -F= -v key="$required_env" '$1 == key && length(substr($0, length(key) + 2)) > 0 { found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
@@ -113,7 +130,7 @@ if [[ ",${SERVICES}," == *,open-dot,* ]]; then
     local_public_url="https://dots.singulancelabs.com"
   fi
 else
-  [ -z "$OPEN_DOT_IMAGE$OPEN_DOT_SOURCE_SHA" ] \
+  [ -z "$OPEN_DOT_IMAGE$OPEN_DOT_SOURCE_SHA$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT" ] \
     || { echo "FATAL: Open Dot image inputs require --services open-dot"; exit 2; }
   [ "$OPEN_DOT_MODE" = cloud ] || { echo "FATAL: --open-dot-mode requires --services open-dot"; exit 2; }
 fi
@@ -263,9 +280,33 @@ fi
 echo "services:" > "$OVERRIDE.tmp"
 for s in "${SVCS[@]}"; do
   if [ "$s" = open-dot ]; then
-    echo "[pull] open-dot → $OPEN_DOT_IMAGE"
-    docker pull "$OPEN_DOT_IMAGE" >/dev/null
-    image_source_sha=$(docker image inspect "$OPEN_DOT_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)
+    if [ "$OPEN_DOT_IMAGE_PRELOADED" = 1 ]; then
+      echo "[image] open-dot verifies and loads private staged archive"
+      receipt_values=$(python3 "$REL/scripts/verify-open-dot-image-archive.py" \
+        --archive "$OPEN_DOT_IMAGE_ARCHIVE" --receipt "$OPEN_DOT_IMAGE_RECEIPT" \
+        --registry-image "$OPEN_DOT_IMAGE" --source-sha "$OPEN_DOT_SOURCE_SHA")
+      IFS=$'\t' read -r OPEN_DOT_DEPLOY_IMAGE OPEN_DOT_IMAGE_ID OPEN_DOT_ARCHIVE_SHA256 <<< "$receipt_values"
+      archive_key="${OPEN_DOT_IMAGE_ARCHIVE%/*}"
+      archive_key="${archive_key##*/}"
+      [ "$archive_key" = "$OPEN_DOT_ARCHIVE_SHA256" ] || {
+        echo "FATAL: staged Open Dot archive directory does not match its content digest"; exit 1;
+      }
+      docker load --input "$OPEN_DOT_IMAGE_ARCHIVE" >/dev/null
+      loaded_id=$(docker image inspect "$OPEN_DOT_DEPLOY_IMAGE" --format '{{.Id}}' 2>/dev/null || true)
+      [ "$loaded_id" = "$OPEN_DOT_IMAGE_ID" ] || {
+        echo "FATAL: preloaded Open Dot image ID ${loaded_id:-missing} does not match receipt"; exit 1;
+      }
+      actual_id=$(docker image inspect "$OPEN_DOT_IMAGE_ID" --format '{{.Id}}' 2>/dev/null || true)
+      [ "$actual_id" = "$OPEN_DOT_IMAGE_ID" ] || {
+        echo "FATAL: expected preloaded Open Dot image is absent or changed"; exit 1;
+      }
+      image_source_sha=$(docker image inspect "$OPEN_DOT_IMAGE_ID" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)
+    else
+      echo "[pull] open-dot → $OPEN_DOT_IMAGE"
+      docker pull "$OPEN_DOT_IMAGE" >/dev/null
+      OPEN_DOT_DEPLOY_IMAGE="$OPEN_DOT_IMAGE"
+      image_source_sha=$(docker image inspect "$OPEN_DOT_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)
+    fi
     [ "$image_source_sha" = "$OPEN_DOT_SOURCE_SHA" ] || {
       echo "FATAL: Open Dot image source revision ${image_source_sha:-missing} does not match $OPEN_DOT_SOURCE_SHA"
       exit 1
@@ -274,7 +315,7 @@ for s in "${SVCS[@]}"; do
     if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
     image_digest="${OPEN_DOT_IMAGE##*@}"
     {
-      printf '  %s:\n    image: %s\n    labels:\n' "$OPEN_DOT_COMPOSE_SERVICE" "$OPEN_DOT_IMAGE"
+      printf '  %s:\n    image: %s\n    labels:\n' "$OPEN_DOT_COMPOSE_SERVICE" "$OPEN_DOT_DEPLOY_IMAGE"
       printf '      org.opencontainers.image.revision: "%s"\n' "$SHA"
       printf '      com.singulance.open-dot.source-revision: "%s"\n' "$OPEN_DOT_SOURCE_SHA"
       printf '      com.singulance.open-dot.image-digest: "%s"\n' "$image_digest"
@@ -482,7 +523,8 @@ done
 if [ "${#VERIFY_SERVICES[@]}" -gt 0 ]; then
   VERIFY_ARGS=()
   if [[ ",${SERVICES}," == *,open-dot,* ]]; then
-    VERIFY_ARGS+=(--open-dot-image "$OPEN_DOT_IMAGE" --open-dot-source-sha "$OPEN_DOT_SOURCE_SHA")
+    VERIFY_ARGS+=(--open-dot-image "$OPEN_DOT_IMAGE" --open-dot-source-sha "$OPEN_DOT_SOURCE_SHA" --open-dot-deploy-image "$OPEN_DOT_DEPLOY_IMAGE")
+    [ "$OPEN_DOT_IMAGE_PRELOADED" = 0 ] || VERIFY_ARGS+=(--open-dot-image-expected-id "$OPEN_DOT_IMAGE_ID")
   fi
   "$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$(IFS=,; echo "${VERIFY_SERVICES[*]}")" --source-root "$REL" "${VERIFY_ARGS[@]}" || FAIL=1
 fi
@@ -491,6 +533,9 @@ fi
 {
   echo "{"; echo "  \"sha\": \"$SHA\","; echo "  \"short\": \"$SHORT\","; echo "  \"ts\": \"$TS\","
   echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; [ -z "$HARNESS_IMAGE_EXPECTED_ID" ] || echo "  \"harness_image_id\": \"$HARNESS_IMAGE_EXPECTED_ID\","; [ -z "$OPEN_DOT_IMAGE" ] || echo "  \"open_dot_image\": \"$OPEN_DOT_IMAGE\","; [ -z "$OPEN_DOT_SOURCE_SHA" ] || echo "  \"open_dot_source_sha\": \"$OPEN_DOT_SOURCE_SHA\","; [[ ",${SERVICES}," != *,open-dot,* ]] || echo "  \"open_dot_mode\": \"$OPEN_DOT_MODE\","; echo "  \"worktree\": \"$REL\","
+  [ -z "$OPEN_DOT_DEPLOY_IMAGE" ] || echo "  \"open_dot_deploy_image\": \"$OPEN_DOT_DEPLOY_IMAGE\",";
+  [ -z "$OPEN_DOT_IMAGE_ID" ] || echo "  \"open_dot_image_id\": \"$OPEN_DOT_IMAGE_ID\",";
+  [ -z "$OPEN_DOT_ARCHIVE_SHA256" ] || echo "  \"open_dot_archive_sha256\": \"$OPEN_DOT_ARCHIVE_SHA256\",";
   echo -n "  \"rollback\": {"; first=1; for s in "${!ROLLBACK[@]}"; do [ $first = 1 ] || echo -n ","; first=0; echo -n "\"$s\":\"${ROLLBACK[$s]}\""; done; echo "},"
   echo "  \"result\": \"$([ $FAIL = 0 ] && echo ok || echo FAILED)\""; echo "}"
 } > "$MANIFEST"

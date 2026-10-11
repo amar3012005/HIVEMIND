@@ -64,4 +64,9 @@ fi
 if [ -n "${OPEN_DOT_MODE:-}" ]; then
   OPEN_DOT_ARGS+=(--open-dot-mode "$OPEN_DOT_MODE")
 fi
+if [ -n "${OPEN_DOT_IMAGE_ARCHIVE:-}${OPEN_DOT_IMAGE_RECEIPT:-}" ]; then
+  [ -n "${OPEN_DOT_IMAGE_ARCHIVE:-}" ] && [ -n "${OPEN_DOT_IMAGE_RECEIPT:-}" ] \
+    || { echo "FATAL: preloaded Open Dot image requires both archive and receipt paths" >&2; exit 2; }
+  OPEN_DOT_ARGS+=(--open-dot-image-archive "$OPEN_DOT_IMAGE_ARCHIVE" --open-dot-image-receipt "$OPEN_DOT_IMAGE_RECEIPT")
+fi
 "$RUNNER" --sha "$SHA" --services "$SERVICES" "${RELEASE_SCOPE_ARGS[@]}" "${OPEN_DOT_ARGS[@]}"

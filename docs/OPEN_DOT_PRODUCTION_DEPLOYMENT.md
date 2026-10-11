@@ -4,7 +4,7 @@ Open Dot is a scoped container service in the canonical SINGULANCE deployment. I
 organization and one authenticated user per process. The app has a private network, private data
 volume, and a dedicated PostgreSQL container and volume. It does not join or read HIVEMIND's
 PostgreSQL service. Core/control-plane remain the identity authority; Open Dot calls the existing
-`https://core.singulancelabs.com/auth/session` endpoint with the browser's `hm_cp_session` cookie.
+`https://api.singulancelabs.com/auth/session` endpoint with the browser's `hm_cp_session` cookie.
 
 ## Immutable image input
 

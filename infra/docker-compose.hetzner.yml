@@ -321,7 +321,7 @@ services:
       DOTS_TENANT_ID: ${OPEN_DOT_ORGANIZATION_ID:-}
       DOTS_USER_ID: ${OPEN_DOT_USER_ID:-}
       DOTS_PUBLIC_URL: ${OPEN_DOT_PUBLIC_URL:-}
-      DOTS_HIVEMIND_AUTH_URL: ${OPEN_DOT_HIVEMIND_AUTH_URL:-https://core.singulancelabs.com/auth/session}
+      DOTS_HIVEMIND_AUTH_URL: ${OPEN_DOT_HIVEMIND_AUTH_URL:-https://api.singulancelabs.com/auth/session}
       DOTS_HIVEMIND_SESSION_COOKIE: hm_cp_session
       OPEN_DOT_DATABASE_URL: postgresql://open_dot:${OPEN_DOT_DB_PASSWORD:-}@open-dot-postgres:5432/open_dot
     depends_on:

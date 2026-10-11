@@ -51,11 +51,13 @@ export function getOpsToolsManifest({ isOperator = false, env = process.env } = 
           sha: { type: 'string', description: 'Exact 40-character pushed HIVE-MIND singulance-main SHA.' },
           services: {
             type: 'array',
-            items: { type: 'string', enum: ['core', 'control-plane', 'employees'] },
+            items: { type: 'string', enum: ['core', 'control-plane', 'employees', 'open-dot'] },
             minItems: 1,
             uniqueItems: true,
-            description: 'Affected container services only.',
+            description: 'Affected container services only. Open Dot must be the sole service and requires both Open Dot image inputs.',
           },
+          open_dot_image: { type: 'string', description: 'Immutable Open Dot image reference ending in @sha256:<64 hex>; required only for services=[open-dot].' },
+          open_dot_source_sha: { type: 'string', description: 'Exact 40-character Open Dot source commit SHA; required only for services=[open-dot].' },
           note: { type: 'string', description: 'Short release note.' },
         },
         required: ['sha', 'services'],
@@ -103,9 +105,37 @@ function requestFor(name, args = {}) {
       return { ok: true, method: 'POST', path: '/v1/release', body: { artifact: 'frontend', sha, note: args.note } };
     case 'deploy_core_services': {
       const services = Array.isArray(args.services) ? [...new Set(args.services)] : [];
-      const allowed = new Set(['core', 'control-plane', 'employees']);
+      const allowed = new Set(['core', 'control-plane', 'employees', 'open-dot']);
       if (!services.length || services.some((service) => !allowed.has(service))) {
-        return validationError('services must contain one or more of: core, control-plane, employees');
+        return validationError('services must contain one or more of: core, control-plane, employees, open-dot');
+      }
+      const hasOpenDotInputs = args.open_dot_image !== undefined || args.open_dot_source_sha !== undefined;
+      const hasOpenDot = services.includes('open-dot');
+      if (hasOpenDot && services.length !== 1) {
+        return validationError('open-dot must be the only service in a release');
+      }
+      if (!hasOpenDot && hasOpenDotInputs) {
+        return validationError('Open Dot image inputs require services=[open-dot]');
+      }
+      if (hasOpenDot) {
+        const openDotImage = String(args.open_dot_image || '').trim();
+        const openDotSourceSha = String(args.open_dot_source_sha || '').trim();
+        if (args.image !== undefined || args.harness_image !== undefined) {
+          return validationError('Open Dot releases cannot include unrelated image inputs');
+        }
+        if (!DIGEST_RE.test(openDotImage)) {
+          return validationError('open_dot_image must be an immutable image reference ending in @sha256:<64 hex>');
+        }
+        if (!/^[a-f0-9]{40}$/.test(openDotSourceSha)) {
+          return validationError('open_dot_source_sha must be the exact 40-character Open Dot source SHA');
+        }
+        return {
+          ok: true, method: 'POST', path: '/v1/release',
+          body: {
+            artifact: 'open-dot', sha, services, open_dot_image: openDotImage,
+            open_dot_source_sha: openDotSourceSha, note: args.note,
+          },
+        };
       }
       return { ok: true, method: 'POST', path: '/v1/release', body: { artifact: 'core-services', sha, services, note: args.note } };
     }

@@ -16,8 +16,11 @@ create a local MCP process, copy a token into a repository, or deploy through a 
 ## Choose the owner
 
 - Da-vinci Cloudflare frontend: `deploy_cloudflare_frontend` with the exact pushed Da-vinci SHA.
-- Core, Control Plane, or Employees: `deploy_core_services` with the exact pushed parent SHA and
-  only the affected services from `core`, `control-plane`, and `employees`.
+- Core, Control Plane, Employees, or Open Dot: `deploy_core_services` with the exact pushed parent
+  SHA and only the affected service. Open Dot additionally requires its immutable external image
+  digest and source commit; it is one process pinned to one existing organization and user, with a
+  dedicated Postgres service and volume. The live gateway must explicitly accept and forward both
+  Open Dot image inputs. If it does not, stop before release; do not fall back to direct SSH.
 - Native Harness/Cordis: build and publish the immutable runner image from the Harness SHA first,
   then use `deploy_harness_runner` with the matching parent SHA and image digest.
 - Existing release: `get_release_status` with its returned `instance_id`.

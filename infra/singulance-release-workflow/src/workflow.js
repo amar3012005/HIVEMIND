@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 
-/** @typedef {'frontend' | 'core' | 'control-plane' | 'employees' | 'core-services' | 'harness-runner'} Artifact */
+/** @typedef {'frontend' | 'core' | 'control-plane' | 'employees' | 'core-services' | 'harness-runner' | 'open-dot'} Artifact */
 
 const ARTIFACTS = {
   frontend: {
@@ -49,11 +49,19 @@ const ARTIFACTS = {
     service: 'harness-runner',
     canary: 'https://api.singulancelabs.com/health',
   },
+  'open-dot': {
+    owner: 'amar3012005',
+    repo: 'HIVEMIND',
+    ref: 'singulance-main',
+    workflow: 'singulance-production-hetzner.yml',
+    service: 'open-dot',
+    canary: 'https://dots.singulancelabs.com/api/health',
+  },
 };
 
 export class SingulanceProductionRelease extends WorkflowEntrypoint {
   /**
- * @param {{ payload: { artifact: Artifact, sha?: string, services?: string[], image?: string, requestedBy?: string } }} event
+ * @param {{ payload: { artifact: Artifact, sha?: string, services?: string[], image?: string, openDotImage?: string, openDotSourceSha?: string, requestedBy?: string } }} event
    * @param {import('cloudflare:workers').WorkflowStep} step
    */
   async run(event, step) {
@@ -61,6 +69,10 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
     const spec = ARTIFACTS[artifact];
     if (!spec) {
       throw new Error(`unknown artifact ${artifact}. allowed: ${Object.keys(ARTIFACTS).join(', ')}`);
+    }
+    if (artifact === 'open-dot' && event.payload?.services
+      && (event.payload.services.length !== 1 || event.payload.services[0] !== 'open-dot')) {
+      throw new Error('open-dot releases may target only the open-dot service');
     }
 
     const sha = await step.do('resolve-locked-ref', async () => {
@@ -89,6 +101,8 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
             ...(spec.service ? { services: spec.service } : {}),
             ...(event.payload?.services ? { services: event.payload.services.join(',') } : {}),
             ...(event.payload?.image ? { harness_image: event.payload.image } : {}),
+            ...(event.payload?.openDotImage ? { open_dot_image: event.payload.openDotImage } : {}),
+            ...(event.payload?.openDotSourceSha ? { open_dot_source_sha: event.payload.openDotSourceSha } : {}),
             requested_by: event.payload.requestedBy || 'cloudflare-workflow',
           },
         }),
@@ -128,6 +142,9 @@ export class SingulanceProductionRelease extends WorkflowEntrypoint {
       async () => {
         const res = await fetch(spec.canary, { redirect: 'follow' });
         if (!res.ok) throw new Error(`canary ${spec.canary} → ${res.status}`);
+        // Open Dot's public readiness route reports only app/Postgres health
+        // and deliberately bypasses session auth. It proves routing/readiness,
+        // never authenticated identity; a separate signed-in canary is required.
         return { url: spec.canary, status: res.status };
       },
     );

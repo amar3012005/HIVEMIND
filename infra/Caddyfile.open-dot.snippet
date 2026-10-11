@@ -1,0 +1,5 @@
+# Add to the existing production Caddyfile only after hm-open-dot is healthy.
+# The app port remains bound to loopback and this site uses the existing Caddy TLS.
+dots.singulancelabs.com {
+	reverse_proxy localhost:3177
+}

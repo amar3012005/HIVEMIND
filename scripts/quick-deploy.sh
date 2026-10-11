@@ -51,4 +51,8 @@ trap 'rm -f "$RUNNER"' EXIT
 git -C /root/hivemind-main show "$SHA:scripts/release-canonical.sh" > "$RUNNER"
 chmod 700 "$RUNNER"
 echo "== canonical release $BRANCH @ $SHA services=$SERVICES"
-"$RUNNER" --sha "$SHA" --services "$SERVICES" "${RELEASE_SCOPE_ARGS[@]}"
+OPEN_DOT_ARGS=()
+if [ -n "${OPEN_DOT_IMAGE:-}" ] || [ -n "${OPEN_DOT_SOURCE_SHA:-}" ]; then
+  OPEN_DOT_ARGS=(--open-dot-image "${OPEN_DOT_IMAGE:-}" --open-dot-source-sha "${OPEN_DOT_SOURCE_SHA:-}")
+fi
+"$RUNNER" --sha "$SHA" --services "$SERVICES" "${RELEASE_SCOPE_ARGS[@]}" "${OPEN_DOT_ARGS[@]}"

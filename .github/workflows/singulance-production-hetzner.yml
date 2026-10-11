@@ -15,6 +15,14 @@ on:
         description: Immutable Harness image digest when services includes harness-runner
         required: false
         type: string
+      open_dot_image:
+        description: Immutable Open Dot image digest when services includes open-dot
+        required: false
+        type: string
+      open_dot_source_sha:
+        description: 40-character Open Dot source commit when services includes open-dot
+        required: false
+        type: string
       requested_by:
         description: Who triggered the Cloudflare Workflow
         required: false
@@ -46,12 +54,16 @@ jobs:
           fi
       - name: SSH canonical release
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          OPEN_DOT_IMAGE: ${{ github.event.inputs.open_dot_image }}
+          OPEN_DOT_SOURCE_SHA: ${{ github.event.inputs.open_dot_source_sha }}
         with:
           host: ${{ secrets.SINGULANCE_SSH_HOST }}
           username: ${{ secrets.SINGULANCE_SSH_USER }}
           key: ${{ secrets.SINGULANCE_SSH_KEY }}
           script_stop: true
           command_timeout: 25m
+          envs: OPEN_DOT_IMAGE,OPEN_DOT_SOURCE_SHA
           script: |
             set -euo pipefail
             export RELEASE_SESSION_ID="gha-${{ github.run_id }}"

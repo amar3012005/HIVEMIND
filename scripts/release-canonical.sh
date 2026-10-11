@@ -6,6 +6,8 @@
 #                        [--canary-url https://next.singulancelabs.com/hivemind/app] \
 #                        [--skip-canary] [--skip-migrations] [--dry-run]
 #                        [--service-scoped] [--allow-divergence]
+#                        [--open-dot-image <registry/name@sha256:digest>]
+#                        [--open-dot-source-sha <40-char-open-dot-git-sha>]
 #
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
@@ -20,7 +22,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -34,6 +36,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --harness-image-preloaded) HARNESS_IMAGE_PRELOADED=1; shift;;
   --harness-image-preloaded-ref) HARNESS_IMAGE_PRELOADED_REF="$2"; shift 2;;
   --harness-image-expected-id) HARNESS_IMAGE_EXPECTED_ID="$2"; shift 2;;
+  --open-dot-image) OPEN_DOT_IMAGE="$2"; shift 2;;
+  --open-dot-source-sha) OPEN_DOT_SOURCE_SHA="$2"; shift 2;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
@@ -46,8 +50,8 @@ PRESENCE="$HDIR/scripts/release-presence.sh"
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=hivemind-harness-runner-1 [harness-tunnel]=hivemind-harness-tunnel-1 )
-declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=harness-chat )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=hivemind-harness-runner-1 [harness-tunnel]=hivemind-harness-tunnel-1 [open-dot]=hm-open-dot )
+declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [byod-broker]=byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract [harness-runner]=harness-chat [open-dot]=open-dot )
 COMPOSE_PROJECT=$(docker inspect "${CONTAINER[core]}" \
   --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)
 # A fresh host has no Core label yet; otherwise preserve the live project name
@@ -80,6 +84,21 @@ if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
       exit 1
     fi
   done
+fi
+if [[ ",${SERVICES}," == *,open-dot,* ]]; then
+  [[ "$OPEN_DOT_IMAGE" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]] \
+    || { echo "FATAL: open-dot requires --open-dot-image pinned by @sha256"; exit 2; }
+  [[ "$OPEN_DOT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "FATAL: open-dot requires --open-dot-source-sha with the 40-character Open Dot commit"; exit 2; }
+  for required_env in OPEN_DOT_ORGANIZATION_ID OPEN_DOT_USER_ID OPEN_DOT_PUBLIC_URL OPEN_DOT_DB_PASSWORD; do
+    if ! awk -F= -v key="$required_env" '$1 == key && length(substr($0, length(key) + 2)) > 0 { found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
+      echo "FATAL: open-dot requires non-empty $required_env in the managed production environment"
+      exit 1
+    fi
+  done
+else
+  [ -z "$OPEN_DOT_IMAGE$OPEN_DOT_SOURCE_SHA" ] \
+    || { echo "FATAL: Open Dot image inputs require --services open-dot"; exit 2; }
 fi
 [ "$HARNESS_IMAGE_PRELOADED" = 0 ] || [[ ",${SERVICES}," == *,harness-runner,* ]] \
   || { echo "FATAL: --harness-image-preloaded requires harness-runner"; exit 2; }
@@ -171,6 +190,8 @@ fi
 echo "[worktree] $REL @ $(git -C "$REL" rev-parse --short HEAD)"
 
 # ── compose validation ─────────────────────────────────────────────────────
+COMPOSE_PROFILES=(--profile harness-chat)
+if [[ ",${SERVICES}," == *,open-dot,* ]]; then COMPOSE_PROFILES+=(--profile open-dot); fi
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 IMAGE_LABELS=(--label "org.opencontainers.image.revision=$SHA" --label "org.opencontainers.image.created=$TS")
 STATE_ROOT="${RELEASE_STATE_ROOT:-/root/releases/manifests/$SHORT/$TS}"
@@ -186,7 +207,7 @@ OVERRIDE="$STATE_ROOT/deploy-override.yml"
 # --project-directory. No secret value is copied into this artifact.
 HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
 sed "s#env_file: \[../.env\]#env_file: [$ENVF]#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
-docker compose --project-name "$COMPOSE_PROJECT" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
+docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
   && echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()
 
@@ -200,6 +221,25 @@ fi
 # ── build immutable sha images + preserve rollback ─────────────────────────
 echo "services:" > "$OVERRIDE.tmp"
 for s in "${SVCS[@]}"; do
+  if [ "$s" = open-dot ]; then
+    echo "[pull] open-dot → $OPEN_DOT_IMAGE"
+    docker pull "$OPEN_DOT_IMAGE" >/dev/null
+    image_source_sha=$(docker image inspect "$OPEN_DOT_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)
+    [ "$image_source_sha" = "$OPEN_DOT_SOURCE_SHA" ] || {
+      echo "FATAL: Open Dot image source revision ${image_source_sha:-missing} does not match $OPEN_DOT_SOURCE_SHA"
+      exit 1
+    }
+    CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
+    if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
+    image_digest="${OPEN_DOT_IMAGE##*@}"
+    {
+      printf '  %s:\n    image: %s\n    labels:\n' "$s" "$OPEN_DOT_IMAGE"
+      printf '      org.opencontainers.image.revision: "%s"\n' "$SHA"
+      printf '      com.singulance.open-dot.source-revision: "%s"\n' "$OPEN_DOT_SOURCE_SHA"
+      printf '      com.singulance.open-dot.image-digest: "%s"\n' "$image_digest"
+    } >> "$OVERRIDE.tmp"
+    continue
+  fi
   if [ "$s" = harness-runner ]; then
     CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
     if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
@@ -232,7 +272,25 @@ mv "$OVERRIDE.tmp" "$OVERRIDE"
 # credential stays Core-only in a root-private versioned release artifact.
 CRM_OVERRIDE="$STATE_ROOT/crm-activation.json"
 python3 "$REL/scripts/preserve-crm-activation.py" "$CRM_OVERRIDE" "$ENVF" "$SERVICES"
-docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" --env-file "$ENVF" config -q
+docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" --env-file "$ENVF" config -q
+
+# Open Dot's database is a dedicated persistent dependency. Create or start it
+# on the first scoped release, but never force-recreate it with an app image
+# update. The named volume is independent of HIVEMIND Postgres.
+if [[ ",${SERVICES}," == *,open-dot,* ]]; then
+  db_state=$(docker inspect hm-open-dot-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)
+  if [ "$db_state" != healthy ]; then
+    docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" --env-file "$ENVF" up -d --no-deps open-dot-postgres >/dev/null
+    for i in $(seq 1 45); do
+      db_state=$(docker inspect hm-open-dot-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || echo missing)
+      [ "$db_state" = healthy ] && break
+      sleep 2
+    done
+    [ "$db_state" = healthy ] || { echo "FATAL: independent Open Dot Postgres did not become healthy (state=$db_state)"; exit 1; }
+  else
+    echo "[database] existing independent Open Dot Postgres is healthy; preserving it"
+  fi
+fi
 
 # Database migrations are a pre-deploy gate for Core, not an implicit startup
 # side effect. Run the guarded migrator from the newly built immutable image
@@ -311,14 +369,14 @@ fi
 for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
-  docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
+  docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
   if [ "$s" = harness-runner ]; then
     # The tunnel is a profile-bound companion: it is never deployed without
     # the runner and has no independent image or persistence lifecycle.
     echo "[deploy] harness-tunnel"
     "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase deploying:harness-tunnel
-    docker compose --project-name "$COMPOSE_PROJECT" --profile harness-chat --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
+    docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
       --env-file "$ENVF" up -d --no-deps --force-recreate harness-tunnel >/dev/null
   fi
 done
@@ -353,13 +411,17 @@ for s in "${SVCS[@]}"; do
   [ "$s" = harness-runner ] || VERIFY_SERVICES+=("$s")
 done
 if [ "${#VERIFY_SERVICES[@]}" -gt 0 ]; then
-  "$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$(IFS=,; echo "${VERIFY_SERVICES[*]}")" --source-root "$REL" || FAIL=1
+  VERIFY_ARGS=()
+  if [[ ",${SERVICES}," == *,open-dot,* ]]; then
+    VERIFY_ARGS+=(--open-dot-image "$OPEN_DOT_IMAGE" --open-dot-source-sha "$OPEN_DOT_SOURCE_SHA")
+  fi
+  "$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$(IFS=,; echo "${VERIFY_SERVICES[*]}")" --source-root "$REL" "${VERIFY_ARGS[@]}" || FAIL=1
 fi
 
 # ── manifest ───────────────────────────────────────────────────────────────
 {
   echo "{"; echo "  \"sha\": \"$SHA\","; echo "  \"short\": \"$SHORT\","; echo "  \"ts\": \"$TS\","
-  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; [ -z "$HARNESS_IMAGE_EXPECTED_ID" ] || echo "  \"harness_image_id\": \"$HARNESS_IMAGE_EXPECTED_ID\","; echo "  \"worktree\": \"$REL\","
+  echo "  \"services\": \"$SERVICES\","; [ -z "$HARNESS_IMAGE" ] || echo "  \"harness_image\": \"$HARNESS_IMAGE\","; [ -z "$HARNESS_IMAGE_EXPECTED_ID" ] || echo "  \"harness_image_id\": \"$HARNESS_IMAGE_EXPECTED_ID\","; [ -z "$OPEN_DOT_IMAGE" ] || echo "  \"open_dot_image\": \"$OPEN_DOT_IMAGE\","; [ -z "$OPEN_DOT_SOURCE_SHA" ] || echo "  \"open_dot_source_sha\": \"$OPEN_DOT_SOURCE_SHA\","; echo "  \"worktree\": \"$REL\","
   echo -n "  \"rollback\": {"; first=1; for s in "${!ROLLBACK[@]}"; do [ $first = 1 ] || echo -n ","; first=0; echo -n "\"$s\":\"${ROLLBACK[$s]}\""; done; echo "},"
   echo "  \"result\": \"$([ $FAIL = 0 ] && echo ok || echo FAILED)\""; echo "}"
 } > "$MANIFEST"
@@ -369,6 +431,10 @@ if [ "$FAIL" = 0 ]; then
   trap - EXIT
   echo "RELEASE OK — $SHORT"
 else
-  echo "RELEASE FAILED — rollback: hivemind/<img>:rollback"
+  if [[ ",${SERVICES}," == *,open-dot,* ]] && [ -z "${ROLLBACK[open-dot]:-}" ]; then
+    echo "RELEASE FAILED — first Open Dot install has no previous image. Remove only hm-open-dot and its proxy site block; preserve both Open Dot volumes. See docs/OPEN_DOT_PRODUCTION_DEPLOYMENT.md"
+  else
+    echo "RELEASE FAILED — rollback: hivemind/<img>:rollback"
+  fi
   exit 1
 fi

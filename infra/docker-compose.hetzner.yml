@@ -272,6 +272,114 @@ services:
     tmpfs:
       - /tmp:size=32m,mode=1777
 
+  # Open Dot is an independently scoped, single-organization app. It has a
+  # dedicated Postgres service/volume and a private network; it never joins the
+  # HIVEMIND database or receives the shared .env file. The release helper
+  # requires an externally built image pinned by digest before this profile can
+  # be deployed. Browser dependencies stay in that app's own image build.
+  open-dot-postgres:
+    image: postgres:17-alpine
+    container_name: hm-open-dot-postgres
+    profiles: ["open-dot"]
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1536m
+    cpus: 0.5
+    environment:
+      POSTGRES_DB: open_dot
+      POSTGRES_USER: open_dot
+      POSTGRES_PASSWORD: ${OPEN_DOT_DB_PASSWORD:-}
+    volumes:
+      - open-dot-postgres-data:/var/lib/postgresql/data
+    networks: [open-dot]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U open_dot -d open_dot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  open-dot:
+    image: ${OPEN_DOT_IMAGE:-hivemind/open-dot:disabled}
+    container_name: hm-open-dot
+    profiles: ["open-dot"]
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 1.0
+    cap_drop: [ALL]
+    security_opt:
+      - seccomp=./open-dot-seccomp.json
+    environment:
+      NODE_ENV: production
+      DOTS_DEPLOYMENT_MODE: cloud
+      DOTS_CLOUD_MODE: "1"
+      DOTS_DATA_DIR: /data
+      DOTS_COMPUTER: cloud
+      DOTS_COMPUTER_TOOL: "off"
+      DOTS_TENANT_ID: ${OPEN_DOT_ORGANIZATION_ID:-}
+      DOTS_USER_ID: ${OPEN_DOT_USER_ID:-}
+      DOTS_PUBLIC_URL: ${OPEN_DOT_PUBLIC_URL:-}
+      DOTS_HIVEMIND_AUTH_URL: ${OPEN_DOT_HIVEMIND_AUTH_URL:-https://api.singulancelabs.com/auth/session}
+      DOTS_HIVEMIND_SESSION_COOKIE: hm_cp_session
+      OPEN_DOT_DATABASE_URL: postgresql://open_dot:${OPEN_DOT_DB_PASSWORD:-}@open-dot-postgres:5432/open_dot
+    depends_on:
+      open-dot-postgres: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${OPEN_DOT_HOST_PORT:-3177}:3100"
+    volumes:
+      - open-dot-data:/data
+    networks: [open-dot]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # Single-user local-prototype mode. It reuses the immutable Open Dot image,
+  # but persists the prototype SQLite store on its own dedicated volume and
+  # requires Core authentication plus fixed owner binding. It does not start
+  # or connect to the optional cloud PostgreSQL profile above.
+  open-dot-local:
+    image: ${OPEN_DOT_IMAGE:-hivemind/open-dot:disabled}
+    container_name: hm-open-dot
+    profiles: ["open-dot-local"]
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    mem_limit: 2g
+    memswap_limit: 3g
+    cpus: 1.0
+    cap_drop: [ALL]
+    security_opt:
+      - seccomp=./open-dot-seccomp.json
+    environment:
+      NODE_ENV: production
+      DOTS_DEPLOYMENT_MODE: local
+      DOTS_CLOUD_MODE: "0"
+      DOTS_PROTECTED_LOCAL_SERVER: "1"
+      DOTS_DATA_DIR: /data
+      DOTS_COMPUTER: local
+      DOTS_COMPUTER_TOOL: "off"
+      DOTS_TENANT_ID: ${OPEN_DOT_ORGANIZATION_ID:-}
+      DOTS_USER_ID: ${OPEN_DOT_USER_ID:-}
+      DOTS_PUBLIC_URL: ${OPEN_DOT_PUBLIC_URL:-}
+      DOTS_HIVEMIND_AUTH_URL: ${OPEN_DOT_HIVEMIND_AUTH_URL:-https://api.singulancelabs.com/auth/session}
+      DOTS_HIVEMIND_SESSION_COOKIE: hm_cp_session
+    ports:
+      - "127.0.0.1:${OPEN_DOT_HOST_PORT:-3177}:3100"
+    volumes:
+      - open-dot-local-data:/data
+    networks: [open-dot-local]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
   employees:
     build: { context: ../employees-service }
     image: hivemind/employees:${VERSION:-latest}
@@ -612,3 +720,15 @@ volumes:
   qdrant-data:
   redis-data:
   docling-models:
+  open-dot-postgres-data:
+    name: hivemind-open-dot-postgres-data
+  open-dot-data:
+    name: hivemind-open-dot-data
+  open-dot-local-data:
+    name: hivemind-open-dot-local-data
+
+networks:
+  open-dot:
+    name: hivemind-open-dot
+  open-dot-local:
+    name: hivemind-open-dot-local

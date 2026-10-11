@@ -10,6 +10,7 @@ to Hetzner from a Worker).
 | `core` | HIVEMIND `singulance-main` | `singulance-production-hetzner.yml` | `https://api.singulancelabs.com/health` |
 | `control-plane` | HIVEMIND `singulance-main` | same | same |
 | `employees` | HIVEMIND `singulance-main` | same | same |
+| `open-dot` | HIVE-MIND `singulance-main` + immutable Open Dot image digest and source SHA | `singulance-production-hetzner.yml` | `https://dots.singulancelabs.com/` |
 
 Enigma (`dev.next`) and preview are **not** in this Workflow. They keep their
 own Workers (`hivemind-web-enigma`, `hivemind-web-preview`).

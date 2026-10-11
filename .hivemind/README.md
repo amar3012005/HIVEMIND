@@ -45,7 +45,7 @@ receive deploy capability.
 | Changed artifact | Use the corresponding Ops Gateway deployment tool |
 |---|---|
 | Da-vinci frontend / Cloudflare Worker | `deploy_cloudflare_frontend` |
-| HIVE Core, Control Plane, Employees, or a scoped container service | `deploy_core_services` |
+| HIVE Core, Control Plane, Employees, or a scoped container service (including Open Dot) | `deploy_core_services` |
 | Native Harness, Cordis plugin, or compiled Harness UI | `deploy_harness_runner` |
 
 The direct tool contract is:
@@ -53,7 +53,7 @@ The direct tool contract is:
 | Tool | Required arguments | Result |
 |---|---|---|
 | `deploy_cloudflare_frontend` | Da-vinci `sha`, optional `note` | Versioned Cloudflare frontend release and rollback identity |
-| `deploy_core_services` | parent HIVE-MIND `sha`, scoped `services`, optional `note` | Immutable Core/Control/Employees artifact and scoped recreate |
+| `deploy_core_services` | parent HIVE-MIND `sha`, scoped `services`, optional `note`; Open Dot also requires its immutable image digest and source SHA | Immutable service artifact and scoped recreate |
 | `deploy_harness_runner` | parent HIVE-MIND `sha`, immutable runner `image` digest, optional `note` | Runner-only recreate and prior image |
 | `get_release_status` | `instance_id` | Release state, evidence, and rollback data |
 

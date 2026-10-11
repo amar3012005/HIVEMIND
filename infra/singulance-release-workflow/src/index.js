@@ -37,6 +37,9 @@ export default {
           sha: body.sha,
           services: body.services,
           image: body.image,
+          openDotImage: body.open_dot_image,
+          openDotSourceSha: body.open_dot_source_sha,
+          openDotMode: body.open_dot_mode,
           note: body.note,
           requestedBy: body.requested_by || request.headers.get('x-requested-by') || 'unknown',
         },
@@ -56,7 +59,7 @@ export default {
       {
         error: 'not_found',
         usage: {
-          start: 'POST /v1/release {"artifact":"frontend"|"core"|"control-plane"|"employees"}',
+          start: 'POST /v1/release {"artifact":"frontend"|"core"|"control-plane"|"employees"|"open-dot"}',
           status: 'GET /v1/release/:instanceId',
         },
       },

@@ -11,6 +11,8 @@ const env = {
 };
 const SHA = 'a'.repeat(40);
 const DIGEST = `registry.example/hivemind/harness-chat@sha256:${'b'.repeat(64)}`;
+const OPEN_DOT_IMAGE = `ghcr.io/amar3012005/open-dot-cloud@sha256:${'c'.repeat(64)}`;
+const OPEN_DOT_SOURCE_SHA = 'd'.repeat(40);
 
 test('Ops deployment tools are exposed only to configured operator MCP tokens', () => {
   assert.equal(getOpsToolsManifest({ isOperator: false, env }).length, 0);
@@ -39,6 +41,68 @@ test('Ops deployment calls forward exact release data to the gateway', async () 
   assert.deepEqual(JSON.parse(calls[0].init.body), {
     artifact: 'harness-runner', sha: SHA, image: DIGEST, requested_by: 'mcp:test',
   });
+});
+
+test('Open Dot deployment forwards an isolated immutable image and exact source SHA', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ instanceId: 'open_dot_123' }), { status: 202 });
+  };
+  const result = await invokeOpsTool('deploy_core_services', {
+    sha: SHA, services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE,
+    open_dot_source_sha: OPEN_DOT_SOURCE_SHA, note: 'Open Dot image update',
+  }, { env, requestedBy: 'mcp:test', fetchImpl });
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    artifact: 'open-dot', sha: SHA, services: ['open-dot'],
+    open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA,
+    open_dot_mode: 'cloud',
+    note: 'Open Dot image update', requested_by: 'mcp:test',
+  });
+});
+
+test('Open Dot local-prototype mode is explicitly forwarded with the immutable artifact', async () => {
+  const calls = [];
+  const result = await invokeOpsTool('deploy_core_services', {
+    sha: SHA, services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE,
+    open_dot_source_sha: OPEN_DOT_SOURCE_SHA, open_dot_mode: 'local-prototype',
+  }, { env, requestedBy: 'mcp:test', fetchImpl: async (_url, init) => {
+    calls.push(init);
+    return new Response(JSON.stringify({ instanceId: 'open_dot_local_123' }), { status: 202 });
+  } });
+  assert.equal(result.ok, true);
+  assert.equal(JSON.parse(calls[0].body).open_dot_mode, 'local-prototype');
+});
+
+test('existing Core service deployment request remains unchanged', async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    calls.push(init);
+    return new Response(JSON.stringify({ instanceId: 'core_123' }), { status: 202 });
+  };
+  await invokeOpsTool('deploy_core_services', { sha: SHA, services: ['core', 'employees'] }, { env, fetchImpl });
+  assert.deepEqual(JSON.parse(calls[0].body), {
+    artifact: 'core-services', sha: SHA, services: ['core', 'employees'], requested_by: 'mcp-operator',
+  });
+});
+
+test('Open Dot deployment rejects mixed services, missing or malformed image inputs, and unrelated inputs', async () => {
+  const invoke = (args) => invokeOpsTool('deploy_core_services', { sha: SHA, ...args }, { env });
+  for (const args of [
+    { services: ['open-dot', 'core'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA },
+    { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE },
+    { services: ['open-dot'], open_dot_source_sha: OPEN_DOT_SOURCE_SHA },
+    { services: ['open-dot'], open_dot_image: 'open-dot:latest', open_dot_source_sha: OPEN_DOT_SOURCE_SHA },
+    { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: 'D'.repeat(40) },
+    { services: ['core'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA },
+    { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA, image: DIGEST },
+    { services: ['open-dot'], open_dot_image: OPEN_DOT_IMAGE, open_dot_source_sha: OPEN_DOT_SOURCE_SHA, open_dot_mode: 'local' },
+    { services: ['core'], open_dot_mode: 'local-prototype' },
+  ]) {
+    const result = await invoke(args);
+    assert.equal(result.ok, false, JSON.stringify(args));
+  }
 });
 
 test('Ops deployment rejects mutable or malformed release identifiers', async () => {

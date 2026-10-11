@@ -15,6 +15,30 @@ on:
         description: Immutable Harness image digest when services includes harness-runner
         required: false
         type: string
+      open_dot_image:
+        description: Immutable Open Dot image digest when services includes open-dot
+        required: false
+        type: string
+      open_dot_source_sha:
+        description: 40-character Open Dot source commit when services includes open-dot
+        required: false
+        type: string
+      open_dot_mode:
+        description: Open Dot runtime mode; local-prototype uses the dedicated SQLite volume
+        required: false
+        type: choice
+        options:
+          - cloud
+          - local-prototype
+        default: cloud
+      open_dot_image_archive:
+        description: Optional private server-staged image archive for verified offline loading
+        required: false
+        type: string
+      open_dot_image_receipt:
+        description: Matching private server-staged transfer receipt
+        required: false
+        type: string
       requested_by:
         description: Who triggered the Cloudflare Workflow
         required: false
@@ -44,22 +68,39 @@ jobs:
           if [ -n "${{ github.event.inputs.sha }}" ]; then
             test "$HEAD" = "${{ github.event.inputs.sha }}"
           fi
+          echo "RELEASE_SOURCE_SHA=$HEAD" >> "$GITHUB_ENV"
       - name: SSH canonical release
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          OPEN_DOT_IMAGE: ${{ github.event.inputs.open_dot_image }}
+          OPEN_DOT_SOURCE_SHA: ${{ github.event.inputs.open_dot_source_sha }}
+          OPEN_DOT_MODE: ${{ github.event.inputs.open_dot_mode }}
+          OPEN_DOT_IMAGE_ARCHIVE: ${{ github.event.inputs.open_dot_image_archive }}
+          OPEN_DOT_IMAGE_RECEIPT: ${{ github.event.inputs.open_dot_image_receipt }}
+          RELEASE_SOURCE_SHA: ${{ env.RELEASE_SOURCE_SHA }}
         with:
           host: ${{ secrets.SINGULANCE_SSH_HOST }}
           username: ${{ secrets.SINGULANCE_SSH_USER }}
           key: ${{ secrets.SINGULANCE_SSH_KEY }}
           script_stop: true
           command_timeout: 25m
+          envs: OPEN_DOT_IMAGE,OPEN_DOT_SOURCE_SHA,OPEN_DOT_MODE,OPEN_DOT_IMAGE_ARCHIVE,OPEN_DOT_IMAGE_RECEIPT,RELEASE_SOURCE_SHA
           script: |
             set -euo pipefail
+            [[ "$RELEASE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            git -C /root/hivemind-main fetch --quiet https://github.com/amar3012005/HIVEMIND.git "$RELEASE_SOURCE_SHA"
+            git -C /root/hivemind-main cat-file -e "$RELEASE_SOURCE_SHA^{commit}"
+            BOOTSTRAP=$(mktemp /tmp/quick-deploy.XXXXXX.sh)
+            trap 'rm -f "$BOOTSTRAP"' EXIT
+            git -C /root/hivemind-main show "$RELEASE_SOURCE_SHA:scripts/quick-deploy.sh" > "$BOOTSTRAP"
+            chmod 700 "$BOOTSTRAP"
             export RELEASE_SESSION_ID="gha-${{ github.run_id }}"
+            export SINGULANCE_EXPECTED_SHA="$RELEASE_SOURCE_SHA"
             export RELEASE_MIN_DISK_GB="${RELEASE_MIN_DISK_GB:-12}"
             if [ -n "${{ github.event.inputs.harness_image }}" ]; then
               export HIVEMIND_HARNESS_IMAGE="${{ github.event.inputs.harness_image }}"
             fi
             IFS=',' read -r -a services <<< "${{ github.event.inputs.services }}"
-            /root/quick-deploy.sh singulance-main "${services[@]}"
+            "$BOOTSTRAP" singulance-main "${services[@]}"
       - name: Canary API
         run: curl -fsS -o /dev/null https://api.singulancelabs.com/health

@@ -2634,7 +2634,7 @@ async function resolveCurrentOrg(userId, preferredOrgId = null) {
   const membership = await prisma?.userOrganization.findFirst({
     where: { userId, isActive: true },
     include: { org: true },
-    orderBy: [{ joinedAt: 'desc' }, { invitedAt: 'desc' }]
+    orderBy: [{ joinedAt: { sort: 'desc', nulls: 'last' } }, { invitedAt: { sort: 'desc', nulls: 'last' } }]
   });
   if (!membership) return { org: null, role: null };
   return { org: membership.org, role: membership.role || 'member' };
@@ -2647,7 +2647,7 @@ async function resolveSessionOrg(userId) {
   const membership = await prisma?.userOrganization.findFirst({
     where: { userId, isActive: true },
     select: { orgId: true, role: true },
-    orderBy: [{ joinedAt: 'desc' }, { invitedAt: 'desc' }],
+    orderBy: [{ joinedAt: { sort: 'desc', nulls: 'last' } }, { invitedAt: { sort: 'desc', nulls: 'last' } }],
   });
   if (!membership) return { org: null, role: null };
   return { org: { id: membership.orgId }, role: membership.role || 'member' };

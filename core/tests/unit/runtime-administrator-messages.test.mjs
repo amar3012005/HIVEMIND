@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { messageAdministrator, validateAdministratorMessage, savedAdministratorRequest } from '../../src/harness-chat/runtime-administrator-messages.js';
+import { messageAdministrator, validateAdministratorMessage, savedAdministratorRequest, savedAdministratorConnection } from '../../src/harness-chat/runtime-administrator-messages.js';
 import { renderRuntimeAdministratorEmail } from '../../src/email/templates/runtime-administrator.js';
 const claims={sub:'11111111-1111-4111-8111-111111111111',org_id:'22222222-2222-4222-8222-222222222222',operating_role:'runtime',operating_session:'session-test'};
 const input={message_key:'task-result-1',kind:'completion',subject:'Your review is ready',message:'I checked Sofia’s review. It is ready to view.'};
-function database({role='admin',active=true,enabled=true,events=[]}={}) {
+function database({role='admin',active=true,enabled=true,events=[],parents=[]}={}) {
  let row; const db={
   userOrganization:{findUnique:async()=>({role,isActive:active})},user:{findUnique:async()=>({email:'admin@example.com',displayName:'Amar'})},organization:{findUnique:async()=>({name:'SINGULANCE'})},hqRuntime:{findUnique:async()=>({ownerUserId:claims.sub,emailUpdatesEnabled:enabled})},
   $transaction:async fn=>fn(db),
@@ -14,6 +14,7 @@ function database({role='admin',active=true,enabled=true,events=[]}={}) {
    if(sql.includes('harness_sessions'))return[{id:claims.operating_session}];
    if(sql.includes('harness_session_events'))return events;
    if(sql.startsWith('INSERT')) {row??={id:'33333333-3333-4333-8333-333333333333',content_hash:args[4],status:'pending',message:JSON.parse(args[5])};return[{id:row.id}];}
+   if(sql.startsWith('SELECT receipt'))return parents;
    if(sql.startsWith('SELECT *'))return[{...row}];
    if(sql.includes("status='dispatching'")){row.status='dispatching';return[{id:row.id}];}
    if(sql.startsWith('UPDATE')){row.status=args[1];row.receipt=JSON.parse(args[2]);return[{id:row.id}];}
@@ -23,7 +24,7 @@ function database({role='admin',active=true,enabled=true,events=[]}={}) {
 }
 test('Runtime overlay reuses branded shell and escapes all human text',()=>{
  const r=renderRuntimeAdministratorEmail({companyName:'SINGULANCE <organization>',administratorName:'<Amar>',subject:'Review <ready>',message:'<script>bad()</script>\nYour review is ready.',kind:'approval',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://chat.singulancelabs.com/assets/runtime-computer-c2305f5b.webp'});
- assert.ok(r.html.includes('HIVEMIND / SYSTEM MESSAGE'));assert.ok(r.html.includes('Your AI Chief of Staff'));assert.ok(!r.html.includes('<script>'));assert.ok(r.html.includes('Hi admin, this is Runtime from SINGULANCE &lt;organization&gt;'));assert.ok(r.text.includes('Hi admin, this is Runtime from SINGULANCE <organization>'));assert.ok(!r.html.includes('&lt;Amar&gt;'));assert.ok(r.html.includes('Opening this email or its link does not grant approval'));assert.ok(r.text.includes('Review request:'));
+ assert.ok(r.html.includes('HIVEMIND / SYSTEM MESSAGE'));assert.ok(r.html.includes('Your AI Chief of Staff'));assert.ok(!r.html.includes('<script>'));assert.ok(r.html.includes('Hi admin, this is Runtime from SINGULANCE &lt;organization&gt;'));assert.ok(r.text.includes('Hi admin, this is Runtime from SINGULANCE <organization>'));assert.ok(!r.html.includes('&lt;Amar&gt;'));assert.ok(r.html.includes('Opening this email or its link does not grant approval'));assert.ok(r.text.includes('Approve:'));
 });
 test('recipient overrides and unbound decision references are rejected',()=>{
  assert.throws(()=>validateAdministratorMessage({...input,to:'someone@example.com'}));assert.throws(()=>validateAdministratorMessage({...input,kind:'decision'}));assert.throws(()=>validateAdministratorMessage({...input,subject:'Header\ninjection'}));
@@ -68,4 +69,42 @@ test('typed delegated blocker email is deduplicated and does not grant or resume
  assert.equal(sent,1);assert.equal(blocker.state,'blocked');
  await assert.rejects(messageAdministrator({db,claims,input:{...request,message_key:'other-key'},send}),/native_request_not_found/);
  assert.equal(sent,1);
+});
+
+test('thread root is scoped to current org/admin recipient and sender and uses stable subject',async()=>{
+ const db=database({parents:[{receipt:{messageId:'opaque-provider-id'}},{receipt:{messageId:'<first@cloudflare.example>'}}]});
+ const base=db.$queryRawUnsafe;let checked=false;db.$queryRawUnsafe=async(sql,...args)=>{if(sql.startsWith('SELECT receipt')){checked=true;assert.equal(args[0],claims.org_id);assert.equal(args[1],claims.sub);assert.match(args[2],/^[a-f0-9]{64}$/);assert.match(args[3],/^[a-f0-9]{64}$/);assert.match(sql,/recipientHash/);assert.match(sql,/senderHash/);}return base(sql,...args);};
+ const result=await messageAdministrator({db,claims,input,send:async args=>{assert.deepEqual(args.thread,{inReplyTo:'<first@cloudflare.example>'});assert.equal(args.rendered.subject,'SINGULANCE · Runtime updates');return{ok:true,provider:'cloudflare',messageId:'<next@cloudflare.example>',deliveryStatus:'queued'};}});
+ assert.equal(checked,true);assert.equal(result.sent,true);assert.equal(result.receipt.deliveryStatus,'queued');
+});
+test('opaque provider ids cannot become fabricated email thread anchors',async()=>{
+ const db=database({parents:[{receipt:{messageId:'opaque-id'}},{receipt:{messageId:'<bad@domain>\r\nBcc: victim@example.com'}}]});
+ await messageAdministrator({db,claims,input,send:async args=>{assert.equal(args.thread,undefined);return{ok:true,provider:'cloudflare',messageId:'opaque-current',deliveryStatus:'queued'};}});
+});
+test('provider acceptance must include Cloudflare message receipt and does not imply approval',async()=>{
+ for(const receipt of [{ok:true,provider:'gmail_nango',messageId:'other'},{ok:true,provider:'cloudflare'}]){const result=await messageAdministrator({db:database(),claims,input,send:async()=>receipt});assert.equal(result.sent,false);assert.equal(result.status,'unknown');}
+});
+
+const connectionEvents=()=>[{event_type:'hivemind/connected-receipt',payload:{data:{version:1,tool:'connection_authorization',workflowSessionId:'workflow-1',receipt:{status:'connection_required',request_call_id:'call-connect',app_label:'Google Sheets',toolkit:'googlesheets',reason:'Read the finance workbooks for the existing review.',redirect_url:'https://untrusted.invalid/authorize',session_id:'workflow-1'}}}},{event_type:'tool/call',payload:{data:{callId:'call-connect',name:'hivemind_connected_task'}}}];
+const connectionMessage=()=>({...input,kind:'approval',request_call_id:'call-connect',message_key:'call-connect-user-request'});
+test('Runtime own connection receipt must match originating native call, workflow and pending status',()=>{
+ const events=connectionEvents(),msg=connectionMessage();assert.deepEqual(savedAdministratorConnection(events,msg,claims.operating_session),{appLabel:'Google Sheets',reason:'Read the finance workbooks for the existing review.'});assert.equal(savedAdministratorRequest(events,msg,claims.operating_session),true);
+ for(const mutate of [e=>e[0].payload.data.receipt.status='ready',e=>e[0].payload.data.version=2,e=>e[0].payload.data.receipt.session_id='other-workflow',e=>e[1].payload.data.name='other_tool',e=>e[0].payload.data.receipt.reason='bad\nreason',e=>e[0].payload.data.receipt.app_label='']){const changed=connectionEvents();mutate(changed);assert.equal(savedAdministratorRequest(changed,msg,claims.operating_session),false);}
+ const latest=structuredClone(events[0]);latest.payload.data.receipt.status='ready';assert.equal(savedAdministratorRequest([latest,...events],msg,claims.operating_session),false);
+ assert.equal(savedAdministratorRequest(events,{...msg,message_key:'invented'},claims.operating_session),false);
+});
+test('connection email derives app and purpose from saved receipt, uses authenticated review link, and stays paused',async()=>{
+ const events=connectionEvents(),db=database({events});let count=0;
+ const send=async args=>{count++;assert.equal(args.to,'admin@example.com');for(const body of [args.rendered.html,args.rendered.text]){assert.ok(body.includes('Connect Google Sheets'));assert.ok(body.includes('Read the finance workbooks'));assert.ok(!body.includes('untrusted.invalid'));assert.ok(body.includes('request=call-connect'));assert.ok(body.includes('Opening an email link never grants'));}return{ok:true,provider:'cloudflare',messageId:'<connect@cf.example>',deliveryStatus:'queued'};};
+ await messageAdministrator({db,claims,input:connectionMessage(),send});await messageAdministrator({db,claims,input:connectionMessage(),send});assert.equal(count,1);assert.equal(events[0].payload.data.receipt.status,'connection_required');
+});
+test('approval action links navigate same authenticated room and carry no authorization token',async()=>{
+ const db=database({events:[{event_type:'approval/asked',payload:{data:{callId:'approve-1'}}}]});
+ await messageAdministrator({db,claims,input:{...input,kind:'approval',request_call_id:'approve-1'},send:async args=>{for(const action of ['approve','decline']){assert.ok(args.rendered.html.includes(`review=${action}`));assert.ok(args.rendered.text.includes(`review=${action}`));}assert.ok(args.rendered.html.includes('request=approve-1'));assert.ok(!args.rendered.html.includes('token='));return{ok:true,provider:'cloudflare',messageId:'<approval@cf.example>'};}});
+});
+
+test('native connection lookup is bound to exact authenticated Runtime room and tenant',async()=>{
+ const db=database({events:connectionEvents()});const query=db.$queryRawUnsafe;let checked=false;
+ db.$queryRawUnsafe=async(sql,...args)=>{if(sql.includes('harness_session_events')){checked=true;assert.deepEqual(args,[claims.operating_session,claims.org_id,claims.sub,'call-connect']);assert.match(sql,/ORDER BY sequence DESC/);assert.match(sql,/receipt.*request_call_id/);return [];}return query(sql,...args);};
+ await assert.rejects(messageAdministrator({db,claims,input:connectionMessage(),send:()=>assert.fail('foreign or absent evidence cannot send')}),/native_request_not_found/);assert.equal(checked,true);
 });

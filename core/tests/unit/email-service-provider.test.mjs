@@ -16,6 +16,7 @@ const {
   queueSystemEmailBundle,
   queueEmailDelivery,
   sendSystemEmail,
+  sendRenderedSystemEmail,
   sendSystemEmailBundle,
   sendTeamInvitationEmails,
 } = await import('../../src/email/email-service.js');
@@ -259,4 +260,17 @@ test('team invitation sends the secure link only to the member and a separate ad
   assert.equal(messages[1].to, 'admin@example.com');
   assert.doesNotMatch(messages[1].html, /secret-invite/);
   assert.match(messages[1].html, /member@example\.com/);
+});
+
+test('rendered administrator email preserves safe reply headers and never sends custom Message-ID',async()=>{
+ setEnv({CLOUDFLARE_EMAIL_API_TOKEN:'unit-token',CLOUDFLARE_ACCOUNT_ID:'unit-account',CLOUDFLARE_EMAIL_FROM:'Runtime <runtime@singulancelabs.com>'});
+ let body;global.fetch=async(_url,init)=>{body=JSON.parse(init.body);return new Response(JSON.stringify({result:{queued:['owner@example.com'],message_id:'<next@cf.example>'}}),{status:200});};
+ const receipt=await sendRenderedSystemEmail({to:'owner@example.com',rendered:{subject:'Runtime updates',text:'Review',html:'<p>Review</p>'},thread:{inReplyTo:'<root@cf.example>',references:'<root@cf.example>'},requiredProvider:'cloudflare',providerAttempts:1});
+ assert.equal(receipt.deliveryStatus,'queued');assert.deepEqual(body.headers,{'In-Reply-To':'<root@cf.example>',References:'<root@cf.example>'});assert.equal(body.text,'Review');
+});
+test('rendered email rejects thread injection or opaque provider anchors before transport',async()=>{
+ global.fetch=()=>assert.fail('invalid headers must not reach provider');
+ for(const thread of [{inReplyTo:'opaque-id'},{inReplyTo:'<root@cf.example>\r\nBcc: victim@example.com'},{inReplyTo:'<root@cf.example>',references:'opaque'},{inReplyTo:'<root@cf.example>',arbitrary:'header'}]){
+  const result=await sendRenderedSystemEmail({to:'owner@example.com',rendered:{subject:'Review',text:'Review',html:'<p>Review</p>'},thread});assert.equal(result.error,'invalid_email_thread');
+ }
 });

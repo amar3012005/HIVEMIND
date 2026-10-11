@@ -26,6 +26,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { emailThreadHeaders } from './thread-headers.js';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -512,19 +513,21 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 }
 
 /** Send a fully rendered branded message through the canonical delivery path. */
-export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification, providerAttempts = 2, providerFallback = true, requiredProvider } = {}) {
+export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, thread, templateId = 'rendered_message', attachments = [], notification, providerAttempts = 2, providerFallback = true, requiredProvider } = {}) {
   if (!to || !validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
   if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
+  let threadHeaders;
+  try { threadHeaders = emailThreadHeaders(thread); } catch { return { ok: false, skipped: true, error: 'invalid_email_thread' }; }
   const providers = configuredProviders();
   if (requiredProvider === 'cloudflare' && !providers.cloudflare) return { ok: false, skipped: true, error: 'cloudflare_email_unavailable' };
   const gmail = requiredProvider === 'cloudflare' ? null : connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
   if (!providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
   if (providers.cloudflare) {
-    const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {}, maxAttempts: providerAttempts });
+    const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders, maxAttempts: providerAttempts });
     if (result.ok || result.permanent || !gmail || !providerFallback) return projectAcceptedEmail({ to, rendered, templateId, result, notification });
   }
-  const result = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {}, maxAttempts: providerAttempts });
+  const result = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders, maxAttempts: providerAttempts });
   return projectAcceptedEmail({ to, rendered, templateId, result, notification });
 }
 

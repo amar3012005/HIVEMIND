@@ -355,6 +355,16 @@ test('runner admits one actual Composio execution and makes replay idempotent', 
   assert.equal(calls[0].service, 'composio_tool_call');
   assert.equal(calls[0].idempotencyKey, calls[1].idempotencyKey);
   assert.match(calls[0].idempotencyKey, /^harness:[a-f0-9]{64}$/);
+  const composite = 'call_native_123|fc_native_456';
+  assert.equal((await invoke(composite)).status, 200);
+  assert.equal((await invoke(composite)).status, 200);
+  assert.equal(calls[2].metadata.call_id, composite);
+  assert.equal(calls[2].idempotencyKey, calls[3].idempotencyKey);
+  assert.notEqual(calls[0].idempotencyKey, calls[2].idempotencyKey);
+  for (const invalid of ['call|bad\n', 'call bad', 'call/bad', 'call?bad', 'x'.repeat(181)]) {
+    assert.equal((await invoke(invalid)).status, 400);
+  }
+  assert.equal(calls.length, 4, 'invalid identities must not reach credit charging');
 });
 
 test('runner charges a no-tool Harness turn once and rejects exhausted credits', async () => {

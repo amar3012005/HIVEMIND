@@ -347,7 +347,8 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     const kind = input?.kind;
     const tool = typeof input?.tool === 'string' ? input.tool : '';
     const validSessionId = isHarnessSessionId(sessionId);
-    if (!validSessionId || !/^[A-Za-z0-9._:-]{1,180}$/.test(callId) || turnId < 0) {
+    // Preserve native composite call/function IDs in the existing debit identity.
+    if (!validSessionId || !/^[A-Za-z0-9._:|\-]{1,180}$/.test(callId) || turnId < 0) {
       jsonResponse(res, { error: 'Invalid credit operation identity' }, 400); return true;
     }
     const service = kind === 'composio_execution' ? 'composio_tool_call'

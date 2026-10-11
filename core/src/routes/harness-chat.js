@@ -1,3 +1,4 @@
+import { savedNativeAgendaQuestion } from '../harness-chat/runtime-agenda-confirmation.js';
 import { nativeSessionHash, nativeRunnerPrincipalAllowed } from '../mobile/native-principal.js';
 import { runtimeSupportReport, nightlyRoutineContext } from '../harness-chat/runtime-support-report.js';
 import { brainConnectionRoute, connectionStatus, startPlanOAuth, finishPlanOAuth, updateConnection } from '../chatgpt-plan/oauth.js';
@@ -803,13 +804,18 @@ async function requireRuntimeAgendaConfirmation(db, principal, reference) {
       (($4::bigint IS NOT NULL AND sequence=$4::bigint AND event_type='user/message') OR
        ($5::text IS NOT NULL AND event_type='hivemind/voice-call-ended' AND COALESCE(payload->'data',payload)->>'callId'=$5))`,
       principal.runtimeSessionId, principal.orgId, principal.userId, match[2] || null, match[3] || null);
-    if (!events.some(event => {
+    let confirmed = false;
+    for (const event of events) {
       const data = event.payload.data ?? event.payload;
       if (principal.sharedOrganizationAgents) {
         const actor=match[2] ? data.source?.authenticatedActor : data.authenticatedActor;
-        if (actor ? actor.userId!==principal.actorUserId || actor.orgId!==principal.orgId : principal.actorUserId!==principal.userId) return false;
+        if (actor ? actor.userId!==principal.actorUserId || actor.orgId!==principal.orgId : principal.actorUserId!==principal.userId) continue;
       }
-      return match[2] ? data.source?.kind === 'user' : data.hadUserSpeech === true;
-    })) throw new Error('invalid_agenda_confirmation');
+      if (match[2] && data.source?.kind === 'user-question-reply') {
+        confirmed = await savedNativeAgendaQuestion(tx, schemas[0].table_schema, principal, data.source, match[2]);
+      } else confirmed = match[2] ? data.source?.kind === 'user' : data.hadUserSpeech === true;
+      if (confirmed) break;
+    }
+    if (!confirmed) throw new Error('invalid_agenda_confirmation');
   });
 }

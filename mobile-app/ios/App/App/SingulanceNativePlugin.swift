@@ -27,6 +27,8 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 guard error == nil, let callback = callback else { call.reject("Sign-in was cancelled or failed."); return }
                 call.resolve(["url": callback.absoluteString])
             }
+            // Explicit app sign-in must not silently reuse a simulator/browser account.
+            authentication.prefersEphemeralWebBrowserSession = true
             authentication.presentationContextProvider = self
             self.authenticationSession = authentication
             if !authentication.start() { self.authenticationSession = nil; call.reject("Sign-in could not start.") }

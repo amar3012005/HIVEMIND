@@ -239,7 +239,10 @@ private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
     }
 }
 class SingulanceViewController: CAPBridgeViewController {
+    private var nativeBridgeRegistered = false
     override func capacitorDidLoad() {
+        guard !nativeBridgeRegistered, bridge != nil else { return }
+        nativeBridgeRegistered = true
         bridge?.registerPluginInstance(SingulanceNativePlugin())
         // The stock WK script handler can be addressed by iframes even though its
         // helper script is main-frame-only. Filter the native message boundary itself.

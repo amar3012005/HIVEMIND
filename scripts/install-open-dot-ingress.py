@@ -274,7 +274,12 @@ def install(config, state):
             live_without_owned = live
 
         normalized, aliases = normalize_verified_file_aliases(source_without_owned, live_without_owned)
-        if normalized != live_without_owned:
+        same_baseline = (
+            _same_adapted_config(normalized, live_without_owned)
+            if owned_in_file
+            else normalized == live_without_owned
+        )
+        if not same_baseline:
             raise RuntimeError("Caddy live/file drift remains after the verified Caddyfile path normalization; no changes made")
         if aliases > 1:
             raise RuntimeError("Unexpected number of Caddyfile path aliases; no changes made")

@@ -14,9 +14,18 @@ def main():
             continue
         info = json.loads(capture(['docker','inspect',names[service]]))[0]
         live = dict(x.split('=',1) for x in info['Config']['Env'] if '=' in x)
+        environment = {}
+        if service in ('core', 'control-plane') and live.get('HIVEMIND_EMPLOYEE_LIFECYCLE_URL'):
+            endpoint = live['HIVEMIND_EMPLOYEE_LIFECYCLE_URL']
+            url = urllib.parse.urlsplit(endpoint)
+            assert url.scheme in ('http', 'https') and url.hostname and not url.username and not url.password
+            assert url.path == '/internal/hivemind/employee-lifecycle' and not url.query and not url.fragment
+            environment['HIVEMIND_EMPLOYEE_LIFECYCLE_URL'] = endpoint
         if live.get('HIVE_APP_RUNTIME_ENABLED') != 'true':
+            if environment:
+                overrides[service] = {'environment':environment}
             continue
-        environment = {'HIVE_APP_RUNTIME_ENABLED':'true'}
+        environment['HIVE_APP_RUNTIME_ENABLED'] = 'true'
         if service == 'core':
             secret = pathlib.Path('/root/releases/secrets/crm-core-runtime.env')
             props = secret.lstat()

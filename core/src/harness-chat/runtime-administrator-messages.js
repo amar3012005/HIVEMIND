@@ -37,10 +37,11 @@ export function savedAdministratorRequest(events, message, runtimeSessionId) {
 }
 function fail(code, status = 400) { const e = new Error(code); e.status = status; throw e; }
 export function validateAdministratorMessage(input) {
+ // Native providers may correlate call and function IDs with '|'; preserve the exact bounded ID.
  if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['message_key','kind','subject','message','request_call_id'].includes(k))) fail('invalid_administrator_message');
- if (typeof input.message_key !== 'string' || !/^[A-Za-z0-9._:-]{1,180}$/.test(input.message_key || '') || !kinds.has(input.kind)) fail('invalid_message_identity');
+ if (typeof input.message_key !== 'string' || !/^[A-Za-z0-9._:|\-]{1,180}$/.test(input.message_key || '') || !kinds.has(input.kind)) fail('invalid_message_identity');
  for (const [key, limit] of [['subject',120],['message',4000]]) if (typeof input[key] !== 'string' || !input[key].trim() || input[key].length > limit || (key === 'subject' && /[\r\n]/.test(input[key]))) fail('invalid_message_content');
- if (input.request_call_id !== undefined && !/^[A-Za-z0-9._:-]{1,180}$/.test(input.request_call_id)) fail('invalid_request_reference');
+ if (input.request_call_id !== undefined && !/^[A-Za-z0-9._:|\-]{1,180}$/.test(input.request_call_id)) fail('invalid_request_reference');
  if (input.kind !== 'completion' && !input.request_call_id) fail('native_request_reference_required');
  return { message_key: input.message_key, kind: input.kind, subject: input.subject.trim(), message: input.message.trim(), ...(input.request_call_id ? { request_call_id: input.request_call_id } : {}) };
 }

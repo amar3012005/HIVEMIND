@@ -108,3 +108,27 @@ test('native connection lookup is bound to exact authenticated Runtime room and 
  db.$queryRawUnsafe=async(sql,...args)=>{if(sql.includes('harness_session_events')){checked=true;assert.deepEqual(args,[claims.operating_session,claims.org_id,claims.sub,'call-connect']);assert.match(sql,/ORDER BY sequence DESC/);assert.match(sql,/receipt.*request_call_id/);return [];}return query(sql,...args);};
  await assert.rejects(messageAdministrator({db,claims,input:connectionMessage(),send:()=>assert.fail('foreign or absent evidence cannot send')}),/native_request_not_found/);assert.equal(checked,true);
 });
+
+
+test('native composite call IDs retain exact correlation and idempotency in connection email', async()=>{
+ const callId='call_JDgKVND63bguINQPhAuHED87|fc_0a4343825314d3d5016acb42d75a3c87d2abf1c5212ef78ebc';
+ const events=connectionEvents();events[0].payload.data.receipt.request_call_id=callId;events[1].payload.data.callId=callId;
+ const request={...connectionMessage(),request_call_id:callId,message_key:`${callId}-user-request`};
+ assert.equal(validateAdministratorMessage(request).request_call_id,callId);
+ assert.equal(validateAdministratorMessage(request).message_key,request.message_key);
+ assert.equal(savedAdministratorRequest(events,request,claims.operating_session),true);
+ const db=database({events});let sent=0;const query=db.$queryRawUnsafe;
+ db.$queryRawUnsafe=async(sql,...args)=>{if(sql.includes('harness_session_events'))assert.equal(args[3],callId);return query(sql,...args);};
+ const send=async args=>{sent++;assert.ok(args.rendered.text.includes(`request=${encodeURIComponent(callId)}`));return{ok:true,provider:'cloudflare',messageId:'<native-composite@cf.example>',deliveryStatus:'queued'};};
+ assert.equal((await messageAdministrator({db,claims,input:request,send})).status,'accepted');
+ assert.equal((await messageAdministrator({db,claims,input:request,send})).replayed,true);
+ assert.equal(sent,1);assert.equal(events[0].payload.data.receipt.status,'connection_required');
+});
+test('bounded native identifiers reject injection characters while allowing only the native pipe addition',()=>{
+ for(const bad of ['call\r\nBcc:attacker','call/path','call?approval=true','call<script>','call\u0000id','call id',"call' OR 1=1",'x'.repeat(181)]){
+  assert.throws(()=>validateAdministratorMessage({...input,request_call_id:bad,kind:'decision'}),/invalid_request_reference/);
+  assert.throws(()=>validateAdministratorMessage({...input,message_key:bad}),/invalid_message_identity/);
+ }
+ assert.equal(validateAdministratorMessage({...input,request_call_id:'x'.repeat(180),kind:'decision'}).request_call_id.length,180);
+ assert.equal(validateAdministratorMessage({...input,message_key:'x'.repeat(180)}).message_key.length,180);
+});

@@ -4,7 +4,7 @@ import { runtimeSupportReport, nightlyRoutineContext } from '../harness-chat/run
 import { brainConnectionRoute, connectionStatus, startPlanOAuth, finishPlanOAuth, updateConnection } from '../chatgpt-plan/oauth.js';
 import { serveBrainPlan } from '../chatgpt-plan/brain-broker.js';
 import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
-import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus } from '../employees/open-dot-runtime-bridge.js';
+import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus, cancelOpenDotRuntime } from '../employees/open-dot-runtime-bridge.js';
 import { readOpenDotEmployeeArtifact, relayOpenDotEmployeeOperation, verifyOpenDotRuntimeBridgeAuthorization } from '../employees/open-dot-runtime-employee-operation.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
@@ -206,13 +206,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   });
   if (!membership?.isActive) { jsonResponse(res, { error: 'Organization membership required' }, 403); return true; }
   if (!await nativeRunnerPrincipalAllowed({claims,prisma,redisConfig})) { jsonResponse(res,{error:'Native session or AI consent unavailable'},403); return true; }
-  if (pathname === `${INTERNAL_PREFIX}/open-dot/runtime/dispatch` || pathname === `${INTERNAL_PREFIX}/open-dot/runtime/status`) {
+  if (pathname === `${INTERNAL_PREFIX}/open-dot/runtime/dispatch` || pathname === `${INTERNAL_PREFIX}/open-dot/runtime/status` || pathname === `${INTERNAL_PREFIX}/open-dot/runtime/cancel`) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     try {
       const input = await parseBody(req);
       const result = pathname.endsWith('/dispatch')
         ? await dispatchOpenDotRuntime(prisma, claims, input, { env, fetchImpl })
-        : await readOpenDotRuntimeStatus(prisma, claims, input, { env, fetchImpl });
+        : pathname.endsWith('/cancel')
+          ? await cancelOpenDotRuntime(prisma, claims, input, { env, fetchImpl })
+          : await readOpenDotRuntimeStatus(prisma, claims, input, { env, fetchImpl });
       jsonResponse(res, result);
     } catch (error) {
       jsonResponse(res, { error: error.status ? error.code || error.message : 'open_dot_runtime_unavailable' }, error.status || 503);

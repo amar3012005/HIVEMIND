@@ -1,5 +1,6 @@
 /** Purpose-separated relay for Open Dot's employee-to-Runtime tools. */
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { requireRuntimeSession } from './open-dot-runtime-bridge.js';
 import { lifecycleError } from './native-lifecycle.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -136,13 +137,15 @@ export async function relayOpenDotEmployeeOperation(db, raw, { env = process.env
 }
 
 export async function readOpenDotEmployeeArtifact(db, claims, raw, { env = process.env, fetchImpl = fetch } = {}) {
-  exact(raw, ['employee_id','dot_id','dispatch_message_id','artifact_id']);
+  exact(raw, ['employee_id','dot_id','dispatch_message_id','artifact_id','root_session_id']);
+  requireRuntimeSession(claims, raw.root_session_id);
   const identityInput = { organization_id: claims.org_id, user_id: claims.sub, ...raw, operation: 'artifact' };
   for (const key of ['organization_id','user_id','employee_id','dispatch_message_id']) if (!UUID.test(identityInput[key] || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
   if (!DOT_ID.test(identityInput.dot_id || '') || !FILE_ID.test(identityInput.artifact_id || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
   const identity = await visibleBoundEmployee(db, identityInput);
   const payload = { version: 1, organizationId: claims.org_id, userId: claims.sub, employeeId: identity.employeeId,
-    dotId: identity.dotId, dispatchMessageId: identityInput.dispatch_message_id, artifactId: identityInput.artifact_id };
+    dotId: identity.dotId, dispatchMessageId: identityInput.dispatch_message_id, artifactId: identityInput.artifact_id,
+    rootSessionId: raw.root_session_id };
   const secret = env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
   if (typeof secret !== 'string' || Buffer.byteLength(secret,'utf8') < 32) lifecycleError('open_dot_runtime_bridge_unavailable', 503);
   let response;

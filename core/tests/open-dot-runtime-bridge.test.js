@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus } from '../src/employees/open-dot-runtime-bridge.js';
+import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus, cancelOpenDotRuntime } from '../src/employees/open-dot-runtime-bridge.js';
 
 const orgId = '11111111-1111-4111-8111-111111111111';
 const userId = '22222222-2222-4222-8222-222222222222';
@@ -71,4 +71,26 @@ test('relay fails closed for unbound employees and identities outside the visibl
       kind: 'update', text: 'Do this.', artifact_ids: [],
     }, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async () => { throw new Error('must not call'); } }));
   }
+});
+
+test('cancel relays the canonical binding and exact authenticated root only', async () => {
+  let payload;
+  const input = { employee_id: employeeId, dot_id: 'dot_example_1', message_id: messageId, root_session_id: rootSessionId };
+  const claims = { sub: userId, org_id: orgId, operating_role: 'runtime', operating_session: rootSessionId };
+  await cancelOpenDotRuntime(dbFor(), claims, input, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async (url, options) => {
+    assert.equal(url, 'https://dots.singulancelabs.com/api/internal/hivemind/runtime/cancel'); payload = JSON.parse(options.body);
+    return new Response(JSON.stringify({ cancelled: true }));
+  } });
+  assert.deepEqual(payload, { version: 1, organizationId: orgId, userId, employeeId, dotId: 'dot_example_1', messageId, rootSessionId });
+  for (const bad of [{ ...input, root_session_id: 'session-foreign' }, { ...input, task_id: 'caller-authority' }, { ...input, dot_id: 'dot_wrong' }]) {
+    await assert.rejects(cancelOpenDotRuntime(dbFor(), claims, bad, { env: {}, fetchImpl: async () => { throw new Error('must not call'); } }));
+  }
+});
+test('dispatch accepts all native receiver kinds and rejects unknown kinds', async () => {
+  const claims = { sub: userId, org_id: orgId, operating_role: 'runtime', operating_session: rootSessionId };
+  for (const kind of ['assignment', 'review', 'continuation', 'blocker', 'question', 'update']) {
+    await dispatchOpenDotRuntime(dbFor(), claims, { employee_id: employeeId, message_id: messageId, root_session_id: rootSessionId, kind, text: 'Bound task' },
+      { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async (_url, options) => { assert.equal(JSON.parse(options.body).kind, kind); return new Response('{}'); } });
+  }
+  await assert.rejects(dispatchOpenDotRuntime(dbFor(), claims, { employee_id: employeeId, message_id: messageId, root_session_id: rootSessionId, kind: 'execute', text: 'Bound task' }, { env: {} }), /invalid_open_dot_runtime_request/);
 });

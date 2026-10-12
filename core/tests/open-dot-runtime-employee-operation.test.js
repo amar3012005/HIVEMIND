@@ -47,8 +47,8 @@ test('artifact read derives the authenticated scope and returns only verified Do
   const artifact = { id: 'file_0123456789abcdef', name: 'notes.txt', mime: 'text/plain', size: bytes.length,
     checksum: createHash('sha256').update(bytes).digest('hex'), dataBase64: bytes.toString('base64') };
   let request;
-  const result = await readOpenDotEmployeeArtifact(dbFor(), { sub: userId, org_id: organizationId },
-    { employee_id: employeeId, dot_id: dotId, dispatch_message_id: dispatchMessageId, artifact_id: artifact.id },
+  const result = await readOpenDotEmployeeArtifact(dbFor(), { sub: userId, org_id: organizationId, operating_role: 'runtime', operating_session: 'session-runtime-root' },
+    { employee_id: employeeId, dot_id: dotId, dispatch_message_id: dispatchMessageId, artifact_id: artifact.id, root_session_id: 'session-runtime-root' },
     { env: tokenEnv, fetchImpl: async (url, options) => {
       request = { url, options };
       return new Response(JSON.stringify({ employeeId, dotId, dispatchMessageId, artifact }), { status: 200 });
@@ -58,4 +58,13 @@ test('artifact read derives the authenticated scope and returns only verified Do
   const body = JSON.parse(request.options.body);
   assert.equal(body.userId, userId); assert.equal(body.organizationId, organizationId);
   assert.equal(body.dispatchMessageId, dispatchMessageId);
+  assert.equal(body.rootSessionId, 'session-runtime-root');
+});
+
+test('artifact read rejects generic runners and a different Runtime root before fetching', async () => {
+  for (const claims of [{ sub: userId, org_id: organizationId }, { sub: userId, org_id: organizationId, operating_role: 'runtime', operating_session: 'session-other-root' }]) {
+    await assert.rejects(readOpenDotEmployeeArtifact(dbFor(), claims, { employee_id: employeeId, dot_id: dotId,
+      dispatch_message_id: dispatchMessageId, artifact_id: 'file_0123456789abcdef', root_session_id: 'session-runtime-root' },
+      { env: tokenEnv, fetchImpl: async () => { throw new Error('must not fetch'); } }), /runtime_session_required/);
+  }
 });

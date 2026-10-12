@@ -18,7 +18,7 @@ function boundedText(value, code, max) {
   return value;
 }
 
-function requireRuntimeSession(claims, rootSessionId) {
+export function requireRuntimeSession(claims, rootSessionId) {
   if (!RUNTIME_SESSION_ID.test(rootSessionId || '') || claims.operating_role !== 'runtime'
       || claims.operating_session !== rootSessionId) lifecycleError('runtime_session_required', 403);
 }
@@ -96,7 +96,7 @@ export async function dispatchOpenDotRuntime(db, claims, input, { env, fetchImpl
   exactObject(input, ['employee_id', 'message_id', 'root_session_id', 'task_id', 'task_revision', 'kind', 'text', 'artifact_ids']);
   if (!UUID.test(input.message_id || '')) lifecycleError('invalid_open_dot_runtime_request', 400);
   requireRuntimeSession(claims, input.root_session_id);
-  if (!['question', 'update'].includes(input.kind)) lifecycleError('invalid_open_dot_runtime_request', 400);
+  if (!['assignment', 'review', 'continuation', 'blocker', 'question', 'update'].includes(input.kind)) lifecycleError('invalid_open_dot_runtime_request', 400);
   const text = boundedText(input.text, 'invalid_open_dot_runtime_text', 12000);
   const artifactIds = input.artifact_ids ?? [];
   if (!Array.isArray(artifactIds) || artifactIds.length > 32 || artifactIds.some(id => typeof id !== 'string' || !id.trim() || id.length > 180)) {
@@ -118,6 +118,17 @@ export async function readOpenDotRuntimeStatus(db, claims, input, { env, fetchIm
   requireRuntimeSession(claims, input.root_session_id);
   const binding = await visibleBoundEmployee(db, claims, input.employee_id, input.dot_id);
   return postDot('status', { version: 1, organizationId: claims.org_id, userId: claims.sub,
+    employeeId: binding.employeeId, dotId: binding.dotId, messageId: input.message_id,
+    rootSessionId: input.root_session_id }, { env, fetchImpl });
+}
+
+/** Cancel only the dispatch bound to the authenticated Runtime root. */
+export async function cancelOpenDotRuntime(db, claims, input, { env, fetchImpl } = {}) {
+  exactObject(input, ['employee_id', 'dot_id', 'message_id', 'root_session_id']);
+  if (!UUID.test(input.message_id || '')) lifecycleError('invalid_open_dot_runtime_request', 400);
+  requireRuntimeSession(claims, input.root_session_id);
+  const binding = await visibleBoundEmployee(db, claims, input.employee_id, input.dot_id);
+  return postDot('cancel', { version: 1, organizationId: claims.org_id, userId: claims.sub,
     employeeId: binding.employeeId, dotId: binding.dotId, messageId: input.message_id,
     rootSessionId: input.root_session_id }, { env, fetchImpl });
 }

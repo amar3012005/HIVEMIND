@@ -41,7 +41,7 @@ test('fixed Dot proof and adoption preserve the exact canonical employee identit
     update: async ({ data }) => { saved = data; Object.assign(row, data); return row; },
   } };
   const db = { userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) }, $transaction: async fn => fn(tx) };
-  const returnedProof = { ...principal, employeeId, dotId: 'dot-existing', creationKey: 'adopt-abc' };
+  const returnedProof = { organizationId: principal.orgId, userId: principal.userId, employeeId, dotId: 'dot-existing', creationKey: 'adopt-abc' };
   let request;
   const proof = await verifyOpenDotBinding({ employeeId, creationKey: returnedProof.creationKey, principal,
     sessionCookie: 'session.id.signature', fetchImpl: async (url, options) => {

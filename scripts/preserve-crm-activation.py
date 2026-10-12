@@ -14,9 +14,17 @@ def main():
             continue
         info = json.loads(capture(['docker','inspect',names[service]]))[0]
         live = dict(x.split('=',1) for x in info['Config']['Env'] if '=' in x)
+        environment = {}
+        # Native mobile admission was verified and activated independently of
+        # CRM. Preserve that approved gate on Control-only releases, never
+        # enable it merely because a new image supports it.
+        if service == 'control-plane' and live.get('HIVE_MOBILE_RUNNER_CONSENT_READY') == 'true':
+            environment['HIVE_MOBILE_RUNNER_CONSENT_READY'] = 'true'
         if live.get('HIVE_APP_RUNTIME_ENABLED') != 'true':
+            if environment:
+                overrides[service] = {'environment': environment}
             continue
-        environment = {'HIVE_APP_RUNTIME_ENABLED':'true'}
+        environment['HIVE_APP_RUNTIME_ENABLED'] = 'true'
         if service == 'core':
             secret = pathlib.Path('/root/releases/secrets/crm-core-runtime.env')
             props = secret.lstat()

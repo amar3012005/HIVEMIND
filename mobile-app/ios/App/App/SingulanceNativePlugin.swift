@@ -260,6 +260,51 @@ private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
 }
 class SingulanceViewController: CAPBridgeViewController {
     private var nativeBridgeRegistered = false
+    #if DEBUG
+    override func webView(with frame: CGRect, configuration: WKWebViewConfiguration) -> WKWebView {
+        configuration.userContentController.add(VoicePlaybackDiagnostics(), name: "voicePlaybackDiagnostics")
+        let script = """
+        (() => {
+          if (location.protocol !== 'capacitor:' || location.hostname !== 'localhost') return;
+          const peers = [], audios = [], contexts = [];
+          const observe = (name, list) => {
+            const Original = window[name]; if (!Original) return;
+            window[name] = new Proxy(Original, { construct(target, args, newTarget) {
+              const instance = Reflect.construct(target, args, newTarget);
+              list.push(new WeakRef(instance)); return instance;
+            }});
+          };
+          observe('RTCPeerConnection', peers); observe('Audio', audios); observe('AudioContext', contexts);
+          window.webkit.messageHandlers.voicePlaybackDiagnostics.postMessage({ installed: true });
+          setInterval(async () => {
+            const live = list => list.map(ref => ref.deref()).filter(Boolean);
+            const active = live(peers).filter(peer => peer.connectionState !== 'closed');
+            const media = live(audios).filter(audio => audio.srcObject);
+            if (!active.length && !media.length) return;
+            let packets = 0, bytes = 0, energy = 0;
+            for (const peer of active) {
+              try { (await peer.getStats()).forEach(report => {
+                if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+                  packets += report.packetsReceived || 0; bytes += report.bytesReceived || 0;
+                  energy += report.totalAudioEnergy || 0;
+                }
+              }); } catch {}
+            }
+            window.webkit.messageHandlers.voicePlaybackDiagnostics.postMessage({
+              connected: active.filter(peer => peer.connectionState === 'connected').length,
+              packets, bytes, energy,
+              playing: media.filter(audio => !audio.paused).length,
+              muted: media.filter(audio => audio.muted).length,
+              ready: media.filter(audio => audio.readyState >= 2).length,
+              running: live(contexts).filter(context => context.state === 'running').length
+            });
+          }, 5000);
+        })();
+        """
+        configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        return super.webView(with: frame, configuration: configuration)
+    }
+    #endif
     override func capacitorDidLoad() {
         guard !nativeBridgeRegistered, bridge != nil else { return }
         nativeBridgeRegistered = true
@@ -272,3 +317,17 @@ class SingulanceViewController: CAPBridgeViewController {
         }
     }
 }
+
+#if DEBUG
+private class VoicePlaybackDiagnostics: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, let url = message.frameInfo.request.url,
+              url.scheme == "capacitor", url.host == "localhost",
+              let body = message.body as? [String: Any] else { return }
+        if body["installed"] as? Bool == true { NSLog("[VoicePlayback] diagnostic initialized"); return }
+        func count(_ key: String) -> Int { max(0, min((body[key] as? NSNumber)?.intValue ?? 0, 1_000_000_000)) }
+        let energy = max(0, min((body["energy"] as? NSNumber)?.doubleValue ?? 0, 1_000_000))
+        NSLog("[VoicePlayback] connected=%d packets=%d bytes=%d energy=%.5f playing=%d muted=%d ready=%d runningContexts=%d", count("connected"), count("packets"), count("bytes"), energy, count("playing"), count("muted"), count("ready"), count("running"))
+    }
+}
+#endif

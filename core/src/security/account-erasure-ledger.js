@@ -12,8 +12,8 @@ export async function admitAccountErasure(prisma,{userId,actorId,confirmation,ow
   const rows=await tx.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_operations(user_id,ownership_snapshot,actor_id,confirmation) VALUES($1::uuid,$2::jsonb,$1::uuid,'DELETE')
    ON CONFLICT(user_id) WHERE state<>'completed' DO UPDATE SET user_id=EXCLUDED.user_id,
      state=CASE WHEN account_erasure_operations.state='blocked' THEN 'pending' ELSE account_erasure_operations.state END,
-     next_attempt_at=CASE WHEN account_erasure_operations.state='blocked' THEN now() ELSE account_erasure_operations.next_attempt_at END,
-     failure_code=CASE WHEN account_erasure_operations.state='blocked' THEN NULL ELSE account_erasure_operations.failure_code END RETURNING *`,userId,JSON.stringify(ownershipSnapshot));
+     next_attempt_at=CASE WHEN account_erasure_operations.state='blocked' OR account_erasure_operations.failure_code IS NOT NULL THEN now() ELSE account_erasure_operations.next_attempt_at END,
+     failure_code=CASE WHEN account_erasure_operations.state='blocked' OR account_erasure_operations.failure_code IS NOT NULL THEN NULL ELSE account_erasure_operations.failure_code END RETURNING *`,userId,JSON.stringify(ownershipSnapshot));
   return rows[0];
  });
 }
@@ -35,6 +35,6 @@ export async function saveErasureReceipt(prisma,{operationId,workerId,store,coor
 }
 export async function blockAccountErasure(prisma,{operationId,workerId,code,retrySeconds=60}) {
  if(!uuid(operationId)||!uuid(workerId)||!Number.isInteger(retrySeconds)||retrySeconds<1||retrySeconds>86400)fail('ERASURE_RETRY_INVALID');
- const count=await prisma.$executeRawUnsafe(`UPDATE hivemind.account_erasure_operations SET state='blocked',failure_code=$3,next_attempt_at=now()+($4*interval '1 second'),lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE id=$1::uuid AND lease_owner=$2::uuid AND lease_until>now() AND state='processing'`,operationId,workerId,code,retrySeconds);
+ const count=await prisma.$executeRawUnsafe(`UPDATE hivemind.account_erasure_operations SET state=CASE WHEN state='reconciled' THEN 'reconciled' ELSE 'blocked' END,failure_code=$3,next_attempt_at=now()+($4*interval '1 second'),lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE id=$1::uuid AND lease_owner=$2::uuid AND lease_until>now() AND state IN ('processing','reconciled')`,operationId,workerId,code,retrySeconds);
  if(!count)fail('ERASURE_LEASE_LOST');
 }

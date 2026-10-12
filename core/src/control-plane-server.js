@@ -1,3 +1,4 @@
+import { cleanupAccountRuntimeReferences } from './security/account-runtime-erasure.js';
 import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
 import { planAccountErasureScope } from './security/account-erasure-scope.js';
@@ -3121,6 +3122,7 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
 
     // Preserve identity and membership coordinates when remote erasure needs retry.
     emit(90, 'Vector erasure verified');
+    await cleanupAccountRuntimeReferences(getCentralPrismaClient(), userId, orgIdsToDelete);
     await prisma.user.delete({ where: { id: userId } });
     emit(95, 'Deleted user record');
 
@@ -7847,14 +7849,14 @@ const server = http.createServer(async (req, res) => {
     if (String(req.headers.authorization || '').startsWith('Erasure erasure.')) {
       try {
         const operation = await readErasureStatusToken(getCentralPrismaClient(),req.headers.authorization,url.searchParams.get('operationId'));
-        return operation ? jsonResponse(res,{status:operation.state,operationId:operation.id,...(operation.failure_code?{failureCode:operation.failure_code,error:operation.failure_code}:{})}) : jsonResponse(res,{error:'Invalid or expired erasure status receipt'},401);
+        return operation ? jsonResponse(res,{status:operation.state==='reconciled' && operation.failure_code ? 'blocked' : operation.state,operationId:operation.id,...(operation.failure_code?{failureCode:operation.failure_code,error:operation.failure_code}:{})}) : jsonResponse(res,{error:'Invalid or expired erasure status receipt'},401);
       } catch { return jsonResponse(res,{error:'Erasure status is unavailable'},503); }
     }
     const current = await requireSession(req,res); if (!current) return;
     try {
       const rows = await getCentralPrismaClient().$queryRawUnsafe('SELECT id,state,failure_code,created_at,updated_at FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid ORDER BY created_at DESC LIMIT 1',current.session.userId);
       const operation=rows[0];
-      return jsonResponse(res,operation?{status:operation.state,operationId:operation.id,...(operation.failure_code?{failureCode:operation.failure_code,error:operation.failure_code}:{})}:{status:'none'});
+      return jsonResponse(res,operation?{status:operation.state==='reconciled' && operation.failure_code ? 'blocked' : operation.state,operationId:operation.id,...(operation.failure_code?{failureCode:operation.failure_code,error:operation.failure_code}:{})}:{status:'none'});
     } catch (error) { return jsonResponse(res,{error:'Account erasure status is unavailable',code:'ERASURE_STATUS_UNAVAILABLE'},503); }
 
   }

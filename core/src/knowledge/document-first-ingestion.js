@@ -1,3 +1,4 @@
+import { withAccountIngestionLease } from '../security/account-ingestion-lease.js';
 /**
  * Document-First Ingestion Service
  * Phase 1: Evidence → Structure → Canonical Memory transformation
@@ -1760,7 +1761,7 @@ Output the JSON object and nothing else.`;
             const vec = vectors[idx];
             if (!usableEmbedding(vec)) return; // authoritative memory remains; reconciler indexes it
             enrichRecs.push({ factId: p.factId, vec });
-            await vs?.storeMemory({
+            await withAccountIngestionLease(this.db, { userId, lane: 'document-vector' }, () => vs?.storeMemory({
               id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
               title: p.title, memory_type: 'fact', is_latest: true, tags: p.entityTags,
               project_ids: Array.isArray(p.t.project_ids) ? p.t.project_ids : [],
@@ -1769,7 +1770,7 @@ Output the JSON object and nothing else.`;
               metadata: p.provenance, document_date: metadata.document_date || null,
               valid_from: metadata.valid_from || null, valid_to: metadata.valid_to || null,
               content_hash: p.contentHash,
-            }, { vector: vec, embeddingWorkload: 'ingestion' });
+            }, { vector: vec, embeddingWorkload: 'ingestion' }));
           } catch (vecErr) {
             this.logger.warn?.(`[kb-distill] vector index failed for ${p.factId}: ${vecErr.message}`);
           }
@@ -2488,14 +2489,14 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
+            await withAccountIngestionLease(this.db, { userId, lane: 'document-vector' }, () => vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
               title: p.title, memory_type: p.memory_type, is_latest: true, tags: p.tags,
               project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
               primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private',
               created_at: new Date().toISOString(), source_metadata: p.source_metadata,
               metadata: p.metadata, document_date: p.document_date, valid_from: p.valid_from,
               valid_to: p.valid_to, content_hash: p.content_hash },
-            { vector: vec, embeddingWorkload: 'ingestion' });
+            { vector: vec, embeddingWorkload: 'ingestion' }));
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
         if (deferredVectors) {

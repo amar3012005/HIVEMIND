@@ -29,3 +29,9 @@ CREATE TRIGGER account_erasure_artifacts_fence BEFORE INSERT OR UPDATE ON hivemi
 CREATE TRIGGER account_erasure_ingest_fence BEFORE INSERT OR UPDATE ON hivemind.knowledge_ingest_jobs FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
 CREATE TRIGGER account_erasure_segments_fence BEFORE INSERT OR UPDATE ON hivemind.knowledge_segments FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
 CREATE TRIGGER account_erasure_memories_fence BEFORE INSERT OR UPDATE ON hivemind.memories FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
+CREATE TABLE hivemind.account_ingestion_leases (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),user_id uuid NOT NULL,lane text NOT NULL,
+ state text NOT NULL DEFAULT 'active' CHECK(state IN ('active','settled','unknown')),
+ created_at timestamptz NOT NULL DEFAULT now(),settled_at timestamptz
+);
+CREATE INDEX account_ingestion_unsettled ON hivemind.account_ingestion_leases(user_id) WHERE state<>'settled';

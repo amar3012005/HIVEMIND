@@ -6,7 +6,7 @@ const orgId = '11111111-1111-4111-8111-111111111111';
 const userId = '22222222-2222-4222-8222-222222222222';
 const employeeId = '33333333-3333-4333-8333-333333333333';
 const messageId = '44444444-4444-4444-8444-444444444444';
-const rootSessionId = '55555555-5555-4555-8555-555555555555';
+const rootSessionId = 'session-46d220df35a3f985de773d7832c82d8e';
 
 function dbFor({ role = 'member', state = 'bound', phase = 'active', dotId = 'dot_example_1', visible = true } = {}) {
   return {

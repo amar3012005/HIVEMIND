@@ -3,6 +3,7 @@ import { lifecycleError } from './native-lifecycle.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DOT_ID = /^dot_[a-zA-Z0-9_-]+$/;
+const RUNTIME_SESSION_ID = /^session-[a-z0-9-]{1,120}$/;
 const DOT_RUNTIME_URL = 'https://dots.singulancelabs.com/api/internal/hivemind/runtime';
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const TIMEOUT_MS = 8000;
@@ -18,7 +19,7 @@ function boundedText(value, code, max) {
 }
 
 function requireRuntimeSession(claims, rootSessionId) {
-  if (!UUID.test(rootSessionId || '') || claims.operating_role !== 'runtime'
+  if (!RUNTIME_SESSION_ID.test(rootSessionId || '') || claims.operating_role !== 'runtime'
       || claims.operating_session !== rootSessionId) lifecycleError('runtime_session_required', 403);
 }
 

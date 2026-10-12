@@ -5,6 +5,7 @@ import { brainConnectionRoute, connectionStatus, startPlanOAuth, finishPlanOAuth
 import { serveBrainPlan } from '../chatgpt-plan/brain-broker.js';
 import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } from '../employees/native-lifecycle.js';
 import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus } from '../employees/open-dot-runtime-bridge.js';
+import { readOpenDotEmployeeArtifact, relayOpenDotEmployeeOperation, verifyOpenDotRuntimeBridgeAuthorization } from '../employees/open-dot-runtime-employee-operation.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
@@ -182,7 +183,17 @@ async function scopedProjects(prisma, claims) {
 async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService, decisionHandler = decideRuntimeStage }) {
   const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
   const creditOperationRequest = pathname === CREDIT_OPERATION_PREFIX;
+  const dotEmployeeOperationRequest = pathname === `${INTERNAL_PREFIX}/open-dot/runtime/employee-operation`;
   if (!receiptRequest && !creditOperationRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
+  if (dotEmployeeOperationRequest) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    if (!verifyOpenDotRuntimeBridgeAuthorization(req.headers.authorization, env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN)) {
+      jsonResponse(res, { error: 'Unauthorized' }, 401); return true;
+    }
+    try { jsonResponse(res, await relayOpenDotEmployeeOperation(prisma, await parseBody(req), { env, fetchImpl })); }
+    catch (error) { jsonResponse(res, { error: error.status ? error.code || error.message : 'open_dot_runtime_unavailable' }, error.status || 503); }
+    return true;
+  }
   const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let claims;
   try {
@@ -205,6 +216,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       jsonResponse(res, result);
     } catch (error) {
       jsonResponse(res, { error: error.status ? error.code || error.message : 'open_dot_runtime_unavailable' }, error.status || 503);
+    }
+    return true;
+  }
+  if (pathname === `${INTERNAL_PREFIX}/open-dot/runtime/artifact`) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    try {
+      jsonResponse(res, await readOpenDotEmployeeArtifact(prisma, claims, await parseBody(req), { env, fetchImpl }));
+    } catch (error) {
+      jsonResponse(res, { error: error.status ? error.code || error.message : 'open_dot_artifact_unavailable' }, error.status || 503);
     }
     return true;
   }

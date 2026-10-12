@@ -161,6 +161,24 @@ export class ControlPlaneSessionStore {
     return stateId;
   }
 
+  // Desktop handoff codes MUST be consumed atomically: GET then DEL would
+  // allow two parallel exchanges to redeem the same login authorization.
+  async consumeAuthStateOnce(stateId) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(stateId || '')) return null;
+    const redis = await getRedisClient(this.config);
+    if (redis) {
+      const raw = await redis.call('GETDEL', `cp:${memoryStateKey(stateId)}`);
+      return raw ? JSON.parse(raw) : null;
+    }
+    // A configured production Redis outage must not silently redeem a code
+    // from this process's private fallback map instead of the shared store.
+    if (this.config.redisUrl || this.config.redisHost) return null;
+    const key = memoryStateKey(stateId);
+    const payload = states.get(key) || null;
+    states.delete(key);
+    return payload;
+  }
+
   async consumeAuthState(stateId) {
     const redis = await getRedisClient(this.config);
     if (redis) {

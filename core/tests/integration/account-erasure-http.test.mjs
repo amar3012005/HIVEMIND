@@ -29,6 +29,8 @@ const db=getCentralPrismaClient();const userId=crypto.randomUUID();const orgId=c
 await db.user.create({data:{id:userId,zitadelUserId:`fixture-${userId}`,email:`${userId}@example.invalid`}});
 await db.organization.create({data:{id:orgId,zitadelOrgId:`fixture-${orgId}`,name:'Fictional erasure HTTP fixture',slug:`fixture-${orgId}`}});
 await db.userOrganization.create({data:{userId,orgId,role:'owner'}});
+await db.$executeRawUnsafe('INSERT INTO hivemind.harness_dream_settings(org_id,user_id) VALUES($1::uuid,$2::uuid)',orgId,userId);
+await db.$executeRawUnsafe('INSERT INTO hivemind.harness_dream_due(org_id,user_id) VALUES($1::uuid,$2::uuid)',orgId,userId);
 await db.sourceArtifact.create({data:{id:artifactId,userId,orgId,artifactType:'upload',sourcePlatform:'knowledge_upload',checksum:'a'.repeat(64),storageLocation:`kb/${userId}/fixture`,metadata:{sourceObjectKey:`org/${orgId}/sha256/${'a'.repeat(64)}/fixture.txt`}}});
 await db.knowledgeDocument.create({data:{id:docId,userId,orgId,sourceArtifactId:artifactId,documentType:'file',sourcePlatform:'knowledge_upload'}});
 objects.add(`org/${orgId}/sha256/${'a'.repeat(64)}/fixture.txt`);

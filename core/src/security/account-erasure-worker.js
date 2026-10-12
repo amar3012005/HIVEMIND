@@ -17,7 +17,7 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
       const scope=op.ownership_snapshot;
       if(scope.organizations.some(org=>org.storageMode?.startsWith('byod')||org.hostingMode==='self_hosted'))fail('SOURCE_ERASURE_AUTHORIZATION_REQUIRED');
       const current=await planAccountErasureScope(prisma,op.user_id);
-      const identity=items=>JSON.stringify(items.map(x=>({orgId:x.orgId,disposition:x.disposition,remainingMembers:x.remainingMembers})).sort((a,b)=>a.orgId.localeCompare(b.orgId)));
+      const identity=items=>JSON.stringify(items.map(x=>({orgId:x.orgId,disposition:x.disposition,storageMode:x.storageMode,hostingMode:x.hostingMode,remainingMembers:x.remainingMembers.map(member=>({userId:member.userId,role:member.role})).sort((a,b)=>a.userId.localeCompare(b.userId))})).sort((a,b)=>a.orgId.localeCompare(b.orgId)));
       if(identity(scope.organizations)!==identity(current.organizations))fail('ERASURE_OWNERSHIP_CHANGED');
       if(await countForeignExclusiveStoreRecords(prisma,op.user_id,scope.organizations))fail('FOREIGN_ORGANIZATION_COPIES_RETAINED');
       const knownOrgIds=scope.organizations.map(org=>org.orgId);

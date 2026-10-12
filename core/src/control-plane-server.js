@@ -2982,7 +2982,11 @@ async function recoverAccountErasure() {
   if (erasureWorkerRunning) return;
   erasureWorkerRunning = true;
   try {
-    await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion});
+    for (let batch=0;batch<4;batch++) {
+      const result=await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion});
+      if (!result) break;
+      if (batch===3) setImmediate(recoverAccountErasure);
+    }
   } catch (error) { console.warn('[account-erasure] Recovery unavailable:', error.code || error.name); }
   finally { erasureWorkerRunning = false; }
 }

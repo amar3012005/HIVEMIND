@@ -15,7 +15,7 @@ def verify(image: object, expected_id: str, source_sha: str) -> str:
         raise ValueError("Docker image inspection must contain one image object")
     image_id = image.get("Id")
     if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
-        raise ValueError("preloaded image has an invalid Docker config ID")
+        raise ValueError("preloaded image has an invalid Docker image ID")
     if image_id != expected_id:
         raise ValueError("preloaded image ID does not match the pinned expected ID")
     if image.get("Os") != "linux" or image.get("Architecture") != "amd64":

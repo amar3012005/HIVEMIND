@@ -12,7 +12,7 @@
 #                        [--open-dot-image-receipt <private-staged-receipt>]
 #                        [--open-dot-image-preloaded]
 #                        [--open-dot-image-preloaded-ref <loaded-local-tag>]
-#                        [--open-dot-image-expected-id <sha256:config-id>]
+#                        [--open-dot-image-expected-id <sha256:docker-image-id>]
 #                        [--open-dot-mode cloud|local-prototype]
 #
 # Enforces the canonical parallel workflow:
@@ -312,7 +312,7 @@ for s in "${SVCS[@]}"; do
         || { echo "FATAL: preloaded Open Dot image is absent: $OPEN_DOT_IMAGE_PRELOADED_REF"; exit 1; }
       OPEN_DOT_IMAGE_ID=$(printf '%s' "$image_json" | python3 "$REL/scripts/verify-open-dot-preloaded-image.py" \
         --expected-id "$OPEN_DOT_IMAGE_EXPECTED_ID" --source-sha "$OPEN_DOT_SOURCE_SHA")
-      # Docker's config ID pins what Compose will run; OPEN_DOT_IMAGE remains
+      # Docker's image ID pins what Compose will run; OPEN_DOT_IMAGE remains
       # the immutable registry provenance reference recorded in release labels.
       OPEN_DOT_DEPLOY_IMAGE="$OPEN_DOT_IMAGE_ID"
       image_source_sha="$OPEN_DOT_SOURCE_SHA"
@@ -355,10 +355,10 @@ for s in "${SVCS[@]}"; do
       printf '      org.opencontainers.image.revision: "%s"\n' "$SHA"
       printf '      com.singulance.open-dot.source-revision: "%s"\n' "$OPEN_DOT_SOURCE_SHA"
       # This digest is the immutable registry provenance supplied by the caller,
-      # not Docker's config ID (OPEN_DOT_IMAGE_ID), which pins preloaded runs.
+      # not Docker's image ID (OPEN_DOT_IMAGE_ID), which pins preloaded runs.
       printf '      com.singulance.open-dot.image-digest: "%s"\n' "$image_digest"
       if [ "$OPEN_DOT_IMAGE_PRELOADED" = 1 ]; then
-        printf '      com.singulance.open-dot.docker-config-id: "%s"\n' "$OPEN_DOT_IMAGE_ID"
+        printf '      com.singulance.open-dot.docker-image-id: "%s"\n' "$OPEN_DOT_IMAGE_ID"
       fi
     } >> "$OVERRIDE.tmp"
     continue

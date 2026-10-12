@@ -65,6 +65,8 @@ class VerifyOpenDotPreloadedImageTests(unittest.TestCase):
         self.assertIn("verify-open-dot-preloaded-image.py", native_branch)
         self.assertIn('OPEN_DOT_DEPLOY_IMAGE="$OPEN_DOT_IMAGE_ID"', native_branch)
         self.assertIn('printf \'  %s:\\n    image: %s\\n    labels:\\n\' "$OPEN_DOT_COMPOSE_SERVICE" "$OPEN_DOT_DEPLOY_IMAGE"', release)
+        self.assertIn("com.singulance.open-dot.docker-image-id", release)
+        self.assertIn("com.singulance.open-dot.docker-image-id", (Path(__file__).parents[1] / "verify-deployed.sh").read_text())
         self.assertIn('[ "$s" != open-dot ] || PULL_ARGS+=(--pull never)', release)
 
 

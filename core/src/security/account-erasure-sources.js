@@ -25,7 +25,7 @@ export async function inventoryAccountErasureSources(prisma,{userId,ownershipSna
     coordinate.foreignReferences=foreignJobs+foreignArtifacts;
     coordinate.shared ||= coordinate.foreignReferences>0;
   }
-  const unknownStores = artifacts.filter(row => row.storageLocation && !/^(kb|enterprise|connector)\//.test(row.storageLocation) && !keyFrom(row));
+  const unknownStores = artifacts.filter(row => row.storageLocation && row.storageLocation !== 'inline:source_artifacts.payload' && !/^(kb|enterprise|connector)\//.test(row.storageLocation) && !keyFrom(row));
   return {invalidCoordinates,unknownStores,jobs,documents,artifacts,coordinates:[...coordinates.values()],inFlight:jobs.filter(job=>!TERMINAL.has(job.status)),remote:jobs.filter(job=>['remote','agent','self_hosted'].includes(job.storageMode))};
 }
 /** Bounded physical-copy phase; never drops SQL coordinates or connector originals. */

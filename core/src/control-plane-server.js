@@ -7840,8 +7840,11 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/v1/account/erasure' && req.method === 'GET') {
     const current = await requireSession(req,res); if (!current) return;
-    const rows = await getCentralPrismaClient().$queryRawUnsafe('SELECT id,state,failure_code,created_at,updated_at FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid ORDER BY created_at DESC LIMIT 1',current.session.userId);
-    return jsonResponse(res,{operation:rows[0] || null});
+    try {
+      const rows = await getCentralPrismaClient().$queryRawUnsafe('SELECT id,state,failure_code,created_at,updated_at FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid ORDER BY created_at DESC LIMIT 1',current.session.userId);
+      return jsonResponse(res,{operation:rows[0] || null});
+    } catch (error) { return jsonResponse(res,{error:'Account erasure status is unavailable',code:'ERASURE_STATUS_UNAVAILABLE'},503); }
+
   }
 
   if ((pathname === '/v1/account' && req.method === 'DELETE') || (pathname === '/v1/account/delete' && req.method === 'POST')) {

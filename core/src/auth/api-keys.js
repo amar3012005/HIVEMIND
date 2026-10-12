@@ -8,6 +8,7 @@ export const ENTITLEMENT_SCOPES = [
   'web_research',
   'web_crawl',
   'web_admin',
+  'open_dot:recovery',
   'selfhost:bootstrap',
   'selfhost:connect',
 ];

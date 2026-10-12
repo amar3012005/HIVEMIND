@@ -144,7 +144,7 @@ export async function readOpenDotEmployeeArtifact(db, claims, raw, { env = proce
   if (!DOT_ID.test(identityInput.dot_id || '') || !FILE_ID.test(identityInput.artifact_id || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
   const identity = await visibleBoundEmployee(db, identityInput);
   const payload = { version: 1, organizationId: claims.org_id, userId: claims.sub, employeeId: identity.employeeId,
-    dotId: identity.dotId, dispatchMessageId: identityInput.dispatch_message_id, artifactId: identityInput.artifact_id,
+    dotId: identity.dotId, messageId: identityInput.dispatch_message_id, artifactId: identityInput.artifact_id,
     rootSessionId: raw.root_session_id };
   const secret = env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
   if (typeof secret !== 'string' || Buffer.byteLength(secret,'utf8') < 32) lifecycleError('open_dot_runtime_bridge_unavailable', 503);
@@ -155,7 +155,7 @@ export async function readOpenDotEmployeeArtifact(db, claims, raw, { env = proce
   const artifactResult = await readBounded(response, MAX_DOT_RESPONSE_BYTES, 'open_dot_runtime_invalid_artifact');
   if (!response.ok) lifecycleError('open_dot_artifact_unavailable', response.status >= 500 ? 503 : 409);
   if (artifactResult.employeeId !== identity.employeeId || artifactResult.dotId !== identity.dotId ||
-      artifactResult.dispatchMessageId !== identityInput.dispatch_message_id || artifactResult.artifact?.id !== identityInput.artifact_id) {
+      artifactResult.messageId !== identityInput.dispatch_message_id || artifactResult.rootSessionId !== raw.root_session_id || artifactResult.artifact?.id !== identityInput.artifact_id) {
     lifecycleError('open_dot_artifact_unverified', 409);
   }
   const artifact = artifactResult.artifact;

@@ -51,13 +51,13 @@ test('artifact read derives the authenticated scope and returns only verified Do
     { employee_id: employeeId, dot_id: dotId, dispatch_message_id: dispatchMessageId, artifact_id: artifact.id, root_session_id: 'session-runtime-root' },
     { env: tokenEnv, fetchImpl: async (url, options) => {
       request = { url, options };
-      return new Response(JSON.stringify({ employeeId, dotId, dispatchMessageId, artifact }), { status: 200 });
+      return new Response(JSON.stringify({ employeeId, dotId, messageId: dispatchMessageId, rootSessionId: 'session-runtime-root', artifact }), { status: 200 });
     } });
   assert.deepEqual(result, artifact);
   assert.equal(request.url, 'https://dots.singulancelabs.com/api/internal/hivemind/runtime/artifact');
   const body = JSON.parse(request.options.body);
   assert.equal(body.userId, userId); assert.equal(body.organizationId, organizationId);
-  assert.equal(body.dispatchMessageId, dispatchMessageId);
+  assert.equal(body.messageId, dispatchMessageId);
   assert.equal(body.rootSessionId, 'session-runtime-root');
 });
 

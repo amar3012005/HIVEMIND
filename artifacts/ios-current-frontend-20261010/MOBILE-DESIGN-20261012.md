@@ -1,6 +1,6 @@
 # Mobile design and notification repair
 
-Packaged frontend source: `1fb4aef70b8098d199c4464002a124e28166320b`.
+Packaged frontend source: `0ab2897186b1c7526a97104d2bc67c8427619fab`.
 Design references are saved in the frontend task checkout under `artifacts/mobile-design-20261012`.
 
 ## Implemented
@@ -23,6 +23,6 @@ Design references are saved in the frontend task checkout under `artifacts/mobil
 
 ## Remaining acceptance
 
-Simulator tap automation intermittently reports capture/no-window failures or leaves the screen unchanged. Full independent scrolling and post-refinement page interaction checks are not yet established. Build success is not a substitute for those checks. Physical iPhone and TestFlight acceptance remain separate.
+Switching Device Hub to the compact simulator window restored usable tap input. The dropdown was opened, scrolled to the older 19-day notice, allowed to settle after native overscroll, and closed; rows remained readable and the sidebar was restored. Screenshot: `notifications-fixed.png`. The final package also showed the refined upload controls and meeting-note statistics disclosure and recording surface. Populated connector and artifact acceptance is incomplete: the native connector request was captured returning HTTP 401, and the artifact catalog previously reported incomplete history. Native CP sessions are configured with a one-hour lifetime without renewal; expiry is a possible cause, not proven from the banner alone. No authentication policy was weakened. Physical iPhone and TestFlight acceptance remain separate.
 
-Native artifact dashboard styling is a separate runner release. Its CSS-only source is based on the current live runner revision, rather than replacing newer Runtime context changes.
+Native artifact dashboard styling is deployed as `hivemind/harness-chat:sha-6db0a078f9b9-mobile-artifacts`, image ID `sha256:abac4954e4e6664b0400d093d4099aa71d716f3222647e1c97f89dfb1cbeca53`. The complete diff from base `3b70533e0afabc86c76cb1e85df8e6c01d20f3b4` is one artifact CSS file. Eight library tests, normal push checks, actual-image compilation checks and runner health passed. The cutover preserved sibling container identities. Rollback manifest: `/root/releases/mobile-artifact-6db0a078f9b9/rollback-image.json`. This proves deployment, not populated preview acceptance.

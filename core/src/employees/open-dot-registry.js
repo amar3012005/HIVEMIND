@@ -137,17 +137,21 @@ export async function bindOpenDotEmployee(db, principal, input, { proof, now = D
       lifecycleError('open_dot_registry_metadata_conflict');
     }
     const isNewCreation = input.operation === 'bind';
+    if (current?.state === 'bound') {
+      // The persisted revision records the successful mutation. A retry must
+      // present the revision it originally expected, and the verified Dot/key
+      // pair must still match the immutable binding.
+      if (current.dot_id === proof.dotId && current.creation_key === creationKey
+          && input.expected_binding_revision === current.binding_revision - 1) {
+        return { employee: publicEmployee(row), replayed: true, scope: { organizationId: principal.orgId, userId: principal.userId },
+          lifecycle: lifecycleSummary(row), open_dot_employee: current };
+      }
+      lifecycleError('open_dot_binding_revision_conflict', 409);
+    }
     if (isNewCreation && (!current || current.state !== 'provisioning' || current.creation_key !== creationKey)) {
       lifecycleError('open_dot_creation_not_pending', 409);
     }
     if (!isNewCreation && current && current.creation_key !== creationKey) {
-      lifecycleError('open_dot_employee_already_bound', 409);
-    }
-    if (current?.state === 'bound') {
-      if (current.dot_id === proof.dotId && current.creation_key === creationKey) {
-        return { employee: publicEmployee(row), replayed: true, scope: { organizationId: principal.orgId, userId: principal.userId },
-          lifecycle: lifecycleSummary(row), open_dot_employee: current };
-      }
       lifecycleError('open_dot_employee_already_bound', 409);
     }
     const currentRevision = current?.binding_revision ?? 0;

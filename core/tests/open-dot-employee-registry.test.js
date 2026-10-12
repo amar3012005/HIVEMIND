@@ -57,6 +57,11 @@ test('fixed Dot proof and adoption preserve the exact canonical employee identit
   assert.equal(result.open_dot_employee.state, 'bound');
   assert.equal(result.open_dot_employee.execution_state, 'pending');
   assert.equal(result.open_dot_employee.binding_revision, 1);
+  const replay = await bindOpenDotEmployee(db, principal, { operation: 'adopt', employee_id: employeeId,
+    creation_key: proof.creationKey, expected_binding_revision: 0 }, { proof, now: 0 });
+  assert.equal(replay.replayed, true);
+  await assert.rejects(bindOpenDotEmployee(db, principal, { operation: 'adopt', employee_id: employeeId,
+    creation_key: proof.creationKey, expected_binding_revision: 1 }, { proof, now: 0 }), /open_dot_binding_revision_conflict/);
   assert.deepEqual(saved, { policyRules: { ...row.policyRules, open_dot_employee: result.open_dot_employee } });
   assert.equal(row.persona, 'Keep this persona.');
   assert.equal(row.avatarUrl, 'https://example.com/avatar.png');

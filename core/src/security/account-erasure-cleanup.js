@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 /** Safe SQL-copy cleanup after durable object receipts; shared/remote scopes need transfer adapters. */
 export async function cleanupExclusiveSourceCopies(prisma,{userId,operationId,workerId,ownershipSnapshot,inventory,verifiedObjects}) {
   if(!verifiedObjects)throw Object.assign(new Error('Source object receipts are required'),{code:'SOURCE_ERASURE_RECEIPTS_REQUIRED'});
@@ -12,6 +13,15 @@ export async function cleanupExclusiveSourceCopies(prisma,{userId,operationId,wo
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))',`account-erasure:${userId}`);
     const operation=await tx.$queryRawUnsafe("SELECT id FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid AND id=$2::uuid AND lease_owner=$3::uuid AND lease_until>now() AND state='processing' LIMIT 1",userId,operationId,workerId);
     if(!operation.length)throw Object.assign(new Error('Active erasure operation required'),{code:'ERASURE_OPERATION_REQUIRED'});
+    for (const coordinate of inventory.coordinates) {
+      const hash = crypto.createHash('sha256').update(coordinate.key).digest('hex');
+      const receipts = await tx.$queryRawUnsafe('SELECT outcome,evidence FROM hivemind.account_erasure_receipts WHERE operation_id=$1::uuid AND store=$2 AND coordinate_hash=$3',operationId,'cloudflare_r2',hash);
+      const expected = coordinate.shared ? 'retained_shared' : 'erased';
+      if (receipts[0]?.outcome !== expected || receipts[0]?.evidence?.verified !== true) {
+        throw Object.assign(new Error('Durable source receipt is missing'),{code:'SOURCE_ERASURE_RECEIPTS_REQUIRED'});
+      }
+    }
+
     const leases=await tx.$queryRawUnsafe("SELECT count(*)::integer AS count FROM hivemind.account_ingestion_leases WHERE user_id=$1::uuid AND state<>'settled'",userId);
     if(leases[0]?.count!==0)throw Object.assign(new Error('Ingestion is not drained'),{code:'ERASURE_INGEST_DRAIN_REQUIRED'});
     await tx.knowledgeIngestJob.deleteMany({where:{userId}});

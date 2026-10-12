@@ -10,6 +10,9 @@
 #                        [--open-dot-source-sha <40-char-open-dot-git-sha>]
 #                        [--open-dot-image-archive <private-staged-archive>]
 #                        [--open-dot-image-receipt <private-staged-receipt>]
+#                        [--open-dot-image-preloaded]
+#                        [--open-dot-image-preloaded-ref <loaded-local-tag>]
+#                        [--open-dot-image-expected-id <sha256:config-id>]
 #                        [--open-dot-mode cloud|local-prototype]
 #
 # Enforces the canonical parallel workflow:
@@ -25,7 +28,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""; OPEN_DOT_MODE="cloud"; OPEN_DOT_IMAGE_ARCHIVE=""; OPEN_DOT_IMAGE_RECEIPT=""; OPEN_DOT_IMAGE_PRELOADED=0; OPEN_DOT_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE_ID=""; OPEN_DOT_ARCHIVE_SHA256=""
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0; HARNESS_IMAGE=""; HARNESS_IMAGE_PRELOADED=0; HARNESS_IMAGE_PRELOADED_REF=""; HARNESS_IMAGE_EXPECTED_ID=""; HARNESS_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE=""; OPEN_DOT_SOURCE_SHA=""; OPEN_DOT_MODE="cloud"; OPEN_DOT_IMAGE_ARCHIVE=""; OPEN_DOT_IMAGE_RECEIPT=""; OPEN_DOT_IMAGE_PRELOADED=0; OPEN_DOT_IMAGE_NATIVE=0; OPEN_DOT_IMAGE_PRELOADED_REF=""; OPEN_DOT_IMAGE_EXPECTED_ID=""; OPEN_DOT_DEPLOY_IMAGE=""; OPEN_DOT_IMAGE_ID=""; OPEN_DOT_ARCHIVE_SHA256=""
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -43,6 +46,9 @@ while [ $# -gt 0 ]; do case "$1" in
   --open-dot-source-sha) OPEN_DOT_SOURCE_SHA="$2"; shift 2;;
   --open-dot-image-archive) OPEN_DOT_IMAGE_ARCHIVE="$2"; shift 2;;
   --open-dot-image-receipt) OPEN_DOT_IMAGE_RECEIPT="$2"; shift 2;;
+  --open-dot-image-preloaded) OPEN_DOT_IMAGE_PRELOADED=1; OPEN_DOT_IMAGE_NATIVE=1; shift;;
+  --open-dot-image-preloaded-ref) OPEN_DOT_IMAGE_PRELOADED_REF="$2"; shift 2;;
+  --open-dot-image-expected-id) OPEN_DOT_IMAGE_EXPECTED_ID="$2"; shift 2;;
   --open-dot-mode) OPEN_DOT_MODE="$2"; shift 2;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
@@ -98,7 +104,26 @@ if [[ ",${SERVICES}," == *,open-dot,* ]]; then
     || { echo "FATAL: open-dot requires --open-dot-image pinned by @sha256"; exit 2; }
   [[ "$OPEN_DOT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
     || { echo "FATAL: open-dot requires --open-dot-source-sha with the 40-character Open Dot commit"; exit 2; }
-  if [ -n "$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT" ]; then
+  if [ "$OPEN_DOT_IMAGE_PRELOADED" = 1 ]; then
+    [ -z "$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT" ] \
+      || { echo "FATAL: native preloaded Open Dot image cannot be combined with archive/receipt inputs"; exit 2; }
+    [ -n "$OPEN_DOT_IMAGE_PRELOADED_REF" ] \
+      || { echo "FATAL: preloaded Open Dot image requires --open-dot-image-preloaded-ref"; exit 2; }
+    [[ "$OPEN_DOT_IMAGE_EXPECTED_ID" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || { echo "FATAL: preloaded Open Dot image requires --open-dot-image-expected-id pinned by sha256"; exit 2; }
+    [[ "$OPEN_DOT_IMAGE_PRELOADED_REF" =~ ^[^[:space:]@]+(:[^[:space:]@]+)?$ ]] \
+      || { echo "FATAL: invalid preloaded Open Dot local image reference"; exit 2; }
+    OPEN_DOT_IMAGE_ID="$OPEN_DOT_IMAGE_EXPECTED_ID"
+    OPEN_DOT_DEPLOY_IMAGE="$OPEN_DOT_IMAGE_PRELOADED_REF"
+  elif [ -n "$OPEN_DOT_IMAGE_PRELOADED_REF$OPEN_DOT_IMAGE_EXPECTED_ID" ]; then
+    echo "FATAL: Open Dot preloaded ref and expected ID require --open-dot-image-preloaded" >&2
+    exit 2
+  fi
+  if [ "$OPEN_DOT_IMAGE_NATIVE" = 1 ]; then
+    : # Native preloaded image identity was validated above; do not load/pull it.
+  elif [ -n "$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT" ]; then
+    [ "$OPEN_DOT_IMAGE_NATIVE" = 0 ] \
+      || { echo "FATAL: Open Dot preloaded image mode cannot be combined with archive inputs"; exit 2; }
     [ -n "$OPEN_DOT_IMAGE_ARCHIVE" ] && [ -n "$OPEN_DOT_IMAGE_RECEIPT" ] \
       || { echo "FATAL: preloaded Open Dot image requires both archive and receipt paths"; exit 2; }
     [[ "$OPEN_DOT_IMAGE_ARCHIVE" =~ ^/root/releases/artifacts/open-dot/[0-9a-f]{64}/open-dot-image\.tar\.gz$ ]] \
@@ -130,7 +155,8 @@ if [[ ",${SERVICES}," == *,open-dot,* ]]; then
     local_public_url="https://dots.singulancelabs.com"
   fi
 else
-  [ -z "$OPEN_DOT_IMAGE$OPEN_DOT_SOURCE_SHA$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT" ] \
+  [ -z "$OPEN_DOT_IMAGE$OPEN_DOT_SOURCE_SHA$OPEN_DOT_IMAGE_ARCHIVE$OPEN_DOT_IMAGE_RECEIPT$OPEN_DOT_IMAGE_PRELOADED_REF$OPEN_DOT_IMAGE_EXPECTED_ID" ] \
+    && [ "$OPEN_DOT_IMAGE_PRELOADED" = 0 ] \
     || { echo "FATAL: Open Dot image inputs require --services open-dot"; exit 2; }
   [ "$OPEN_DOT_MODE" = cloud ] || { echo "FATAL: --open-dot-mode requires --services open-dot"; exit 2; }
 fi
@@ -280,7 +306,17 @@ fi
 echo "services:" > "$OVERRIDE.tmp"
 for s in "${SVCS[@]}"; do
   if [ "$s" = open-dot ]; then
-    if [ "$OPEN_DOT_IMAGE_PRELOADED" = 1 ]; then
+    if [ "$OPEN_DOT_IMAGE_NATIVE" = 1 ]; then
+      echo "[image] open-dot verifies preloaded immutable artifact without registry access"
+      image_json=$(docker image inspect "$OPEN_DOT_IMAGE_PRELOADED_REF" --format '{{json .}}' 2>/dev/null) \
+        || { echo "FATAL: preloaded Open Dot image is absent: $OPEN_DOT_IMAGE_PRELOADED_REF"; exit 1; }
+      OPEN_DOT_IMAGE_ID=$(printf '%s' "$image_json" | python3 "$REL/scripts/verify-open-dot-preloaded-image.py" \
+        --expected-id "$OPEN_DOT_IMAGE_EXPECTED_ID" --source-sha "$OPEN_DOT_SOURCE_SHA")
+      # Docker's config ID pins what Compose will run; OPEN_DOT_IMAGE remains
+      # the immutable registry provenance reference recorded in release labels.
+      OPEN_DOT_DEPLOY_IMAGE="$OPEN_DOT_IMAGE_ID"
+      image_source_sha="$OPEN_DOT_SOURCE_SHA"
+    elif [ "$OPEN_DOT_IMAGE_PRELOADED" = 1 ]; then
       echo "[image] open-dot verifies and loads private staged archive"
       receipt_values=$(python3 "$REL/scripts/verify-open-dot-image-archive.py" \
         --archive "$OPEN_DOT_IMAGE_ARCHIVE" --receipt "$OPEN_DOT_IMAGE_RECEIPT" \
@@ -318,7 +354,12 @@ for s in "${SVCS[@]}"; do
       printf '  %s:\n    image: %s\n    labels:\n' "$OPEN_DOT_COMPOSE_SERVICE" "$OPEN_DOT_DEPLOY_IMAGE"
       printf '      org.opencontainers.image.revision: "%s"\n' "$SHA"
       printf '      com.singulance.open-dot.source-revision: "%s"\n' "$OPEN_DOT_SOURCE_SHA"
+      # This digest is the immutable registry provenance supplied by the caller,
+      # not Docker's config ID (OPEN_DOT_IMAGE_ID), which pins preloaded runs.
       printf '      com.singulance.open-dot.image-digest: "%s"\n' "$image_digest"
+      if [ "$OPEN_DOT_IMAGE_PRELOADED" = 1 ]; then
+        printf '      com.singulance.open-dot.docker-config-id: "%s"\n' "$OPEN_DOT_IMAGE_ID"
+      fi
     } >> "$OVERRIDE.tmp"
     continue
   fi
@@ -452,9 +493,11 @@ for s in "${SVCS[@]}"; do
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
   compose_service="$s"
+  PULL_ARGS=()
   [ "$s" != open-dot ] || compose_service="$OPEN_DOT_COMPOSE_SERVICE"
+  [ "$s" != open-dot ] || PULL_ARGS+=(--pull never)
   docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" \
-    --env-file "$ENVF" up -d --no-deps --force-recreate "$compose_service" >/dev/null
+    --env-file "$ENVF" up "${PULL_ARGS[@]}" -d --no-deps --force-recreate "$compose_service" >/dev/null
   if [ "$s" = harness-runner ]; then
     # The tunnel is a profile-bound companion: it is never deployed without
     # the runner and has no independent image or persistence lifecycle.

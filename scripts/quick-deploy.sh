@@ -69,4 +69,14 @@ if [ -n "${OPEN_DOT_IMAGE_ARCHIVE:-}${OPEN_DOT_IMAGE_RECEIPT:-}" ]; then
     || { echo "FATAL: preloaded Open Dot image requires both archive and receipt paths" >&2; exit 2; }
   OPEN_DOT_ARGS+=(--open-dot-image-archive "$OPEN_DOT_IMAGE_ARCHIVE" --open-dot-image-receipt "$OPEN_DOT_IMAGE_RECEIPT")
 fi
+if [ "${OPEN_DOT_IMAGE_PRELOADED:-0}" = 1 ]; then
+  [ -n "${OPEN_DOT_IMAGE_PRELOADED_REF:-}" ] && [ -n "${OPEN_DOT_IMAGE_EXPECTED_ID:-}" ] \
+    || { echo "FATAL: native preloaded Open Dot requires OPEN_DOT_IMAGE_PRELOADED_REF and OPEN_DOT_IMAGE_EXPECTED_ID" >&2; exit 2; }
+  OPEN_DOT_ARGS+=(--open-dot-image-preloaded \
+    --open-dot-image-preloaded-ref "$OPEN_DOT_IMAGE_PRELOADED_REF" \
+    --open-dot-image-expected-id "$OPEN_DOT_IMAGE_EXPECTED_ID")
+elif [ -n "${OPEN_DOT_IMAGE_PRELOADED_REF:-}${OPEN_DOT_IMAGE_EXPECTED_ID:-}" ]; then
+  echo "FATAL: Open Dot preloaded ref and expected ID require OPEN_DOT_IMAGE_PRELOADED=1" >&2
+  exit 2
+fi
 "$RUNNER" --sha "$SHA" --services "$SERVICES" "${RELEASE_SCOPE_ARGS[@]}" "${OPEN_DOT_ARGS[@]}"

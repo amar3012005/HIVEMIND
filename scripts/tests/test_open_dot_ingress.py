@@ -94,6 +94,64 @@ class FakeCaddy:
 
 
 class InstallOpenDotIngressTests(unittest.TestCase):
+    def test_adapter_route_order_is_normalized_only_for_terminal_disjoint_literal_hosts(self):
+        routes = [route("z.example.test", "localhost:3002"), route("a.example.test", "localhost:3001")]
+        left = {"apps": {"http": {"servers": {"srv0": {"routes": routes}}}}}
+        right = copy.deepcopy(left)
+        right["apps"]["http"]["servers"]["srv0"]["routes"].reverse()
+        self.assertTrue(HELPER._same_adapted_config(left, right))
+
+    def test_adapter_route_order_is_not_normalized_for_overlapping_hosts(self):
+        routes = [route("*.example.test", "localhost:3002"), route("a.example.test", "localhost:3001")]
+        left = {"apps": {"http": {"servers": {"srv0": {"routes": routes}}}}}
+        right = copy.deepcopy(left)
+        right["apps"]["http"]["servers"]["srv0"]["routes"].reverse()
+        self.assertFalse(HELPER._same_adapted_config(left, right))
+
+    def test_adapter_route_order_is_not_normalized_for_casefolded_overlap(self):
+        routes = [route("Example.test", "localhost:3002"), route("example.test", "localhost:3001")]
+        left = {"apps": {"http": {"servers": {"srv0": {"routes": routes}}}}}
+        right = copy.deepcopy(left)
+        right["apps"]["http"]["servers"]["srv0"]["routes"].reverse()
+        self.assertFalse(HELPER._same_adapted_config(left, right))
+
+    def test_adapter_route_order_is_not_normalized_for_placeholders_or_nonterminal_routes(self):
+        for unsafe in (route("{$HOST}", "localhost:3002"), {**route("a.example.test", "localhost:3001"), "terminal": False}):
+            left = {"apps": {"http": {"servers": {"srv0": {"routes": [unsafe, route("z.example.test", "localhost:3003")]}}}}}
+            right = copy.deepcopy(left)
+            right["apps"]["http"]["servers"]["srv0"]["routes"].reverse()
+            self.assertFalse(HELPER._same_adapted_config(left, right))
+
+    def test_aligned_alias_comparison_handles_route_reorder_without_changing_live_order(self):
+        source = {
+            "apps": {"http": {"servers": {"srv0": {"routes": [
+                route("zeta.example.test", "localhost:3002"),
+                route("preview.example.test", "localhost:3003"),
+            ]}}}}
+        }
+        source["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"].append(
+            {"handler": "file_server", "hide": ["./Caddyfile"]}
+        )
+        live = copy.deepcopy(source)
+        live_routes = live["apps"]["http"]["servers"]["srv0"]["routes"]
+        live_routes.reverse()
+        live_routes[1]["handle"][-1]["hide"] = [HELPER.CADDYFILE_DEST]
+        live_order = copy.deepcopy(live_routes)
+
+        source_for_compare = HELPER._sort_disjoint_literal_host_routes(source)
+        live_for_compare = HELPER._sort_disjoint_literal_host_routes(live)
+        normalized, aliases = HELPER.normalize_verified_file_aliases(source_for_compare, live_for_compare)
+
+        self.assertEqual(aliases, 1)
+        self.assertTrue(HELPER._same_adapted_config(normalized, live_for_compare))
+        self.assertEqual(live_routes, live_order)
+
+    def test_adapter_comparison_still_rejects_real_upstream_drift(self):
+        left = {"apps": {"http": {"servers": {"srv0": {"routes": [route("a.example.test", "localhost:3001")]}}}}}
+        right = copy.deepcopy(left)
+        right["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][0]["upstreams"][0]["dial"] = "localhost:9999"
+        self.assertFalse(HELPER._same_adapted_config(left, right))
+
     def run_install(self, api, config_path, state_path, write_stream=None):
         def adapted(text):
             return copy.deepcopy(api.candidate if HELPER.BLOCK_START.encode() in text else api.baseline)

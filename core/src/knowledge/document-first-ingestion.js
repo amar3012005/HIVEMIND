@@ -3228,6 +3228,10 @@ Every item must include a non-empty content field and one or more valid support_
    * @returns {Promise<{documentId, segmentCount, candidateCount, promotedCount}>}
    */
   async ingestKnowledgeDocument(opts) {
+    return withAccountIngestionLease(this.db, { userId: opts.userId, lane: 'ingestKnowledgeDocument' }, () => this._leased_ingestKnowledgeDocument(opts));
+  }
+
+  async _leased_ingestKnowledgeDocument(opts) {
     // IMAGES NEVER TAKE THE DOCUMENT PATH — enforced here, not left to callers.
     //
     // An image is not a document. There is no text to segment, so the evidence
@@ -4040,6 +4044,10 @@ Every item must include a non-empty content field and one or more valid support_
    * Ingest enterprise document with schema extraction
    */
   async ingestEnterpriseDocument(opts) {
+    return withAccountIngestionLease(this.db, { userId: opts.userId, lane: 'ingestEnterpriseDocument' }, () => this._leased_ingestEnterpriseDocument(opts));
+  }
+
+  async _leased_ingestEnterpriseDocument(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestEnterpriseDocument(opts)); // residency
     assertKbAllowedForOrg(opts?.orgId);
     let { userId, orgId, filename, fileBuffer, contentType, schema, metadata = {} } = opts;
@@ -4158,6 +4166,10 @@ Every item must include a non-empty content field and one or more valid support_
    * @param {Object} [params.metadata]
    */
   async ingestConnectorRecord(opts) {
+    return withAccountIngestionLease(this.db, { userId: opts.userId, lane: 'ingestConnectorRecord' }, () => this._leased_ingestConnectorRecord(opts));
+  }
+
+  async _leased_ingestConnectorRecord(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestConnectorRecord(opts)); // residency
     // Remote (self-host) orgs: KB writes route to the agent — guard lifted for connector path.
     if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);

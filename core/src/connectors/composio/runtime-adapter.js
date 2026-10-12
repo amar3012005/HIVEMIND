@@ -83,12 +83,13 @@ export function resolveGovernedReadGrant(
 
 /** Short-lived tenant-bound grant for a tool-router session. Write grants still
  * require the caller's separate human approval gate before execution. */
-export function issueGovernedToolGrant({ orgId, userId, toolkit, sessionId, toolSlug }, { now = Date.now(), secret } = {}) {
+export function issueGovernedToolGrant({ orgId, userId, toolkit, sessionId, toolSlug, providerSource = 'composio' }, { now = Date.now(), secret } = {}) {
   if (![orgId, userId, toolkit, sessionId, toolSlug].every((value) => String(value || '').trim())) {
     throw new Error('governed_tool_grant_denied');
   }
+  if (!['composio', 'nango-native-gmail'].includes(providerSource)) throw new Error('governed_tool_grant_denied');
   const effect = toolSlug === '__connection__' ? 'connection' : isGovernedReadTool({ slug: toolSlug }) ? 'read' : 'write';
-  const grant = { orgId, userId, toolkit, sessionId, toolSlug, effect, expiresAt: now + GOVERNED_READ_GRANT_TTL_MS };
+  const grant = { orgId, userId, toolkit, sessionId, toolSlug, effect, providerSource, expiresAt: now + GOVERNED_READ_GRANT_TTL_MS };
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', governedGrantKey(secret), iv);
   const encrypted = Buffer.concat([cipher.update(JSON.stringify(grant), 'utf8'), cipher.final()]);
@@ -109,6 +110,9 @@ export function resolveGovernedToolGrant({ grantId, orgId, userId, toolSlug }, {
   if (Number(grant.expiresAt) <= now) throw new Error('governed_tool_grant_expired');
   if (grant.orgId !== orgId || grant.userId !== userId || grant.toolSlug !== toolSlug) {
     throw new Error('governed_tool_grant_scope_denied');
+  }
+  if (!['read', 'write'].includes(grant.effect) || !['composio', 'nango-native-gmail'].includes(grant.providerSource)) {
+    throw new Error('governed_tool_grant_invalid');
   }
   return grant;
 }

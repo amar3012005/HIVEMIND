@@ -131,7 +131,7 @@ services:
     build: { context: .., dockerfile: Dockerfile.control-plane }
     image: hivemind/control-plane:${VERSION:-latest}
     container_name: hm-control
-    env_file: [../.env]
+    env_file: [../.env, { path: "${OPEN_DOT_RUNTIME_BRIDGE_ENV_FILE:-/root/hivemind/secrets/open-dot-runtime-bridge.env}", required: false }]
     restart: unless-stopped
     mem_limit: 1536m
     memswap_limit: 2304m

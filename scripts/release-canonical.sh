@@ -290,7 +290,7 @@ OVERRIDE="$STATE_ROOT/deploy-override.yml"
 # make the shared env_file absolute, and preserve canonical relative contexts via
 # --project-directory. No secret value is copied into this artifact.
 HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
-sed "s#env_file: \[../.env\]#env_file: [$ENVF]#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
+sed "s#env_file: \[../.env#env_file: [$ENVF#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
 docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
   && echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()

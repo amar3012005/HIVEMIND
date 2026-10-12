@@ -26,3 +26,5 @@ END $$;
 CREATE TRIGGER account_erasure_documents_fence BEFORE INSERT OR UPDATE ON hivemind.knowledge_documents FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
 CREATE TRIGGER account_erasure_artifacts_fence BEFORE INSERT OR UPDATE ON hivemind.source_artifacts FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
 CREATE TRIGGER account_erasure_ingest_fence BEFORE INSERT OR UPDATE ON hivemind.knowledge_ingest_jobs FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
+CREATE TRIGGER account_erasure_segments_fence BEFORE INSERT OR UPDATE ON hivemind.knowledge_segments FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
+CREATE TRIGGER account_erasure_memories_fence BEFORE INSERT OR UPDATE ON hivemind.memories FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();

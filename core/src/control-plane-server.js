@@ -1,7 +1,7 @@
 import { verifiedAccountIngestionDrain } from './security/account-ingestion-lease.js';
 import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
-import { planAccountErasureScope, countForeignExclusiveStoreRecords } from './security/account-erasure-scope.js';
+import { planAccountErasureScope, countForeignExclusiveStoreRecords, countForeignEvidenceReferences } from './security/account-erasure-scope.js';
 import { runAccountErasureOnce } from './security/account-erasure-worker.js';
 import { CloudflareKnowledgeIngestClient } from './knowledge/cloudflare-ingest-client.js';
 import { handleOrganizationSettings } from './billing/organization-policy.js';
@@ -7900,6 +7900,7 @@ const server = http.createServer(async (req, res) => {
       const authority = getCentralPrismaClient();
       const ownershipSnapshot = await planAccountErasureScope(authority,user.id);
       const existingOperations = await authority.$queryRawUnsafe("SELECT id FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid AND state<>'completed' LIMIT 1",user.id);
+      const foreignEvidenceReferences = await countForeignEvidenceReferences(authority,user.id);
       const foreignStoreRecords = await countForeignExclusiveStoreRecords(authority,user.id,ownershipSnapshot.organizations);
       let sourceEmpty = false;
       try { await requireReconciledSourceErasure(authority,user.id); sourceEmpty = true; } catch (error) { if(error.code!=='SOURCE_ERASURE_RECONCILIATION_REQUIRED') throw error; }
@@ -7907,7 +7908,7 @@ const server = http.createServer(async (req, res) => {
       try { await verifiedAccountIngestionDrain(authority,user.id); writesDrained = true; } catch (error) { if(error.code!=='ERASURE_INGEST_DRAIN_REQUIRED') throw error; }
       const knownOrgIds = ownershipSnapshot.organizations.map(org=>org.orgId);
       const unownedMemories = await authority.memory.count({where:{userId:user.id,orgId:knownOrgIds.length?{notIn:knownOrgIds}:{not:null}}});
-      if (sourceEmpty && !foreignStoreRecords && writesDrained && !unownedMemories && !existingOperations.length && ownershipSnapshot.organizations.every(org=>org.disposition==='delete_exclusive' && !org.storageMode?.startsWith('byod') && org.hostingMode!=='self_hosted')) {
+      if (sourceEmpty && !foreignEvidenceReferences && !foreignStoreRecords && writesDrained && !unownedMemories && !existingOperations.length && ownershipSnapshot.organizations.every(org=>org.disposition==='delete_exclusive' && !org.storageMode?.startsWith('byod') && org.hostingMode!=='self_hosted')) {
         const result = await performAccountDeletion({userId:user.id,orgIdsToDelete:ownershipSnapshot.organizations.map(org=>org.orgId)});
         if (!result.ok) return jsonResponse(res,{error:result.error,status:'failed'},500);
         await sessionStore.destroySession(current.sessionId);

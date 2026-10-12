@@ -19,6 +19,7 @@ CREATE TABLE hivemind.account_erasure_receipts (
 CREATE FUNCTION hivemind.account_erasure_write_fence() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  PERFORM pg_advisory_xact_lock(hashtext('account-erasure:' || NEW.user_id::text));
+ PERFORM pg_advisory_xact_lock(hashtext('account-erasure-org:' || NEW.org_id::text));
  IF EXISTS(SELECT 1 FROM hivemind.account_erasure_operations WHERE state<>'completed' AND (user_id=NEW.user_id OR ownership_snapshot->'organizations' @> jsonb_build_array(jsonb_build_object('orgId',NEW.org_id::text,'disposition','delete_exclusive')))) THEN
   RAISE EXCEPTION 'Account source writes are fenced during erasure' USING ERRCODE='55000';
  END IF;

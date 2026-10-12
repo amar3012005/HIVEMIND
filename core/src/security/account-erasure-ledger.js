@@ -6,6 +6,9 @@ export async function admitAccountErasure(prisma,{userId,actorId,confirmation,ow
  if(!uuid(userId) || actorId!==userId || confirmation!=='DELETE' || !ownershipSnapshot) fail('ERASURE_SCOPE_REQUIRED');
  return prisma.$transaction(async tx=>{
   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))',`account-erasure:${userId}`);
+  for (const orgId of (ownershipSnapshot.organizations||[]).map(org=>org.orgId).sort()) {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))',`account-erasure-org:${orgId}`);
+  }
   const rows=await tx.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_operations(user_id,ownership_snapshot,actor_id,confirmation) VALUES($1::uuid,$2::jsonb,$1::uuid,'DELETE')
    ON CONFLICT(user_id) WHERE state<>'completed' DO UPDATE SET user_id=EXCLUDED.user_id RETURNING *`,userId,JSON.stringify(ownershipSnapshot));
   return rows[0];

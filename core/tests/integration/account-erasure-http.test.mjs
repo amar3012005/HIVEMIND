@@ -1,3 +1,4 @@
+import test from 'node:test';
 // Run ONLY against the isolated Linux image and a schema-only fictional fixture DB.
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -6,6 +7,7 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import {getCentralPrismaClient} from '../../src/db/prisma.js';
 import {ControlPlaneSessionStore,getRedisClient} from '../../src/control-plane/session-store.js';
+test('isolated authenticated account erasure HTTP lifecycle', {skip:!process.env.DATABASE_URL?.includes('account_erasure_full_20261012')}, async()=> {
 if(!process.env.DATABASE_URL?.includes('account_erasure_full_20261012'))throw new Error('Dedicated erasure fixture database required');
 for(const name of ['HIVEMIND_ADMIN_SECRET','HIVEMIND_CONTROL_PLANE_SESSION_SECRET','HIVEMIND_PLATFORM_ADMIN_PASSCODE','HIVEMIND_MASTER_API_KEY'])process.env[name]=crypto.randomBytes(32).toString('hex');
 process.env.CONTROL_PLANE_PORT='3910';process.env.HIVEMIND_RUNTIME_ROLE='app';
@@ -68,3 +70,5 @@ try {
  await blockedCase({shared:true});await blockedCase({active:true});
  console.log('ERASURE_HTTP_FIXTURE_PASS: authenticated202, no early logout, exclusive finalization, wrong token/operation/expiry refusal, restart status, shared-copy protection, unknown old-write blocker');
 } finally {child?.kill('SIGTERM');mock.close();await db.$disconnect();const redis=await getRedisClient({redisUrl:process.env.REDIS_URL});await redis?.quit();fs.closeSync(log);}
+
+});

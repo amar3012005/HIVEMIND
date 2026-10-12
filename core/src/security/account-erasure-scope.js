@@ -21,6 +21,10 @@ export async function inspectSourceObjectRetention(prisma,{userId,sourceObjectKe
 export async function countForeignExclusiveStoreRecords(prisma,userId,organizations) {
   const orgIds=organizations.filter(org=>org.disposition==='delete_exclusive').map(org=>org.orgId);
   if(!orgIds.length)return 0;
-  const counts=await Promise.all(['memory','knowledgeDocument','sourceArtifact','knowledgeIngestJob'].map(name=>prisma[name].count({where:{orgId:{in:orgIds},userId:{not:userId}}})));
+  const counts=await Promise.all(['memory','knowledgeDocument','sourceArtifact','knowledgeIngestJob','knowledgeSegment','documentTable'].map(name=>prisma[name].count({where:{orgId:{in:orgIds},userId:{not:userId}}})));
   return counts.reduce((total,count)=>total+count,0);
+}
+
+export async function countForeignEvidenceReferences(prisma,userId) {
+  return prisma.memoryEvidenceLink.count({where:{memory:{userId:{not:userId}},OR:[{document:{userId}},{segment:{userId}}]}});
 }

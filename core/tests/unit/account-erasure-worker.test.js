@@ -3,7 +3,7 @@ const userId='11111111-1111-1111-1111-111111111111';const workerId='22222222-222
 function fixture({shared=false,unknown=false,reconciled=false,missing=false}={}) {
  const op={id:'33333333-3333-3333-3333-333333333333',user_id:userId,actor_id:userId,confirmation:'DELETE',state:reconciled?'reconciled':'processing',ownership_snapshot:{organizations:shared?[{orgId:'company',disposition:'retain_shared',remainingMembers:[{userId:'other',role:'member'}]}]:[]}};const removed=[];
  const db={$transaction:fn=>fn(db),$executeRawUnsafe:async()=>1,$queryRawUnsafe:async sql=>sql.includes('WITH candidate')?[op]:sql.includes('count(*)')?[{count:unknown?1:0}]:[{id:op.id}],user:{findUnique:async()=>missing?null:{id:userId}},userOrganization:{findMany:async query=>query.where.userId===userId?(shared?[{orgId:'company',role:'member'}]:[]):[{userId:'other',role:'member'}],count:async()=>0},memory:{count:async()=>shared?1:0}};
- for(const name of ['knowledgeIngestJob','knowledgeDocument','sourceArtifact'])db[name]={findMany:async()=>[],count:async()=>0,deleteMany:async()=>{removed.push(name);}};
+ for(const name of ['knowledgeIngestJob','knowledgeDocument','sourceArtifact','knowledgeSegment','documentTable','memoryEvidenceLink'])db[name]={findMany:async()=>[],count:async()=>0,deleteMany:async()=>{removed.push(name);}};
  return{db,removed};
 }
 test('shared company and unknown provider work block without destructive actions',async()=>{for(const args of [{shared:true},{unknown:true}]){const{db,removed}=fixture(args);let finalized=false;const result=await runAccountErasureOnce({prisma:db,workerId,finalize:async()=>{finalized=true;return{ok:true};}});assert.equal(result.status,'blocked');assert.deepEqual(removed,[]);assert.equal(finalized,false);}});

@@ -1,7 +1,7 @@
 /** Remove owned native Runtime references before deleting their human identity. */
 export async function cleanupAccountRuntimeReferences(prisma, userId, orgIds) {
   return prisma.$transaction(async tx => {
-    const tables = ['harness_dream_settings','harness_dream_runs','harness_dream_due','harness_dream_connector_evidence','harness_scheduled_tasks'];
+    const tables = ['harness_dream_settings','harness_dream_runs','harness_dream_due','harness_dream_connector_evidence','harness_scheduled_tasks','harness_company_hq'];
     const present = new Set();
     for (const table of tables) {
       const rows = await tx.$queryRawUnsafe('SELECT to_regclass($1)::text AS relation', `hivemind.${table}`);

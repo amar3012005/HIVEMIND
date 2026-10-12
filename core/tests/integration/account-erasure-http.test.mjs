@@ -31,6 +31,10 @@ await db.organization.create({data:{id:orgId,zitadelOrgId:`fixture-${orgId}`,nam
 await db.userOrganization.create({data:{userId,orgId,role:'owner'}});
 await db.$executeRawUnsafe('INSERT INTO hivemind.harness_dream_settings(org_id,user_id) VALUES($1::uuid,$2::uuid)',orgId,userId);
 await db.$executeRawUnsafe('INSERT INTO hivemind.harness_dream_due(org_id,user_id) VALUES($1::uuid,$2::uuid)',orgId,userId);
+const nativeSessionId=`erasure-fixture-${userId}`;
+await db.$executeRawUnsafe("INSERT INTO hivemind.harness_sessions(id,org_id,user_id,profile,variation,header) VALUES($1,$2::uuid,$3::uuid,'hive','default','{}'::jsonb)",nativeSessionId,orgId,userId);
+await db.$executeRawUnsafe('INSERT INTO hivemind.harness_company_hq(org_id,user_id,session_id) VALUES($1::uuid,$2::uuid,$3)',orgId,userId,nativeSessionId);
+await db.$executeRawUnsafe("INSERT INTO hivemind.harness_scheduled_tasks(id,session_id,org_id,user_id,actor_user_id,record,scheduled_at) VALUES($1,$2,$3::uuid,$4::uuid,$4::uuid,'{}'::jsonb,now()+interval '1 day')",`erasure-schedule-${userId}`,nativeSessionId,orgId,userId);
 await db.sourceArtifact.create({data:{id:artifactId,userId,orgId,artifactType:'upload',sourcePlatform:'knowledge_upload',checksum:'a'.repeat(64),storageLocation:`kb/${userId}/fixture`,metadata:{sourceObjectKey:`org/${orgId}/sha256/${'a'.repeat(64)}/fixture.txt`}}});
 await db.knowledgeDocument.create({data:{id:docId,userId,orgId,sourceArtifactId:artifactId,documentType:'file',sourcePlatform:'knowledge_upload'}});
 objects.add(`org/${orgId}/sha256/${'a'.repeat(64)}/fixture.txt`);

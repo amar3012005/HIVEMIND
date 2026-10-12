@@ -3116,13 +3116,13 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
         console.warn(`[account-delete] ⚠ reassign ${model}: ${err.message}`);
       }
     };
+    await cleanupAccountRuntimeReferences(getCentralPrismaClient(), userId, orgIdsToDelete);
     await reassignCreatedBy('team');
     await reassignCreatedBy('project');
     emit(89, 'Detached created_by references');
 
     // Preserve identity and membership coordinates when remote erasure needs retry.
     emit(90, 'Vector erasure verified');
-    await cleanupAccountRuntimeReferences(getCentralPrismaClient(), userId, orgIdsToDelete);
     await prisma.user.delete({ where: { id: userId } });
     emit(95, 'Deleted user record');
 

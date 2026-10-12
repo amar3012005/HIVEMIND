@@ -10385,6 +10385,167 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // POST /v1/service/connected-apps/tasks — user-scoped, governed READ bridge
+  // for Open Dot. Identity is derived from the persisted API key and active
+  // organization membership; caller-supplied identity fields are rejected.
+  // This endpoint deliberately has no connection-management or write action.
+  if (pathname === '/v1/service/connected-apps/tasks' && req.method === 'POST') {
+    const privateHeaders = { 'Cache-Control': 'private, no-store', Pragma: 'no-cache' };
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503, privateHeaders);
+    const rawKey = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
+      || String(req.headers['x-api-key'] || '').trim();
+    if (!rawKey) return jsonResponse(res, { error: 'API key required' }, 401, privateHeaders);
+    try {
+      const keyRecord = await authenticatePersistedApiKey(prisma, rawKey);
+      if (!keyRecord?.userId || !keyRecord?.orgId) {
+        return jsonResponse(res, { error: 'Invalid or unscoped API key' }, 401, privateHeaders);
+      }
+      const scopes = Array.isArray(keyRecord.scopes) ? keyRecord.scopes : [];
+      if (!scopes.includes('mcp')) {
+        return jsonResponse(res, { error: 'mcp scope required' }, 403, privateHeaders);
+      }
+      const ts = await _getTeamStore();
+      const accessibleTeamIds = ts
+        ? await ts.store.accessibleTeamIds({ userId: keyRecord.userId, orgId: keyRecord.orgId })
+        : [];
+      const principal = await resolveKeyAccess(prisma, keyRecord, {
+        projectIds: [], teamIds: accessibleTeamIds,
+      });
+      const membership = await getActiveOrganizationMembership(prisma, {
+        userId: principal.userId, orgId: principal.orgId,
+      });
+      if (!membership) return jsonResponse(res, { error: 'Organization membership required' }, 403, privateHeaders);
+
+      const body = await parseBody(req).catch(() => null);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return jsonResponse(res, { error: 'JSON object required' }, 400, privateHeaders);
+      }
+      const forbiddenIdentity = ['org_id', 'user_id', 'orgId', 'userId', 'organization_id', 'organizationId'];
+      if (forbiddenIdentity.some((field) => Object.hasOwn(body, field))) {
+        return jsonResponse(res, { error: 'Caller identity fields are not accepted' }, 400, privateHeaders);
+      }
+      const action = String(body.action || '');
+      const toolkit = String(body.toolkit || '').trim().toLowerCase();
+      const validToolkit = /^[a-z0-9_-]{1,80}$/.test(toolkit);
+      if (!['connection_status', 'search', 'execute_read'].includes(action)) {
+        return jsonResponse(res, { error: 'Unsupported connected-app action; only read operations are available' }, 400, privateHeaders);
+      }
+      if (action !== 'connection_status' && !validToolkit) {
+        return jsonResponse(res, { error: 'Valid toolkit required' }, 400, privateHeaders);
+      }
+
+      if (action === 'connection_status') {
+        const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
+        const connections = (accounts || []).map((row) => ({
+          toolkit: row.toolkit, status: row.status, updatedAt: row.updatedAt || null, source: 'composio',
+        }));
+        const nangoGmail = await prisma.nangoConnection?.findFirst({
+          where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+          select: { connectedAt: true },
+        });
+        if (nangoGmail) connections.push({ toolkit: 'gmail', status: 'ACTIVE', updatedAt: nangoGmail.connectedAt || null, source: 'nango-native-gmail' });
+        const filteredConnections = connections.filter((row) => !toolkit || String(row.toolkit || '').toLowerCase() === toolkit);
+        return jsonResponse(res, {
+          ok: true, action, connections: filteredConnections,
+          activeToolkits: [...new Set(filteredConnections.filter((row) => String(row.status).toUpperCase() === 'ACTIVE').map((row) => String(row.toolkit).toLowerCase()))],
+          authority: 'user-scoped-composio-read',
+          scope: { org_id: principal.orgId, user_id: principal.userId, authority: 'server-derived-from-api-key' },
+        }, 200, privateHeaders);
+      }
+
+      if (action === 'search') {
+        const useCase = String(body.use_case || '').trim().slice(0, 1200);
+        if (!useCase) return jsonResponse(res, { error: 'use_case is required' }, 400, privateHeaders);
+        const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
+        const active = (accounts || []).some((row) => String(row.toolkit || '').toLowerCase() === toolkit
+          && String(row.status || '').toUpperCase() === 'ACTIVE');
+        if (!active && toolkit === 'gmail') {
+          const nangoGmail = await prisma.nangoConnection?.findFirst({
+            where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+            select: { connectionId: true },
+          });
+          if (nangoGmail?.connectionId) {
+            const { GMAIL_MANIFEST } = await import('./connectors/runtime/plugins/gmail/index.js');
+            const readTools = (GMAIL_MANIFEST.tools || []).filter((tool) => tool.access === 'read'
+              && tool.approval === 'never' && tool.allowedSurfaces?.includes('hyperagents'));
+            const tools = readTools.map((tool) => {
+              const grant = issueGovernedReadGrant({
+                orgId: principal.orgId, userId: principal.userId, toolkit,
+                sessionId: 'nango-native-gmail', toolSlug: tool.name,
+              });
+              return {
+                name: tool.name, toolSlug: tool.name, description: tool.description,
+                inputSchema: tool.inputSchema, toolkit, effect: 'read', providerSource: 'nango-native-gmail',
+                grantId: grant.grantId, grantExpiresAt: grant.expiresAt,
+              };
+            });
+            return jsonResponse(res, {
+              ok: true, action, tools, connectionStatus: 'active', providerSource: 'nango-native-gmail',
+              authority: 'user-scoped-native-gmail-read',
+            }, 200, privateHeaders);
+          }
+        }
+        if (!active) return jsonResponse(res, {
+          ok: true, action, tools: [], connectionStatus: 'not_connected', authority: 'user-scoped-composio-read',
+        }, 200, privateHeaders);
+        const discovered = await discoverGovernedSessionReads(principal.orgId, {
+          toolkits: [toolkit], useCases: [useCase], userId: principal.userId,
+        });
+        const tools = (discovered.tools || []).map((tool) => {
+          const grant = issueGovernedReadGrant({
+            orgId: principal.orgId, userId: principal.userId, toolkit: tool.toolkit || toolkit,
+            sessionId: tool.sessionId, toolSlug: tool.toolSlug,
+          });
+          const { sessionId: _sessionId, ...publicTool } = tool;
+          return { ...publicTool, effect: 'read', providerSource: 'composio', grantId: grant.grantId, grantExpiresAt: grant.expiresAt };
+        });
+        return jsonResponse(res, {
+          ok: true, action, tools, connectionStatus: 'active', authority: 'user-scoped-composio-read',
+          searchedLogId: discovered.searchedLogId || null, schemaLogId: discovered.schemaLogId || null,
+        }, 200, privateHeaders);
+      }
+
+      const toolSlug = String(body.tool_slug || '').trim();
+      if (!/^[A-Za-z0-9_./:-]{1,180}$/.test(toolSlug)) {
+        return jsonResponse(res, { error: 'Valid tool_slug required' }, 400, privateHeaders);
+      }
+      const grant = resolveGovernedReadGrant({
+        grantId: String(body.grant_id || ''), orgId: principal.orgId, userId: principal.userId, toolSlug,
+      });
+      if (String(grant.toolkit || '').toLowerCase() !== toolkit) {
+        return jsonResponse(res, { error: 'Grant toolkit mismatch' }, 403, privateHeaders);
+      }
+      const args = body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
+        ? body.arguments : {};
+      if (grant.sessionId === 'nango-native-gmail') {
+        if (toolkit !== 'gmail') return jsonResponse(res, { error: 'Native Gmail grant toolkit mismatch' }, 403, privateHeaders);
+        const nangoGmail = await prisma.nangoConnection?.findFirst({
+          where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+          select: { connectionId: true },
+        });
+        if (!nangoGmail?.connectionId) return jsonResponse(res, { error: 'Native Gmail connection is no longer active' }, 403, privateHeaders);
+        const { GMAIL_MANIFEST } = await import('./connectors/runtime/plugins/gmail/index.js');
+        const nativeTool = GMAIL_MANIFEST.tools.find((tool) => tool.name === toolSlug
+          && tool.access === 'read' && tool.approval === 'never' && tool.allowedSurfaces?.includes('hyperagents'));
+        if (!nativeTool?.legacyName) return jsonResponse(res, { error: 'Native Gmail read tool is not allowed' }, 403, privateHeaders);
+        const { runGoogleTool } = await import('./connectors/google-native.js');
+        const data = await runGoogleTool(nativeTool.legacyName, args, {
+          user_id: principal.userId, org_id: principal.orgId,
+        }, prisma);
+        return jsonResponse(res, {
+          ok: true, action, successful: true, data,
+          receipt: { provider: 'nango-native-gmail', toolSlug, effect: 'read' },
+          authority: 'user-scoped-native-gmail-read',
+        }, 200, privateHeaders);
+      }
+      const result = await executeGovernedSessionRead({ sessionId: grant.sessionId, toolSlug, args });
+      return jsonResponse(res, { ok: true, action, ...result, authority: 'user-scoped-composio-read' }, 200, privateHeaders);
+    } catch (error) {
+      const denied = /(?:read_denied|grant_(?:denied|expired|invalid|scope_denied)|subject mismatch)/i.test(String(error?.message));
+      return jsonResponse(res, { error: denied ? 'Read grant denied or expired' : 'Connected-app read unavailable' }, denied ? 403 : 502, privateHeaders);
+    }
+  }
+
   // GET /v1/company/context — immutable admission context for authenticated
   // external agents. Company identity comes from the completed onboarding
   // payload, never recall or model inference. Tenant scope comes only from the

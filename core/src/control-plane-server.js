@@ -1324,9 +1324,14 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
   const recoverAttention = async () => {
     if (recoveringAttention) return;
     recoveringAttention = true;
-    try { await recoverPendingActivity(prisma); }
-    catch { console.warn('[runtime-attention] pending recovery unavailable'); }
-    finally { recoveringAttention = false; }
+    try {
+      try { await recoverPendingActivity(prisma); }
+      catch { console.warn('[runtime-attention] pending recovery unavailable'); }
+      try {
+        const { recoverBoundOpenDotLifecycles } = await import('./employees/open-dot-lifecycle-recovery.js');
+        await recoverBoundOpenDotLifecycles(prisma);
+      } catch { console.warn('[open-dot-lifecycle] recovery unavailable'); }
+    } finally { recoveringAttention = false; }
   };
   setTimeout(recoverAttention, 15000).unref();
   setInterval(recoverAttention, 60000).unref();

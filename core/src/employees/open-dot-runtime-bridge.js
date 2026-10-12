@@ -17,6 +17,11 @@ function boundedText(value, code, max) {
   return value;
 }
 
+function requireRuntimeSession(claims, rootSessionId) {
+  if (!UUID.test(rootSessionId || '') || claims.operating_role !== 'runtime'
+      || claims.operating_session !== rootSessionId) lifecycleError('runtime_session_required', 403);
+}
+
 async function visibleBoundEmployee(db, claims, employeeId, requestedDotId) {
   if (!UUID.test(employeeId || '')) lifecycleError('invalid_employee_id', 400);
   const membership = await db.userOrganization.findUnique({
@@ -88,7 +93,8 @@ async function postDot(path, payload, { env, fetchImpl = fetch } = {}) {
 
 export async function dispatchOpenDotRuntime(db, claims, input, { env, fetchImpl } = {}) {
   exactObject(input, ['employee_id', 'message_id', 'root_session_id', 'task_id', 'task_revision', 'kind', 'text', 'artifact_ids']);
-  if (!UUID.test(input.message_id || '') || !UUID.test(input.root_session_id || '')) lifecycleError('invalid_open_dot_runtime_request', 400);
+  if (!UUID.test(input.message_id || '')) lifecycleError('invalid_open_dot_runtime_request', 400);
+  requireRuntimeSession(claims, input.root_session_id);
   if (!['question', 'update'].includes(input.kind)) lifecycleError('invalid_open_dot_runtime_request', 400);
   const text = boundedText(input.text, 'invalid_open_dot_runtime_text', 12000);
   const artifactIds = input.artifact_ids ?? [];
@@ -106,9 +112,11 @@ export async function dispatchOpenDotRuntime(db, claims, input, { env, fetchImpl
 }
 
 export async function readOpenDotRuntimeStatus(db, claims, input, { env, fetchImpl } = {}) {
-  exactObject(input, ['employee_id', 'dot_id', 'message_id']);
+  exactObject(input, ['employee_id', 'dot_id', 'message_id', 'root_session_id']);
   if (!UUID.test(input.message_id || '')) lifecycleError('invalid_open_dot_runtime_request', 400);
+  requireRuntimeSession(claims, input.root_session_id);
   const binding = await visibleBoundEmployee(db, claims, input.employee_id, input.dot_id);
   return postDot('status', { version: 1, organizationId: claims.org_id, userId: claims.sub,
-    employeeId: binding.employeeId, dotId: binding.dotId, messageId: input.message_id }, { env, fetchImpl });
+    employeeId: binding.employeeId, dotId: binding.dotId, messageId: input.message_id,
+    rootSessionId: input.root_session_id }, { env, fetchImpl });
 }

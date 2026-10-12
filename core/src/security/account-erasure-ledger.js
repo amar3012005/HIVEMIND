@@ -2,11 +2,11 @@ import crypto from 'node:crypto';
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 const fail = code => {throw Object.assign(new Error(code),{code,status:409});};
 /** Admission is called only after authenticated DELETE confirmation and read-only ownership validation. */
-export async function admitAccountErasure(prisma,{userId,ownershipSnapshot}) {
- if(!uuid(userId) || !ownershipSnapshot) fail('ERASURE_SCOPE_REQUIRED');
+export async function admitAccountErasure(prisma,{userId,actorId,confirmation,ownershipSnapshot}) {
+ if(!uuid(userId) || actorId!==userId || confirmation!=='DELETE' || !ownershipSnapshot) fail('ERASURE_SCOPE_REQUIRED');
  return prisma.$transaction(async tx=>{
   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))',`account-erasure:${userId}`);
-  const rows=await tx.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_operations(user_id,ownership_snapshot) VALUES($1::uuid,$2::jsonb)
+  const rows=await tx.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_operations(user_id,ownership_snapshot,actor_id,confirmation) VALUES($1::uuid,$2::jsonb,$1::uuid,'DELETE')
    ON CONFLICT(user_id) WHERE state<>'completed' DO UPDATE SET user_id=EXCLUDED.user_id RETURNING *`,userId,JSON.stringify(ownershipSnapshot));
   return rows[0];
  });
@@ -19,7 +19,7 @@ export async function claimAccountErasure(prisma,{workerId,leaseSeconds=30}) {
 }
 export async function saveErasureReceipt(prisma,{operationId,workerId,store,coordinate,outcome,evidence}) {
  if(!uuid(operationId)||!uuid(workerId)||!store||!coordinate||!['erased','retained_shared'].includes(outcome)||!evidence?.verified) fail('ERASURE_RECEIPT_UNVERIFIED');
- if(outcome==='retained_shared'&&!evidence.foreignReferences) fail('ERASURE_SHARED_RETENTION_UNVERIFIED');
+ if(outcome==='retained_shared'&&!evidence.foreignReferences&&!evidence.retainedCompanyScope) fail('ERASURE_SHARED_RETENTION_UNVERIFIED');
  const hash=crypto.createHash('sha256').update(coordinate).digest('hex');
  const rows=await prisma.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_receipts(operation_id,store,coordinate_hash,outcome,evidence)
  SELECT id,$3,$4,$5,$6::jsonb FROM hivemind.account_erasure_operations WHERE id=$1::uuid AND lease_owner=$2::uuid AND lease_until>now() AND state='processing'

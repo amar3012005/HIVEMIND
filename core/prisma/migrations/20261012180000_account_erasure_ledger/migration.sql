@@ -1,6 +1,7 @@
 -- Durable erasure state preserves identity and source coordinates until reconciled.
 CREATE TABLE hivemind.account_erasure_operations (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL,
+ actor_id uuid NOT NULL, confirmation text NOT NULL CHECK(confirmation='DELETE'),
  state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','processing','blocked','reconciled','completed')),
  ownership_snapshot jsonb NOT NULL, lease_owner uuid, lease_until timestamptz,
  attempts integer NOT NULL DEFAULT 0, next_attempt_at timestamptz NOT NULL DEFAULT now(),

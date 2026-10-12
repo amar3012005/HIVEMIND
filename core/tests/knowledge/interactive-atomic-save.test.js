@@ -1,3 +1,4 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DocumentFirstIngestionService } from '../../src/knowledge/document-first-ingestion.js';
@@ -7,7 +8,7 @@ for (const deferred of [true, false]) {
     let finish;
     let started = false;
     const pending = new Promise((resolve) => { finish = resolve; });
-    const service = new DocumentFirstIngestionService({
+    const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
       db: {}, memoryGraphEngine: { ingestMemory: async () => ({ memoryId: 'saved-1' }) },
       logger: { info() {}, warn() {} },
     });

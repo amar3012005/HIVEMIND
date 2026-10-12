@@ -1,3 +1,4 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DocumentFirstIngestionService } from '../../src/knowledge/document-first-ingestion.js';
@@ -23,7 +24,7 @@ test('malformed document retains its raw artifact but creates no document, segme
   const memoryGraphEngine = {
     ingestMemory: async () => calls.push('memoryGraphEngine.ingestMemory'),
   };
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db,
     memoryGraphEngine,
     smartIngestRouter: null,

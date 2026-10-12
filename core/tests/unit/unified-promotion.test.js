@@ -1,3 +1,4 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -201,7 +202,7 @@ test('unified ingestion persists the classified type and exact evidence link', a
   const links = [];
   const derivations = [];
   const relationships = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {
       memoryEvidenceLink: { createMany: async ({ data }) => links.push(...data) },
       memoryDerivation: { createMany: async ({ data }) => derivations.push(...data) },
@@ -260,7 +261,7 @@ test('unified ingestion persists the classified type and exact evidence link', a
 test('document parent is a bounded summary with structural PartOf edges', async () => {
   const ingested = [];
   const relationships = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {},
     memoryGraphEngine: {
       ingestMemory: async (payload) => { ingested.push(payload); return { memoryId: 'parent-1' }; },
@@ -285,7 +286,7 @@ test('canonical entity extraction runs only over curated durable memories', asyn
   const previous = process.env.ENABLE_ENTITY_EXTRACTION;
   process.env.ENABLE_ENTITY_EXTRACTION = 'true';
   const seen = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {},
     entityExtractor: { extractFromSegment: async (args) => seen.push(args.segment) },
     logger: { info() {}, warn() {} },
@@ -312,7 +313,7 @@ test('document deletion cancels queued entity enrichment before source rows disa
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   const seen = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {},
     entityExtractor: {
       extractFromSegment: async ({ segment, shouldContinue }) => {
@@ -341,7 +342,7 @@ test('document deletion cancels queued entity enrichment before source rows disa
 
 test('curated Updates use the atomic version operator', async () => {
   const calls = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {},
     memoryGraphEngine: {
       applyUpdate: async (...args) => calls.push(args),

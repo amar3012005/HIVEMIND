@@ -1,3 +1,4 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -56,7 +57,7 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
     storeMemory: async (memory) => vectorWrites.push({ layer: 'memory', id: memory.id }),
   };
   const evidenceWrites = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: prisma,
     memoryGraphEngine: engine,
     smartIngestRouter: null,

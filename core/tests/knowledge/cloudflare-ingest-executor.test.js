@@ -1,3 +1,4 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -48,7 +49,7 @@ function fixture({ remote = false, image = false } = {}) {
   };
   const events = [];
   const steps = stepStore();
-  const executor = new CloudflareKnowledgeIngestExecutor({
+  const executor = new CloudflareKnowledgeIngestExecutor({ centralPrisma: accountErasureAuthorityFixture(),
     prisma: {
       knowledgeDocument: {
         findFirst: async () => ({ id: ids.document, _count: { segments: 8, memoryLinks: 2 } }),
@@ -382,7 +383,7 @@ test('Core restart requeues every current Workflow in-process checkpoint', async
     $executeRawUnsafe: async (statement) => { sql.push(statement); return 1; },
   };
   prisma.$transaction = async (work) => work(prisma);
-  const executor = new CloudflareKnowledgeIngestExecutor({
+  const executor = new CloudflareKnowledgeIngestExecutor({ centralPrisma: accountErasureAuthorityFixture(),
     prisma,
     jobStore: {},
     objectClient: {},

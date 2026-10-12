@@ -1,10 +1,11 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DocumentFirstIngestionService } from '../../src/knowledge/document-first-ingestion.js';
 
 test('projects every promoted memory through the injected canonical boundary', async () => {
   const calls = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     canonicalProjector: async (input) => {
       calls.push(input);
       return { memoryId: input.memory.id, status: 'complete' };
@@ -27,7 +28,7 @@ test('projects every promoted memory through the injected canonical boundary', a
 
 test('isolates a failed canonical projection without skipping later memories', async () => {
   const calls = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     canonicalProjector: async ({ memory }) => {
       calls.push(memory.id);
       if (memory.id === 'm-1') throw new Error('temporary projection outage');
@@ -47,7 +48,7 @@ test('isolates a failed canonical projection without skipping later memories', a
 
 test('latches one admitted feature mode across all memories in a document', async () => {
   const admittedModes = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     canonicalProjector: async ({ memory, admittedMode }) => {
       admittedModes.push(admittedMode);
       return { memoryId: memory.id, mode: admittedMode || 'full', status: 'complete' };

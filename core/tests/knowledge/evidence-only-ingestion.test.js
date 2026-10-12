@@ -1,3 +1,4 @@
+import { accountErasureAuthorityFixture } from '../fixtures/account-erasure-authority.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -31,7 +32,7 @@ test('promotion retains complete persisted evidence provenance', () => {
 test('stored evidence promotion generates memories without invoking extraction and advances document mode', async () => {
   const documentId = '33333333-3333-4333-8333-333333333333';
   const updates = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {
       knowledgeDocument: {
         findFirst: async () => ({
@@ -81,7 +82,7 @@ test('promoted memories retain stored evidence provenance in memory and vector w
   const memoryWrites = [];
   const vectorWrites = [];
   const evidenceLinks = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {
       knowledgeSegment: { findMany: async () => [], update: async () => ({}) },
       memoryEvidenceLink: { createMany: async ({ data }) => evidenceLinks.push(...data) },
@@ -167,7 +168,7 @@ test('promoted memories retain stored evidence provenance in memory and vector w
 
 test('default promotion curation caps atomic memories at fourteen', async () => {
   const caps = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: {}, memoryGraphEngine: { vectorStore: null }, smartIngestRouter: null, embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -227,7 +228,7 @@ test('one document parent completes a fourteen-memory promotion and keeps child 
       },
     },
   }));
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: { memoryEvidenceLink: { createMany: async ({ data }) => summaryLinks.push(...data) } },
     memoryGraphEngine: {
       ingestMemory: async (payload) => {
@@ -296,7 +297,7 @@ test('intentional evidence ingest stops after hybrid indexing and never calls me
     },
     memoryEvidenceLink: { count: async () => 0 },
   };
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db,
     memoryGraphEngine: { ingestMemory: async () => { throw new Error('memory generation called'); } },
     smartIngestRouter: null,
@@ -374,7 +375,7 @@ test('parser output is sanitized before document metadata and segment creation',
     knowledgeSegment: { findMany: async () => [], count: async () => 1 },
     memoryEvidenceLink: { count: async () => 0 },
   };
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -429,7 +430,7 @@ test('intentional evidence ingest fails closed when semantic indexing is incompl
     knowledgeSegment: { findMany: async () => [], count: async () => 0 },
     memoryEvidenceLink: { count: async () => 0 },
   };
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -468,7 +469,7 @@ test('memories plus evidence also stops before promotion when evidence indexing 
     knowledgeSegment: { findMany: async () => [], count: async () => 0 },
     memoryEvidenceLink: { count: async () => 0 },
   };
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -515,7 +516,7 @@ test('durable retry embeds only persisted segments still missing vectors', async
     knowledgeSegment: { findMany: async () => [pending], count: async () => 1 },
     memoryEvidenceLink: { count: async () => 0 },
   };
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: {},
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -549,7 +550,7 @@ test('durable retry embeds only persisted segments still missing vectors', async
 
 test('central vector batch failure is never marked stored or reported embedded', async () => {
   const updated = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
     memoryGraphEngine: {}, smartIngestRouter: null,
     embeddingService: {
@@ -575,7 +576,7 @@ test('large evidence embedding uses provider batches of at most twenty and one v
   const stored = [];
   const updated = [];
   const calls = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
     memoryGraphEngine: {}, smartIngestRouter: null,
     embeddingService: {
@@ -612,7 +613,7 @@ test('large evidence embedding uses provider batches of at most twenty and one v
 });
 
 test('a vector marker write failure remains incomplete even when Qdrant accepted the batch', async () => {
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: { knowledgeSegment: { updateMany: async () => { throw new Error('postgres unavailable'); } } },
     memoryGraphEngine: {}, smartIngestRouter: null,
     embeddingService: {
@@ -637,7 +638,7 @@ test('a vector marker write failure remains incomplete even when Qdrant accepted
 test('invalid evidence vectors never reach Qdrant and remain recoverable', async () => {
   let storeCalls = 0;
   const updated = [];
-  const service = new DocumentFirstIngestionService({
+  const service = new DocumentFirstIngestionService({ centralPrisma: accountErasureAuthorityFixture(),
     db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
     memoryGraphEngine: {}, smartIngestRouter: null,
     embeddingService: {

@@ -16,6 +16,9 @@ export function nativeLifecycle(employee) {
 }
 export function employeeCanDispatch(employee, now = Date.now()) {
   if (!employee || employee.archivedAt || employee.status === 'paused') return false;
+  // Open Dot employees have a separate executor. Until that adapter owns the
+  // dispatch path, never let an Open Dot click fall through to native DSH.
+  if (Object.hasOwn(employee.policyRules || {}, 'open_dot_employee')) return false;
   const lifecycle = nativeLifecycle(employee);
   if (Object.hasOwn(employee.policyRules || {}, 'native_lifecycle') && !lifecycle) return false;
   return !lifecycle || (lifecycle.phase === 'active' && ['durable','temporary'].includes(lifecycle.kind) &&
@@ -57,7 +60,7 @@ function publicEmployee(row) {
     archivedAt: row.archivedAt, policyRules: row.policyRules };
 }
 /** One org-scoped transaction serializes replay and mutation on the existing registry. */
-export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now() } = {}) {
+export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now(), executionBackend = 'native' } = {}) {
   await requireLifecycleAdministrator(db, principal);
   if (principal.runtimeSessionId) await requireNativeRuntime(db, principal);
   if (principal.employeeSessionId) {
@@ -66,7 +69,14 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
   }
   if (input?.operation === 'create') {
     const value = validateNativeCreation(input, -Infinity);
-    const hash = createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    if (!['native','open-dot'].includes(executionBackend)) lifecycleError('invalid_execution_backend',400);
+    const inputDigest = createHash('sha256').update(JSON.stringify({
+      name:value.name, persona:value.persona, role:value.role, lifecycle:value.lifecycle,
+      expires_at:value.expires_at, avatar_url:value.avatar_url, appearance:value.appearance,
+    })).digest('hex');
+    const hash = executionBackend === 'open-dot'
+      ? createHash('sha256').update(JSON.stringify({execution_backend:executionBackend,input_digest:inputDigest})).digest('hex')
+      : createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const slug = `employee-${createHash('sha256').update(`${principal.orgId}:${value.creation_key}`).digest('hex').slice(0, 24)}`;
     return db.$transaction(async tx => {
       // PostgreSQL returns void here; Prisma raw queries need a readable column type.
@@ -82,11 +92,15 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
         name: value.name, persona: value.persona, roleArchetype: value.role, avatarUrl: value.avatar_url,
         scope: 'organization', status: 'draft', model: 'native-harness', llmProvider: 'native-harness',
         tools: [], enabledConnectors: [],
-        policyRules: { ...(value.appearance ? {appearance:value.appearance} : {}), native_lifecycle: { version: VERSION, kind: value.lifecycle, phase: 'active',
+        // DigitalEmployee has no execution-backend column. Keep the integration
+        // marker in reserved policyRules metadata beside the canonical lifecycle
+        // and appearance until a dedicated schema field is justified.
+        policyRules: { ...(value.appearance ? {appearance:value.appearance} : {}), native_lifecycle: { version: VERSION, kind: value.lifecycle, phase: executionBackend === 'open-dot' ? 'provisioning' : 'active',
           revision: 1, profile_revision:1, onboarding_required: !principal.runtimeSessionId || input.persona == null,
           profile_stage: principal.runtimeSessionId && input.persona != null ? 'ready' : 'responsibilities',
           ...(principal.runtimeSessionId && input.persona != null ? {profile_ready_at:new Date(now).toISOString(),joining_profile:{name:value.name,role:value.role,profileRevision:1,at:new Date(now).toISOString()}} : {}), expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
-          ...(principal.runtimeSessionId ? { runtime_session: principal.runtimeSessionId } : {}) } },
+          ...(principal.runtimeSessionId ? { runtime_session: principal.runtimeSessionId } : {}) },
+          ...(executionBackend === 'open-dot' ? {open_dot_employee:{version:VERSION,execution_backend:'open-dot',state:'provisioning',execution_state:'pending',creation_key:value.creation_key,input_digest:inputDigest,binding_revision:1}} : {}) },
       } });
       return { employee: publicEmployee(employee), replayed: false };
     });
@@ -104,7 +118,10 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       return { employee: publicEmployee(row), replayed: true, closeout: { ready: true, archived: true } };
     }
     if (input.operation === 'configure') {
-      if (!employeeCanDispatch(row, now)) lifecycleError('employee_profile_not_active');
+      const dot = row.policyRules?.open_dot_employee;
+      const dotProfileMayBeConfigured = dot?.version === VERSION && dot.execution_backend === 'open-dot'
+        && dot.state === 'bound' && nativeLifecycle(row)?.phase === 'active';
+      if (!employeeCanDispatch(row, now) && !dotProfileMayBeConfigured) lifecycleError('employee_profile_not_active');
       if (Object.keys(input).some(key => !['operation','employee_id','expected_profile_revision','persona','role','name'].includes(key))) lifecycleError('invalid_employee_configuration',400);
       const update = {};
       if (input.persona !== undefined) update.persona = text(input.persona,'persona',12000);

@@ -169,6 +169,27 @@ export class CloudflareKnowledgeIngestClient {
     await this._request(`/objects/${objectKey}`, { method: 'DELETE' }).catch(() => null);
   }
 
+  /** Account erasure must never accept best-effort cleanup as a receipt. */
+  async deleteObjectVerified(objectKey) {
+    if (!objectKey) throw Object.assign(new Error('Source object key is required'), { code: 'SOURCE_OBJECT_KEY_REQUIRED', retryable: false });
+    const pathname = `/objects/${encodeURIComponent(objectKey)}`;
+    const response = await this._request(pathname, { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) {
+      throw Object.assign(new Error(`Source object erasure failed with HTTP ${response.status}`), {
+        code: [401, 403].includes(response.status) ? 'SOURCE_ERASURE_AUTHORIZATION_REQUIRED' : 'SOURCE_OBJECT_ERASURE_FAILED',
+        retryable: response.status >= 500 || response.status === 429,
+      });
+    }
+    const verification = await this._request(pathname, { method: 'HEAD' });
+    if (verification.status !== 404) {
+      throw Object.assign(new Error('Source object absence could not be verified'), {
+        code: [401, 403].includes(verification.status) ? 'SOURCE_ERASURE_AUTHORIZATION_REQUIRED' : 'SOURCE_OBJECT_ERASURE_UNVERIFIED',
+        retryable: verification.status >= 500 || verification.status === 429,
+      });
+    }
+    return { status: 'erased', verifiedAbsent: true };
+  }
+
   async stats() {
     return {
       enabled: this.configured(),

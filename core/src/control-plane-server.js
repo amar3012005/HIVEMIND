@@ -10427,10 +10427,10 @@ const server = http.createServer(async (req, res) => {
       const action = String(body.action || '');
       const toolkit = String(body.toolkit || '').trim().toLowerCase();
       const validToolkit = /^[a-z0-9_-]{1,80}$/.test(toolkit);
-      if (!['connection_status', 'search', 'execute_read'].includes(action)) {
-        return jsonResponse(res, { error: 'Unsupported connected-app action; only read operations are available' }, 400, privateHeaders);
+      if (!['connection_status', 'search', 'execute_read', 'prepare_write', 'pending_write_status'].includes(action)) {
+        return jsonResponse(res, { error: 'Unsupported connected-app action' }, 400, privateHeaders);
       }
-      if (action !== 'connection_status' && !validToolkit) {
+      if (!['connection_status', 'pending_write_status'].includes(action) && !validToolkit) {
         return jsonResponse(res, { error: 'Valid toolkit required' }, 400, privateHeaders);
       }
 
@@ -10445,10 +10445,26 @@ const server = http.createServer(async (req, res) => {
         });
         if (nangoGmail) connections.push({ toolkit: 'gmail', status: 'ACTIVE', updatedAt: nangoGmail.connectedAt || null, source: 'nango-native-gmail' });
         const filteredConnections = connections.filter((row) => !toolkit || String(row.toolkit || '').toLowerCase() === toolkit);
+        const cursor = typeof body.cursor === 'string' && body.cursor.length <= 512 ? body.cursor : null;
+        const catalog = await composioService.listToolkits({
+          ...(toolkit ? { search: toolkit } : {}), ...(cursor ? { cursor } : {}), limit: 100,
+        });
+        const accountByToolkit = new Map(filteredConnections.filter((row) => row.source !== 'nango-native-gmail')
+          .map((row) => [String(row.toolkit || '').toLowerCase(), row]));
+        const catalogRows = (catalog.items || []).map((item) => {
+          const account = accountByToolkit.get(String(item.slug || '').toLowerCase());
+          const status = account ? String(account.status) : 'AVAILABLE';
+          return { toolkit: item.slug, name: item.name, status, source: account?.source || 'composio',
+            connected: status.toUpperCase() === 'ACTIVE', noAuth: item.noAuth === true };
+        });
+        if (nangoGmail && (!toolkit || toolkit === 'gmail')) {
+          catalogRows.push({ toolkit: 'gmail', name: 'Gmail', status: 'ACTIVE', source: 'nango-native-gmail', connected: true, noAuth: false });
+        }
         return jsonResponse(res, {
           ok: true, action, connections: filteredConnections,
+          catalog: catalogRows, nextCursor: catalog.nextCursor || null, totalItems: catalog.totalItems || 0,
           activeToolkits: [...new Set(filteredConnections.filter((row) => String(row.status).toUpperCase() === 'ACTIVE').map((row) => String(row.toolkit).toLowerCase()))],
-          authority: 'user-scoped-composio-read',
+          authority: 'user-scoped-connected-apps',
           scope: { org_id: principal.orgId, user_id: principal.userId, authority: 'server-derived-from-api-key' },
         }, 200, privateHeaders);
       }
@@ -10459,49 +10475,83 @@ const server = http.createServer(async (req, res) => {
         const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
         const active = (accounts || []).some((row) => String(row.toolkit || '').toLowerCase() === toolkit
           && String(row.status || '').toUpperCase() === 'ACTIVE');
-        if (!active && toolkit === 'gmail') {
+        const nativeTools = [];
+        if (toolkit === 'gmail') {
           const nangoGmail = await prisma.nangoConnection?.findFirst({
             where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
             select: { connectionId: true },
           });
           if (nangoGmail?.connectionId) {
             const { GMAIL_MANIFEST } = await import('./connectors/runtime/plugins/gmail/index.js');
-            const readTools = (GMAIL_MANIFEST.tools || []).filter((tool) => tool.access === 'read'
-              && tool.approval === 'never' && tool.allowedSurfaces?.includes('hyperagents'));
-            const tools = readTools.map((tool) => {
-              const grant = issueGovernedReadGrant({
+            const appTools = (GMAIL_MANIFEST.tools || []).filter((tool) => tool.allowedSurfaces?.includes('hyperagents')
+              && ((tool.access === 'read' && tool.approval === 'never') || (tool.access === 'write' && tool.approval === 'required')));
+            nativeTools.push(...appTools.map((tool) => {
+              const grant = issueGovernedToolGrant({
                 orgId: principal.orgId, userId: principal.userId, toolkit,
-                sessionId: 'nango-native-gmail', toolSlug: tool.name,
+                sessionId: 'nango-native-gmail', toolSlug: tool.name, providerSource: 'nango-native-gmail',
               });
               return {
                 name: tool.name, toolSlug: tool.name, description: tool.description,
-                inputSchema: tool.inputSchema, toolkit, effect: 'read', providerSource: 'nango-native-gmail',
+                inputSchema: tool.inputSchema, toolkit, effect: tool.access,
+                providerSource: 'nango-native-gmail',
                 grantId: grant.grantId, grantExpiresAt: grant.expiresAt,
+                ...(grant.effect === 'write' ? { attemptKey: crypto.randomBytes(24).toString('base64url') } : {}),
               };
-            });
-            return jsonResponse(res, {
-              ok: true, action, tools, connectionStatus: 'active', providerSource: 'nango-native-gmail',
-              authority: 'user-scoped-native-gmail-read',
-            }, 200, privateHeaders);
+            }));
           }
         }
-        if (!active) return jsonResponse(res, {
-          ok: true, action, tools: [], connectionStatus: 'not_connected', authority: 'user-scoped-composio-read',
-        }, 200, privateHeaders);
-        const discovered = await discoverGovernedSessionReads(principal.orgId, {
-          toolkits: [toolkit], useCases: [useCase], userId: principal.userId,
-        });
-        const tools = (discovered.tools || []).map((tool) => {
-          const grant = issueGovernedReadGrant({
-            orgId: principal.orgId, userId: principal.userId, toolkit: tool.toolkit || toolkit,
-            sessionId: tool.sessionId, toolSlug: tool.toolSlug,
+        let discovered = { tools: [], sessionId: null };
+        try {
+          discovered = await composioService.discoverSessionTools(principal.orgId, {
+            toolkits: [toolkit], useCases: [useCase], userId: principal.userId,
+            allowDisconnected: true, hydrateSchemas: true, manageConnections: false,
+            ...(String(body.known_fields || '').trim() ? { searchPayload: {
+              session: { generate_id: true }, queries: [{ use_case: useCase, known_fields: String(body.known_fields).trim().slice(0, 1200) }],
+            } } : {}),
           });
-          const { sessionId: _sessionId, ...publicTool } = tool;
-          return { ...publicTool, effect: 'read', providerSource: 'composio', grantId: grant.grantId, grantExpiresAt: grant.expiresAt };
-        });
+        } catch (error) {
+          if (!nativeTools.length) throw error;
+          console.warn('[connected-apps] Composio discovery unavailable; returning native Gmail tools');
+        }
+        const tools = (discovered.tools || []).map((tool) => {
+          const toolSlug = tool?._composio?.slug;
+          if (!toolSlug) return null;
+          const grant = issueGovernedToolGrant({
+            orgId: principal.orgId, userId: principal.userId, toolkit: tool.toolkit || toolkit,
+            sessionId: tool._composio.sessionId || discovered.sessionId, toolSlug,
+          });
+          return {
+            name: tool.function?.name || `composio_${toolSlug.toLowerCase()}`,
+            toolSlug, description: tool.function?.description || '',
+            inputSchema: tool.function?.parameters || { type: 'object', properties: {} },
+            toolkit: tool._composio.toolkit || toolkit, effect: grant.effect,
+            providerSource: 'composio', grantId: grant.grantId, grantExpiresAt: grant.expiresAt,
+            ...(grant.effect === 'write' ? { attemptKey: crypto.randomBytes(24).toString('base64url') } : {}),
+          };
+        }).filter(Boolean);
+        tools.unshift(...nativeTools);
         return jsonResponse(res, {
-          ok: true, action, tools, connectionStatus: 'active', authority: 'user-scoped-composio-read',
+          ok: true, action, tools, connectionStatus: active || nativeTools.length ? 'active' : 'not_connected', authority: 'user-scoped-connected-apps',
+          scope: { org_id: principal.orgId, user_id: principal.userId, authority: 'server-derived-from-api-key' },
           searchedLogId: discovered.searchedLogId || null, schemaLogId: discovered.schemaLogId || null,
+        }, 200, privateHeaders);
+      }
+
+      if (action === 'pending_write_status') {
+        const draftId = String(body.draft_id || '');
+        const dotId = String(body.open_dot_id || '');
+        if (!/^[0-9a-f-]{36}$/i.test(draftId) || !/^[A-Za-z0-9_-]{1,120}$/.test(dotId)) {
+          return jsonResponse(res, { error: 'Pending-write reference is invalid' }, 400, privateHeaders);
+        }
+        const row = await prisma.pendingWrite.findFirst({
+          where: { id: draftId, userId: principal.userId, orgId: principal.orgId,
+            traceId: { startsWith: `open-dot:${dotId}:` } },
+          select: { id: true, provider: true, toolName: true, preview: true, status: true, expiresAt: true, createdAt: true },
+        });
+        if (!row) return jsonResponse(res, { error: 'Pending write not found' }, 404, privateHeaders);
+        return jsonResponse(res, { ok: true, action, draft: row,
+          authority: 'user-scoped-pending-write',
+          scope: { org_id: principal.orgId, user_id: principal.userId, authority: 'server-derived-from-api-key' },
         }, 200, privateHeaders);
       }
 
@@ -10509,15 +10559,91 @@ const server = http.createServer(async (req, res) => {
       if (!/^[A-Za-z0-9_./:-]{1,180}$/.test(toolSlug)) {
         return jsonResponse(res, { error: 'Valid tool_slug required' }, 400, privateHeaders);
       }
-      const grant = resolveGovernedReadGrant({
+      const resolvedGrant = resolveGovernedToolGrant({
         grantId: String(body.grant_id || ''), orgId: principal.orgId, userId: principal.userId, toolSlug,
       });
+      const grant = resolvedGrant;
       if (String(grant.toolkit || '').toLowerCase() !== toolkit) {
         return jsonResponse(res, { error: 'Grant toolkit mismatch' }, 403, privateHeaders);
       }
+      if (action === 'execute_read' && grant.effect !== 'read') {
+        return jsonResponse(res, { error: 'Read grant required' }, 403, privateHeaders);
+      }
+      if (action === 'prepare_write' && !['composio', 'nango-native-gmail'].includes(grant.providerSource)) {
+        return jsonResponse(res, { error: 'Connected-app write source is unsupported' }, 403, privateHeaders);
+      }
       const args = body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
         ? body.arguments : {};
-      if (grant.sessionId === 'nango-native-gmail') {
+      if (action === 'prepare_write') {
+        if (grant.effect !== 'write') return jsonResponse(res, { error: 'Write grant required' }, 403, privateHeaders);
+        let inputSchema;
+        let provider = 'composio';
+        let toolGroup = 'composio';
+        let sessionId = grant.sessionId;
+        let exactToolName = toolSlug;
+        if (grant.providerSource === 'nango-native-gmail') {
+          if (sessionId !== 'nango-native-gmail') return jsonResponse(res, { error: 'Native Gmail write grant source mismatch' }, 403, privateHeaders);
+          if (toolkit !== 'gmail') return jsonResponse(res, { error: 'Native Gmail grant toolkit mismatch' }, 403, privateHeaders);
+          const nangoGmail = await prisma.nangoConnection?.findFirst({
+            where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+            select: { connectionId: true },
+          });
+          if (!nangoGmail?.connectionId) return jsonResponse(res, { error: 'Native Gmail connection is no longer active' }, 403, privateHeaders);
+          const { GMAIL_MANIFEST } = await import('./connectors/runtime/plugins/gmail/index.js');
+          const nativeTool = GMAIL_MANIFEST.tools.find((tool) => tool.name === toolSlug && tool.access === 'write'
+            && tool.approval === 'required' && tool.allowedSurfaces?.includes('hyperagents'));
+          if (!nativeTool) return jsonResponse(res, { error: 'Native Gmail write tool is not allowed' }, 403, privateHeaders);
+          inputSchema = nativeTool.inputSchema;
+          provider = 'gmail';
+          toolGroup = 'gmail';
+          exactToolName = nativeTool.name;
+        } else {
+          const schemas = await composioService.getSessionToolSchemas(sessionId, [toolSlug]);
+          inputSchema = schemas?.[toolSlug]?.input_schema;
+        }
+        if (!inputSchema || typeof inputSchema !== 'object') return jsonResponse(res, { error: 'Connected-app write schema unavailable' }, 502, privateHeaders);
+        const { default: Ajv } = await import('ajv');
+        let valid = false;
+        try { valid = new Ajv({ strict: false, allErrors: true }).compile(inputSchema)(args); } catch { valid = false; }
+        if (!valid) return jsonResponse(res, { error: 'Connected-app write arguments failed schema validation' }, 400, privateHeaders);
+        const dotId = String(body.open_dot_id || '');
+        const attemptKey = String(body.attempt_key || '');
+        if (!/^[A-Za-z0-9_-]{1,120}$/.test(dotId) || !/^[A-Za-z0-9_-]{16,180}$/.test(attemptKey)) {
+          return jsonResponse(res, { error: 'Open Dot write context is invalid' }, 400, privateHeaders);
+        }
+        const toolArgs = {
+          ...args,
+          ...(provider === 'composio' ? { _composio_slug: toolSlug, _composio_session_id: sessionId } : {}),
+          _open_dot_id: dotId, _open_dot_attempt_key: attemptKey,
+          _input_schema: inputSchema,
+        };
+        const serialized = JSON.stringify(toolArgs);
+        const argsHash = crypto.createHash('sha256').update(serialized).digest('hex');
+        const idempotencyKey = crypto.createHash('sha256')
+          .update(`open-dot:${principal.orgId}:${principal.userId}:${dotId}:${attemptKey}:${toolSlug}:${JSON.stringify(args)}`).digest('hex');
+        let draft = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: principal.orgId, userId: principal.userId } });
+        if (!draft) {
+          try {
+            draft = await prisma.pendingWrite.create({ data: {
+              userId: principal.userId, orgId: principal.orgId, provider, toolGroup, toolName: exactToolName,
+              toolArgs, argsHash, traceId: `open-dot:${dotId}:${attemptKey}`.slice(0, 160), idempotencyKey,
+              expiresAt: new Date(Date.now() + 15 * 60_000),
+              preview: `${exactToolName} awaiting user approval`.slice(0, 200), status: 'draft',
+            } });
+          } catch (error) {
+            if (error?.code !== 'P2002') throw error;
+            draft = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: principal.orgId, userId: principal.userId } });
+            if (!draft) throw error;
+          }
+        }
+        return jsonResponse(res, {
+          ok: true, action, status: draft.status === 'draft' ? 'approval_required' : draft.status,
+          approval: { id: draft.id, summary: draft.preview, expiresAt: draft.expiresAt },
+          authority: 'user-scoped-pending-write',
+        }, 200, privateHeaders);
+      }
+      if (grant.providerSource === 'nango-native-gmail') {
+        if (grant.effect !== 'read' || grant.sessionId !== 'nango-native-gmail') return jsonResponse(res, { error: 'Native Gmail read grant source mismatch' }, 403, privateHeaders);
         if (toolkit !== 'gmail') return jsonResponse(res, { error: 'Native Gmail grant toolkit mismatch' }, 403, privateHeaders);
         const nangoGmail = await prisma.nangoConnection?.findFirst({
           where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },

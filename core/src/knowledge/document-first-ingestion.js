@@ -4361,6 +4361,12 @@ Every item must include a non-empty content field and one or more valid support_
    *   skipped?:boolean, reason?:string, error?:string}>}
    */
   async ingestSource(envelope) {
+    const validation = validateEnvelope(envelope);
+    if (!validation.ok) return {ok:false,error:validation.error};
+    return withAccountIngestionLease(this.erasureAuthority,{userId:envelope.userId,lane:'ingest-source'},()=>this._leased_ingestSource(envelope));
+  }
+
+  async _leased_ingestSource(envelope) {
     const v = validateEnvelope(envelope);
     if (!v.ok) return { ok: false, error: v.error };
 

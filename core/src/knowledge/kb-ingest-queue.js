@@ -1,3 +1,4 @@
+import { withAccountIngestionLease } from '../security/account-ingestion-lease.js';
 /**
  * Durable KB ingestion queue — BullMQ on the existing Redis, wrapping the
  * verified document-first pipeline (documentFirstIngestion is called UNCHANGED
@@ -634,7 +635,7 @@ export class KbIngestQueue {
           this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename, ...detail });
           this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0, detail).catch(() => {});
         };
-      const work = promotionOnly
+      const work = withAccountIngestionLease(this.jobStore.prisma, { userId, lane: 'kb-queue' }, () => promotionOnly
         ? this.dfi.promoteStoredEvidence({
           documentId: metadata.promotion_document_id,
           userId,
@@ -650,7 +651,7 @@ export class KbIngestQueue {
             source: { type: 'kb', filename },
             file: { buffer: fileBuffer, contentType: contentType || 'application/octet-stream', filename },
             metadata: metadata || {}, ingestMode: metadata?.ingest_mode || 'both', onProgress,
-          });
+          }));
       // Hard timeout: poison-pill guard. The pipeline is idempotent (checksum
       // upserts + segment reuse), so an abandoned attempt is safe to retry.
       const result = await Promise.race([

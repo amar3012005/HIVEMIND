@@ -1,3 +1,4 @@
+import { withAccountIngestionLease } from '../security/account-ingestion-lease.js';
 import crypto from 'node:crypto';
 import { KnowledgeIngestStepStore } from './ingest-step-store.js';
 import {
@@ -351,6 +352,10 @@ export class CloudflareKnowledgeIngestExecutor {
   }
 
   async _materialize(job) {
+    return withAccountIngestionLease(this.prisma, { userId: job.userId, lane: 'cloudflare-ingest' }, () => this._materializeLeased(job));
+  }
+
+  async _materializeLeased(job) {
     const isImage = job.mediaKind === 'image' || job.metadata?.media_kind === 'image';
     const durableMetadata = isImage
       ? { ...(job.metadata || {}), media_kind: 'image', ingest_mode: 'both' }

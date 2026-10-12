@@ -4,7 +4,7 @@ export async function planAccountErasureScope(prisma, userId) {
   const organizations = [];
   for (const membership of memberships) {
     const others = await prisma.userOrganization.findMany({
-      where:{orgId:membership.orgId,userId:{not:userId},isActive:true},
+      where:{orgId:membership.orgId,userId:{not:userId}},
       select:{userId:true,role:true},
     });
     organizations.push({orgId:membership.orgId,disposition:membership.role==='owner'&&!others.length?'delete_exclusive':'retain_shared',remainingMembers:others.map(row=>({userId:row.userId,role:row.role}))});

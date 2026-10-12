@@ -19,7 +19,7 @@ CREATE TABLE hivemind.account_erasure_receipts (
 CREATE FUNCTION hivemind.account_erasure_write_fence() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  PERFORM pg_advisory_xact_lock(hashtext('account-erasure:' || NEW.user_id::text));
- IF EXISTS(SELECT 1 FROM hivemind.account_erasure_operations WHERE user_id=NEW.user_id AND state<>'completed') THEN
+ IF EXISTS(SELECT 1 FROM hivemind.account_erasure_operations WHERE state<>'completed' AND (user_id=NEW.user_id OR ownership_snapshot->'organizations' @> jsonb_build_array(jsonb_build_object('orgId',NEW.org_id::text,'disposition','delete_exclusive')))) THEN
   RAISE EXCEPTION 'Account source writes are fenced during erasure' USING ERRCODE='55000';
  END IF;
  RETURN NEW;
@@ -35,3 +35,12 @@ CREATE TABLE hivemind.account_ingestion_leases (
  created_at timestamptz NOT NULL DEFAULT now(),settled_at timestamptz
 );
 CREATE INDEX account_ingestion_unsettled ON hivemind.account_ingestion_leases(user_id) WHERE state<>'settled';
+
+CREATE TRIGGER account_erasure_membership_fence BEFORE INSERT OR UPDATE ON hivemind.user_organizations FOR EACH ROW EXECUTE FUNCTION hivemind.account_erasure_write_fence();
+ALTER TABLE hivemind.account_erasure_operations ADD COLUMN status_token_hash text, ADD COLUMN status_token_expires_at timestamptz;
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='hivemind_user') THEN
+  GRANT SELECT,INSERT,UPDATE ON hivemind.account_erasure_operations,hivemind.account_ingestion_leases TO hivemind_user;
+  GRANT SELECT,INSERT ON hivemind.account_erasure_receipts TO hivemind_user;
+ END IF;
+END $$;

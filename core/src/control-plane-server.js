@@ -1,3 +1,5 @@
+import { verifiedAccountIngestionDrain } from './security/account-ingestion-lease.js';
+import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
 import { planAccountErasureScope } from './security/account-erasure-scope.js';
 import { runAccountErasureOnce } from './security/account-erasure-worker.js';
@@ -7839,10 +7841,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/v1/account/erasure' && req.method === 'GET') {
+    if (String(req.headers.authorization || '').startsWith('Erasure erasure.')) {
+      try {
+        const operation = await readErasureStatusToken(getCentralPrismaClient(),req.headers.authorization,url.searchParams.get('operationId'));
+        return operation ? jsonResponse(res,{status:operation.state,operationId:operation.id,...(operation.failure_code?{failureCode:operation.failure_code,error:operation.failure_code}:{})}) : jsonResponse(res,{error:'Invalid or expired erasure status receipt'},401);
+      } catch { return jsonResponse(res,{error:'Erasure status is unavailable'},503); }
+    }
     const current = await requireSession(req,res); if (!current) return;
     try {
       const rows = await getCentralPrismaClient().$queryRawUnsafe('SELECT id,state,failure_code,created_at,updated_at FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid ORDER BY created_at DESC LIMIT 1',current.session.userId);
-      return jsonResponse(res,{operation:rows[0] || null});
+      const operation=rows[0];
+      return jsonResponse(res,operation?{status:operation.state,operationId:operation.id,...(operation.failure_code?{failureCode:operation.failure_code,error:operation.failure_code}:{})}:{status:'none'});
     } catch (error) { return jsonResponse(res,{error:'Account erasure status is unavailable',code:'ERASURE_STATUS_UNAVAILABLE'},503); }
 
   }
@@ -7886,9 +7895,24 @@ const server = http.createServer(async (req, res) => {
     try {
       const authority = getCentralPrismaClient();
       const ownershipSnapshot = await planAccountErasureScope(authority,user.id);
+      const existingOperations = await authority.$queryRawUnsafe("SELECT id FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid AND state<>'completed' LIMIT 1",user.id);
+      let sourceEmpty = false;
+      try { await requireReconciledSourceErasure(authority,user.id); sourceEmpty = true; } catch (error) { if(error.code!=='SOURCE_ERASURE_RECONCILIATION_REQUIRED') throw error; }
+      let writesDrained = false;
+      try { await verifiedAccountIngestionDrain(authority,user.id); writesDrained = true; } catch (error) { if(error.code!=='ERASURE_INGEST_DRAIN_REQUIRED') throw error; }
+      const knownOrgIds = ownershipSnapshot.organizations.map(org=>org.orgId);
+      const unownedMemories = await authority.memory.count({where:{userId:user.id,orgId:knownOrgIds.length?{notIn:knownOrgIds}:{not:null}}});
+      if (sourceEmpty && writesDrained && !unownedMemories && !existingOperations.length && ownershipSnapshot.organizations.every(org=>org.disposition==='delete_exclusive')) {
+        const result = await performAccountDeletion({userId:user.id,orgIdsToDelete:ownershipSnapshot.organizations.map(org=>org.orgId)});
+        if (!result.ok) return jsonResponse(res,{error:result.error,status:'failed'},500);
+        await sessionStore.destroySession(current.sessionId);
+        return jsonResponse(res,{success:true,status:'completed'},200,{'Set-Cookie':clearSessionCookie()});
+      }
+
       const operation = await admitAccountErasure(authority,{userId:user.id,actorId:current.session.userId,confirmation:'DELETE',ownershipSnapshot});
+      const statusToken = await issueErasureStatusToken(authority,operation.id,user.id);
       setImmediate(() => recoverAccountErasure());
-      return jsonResponse(res,{status:'pending',operation_id:operation.id,message:'Account erasure is being reconciled. Your account remains active until verified cleanup completes.'},202);
+      return jsonResponse(res,{status:operation.state,operationId:operation.id,receiptToken:statusToken,message:'Account erasure is being reconciled. Your account remains active until verified cleanup completes.'},202);
     } catch (error) {
       return jsonResponse(res,{error:'Account erasure could not be admitted; your account remains active.',code:error.code || 'ERASURE_ADMISSION_UNAVAILABLE'},error.status || 503);
     }

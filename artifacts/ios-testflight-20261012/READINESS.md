@@ -25,6 +25,14 @@
 - User voice retest: a reply is produced but remains inaudible. Simulator Sound=1 and output=MacBook Pro Speakers were observed. Capacitor configuration already permits gesture-free playback. Exact audio fault remains unresolved; no speculative call-code change made.
 - User clarifies ringback is audible, but employee speech is not; mobile web voice works. Current live native image is `hivemind/harness-chat:sha-d190bbb2c72e-bounded`, digest `sha256:02ebfce9556083c429b20b1806f07acc990ac7b4641b6a23157fe49f513dc242`. Voice component and Grok adapter source are unchanged versus 6db0a078. Current web main 22b7e672 is included in this iOS candidate.
 - Debug-only native playback counters installed through the existing Capacitor WebView factory hook. Local Xcode confirms `[VoicePlayback] diagnostic initialized`. No call counters yet; another visible call is required. Captures only connection/packet/energy/playback aggregates, not audio, transcripts, addresses or credentials. Release rebuild succeeds and diagnostic strings are absent from the Release executable.
+
+## Silent speech trace and repair candidate
+
+User repeated the call; native counters show connected=1, inbound audio packets rising 59 → 294 → 533, bytes 9581 → 33565 → 50773, nonzero energy 0.16941 → 0.46380; HTML media playing=1, muted=0, ready=1; runningContexts=1. Ringback audible; employee speech inaudible. This proves delivery of nonzero audio to the iOS client, not audible rendering.
+
+Native repair e316e6aa0ba43a762b7aa21ec8b241a2b66f3a89 builds from exact live d190bbb2c72e. Routes provider stream to a gain-controlled output in the already running Web Audio activity context, only for capacitor: pages. The microphone remains analysis-only. Mutes the old media element to avoid duplicate output; speaker controls operate the native gain; navigation releases nodes/context. Browser HTML playback remains unchanged. Eleven focused voice checks, normal commit checks and full push typechecks pass.
+
+Deployed image: `hivemind/harness-chat:sha-e316e6aa0ba4-ios-voice-playbacks`, digest `sha256:c2da118fc6b65a8fc0cb8c9f92a1965a4d4f775e977b2fc29451e1d08ca9bf72`. Actual image retains existing presets/plugins and compiled native speaker route. Managed runner-only cutover reports healthy; sibling container identities preserved. Rollback: `/root/releases/ios-voice-playback-e316e6aa0ba4/rollback-image.json`. Simulator app restarted to load new plugin revision. Audible speech, native mute/unmute and device acceptance remain pending.
 - App Store Connect app record and intended release version/build number.
 - Distribution signing/Apple account setup. Available local identity is Apple Development; no Apple Distribution identity currently verified.
 - Review collection/tracking and required-reason API inventory, including bundled native dependencies. Existing privacy manifest has an empty required-reason list and an explicit owner-review note; that is not privacy approval.

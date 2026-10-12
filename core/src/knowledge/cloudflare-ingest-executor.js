@@ -72,11 +72,12 @@ function terminalResult(result = {}) {
 
 export class CloudflareKnowledgeIngestExecutor {
   constructor({
-    prisma, jobStore, objectClient, documentFirstIngestion,
+    prisma, centralPrisma, jobStore, objectClient, documentFirstIngestion,
     validateJob, processUpload, isRemoteOrg = () => false, stepStore = null,
     logger = console,
   }) {
     this.prisma = prisma;
+    this.erasureAuthority = centralPrisma;
     this.jobStore = jobStore;
     this.objectClient = objectClient;
     this.dfi = documentFirstIngestion;
@@ -352,7 +353,7 @@ export class CloudflareKnowledgeIngestExecutor {
   }
 
   async _materialize(job) {
-    return withAccountIngestionLease(this.prisma, { userId: job.userId, lane: 'cloudflare-ingest' }, () => this._materializeLeased(job));
+    return withAccountIngestionLease(this.erasureAuthority, { userId: job.userId, lane: 'cloudflare-ingest' }, () => this._materializeLeased(job));
   }
 
   async _materializeLeased(job) {

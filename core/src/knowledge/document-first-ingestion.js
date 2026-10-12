@@ -1156,8 +1156,9 @@ function safePathSegment(name) {
 }
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
+  constructor({ db, centralPrisma, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
     this.db = db;
+    this.erasureAuthority = centralPrisma;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
     this.doclingAdapter = doclingAdapter;
@@ -1761,7 +1762,7 @@ Output the JSON object and nothing else.`;
             const vec = vectors[idx];
             if (!usableEmbedding(vec)) return; // authoritative memory remains; reconciler indexes it
             enrichRecs.push({ factId: p.factId, vec });
-            await withAccountIngestionLease(this.db, { userId, lane: 'document-vector' }, () => vs?.storeMemory({
+            await withAccountIngestionLease(this.erasureAuthority, { userId, lane: 'document-vector' }, () => vs?.storeMemory({
               id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
               title: p.title, memory_type: 'fact', is_latest: true, tags: p.entityTags,
               project_ids: Array.isArray(p.t.project_ids) ? p.t.project_ids : [],
@@ -2489,7 +2490,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await withAccountIngestionLease(this.db, { userId, lane: 'document-vector' }, () => vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
+            await withAccountIngestionLease(this.erasureAuthority, { userId, lane: 'document-vector' }, () => vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
               title: p.title, memory_type: p.memory_type, is_latest: true, tags: p.tags,
               project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
               primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private',
@@ -3228,7 +3229,7 @@ Every item must include a non-empty content field and one or more valid support_
    * @returns {Promise<{documentId, segmentCount, candidateCount, promotedCount}>}
    */
   async ingestKnowledgeDocument(opts) {
-    return withAccountIngestionLease(this.db, { userId: opts.userId, lane: 'ingestKnowledgeDocument' }, () => this._leased_ingestKnowledgeDocument(opts));
+    return withAccountIngestionLease(this.erasureAuthority, { userId: opts.userId, lane: 'ingestKnowledgeDocument' }, () => this._leased_ingestKnowledgeDocument(opts));
   }
 
   async _leased_ingestKnowledgeDocument(opts) {
@@ -4044,7 +4045,7 @@ Every item must include a non-empty content field and one or more valid support_
    * Ingest enterprise document with schema extraction
    */
   async ingestEnterpriseDocument(opts) {
-    return withAccountIngestionLease(this.db, { userId: opts.userId, lane: 'ingestEnterpriseDocument' }, () => this._leased_ingestEnterpriseDocument(opts));
+    return withAccountIngestionLease(this.erasureAuthority, { userId: opts.userId, lane: 'ingestEnterpriseDocument' }, () => this._leased_ingestEnterpriseDocument(opts));
   }
 
   async _leased_ingestEnterpriseDocument(opts) {
@@ -4166,7 +4167,7 @@ Every item must include a non-empty content field and one or more valid support_
    * @param {Object} [params.metadata]
    */
   async ingestConnectorRecord(opts) {
-    return withAccountIngestionLease(this.db, { userId: opts.userId, lane: 'ingestConnectorRecord' }, () => this._leased_ingestConnectorRecord(opts));
+    return withAccountIngestionLease(this.erasureAuthority, { userId: opts.userId, lane: 'ingestConnectorRecord' }, () => this._leased_ingestConnectorRecord(opts));
   }
 
   async _leased_ingestConnectorRecord(opts) {

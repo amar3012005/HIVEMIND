@@ -71,14 +71,14 @@ async function loadCore() {
     path.resolve(__dirname, '../../src')
   ]);
 
-  const [{ getPrismaClient, ensureTenantContext }, { PrismaGraphStore }, { MemoryGraphEngine }, { DocumentFirstIngestionService }] = await Promise.all([
+  const [{ getCentralPrismaClient, getPrismaClient, ensureTenantContext }, { PrismaGraphStore }, { MemoryGraphEngine }, { DocumentFirstIngestionService }] = await Promise.all([
     import(pathToFileURL(path.join(coreBase, 'db/prisma.js')).href),
     import(pathToFileURL(path.join(coreBase, 'memory/prisma-graph-store.js')).href),
     import(pathToFileURL(path.join(coreBase, 'memory/graph-engine.js')).href),
     import(pathToFileURL(path.join(coreBase, 'knowledge/document-first-ingestion.js')).href),
   ]);
 
-  cachedCore = { getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine, DocumentFirstIngestionService };
+  cachedCore = { getCentralPrismaClient, getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine, DocumentFirstIngestionService };
   return cachedCore;
 }
 
@@ -129,7 +129,7 @@ async function createPersistedMemoryWriter() {
     return cachedWriter;
   }
 
-  const { getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine, DocumentFirstIngestionService } = await loadCore();
+  const { getCentralPrismaClient, getPrismaClient, ensureTenantContext, PrismaGraphStore, MemoryGraphEngine, DocumentFirstIngestionService } = await loadCore();
   const prisma = getPrismaClient();
   if (!prisma) {
     return null;
@@ -137,7 +137,7 @@ async function createPersistedMemoryWriter() {
 
   const store = new PrismaGraphStore(prisma);
   const engine = new MemoryGraphEngine({ store });
-  const canonicalIngestion = new DocumentFirstIngestionService({ db: prisma, memoryGraphEngine: engine });
+  const canonicalIngestion = new DocumentFirstIngestionService({ centralPrisma: getCentralPrismaClient(), db: prisma, memoryGraphEngine: engine });
 
   cachedWriter = {
     async persistChunk(chunk, context) {

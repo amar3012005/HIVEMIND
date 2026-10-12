@@ -170,9 +170,10 @@ export class KbIngestQueue {
    * @param {function} [deps.recordUsage]         (orgId, result) => void — plan-quota accounting post-success
    * @param {object} [deps.logger]
    */
-  constructor({ documentFirstIngestion, ingestTracker, recordUsage = null, jobStore = null,
+  constructor({ centralPrisma, documentFirstIngestion, ingestTracker, recordUsage = null, jobStore = null,
     validateJob = null, processUpload = null, logger = console }) {
     this.dfi = documentFirstIngestion;
+    this.erasureAuthority = centralPrisma;
     this.tracker = ingestTracker;
     this.recordUsage = recordUsage;
     this.jobStore = jobStore;
@@ -635,7 +636,7 @@ export class KbIngestQueue {
           this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename, ...detail });
           this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0, detail).catch(() => {});
         };
-      const work = withAccountIngestionLease(this.jobStore.prisma, { userId, lane: 'kb-queue' }, () => promotionOnly
+      const work = withAccountIngestionLease(this.erasureAuthority, { userId, lane: 'kb-queue' }, () => promotionOnly
         ? this.dfi.promoteStoredEvidence({
           documentId: metadata.promotion_document_id,
           userId,

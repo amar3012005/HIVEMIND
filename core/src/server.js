@@ -356,7 +356,7 @@ loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 const { MemoryEngine } = await import('./engine.local.js');
 const { resolveAuthoritySnapshot } = await import('./icarus/authority-snapshot.js');
 const { getGroqClient } = await import('../config/groq.js');
-const { getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg, getAmrEngineStatus } = await import('./db/prisma.js');
+const { getCentralPrismaClient, getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg, getAmrEngineStatus } = await import('./db/prisma.js');
 const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
 
 // Start capturing logs for this container (hm-core)
@@ -2602,6 +2602,7 @@ if (process.env.DOCLING_URL) {
 if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentMemoryStore && persistentMemoryEngine) {
   try {
     documentFirstIngestion = new DocumentFirstIngestionService({
+      centralPrisma: getCentralPrismaClient(),
       db: prisma,
       smartIngestRouter,
       memoryGraphEngine: persistentMemoryEngine,
@@ -2768,6 +2769,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         };
       };
       kbIngestQueue = new KbIngestQueue({
+        centralPrisma: getCentralPrismaClient(),
         documentFirstIngestion,
         ingestTracker,
         jobStore: knowledgeUploadJobStore,
@@ -2783,6 +2785,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       kbIngestQueue.workflowStatusResolver = (instanceId) => cloudflareKnowledgeIngestClient.getWorkflowStatus(instanceId);
       isAuthorizedKnowledgeWorkflowRequest = workflowModule.isAuthorizedKnowledgeWorkflowRequest;
       knowledgeWorkflowExecutor = new workflowModule.CloudflareKnowledgeIngestExecutor({
+        centralPrisma: getCentralPrismaClient(),
         prisma,
         jobStore: knowledgeUploadJobStore,
         objectClient: cloudflareKnowledgeIngestClient,

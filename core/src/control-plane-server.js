@@ -10436,12 +10436,18 @@ const server = http.createServer(async (req, res) => {
 
       if (action === 'connection_status') {
         const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
-        const connections = (accounts || [])
-          .filter((row) => !toolkit || String(row.toolkit || '').toLowerCase() === toolkit)
-          .map((row) => ({ toolkit: row.toolkit, status: row.status, updatedAt: row.updatedAt || null }));
+        const connections = (accounts || []).map((row) => ({
+          toolkit: row.toolkit, status: row.status, updatedAt: row.updatedAt || null, source: 'composio',
+        }));
+        const nangoGmail = await prisma.nangoConnection?.findFirst({
+          where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+          select: { connectedAt: true },
+        });
+        if (nangoGmail) connections.push({ toolkit: 'gmail', status: 'ACTIVE', updatedAt: nangoGmail.connectedAt || null, source: 'nango-native-gmail' });
+        const filteredConnections = connections.filter((row) => !toolkit || String(row.toolkit || '').toLowerCase() === toolkit);
         return jsonResponse(res, {
-          ok: true, action, connections,
-          activeToolkits: [...new Set(connections.filter((row) => String(row.status).toUpperCase() === 'ACTIVE').map((row) => String(row.toolkit).toLowerCase()))],
+          ok: true, action, connections: filteredConnections,
+          activeToolkits: [...new Set(filteredConnections.filter((row) => String(row.status).toUpperCase() === 'ACTIVE').map((row) => String(row.toolkit).toLowerCase()))],
           authority: 'user-scoped-composio-read',
           scope: { org_id: principal.orgId, user_id: principal.userId, authority: 'server-derived-from-api-key' },
         }, 200, privateHeaders);
@@ -10453,6 +10459,32 @@ const server = http.createServer(async (req, res) => {
         const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
         const active = (accounts || []).some((row) => String(row.toolkit || '').toLowerCase() === toolkit
           && String(row.status || '').toUpperCase() === 'ACTIVE');
+        if (!active && toolkit === 'gmail') {
+          const nangoGmail = await prisma.nangoConnection?.findFirst({
+            where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+            select: { connectionId: true },
+          });
+          if (nangoGmail?.connectionId) {
+            const { GMAIL_MANIFEST } = await import('./connectors/runtime/plugins/gmail/index.js');
+            const readTools = (GMAIL_MANIFEST.tools || []).filter((tool) => tool.access === 'read'
+              && tool.approval === 'never' && tool.allowedSurfaces?.includes('hyperagents'));
+            const tools = readTools.map((tool) => {
+              const grant = issueGovernedReadGrant({
+                orgId: principal.orgId, userId: principal.userId, toolkit,
+                sessionId: 'nango-native-gmail', toolSlug: tool.name,
+              });
+              return {
+                name: tool.name, toolSlug: tool.name, description: tool.description,
+                inputSchema: tool.inputSchema, toolkit, effect: 'read', providerSource: 'nango-native-gmail',
+                grantId: grant.grantId, grantExpiresAt: grant.expiresAt,
+              };
+            });
+            return jsonResponse(res, {
+              ok: true, action, tools, connectionStatus: 'active', providerSource: 'nango-native-gmail',
+              authority: 'user-scoped-native-gmail-read',
+            }, 200, privateHeaders);
+          }
+        }
         if (!active) return jsonResponse(res, {
           ok: true, action, tools: [], connectionStatus: 'not_connected', authority: 'user-scoped-composio-read',
         }, 200, privateHeaders);
@@ -10465,7 +10497,7 @@ const server = http.createServer(async (req, res) => {
             sessionId: tool.sessionId, toolSlug: tool.toolSlug,
           });
           const { sessionId: _sessionId, ...publicTool } = tool;
-          return { ...publicTool, effect: 'read', grantId: grant.grantId, grantExpiresAt: grant.expiresAt };
+          return { ...publicTool, effect: 'read', providerSource: 'composio', grantId: grant.grantId, grantExpiresAt: grant.expiresAt };
         });
         return jsonResponse(res, {
           ok: true, action, tools, connectionStatus: 'active', authority: 'user-scoped-composio-read',
@@ -10485,6 +10517,27 @@ const server = http.createServer(async (req, res) => {
       }
       const args = body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
         ? body.arguments : {};
+      if (grant.sessionId === 'nango-native-gmail') {
+        if (toolkit !== 'gmail') return jsonResponse(res, { error: 'Native Gmail grant toolkit mismatch' }, 403, privateHeaders);
+        const nangoGmail = await prisma.nangoConnection?.findFirst({
+          where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
+          select: { connectionId: true },
+        });
+        if (!nangoGmail?.connectionId) return jsonResponse(res, { error: 'Native Gmail connection is no longer active' }, 403, privateHeaders);
+        const { GMAIL_MANIFEST } = await import('./connectors/runtime/plugins/gmail/index.js');
+        const nativeTool = GMAIL_MANIFEST.tools.find((tool) => tool.name === toolSlug
+          && tool.access === 'read' && tool.approval === 'never' && tool.allowedSurfaces?.includes('hyperagents'));
+        if (!nativeTool?.legacyName) return jsonResponse(res, { error: 'Native Gmail read tool is not allowed' }, 403, privateHeaders);
+        const { runGoogleTool } = await import('./connectors/google-native.js');
+        const data = await runGoogleTool(nativeTool.legacyName, args, {
+          user_id: principal.userId, org_id: principal.orgId,
+        }, prisma);
+        return jsonResponse(res, {
+          ok: true, action, successful: true, data,
+          receipt: { provider: 'nango-native-gmail', toolSlug, effect: 'read' },
+          authority: 'user-scoped-native-gmail-read',
+        }, 200, privateHeaders);
+      }
       const result = await executeGovernedSessionRead({ sessionId: grant.sessionId, toolSlug, args });
       return jsonResponse(res, { ok: true, action, ...result, authority: 'user-scoped-composio-read' }, 200, privateHeaders);
     } catch (error) {

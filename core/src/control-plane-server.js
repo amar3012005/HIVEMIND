@@ -10350,7 +10350,10 @@ const server = http.createServer(async (req, res) => {
             teamIds: principal.teamId ? [principal.teamId] : principal.teamIds,
           });
       const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
-      const enriched = await enrichEmployeesWithHyperState(employees);
+      // The legacy governed-agent roster must not expose Open Dot employees to
+      // a second executor until an explicit cross-engine adapter exists.
+      const enriched = await enrichEmployeesWithHyperState(employees.filter(employee =>
+        !Object.hasOwn(employee.policyRules || {}, 'open_dot_employee')));
       const profiles = enriched.map((employee) => ({
         id: employee.id,
         name: employee.name,
@@ -11039,6 +11042,70 @@ Write the persona now.`;
   }
 
   // Human and Chief requests share one registry lifecycle authority.
+  // Open Dot mutations are session-bound and always resolve tenant/user from
+  // HIVE's signed session. The ownership proof is fetched server-to-server by
+  // open-dot-registry.js from the fixed Dot BFF route.
+  if (pathname === '/v1/employees/open-dot/lifecycle') {
+    const privateHeaders = { 'Cache-Control': 'private, no-store', Pragma: 'no-cache' };
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const principal = { userId: current.session.userId, orgId: current.session.orgId };
+    if (req.method === 'GET') {
+      try {
+        const employeeId = new URL(req.url, 'http://localhost').searchParams.get('employee_id') || '';
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(employeeId)) {
+          return jsonResponse(res, { error: 'Invalid employee ID' }, 400, privateHeaders);
+        }
+        const employee = await prisma.digitalEmployee.findFirst({ where: { id: employeeId, orgId: principal.orgId } });
+        if (!employee) return jsonResponse(res, { error: 'Employee not found' }, 404, privateHeaders);
+        const membership = await getOrgMembership(principal.userId, principal.orgId);
+        if (!membership?.isActive) return jsonResponse(res, { error: 'Organization membership required' }, 403, privateHeaders);
+        const isOrgAdmin = membership.role === 'owner' || membership.role === 'admin';
+        let visible = isOrgAdmin || employee.createdBy === principal.userId || employee.scope === 'organization';
+        if (!visible && employee.scope === 'team' && employee.teamId) {
+          const ts = await _getTeamStore();
+          const teamIds = ts ? await ts.store.accessibleTeamIds({ userId: principal.userId, orgId: principal.orgId }) : [];
+          visible = teamIds.includes(employee.teamId);
+        }
+        if (!visible) return jsonResponse(res, { error: 'Employee access denied' }, 403, privateHeaders);
+        const { nativeLifecycle } = await import('./employees/native-lifecycle.js');
+        const marker = employee.policyRules?.open_dot_employee || null;
+        return jsonResponse(res, {
+          scope: { organizationId: principal.orgId, userId: principal.userId },
+          employee: { id: employee.id, name: employee.name, slug: employee.slug, avatarUrl: employee.avatarUrl,
+            persona: employee.persona, roleArchetype: employee.roleArchetype, status: employee.status,
+            archivedAt: employee.archivedAt, policyRules: employee.policyRules || {} },
+          open_dot_employee: marker,
+          lifecycle: nativeLifecycle(employee) ? { phase: nativeLifecycle(employee).phase,
+            revision: nativeLifecycle(employee).revision, profile_revision: nativeLifecycle(employee).profile_revision } : null,
+        }, 200, privateHeaders);
+      } catch (error) {
+        return jsonResponse(res, { error: error.status ? error.message : 'Open Dot employee lookup unavailable' }, error.status || 503, privateHeaders);
+      }
+    }
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405, privateHeaders);
+    try {
+      const input = await parseBody(req);
+      const { createOpenDotEmployee, bindOpenDotEmployee, verifyOpenDotBinding,
+        validateOpenDotAdoptionRequest } = await import('./employees/open-dot-registry.js');
+      if (input?.operation === 'create') {
+        const result = await createOpenDotEmployee(prisma, principal, input);
+        return jsonResponse(res, result, 200, privateHeaders);
+      }
+      const bindingInput = input?.operation === 'adopt' ? validateOpenDotAdoptionRequest(input) : input;
+      if (!['bind','adopt'].includes(bindingInput?.operation)) return jsonResponse(res, { error: 'Invalid Open Dot employee operation' }, 400, privateHeaders);
+      const { requireLifecycleAdministrator } = await import('./employees/native-lifecycle.js');
+      await requireLifecycleAdministrator(prisma, principal);
+      const sessionCookie = parseCookies(req).hm_cp_session;
+      const proof = await verifyOpenDotBinding({ employeeId: bindingInput.employee_id,
+        creationKey: bindingInput.creation_key, principal, sessionCookie });
+      const result = await bindOpenDotEmployee(prisma, principal, bindingInput, { proof });
+      return jsonResponse(res, result, 200, privateHeaders);
+    } catch (error) {
+      return jsonResponse(res, { error: error.status ? error.message : 'Open Dot employee lifecycle unavailable' }, error.status || 503, privateHeaders);
+    }
+  }
+
   if (pathname === '/v1/employees/native-lifecycle' && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
@@ -11070,8 +11137,9 @@ Write the persona now.`;
     const store = await _getEmployeeStore();
     if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const body = await parseBody(req);
-    if (Object.hasOwn(body.policy_rules || {}, 'native_lifecycle') || Object.hasOwn(body.policyRules || {}, 'native_lifecycle')) {
-      return jsonResponse(res, { error: 'Native lifecycle metadata is reserved' }, 400);
+    if (Object.hasOwn(body.policy_rules || {}, 'native_lifecycle') || Object.hasOwn(body.policyRules || {}, 'native_lifecycle')
+        || Object.hasOwn(body.policy_rules || {}, 'open_dot_employee') || Object.hasOwn(body.policyRules || {}, 'open_dot_employee')) {
+      return jsonResponse(res, { error: 'Native employee lifecycle metadata is reserved' }, 400);
     }
     if (!body.name || !body.persona) {
       return jsonResponse(res, { error: 'name and persona are required' }, 400);
@@ -11782,7 +11850,8 @@ Write the persona now.`;
 
       const out = [];
       for (const r of rows) {
-        if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')) continue;
+        if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')
+            || Object.hasOwn(r.policyRules || {}, 'open_dot_employee')) continue;
         let apiKey = null;
         if (r.scopedApiKeyEncrypted) {
           try { apiKey = decryptToken(r.scopedApiKeyEncrypted); } catch {}
@@ -11846,7 +11915,10 @@ Write the persona now.`;
     try {
       const r = await store.findBySlugForChat(slug, { orgId });
       if (!r) return jsonResponse(res, { error: 'employee not found' }, 404);
-      if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')) return jsonResponse(res, { error: 'Native employee requires its persistent Harness room' }, 409);
+      if (Object.hasOwn(r.policyRules || {}, 'native_lifecycle')
+          || Object.hasOwn(r.policyRules || {}, 'open_dot_employee')) {
+        return jsonResponse(res, { error: 'Employee uses a registered non-sidecar lifecycle' }, 409);
+      }
       const { decryptToken, encryptToken } = await import('./connectors/framework/connector-store.js');
       const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
       let apiKey = null;
@@ -11920,8 +11992,12 @@ Write the persona now.`;
       return jsonResponse(res, { error: 'master key required' }, 403);
     }
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const store = await _getEmployeeStore();
     const empId = sidecarStatusMatch[1];
+    const existing = await prisma.digitalEmployee.findUnique({ where: { id: empId }, select: { policyRules: true } });
+    if (Object.hasOwn(existing?.policyRules || {}, 'open_dot_employee')) {
+      return jsonResponse(res, { error: 'Open Dot employees do not use the Python sidecar' }, 409);
+    }
+    const store = await _getEmployeeStore();
     const body = await parseBody(req);
     const newStatus = body?.status;
     if (!newStatus) return jsonResponse(res, { error: 'status required' }, 400);
@@ -12025,7 +12101,7 @@ Write the persona now.`;
     if (!emp) return jsonResponse(res, { error: 'Employee not found' }, 404);
 
     // Native employees never enter legacy credential provisioning or sidecar dispatch.
-    if (Object.hasOwn(emp.policyRules || {}, 'native_lifecycle') && req.method !== 'GET') {
+    if ((Object.hasOwn(emp.policyRules || {}, 'native_lifecycle') || Object.hasOwn(emp.policyRules || {}, 'open_dot_employee')) && req.method !== 'GET') {
       return jsonResponse(res, { error: 'Use the native employee lifecycle endpoint' }, 409);
     }
 
@@ -12040,8 +12116,9 @@ Write the persona now.`;
       if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
       try {
         const body = await parseBody(req);
-        if (Object.hasOwn(body.policyRules || {}, 'native_lifecycle') || Object.hasOwn(body.policy_rules || {}, 'native_lifecycle')) {
-          return jsonResponse(res, { error: 'Native lifecycle metadata is reserved' }, 400);
+        if (Object.hasOwn(body.policyRules || {}, 'native_lifecycle') || Object.hasOwn(body.policy_rules || {}, 'native_lifecycle')
+            || Object.hasOwn(body.policyRules || {}, 'open_dot_employee') || Object.hasOwn(body.policy_rules || {}, 'open_dot_employee')) {
+          return jsonResponse(res, { error: 'Native employee lifecycle metadata is reserved' }, 400);
         }
         const updated = await store.update({ id: empId, data: body });
         _notifyEmployeesReload();
@@ -12197,6 +12274,9 @@ Write the persona now.`;
     // GET /v1/employees/:id/runtime-config (called by Python sidecar)
     // Auth here is the session cookie; sidecar will additionally use API key.
     if (sub === 'runtime-config' && req.method === 'GET') {
+      if (Object.hasOwn(emp.policyRules || {}, 'open_dot_employee')) {
+        return jsonResponse(res, { error: 'Open Dot employees do not use the Python sidecar' }, 409);
+      }
       const cfg = await store.getRuntimeConfig({ id: empId });
       if (!cfg) return jsonResponse(res, { error: 'Not found' }, 404);
       const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
@@ -12406,6 +12486,13 @@ Write the persona now.`;
   // POST /v1/employees/:slug/chat — 1-on-1 ReAct turn against one employee
   const empChatMatch = pathname.match(/^\/v1\/employees\/([a-z0-9-]+)\/chat$/);
   if (empChatMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const employee = await prisma.digitalEmployee.findFirst({ where: { slug: empChatMatch[1], orgId: current.session.orgId },
+      select: { policyRules: true } });
+    if (Object.hasOwn(employee?.policyRules || {}, 'open_dot_employee')) {
+      return jsonResponse(res, { error: 'Open Dot employee dispatch is not connected to the HIVE sidecar' }, 409);
+    }
     await _forwardSidecar(req, res, `/v1/employees/${empChatMatch[1]}/chat`);
     return;
   }

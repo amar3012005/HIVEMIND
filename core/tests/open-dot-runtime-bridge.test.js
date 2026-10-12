@@ -24,7 +24,8 @@ function dbFor({ role = 'member', state = 'bound', phase = 'active', dotId = 'do
 
 test('dispatch forwards only verified scoped identity and the canonical binding to fixed Dot runtime', async () => {
   let request;
-  const result = await dispatchOpenDotRuntime(dbFor(), { sub: userId, org_id: orgId }, {
+  const claims = { sub: userId, org_id: orgId, operating_role: 'runtime', operating_session: rootSessionId };
+  const result = await dispatchOpenDotRuntime(dbFor(), claims, {
     employee_id: employeeId, message_id: messageId, root_session_id: rootSessionId,
     kind: 'question', text: 'Please review this.', artifact_ids: ['artifact-1'],
   }, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async (url, options) => {
@@ -44,8 +45,9 @@ test('dispatch forwards only verified scoped identity and the canonical binding 
 
 test('status uses the persisted Dot binding and rejects a caller supplied mismatch', async () => {
   let request;
-  const result = await readOpenDotRuntimeStatus(dbFor(), { sub: userId, org_id: orgId }, {
-    employee_id: employeeId, dot_id: 'dot_example_1', message_id: messageId,
+  const claims = { sub: userId, org_id: orgId, operating_role: 'runtime', operating_session: rootSessionId };
+  const result = await readOpenDotRuntimeStatus(dbFor(), claims, {
+    employee_id: employeeId, dot_id: 'dot_example_1', message_id: messageId, root_session_id: rootSessionId,
   }, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async (url, options) => {
     request = { url, options };
     return new Response(JSON.stringify({ status: 'queued' }), { status: 200 });
@@ -53,14 +55,18 @@ test('status uses the persisted Dot binding and rejects a caller supplied mismat
   assert.deepEqual(result, { status: 'queued' });
   assert.equal(request.url, 'https://dots.singulancelabs.com/api/internal/hivemind/runtime/status');
   assert.equal(JSON.parse(request.options.body).dotId, 'dot_example_1');
-  await assert.rejects(readOpenDotRuntimeStatus(dbFor(), { sub: userId, org_id: orgId }, {
-    employee_id: employeeId, dot_id: 'dot_other', message_id: messageId,
+  assert.equal(JSON.parse(request.options.body).rootSessionId, rootSessionId);
+  await assert.rejects(readOpenDotRuntimeStatus(dbFor(), claims, {
+    employee_id: employeeId, dot_id: 'dot_other', message_id: messageId, root_session_id: rootSessionId,
   }, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async () => { throw new Error('must not call'); } }), /open_dot_binding_mismatch/);
+  await assert.rejects(readOpenDotRuntimeStatus(dbFor(), { sub: userId, org_id: orgId }, {
+    employee_id: employeeId, dot_id: 'dot_example_1', message_id: messageId, root_session_id: rootSessionId,
+  }, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async () => { throw new Error('must not call'); } }), /runtime_session_required/);
 });
 
 test('relay fails closed for unbound employees and identities outside the visible roster', async () => {
   for (const db of [dbFor({ state: 'provisioning' }), dbFor({ visible: false })]) {
-    await assert.rejects(dispatchOpenDotRuntime(db, { sub: userId, org_id: orgId }, {
+    await assert.rejects(dispatchOpenDotRuntime(db, { sub: userId, org_id: orgId, operating_role: 'runtime', operating_session: rootSessionId }, {
       employee_id: employeeId, message_id: messageId, root_session_id: rootSessionId,
       kind: 'update', text: 'Do this.', artifact_ids: [],
     }, { env: { OPEN_DOT_RUNTIME_BRIDGE_TOKEN: 'x'.repeat(40) }, fetchImpl: async () => { throw new Error('must not call'); } }));

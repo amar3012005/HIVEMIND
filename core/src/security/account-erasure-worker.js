@@ -27,6 +27,7 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
       }
       const inventory=await inventoryAccountErasureSources(prisma,{userId:op.user_id,ownershipSnapshot:scope});
       // All shared/remote classes block BEFORE physical deletion begins.
+      if(inventory.unknownStores.length)fail('SOURCE_ERASURE_ADAPTER_REQUIRED');
       if(inventory.remote.length)fail('SOURCE_ERASURE_AUTHORIZATION_REQUIRED');
       if([...inventory.jobs,...inventory.documents,...inventory.artifacts].some(row=>shared.includes(row.orgId)))fail('SHARED_SOURCE_TRANSFER_REQUIRED');
       const drain=await verifiedAccountIngestionDrain(prisma,op.user_id);

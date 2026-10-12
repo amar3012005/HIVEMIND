@@ -1,5 +1,5 @@
 const TERMINAL = new Set(['ready','failed','dead','cancelled']);
-const keyFrom = row => row.sourceObjectKey || row.metadata?.sourceObjectKey || row.metadata?.source_object_key || null;
+const keyFrom = row => row.sourceObjectKey || row.metadata?.sourceObjectKey || row.metadata?.source_object_key || row.metadata?.objectKey || row.metadata?.object_key || null;
 /** Includes linked artifacts rather than assuming a document's uploader owns its bytes. */
 export async function inventoryAccountErasureSources(prisma,{userId,ownershipSnapshot}) {
   const [jobs,documents,artifacts] = await Promise.all([
@@ -23,11 +23,13 @@ export async function inventoryAccountErasureSources(prisma,{userId,ownershipSna
     coordinate.foreignReferences=foreignJobs+foreignArtifacts;
     coordinate.shared ||= coordinate.foreignReferences>0;
   }
-  return {jobs,documents,artifacts,coordinates:[...coordinates.values()],inFlight:jobs.filter(job=>!TERMINAL.has(job.status)),remote:jobs.filter(job=>['remote','agent','self_hosted'].includes(job.storageMode))};
+  const unknownStores = artifacts.filter(row => row.storageLocation && !/^(kb|enterprise|connector)\//.test(row.storageLocation) && !keyFrom(row));
+  return {unknownStores,jobs,documents,artifacts,coordinates:[...coordinates.values()],inFlight:jobs.filter(job=>!TERMINAL.has(job.status)),remote:jobs.filter(job=>['remote','agent','self_hosted'].includes(job.storageMode))};
 }
 /** Bounded physical-copy phase; never drops SQL coordinates or connector originals. */
 export async function reconcileOwnedSourceObjects({inventory,objectClient,saveReceipt,drainReceipt}) {
   if(!drainReceipt?.verified || !drainReceipt.noLateExternalWrites) throw Object.assign(new Error('Ingestion drain is not verified'),{code:'ERASURE_INGEST_DRAIN_REQUIRED'});
+  if(inventory.unknownStores?.length) throw Object.assign(new Error('Unknown source storage requires an erasure adapter'),{code:'SOURCE_ERASURE_ADAPTER_REQUIRED'});
   if(inventory.remote.length) throw Object.assign(new Error('Remote source-store erasure authorization required'),{code:'SOURCE_ERASURE_AUTHORIZATION_REQUIRED'});
   for(const coordinate of inventory.coordinates) {
     if(coordinate.shared) {await saveReceipt({store:'cloudflare_r2',coordinate:coordinate.key,outcome:'retained_shared',evidence:{verified:true,foreignReferences:coordinate.foreignReferences,retainedCompanyScope:true}});continue;}

@@ -11077,6 +11077,10 @@ Write the persona now.`;
       const proof = await verifyOpenDotBinding({ employeeId: bindingInput.employee_id,
         creationKey: bindingInput.creation_key, principal, sessionCookie });
       const result = await bindOpenDotEmployee(prisma, principal, bindingInput, { proof });
+      // Binding is already durable. Replay the same idempotent native lifecycle
+      // callback after both first bind and safe retries so a missed welcome can recover.
+      const { activateBoundOpenDotEmployee } = await import('./employees/native-lifecycle-bridge.js');
+      result.native_activation = await activateBoundOpenDotEmployee(principal, result.employee);
       return jsonResponse(res, result, 200, privateHeaders);
     } catch (error) {
       return jsonResponse(res, { error: error.status ? error.message : 'Open Dot employee lifecycle unavailable' }, error.status || 503, privateHeaders);
@@ -11095,8 +11099,13 @@ Write the persona now.`;
         assertNativeEmployeeLifecycleConfigured();
       }
       const result = await manageNativeEmployee(prisma, principal, input);
-      const usesOpenDotExecutor = Object.hasOwn(result.employee?.policyRules || {}, 'open_dot_employee');
-      if (!usesOpenDotExecutor && ['create','configure','archive'].includes(input.operation)) {
+      const hasOpenDotMarker = Object.hasOwn(result.employee?.policyRules || {}, 'open_dot_employee');
+      const openDotBound = result.employee?.policyRules?.open_dot_employee?.state === 'bound'
+        && result.employee?.policyRules?.open_dot_employee?.execution_backend === 'open-dot';
+      if (openDotBound && input.operation === 'configure') {
+        const { activateBoundOpenDotEmployee } = await import('./employees/native-lifecycle-bridge.js');
+        result.native_activation = await activateBoundOpenDotEmployee(principal, result.employee);
+      } else if (!hasOpenDotMarker && ['create','configure','archive'].includes(input.operation)) {
         const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee);
       }

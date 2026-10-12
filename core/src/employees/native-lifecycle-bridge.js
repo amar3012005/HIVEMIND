@@ -32,3 +32,16 @@ export async function activateNativeEmployeeLifecycle(principal, employee, { env
     return result;
   } catch { return {status:'pending',reason:'native_lifecycle_host_unconfirmed'}; }
 }
+
+/** Replay the existing Runtime lifecycle callback only for an exact bound Open Dot employee. */
+export async function activateBoundOpenDotEmployee(principal, employee, options) {
+  const marker = employee?.policyRules?.open_dot_employee || employee?.policy_rules?.open_dot_employee;
+  const lifecycle = employee?.policyRules?.native_lifecycle || employee?.policy_rules?.native_lifecycle;
+  if (!employee?.id || marker?.version !== 1 || marker?.execution_backend !== 'open-dot' || marker?.state !== 'bound' || typeof marker.dot_id !== 'string' || !marker.dot_id
+      || !Number.isInteger(marker.binding_revision) || marker.binding_revision < 1
+      || employee.archivedAt || employee.archived_at || employee.status === 'paused'
+      || lifecycle?.phase && lifecycle.phase !== 'active') {
+    return { status: 'pending', reason: 'open_dot_employee_not_ready' };
+  }
+  return activateNativeEmployeeLifecycle(principal, employee, options);
+}

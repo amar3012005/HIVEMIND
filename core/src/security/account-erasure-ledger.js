@@ -13,8 +13,8 @@ export async function admitAccountErasure(prisma,{userId,actorId,confirmation,ow
 }
 export async function claimAccountErasure(prisma,{workerId,leaseSeconds=30}) {
  if(!uuid(workerId) || !Number.isInteger(leaseSeconds)||leaseSeconds<1||leaseSeconds>300) fail('ERASURE_LEASE_INVALID');
- const rows=await prisma.$queryRawUnsafe(`WITH candidate AS (SELECT id FROM hivemind.account_erasure_operations WHERE state IN ('pending','processing','blocked') AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
- UPDATE hivemind.account_erasure_operations op SET state='processing',lease_owner=$1::uuid,lease_until=now()+($2*interval '1 second'),attempts=attempts+1,updated_at=now() FROM candidate WHERE op.id=candidate.id RETURNING op.*`,workerId,leaseSeconds);
+ const rows=await prisma.$queryRawUnsafe(`WITH candidate AS (SELECT id FROM hivemind.account_erasure_operations WHERE state IN ('pending','processing','blocked','reconciled') AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+ UPDATE hivemind.account_erasure_operations op SET state=CASE WHEN op.state='reconciled' THEN 'reconciled' ELSE 'processing' END,lease_owner=$1::uuid,lease_until=now()+($2*interval '1 second'),attempts=attempts+1,updated_at=now() FROM candidate WHERE op.id=candidate.id RETURNING op.*`,workerId,leaseSeconds);
  return rows[0]??null;
 }
 export async function saveErasureReceipt(prisma,{operationId,workerId,store,coordinate,outcome,evidence}) {

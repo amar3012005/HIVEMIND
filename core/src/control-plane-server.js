@@ -1,3 +1,7 @@
+import { admitAccountErasure } from './security/account-erasure-ledger.js';
+import { planAccountErasureScope } from './security/account-erasure-scope.js';
+import { runAccountErasureOnce } from './security/account-erasure-worker.js';
+import { CloudflareKnowledgeIngestClient } from './knowledge/cloudflare-ingest-client.js';
 import { handleOrganizationSettings } from './billing/organization-policy.js';
 import { recoverPendingActivity } from './connectors/composio/activity-relevance.js';
 import { changeSessionOrganization } from './mobile/session-organization.js';
@@ -20,7 +24,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { getPrismaClient } from './db/prisma.js';
+import { getPrismaClient, getCentralPrismaClient } from './db/prisma.js';
 import {
   authenticatePersistedApiKey,
   createPersistedApiKey,
@@ -2971,6 +2975,16 @@ async function purgeUserVectors(userId, userOrgs = [], orgIdsToDelete = []) {
  * @param {(pct: number, step: string) => void} [opts.onProgress] - Called with 0-100 and step label
  * @returns {Promise<{ok: boolean, error?: string}>}
  */
+let erasureWorkerRunning = false;
+async function recoverAccountErasure() {
+  if (erasureWorkerRunning) return;
+  erasureWorkerRunning = true;
+  try {
+    await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion});
+  } catch (error) { console.warn('[account-erasure] Recovery unavailable:', error.code || error.name); }
+  finally { erasureWorkerRunning = false; }
+}
+
 async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress }) {
   const t0 = Date.now();
   // 5000 was hitting the 30s Postgres socket timeout for users with large
@@ -7824,6 +7838,12 @@ const server = http.createServer(async (req, res) => {
     }, 201);
   }
 
+  if (pathname === '/v1/account/erasure' && req.method === 'GET') {
+    const current = await requireSession(req,res); if (!current) return;
+    const rows = await getCentralPrismaClient().$queryRawUnsafe('SELECT id,state,failure_code,created_at,updated_at FROM hivemind.account_erasure_operations WHERE user_id=$1::uuid ORDER BY created_at DESC LIMIT 1',current.session.userId);
+    return jsonResponse(res,{operation:rows[0] || null});
+  }
+
   if ((pathname === '/v1/account' && req.method === 'DELETE') || (pathname === '/v1/account/delete' && req.method === 'POST')) {
     console.log('[account-delete] ▶ Request received:', req.method, pathname);
     const current = await requireSession(req, res);
@@ -7858,78 +7878,17 @@ const server = http.createServer(async (req, res) => {
     }
     console.log('[account-delete] ✓ User found:', user.email, '(id:', user.id, ')');
 
-    // Reject before ownership transfers, streaming headers or cookie changes.
+    // Confirmation admits durable work, preserving login and company ownership.
+    // The browser does not own cleanup; recovery resumes the persisted operation.
     try {
-      await requireReconciledSourceErasure(prisma, user.id);
+      const authority = getCentralPrismaClient();
+      const ownershipSnapshot = await planAccountErasureScope(authority,user.id);
+      const operation = await admitAccountErasure(authority,{userId:user.id,actorId:current.session.userId,confirmation:'DELETE',ownershipSnapshot});
+      setImmediate(() => recoverAccountErasure());
+      return jsonResponse(res,{status:'pending',operation_id:operation.id,message:'Account erasure is being reconciled. Your account remains active until verified cleanup completes.'},202);
     } catch (error) {
-      return jsonResponse(res, { error: 'Durable source-store erasure is pending reconciliation; account remains active.', code: error.code || 'SOURCE_ERASURE_RECONCILIATION_REQUIRED', status: 'pending' }, error.status || 503);
+      return jsonResponse(res,{error:'Account erasure could not be admitted; your account remains active.',code:error.code || 'ERASURE_ADMISSION_UNAVAILABLE'},error.status || 503);
     }
-
-    const deletionCheck = await validateAccountDeletion(user.id);
-    console.log('[account-delete] Validation result:', JSON.stringify(deletionCheck));
-    if (!deletionCheck.ok) {
-      console.warn('[account-delete] ✗ Validation failed:', JSON.stringify(deletionCheck));
-      return jsonResponse(res, deletionCheck, deletionCheck.status || 409);
-    }
-
-    console.log('[account-delete] ✓ Validation passed — starting deletion');
-
-    // Check if client wants SSE streaming (Accept: text/event-stream)
-    const wantsSSE = (req.headers.accept || '').includes('text/event-stream') || body.stream === true;
-
-    if (wantsSSE) {
-      // SSE streaming delete with progress
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Set-Cookie': clearSessionCookie(),
-      });
-
-      const sendEvent = (data) => {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-      };
-
-      const result = await performAccountDeletion({
-        userId: user.id,
-        orgIdsToDelete: deletionCheck.orgIdsToDelete || [],
-        onProgress: (pct, step) => {
-          sendEvent({ progress: pct, step, userId: user.id });
-        },
-      });
-
-      if (result.ok) {
-        await sessionStore.destroySession(current.sessionId);
-        sendEvent({ progress: 100, step: 'Account deleted', done: true, success: true });
-      } else {
-        sendEvent({ progress: -1, step: result.error, done: true, success: false, error: result.error });
-      }
-      res.end();
-      return;
-    }
-
-    // Non-streaming: wait for completion, return final result
-    const result = await performAccountDeletion({
-      userId: user.id,
-      orgIdsToDelete: deletionCheck.orgIdsToDelete || [],
-    });
-
-    if (!result.ok) {
-      return jsonResponse(res, { error: result.error, status: 'failed' }, 500, {
-      });
-    }
-
-    await sessionStore.destroySession(current.sessionId);
-
-    return jsonResponse(res, {
-      success: true,
-      status: 'completed',
-      deleted_user_id: user.id,
-      deleted_email: user.email,
-      deleted_org_ids: deletionCheck.orgIdsToDelete || [],
-    }, 200, {
-      'Set-Cookie': clearSessionCookie(),
-    });
   }
 
   const revokeMatch = pathname.match(/^\/v1\/api-keys\/([^/]+)\/revoke$/);
@@ -17697,6 +17656,7 @@ Write the persona now.`;
 });
 
 if (shouldStartHttpServer()) {
+  setInterval(recoverAccountErasure,60000).unref();
   server.listen(CONFIG.port, '0.0.0.0', () => {
     console.log(`[control-plane] listening on ${CONFIG.port}`);
   });

@@ -10350,10 +10350,9 @@ const server = http.createServer(async (req, res) => {
             teamIds: principal.teamId ? [principal.teamId] : principal.teamIds,
           });
       const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
-      // The legacy governed-agent roster must not expose Open Dot employees to
-      // a second executor until an explicit cross-engine adapter exists.
-      const enriched = await enrichEmployeesWithHyperState(employees.filter(employee =>
-        !Object.hasOwn(employee.policyRules || {}, 'open_dot_employee')));
+      // Keep canonical Open Dot identities and policy metadata in Runtime's
+      // authorized roster. Dispatch denial is enforced by employeeCanDispatch.
+      const enriched = await enrichEmployeesWithHyperState(employees);
       const profiles = enriched.map((employee) => ({
         id: employee.id,
         name: employee.name,
@@ -11118,7 +11117,8 @@ Write the persona now.`;
         assertNativeEmployeeLifecycleConfigured();
       }
       const result = await manageNativeEmployee(prisma, principal, input);
-      if (['create','configure','archive'].includes(input.operation)) {
+      const usesOpenDotExecutor = Object.hasOwn(result.employee?.policyRules || {}, 'open_dot_employee');
+      if (!usesOpenDotExecutor && ['create','configure','archive'].includes(input.operation)) {
         const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee);
       }

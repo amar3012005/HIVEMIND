@@ -28,6 +28,7 @@ import {
   resolveKeyAccess,
   revokePersistedApiKey
 } from './auth/api-keys.js';
+import { authorizeOpenDotRecoveryRequest } from './auth/open-dot-recovery.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import {
@@ -10279,6 +10280,31 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { employees: enrichedEmployees });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // GET /v1/service/open-dot/recovery-principal — tenant scope for the
+  // service-owned Open Dot recovery dispatcher. Identity is derived only from
+  // a persisted, explicitly scoped service key and a live membership check.
+  if (pathname === '/v1/service/open-dot/recovery-principal') {
+    const privateHeaders = { 'Cache-Control': 'private, no-store', Pragma: 'no-cache' };
+    if (req.method !== 'GET') return jsonResponse(res, { error: 'Method not allowed' }, 405, privateHeaders);
+    try {
+      const result = await authorizeOpenDotRecoveryRequest({
+        prisma,
+        authorization: req.headers.authorization,
+      });
+      if (result.status !== 200) return jsonResponse(res, result.body, result.status, privateHeaders);
+      return jsonResponse(res, {
+        ok: true,
+        scope: {
+          org_id: result.principal.orgId,
+          user_id: result.principal.userId,
+          authority: 'server-derived-from-open-dot-recovery-service-key',
+        },
+      }, 200, privateHeaders);
+    } catch {
+      return jsonResponse(res, { error: 'Recovery authorization unavailable' }, 503, privateHeaders);
     }
   }
 

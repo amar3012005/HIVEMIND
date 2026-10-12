@@ -20,8 +20,9 @@
 
 ## Pending — not release acceptance
 
-- Install this exact candidate from its Xcode project and repeat account, history, switching, keyboard and artifacts checks.
+- Exact candidate installed and running through Xcode on iPhone 18 Pro Max. Signed-in AMAR/Wise and all three employees remain visible after installation. Repeat history, switching, keyboard and artifacts checks on this exact candidate; phone coordinate control currently fails with noWindowsAvailable.
 - Audible voice playback and microphone test; physical iPhone verification.
+- User voice retest: a reply is produced but remains inaudible. Simulator Sound=1 and output=MacBook Pro Speakers were observed. Capacitor configuration already permits gesture-free playback. Exact audio fault remains unresolved; no speculative call-code change made.
 - App Store Connect app record and intended release version/build number.
 - Distribution signing/Apple account setup. Available local identity is Apple Development; no Apple Distribution identity currently verified.
 - Review collection/tracking and required-reason API inventory, including bundled native dependencies. Existing privacy manifest has an empty required-reason list and an explicit owner-review note; that is not privacy approval.

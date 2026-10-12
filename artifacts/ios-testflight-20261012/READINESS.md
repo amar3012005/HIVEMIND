@@ -54,3 +54,9 @@ What to Test: Sign in to your own workspace. Confirm the full team appears. Open
 - Local logs: `/tmp/testflight-device-release.log`, `/tmp/testflight-simulator-build.log`, `/tmp/testflight-auth-tests.log`, `/tmp/testflight-frontend-build.log`.
 
 No TestFlight upload or approved distribution archive exists from this task yet. Do not fabricate `release-evidence.json`: the existing archive command requires actual physical-device and review evidence before distribution preparation.
+
+## TestFlight account check — 13 October 2026
+
+Xcode Apple Accounts shows only the existing Personal Team, with On Device Testing and one provisioned device. No paid distribution team is visible yet. User will sign in to their paid team. Keep the existing app signing configuration until the actual paid team ID and bundle access are verified. Signed Release signature verification and native packaged checks pass; this is not an uploaded TestFlight build.
+
+The installed microphone diagnostic has initialized, but no outgoing microphone counters have been captured from the subsequent test yet. Intro playback is verified; two-way voice remains open.

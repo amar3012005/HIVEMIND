@@ -1,13 +1,13 @@
 /** Pure ownership planning. Never invokes legacy validateAccountDeletion, which promotes owners. */
 export async function planAccountErasureScope(prisma, userId) {
-  const memberships = await prisma.userOrganization.findMany({where:{userId},select:{orgId:true,role:true}});
+  const memberships = await prisma.userOrganization.findMany({where:{userId},select:{orgId:true,role:true,org:{select:{memoryStorageMode:true,hostingMode:true}}}});
   const organizations = [];
   for (const membership of memberships) {
     const others = await prisma.userOrganization.findMany({
       where:{orgId:membership.orgId,userId:{not:userId}},
       select:{userId:true,role:true},
     });
-    organizations.push({orgId:membership.orgId,disposition:membership.role==='owner'&&!others.length?'delete_exclusive':'retain_shared',remainingMembers:others.map(row=>({userId:row.userId,role:row.role}))});
+    organizations.push({orgId:membership.orgId,storageMode:membership.org?.memoryStorageMode || 'hybrid',hostingMode:membership.org?.hostingMode || 'managed',disposition:membership.role==='owner'&&!others.length?'delete_exclusive':'retain_shared',remainingMembers:others.map(row=>({userId:row.userId,role:row.role}))});
   }
   return {userId,organizations,connectorOriginals:'retain',plannedAt:new Date().toISOString()};
 }

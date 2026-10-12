@@ -7903,7 +7903,7 @@ const server = http.createServer(async (req, res) => {
       try { await verifiedAccountIngestionDrain(authority,user.id); writesDrained = true; } catch (error) { if(error.code!=='ERASURE_INGEST_DRAIN_REQUIRED') throw error; }
       const knownOrgIds = ownershipSnapshot.organizations.map(org=>org.orgId);
       const unownedMemories = await authority.memory.count({where:{userId:user.id,orgId:knownOrgIds.length?{notIn:knownOrgIds}:{not:null}}});
-      if (sourceEmpty && !foreignStoreRecords && writesDrained && !unownedMemories && !existingOperations.length && ownershipSnapshot.organizations.every(org=>org.disposition==='delete_exclusive')) {
+      if (sourceEmpty && !foreignStoreRecords && writesDrained && !unownedMemories && !existingOperations.length && ownershipSnapshot.organizations.every(org=>org.disposition==='delete_exclusive' && !org.storageMode?.startsWith('byod') && org.hostingMode!=='self_hosted')) {
         const result = await performAccountDeletion({userId:user.id,orgIdsToDelete:ownershipSnapshot.organizations.map(org=>org.orgId)});
         if (!result.ok) return jsonResponse(res,{error:result.error,status:'failed'},500);
         await sessionStore.destroySession(current.sessionId);

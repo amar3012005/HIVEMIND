@@ -15,6 +15,7 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
     if(!user && op.state!=='reconciled')fail('ERASURE_IDENTITY_STATE_UNKNOWN');
     if(user && op.state!=='reconciled') {
       const scope=op.ownership_snapshot;
+      if(scope.organizations.some(org=>org.storageMode?.startsWith('byod')||org.hostingMode==='self_hosted'))fail('SOURCE_ERASURE_AUTHORIZATION_REQUIRED');
       const current=await planAccountErasureScope(prisma,op.user_id);
       const identity=items=>JSON.stringify(items.map(x=>({orgId:x.orgId,disposition:x.disposition,remainingMembers:x.remainingMembers})).sort((a,b)=>a.orgId.localeCompare(b.orgId)));
       if(identity(scope.organizations)!==identity(current.organizations))fail('ERASURE_OWNERSHIP_CHANGED');

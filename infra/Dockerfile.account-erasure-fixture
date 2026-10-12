@@ -1,0 +1,11 @@
+ARG ERASURE_BASE_IMAGE
+FROM ${ERASURE_BASE_IMAGE}
+USER root
+WORKDIR /app
+COPY --chown=nodejs:nodejs core/src/ /app/src/
+COPY --chown=nodejs:nodejs core/tests/ /app/tests/
+COPY core/package.json /app/package.json
+RUN mkdir -p /app/data/whatsapp-sessions && chown -R nodejs:nodejs /app/data
+USER nodejs
+ENV NODE_ENV=test
+CMD ["node", "--test", "tests/integration/account-erasure-http.test.mjs"]

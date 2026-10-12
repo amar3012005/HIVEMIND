@@ -90,6 +90,9 @@ for service in "${requested[@]}"; do
       container_image_id=$(docker inspect "$container" --format '{{.Image}}' 2>/dev/null || true)
       [ "$container_image_id" = "$OPEN_DOT_IMAGE_EXPECTED_ID" ] \
         || { echo "FATAL: Open Dot container image ID=${container_image_id:-missing}, expected preloaded receipt ID" >&2; exit 1; }
+      image_id_label=$(docker inspect "$container" --format '{{ index .Config.Labels "com.singulance.open-dot.docker-image-id" }}' 2>/dev/null || true)
+      [ "$image_id_label" = "$OPEN_DOT_IMAGE_EXPECTED_ID" ] \
+        || { echo "FATAL: Open Dot container Docker image ID label=${image_id_label:-missing}, expected preloaded image ID" >&2; exit 1; }
     fi
     parent_label=$(docker inspect "$container" --format '{{ index .Config.Labels "com.singulance.open-dot.source-revision" }}' 2>/dev/null || true)
     [ "$parent_label" = "$OPEN_DOT_SOURCE_SHA" ] || { echo "FATAL: Open Dot container source revision=${parent_label:-missing}, expected=$OPEN_DOT_SOURCE_SHA" >&2; exit 1; }

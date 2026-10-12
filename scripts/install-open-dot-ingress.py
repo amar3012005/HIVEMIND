@@ -228,9 +228,58 @@ def _stable_adapter_config(config):
 
 def _same_adapted_config(left, right):
     # Caddy assigns groupNN names while adapting routes. Inserting a hostname
-    # earlier in its sorted route order renumbers later generated groups even
-    # when every pre-existing route and group relationship is unchanged.
-    return _stable_adapter_config(left) == _stable_adapter_config(right)
+    # earlier in its sorted route order can renumber groups and reorder
+    # terminal routes for disjoint literal hosts. Normalize those two adapter
+    # effects for comparison only; never use the normalized value for writes.
+    return _stable_adapter_config(_sort_disjoint_literal_host_routes(left)) == _stable_adapter_config(
+        _sort_disjoint_literal_host_routes(right)
+    )
+
+
+def _literal_host(host):
+    return (
+        isinstance(host, str)
+        and bool(host)
+        and host == host.strip()
+        and not any(char.isspace() or char in "*{}?<>/\\%" for char in host)
+    )
+
+
+def _route_exact_hosts(route):
+    if not isinstance(route, dict) or route.get("terminal") is not True:
+        return None
+    alternatives = route.get("match")
+    if not isinstance(alternatives, list) or not alternatives:
+        return None
+    hosts = []
+    for alternative in alternatives:
+        values = alternative.get("host") if isinstance(alternative, dict) else None
+        if not isinstance(values, list) or not values or not all(_literal_host(value) for value in values):
+            return None
+        hosts.extend(value.casefold() for value in values)
+    if len(set(hosts)) != len(hosts):
+        return None
+    return tuple(sorted(hosts))
+
+
+def _sort_disjoint_literal_host_routes(config):
+    """Sort comparison copies only when terminal routes have disjoint exact hosts."""
+    result = copy.deepcopy(config)
+    servers = result.get("apps", {}).get("http", {}).get("servers", {})
+    if not isinstance(servers, dict):
+        return result
+    for server in servers.values():
+        routes = server.get("routes") if isinstance(server, dict) else None
+        if not isinstance(routes, list) or not routes:
+            continue
+        host_keys = [_route_exact_hosts(route) for route in routes]
+        if any(key is None for key in host_keys):
+            continue
+        all_hosts = [host for key in host_keys for host in key]
+        if len(set(all_hosts)) != len(all_hosts):
+            continue
+        server["routes"] = [route for _, route in sorted(zip(host_keys, routes), key=lambda pair: pair[0])]
+    return result
 
 
 def install(config, state):
@@ -273,12 +322,12 @@ def install(config, state):
             source_without_owned = adapted_source
             live_without_owned = live
 
-        normalized, aliases = normalize_verified_file_aliases(source_without_owned, live_without_owned)
-        same_baseline = (
-            _same_adapted_config(normalized, live_without_owned)
-            if owned_in_file
-            else normalized == live_without_owned
-        )
+        # Align only comparison copies before matching positional file aliases.
+        # Actual live route order is retained for the append and rollback paths.
+        source_for_compare = _sort_disjoint_literal_host_routes(source_without_owned)
+        live_for_compare = _sort_disjoint_literal_host_routes(live_without_owned)
+        normalized, aliases = normalize_verified_file_aliases(source_for_compare, live_for_compare)
+        same_baseline = _same_adapted_config(normalized, live_for_compare)
         if not same_baseline:
             raise RuntimeError("Caddy live/file drift remains after the verified Caddyfile path normalization; no changes made")
         if aliases > 1:
@@ -294,7 +343,9 @@ def install(config, state):
         if server_name not in live.get("apps", {}).get("http", {}).get("servers", {}):
             raise RuntimeError("Open Dot route does not target an existing live HTTP server")
         candidate_without_route = _without_route(adapted_candidate, server_name, route)
-        if not _same_adapted_config(candidate_without_route, adapted_source):
+        candidate_for_compare = _sort_disjoint_literal_host_routes(candidate_without_route)
+        source_for_compare = _sort_disjoint_literal_host_routes(adapted_source)
+        if not _same_adapted_config(candidate_for_compare, source_for_compare):
             raise RuntimeError("Adding Open Dot changes other adapted Caddy routes; no changes made")
 
         if _find_site_routes(live):

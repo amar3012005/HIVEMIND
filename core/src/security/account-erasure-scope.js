@@ -17,3 +17,10 @@ export async function inspectSourceObjectRetention(prisma,{userId,sourceObjectKe
   const foreign = await prisma.knowledgeIngestJob.count({where:{sourceObjectKey,userId:{not:userId}}});
   return {disposition:foreign?'retained_shared':'erase_owned_copy',foreignReferences:foreign};
 }
+/** Sole membership is not proof that all persisted company copies belong to this user. */
+export async function countForeignExclusiveStoreRecords(prisma,userId,organizations) {
+  const orgIds=organizations.filter(org=>org.disposition==='delete_exclusive').map(org=>org.orgId);
+  if(!orgIds.length)return 0;
+  const counts=await Promise.all(['memory','knowledgeDocument','sourceArtifact','knowledgeIngestJob'].map(name=>prisma[name].count({where:{orgId:{in:orgIds},userId:{not:userId}}})));
+  return counts.reduce((total,count)=>total+count,0);
+}

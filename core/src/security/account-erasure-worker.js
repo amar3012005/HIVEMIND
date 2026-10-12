@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import {claimAccountErasure,saveErasureReceipt,blockAccountErasure} from './account-erasure-ledger.js';
-import {planAccountErasureScope} from './account-erasure-scope.js';
+import {planAccountErasureScope,countForeignExclusiveStoreRecords} from './account-erasure-scope.js';
 import {inventoryAccountErasureSources,reconcileOwnedSourceObjects} from './account-erasure-sources.js';
 import {verifiedAccountIngestionDrain} from './account-ingestion-lease.js';
 import {cleanupExclusiveSourceCopies} from './account-erasure-cleanup.js';
@@ -18,6 +18,7 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
       const current=await planAccountErasureScope(prisma,op.user_id);
       const identity=items=>JSON.stringify(items.map(x=>({orgId:x.orgId,disposition:x.disposition,remainingMembers:x.remainingMembers})).sort((a,b)=>a.orgId.localeCompare(b.orgId)));
       if(identity(scope.organizations)!==identity(current.organizations))fail('ERASURE_OWNERSHIP_CHANGED');
+      if(await countForeignExclusiveStoreRecords(prisma,op.user_id,scope.organizations))fail('FOREIGN_ORGANIZATION_COPIES_RETAINED');
       const knownOrgIds=scope.organizations.map(org=>org.orgId);
       const outsideMemories=await prisma.memory.count({where:{userId:op.user_id,orgId:knownOrgIds.length?{notIn:knownOrgIds}:{not:null}}});
       if(outsideMemories)fail('SHARED_MEMORY_SCOPE_UNVERIFIED');

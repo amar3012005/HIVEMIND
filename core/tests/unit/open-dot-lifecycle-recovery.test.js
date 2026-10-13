@@ -21,3 +21,5 @@ f=fixture();result=await recoverBoundOpenDotLifecycles(f.db,{now:f.now,activate:
 f=fixture();result=await recoverBoundOpenDotLifecycles(f.db,{now:f.now,activate:async(_p,row)=>{f.revoke();return{status:'ready',employeeId:row.id};}});assert.equal(result.delivered,0,'revoked creator cannot acknowledge delivery');assert.equal(f.row().policyRules.open_dot_lifecycle_delivery.state,'pending');
 for(const mutate of [r=>r.policyRules.open_dot_employee.execution_backend='native',r=>r.policyRules.open_dot_employee.binding_revision=0,r=>r.policyRules.native_lifecycle.creation_hash='malformed',r=>r.archivedAt=new Date(),r=>r.status='paused']){const row=employee();mutate(row);assert.equal(lifecycleDeliveryIdentity(row),null);}
 console.log('PASS durable lifecycle recovery backoff, concurrent claim, binding CAS, expired producer, current membership and profile preservation');
+
+for(const expiry of ['not-a-date','2099-02-30T00:00:00.000Z','2099-01-01','2020-01-01T00:00:00.000Z']){const row=employee();row.policyRules.native_lifecycle.kind='temporary';row.policyRules.native_lifecycle.expires_at=expiry;assert.equal(lifecycleDeliveryIdentity(row),null);}

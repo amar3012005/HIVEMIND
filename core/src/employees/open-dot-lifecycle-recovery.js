@@ -5,6 +5,11 @@ import { requireLifecycleAdministrator } from './native-lifecycle.js';
 const KEY = 'open_dot_lifecycle_delivery';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLAIM_MS = 60000;
+function validFutureExpiry(value) {
+  if(typeof value!=='string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value))return false;
+  const at=Date.parse(value);
+  return Number.isFinite(at) && new Date(at).toISOString()===value && at>Date.now();
+}
 export function lifecycleDeliveryIdentity(row) {
   const policy=row?.policyRules, binding=policy?.open_dot_employee, lifecycle=policy?.native_lifecycle;
   if (!UUID.test(row?.id || '') || !UUID.test(row.orgId || '') || !UUID.test(row.createdBy || '') ||
@@ -13,7 +18,7 @@ export function lifecycleDeliveryIdentity(row) {
       lifecycle?.version!==1 || lifecycle.phase!=='active' || !['durable','temporary'].includes(lifecycle.kind) || !/^[a-f0-9]{64}$/.test(lifecycle.creation_hash || '') ||
       !['responsibilities','runtime_review','ready'].includes(lifecycle.profile_stage) ||
       !Number.isSafeInteger(lifecycle.profile_revision) || lifecycle.profile_revision<1 ||
-      (lifecycle.kind==='temporary' && !(Date.parse(lifecycle.expires_at)>Date.now()))) return null;
+      (lifecycle.kind==='temporary' && !validFutureExpiry(lifecycle.expires_at))) return null;
   const source={employee_id:row.id,organization_id:row.orgId,user_id:row.createdBy,creation_hash:lifecycle.creation_hash,binding_revision:binding.binding_revision,dot_id:binding.dot_id,
     profile_revision:lifecycle.profile_revision,profile_stage:lifecycle.profile_stage};
   return {...source,fingerprint:createHash('sha256').update(JSON.stringify(source)).digest('hex')};
@@ -41,7 +46,16 @@ export async function recoverBoundOpenDotLifecycles(db,{limit=4,now=()=>Date.now
       AND l->'version'='1'::jsonb AND l->>'phase'='active'
       AND (l->>'creation_hash') ~ '^[a-f0-9]{64}$' AND l->>'profile_stage' IN ('responsibilities','runtime_review','ready')
       AND jsonb_typeof(l->'profile_revision')='number' AND (l->>'profile_revision') ~ '^[1-9][0-9]{0,14}$'
-      AND (l->>'kind'='durable' OR (l->>'kind'='temporary' AND CASE WHEN pg_input_is_valid(l->>'expires_at','timestamp with time zone') THEN (l->>'expires_at')::timestamptz > clock_timestamp() ELSE false END))
+      -- PostgreSQL 15 has no pg_input_is_valid. Validate canonical UTC components
+      -- before integer casts; compare canonical ISO text without unsafe timestamp casts.
+      AND (l->>'kind'='durable' OR (l->>'kind'='temporary' AND CASE
+        WHEN l->>'expires_at' ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9][.][0-9]{3}Z$'
+        THEN substring(l->>'expires_at',9,2)::integer <= CASE substring(l->>'expires_at',6,2)::integer
+          WHEN 2 THEN CASE WHEN substring(l->>'expires_at',1,4)::integer % 400=0 OR
+            (substring(l->>'expires_at',1,4)::integer % 4=0 AND substring(l->>'expires_at',1,4)::integer % 100<>0) THEN 29 ELSE 28 END
+          WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END
+          AND l->>'expires_at' > to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        ELSE false END))
       AND (d->'employee_id' IS DISTINCT FROM to_jsonb(e.id::text) OR d->'organization_id' IS DISTINCT FROM to_jsonb(e.org_id::text) OR d->'user_id' IS DISTINCT FROM to_jsonb(e.created_by::text) OR d->'creation_hash' IS DISTINCT FROM l->'creation_hash'
         OR d->'binding_revision' IS DISTINCT FROM b->'binding_revision'
         OR d->'dot_id' IS DISTINCT FROM b->'dot_id'

@@ -291,8 +291,11 @@ OVERRIDE="$STATE_ROOT/deploy-override.yml"
 # --project-directory. No secret value is copied into this artifact.
 HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
 sed "s#env_file: \[../.env#env_file: [$ENVF#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
-docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
-  && echo "[compose] canonical hetzner valid"
+if ! docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q; then
+  echo "FATAL: canonical Compose configuration failed validation; no deployment"
+  exit 1
+fi
+echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()
 
 if [ "$DRY" = 1 ]; then

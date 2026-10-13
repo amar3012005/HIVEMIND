@@ -139,11 +139,14 @@ export async function handleRecallRoute(ctx = {}) {
   } = ctx;
 
   const _recallT0 = Date.now();
+  const requestController = new AbortController();
+  const cancelRequest = () => requestController.abort(new Error('Recall client disconnected'));
   if (!ensurePersistedMemoryOrFail(res, '/api/recall')) return;
   if (orgId && !rateLimitAllowOrgRequest(orgId)) {
     return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
   }
 
+  res.once?.('close', cancelRequest);
   try {
     // Accept `query` as an alias for `query_context`/`context`.
     //
@@ -241,7 +244,7 @@ export async function handleRecallRoute(ctx = {}) {
         buildPacket: buildRecallPacket,
       };
     }
-    const recallPlan = recallRuntime.resolvePlan({
+    const resolvedRecallPlan = recallRuntime.resolvePlan({
       ...body,
       // A picker-issued entity ID is a typed RetrievalSpec predicate. Never
       // let an omitted legacy mode bypass that predicate and fall into the
@@ -250,19 +253,29 @@ export async function handleRecallRoute(ctx = {}) {
       entities: resolvedEntityNames,
       explicit_mode: true,
     });
+    // Ordinary public recall uses the existing bounded Core service too.
+    // Keep its inferred fact/explain plan and all typed predicates; only the
+    // compatibility dispatch flag changes. Explicit legacy `memory` remains.
+    const ordinaryAuto = !body.mode || String(body.mode).toLowerCase() === 'auto';
+    // These legacy-only ranking/author controls have no equivalent bounded
+    // contract yet. Keep their established semantics rather than silently
+    // discarding a caller's filter during the ordinary-auto migration.
+    const legacyOnlyControls = ['author', 'author_id', 'weights', 'preferred_project',
+      'preferred_source_platforms', 'preferred_tags', 'source_platforms', 'transaction_at']
+      .some((key) => body[key] != null && (!Array.isArray(body[key]) || body[key].length > 0));
+    const recallPlan = ordinaryAuto && !legacyOnlyControls && String(rawRecallQuery).trim()
+      ? { ...resolvedRecallPlan, legacy: false }
+      : resolvedRecallPlan;
     // Evaluate once and latch for the entire request. Flag changes cannot split
     // one recall between old/new lane semantics; evaluation failure is the exact
     // rollback path and preserves the existing response behavior.
-    const recallReliabilityV1 = recallReliabilityClient
-      ? await recallReliabilityClient.enabledFor({ orgId, userId })
-      : false;
-    const recallQualityMode = recallQualityClient
-      ? await recallQualityClient.modeFor({ orgId, userId })
-      : 'off';
+    const [recallReliabilityV1, recallQualityMode] = await Promise.all([
+      recallReliabilityClient ? recallReliabilityClient.enabledFor({ orgId, userId }) : false,
+      recallQualityClient ? recallQualityClient.modeFor({ orgId, userId }) : 'off',
+    ]);
 
-    // Explicit quick/fact/explain/full modes use the bounded, source-grounded
-    // parallel service. Unspecified and legacy modes retain the established
-    // backwards-compatible HTTP response pipeline below.
+    // Auto and explicit quick/fact/explain/full use the bounded service.
+    // Explicit compatibility modes retain the established pipeline below.
     if (!recallPlan.legacy) {
       if (!query || typeof query !== 'string') {
         return jsonResponse(res, { error: 'query_context is required' }, 400);
@@ -278,6 +291,7 @@ export async function handleRecallRoute(ctx = {}) {
       let bounded;
       try {
         bounded = await recallRuntime.recall(query, {
+          signal: requestController.signal,
           mode: recallPlan.mode,
           explicit_mode: true,
           include_live: body.include_live === true,
@@ -331,6 +345,7 @@ export async function handleRecallRoute(ctx = {}) {
           scopeFilter: recallPlan.scope_filter,
         });
       } catch (error) {
+        if (res.destroyed || requestController.signal.aborted) return;
         if (isRemoteMemoryUnavailableError(error)) {
           return jsonResponse(res, {
             error: 'memory_unavailable',
@@ -420,6 +435,7 @@ export async function handleRecallRoute(ctx = {}) {
           recall_quality_mode: recallQualityMode,
           status: bounded.trace?.reliability?.status || 'legacy',
           lane_states: bounded.trace?.reliability?.lanes || null,
+          embedding_unavailable: bounded.trace?.embedding_unavailable === true,
         },
         evidence_packet: packet,
         cutoff_reason: cutoffReason,
@@ -774,11 +790,21 @@ export async function handleRecallRoute(ctx = {}) {
     } catch {}
     return jsonResponse(res, result);
   } catch (error) {
+    if (res.destroyed || requestController.signal.aborted) return;
+    if (error?.code === 'MEMORY_RETRIEVAL_TIMEOUT' || error?.code === 'MEMORY_RETRIEVAL_UNAVAILABLE') {
+      return jsonResponse(res, {
+        error: 'memory_retrieval_timeout',
+        message: 'The authorized retrieval could not finish. No absence conclusion was made.',
+        retryable: true,
+      }, 503);
+    }
     console.error('Auto recall failed:', error);
     return jsonResponse(res, {
       error: 'Recall failed',
       message: error.message
     }, 500);
+  } finally {
+    res.removeListener?.('close', cancelRequest);
   }
 }
 

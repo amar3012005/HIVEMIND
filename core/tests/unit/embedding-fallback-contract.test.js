@@ -91,3 +91,37 @@ test('a cooling provider is deprioritized but never removed from the fail-closed
   assert.deepEqual(await service.embed(['second']), [[1]]);
   assert.deepEqual(calls, ['primary']);
 });
+
+ test('caller deadline prevents fallback even when primary labels it a local timeout', async () => {
+  const controller = new AbortController();
+  let fallbackCalls = 0;
+  const service = new FallbackEmbedService([
+    { name: 'primary', service: { embed: async () => {
+      controller.abort(new Error('caller deadline'));
+      throw Object.assign(new Error('provider timeout'), { code: 'EMBEDDING_TIMEOUT' });
+    } } },
+    { name: 'fallback', service: { embed: async () => { fallbackCalls++; return [[1]]; } } },
+  ]);
+  await assert.rejects(service.embed(['query'], { signal: controller.signal }), /provider timeout/);
+  assert.equal(fallbackCalls, 0);
+});
+
+test('Cloudflare pending transport is not shared across independent caller signals', async () => {
+  let requests = 0;
+  const service = new CloudflareWorkersAIEmbedService({
+    accountId: 'account', apiToken: 'secret', gatewayId: 'gateway',
+    fetchImpl: async (_url, options) => {
+      requests++;
+      return new Promise((_, reject) => options.signal.addEventListener('abort',
+        () => reject(new Error('transport aborted')), { once: true }));
+    },
+  });
+  const first = new AbortController(); const second = new AbortController();
+  const a = service.embedOne('same query', { tenantId: 'tenant', signal: first.signal });
+  const b = service.embedOne('same query', { tenantId: 'tenant', signal: second.signal });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  first.abort(new Error('first disconnected')); second.abort(new Error('second disconnected'));
+  await Promise.allSettled([a, b]);
+  assert.equal(requests, 2);
+  assert.equal(service.inFlight.size, 0);
+});

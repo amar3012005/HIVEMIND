@@ -569,3 +569,33 @@ test('an unresolved explicit source fails closed before memory recall', async ()
   assert.deepEqual(result.memories, []);
   assert.equal(result.trace.cutoff_reason, 'source_not_found');
 });
+
+test('unavailable embedding retains authorized lexical memory without another embedding or evidence call', async () => {
+  let embeddingCalls = 0;
+  let evidenceCalls = 0;
+  const memory = { id: 'lexical-memory', content: 'Samsung campaign has an approved offer.',
+    tags: [], memory_type: 'fact', user_id: 'user-1', org_id: 'org-1',
+    scope: 'personal', is_latest: true, created_at: '2026-10-01T00:00:00Z' };
+  const router = new RecallRouter({
+    persistentMemoryStore: emptyStore({ searchMemories: async () => [memory] }),
+    evidenceRetrieval: embeddingEvidence({
+      qdrantClient: { generateEmbedding: async () => { embeddingCalls++; return null; } },
+      retrieveEvidence: async () => { evidenceCalls++; throw new Error('must not re-embed'); },
+    }), prisma: null,
+  });
+  const result = await router.recall('Samsung campaign offer', {
+    mode: 'fact', explicit_mode: true, structured_intent: true,
+  }, { userId: 'user-1', orgId: 'org-1', accessContext: { projectIds: [], teamIds: [] } });
+  assert.equal(embeddingCalls, 1);
+  assert.equal(evidenceCalls, 0);
+  assert.equal(result.trace.embedding_unavailable, true);
+  assert.deepEqual(result.memories.map(row => row.id), [memory.id]);
+});
+
+test('unavailable embedding with no established lexical match never returns successful absence', async () => {
+  const router = new RecallRouter({ persistentMemoryStore: emptyStore(),
+    evidenceRetrieval: embeddingEvidence({ qdrantClient: { generateEmbedding: async () => null } }), prisma: null });
+  await assert.rejects(router.recall('missing query', { mode: 'fact', structured_intent: true },
+    { userId: 'user-1', orgId: 'org-1', accessContext: { projectIds: [], teamIds: [] } }),
+  error => error.code === 'MEMORY_RETRIEVAL_UNAVAILABLE');
+});

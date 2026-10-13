@@ -1,3 +1,4 @@
+import { embeddingCancellationOwnerKey } from './recall-deadline.js';
 import { currentOrg } from '../db/prisma.js';
 import { getEmbeddingAdmissionController } from './admission.js';
 
@@ -115,7 +116,7 @@ export class CloudflareWorkersAIEmbedService {
     const texts = (Array.isArray(input) ? input : [input]).map(String);
     const cacheKey = JSON.stringify(texts);
     if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
-    const inFlightKey = `${options.tenantId || currentOrg() || 'shared'}\u0000${options.workload || 'interactive'}\u0000${cacheKey}`;
+    const inFlightKey = `${options.tenantId || currentOrg() || 'shared'}\u0000${options.workload || 'interactive'}\u0000${cacheKey}\u0000${embeddingCancellationOwnerKey(options.signal)}`;
     if (this.inFlight.has(inFlightKey)) return this.inFlight.get(inFlightKey);
     const pending = (async () => {
       const output = [];

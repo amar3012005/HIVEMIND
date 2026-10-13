@@ -21,6 +21,7 @@
  *   - Cognition-loop canonicals propagate substantive source tags.
  */
 
+import { boundedRecallEmbedding } from '../embeddings/recall-deadline.js';
 import { recallPersistedMemories, crossClusterEntityBoost, normalizeQueryTemporalTokens } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
 // Two-reranker contract: this `rerank` is the OPT-IN CROSS-ENCODER pass (external model,
@@ -1068,6 +1069,7 @@ async function hop1Memory({ store, query, options, ctx }) {
   const recallArgs = {
     query_context: query,
     query_vector: options.query_vector || null,
+    skip_vector: options.skip_vector === true,
     user_id: ctx.userId,
     org_id: ctx.orgId,
     max_memories: Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50),
@@ -1980,15 +1982,16 @@ export class RecallRouter {
     // callers retain metadata-based filename resolution for compatibility.
     const allowImplicitSource = !recallPlan.source.requested;
     const queryVectorPromise = this.evidence?.qdrantClient?.generateEmbedding
-      ? this.evidence.qdrantClient.generateEmbedding(query, {
-          workload: 'interactive', tenantId: ctx.orgId,
+      ? boundedRecallEmbedding(this.evidence.qdrantClient, query, {
+          tenantId: ctx.orgId, signal: options.signal,
+          timeoutMs: recallPlan.mode === 'fact' ? 1500 : recallPlan.latency_budget_ms,
         }).catch((error) => {
-          if (options.reliability_v1 === true) return null;
-          throw error;
+          if (options.signal?.aborted) throw error;
+          return null;
         })
       : (options.reliability_v1 === true
         ? Promise.resolve(null)
-        : Promise.reject(new Error('unified recall embedding service unavailable')));
+        : Promise.resolve(null));
     const [implicitSource, canonicalEntities, queryVector] = await Promise.all([
       allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,
@@ -2006,9 +2009,8 @@ export class RecallRouter {
       ),
       queryVectorPromise,
     ]);
-    if ((!Array.isArray(queryVector) || queryVector.length === 0) && options.reliability_v1 !== true) {
-      throw new Error('unified recall query embedding unavailable');
-    }
+    if (options.signal?.aborted) throw options.signal.reason;
+    const embeddingUnavailable = !Array.isArray(queryVector) || queryVector.length === 0;
     if (stageTiming) stageTiming.entity_resolution_ms = Date.now() - startedAt;
     if (implicitSource) {
       recallPlan = resolveRecallPlan({
@@ -2094,6 +2096,7 @@ export class RecallRouter {
       strict_entity_selection: selectedEntityNames.length > 0 || selectedEntityGroups.length > 0,
       alternate_lexical_query: options.alternate_lexical_query || exactEntityLexicalQuery,
       query_vector: queryVector,
+      skip_vector: embeddingUnavailable,
       limit: (temporalInventory || strictFilteredInventory)
         ? Math.max(50, Number(options.limit) || 0)
         : options.limit,
@@ -2284,7 +2287,9 @@ export class RecallRouter {
     // start the tenant-scoped evidence lane alongside memory recall instead of
     // waiting for asynchronous fact promotion to provide an anchor.
     const evidenceStartedAt = Date.now();
-    const sourceFirstEvidence = recallPlan.expand_evidence && !recallPlan.relationships?.requested
+    const sourceFirstEvidence = embeddingUnavailable
+      ? Promise.resolve({ items: [], reason: 'embedding_unavailable' })
+      : recallPlan.expand_evidence && !recallPlan.relationships?.requested
       ? (explicitDocumentSourceRequested && explicitSourceDocuments.length === 0
         ? Promise.resolve({ items: [], reason: explicitSourceMemoryAnchors.length ? 'memory-source-only' : 'source-not-found', docIds: [] })
         : hop2Evidence({
@@ -2582,12 +2587,17 @@ export class RecallRouter {
       options.relationship_memory_ids = memories.map(recallMemoryRowId).filter(Boolean);
     }
 
+    if (embeddingUnavailable && memories.length === 0) {
+      const error = new Error('Embedding unavailable and no authorized lexical result could be established');
+      error.code = 'MEMORY_RETRIEVAL_UNAVAILABLE';
+      throw error;
+    }
     const inspection = inspectMemories(memories);
 
     // ── HOP 2 + HOP 3 (parallel, both keyed on inspection) ────────────────
     const t2Start = Date.now();
     const [hop2, hop3] = await Promise.all([
-      !recallPlan.expand_evidence || Boolean(recallPlan.target_memory_id)
+      embeddingUnavailable || !recallPlan.expand_evidence || Boolean(recallPlan.target_memory_id)
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : measuredSourceFirstEvidence || hop2Evidence({
           evidenceService: this.evidence, query, queryVector, ctx, inspection, prisma: this.prisma,
@@ -2920,6 +2930,7 @@ export class RecallRouter {
       trace: {
         recall_plan:     recallPlan,
         embedding_passes: 1,
+        embedding_unavailable: embeddingUnavailable,
         retrieval_passes: 1,
         hybrid_ranking_mode: hybridRankingMode,
         rerank_passes: hybridRerankPasses,

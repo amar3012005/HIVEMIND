@@ -1419,6 +1419,7 @@ async function _recallPersistedMemoriesImpl(store, {
   trace_stages = false,
   timing = null,
   reliability_v1 = false,
+  skip_vector = false,
   recall_quality_mode = 'off',
 }) {
   const laneStates = reliability_v1 ? {
@@ -1575,7 +1576,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // it. Output is byte-identical — same inputs, same filter, just no longer
   // serialized — so accuracy is unchanged (Solvis combo@8 eval-gated). The
   // result is consumed at `await _vectorCandidatesPromise` further down.
-  const _vectorCandidatesPromise = vectorCandidatesForRecall(store, {
+  const _vectorCandidatesPromise = skip_vector ? Promise.resolve([]) : vectorCandidatesForRecall(store, {
     query_context,
     query_vector,
     user_id,
@@ -1619,7 +1620,7 @@ async function _recallPersistedMemoriesImpl(store, {
     : Promise.resolve([]);
   _relationshipsPromise.catch(() => {});
 
-  const _temporalCandidatesPromise = (TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length)
+  const _temporalCandidatesPromise = (!skip_vector && TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length)
     ? vectorCandidatesForRecall(store, {
         query_context, user_id, org_id, project, source_platforms,
         tags: _temporalFilterTags, max_memories,
@@ -1636,7 +1637,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // Entity additive pass overlaps too — it waits only on the entity-tag LLM
   // extraction (already in flight), not on the main fetch. SHOULD mode only;
   // 'must' mode resolved its tags into _effectiveTags above (hard filter).
-  const _entityCandidatesPromise = (ENTITY_FILTER_MODE === 'should')
+  const _entityCandidatesPromise = (!skip_vector && ENTITY_FILTER_MODE === 'should')
     ? _entityTagsPromise.then((entityTags) => {
         if (!entityTags || !entityTags.length) return [];
         return vectorCandidatesForRecall(store, {
@@ -1785,7 +1786,9 @@ async function _recallPersistedMemoriesImpl(store, {
   if (reliability_v1) {
     try {
       vectorCandidates = await _vectorCandidatesPromise;
-      laneStates.memory_vector = { status: 'complete', candidates: vectorCandidates.length };
+      laneStates.memory_vector = skip_vector
+        ? { status: 'failed', candidates: 0, error_code: 'memory_vector_unavailable' }
+        : { status: 'complete', candidates: vectorCandidates.length };
     } catch {
       vectorCandidates = [];
       laneStates.memory_vector = { status: 'failed', candidates: 0, error_code: 'memory_vector_unavailable' };
@@ -1801,7 +1804,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // path stays LLM-free and fast.
   let crosslingualCandidates = [];
   const _doExpand = query_expansion != null ? !!query_expansion : QUERY_EXPANSION_ENABLED;
-  if (_doExpand && vectorCandidates.length < EXPAND_MIN_CANDIDATES) {
+  if (!skip_vector && _doExpand && vectorCandidates.length < EXPAND_MIN_CANDIDATES) {
     const _variants = await expandQueryMultilingual(query_context, org_id);
     if (_variants.length) {
       const _fetched = await Promise.all(_variants.map((v) => vectorCandidatesForRecall(store, {

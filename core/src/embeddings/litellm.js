@@ -1,3 +1,4 @@
+import { embeddingCancellationOwnerKey } from './recall-deadline.js';
 /**
  * HIVE-MIND - LiteLLM Embedding Service
  *
@@ -110,7 +111,7 @@ export class LiteLLMEmbedService {
     // Provider work is coalesced only inside the same tenant/workload. This
     // preserves fair admission and per-tenant usage attribution while the
     // deterministic vector cache may safely be shared for identical text.
-    const inFlightKey = `${tenantKey}\u0000${options.workload || 'interactive'}\u0000${cacheKey}`;
+    const inFlightKey = `${tenantKey}\u0000${options.workload || 'interactive'}\u0000${cacheKey}\u0000${embeddingCancellationOwnerKey(options.signal)}`;
     if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
     if (this.inFlight.has(inFlightKey)) return this.inFlight.get(inFlightKey);
 

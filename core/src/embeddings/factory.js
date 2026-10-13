@@ -78,6 +78,11 @@ export class FallbackEmbedService {
   async embed(input, options = {}) {
     const errors = [];
     for (const link of this._order(Date.now())) {
+      if (options.signal?.aborted) {
+        const cancelled = new Error('Embedding cancelled by recall deadline');
+        cancelled.code = 'EMBEDDING_CANCELLED';
+        throw cancelled;
+      }
       try {
         const out = await link.service.embed(input, options);
         if (this._downUntil.delete(link.name)) console.log(`✅ Embedding link '${link.name}' recovered`);
@@ -86,7 +91,7 @@ export class FallbackEmbedService {
       } catch (err) {
         // Caller cancellation is authoritative. A provider-local timeout is exactly
         // what this same-model fallback chain exists to survive.
-        if (err?.code === 'EMBEDDING_CANCELLED') throw err;
+        if (err?.code === 'EMBEDDING_CANCELLED' || options.signal?.aborted) throw err;
         // Log the FIRST failure of each link, not every one — a hot loop with a dead primary
         // would otherwise bury the log. The cooldown entry doubles as the "already reported" mark.
         if (!this._downUntil.has(link.name)) {

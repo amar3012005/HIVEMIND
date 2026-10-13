@@ -32,7 +32,7 @@ test('model grant binds exact body, tenant and fixed native route with thirty-se
   assert.equal(claims.body_sha256, createHash('sha256').update(JSON.stringify(input)).digest('hex'));
   const fallback = { ...input, provider: 'openai-codex', model: 'gpt-6-luna', request_id: 'fallback-2',
     fallback_from: { provider: input.provider, model: input.model, request_id: input.request_id,
-      failure_code: 'provider_unavailable', output_started: false } };
+      failure_code: 'SERVER', output_started: false } };
   validateOpenDotModelRequest(fallback);
   assert.throws(() => validateOpenDotModelRequest({ ...fallback, fallback_from: undefined }));
   assert.throws(() => validateOpenDotModelRequest({ ...fallback, fallback_from: { ...fallback.fallback_from, output_started: true } }));

@@ -41,7 +41,8 @@ export function validateOpenDotModelRequest(raw) {
     if (!fallback || Object.keys(fallback).some(key => !['provider', 'model', 'request_id', 'failure_code', 'output_started'].includes(key))
       || fallback.provider !== 'cloudflare-workers-ai' || fallback.model !== '@cf/zai-org/glm-5.3-flash'
       || !/^[A-Za-z0-9_.:-]{1,180}$/.test(fallback.request_id || '') || fallback.request_id === raw.request_id
-      || !/^[a-z0-9_]{1,80}$/.test(fallback.failure_code || '') || fallback.output_started !== false)
+      || !['RATE_LIMIT', 'QUOTA_EXCEEDED', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'UNSUPPORTED_CONTENT'].includes(fallback.failure_code)
+      || fallback.output_started !== false)
       lifecycleError('invalid_open_dot_model_request', 400);
   } else if (fallback !== undefined) lifecycleError('invalid_open_dot_model_request', 400);
   if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > MAX_REQUEST_BYTES) lifecycleError('open_dot_model_request_too_large', 413);

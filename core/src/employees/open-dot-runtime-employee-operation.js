@@ -94,8 +94,8 @@ function validateOperation(input) {
   lifecycleError('invalid_open_dot_employee_operation', 400);
 }
 
-async function visibleBoundEmployee(db, input) {
-  for (const key of ['organization_id','user_id','employee_id','dispatch_message_id']) if (!UUID.test(input[key] || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
+export async function visibleBoundEmployee(db, input, { requireDispatch = true } = {}) {
+  for (const key of ['organization_id','user_id','employee_id', ...(requireDispatch ? ['dispatch_message_id'] : [])]) if (!UUID.test(input[key] || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
   if (!DOT_ID.test(input.dot_id || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
   const membership = await db.userOrganization.findUnique({ where: { userId_orgId: { userId: input.user_id, orgId: input.organization_id } },
     select: { role: true, isActive: true, deactivatedAt: true } });

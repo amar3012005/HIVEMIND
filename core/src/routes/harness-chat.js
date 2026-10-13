@@ -7,6 +7,7 @@ import { manageNativeEmployee, nativeLifecycleHostProof, requireNativeRuntime } 
 import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus, cancelOpenDotRuntime } from '../employees/open-dot-runtime-bridge.js';
 import { readOpenDotEmployeeArtifact, relayOpenDotEmployeeOperation, verifyOpenDotRuntimeBridgeAuthorization } from '../employees/open-dot-runtime-employee-operation.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
+import { relayOpenDotModelStream } from '../employees/open-dot-model-relay.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
 import { forwardAppRuntimeRequest } from '../app-runtime/gateway.js';
@@ -184,7 +185,23 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
   const creditOperationRequest = pathname === CREDIT_OPERATION_PREFIX;
   const dotEmployeeOperationRequest = pathname === `${INTERNAL_PREFIX}/open-dot/runtime/employee-operation`;
+  const dotModelRequest = pathname === `${INTERNAL_PREFIX}/open-dot/model/stream`;
   if (!receiptRequest && !creditOperationRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
+  if (dotModelRequest) {
+    if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
+    if (!verifyOpenDotRuntimeBridgeAuthorization(req.headers.authorization, env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN)) {
+      jsonResponse(res, { error: 'Unauthorized' }, 401); return true;
+    }
+    try { await relayOpenDotModelStream(prisma, req, res, await parseBody(req), { env, fetchImpl }); }
+    catch (error) {
+      if (!res.destroyed && !res.writableEnded) {
+        if (res.headersSent) {
+          res.end(`data: ${JSON.stringify({ error: { code: 'open_dot_model_stream_failed', message: 'Model stream interrupted' } })}\n\ndata: [DONE]\n\n`);
+        } else jsonResponse(res, { error: error.status ? error.code || error.message : 'open_dot_model_upstream_unavailable' }, error.status || 503);
+      }
+    }
+    return true;
+  }
   if (dotEmployeeOperationRequest) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
     if (!verifyOpenDotRuntimeBridgeAuthorization(req.headers.authorization, env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN)) {

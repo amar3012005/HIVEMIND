@@ -18,7 +18,7 @@ const db = (overrides = {}) => ({ userOrganization: { findUnique: async () => ({
 function response() {
   const res = new EventEmitter(); res.chunks = []; res.writeHead = (status, headers) => { res.status = status; res.headers = headers; res.headersSent = true; };
   res.write = chunk => { res.chunks.push(String(chunk)); return true; };
-  res.end = () => { res.writableEnded = true; };
+  res.end = chunk => { if (chunk !== undefined) res.chunks.push(String(chunk)); res.writableEnded = true; };
   return res;
 }
 
@@ -70,4 +70,16 @@ test('client disconnect cancels upstream and no new model attempt is started', a
   } }));
   assert.equal(signal.aborted, true); assert.equal(calls, 1);
   assert.equal(res.headersSent, undefined); assert.equal(res.listenerCount('close'), 0);
+});
+
+test('only sanitized broker failure codes survive the relay for proven fallback', async () => {
+  for (const original of ['QUOTA', 'SERVER', 'provider-secret']) {
+    const res = response();
+    await relayOpenDotModelStream(db(), new EventEmitter(), res, body(), { env,
+      fetchImpl: async () => new Response(JSON.stringify({ error: { code: original, message: 'private provider detail' } }),
+        { status: 502, headers: { 'content-type': 'application/json' } }) });
+    assert.equal(JSON.parse(res.chunks.join('')).error.code,
+      original === 'provider-secret' ? 'open_dot_model_upstream_unavailable' : original);
+    assert.doesNotMatch(res.chunks.join(''), /private provider detail|provider-secret/);
+  }
 });

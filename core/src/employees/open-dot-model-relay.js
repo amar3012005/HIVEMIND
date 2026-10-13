@@ -8,6 +8,7 @@ const ORIGIN = 'http://harness-runner:3080';
 const PATH = '/internal/hivemind/open-dot/model/stream';
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
+const FALLBACK_CODES = new Set(['RATE_LIMIT', 'QUOTA', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'UNSUPPORTED_CONTENT']);
 const ALLOWED = new Set(['organization_id','user_id','employee_id','dot_id','session_id','request_id',
   'provider','model','messages','tools','max_tokens','temperature','stop','reasoning_effort','stream',
   'parallel_tool_calls','stream_options','response_format','fallback_from']);
@@ -84,8 +85,26 @@ export async function relayOpenDotModelStream(db, req, res, raw, { env = process
       signal: controller.signal, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json',
         accept: 'text/event-stream' }, body: JSON.stringify(input) });
     if (!upstream.ok) {
-      await upstream.body?.cancel();
-      lifecycleError('open_dot_model_upstream_unavailable', upstream.status >= 500 ? 503 : upstream.status);
+      let code = 'open_dot_model_upstream_unavailable';
+      const errorReader = upstream.body?.getReader();
+      if (errorReader) {
+        try {
+          const chunks = []; let bytes = 0;
+          for (;;) {
+            const item = await errorReader.read(); if (item.done) break;
+            bytes += item.value.byteLength;
+            if (bytes > 4096) break;
+            chunks.push(Buffer.from(item.value));
+          }
+          if (bytes <= 4096) {
+            const candidate = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.error?.code;
+            if (FALLBACK_CODES.has(candidate)) code = candidate;
+          }
+        } catch {} finally { await errorReader.cancel().catch(() => {}); errorReader.releaseLock(); }
+      }
+      res.writeHead(upstream.status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ error: { code, message: code, type: 'hivemind_model_error' } }));
+      return;
     }
     if (!upstream.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream') || !upstream.body) {
       await upstream.body?.cancel(); lifecycleError('open_dot_model_invalid_response', 502);

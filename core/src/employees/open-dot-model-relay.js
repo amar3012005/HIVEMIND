@@ -18,7 +18,7 @@ export function validateOpenDotModelRequest(raw) {
     lifecycleError('invalid_open_dot_model_request', 400);
   }
   const supportedModel = (raw.provider === 'openai-codex' && raw.model === 'gpt-6-luna')
-    || (raw.provider === 'cloudflare-workers-ai' && raw.model === '@cf/zai-org/glm-5.3-flash');
+    || (raw.provider === 'hivemind-global' && raw.model === 'default');
   if (!supportedModel
     || !Number.isSafeInteger(raw.max_tokens) || raw.max_tokens < 1 || raw.max_tokens > 8192
     || !Array.isArray(raw.messages) || raw.messages.length < 1 || raw.messages.length > 256
@@ -40,7 +40,7 @@ export function validateOpenDotModelRequest(raw) {
   const fallback = raw.fallback_from;
   if (raw.provider === 'openai-codex') {
     if (!fallback || Object.keys(fallback).some(key => !['provider', 'model', 'request_id', 'failure_code', 'output_started'].includes(key))
-      || fallback.provider !== 'cloudflare-workers-ai' || fallback.model !== '@cf/zai-org/glm-5.3-flash'
+      || fallback.provider !== 'hivemind-global' || fallback.model !== 'default'
       || !/^[A-Za-z0-9_.:-]{1,180}$/.test(fallback.request_id || '') || fallback.request_id === raw.request_id
       || !['RATE_LIMIT', 'QUOTA', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'UNSUPPORTED_CONTENT'].includes(fallback.failure_code)
       || fallback.output_started !== false)

@@ -9,7 +9,7 @@ const org = '67503d34-97e9-49a8-8c52-8ee30cc7603e';
 const employee = '64f5568b-4d6a-4ae1-9a33-48cb2909d59b';
 const body = () => ({ organization_id: org, user_id: user, employee_id: employee,
   dot_id: 'dot_verified', session_id: 'conv_verified', request_id: 'model-attempt-1',
-  provider: 'cloudflare-workers-ai', model: '@cf/zai-org/glm-5.3-flash', messages: [{ role: 'user', content: 'Reply once' }], max_tokens: 8192 });
+  provider: 'hivemind-global', model: 'default', messages: [{ role: 'user', content: 'Reply once' }], max_tokens: 8192 });
 const env = { HIVE_HARNESS_RUNNER_SERVICE_SECRET: 'test-existing-runner-service-secret-at-least32' };
 const db = (overrides = {}) => ({ userOrganization: { findUnique: async () => ({ role: 'owner', isActive: true }) },
   digitalEmployee: { findFirst: async () => ({ id: employee, orgId: org, createdBy: user, status: 'active',

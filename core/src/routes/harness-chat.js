@@ -653,40 +653,40 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     ...(idempotencyHeader ? { 'x-idempotency-key': idempotencyHeader } : {}),
     ...(body === undefined ? {} : { 'content-type': 'application/json' }),
   };
-  const requestCore = (requestBody, timeoutMs) => fetchImpl(target, {
-    method: req.method,
-    headers,
-    ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }),
-    redirect: 'manual', signal: AbortSignal.timeout(timeoutMs),
-  });
   const primaryTimeoutMs = boundedTimeout(env.HIVE_HARNESS_CORE_PRIMARY_TIMEOUT_MS, 12_000, 17_000);
-  const fallbackTimeoutMs = boundedTimeout(env.HIVE_HARNESS_CORE_FALLBACK_TIMEOUT_MS, 4_000, 5_000);
-  let upstream;
-  try {
-    upstream = await requestCore(body, primaryTimeoutMs);
-  } catch (error) {
-    if (!isRequestTimeout(error) || corePath !== '/api/recall') throw error;
-    // A slow optional embedding/reliability provider must not consume the
-    // runner's complete 20-second tool budget. Retry once through Core's
-    // bounded quick-recall plan, preserving tenant and all hard filters.
-    try {
-      upstream = await requestCore({
-        ...(body || {}),
-        mode: 'quick',
-        max_memories: Math.min(Number(body?.max_memories || body?.limit || 5), 5),
-      }, fallbackTimeoutMs);
-    } catch (fallbackError) {
-      if (!isRequestTimeout(fallbackError)) throw fallbackError;
-      jsonResponse(res, {
-        error: 'memory_retrieval_timeout',
-        message: 'Memory retrieval exceeded its bounded deadline. No absence conclusion was made.',
-        retryable: true,
-      }, 503);
-      return true;
-    }
+  const controller = new AbortController();
+  const disconnected = () => {
+    if (!controller.signal.aborted) controller.abort(new DOMException('Harness caller disconnected', 'AbortError'));
+  };
+  // A timed-out recall is one owned read. Do not launch another Core request
+  // while its retrieval work may still be settling behind the tenant gate.
+  if (corePath === '/api/recall') {
+    req.once?.('aborted', disconnected);
+    res.once?.('close', disconnected);
+    if (req.aborted || res.destroyed) disconnected();
   }
-  const payload = await readJsonBounded(upstream);
-  jsonResponse(res, payload, upstream.status);
+  try {
+    const upstream = await fetchImpl(target, {
+      method: req.method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      redirect: 'manual',
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(primaryTimeoutMs)]),
+    });
+    const payload = await readJsonBounded(upstream);
+    if (!controller.signal.aborted && !res.destroyed) jsonResponse(res, payload, upstream.status);
+  } catch (error) {
+    if (controller.signal.aborted || res.destroyed) return true;
+    if (!isRequestTimeout(error) || corePath !== '/api/recall') throw error;
+    jsonResponse(res, {
+      error: 'memory_retrieval_timeout',
+      message: 'Memory retrieval exceeded its bounded deadline. No absence conclusion was made.',
+      retryable: true,
+    }, 503);
+  } finally {
+    req.removeListener?.('aborted', disconnected);
+    res.removeListener?.('close', disconnected);
+  }
   return true;
 }
 

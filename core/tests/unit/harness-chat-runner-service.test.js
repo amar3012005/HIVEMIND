@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { taskPacket } from './dsh-task-memory.test.js';
 import { verifyHarnessRunnerServiceToken } from '../../src/harness-chat/runner-service-token.js';
 import { handleHarnessChatBootstrapRoute } from '../../src/routes/harness-chat.js';
@@ -99,7 +100,7 @@ test('native Harness entity lookup maps to the canonical Core route with bounded
   assert.equal(calls[0].init.headers['x-hm-org-id'], orgId);
 });
 
-test('native Harness recall retries one bounded quick read when the primary provider times out', async () => {
+test('native Harness recall does not start a duplicate read after the primary times out', async () => {
   const res = {};
   const bodies = [];
   await handleHarnessChatBootstrapRoute({
@@ -117,12 +118,11 @@ test('native Harness recall retries one bounded quick read when the primary prov
       return new Response(JSON.stringify({ results: [{ title: 'Solvis GmbH — Company profile' }], count: 1 }));
     },
   });
-  assert.equal(res.status, 200);
-  assert.equal(bodies.length, 2);
-  assert.equal(bodies[1].mode, 'quick');
-  assert.equal(bodies[1].max_memories, 5);
-  assert.equal(bodies[1].scope_filter, 'organization');
-  assert.equal(res.body.results[0].title, 'Solvis GmbH — Company profile');
+  assert.equal(res.status, 503);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].max_memories, 15);
+  assert.equal(bodies[0].scope_filter, 'organization');
+  assert.equal(res.body.error, 'memory_retrieval_timeout');
 });
 
 test('native Harness recall reports bounded unavailability without asserting empty memory', async () => {
@@ -420,7 +420,7 @@ test('bootstrap surface selection is independent of credits; exhausted credits a
     req: { method: 'POST', headers: {} }, res,
     pathname: '/v1/harness-chat/bootstrap',
     requireSession: async () => ({ session: { userId, orgId } }),
-    prisma: { userOrganization: { findUnique: async () => ({ userId }) } },
+    prisma: { userOrganization: { findUnique: async () => ({ userId, isActive: true }) } },
     parseBody: async () => ({}),
     jsonResponse: (response, body, status = 200) => Object.assign(response, { body, status }),
     env: {
@@ -582,4 +582,29 @@ test('native Muse bridge preserves exact image bytes and rejects external or own
     globalThis.fetch = priorFetch;
     for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
   }
+});
+
+
+test('native recall cancels the upstream read on caller disconnect and removes listeners', async () => {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', headers: { authorization: `Bearer ${token()}` } });
+  const res = new EventEmitter();
+  let calls = 0;
+  let signal;
+  await handleHarnessChatBootstrapRoute({
+    req, res, pathname: '/internal/v1/harness-chat/core/api/recall',
+    prisma: { userOrganization: { findUnique: async () => ({ isActive: true }) } },
+    parseBody: async () => ({ query_context: 'saved campaign', scope_filter: 'organization' }),
+    jsonResponse: () => assert.fail('must not write to a disconnected caller'),
+    redisConfig: { coreApiBaseUrl: 'http://core.test' },
+    env: { HIVE_HARNESS_RUNNER_SERVICE_SECRET: secret },
+    fetchImpl: async (_url, init) => {
+      calls++; signal = init.signal;
+      res.destroyed = true; res.emit('close');
+      signal.throwIfAborted();
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(signal.aborted, true);
+  assert.equal(req.listenerCount('aborted'), 0);
+  assert.equal(res.listenerCount('close'), 0);
 });

@@ -297,7 +297,10 @@ OVERRIDE="$STATE_ROOT/deploy-override.yml"
 # make the shared env_file absolute, and preserve canonical relative contexts via
 # --project-directory. No secret value is copied into this artifact.
 HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
-sed "s#env_file: \[../.env#env_file: [$ENVF#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
+sed \
+  -e "s#env_file: \[../.env\]#env_file: [$ENVF]#g" \
+  -e "s#env_file: \[../.env,#env_file: [$ENVF,#g" \
+  "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
 if ! docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q; then
   echo "FATAL: canonical Compose configuration failed validation; no deployment"
   exit 1

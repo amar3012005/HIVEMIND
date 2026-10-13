@@ -96,6 +96,13 @@ if [[ ",${SERVICES}," == *,harness-runner,* ]]; then
       exit 1
     fi
   done
+  # The runner maps one of these managed references to CLOUDFLARE_API_KEY.
+  # Require the source reference before recreating so a healthy container
+  # cannot be released with an unusable primary model route.
+  if ! awk -F= '$1 == "CLOUDFLARE_API_KEY" || $1 == "CLOUDFLARE_API_TOKEN" || $1 == "CLOUDFLARE_AI_GATEWAY_TOKEN" { if (length(substr($0, length($1) + 2)) > 0) found=1 } END { exit found ? 0 : 1 }' "$ENVF"; then
+    echo "FATAL: harness-runner requires one managed Cloudflare credential reference"
+    exit 1
+  fi
 fi
 if [[ ",${SERVICES}," == *,open-dot,* ]]; then
   [[ "$OPEN_DOT_MODE" = cloud || "$OPEN_DOT_MODE" = local-prototype ]] \

@@ -215,8 +215,10 @@ services:
       # interpolation optional means deployments without this profile remain valid.
       HIVE_HARNESS_TICKET_SECRET: ${HIVE_HARNESS_TICKET_SECRET:-}
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}
-      # Harness's Cloudflare/OpenRouter route reads this server-side credential.
-      CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:-${CLOUDFLARE_AI_GATEWAY_TOKEN:-}}
+      # Harness's Workers AI route needs a Cloudflare API credential. Prefer a
+      # dedicated runner key when provisioned, otherwise reuse the managed API
+      # token. The Gateway token remains the final legacy fallback.
+      CLOUDFLARE_API_KEY: ${CLOUDFLARE_API_KEY:-${CLOUDFLARE_API_TOKEN:-${CLOUDFLARE_AI_GATEWAY_TOKEN:-}}}
       # Connected-app discovery/execution is server-side.  Preserve the existing
       # deployment secret when this optional runner profile is enabled; never
       # surface it in a model prompt or browser payload.

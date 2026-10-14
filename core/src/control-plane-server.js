@@ -1,3 +1,4 @@
+import { nameOnboardingTeam } from './onboarding/employee-names.js';
 import { cleanupAccountRuntimeReferences } from './security/account-runtime-erasure.js';
 import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
@@ -13326,15 +13327,15 @@ Write the persona now.`;
             const catalogText = Object.entries(MARKETPLACE)
               .map(([f, ps]) => `${f}: ${ps.map((p) => `${p.t} [${p.a}]`).join(' | ')}`).join('\n');
             say('Choosing your specialists from the marketplace');
-            // LLM picks the top 3 professions for THIS company + a human first
-            // name each — no generic Nova/Atlas defaults, no bare archetypes.
+            // LLM selects domain professions; the native onboarding name selector
+            // supplies distinct, single-word character names before persistence.
             // CRITICAL for robust round-tables: the trio must span COMPLEMENTARY debate lenses
             // (a challenger + an evidence-hound + a direction-setter), not three of one archetype
             // (which debate as yes-men). Archetypes are shown in [brackets] in the catalog.
             let picks = [];
             try {
               const pj = JSON.parse(await llm(
-                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<realistic human first name, varied genders/origins, NOT Nova/Atlas/Vega>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) prioritize the company-specific domain field and choose at least two roles from it; (2) the three MUST span complementary lenses — ONE [skeptic], ONE [investigator], and ONE [strategist], [generalist], or [coordinator]; (3) no duplicate titles; (4) match the company\'s actual work and business model, not merely the user\'s first goal.',
+                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<short single-word character name such as Luna, Sia, Clip, Kepler or Leo>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) prioritize the company-specific domain field and choose at least two roles from it; (2) the three MUST span complementary lenses — ONE [skeptic], ONE [investigator], and ONE [strategist], [generalist], or [coordinator]; (3) no duplicate titles; (4) match the company\'s actual work and business model, not merely the user\'s first goal.',
                 `COMPANY-SPECIFIC DOMAIN FIELD: ${domainField}\nCATALOG:\n${catalogText}\n\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}${userGoal ? `\nSTATED GOAL: ${userGoal}` : ''}`,
                 { json: true, maxTokens: 500 },
               ));
@@ -13385,6 +13386,7 @@ Write the persona now.`;
                 say('Balancing the team so your round-table has a challenger, an analyst, and a lead');
               }
             }
+            picks = nameOnboardingTeam(picks, `${orgId}:${companyName}`);
             const hires = await Promise.all(picks.slice(0, 3 - specialistCount).map(async (r) => {
               say(`Hiring ${r.name} — ${r.title} (${r.field})`);
               let persona = '';

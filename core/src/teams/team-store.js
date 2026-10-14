@@ -49,6 +49,7 @@ export class TeamStore {
   // ── Teams ─────────────────────────────────────────────────
 
   async listTeamsForUser({ userId, orgId }) {
+    if (!userId || !orgId) return [];
     return this.prisma.team.findMany({
       where: {
         orgId,

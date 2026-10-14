@@ -5,6 +5,7 @@ import { TeamStore } from '../../src/teams/team-store.js';
 test('personal or incomplete principals cannot query organization memberships', async () => {
   const store = new TeamStore(new Proxy({}, { get() { throw new Error('database must not be queried'); } }));
   for (const input of [{ userId: 'user', orgId: null }, { userId: 'user' }, { orgId: 'org' }]) {
+    assert.deepEqual(await store.listTeamsForUser(input), []);
     assert.deepEqual(await store.accessibleTeamIds(input), []);
     assert.deepEqual(await store.accessibleProjectIds(input), []);
   }

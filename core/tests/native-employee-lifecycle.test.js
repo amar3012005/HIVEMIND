@@ -90,3 +90,23 @@ test('responsibility proposal requires Chief confirmation and freezes the first 
   assert.deepEqual(row.policyRules.native_lifecycle.joining_profile,first);
   assert.deepEqual(row.tools,[]);assert.deepEqual(row.enabledConnectors,[]);
 });
+
+test('appearance-only configuration is canonical, revision-guarded and preserves onboarding and permissions', async () => {
+  const lifecycle={version:1,phase:'active',kind:'durable',revision:4,profile_revision:2,profile_stage:'ready',onboarding_required:false,profile_hash:'responsibility-hash',joining_profile:{name:'Alex'}};
+  const row={id:'11111111-1111-4111-8111-111111111111',name:'Alex',status:'draft',tools:['read'],enabledConnectors:['gmail'],policyRules:{appearance,native_lifecycle:lifecycle,other:{keep:true}}};
+  const tx={$queryRawUnsafe:async()=>[],digitalEmployee:{findFirst:async()=>row,update:async({data})=>Object.assign(row,data)}};
+  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$transaction:async fn=>fn(tx)};
+  const principal={orgId:'org',userId:'admin'};
+  const changed={...appearance,colors:{...appearance.colors,clothes:'123ABC'}};
+  const input={operation:'configure',employee_id:row.id,expected_profile_revision:2,appearance:changed};
+  const result=await manageNativeEmployee(db,principal,input);
+  assert.equal(result.appearanceOnly,true);
+  assert.equal(result.employee.policyRules.appearance.colors.clothes,'123ABC');
+  assert.deepEqual(result.employee.policyRules.native_lifecycle,{...lifecycle,profile_revision:3});
+  assert.deepEqual(row.tools,['read']);assert.deepEqual(row.enabledConnectors,['gmail']);assert.deepEqual(row.policyRules.other,{keep:true});
+  assert.equal((await manageNativeEmployee(db,principal,input)).replayed,true);
+  await assert.rejects(manageNativeEmployee(db,principal,{...input,appearance:{...changed,background:'000000'}}),/employee_profile_revision_conflict/);
+  await assert.rejects(manageNativeEmployee(db,principal,{...input,appearance:null}),/invalid_employee_appearance/);
+  await assert.rejects(manageNativeEmployee(db,principal,{...input,appearance:{...changed,permissions:['write']}}),/invalid_employee_appearance/);
+  await assert.rejects(manageNativeEmployee(db,principal,{...input,tools:['write']}),/invalid_employee_configuration/);
+});

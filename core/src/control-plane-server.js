@@ -11107,10 +11107,10 @@ Write the persona now.`;
       const hasOpenDotMarker = Object.hasOwn(result.employee?.policyRules || {}, 'open_dot_employee');
       const openDotBound = result.employee?.policyRules?.open_dot_employee?.state === 'bound'
         && result.employee?.policyRules?.open_dot_employee?.execution_backend === 'open-dot';
-      if (openDotBound && input.operation === 'configure') {
+      if (openDotBound && input.operation === 'configure' && !result.appearanceOnly) {
         const { activateBoundOpenDotEmployee } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateBoundOpenDotEmployee(principal, result.employee);
-      } else if (!hasOpenDotMarker && ['create','configure','archive'].includes(input.operation)) {
+      } else if (!hasOpenDotMarker && !result.appearanceOnly && ['create','configure','archive'].includes(input.operation)) {
         const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee);
       }

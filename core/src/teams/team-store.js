@@ -516,6 +516,9 @@ export class TeamStore {
    * Used by recall scope filter to construct the OR clause.
    */
   async accessibleProjectIds({ userId, orgId }) {
+    // Personal/unassigned sessions have no organization-scoped memberships.
+    // Never issue a nullable or unscoped relation filter for these sessions.
+    if (!userId || !orgId) return [];
     const explicit = await this.prisma.projectMember.findMany({
       where: { userId, project: { orgId, status: 'active' } },
       select: { projectId: true },
@@ -538,6 +541,9 @@ export class TeamStore {
    * Returns team IDs the user is a member of in this org.
    */
   async accessibleTeamIds({ userId, orgId }) {
+    // Personal/unassigned sessions have no organization-scoped memberships.
+    // Never issue a nullable or unscoped relation filter for these sessions.
+    if (!userId || !orgId) return [];
     const rows = await this.prisma.teamMember.findMany({
       where: { userId, team: { orgId, archivedAt: null } },
       select: { teamId: true },

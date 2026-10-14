@@ -1,7 +1,8 @@
-const NAMES = ['Luna', 'Sia', 'Clip', 'Kepler', 'Leo', 'Milo', 'Nova', 'Pico', 'Nori', 'Sol', 'Kiki', 'Echo', 'Lumi', 'Cleo', 'Remy', 'Rio'];
+import { STARTER_EMPLOYEES } from './starter-employees.js';
 
-export function nameOnboardingTeam(hires, seed) {
-  let hash = 2166136261;
-  for (const char of String(seed)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
-  return hires.map((hire, index) => ({ ...hire, name: NAMES[(hash + index) % NAMES.length] }));
+// Starter character identity is fixed; domain professions remain company-specific.
+export function nameOnboardingTeam(hires, existing = []) {
+  const used = new Set((Array.isArray(existing) ? existing : []).map(employee => employee.name));
+  const available = STARTER_EMPLOYEES.filter(employee => !used.has(employee.name));
+  return hires.slice(0, available.length).map((hire, index) => ({ ...hire, name: available[index].name }));
 }

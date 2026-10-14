@@ -1,4 +1,5 @@
 import { nameOnboardingTeam } from './onboarding/employee-names.js';
+import { starterAppearance, starterPersonaContract } from './onboarding/starter-employees.js';
 import { cleanupAccountRuntimeReferences } from './security/account-runtime-erasure.js';
 import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
@@ -13335,7 +13336,7 @@ Write the persona now.`;
             let picks = [];
             try {
               const pj = JSON.parse(await llm(
-                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<short single-word character name such as Luna, Sia, Clip, Kepler or Leo>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) prioritize the company-specific domain field and choose at least two roles from it; (2) the three MUST span complementary lenses — ONE [skeptic], ONE [investigator], and ONE [strategist], [generalist], or [coordinator]; (3) no duplicate titles; (4) match the company\'s actual work and business model, not merely the user\'s first goal.',
+                'You staff a 3-person AI team for a specific company from a fixed marketplace catalog. Each profession has an [archetype] tag. Output ONLY JSON: {"hires":[{"field":"<exact field>","title":"<exact profession title from the catalog>","name":"<Faraday, Feynmann or Turing; assigned canonically after profession selection>","focus":"<=12 words tying the role to THIS company"}]}. Pick EXACTLY 3, each from the catalog verbatim. RULES: (1) prioritize the company-specific domain field and choose at least two roles from it; (2) the three MUST span complementary lenses — ONE [skeptic], ONE [investigator], and ONE [strategist], [generalist], or [coordinator]; (3) no duplicate titles; (4) match the company\'s actual work and business model, not merely the user\'s first goal.',
                 `COMPANY-SPECIFIC DOMAIN FIELD: ${domainField}\nCATALOG:\n${catalogText}\n\nCOMPANY: ${companyName}\nPROFILE: ${JSON.stringify(profile)}\nMISSION: ${mission}${userGoal ? `\nSTATED GOAL: ${userGoal}` : ''}`,
                 { json: true, maxTokens: 500 },
               ));
@@ -13386,7 +13387,7 @@ Write the persona now.`;
                 say('Balancing the team so your round-table has a challenger, an analyst, and a lead');
               }
             }
-            picks = nameOnboardingTeam(picks, `${orgId}:${companyName}`);
+            picks = nameOnboardingTeam(picks, team);
             const hires = await Promise.all(picks.slice(0, 3 - specialistCount).map(async (r) => {
               say(`Hiring ${r.name} — ${r.title} (${r.field})`);
               let persona = '';
@@ -13397,13 +13398,14 @@ Write the persona now.`;
                   { maxTokens: 260 },
                 );
               } catch { /* fallback below */ }
-              if (!persona) persona = `You are ${r.name}, ${r.title} at ${companyName} (${r.blurb}). You are an ${r.archetype}-minded specialist focused on ${r.focus}. You are direct, grounded in the company's real context, and always propose the next concrete action.`;
+              persona = [persona, starterPersonaContract(r, companyName)].filter(Boolean).join('\n\n');
               try {
                 const emp = await store.create({
                   orgId, name: r.name, persona,
                   roleArchetype: r.title, createdBy: userId,
+                  policyRules: { appearance: starterAppearance(r.name) },
                 });
-                return { id: emp.id, name: emp.name, roleArchetype: r.title };
+                return { id: emp.id, name: emp.name, roleArchetype: r.title, policyRules: emp.policyRules };
               } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); return null; }
             }));
             team.push(...hires.filter(Boolean));

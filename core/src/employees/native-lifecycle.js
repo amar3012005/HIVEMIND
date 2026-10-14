@@ -125,19 +125,33 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       const dotProfileMayBeConfigured = dot?.version === VERSION && dot.execution_backend === 'open-dot'
         && dot.state === 'bound' && nativeLifecycle(row)?.phase === 'active';
       if (!employeeCanDispatch(row, now) && !dotProfileMayBeConfigured) lifecycleError('employee_profile_not_active');
-      if (Object.keys(input).some(key => !['operation','employee_id','expected_profile_revision','persona','role','name'].includes(key))) lifecycleError('invalid_employee_configuration',400);
+      if (Object.keys(input).some(key => !['operation','employee_id','expected_profile_revision','persona','role','name','appearance'].includes(key))) lifecycleError('invalid_employee_configuration',400);
       const update = {};
       if (input.persona !== undefined) update.persona = text(input.persona,'persona',12000);
       if (input.role !== undefined) update.roleArchetype = text(input.role,'role',40);
       if (input.name !== undefined) update.name = text(input.name,'name',100);
-      if (!Object.keys(update).length) lifecycleError('empty_employee_configuration',400);
+      const appearance = input.appearance === undefined ? undefined : validateEmployeeAppearance(input.appearance);
+      if (input.appearance !== undefined && !appearance) lifecycleError('invalid_employee_appearance',400);
+      const appearanceOnly = Object.keys(update).length === 0 && appearance !== undefined;
+      if (!Object.keys(update).length && appearance === undefined) lifecycleError('empty_employee_configuration',400);
+      // A visual edit never restarts onboarding or changes responsibility/permission state.
+      if (appearanceOnly) {
+        let previousAppearance = null;
+        try { previousAppearance = validateEmployeeAppearance(row.policyRules?.appearance); } catch { /* An authorized visual edit may repair invalid old visual metadata. */ }
+        if (JSON.stringify(previousAppearance) === JSON.stringify(appearance)) return {employee:publicEmployee(row),replayed:true,appearanceOnly:true};
+        const revision = lifecycle.profile_revision ?? 1;
+        if (input.expected_profile_revision !== revision) lifecycleError('employee_profile_revision_conflict');
+        const updated = await tx.digitalEmployee.update({where:{id:row.id},data:{policyRules:{...row.policyRules,appearance,
+          native_lifecycle:{...lifecycle,profile_revision:revision+1}}}});
+        return {employee:publicEmployee(updated),replayed:false,appearanceOnly:true};
+      }
       const stage = principal.runtimeSessionId && update.persona ? 'ready' : 'runtime_review';
-      const hash = createHash('sha256').update(JSON.stringify({update,stage})).digest('hex');
+      const hash = createHash('sha256').update(JSON.stringify({update,stage,...(appearance ? {appearance} : {})})).digest('hex');
       if (lifecycle.profile_hash === hash) return {employee:publicEmployee(row),replayed:true};
       const revision = lifecycle.profile_revision ?? 1;
       if (input.expected_profile_revision !== revision) lifecycleError('employee_profile_revision_conflict');
       const updated = await tx.digitalEmployee.update({where:{id:row.id},data:{...update,
-        policyRules:{...row.policyRules,native_lifecycle:{...lifecycle,profile_revision:revision+1,profile_hash:hash,
+        policyRules:{...row.policyRules,...(appearance ? {appearance} : {}),native_lifecycle:{...lifecycle,profile_revision:revision+1,profile_hash:hash,
           profile_stage:stage,onboarding_required:stage !== 'ready',
           ...(stage === 'ready' ? {profile_ready_at:lifecycle.profile_ready_at ?? new Date(now).toISOString(),joining_profile:lifecycle.joining_profile ?? {name:update.name ?? row.name,role:update.roleArchetype ?? row.roleArchetype,profileRevision:revision+1,at:new Date(now).toISOString()}} : {})}}}});
       return {employee:publicEmployee(updated),replayed:false};

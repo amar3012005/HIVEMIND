@@ -22,6 +22,20 @@ function dbFor({ role = 'member', state = 'bound', phase = 'active', dotId = 'do
   };
 }
 
+test('direct reply keeps original conversation proof under exact Runtime root and grants no assignment',async()=>{
+  const claims={sub:userId,org_id:orgId,operating_role:'runtime',operating_session:rootSessionId};
+  const direct_reply={jobId:'chat_message_original',messageId:'msg_original',conversationId:'conv_original',contentDigest:'a'.repeat(64),nativeMessageId:'agent-message-original'};
+  const body={employee_id:employeeId,message_id:messageId,root_session_id:rootSessionId,kind:'update',text:'Hello',artifact_ids:[],direct_reply};
+  let sent;
+  const options={env:{OPEN_DOT_RUNTIME_BRIDGE_TOKEN:'x'.repeat(40)},fetchImpl:async(_,input)=>{sent=JSON.parse(input.body);return Response.json({accepted:true})}};
+  await dispatchOpenDotRuntime(dbFor(),claims,body,options);
+  assert.deepEqual(sent.directReply,direct_reply);assert.equal(sent.rootSessionId,rootSessionId);
+  assert.equal(Object.hasOwn(sent,'taskId'),false);
+  for(const patch of [{task_id:'invented'},{kind:'assignment'},{artifact_ids:['artifact-1']},{root_session_id:'session-foreign'}]) {
+    await assert.rejects(dispatchOpenDotRuntime(dbFor(),claims,{...body,...patch},options));
+  }
+});
+
 test('dispatch forwards only verified scoped identity and the canonical binding to fixed Dot runtime', async () => {
   let request;
   const claims = { sub: userId, org_id: orgId, operating_role: 'runtime', operating_session: rootSessionId };

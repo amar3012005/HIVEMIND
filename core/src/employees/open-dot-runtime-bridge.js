@@ -93,7 +93,7 @@ async function postDot(path, payload, { env, fetchImpl = fetch } = {}) {
 }
 
 export async function dispatchOpenDotRuntime(db, claims, input, { env, fetchImpl } = {}) {
-  exactObject(input, ['employee_id', 'message_id', 'root_session_id', 'task_id', 'task_revision', 'kind', 'text', 'artifact_ids']);
+  exactObject(input, ['employee_id', 'message_id', 'root_session_id', 'task_id', 'task_revision', 'kind', 'text', 'artifact_ids','direct_reply']);
   if (!UUID.test(input.message_id || '')) lifecycleError('invalid_open_dot_runtime_request', 400);
   requireRuntimeSession(claims, input.root_session_id);
   if (!['assignment', 'review', 'continuation', 'blocker', 'question', 'update'].includes(input.kind)) lifecycleError('invalid_open_dot_runtime_request', 400);
@@ -105,11 +105,17 @@ export async function dispatchOpenDotRuntime(db, claims, input, { env, fetchImpl
   if (input.task_id !== undefined && (typeof input.task_id !== 'string' || !input.task_id.trim() || input.task_id.length > 180)) lifecycleError('invalid_open_dot_runtime_request', 400);
   if (input.task_revision !== undefined && (!Number.isSafeInteger(input.task_revision) || input.task_revision < 0)) lifecycleError('invalid_open_dot_runtime_request', 400);
   const binding = await visibleBoundEmployee(db, claims, input.employee_id);
+  if (input.direct_reply!==undefined) {
+    exactObject(input.direct_reply,['jobId','messageId','conversationId','contentDigest','nativeMessageId']);
+    if (input.kind!=='update' || input.task_id!==undefined || input.task_revision!==undefined || artifactIds.length ||
+      !/^[a-f0-9]{64}$/.test(input.direct_reply.contentDigest||'')) lifecycleError('invalid_open_dot_runtime_request',400);
+    for (const key of ['jobId','messageId','conversationId','nativeMessageId']) boundedText(input.direct_reply[key],'invalid_open_dot_runtime_request',240);
+  }
   return postDot('dispatch', { version: 1, organizationId: claims.org_id, userId: claims.sub,
     employeeId: binding.employeeId, dotId: binding.dotId, messageId: input.message_id,
     rootSessionId: input.root_session_id, ...(input.task_id === undefined ? {} : { taskId: input.task_id }),
     ...(input.task_revision === undefined ? {} : { taskRevision: input.task_revision }),
-    kind: input.kind, text, artifactIds }, { env, fetchImpl });
+    kind: input.kind, text, artifactIds,...(input.direct_reply?{directReply:input.direct_reply}:{}) }, { env, fetchImpl });
 }
 
 export async function readOpenDotRuntimeStatus(db, claims, input, { env, fetchImpl } = {}) {

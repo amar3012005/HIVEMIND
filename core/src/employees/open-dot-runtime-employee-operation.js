@@ -7,7 +7,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const DOT_ID = /^dot_[a-zA-Z0-9_-]+$/;
 const FILE_ID = /^file_[a-f0-9]{16,64}$/;
 const DOT_RUNTIME_ARTIFACT_URL = 'https://dots.singulancelabs.com/api/internal/hivemind/runtime/artifact';
-const DSH_ORIGIN = 'http://harness-runner:3080';
+const DOT_DIRECT_ORIGIN_URL = 'https://dots.singulancelabs.com/api/internal/hivemind/runtime/coordination-origin';
+const DSH_ORIGIN = 'http://runtime-runner:3080';
 const DSH_PATH = '/internal/hivemind/open-dot/runtime/employee-operation';
 const MAX_DOT_RESPONSE_BYTES = 14 * 1024 * 1024;
 const MAX_DSH_RESPONSE_BYTES = 64 * 1024;
@@ -37,13 +38,16 @@ function signedDshToken(body, secret, now = Date.now()) {
   const claims = { iss: 'hivemind-control-plane', aud: 'hivemind-open-dot-runtime-bridge', sub: body.user_id,
     org_id: body.organization_id, profile: 'hivemind-chat', variation: 'harness', jti: randomUUID(),
     body_sha256: createHash('sha256').update(JSON.stringify(body)).digest('hex'), iat: at, exp: at + 30,
-    employee_id: body.employee_id, dot_id: body.dot_id, dispatch_message_id: body.dispatch_message_id,
+    employee_id: body.employee_id, dot_id: body.dot_id,
+    ...(body.origin ? { origin_sha256: createHash('sha256').update(JSON.stringify(body.origin)).digest('hex') }
+      : { dispatch_message_id: body.dispatch_message_id }),
     operation: body.operation };
   const signingInput = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(claims)}`;
   return `${signingInput}.${createHmac('sha256', secret).update(signingInput).digest('base64url')}`;
 }
 function dshOrigin(env) {
-  const configured = env.HIVE_HARNESS_INTERNAL_ORIGIN;
+  // Purpose-specific origin; never change or inherit the separate Brain route.
+  const configured = env.HIVEMIND_RUNTIME_OPERATION_ORIGIN;
   if (configured === undefined || configured === '') return DSH_ORIGIN;
   let parsed;
   try { parsed = new URL(configured); } catch { lifecycleError('open_dot_runtime_bridge_unavailable', 503); }
@@ -66,7 +70,13 @@ async function readBounded(response, maxBytes, code) {
   try { return JSON.parse(raw); } catch { lifecycleError(code, 502); }
 }
 function validateOperation(input) {
-  const common = ['organization_id','user_id','employee_id','dot_id','dispatch_message_id','operation'];
+  const common = ['organization_id','user_id','employee_id','dot_id','dispatch_message_id','origin','operation'];
+  if (input?.origin !== undefined) {
+    if (input.dispatch_message_id !== undefined || input.operation !== 'message') lifecycleError('invalid_open_dot_employee_operation', 400);
+    exact(input.origin, ['kind','job_id','message_id','conversation_id','content_digest','claim_token']);
+    if (input.origin.kind !== 'direct-chat' || !/^[a-f0-9]{64}$/.test(input.origin.content_digest || '')) lifecycleError('invalid_open_dot_employee_operation', 400);
+    for (const key of ['job_id','message_id','conversation_id','claim_token']) string(input.origin[key], 'invalid_open_dot_employee_operation', 240);
+  }
   if (input?.operation === 'message') {
     exact(input, [...common,'message_key','recipient','kind','text','summary','reply_to','artifact_ids']);
     const kind = input.kind;
@@ -75,7 +85,7 @@ function validateOperation(input) {
     if (!Array.isArray(artifacts) || artifacts.length > 8 || artifacts.some(id => typeof id !== 'string' || !FILE_ID.test(id))) {
       lifecycleError('invalid_open_dot_employee_artifacts', 400);
     }
-    const out = { ...Object.fromEntries(common.map(key => [key, input[key]])), operation: 'message',
+    const out = { ...Object.fromEntries(common.filter(key => input[key] !== undefined).map(key => [key, input[key]])), operation: 'message',
       message_key: string(input.message_key,'invalid_open_dot_employee_operation',120),
       recipient: string(input.recipient,'invalid_open_dot_employee_operation',180), kind,
       text: string(input.text,'invalid_open_dot_employee_operation',12000), artifact_ids: [...artifacts] };
@@ -114,13 +124,37 @@ export async function visibleBoundEmployee(db, input, { requireDispatch = true }
   const marker = employee.policyRules?.open_dot_employee, lifecycle = employee.policyRules?.native_lifecycle;
   if (marker?.version !== 1 || marker.execution_backend !== 'open-dot' || marker.state !== 'bound' || marker.dot_id !== input.dot_id ||
       lifecycle?.version !== 1 || lifecycle.phase !== 'active') lifecycleError('open_dot_employee_not_bound', 409);
-  return { employeeId: employee.id, dotId: marker.dot_id };
+  return { employeeId: employee.id, dotId: marker.dot_id,
+    actor: { userId: input.user_id, orgId: input.organization_id, name: 'Authenticated user', role: membership.role } };
 }
 
 export async function relayOpenDotEmployeeOperation(db, raw, { env = process.env, fetchImpl = fetch } = {}) {
   const input = validateOperation(raw);
-  const identity = await visibleBoundEmployee(db, input);
+  const identity = await visibleBoundEmployee(db, input, { requireDispatch: !input.origin });
   const body = { ...input, employee_id: identity.employeeId, dot_id: identity.dotId };
+  if (input.origin) {
+    const secret = env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
+    if (typeof secret !== 'string' || Buffer.byteLength(secret,'utf8') < 32) lifecycleError('open_dot_runtime_bridge_unavailable', 503);
+    let verification;
+    try {
+      verification = await fetchImpl(DOT_DIRECT_ORIGIN_URL, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
+        headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ organization_id: input.organization_id, user_id: input.user_id,
+          employee_id: identity.employeeId, dot_id: identity.dotId, origin: input.origin }) });
+    } catch { lifecycleError('open_dot_direct_chat_origin_unavailable', 503); }
+    const proof = await readBounded(verification, MAX_DSH_RESPONSE_BYTES, 'open_dot_direct_chat_origin_invalid');
+    if (!verification.ok || proof?.verified !== true || proof.organization_id !== input.organization_id ||
+        proof.user_id !== input.user_id || proof.employee_id !== identity.employeeId || proof.dot_id !== identity.dotId) {
+      lifecycleError('open_dot_direct_chat_origin_unverified', 409);
+    }
+    const expected = { ...input.origin }; delete expected.claim_token;
+    exact(proof.origin, Object.keys(expected));
+    if (Object.entries(expected).some(([key,value]) => proof.origin[key] !== value)) lifecycleError('open_dot_direct_chat_origin_unverified', 409);
+    // The claim credential never leaves the authority verifier for Runtime.
+    body.origin = proof.origin;
+    body.actor = identity.actor;
+    await visibleBoundEmployee(db, input, { requireDispatch: false });
+  }
   const token = signedDshToken(body, env.HIVE_HARNESS_RUNNER_SERVICE_SECRET);
   let response;
   try {

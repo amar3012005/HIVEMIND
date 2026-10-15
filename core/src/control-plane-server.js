@@ -1,3 +1,4 @@
+import { starterCreationKey, provisionOpenDotStarter } from './onboarding/open-dot-starters.js';
 import { nameOnboardingTeam } from './onboarding/employee-names.js';
 import { starterAppearance, starterPersonaContract } from './onboarding/starter-employees.js';
 import { cleanupAccountRuntimeReferences } from './security/account-runtime-erasure.js';
@@ -13252,7 +13253,25 @@ Write the persona now.`;
           // BEFORE assembling the new team, so the fresh findMany sees an empty
           // active roster, hires 3 new specialists, and the HQ room seats only
           // this company's agents (no cross-company leak). Recoverable (archived).
-          await clearPriorOnboarding();
+          // New-company starters use the existing canonical Dot lifecycle. A
+          // retry keeps the original saved profiles and bindings; existing
+          // companies retain their current execution backend and history.
+          const priorEmployees = await prisma.digitalEmployee.findMany({ where: { orgId },
+            select: { id:true, name:true, persona:true, roleArchetype:true, archivedAt:true, policyRules:true } });
+          const starterPrefix = starterCreationKey(siteUrl, 0).slice(0, -1);
+          const resumingStarters = priorEmployees.length > 0 && priorEmployees.every(e => !e.archivedAt
+            && e.policyRules?.native_lifecycle?.predefined_starter?.source === 'hyperagents-onboarding'
+            && e.policyRules?.open_dot_employee?.creation_key?.startsWith(starterPrefix));
+          const nativeStarters = priorEmployees.length === 0 || resumingStarters;
+          if (!nativeStarters) await clearPriorOnboarding();
+          const starterPrincipal = {orgId,userId};
+          const starterCookie = parseCookies(req).hm_cp_session;
+          if (resumingStarters) for (const saved of priorEmployees) {
+            await provisionOpenDotStarter(prisma, starterPrincipal, {operation:'create',
+              creation_key:saved.policyRules.open_dot_employee.creation_key, name:saved.name,
+              persona:saved.persona, role:saved.roleArchetype, appearance:saved.policyRules.appearance},
+              {slot:saved.policyRules.native_lifecycle.predefined_starter.slot,sessionCookie:starterCookie});
+          }
           markTiming('replace_company_cleanup');
 
           // The screenshot is intentionally independent from profile creation.
@@ -13388,7 +13407,7 @@ Write the persona now.`;
               }
             }
             picks = nameOnboardingTeam(picks, team);
-            const hires = await Promise.all(picks.slice(0, 3 - specialistCount).map(async (r) => {
+            const hires = await Promise.all(picks.slice(0, 3 - specialistCount).map(async (r, index) => {
               say(`Hiring ${r.name} — ${r.title} (${r.field})`);
               let persona = '';
               try {
@@ -13400,13 +13419,18 @@ Write the persona now.`;
               } catch { /* fallback below */ }
               persona = [persona, starterPersonaContract(r, companyName)].filter(Boolean).join('\n\n');
               try {
-                const emp = await store.create({
-                  orgId, name: r.name, persona,
-                  roleArchetype: r.title, createdBy: userId,
-                  policyRules: { appearance: starterAppearance(r.name) },
-                });
+                const emp = nativeStarters
+                  ? await provisionOpenDotStarter(prisma, starterPrincipal, {operation:'create',
+                    creation_key:starterCreationKey(siteUrl, specialistCount + index),
+                    name:r.name,persona,role:r.title,appearance:starterAppearance(r.name)},
+                    {slot:specialistCount + index,sessionCookie:starterCookie})
+                  : await store.create({
+                    orgId, name: r.name, persona,
+                    roleArchetype: r.title, createdBy: userId,
+                    policyRules: { appearance: starterAppearance(r.name) },
+                  });
                 return { id: emp.id, name: emp.name, roleArchetype: r.title, policyRules: emp.policyRules };
-              } catch (e) { console.warn('[hyper-onboarding] hire failed:', e.message); return null; }
+              } catch (e) { if (nativeStarters) throw e; console.warn('[hyper-onboarding] hire failed:', e.message); return null; }
             }));
             team.push(...hires.filter(Boolean));
             _notifyEmployeesReload();
@@ -13680,6 +13704,14 @@ Write the persona now.`;
               JSON.stringify({ _company: resultPayload }), room.id,
             );
           } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          if (nativeStarters) {
+            const {activateBoundOpenDotEmployee} = await import('./employees/native-lifecycle-bridge.js');
+            for (const member of team) {
+              const employee = await prisma.digitalEmployee.findFirst({where:{id:member.id,orgId,archivedAt:null}});
+              const activation = await activateBoundOpenDotEmployee(starterPrincipal, employee);
+              if (activation?.status !== 'ready') throw new Error('starter_employee_activation_pending');
+            }
+          }
           try {
             await activateHqAfterOnboarding({
               prisma, orgId, userId, objective: FIRST_LIFE_OBJECTIVE, onboardedAt: resultPayload.onboarded_at,

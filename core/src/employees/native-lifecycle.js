@@ -60,7 +60,7 @@ function publicEmployee(row) {
     archivedAt: row.archivedAt, policyRules: row.policyRules };
 }
 /** One org-scoped transaction serializes replay and mutation on the existing registry. */
-export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now(), executionBackend = 'native' } = {}) {
+export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now(), executionBackend = 'native', predefinedStarter } = {}) {
   await requireLifecycleAdministrator(db, principal);
   if (principal.runtimeSessionId) await requireNativeRuntime(db, principal);
   if (principal.employeeSessionId) {
@@ -69,13 +69,15 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
   }
   if (input?.operation === 'create') {
     const value = validateNativeCreation(input, -Infinity);
+    if (predefinedStarter && (executionBackend !== 'open-dot' || !input.persona || !Number.isInteger(predefinedStarter.slot) || predefinedStarter.slot < 0 || predefinedStarter.slot > 2 || predefinedStarter.source !== 'hyperagents-onboarding')) lifecycleError('invalid_predefined_starter', 400);
+    const profileReady = input.persona != null && (!!principal.runtimeSessionId || !!predefinedStarter);
     if (!['native','open-dot'].includes(executionBackend)) lifecycleError('invalid_execution_backend',400);
     const inputDigest = createHash('sha256').update(JSON.stringify({
       name:value.name, persona:value.persona, role:value.role, lifecycle:value.lifecycle,
       expires_at:value.expires_at, avatar_url:value.avatar_url, appearance:value.appearance,
     })).digest('hex');
     const hash = executionBackend === 'open-dot'
-      ? createHash('sha256').update(JSON.stringify({execution_backend:executionBackend,input_digest:inputDigest})).digest('hex')
+      ? createHash('sha256').update(JSON.stringify({execution_backend:executionBackend,input_digest:inputDigest,...(predefinedStarter ? {predefined_starter:predefinedStarter} : {})})).digest('hex')
       : createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const slug = `employee-${createHash('sha256').update(`${principal.orgId}:${value.creation_key}`).digest('hex').slice(0, 24)}`;
     return db.$transaction(async tx => {
@@ -96,9 +98,10 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
         // marker in reserved policyRules metadata beside the canonical lifecycle
         // and appearance until a dedicated schema field is justified.
         policyRules: { ...(value.appearance ? {appearance:value.appearance} : {}), native_lifecycle: { version: VERSION, kind: value.lifecycle, phase: executionBackend === 'open-dot' ? 'provisioning' : 'active',
-          revision: 1, profile_revision:1, onboarding_required: !principal.runtimeSessionId || input.persona == null,
-          profile_stage: principal.runtimeSessionId && input.persona != null ? 'ready' : 'responsibilities',
-          ...(principal.runtimeSessionId && input.persona != null ? {profile_ready_at:new Date(now).toISOString(),joining_profile:{name:value.name,role:value.role,profileRevision:1,at:new Date(now).toISOString()}} : {}), expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
+          revision: 1, profile_revision:1, onboarding_required: !profileReady,
+          profile_stage: profileReady ? 'ready' : 'responsibilities',
+          ...(predefinedStarter ? {predefined_starter:{version:1,...predefinedStarter}} : {}),
+          ...(profileReady ? {profile_ready_at:new Date(now).toISOString(),joining_profile:{name:value.name,role:value.role,profileRevision:1,at:new Date(now).toISOString()}} : {}), expires_at: value.expires_at, creation_hash: hash, created_by: principal.userId,
           ...(principal.runtimeSessionId ? { runtime_session: principal.runtimeSessionId } : {}) },
           ...(executionBackend === 'open-dot' ? {open_dot_employee:{version:VERSION,execution_backend:'open-dot',state:'provisioning',execution_state:'pending',creation_key:value.creation_key,input_digest:inputDigest,binding_revision:1}} : {}) },
       } });

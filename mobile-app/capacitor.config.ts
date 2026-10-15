@@ -9,7 +9,7 @@ const config: CapacitorConfig = {
   appId: 'com.singulancelabs.mobile',
   appName: 'SINGULANCE',
   webDir: 'www',
-  loggingBehavior: 'debug',
+  loggingBehavior: 'none',
   backgroundColor: '#faf9f6',
   server: {
     ...(remoteUrl ? { url: remoteUrl } : {}),

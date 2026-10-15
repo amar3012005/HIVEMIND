@@ -1,5 +1,25 @@
 # SINGULANCE mobile app
 
+## iPhone web-session mode
+
+The current iPhone entry point presents the live mobile website in Apple's
+`SFSafariViewController`. Login and the workspace remain in the same browser
+session, using the existing website cookie flow. The app does not extract
+cookies, convert native bearer credentials, or inject its privileged Capacitor
+bridge into the website. Core, Control Plane and hosted frontend changes are
+not required for this mode. Apple's browser controls remain visible.
+
+The packaged Capacitor implementation is retained. A Debug launch with
+`--packaged-preview` selects it for isolated bridge investigation. It still
+depends on the server's native-admission policy and is not the default route.
+
+Shared web mobile layout, roster, session loading and artifact improvements
+come from the live website. Native-only plugin behavior is not implied by this
+mode: microphone/audio, downloads, keyboard, accessibility and authenticated
+flows must be tested in this browser context. Retaining native source does not
+prove that every native capability is active in the hosted view. This is not a
+TestFlight readiness claim; the existing release evidence gates still apply.
+
 Capacitor 8 native projects: Android (API 36, minimum 24) and iOS (minimum 15,
 Swift Package Manager). The app shell retains existing server authorization;
 creating the native package does not grant account, organization, or tool access.
@@ -39,6 +59,20 @@ Remove this environment variable and sync again before any release. Capacitor's
 Remote mode is not a substitute for passing store packaging/authentication checks.
 
 ## Native behavior
+
+### iOS simulator authentication
+
+Use a signed simulator build when verifying Keychain-backed authentication:
+
+```sh
+SINGULANCE_APPLE_TEAM_ID=<team-selected-in-Xcode> npm run ios:simulator -- <booted-device-id>
+```
+
+The helper requires matching simulated application entitlements. Do not use
+`CODE_SIGNING_ALLOWED=NO` for authenticated acceptance: the application can launch
+but Keychain access fails with the missing-entitlement error, which can surface
+as an authentication-service failure. Simulator signing does not establish paid
+Developer membership or TestFlight readiness.
 
 - Capacitor App, Browser, Keyboard and Network are registered on both platforms.
 - Android allows only its exact application origin to remain in the privileged

@@ -3,16 +3,73 @@
   "status": "open",
   "baseline_sha": "e6d29abba81e40dc4c205de76c23409fbab920e9",
   "native_owner": "Capacitor iOS shell and app-only frontend transport",
-  "outcome": "Use live mobile website and normal browser login inside Apple's Safari view; retain earlier Capacitor implementation; verify signed-in simulator flows",
-  "scope": ["mobile-app", "app-only Da-vinci native transport"],
-  "preserve": ["Core", "Control Plane", "live website", "Brain runner", "Runtime runner", "tenant isolation", "existing sessions", "composer drafts"],
-  "criteria": [
-    {"id":"behavior","required":true,"passed":false,"evidence":[]},
-    {"id":"native_contract","required":true,"passed":false,"evidence":[]},
-    {"id":"recovery","required":true,"passed":true,"evidence":["41 focused frontend checks passed; bounded retry, tenant reset, draft preservation and terminal denial UI verified"]},
-    {"id":"live_flow","required":true,"passed":false,"evidence":[]}
+  "outcome": "Repair the app launch route and evaluate an app-owned WebKit viewport using the live mobile React frontend and existing web email login, without server or website changes",
+  "scope": [
+    "mobile-app",
+    "app-only Da-vinci native transport"
   ],
-  "release": {"requested":true,"source_sha":"","artifact":"/tmp/singulance-ios-parity-20261015/DerivedData/Build/Products/Debug-iphonesimulator/App.app","rollback":"/tmp/singulance-ios-parity-20261015/Previous-App.app"},
-  "blockers": ["Browser-backed app is at normal web sign-in; user login requested because simulator taps fail", "Roster, Runtime history, HyperAgent switching, keyboard, artifacts and two-way voice remain unverified in browser-backed mode", "Native-only capabilities retained in source are not automatically active in Safari view", "Legacy packaged mode remains denied by server native-admission policy"],
-  "evidence": ["Core, Control Plane, website and runners unchanged", "Signed Debug simulator build installed and actual mobile web sign-in page observed", "Release simulator build passed", "Privileged native bridge is not exposed to hosted pages", "Legacy signed native login returned bootstrap 200 followed by MOBILE_RUNNER_NOT_READY 503"]
+  "preserve": [
+    "Core",
+    "Control Plane",
+    "live website",
+    "Brain runner",
+    "Runtime runner",
+    "tenant isolation",
+    "existing sessions",
+    "composer drafts"
+  ],
+  "criteria": [
+    {
+      "id": "behavior",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "native_contract",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "recovery",
+      "required": true,
+      "passed": true,
+      "evidence": [
+        "41 focused frontend checks passed; bounded retry, tenant reset, draft preservation and terminal denial UI verified"
+      ]
+    },
+    {
+      "id": "live_flow",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    }
+  ],
+  "release": {
+    "requested": true,
+    "source_sha": "",
+    "artifact": "/tmp/singulance-ios-parity-20261015/DerivedData/Build/Products/Debug-iphonesimulator/App.app",
+    "rollback": "/tmp/singulance-ios-parity-20261015/Previous-App.app"
+  },
+  "blockers": [
+    "User reports employee loading and composer failure after correcting the browser-backed Runtime route; authenticated acceptance has not passed",
+    "Embedded WebKit preview is signed out; existing website email login must be completed by the account owner",
+    "Google sign-in uses a separate browser session; secure return to embedded WebKit is not configured and no bearer-token transfer is implemented",
+    "Roster, history, agent switching, keyboard, artifacts and two-way voice remain unverified in embedded mode",
+    "Existing packaged Capacitor mode remains subject to native-admission policy; no server policy changes are authorized"
+  ],
+  "evidence": [
+    "Core, Control Plane, website and runners unchanged",
+    "Signed Debug simulator build installed and actual mobile web sign-in page observed",
+    "Release simulator build passed",
+    "Privileged native bridge is not exposed to hosted pages",
+    "Legacy signed native login returned bootstrap 200 followed by MOBILE_RUNNER_NOT_READY 503",
+    "App launch corrected from legacy Brain /hivemind/m/chat to independent Runtime /hivemind/app/employee/harness",
+    "Signed Debug embedded WebKit preview compiled and launched with --embedded-web-preview; actual hosted login observed without Safari toolbar",
+    "Existing web email login is enabled (read-only /auth/email/config check)",
+    "Native configuration and existing two navigation/release-guard tests passed",
+    "App-specific viewport uses UIKit safe area and keyboard layout guide; authenticated keyboard behavior remains unverified",
+    "Build iOS Apps serve-sim mirror renders the actual simulator and accessibility overlay; input does not cause the requested device actions"
+  ]
 }

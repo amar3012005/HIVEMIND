@@ -9,7 +9,16 @@ import AuthenticationServices
 public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "getCapabilities"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    @objc func getCapabilities(_ call: CAPPluginCall) {
+        guard trusted(), let url = Bundle.main.url(forResource: "mobile-build", withExtension: "json", subdirectory: "public"),
+              let bytes = try? Data(contentsOf: url),
+              let manifest = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+              let sha = manifest["frontendSha"] as? String else {
+            call.reject("The packaged frontend manifest is missing."); return
+        }
+        call.resolve(["transportVersion": 1, "platform": "ios", "frontendSha": sha])
+    }
     private var authenticationSession: ASWebAuthenticationSession?
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         return bridge!.viewController!.view.window!
@@ -28,6 +37,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 call.resolve(["url": callback.absoluteString])
             }
             authentication.presentationContextProvider = self
+            authentication.prefersEphemeralWebBrowserSession = true
             self.authenticationSession = authentication
             if !authentication.start() { self.authenticationSession = nil; call.reject("Sign-in could not start.") }
         }
@@ -74,7 +84,8 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         var q = query(key); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?; let status = SecItemCopyMatching(q as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else { throw NativeError.denied }
+        guard status == errSecSuccess else { throw NativeError.credential(status) }
+        guard let data = result as? Data, let value = String(data: data, encoding: .utf8) else { throw NativeError.denied }
         return value
     }
     @objc func setCredential(_ call: CAPPluginCall) {
@@ -149,7 +160,21 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             }
             let request = try makeRequest(call)
             session.dataTask(with: request) { data, response, error in
-                guard error == nil, let response = response as? HTTPURLResponse, let data = data, data.count <= 20 * 1024 * 1024 else { call.reject("Native request failed."); return }
+                guard error == nil, let response = response as? HTTPURLResponse, let data = data, data.count <= 20 * 1024 * 1024 else {
+                    #if DEBUG
+                    NSLog("[SingulanceNative] transport failed code=%d status=%d", (error as NSError?)?.code ?? 0, (response as? HTTPURLResponse)?.statusCode ?? -1)
+                    #endif
+                    call.reject("Native request failed."); return
+                }
+                #if DEBUG
+                let diagnosticRoutes = ["/v1/bootstrap", "/v1/harness-chat/bootstrap", "/api/hivemind/session/establish", "/api/hivemind/employees", "/api/hivemind/boot"]
+                if let path = request.url?.path, diagnosticRoutes.contains(path) {
+                    let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    let count = (payload?["profiles"] as? [Any])?.count ?? -1
+                    let code = payload?["code"] as? String ?? payload?["error"] as? String ?? ""
+                    NSLog("[SingulanceNative] %@ status=%d type=%@ profiles=%d admissionDisabled=%d", path, response.statusCode, response.mimeType ?? "unknown", count, code == "MOBILE_RUNNER_NOT_READY" ? 1 : 0)
+                }
+                #endif
                 if let url = response.url, url.host == "next.singulancelabs.com" {
                     var fields: [String: String] = [:]
                     for (key, value) in response.allHeaderFields { if let key = key as? String, let value = value as? String { fields[key] = value } }
@@ -161,7 +186,13 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 guard ["text", "base64"].contains(responseType) else { call.reject("Response type is invalid."); return }
                 call.resolve(["status": response.statusCode, "headers": headers, "encoding": responseType, "data": responseType == "base64" ? data.base64EncodedString() : (String(data: data, encoding: .utf8) ?? "")])
             }.resume()
-        } catch { call.reject("Native request is not allowed.") }
+        } catch {
+            #if DEBUG
+            NSLog("[SingulanceNative] request rejected trusted=%d urlAllowed=%d", trusted() ? 1 : 0, (try? allowedURL(call.getString("url"))) == nil ? 0 : 1)
+            if case NativeError.credential(let status) = error { NSLog("[SingulanceNative] credential access failed status=%d", status) }
+            #endif
+            call.reject("Native request is not allowed.")
+        }
     }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
     private func event(_ id: String, _ type: String, _ data: String? = nil) {
@@ -226,7 +257,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         if let url = url { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         if let error = error { call?.reject(error) } else { call?.resolve(["saved": saved]) }
     }
-    enum NativeError: Error { case denied }
+    enum NativeError: Error { case denied; case credential(OSStatus) }
 }
 
 private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
@@ -239,7 +270,13 @@ private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
     }
 }
 class SingulanceViewController: CAPBridgeViewController {
+    private var nativeBridgeRegistered = false
     override func capacitorDidLoad() {
+        #if DEBUG
+        NSLog("[SingulanceNative] controller loaded bridge=%d registered=%d", bridge == nil ? 0 : 1, nativeBridgeRegistered ? 1 : 0)
+        #endif
+        guard !nativeBridgeRegistered, bridge != nil else { return }
+        nativeBridgeRegistered = true
         bridge?.registerPluginInstance(SingulanceNativePlugin())
         // The stock WK script handler can be addressed by iframes even though its
         // helper script is main-frame-only. Filter the native message boundary itself.

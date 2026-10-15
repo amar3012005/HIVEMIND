@@ -295,6 +295,8 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     // Dedicated commercial control surface. This is explicit rather than a
     // wildcard so normal tenant CORS policy cannot expand by accident.
     'https://admin.hivemind.singulancelabs.com',
+    // First-party Runtime must share the same authenticated Control Plane session.
+    'https://runtime-runner.singulancelabs.com',
     'https://singulancelabs.com',
     'https://www.singulancelabs.com',
     'https://chat.singulancelabs.com',

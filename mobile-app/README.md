@@ -1,5 +1,31 @@
 # SINGULANCE mobile app
 
+## Embedded iPhone preview (15 October 2026)
+
+The app-only `--embedded-web-preview` Debug launch uses a persistent `WKWebView`
+loading the actual Runtime mobile route:
+`https://runtime-runner.singulancelabs.com/hivemind/app/employee/harness`.
+The previous default `/hivemind/m/chat` route opened Brain and was incorrect for Runtime.
+The browser-backed default now uses the same corrected Runtime destination.
+
+The embedded preview has no Safari toolbar or privileged Capacitor bridge. UIKit
+owns the safe area and keyboard viewport once; the existing React chat owns its
+history and composer. Non-chat pages keep scrolling in their main content area.
+There is no automatic app-resume reload or chat transport override. Artifact
+downloads use WebKit's authenticated download and the iOS share sheet. Microphone
+requests remain user-prompted and limited to the main workspace origin.
+
+Use the website's existing **email sign-in** for this preview. Google sign-in
+opens the working browser workspace as a separate session; it does not sign the
+embedded view in. Do not copy Safari cookies, put bearer tokens in callback URLs,
+or disable native server consent/admission to disguise that missing handoff.
+
+This preview is **not the Release default**. Debug compilation and a visible login
+have passed; signed-in roster, Runtime and specialist history, keyboard, artifacts
+and two-way voice acceptance are pending. The previous Capacitor implementation
+and browser session are retained. No Core, Control Plane, hosted frontend or
+runner release is included in this app-only change.
+
 ## iPhone web-session mode
 
 The current iPhone entry point presents the live mobile website in Apple's

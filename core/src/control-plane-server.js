@@ -11152,8 +11152,10 @@ Write the persona now.`;
           appearance:e.policyRules.appearance,slot:e.policyRules.native_lifecycle.predefined_starter.slot,
           creation_key:e.policyRules.open_dot_employee.creation_key})));
       for (const input of inputs) {
-        const employee=await provisionOpenDotStarter(prisma,{orgId,userId},{operation:'create',...input},
-          {slot:input.slot,sessionCookie:parseCookies(req).hm_cp_session});
+        // Slot belongs to starter lifecycle metadata, not the public creation contract.
+        const {slot,...creation}=input;
+        const employee=await provisionOpenDotStarter(prisma,{orgId,userId},{operation:'create',...creation},
+          {slot,sessionCookie:parseCookies(req).hm_cp_session});
         const activation=await activateBoundOpenDotEmployee({orgId,userId},employee);
         if(activation.status!=='ready') return jsonResponse(res,{status:'pending',reason:activation.reason},202);
         if(!team.some(e=>e.id===employee.id)) team.push({id:employee.id,name:employee.name,role:employee.roleArchetype});

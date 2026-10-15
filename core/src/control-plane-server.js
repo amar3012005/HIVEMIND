@@ -1,6 +1,6 @@
 import { starterCreationKey, provisionOpenDotStarter } from './onboarding/open-dot-starters.js';
 import { nameOnboardingTeam } from './onboarding/employee-names.js';
-import { starterAppearance, starterPersonaContract } from './onboarding/starter-employees.js';
+import { STARTER_EMPLOYEES, starterAppearance, starterPersonaContract } from './onboarding/starter-employees.js';
 import { cleanupAccountRuntimeReferences } from './security/account-runtime-erasure.js';
 import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
@@ -13061,6 +13061,30 @@ Write the persona now.`;
       // Fire the pipeline — never blocks the HTTP response.
       (async () => {
         try {
+          // Resume a completed predefined team from its saved company record.
+          // Retry activation only; never repeat company research or memory writes.
+          const resumable = await prisma.$queryRawUnsafe(
+            `SELECT agent_connectors->'_company' AS company FROM hivemind.hyper_rooms
+             WHERE org_id=$1::uuid AND archived_at IS NULL AND agent_connectors ? '_company'
+             ORDER BY created_at DESC LIMIT 1`, orgId);
+          const savedCompany = resumable[0]?.company;
+          if (savedCompany?.website === siteUrl && savedCompany?.team?.length === 3) {
+            const savedTeam = await prisma.digitalEmployee.findMany({where:{orgId,archivedAt:null,id:{in:savedCompany.team.map(e=>e.id)}}});
+            const keyPrefix = starterCreationKey(siteUrl,0).slice(0,-1);
+            if (savedTeam.length === 3 && savedTeam.every(e => e.policyRules?.native_lifecycle?.predefined_starter?.source === 'hyperagents-onboarding'
+              && e.policyRules?.open_dot_employee?.creation_key?.startsWith(keyPrefix))) {
+              const {activateBoundOpenDotEmployee} = await import('./employees/native-lifecycle-bridge.js');
+              for (const saved of savedTeam) {
+                const employee = await provisionOpenDotStarter(prisma,{orgId,userId},{operation:'create',
+                  creation_key:saved.policyRules.open_dot_employee.creation_key,name:saved.name,persona:saved.persona,
+                  role:saved.roleArchetype,appearance:saved.policyRules.appearance},
+                  {slot:saved.policyRules.native_lifecycle.predefined_starter.slot,sessionCookie:parseCookies(req).hm_cp_session});
+                if ((await activateBoundOpenDotEmployee({orgId,userId},employee))?.status !== 'ready') throw new Error('starter_employee_activation_pending');
+              }
+              await activateHqAfterOnboarding({prisma,orgId,userId,objective:FIRST_LIFE_OBJECTIVE,onboardedAt:savedCompany.onboarded_at});
+              job.result=savedCompany;job.done=true;say('Runtime is ready for its first wake');return;
+            }
+          }
           say('Getting started');
           say('Creating your company');
           const companyGuess = host.split('.')[0].replace(/[-_]/g, ' ').toUpperCase();
@@ -13262,7 +13286,11 @@ Write the persona now.`;
           const resumingStarters = priorEmployees.length > 0 && priorEmployees.every(e => !e.archivedAt
             && e.policyRules?.native_lifecycle?.predefined_starter?.source === 'hyperagents-onboarding'
             && e.policyRules?.open_dot_employee?.creation_key?.startsWith(starterPrefix));
-          const nativeStarters = priorEmployees.length === 0 || resumingStarters;
+          const savedCompanyRooms = await prisma.$queryRawUnsafe(
+            `SELECT id, name, agent_connectors->'_company' AS company FROM hivemind.hyper_rooms
+             WHERE org_id=$1::uuid AND archived_at IS NULL AND agent_connectors ? '_company'
+             ORDER BY created_at DESC LIMIT 1`, orgId);
+          const nativeStarters = (priorEmployees.length === 0 && savedCompanyRooms.length === 0) || resumingStarters;
           if (!nativeStarters) await clearPriorOnboarding();
           const starterPrincipal = {orgId,userId};
           const starterCookie = parseCookies(req).hm_cp_session;
@@ -13421,9 +13449,9 @@ Write the persona now.`;
               try {
                 const emp = nativeStarters
                   ? await provisionOpenDotStarter(prisma, starterPrincipal, {operation:'create',
-                    creation_key:starterCreationKey(siteUrl, specialistCount + index),
+                    creation_key:starterCreationKey(siteUrl, STARTER_EMPLOYEES.findIndex(e => e.name === r.name)),
                     name:r.name,persona,role:r.title,appearance:starterAppearance(r.name)},
-                    {slot:specialistCount + index,sessionCookie:starterCookie})
+                    {slot:STARTER_EMPLOYEES.findIndex(e => e.name === r.name),sessionCookie:starterCookie})
                   : await store.create({
                     orgId, name: r.name, persona,
                     roleArchetype: r.title, createdBy: userId,
@@ -13632,7 +13660,10 @@ Write the persona now.`;
           // Marketplace specialists take the room seats ahead of legacy generics.
           const rankedTeam = [...team].sort((a, b) => Number(_isSpecialist(b)) - Number(_isSpecialist(a)));
           const participantIds = rankedTeam.map((t) => t.id).slice(0, 5);
-          const room = await createHyperRoom({
+          const reusableStarterRoom = nativeStarters ? await prisma.hyperRoom.findFirst({
+            where:{orgId,archivedAt:null,name:`${companyName} — HQ`},orderBy:{createdAt:'desc'},
+          }) : null;
+          const room = reusableStarterRoom || await createHyperRoom({
               userId, orgId,
               name: `${companyName} — HQ`,
               participantIds,
@@ -13703,7 +13734,7 @@ Write the persona now.`;
               'UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid',
               JSON.stringify({ _company: resultPayload }), room.id,
             );
-          } catch (e) { console.warn('[hyper-onboarding] company state persist failed:', e.message); }
+          } catch (e) { if (nativeStarters) throw e; console.warn('[hyper-onboarding] company state persist failed:', e.message); }
           if (nativeStarters) {
             const {activateBoundOpenDotEmployee} = await import('./employees/native-lifecycle-bridge.js');
             for (const member of team) {

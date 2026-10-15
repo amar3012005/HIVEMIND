@@ -33,7 +33,7 @@ export async function provisionOpenDotStarter(db, principal, input, {
     principal, sessionCookie, fetchImpl });
   const bound = await bindOpenDotEmployee(db, principal, {
     operation: 'bind', employee_id: employee.id, creation_key: marker.creation_key,
-    expected_binding_revision: marker.binding_revision,
+    expected_binding_revision: marker.state === 'bound' ? marker.binding_revision - 1 : marker.binding_revision,
   }, { proof });
   employee = bound.employee;
   // Publish the canonical ready mapping before Runtime can dispatch a welcome.

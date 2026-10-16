@@ -1,16 +1,30 @@
-const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain, dialog, session, Notification } = require('electron');
 const path = require('path');
-const { autoUpdater } = require('electron-updater');
-const log = require('electron-log');
 const fs = require('fs');
-const notch = require('./notch');
+const { isLocalTest } = require('./release-channel');
+if (isLocalTest) {
+  const directory = path.join(app.getPath('appData'), 'SINGULANCE Local Test');
+  require('./browser-profiles').ensurePrivateDir(directory);
+  app.setPath('userData', directory);
+  app.setPath('sessionData', directory);
+  app.setName('SINGULANCE Local Test');
+}
+const autoUpdater = process.mas ? null : isLocalTest ? null : require('electron-updater').autoUpdater;
+const log = require('electron-log');
+const notch = process.mas ? null : isLocalTest ? null : require('./notch');
+const { createDesktopBrowserService } = require('./desktop-browser-service');
+const { createAgentAttention, normalizeAgentSnapshot } = require('./agent-attention');
 
 const isDev = process.env.ELECTRON_IS_DEV === '1';
 // The desktop app is a first-class window onto the live product. file:// builds
 // broke BrowserRouter + same-site cookie auth, so prod loads the real origin.
 const APP_URL = process.env.SINGULANCE_APP_URL || 'https://singulancelabs.com/hivemind/app/overview';
 const FIRST_RUN_FLAG = path.join(app.getPath('userData'), '.launched');
-const PROTOCOL = 'singulance';
+const PROTOCOL = isLocalTest ? 'singulance-local-test' : 'singulance';
+const APP_ORIGIN = new URL(APP_URL).origin;
+const TRUSTED_APP_ORIGINS = [...new Set([APP_ORIGIN, 'https://next.singulancelabs.com', 'https://www.singulancelabs.com'])];
+let desktopBrowserService = null;
+let agentAttention = null;
 
 let mainWindow = null;
 let splashWindow = null;
@@ -19,14 +33,16 @@ let isQuitting = false;
 let updateState = 'idle'; // idle | checking | downloading | downloaded | none | error
 
 // ── App metadata ──────────────────────────────────────────────
-app.setName('SINGULANCE');
+app.setName(isLocalTest ? 'SINGULANCE Local Test' : 'SINGULANCE');
 
 // ── Logging (also captures updater diagnostics → ~/Library/Logs/SINGULANCE) ──
 log.transports.file.level = 'info';
 log.transports.console.level = isDev ? 'debug' : 'warn';
-autoUpdater.logger = log;
-autoUpdater.autoDownload = true;          // pull updates silently in the background
-autoUpdater.autoInstallOnAppQuit = true;  // apply on next quit even if user clicks "Later"
+if (autoUpdater) {
+  autoUpdater.logger = log;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+}
 
 // ── Custom protocol (hivemind://) — OAuth deep-link back into the app ──
 if (process.defaultApp) {
@@ -39,7 +55,6 @@ if (process.defaultApp) {
 
 function handleDeepLink(url) {
   if (!url || !url.startsWith(`${PROTOCOL}://`)) return;
-  log.info('deep-link:', url);
   if (mainWindow) {
     mainWindow.webContents.send('deep-link', url);
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -103,7 +118,7 @@ function createWindow() {
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    title: 'SINGULANCE',
+    title: app.getName(),
     icon: path.join(__dirname, '..', 'assets', 'icon.png'),
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
@@ -231,7 +246,8 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  mainWindow.webContents.on('will-navigate', event => {
+    const url = event.url;
     const inApp = (isDev && url.startsWith('http://localhost:3000')) || url.startsWith('file://') || isInApp(url);
     if (!inApp) {
       event.preventDefault();
@@ -294,15 +310,65 @@ function createTray() {
   });
 }
 
+function ownedEmployeeSender(event) {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id || event.senderFrame !== mainWindow.webContents.mainFrame) {
+    throw new Error('Agent activity requires the owned main window');
+  }
+  const url = new URL(mainWindow.webContents.getURL());
+  const employeeId = url.pathname.match(/^\/hivemind\/app\/employee\/dots\/employee\/([0-9a-f-]{36})(?:\/|$)/i)?.[1];
+  if (!TRUSTED_APP_ORIGINS.includes(url.origin) || !employeeId) throw new Error('Agent activity requires its canonical employee workspace');
+  return employeeId;
+}
+async function openAgentTarget(target) {
+  const response = await session.defaultSession.fetch('https://dots.singulancelabs.com/api/hivemind/employees/status', {
+    credentials: 'include', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) throw new Error('Agent target authorization is unavailable');
+  const current = normalizeAgentSnapshot(await response.json());
+  if (current.scopeKey !== target.scopeKey || !current.rooms.some(room => room.employeeId === target.employeeId && room.dotId === target.dotId && room.conversationId === target.conversationId)) {
+    throw new Error('Agent notification no longer belongs to the current account');
+  }
+  const url = new URL(`/hivemind/app/employee/dots/employee/${target.employeeId}`, APP_URL);
+  url.searchParams.set('c', target.conversationId);
+  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); createTray(); }
+  if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
+  await mainWindow.loadURL(url.href);
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus();
+}
+async function configureAgentNotifications() {
+  if (!agentAttention) return;
+  const enabled = agentAttention.getState().enabled;
+  const answer = await dialog.showMessageBox(mainWindow, { type: 'question', title: 'Agent Notifications',
+    message: enabled ? 'Turn off native agent notifications?' : 'Receive native notifications when agent work needs your attention?',
+    detail: 'Notifications contain generic status only, not messages, passwords or tool arguments. macOS notification and Focus settings remain in control. Clicking a notification opens existing work; it never approves an action.',
+    buttons: [enabled ? 'Turn Off' : 'Enable Notifications', 'Cancel'], defaultId: 1, cancelId: 1, noLink: true });
+  if (answer.response === 0) agentAttention.setEnabled(!enabled);
+}
+function showAgentActivity() {
+  const state = agentAttention?.getState();
+  const detail = !state?.connected ? 'Open an authenticated HIVEMIND employee workspace to receive owned agent activity.'
+    : `Working: ${state.working}\nWaiting for your input or approval: ${state.waiting}\nNeeds attention: ${state.blocked}\nUnread native notifications: ${state.unread}`;
+  dialog.showMessageBox(mainWindow, { type: 'info', title: 'Agent Activity', message: 'Your existing agent work', detail, buttons: ['OK'] });
+}
+
 // ── App menu ──────────────────────────────────────────────────
 function createMenu() {
   const template = [
     {
-      label: 'SINGULANCE',
+      label: app.getName(),
       submenu: [
         { label: 'About SINGULANCE', role: 'about' },
         { type: 'separator' },
         { label: 'Check for Updates…', click: () => checkForUpdates(true) },
+        ...(process.platform === 'darwin' ? [
+          { label: 'Agent Browser…', click: () => desktopBrowserService?.install() },
+          { label: 'Review Paused Browser Actions…', click: () => desktopBrowserService?.reviewUnknown().catch(error => dialog.showMessageBox(mainWindow, {
+            type: 'info', title: 'Browser Review', message: String(error.message), buttons: ['OK'],
+          })) },
+          { label: 'Agent Activity…', click: showAgentActivity },
+          { label: agentAttention?.getState().enabled ? 'Agent Notifications: On…' : 'Agent Notifications: Off…', click: configureAgentNotifications },
+        ] : []),
         { type: 'separator' },
         { label: 'Hide SINGULANCE', role: 'hide' },
         { label: 'Hide Others', role: 'hideOthers' },
@@ -372,6 +438,14 @@ function sendUpdate(status, payload = {}) {
 }
 
 function checkForUpdates(manual = false) {
+  if (isLocalTest) {
+    if (manual) dialog.showMessageBox(mainWindow, { type: 'info', title: 'Local Test Build', message: 'This isolated local build does not download or install updates.' });
+    return;
+  }
+  if (process.mas) {
+    if (manual) dialog.showMessageBox(mainWindow, { type: 'info', title: 'App Updates', message: 'Updates are delivered through TestFlight or the Mac App Store.' });
+    return;
+  }
   if (isDev) {
     if (manual) dialog.showMessageBox(mainWindow, { type: 'info', title: 'Updates', message: 'Update checks are disabled in dev.' });
     return;
@@ -394,6 +468,7 @@ function checkForUpdates(manual = false) {
   });
 }
 
+if (autoUpdater) {
 autoUpdater.on('update-available', (info) => {
   log.info('update available', info && info.version);
   sendUpdate('downloading', { version: info && info.version });
@@ -408,21 +483,19 @@ autoUpdater.on('update-not-available', () => {
 });
 
 autoUpdater.on('download-progress', (p) => {
-  // stream progress to the renderer (UI can show a bar); throttle dock too
   sendUpdate('downloading', { percent: Math.round(p.percent), bytesPerSecond: p.bytesPerSecond, transferred: p.transferred, total: p.total });
-  if (process.platform === 'darwin' && app.dock) app.dock.setBadge(`${Math.round(p.percent)}%`);
 });
 
 autoUpdater.on('error', (err) => {
   log.error('updater error', err);
   sendUpdate('error', { message: String(err && err.message || err) });
-  if (process.platform === 'darwin' && app.dock) app.dock.setBadge('');
+  if (agentAttention && app.dock) { const unread = agentAttention.getState().unread; app.dock.setBadge(unread ? String(unread) : ''); }
 });
 
 autoUpdater.on('update-downloaded', (info) => {
   log.info('update downloaded', info && info.version);
   sendUpdate('downloaded', { version: info && info.version });
-  if (process.platform === 'darwin' && app.dock) app.dock.setBadge('');
+  if (agentAttention && app.dock) { const unread = agentAttention.getState().unread; app.dock.setBadge(unread ? String(unread) : ''); }
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: 'Update Ready',
@@ -435,15 +508,22 @@ autoUpdater.on('update-downloaded', (info) => {
     if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
   });
 });
+}
 
 // ── App lifecycle ─────────────────────────────────────────────
+ipcMain.on('desktop-attention:snapshot', (event, input) => {
+  try {
+    if (!agentAttention || isQuitting || input?.employeeId !== ownedEmployeeSender(event)) return;
+    agentAttention.receive(input);
+  } catch { log.warn('Rejected unowned or invalid agent activity'); }
+});
 ipcMain.handle('open-external', (_, url) => {
   shell.openExternal(url);
 });
 
 ipcMain.handle('check-for-updates', () => { checkForUpdates(true); });
 ipcMain.handle('install-update', () => {
-  if (updateState === 'downloaded') { isQuitting = true; autoUpdater.quitAndInstall(); }
+  if (autoUpdater && updateState === 'downloaded') { isQuitting = true; autoUpdater.quitAndInstall(); }
 });
 
 // IPC: splash "launch" button → open main window, close splash
@@ -455,6 +535,18 @@ ipcMain.handle('launch-app', () => {
 });
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin' && app.dock) app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
+  if (process.platform === 'darwin') {
+    desktopBrowserService = createDesktopBrowserService({ app, BrowserWindow, dialog, ipcMain, session,
+      getMainWindow: () => mainWindow, trustedOrigins: TRUSTED_APP_ORIGINS, log });
+    agentAttention = createAgentAttention({ app, Notification, userDataPath: app.getPath('userData'),
+      getMainWindow: () => mainWindow, openTarget: openAgentTarget, log,
+      onState: state => {
+        if (isQuitting) return;
+        if (tray) tray.setToolTip(`SINGULANCE — ${state.working} working, ${state.waiting} waiting, ${state.blocked} need attention`);
+        createMenu();
+      } });
+  }
   // Cinematic B&W signature intro on every open, then the workspace.
   createSplash();
 
@@ -473,7 +565,7 @@ app.whenReady().then(() => {
   //
   //   Enable for a session:  SINGULANCE_NOTCH=1 open -a SINGULANCE
   //   Enable in dev:         SINGULANCE_NOTCH=1 npm start
-  if (process.env.SINGULANCE_NOTCH === '1') {
+  if (!process.mas && !isLocalTest && process.env.SINGULANCE_NOTCH === '1') {
     try {
       notch.registerNotchIpc();
       notch.createNotchWindow({ mainWindowGetter: () => mainWindow, url: APP_URL });
@@ -494,9 +586,11 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (agentAttention) agentAttention.close();
+  if (desktopBrowserService) void desktopBrowserService.close().catch(() => log.warn('Desktop browser shutdown did not finish'));
   // The HUD is alwaysOnTop + visible on all workspaces; if it outlives the app
   // it leaves a black pill stuck over the menu bar until logout.
-  try { notch.destroyNotch(); } catch (_) { /* already gone */ }
+  try { notch?.destroyNotch(); } catch (_) { /* already gone */ }
 });
 
 // Keep app alive on mac even when all windows closed

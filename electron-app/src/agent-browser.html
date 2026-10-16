@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SINGULANCE Browser</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px -apple-system, BlinkMacSystemFont, sans-serif; }
+    body { margin: 0; background: Canvas; color: CanvasText; }
+    main { max-width: 510px; margin: auto; padding: 32px; }
+    h1 { font-size: 24px; margin: 0 0 14px; }
+    p { line-height: 1.5; }
+    .card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 12px; padding: 18px; }
+    .muted { color: color-mix(in srgb, CanvasText 70%, transparent); font-size: 13px; }
+    button { padding: 9px 16px; border: 0; border-radius: 8px; background: #222; color: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>SINGULANCE Browser</h1>
+  <div class="card">
+    <strong id="status" role="status">Checking browser readiness…</strong>
+    <p>Your agents use a separate Chromium browser. Your personal Chrome history, passwords and profiles are not imported.</p>
+    <p>When a connected local agent first requests access, SINGULANCE asks you to <strong>Allow</strong> or <strong>Deny</strong>. Important clicks and text entry still need your approval.</p>
+    <p class="muted">The browser profile belongs to this app. It is not a full security sandbox. Hosted HIVEMIND agents use it only through their authenticated browser connection.</p>
+  </div>
+  <p><button type="button" onclick="window.close()">Done</button></p>
+</main>
+<script>
+  const status = document.getElementById('status');
+  window.agentBrowserSetup.onInstallProgress((message) => { status.textContent = message; });
+  window.agentBrowserSetup.getState().then((state) => {
+    status.textContent = state.bundled ? 'SINGULANCE Browser is included in this app'
+      : state.installed ? 'Agent browser ready'
+      : state.installing ? 'Downloading your private browser…'
+      : 'Agent browser not installed. Choose Agent Browser… from the SINGULANCE menu whenever you are ready.';
+  }).catch(() => { status.textContent = 'Browser status unavailable. Restart SINGULANCE.'; });
+</script>
+</body>
+</html>

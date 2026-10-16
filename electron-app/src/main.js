@@ -14,11 +14,14 @@ const log = require('electron-log');
 const notch = process.mas ? null : isLocalTest ? null : require('./notch');
 const { createDesktopBrowserService } = require('./desktop-browser-service');
 const { createAgentAttention, normalizeAgentSnapshot } = require('./agent-attention');
+const { installBundledFrontends } = require('./bundled-frontends');
+const FRONTEND_BUNDLE = path.join(__dirname, '..', 'assets', 'frontend');
+const hasBundledFrontends = fs.existsSync(path.join(FRONTEND_BUNDLE, 'manifest.json'));
 
 const isDev = process.env.ELECTRON_IS_DEV === '1';
 // The desktop app is a first-class window onto the live product. file:// builds
 // broke BrowserRouter + same-site cookie auth, so prod loads the real origin.
-const APP_URL = process.env.SINGULANCE_APP_URL || 'https://singulancelabs.com/hivemind/app/overview';
+const APP_URL = process.env.SINGULANCE_APP_URL || 'https://runtime-runner.singulancelabs.com/hivemind/app/employee/harness';
 const FIRST_RUN_FLAG = path.join(app.getPath('userData'), '.launched');
 const PROTOCOL = isLocalTest ? 'singulance-local-test' : 'singulance';
 const APP_ORIGIN = new URL(APP_URL).origin;
@@ -164,7 +167,7 @@ function createWindow() {
   // asset-manifest (changes on every FE build) every 10 min + on window focus,
   // and when a new build ships, prompt once to reload. The quick recorder
   // survives reloads by design, so refreshing is safe mid-session.
-  if (!isDev) {
+  if (!isDev && !hasBundledFrontends) {
     const MANIFEST_URL = new URL('/asset-manifest.json', APP_URL).toString();
     let feBuildId = null;
     let fePromptOpen = false;
@@ -535,6 +538,7 @@ ipcMain.handle('launch-app', () => {
 });
 
 app.whenReady().then(() => {
+  if (!isDev && hasBundledFrontends) installBundledFrontends(session.defaultSession, FRONTEND_BUNDLE, log);
   if (process.platform === 'darwin' && app.dock) app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
   if (process.platform === 'darwin') {
     desktopBrowserService = createDesktopBrowserService({ app, BrowserWindow, dialog, ipcMain, session,

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain, dialog, session, Notification } = require('electron');
+const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain, dialog, session, Notification, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { isLocalTest } = require('./release-channel');
@@ -14,6 +14,7 @@ const log = require('electron-log');
 const notch = process.mas ? null : isLocalTest ? null : require('./notch');
 const { createDesktopBrowserService } = require('./desktop-browser-service');
 const { createAgentAttention, normalizeAgentSnapshot } = require('./agent-attention');
+const { createOfflineHistory } = require('./offline-history');
 const { installBundledFrontends } = require('./bundled-frontends');
 const FRONTEND_BUNDLE = path.join(__dirname, '..', 'assets', 'frontend');
 const hasBundledFrontends = fs.existsSync(path.join(FRONTEND_BUNDLE, 'manifest.json'));
@@ -27,6 +28,7 @@ const PROTOCOL = isLocalTest ? 'singulance-local-test' : 'singulance';
 const APP_ORIGIN = new URL(APP_URL).origin;
 const TRUSTED_APP_ORIGINS = [...new Set([APP_ORIGIN, 'https://next.singulancelabs.com', 'https://www.singulancelabs.com'])];
 let desktopBrowserService = null;
+let offlineHistory = null;
 let agentAttention = null;
 
 let mainWindow = null;
@@ -135,6 +137,8 @@ function createWindow() {
       webSecurity: true,
     },
   });
+
+  offlineHistory?.attach(mainWindow);
 
   // Load app
   if (isDev) {
@@ -403,6 +407,8 @@ function createMenu() {
     {
       label: 'View',
       submenu: [
+        { label: 'Saved Conversations (Offline)…', accelerator: 'CmdOrCtrl+Shift+H', click: () => offlineHistory?.show() },
+        { type: 'separator' },
         { role: 'reload' },
         { role: 'forceReload' },
         { type: 'separator' },
@@ -539,7 +545,8 @@ ipcMain.handle('launch-app', () => {
 });
 
 app.whenReady().then(() => {
-  if (!isDev && hasBundledFrontends) installBundledFrontends(session.defaultSession, FRONTEND_BUNDLE, log);
+  offlineHistory = createOfflineHistory({ app, safeStorage, BrowserWindow, ipcMain, getMainWindow: () => mainWindow, log });
+  if (!isDev && hasBundledFrontends) installBundledFrontends(session.defaultSession, FRONTEND_BUNDLE, log, offlineHistory);
   if (process.platform === 'darwin' && app.dock) app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
   if (process.platform === 'darwin') {
     desktopBrowserService = createDesktopBrowserService({ app, BrowserWindow, dialog, ipcMain, session,

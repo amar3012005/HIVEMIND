@@ -8,6 +8,8 @@ if (index !== -1) {
   if (!directory || !path.isAbsolute(directory) || !fs.statSync(directory).isDirectory()) throw new Error('Pass the existing absolute local QA evidence directory');
   process.env.SINGULANCE_QA_EVIDENCE_DIR = directory;
   require('../test/in-app-browser.electron.cjs');
+} else if (process.argv.includes('--singulance-history-smoke')) {
+  require('../test/offline-history.electron.cjs');
 } else if (process.argv.includes('--singulance-frontend-smoke')) {
   require('../test/bundled-frontends.electron.cjs');
 } else {

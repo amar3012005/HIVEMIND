@@ -151,10 +151,11 @@ function forwardReadRequest(request, ses, headers, credentials, net = require('e
   });
 }
 
-function installBundledFrontends(ses, root, log) {
+function installBundledFrontends(ses, root, log, observer = {}) {
   const bundle = createBundledFrontends(root);
   const served = new Set();
   ses.protocol.handle('https', async request => {
+    const ticket = observer.begin?.(request);
     const result = bundle.resolve(request);
     if (!result) {
       const url = new URL(request.url);
@@ -172,6 +173,7 @@ function installBundledFrontends(ses, root, log) {
       const response = await (['GET', 'HEAD'].includes(request.method)
         ? forwardReadRequest(request, ses, headers, credentials)
         : ses.fetch(request, { headers, bypassCustomProtocolHandlers: true, credentials })).catch(error => { log?.warn('Desktop network forwarding failed', { origin: url.origin, path: url.pathname, error: error.message }); throw error; });
+      if (ticket) void observer.response?.(request, response.clone(), ticket).catch(() => {});
       if (response.status === 0) log?.warn('Network redirect cannot be forwarded', { origin: url.origin, path: url.pathname, type: response.type });
       if (firstParty && ['/api/hivemind/session/establish', '/api/hivemind/boot'].includes(url.pathname) && !response.ok) {
         log?.warn('Desktop session admission', { path: url.pathname, method: request.method, status: response.status, origin: headers.get('origin'), referrerOrigin: (() => { try { return new URL(request.referrer || headers.get('referer')).origin; } catch { return null; } })() });

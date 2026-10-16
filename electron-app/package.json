@@ -1,12 +1,13 @@
 {
   "name": "singulance",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "SINGULANCE — the sovereign AI memory workspace (HIVEMIND desktop)",
   "main": "src/main.js",
   "author": "amarsai3012005",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "test": "node --test test/*.test.js",
     "dev": "ELECTRON_IS_DEV=1 electron .",
     "build:react": "cd ../frontend/Da-vinci && REACT_APP_CONTROL_PLANE_URL=${REACT_APP_CONTROL_PLANE_URL:-https://api.singulancelabs.com} REACT_APP_CORE_API_URL=${REACT_APP_CORE_API_URL:-https://core.singulancelabs.com} REACT_APP_HIVEMIND_SITE_HOST=${REACT_APP_HIVEMIND_SITE_HOST:-electron} CI=false npm run build",
     "copy:react": "rm -rf react-build && cp -r ../frontend/Da-vinci/build react-build",
@@ -16,7 +17,11 @@
     "build:universal": "electron-builder build --mac --universal",
     "build:win": "electron-builder build --win",
     "dist": "electron-builder build --mac --publish=never",
-    "dist:win": "electron-builder build --win --publish=never"
+    "dist:win": "electron-builder build --win --publish=never",
+    "mas:preflight": "node scripts/mas-preflight.cjs",
+    "build:mas": "node scripts/build-mas.cjs",
+    "build:local": "node scripts/build-local.cjs",
+    "testflight:upload": "node scripts/upload-testflight.cjs"
   },
   "build": {
     "appId": "com.singulancelabs.desktop",
@@ -108,12 +113,14 @@
     }
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "playwright": "1.63.0",
     "electron-updater": "^6.3.4",
     "electron-log": "^5.2.0"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
+    "electron": "44.8.0",
+    "electron-builder": "26.17.0",
     "@electron/notarize": "^2.5.0"
   }
 }

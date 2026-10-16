@@ -2,3 +2,8 @@ node_modules/
 dist/
 react-build/
 *.log
+
+assets/frontend/
+
+node_modules
+dist-local/

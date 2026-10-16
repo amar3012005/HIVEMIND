@@ -24,7 +24,7 @@ if (process.platform === 'darwin') {
     }
     if (input.type !== 'hivemind.open-dot.desktop-browser' || !/^[0-9a-f-]{36}$/i.test(input.nonce || '') || !['detect', 'pair', 'proof'].includes(input.action)) return;
     const source = event.source;
-    if (input.action === 'detect' && ['https://next.singulancelabs.com', 'https://singulancelabs.com', 'https://www.singulancelabs.com'].includes(window.location.origin)) {
+    if (input.action === 'detect' && ['https://runtime-runner.singulancelabs.com', 'https://next.singulancelabs.com', 'https://singulancelabs.com', 'https://www.singulancelabs.com'].includes(window.location.origin)) {
       source.postMessage({ type: 'hivemind.open-dot.desktop-browser-result', version: 1, nonce: input.nonce, desktop: true }, event.origin);
       return;
     }

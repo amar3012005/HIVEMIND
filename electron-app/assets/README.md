@@ -32,3 +32,7 @@ Open Dot's existing authenticated history endpoint now supports 50-message curso
 pages rather than eagerly fetching 1,000 messages. DSH retains its native paged
 journal and assembler. The native server is authoritative for newly received,
 edited or removed messages.
+
+## Desktop Google sign-in (2.1.7)
+
+Google application login opens the system browser through the existing `/auth/google` external-tool return contract. A random-port IPv4 loopback listener validates a one-use 256-bit nonce, exact host, GET method and five-minute deadline. The returned application session is verified at `/auth/session` without old cookies; only the server-issued Secure/HttpOnly application cookie is installed. No Google password, Chrome cookie database, client secret, or new persistent API key is accessed. Core and Control are unchanged. The existing server contract returns a session token to loopback, not a PKCE authorization code; replacing that server-side contract requires separate scope. Connector OAuth flows are unchanged.

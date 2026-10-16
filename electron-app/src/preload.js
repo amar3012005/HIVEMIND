@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('electron', {
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
   retryConnect: () => ipcRenderer.invoke('retry-connect'),
+  cancelBrowserSignIn: () => ipcRenderer.invoke('cancel-browser-sign-in'),
   // Deep-link (singulance://) — OAuth callback delivery.
   onDeepLink: (cb) => {
     const h = (_e, url) => cb(url);

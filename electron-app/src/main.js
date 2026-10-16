@@ -15,6 +15,7 @@ const notch = process.mas ? null : isLocalTest ? null : require('./notch');
 const { createDesktopBrowserService } = require('./desktop-browser-service');
 const { createAgentAttention, normalizeAgentSnapshot } = require('./agent-attention');
 const { createOfflineHistory } = require('./offline-history');
+const { isGoogleSignIn, admitSession, createBrowserSignIn } = require('./browser-sign-in');
 const { installBundledFrontends } = require('./bundled-frontends');
 const FRONTEND_BUNDLE = path.join(__dirname, '..', 'assets', 'frontend');
 const hasBundledFrontends = fs.existsSync(path.join(FRONTEND_BUNDLE, 'manifest.json'));
@@ -30,6 +31,7 @@ const TRUSTED_APP_ORIGINS = [...new Set([APP_ORIGIN, 'https://next.singulancelab
 let desktopBrowserService = null;
 let offlineHistory = null;
 let agentAttention = null;
+let browserSignIn = null;
 
 let mainWindow = null;
 let splashWindow = null;
@@ -139,6 +141,21 @@ function createWindow() {
   });
 
   offlineHistory?.attach(mainWindow);
+  browserSignIn?.cancel();
+  browserSignIn = createBrowserSignIn({
+    openExternal: url => shell.openExternal(url),
+    admit: (token, isCurrent) => admitSession(token, mainWindow.webContents.session.cookies, fetch, isCurrent),
+    onComplete: async () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      await mainWindow.loadURL(APP_URL);
+      mainWindow.show(); mainWindow.focus();
+      log.info('Browser sign-in completed');
+    },
+    onError: error => {
+      log.warn('Browser sign-in did not complete');
+      if (mainWindow && !mainWindow.isDestroyed()) { void mainWindow.loadURL(`${APP_ORIGIN}/hivemind/login`); void dialog.showMessageBox(mainWindow, { type: 'warning', message: error.message, buttons: ['OK'] }); }
+    },
+  });
 
   // Load app
   if (isDev) {
@@ -237,7 +254,14 @@ function createWindow() {
   };
   const isInApp = (url) => hostMatches(url, INAPP_HOSTS);
 
+  const startBrowserSignIn = url => {
+    void mainWindow.loadFile(path.join(__dirname, 'browser-sign-in.html'));
+    void browserSignIn.start(url);
+  };
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isGoogleSignIn(url, mainWindow.webContents.getURL())) {
+      startBrowserSignIn(url); return { action: 'deny' };
+    }
     // OAuth / connector popups → allow as a genuine child window (postMessage
     // to opener works, session shared). Everything else → default browser.
     if (hostMatches(url, POPUP_HOSTS)) {
@@ -256,6 +280,9 @@ function createWindow() {
 
   mainWindow.webContents.on('will-navigate', event => {
     const url = event.url;
+    if (isGoogleSignIn(url, mainWindow.webContents.getURL())) {
+      event.preventDefault(); startBrowserSignIn(url); return;
+    }
     const inApp = (isDev && url.startsWith('http://localhost:3000')) || url.startsWith('file://') || isInApp(url);
     if (!inApp) {
       event.preventDefault();
@@ -531,6 +558,13 @@ ipcMain.handle('open-external', (_, url) => {
   shell.openExternal(url);
 });
 
+ipcMain.handle('cancel-browser-sign-in', event => {
+  if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame
+    || event.sender.getURL() !== require('node:url').pathToFileURL(path.join(__dirname, 'browser-sign-in.html')).href) return;
+  browserSignIn?.cancel();
+  return mainWindow.loadURL(`${APP_ORIGIN}/hivemind/login`);
+});
+
 ipcMain.handle('check-for-updates', () => { checkForUpdates(true); });
 ipcMain.handle('install-update', () => {
   if (autoUpdater && updateState === 'downloaded') { isQuitting = true; autoUpdater.quitAndInstall(); }
@@ -597,6 +631,7 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
+  browserSignIn?.cancel();
   isQuitting = true;
   if (agentAttention) agentAttention.close();
   if (desktopBrowserService) void desktopBrowserService.close().catch(() => log.warn('Desktop browser shutdown did not finish'));

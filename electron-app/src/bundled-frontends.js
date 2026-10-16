@@ -102,21 +102,92 @@ function createBundledFrontends(root) {
   return { resolve, manifest, observeBootGraph };
 }
 
+// Electron fetch cancels manual redirects instead of exposing their response.
+// ClientRequest exposes the native redirect event, allowing Chromium's renderer
+// to follow it with its own origin, cookies and navigation security checks.
+function forwardReadRequest(request, ses, headers, credentials, net = require('electron').net) {
+  return new Promise((resolve, reject) => {
+    let origin = headers.get('origin');
+    if (!origin) { try { origin = new URL(request.referrer || headers.get('referer')).origin; } catch {} }
+    const outgoing = net.request({ url: request.url, method: request.method, session: ses,
+      headers: Object.fromEntries(headers), credentials: credentials === 'same-origin' && !origin ? 'omit' : credentials, ...(origin ? { origin } : {}),
+      bypassCustomProtocolHandlers: true, redirect: 'manual' });
+    const responseHeaders = values => {
+      const result = new Headers();
+      for (const [name, value] of Object.entries(values)) {
+        if (['content-encoding', 'content-length', 'transfer-encoding'].includes(name.toLowerCase())) continue;
+        for (const item of Array.isArray(value) ? value : [value]) result.append(name, item);
+      }
+      return result;
+    };
+    const abort = () => outgoing.abort();
+    request.signal?.addEventListener('abort', abort, { once: true });
+    outgoing.once('close', () => request.signal?.removeEventListener('abort', abort));
+    outgoing.once('error', reject);
+    outgoing.once('redirect', (status, _method, location, values) => {
+      const result = responseHeaders(values); result.set('location', location);
+      resolve(new Response(null, { status, headers: result }));
+      // Do not follow here: the renderer owns this redirect.
+    });
+    outgoing.once('response', incoming => {
+      const result = responseHeaders(incoming.headers);
+      if (request.method === 'HEAD' || [204, 205, 304].includes(incoming.statusCode)) {
+        incoming.resume?.(); resolve(new Response(null, { status: incoming.statusCode, headers: result })); return;
+      }
+      let closed = false;
+      const body = new ReadableStream({
+        start(controller) {
+          incoming.on('data', chunk => { if (closed) return; controller.enqueue(new Uint8Array(chunk)); if (controller.desiredSize <= 0) incoming.pause?.(); });
+          incoming.once('end', () => { if (!closed) { closed = true; controller.close(); } });
+          incoming.once('error', error => { if (!closed) { closed = true; controller.error(error); } });
+          incoming.once('aborted', () => { if (!closed) { closed = true; controller.error(new Error('Network response interrupted')); } });
+        },
+        pull() { incoming.resume?.(); },
+        cancel() { closed = true; outgoing.abort(); },
+      });
+      resolve(new Response(body, { status: incoming.statusCode, headers: result }));
+    });
+    outgoing.end();
+  });
+}
+
 function installBundledFrontends(ses, root, log) {
   const bundle = createBundledFrontends(root);
+  const served = new Set();
   ses.protocol.handle('https', async request => {
     const result = bundle.resolve(request);
     if (!result) {
-      const response = await ses.fetch(request, { bypassCustomProtocolHandlers: true, redirect: 'manual' });
       const url = new URL(request.url);
+      // Main-process fetch has no renderer origin to resolve `same-origin`
+      // against. Keep the browser's existing first-party session credential.
+      const firstParty = url.hostname === 'singulancelabs.com' || url.hostname.endsWith('.singulancelabs.com');
+      const headers = new Headers(request.headers);
+      if (!headers.has('origin') && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        try {
+          const referrer = new URL(request.referrer || headers.get('referer'));
+          if (APP_HOSTS.has(referrer.hostname) && referrer.protocol === 'https:') headers.set('origin', referrer.origin);
+        } catch { /* Missing initiator never receives a manufactured origin. */ }
+      }
+      const credentials = firstParty && request.credentials !== 'omit' ? 'include' : request.credentials;
+      const response = await (['GET', 'HEAD'].includes(request.method)
+        ? forwardReadRequest(request, ses, headers, credentials)
+        : ses.fetch(request, { headers, bypassCustomProtocolHandlers: true, credentials })).catch(error => { log?.warn('Desktop network forwarding failed', { origin: url.origin, path: url.pathname, error: error.message }); throw error; });
+      if (response.status === 0) log?.warn('Network redirect cannot be forwarded', { origin: url.origin, path: url.pathname, type: response.type });
+      if (firstParty && ['/api/hivemind/session/establish', '/api/hivemind/boot'].includes(url.pathname) && !response.ok) {
+        log?.warn('Desktop session admission', { path: url.pathname, method: request.method, status: response.status, origin: headers.get('origin'), referrerOrigin: (() => { try { return new URL(request.referrer || headers.get('referer')).origin; } catch { return null; } })() });
+      }
       if (url.origin === 'https://runtime-runner.singulancelabs.com' && url.pathname === '/api/hivemind/boot' && response.ok) {
         try { bundle.observeBootGraph(await response.clone().json()); } catch { /* The server remains the boot authority. */ }
       }
       return response;
     }
+    const resource = new URL(request.url);
+    const kind = resource.hostname === DOT_HOST ? 'opendot' : resource.pathname.startsWith('/plugins/') ? 'native-dsh'
+      : resource.pathname === '/assets/harness-shell.js' ? 'native-shell' : result.type.startsWith('text/html') ? 'document' : 'outer';
+    if (!served.has(kind)) { served.add(kind); log?.info('Bundled frontend in use', { kind }); }
     return new Response(result.body, { headers: { 'Content-Type': result.type, 'Cache-Control': result.type.startsWith('text/html') ? 'no-store' : 'public, max-age=31536000, immutable', ...result.headers, 'X-Singulance-Frontend': 'bundled' } });
   });
   log?.info('Packaged frontends enabled', { release: bundle.manifest.release, assets: Object.keys(bundle.manifest.assets).length, plugins: Object.keys(bundle.manifest.plugins).length });
   return bundle;
 }
-module.exports = { createBundledFrontends, installBundledFrontends, nativeCombo };
+module.exports = { createBundledFrontends, installBundledFrontends, nativeCombo, forwardReadRequest };

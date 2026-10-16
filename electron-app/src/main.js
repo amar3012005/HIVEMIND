@@ -148,6 +148,7 @@ function createWindow() {
 
   // Offline / load-failure → local fallback page with retry (never a white void).
   mainWindow.webContents.on('did-fail-load', (_e, code, desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame && code !== -3) { try { log.warn('Employee frame load failed', { code, desc, origin: new URL(failedUrl).origin, path: new URL(failedUrl).pathname }); } catch {} }
     if (!isMainFrame || isDev || code === -3 /* aborted (normal on redirects) */) return;
     log.warn('load failed', code, desc, failedUrl);
     mainWindow.loadFile(path.join(__dirname, 'offline.html'));

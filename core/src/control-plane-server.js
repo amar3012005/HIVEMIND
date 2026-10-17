@@ -39,7 +39,8 @@ import {
 } from './auth/api-keys.js';
 import { authorizeOpenDotRecoveryRequest } from './auth/open-dot-recovery.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
-import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
+import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie, getRedisClient } from './control-plane/session-store.js';
+import { desktopAuthEnabled, desktopEnabledProviders, redisSupportsAtomicDesktopCodes, validDesktopNonce, validDesktopChallenge, validDesktopIssuedAt, validDesktopExchange } from './control-plane/desktop-auth.js';
 import {
   createPersonalInvitationLink,
   createSignupAdmission,
@@ -341,6 +342,7 @@ const CONFIG = {
   sessionSecret: requireSessionSecret('HIVEMIND_CONTROL_PLANE_SESSION_SECRET', ['SESSION_SECRET']),
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
   authStateTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_AUTH_STATE_TTL_SECONDS || 600),
+  desktopAuthEnabled: desktopAuthEnabled(process.env.HIVEMIND_DESKTOP_AUTH_ENABLED),
   redisUrl: process.env.HIVEMIND_CONTROL_PLANE_REDIS_URL || process.env.REDIS_URL || null,
   redisHost: process.env.REDIS_HOST || null,
   redisPort: Number(process.env.REDIS_PORT || 6379),
@@ -2300,6 +2302,23 @@ const zitadelClient = (CONFIG.zitadelIssuerUrl && CONFIG.zitadelClientId && CONF
       redirectUri: CONFIG.zitadelRedirectUri
     })
   : null;
+
+function desktopAvailableProviders() {
+  return desktopEnabledProviders({
+    google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    zitadel: Boolean(zitadelClient),
+    idpHints: ['microsoft', 'apple']
+      .filter((hint) => process.env[`ZITADEL_IDP_${hint.toUpperCase()}_ID`]).join(','),
+  });
+}
+
+async function desktopAuthReady() {
+  if (!CONFIG.desktopAuthEnabled || !CONFIG.publicBaseUrl.startsWith('https://')) return false;
+  if (!desktopAvailableProviders().length || (!CONFIG.redisUrl && !CONFIG.redisHost)) return false;
+  const redis = await getRedisClient(CONFIG);
+  return redisSupportsAtomicDesktopCodes(redis);
+}
+
 const USE_SECURE_CROSS_SITE_COOKIE = CONFIG.publicBaseUrl.startsWith('https://');
 
 function jsonResponse(res, body, status = 200, headers = {}) {
@@ -2473,6 +2492,14 @@ const SESSION_COOKIE_DOMAIN = process.env.HIVEMIND_SESSION_COOKIE_DOMAIN
 
 function _cookieDomainAttr() {
   return SESSION_COOKIE_DOMAIN ? `; Domain=${SESSION_COOKIE_DOMAIN}` : '';
+}
+
+function isDesktopHandoffReturn(value) {
+  try {
+    const expected = new URL('/auth/desktop/complete', CONFIG.publicBaseUrl);
+    const actual = new URL(value, CONFIG.publicBaseUrl);
+    return actual.origin === expected.origin && actual.pathname === expected.pathname;
+  } catch { return false; }
 }
 
 function makeSessionCookie(sessionId) {
@@ -5278,6 +5305,72 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ─── System-browser desktop sign-in (separate from connector OAuth) ──
+  // The browser receives its own cookie; Electron redeems a short-lived,
+  // one-time code bound to a verifier kept only by the native app. Never put
+  // a session cookie, API key, or OAuth provider token in the deep link.
+  if (pathname === '/auth/desktop/available' && req.method === 'GET') {
+    const available = await desktopAuthReady();
+    return jsonResponse(res, { available, version: 1, providers: available ? desktopAvailableProviders() : [] }, 200, { 'Cache-Control': 'no-store' });
+  }
+  if (pathname === '/auth/desktop/start' && req.method === 'GET') {
+    if (!(await desktopAuthReady())) return jsonResponse(res, { error: 'Desktop sign-in unavailable' }, 503, { 'Cache-Control': 'no-store' });
+    const nonce = url.searchParams.get('state');
+    const challenge = url.searchParams.get('code_challenge');
+    const provider = url.searchParams.get('provider');
+    if (!validDesktopNonce(nonce) || !validDesktopChallenge(challenge)
+        || !['google', 'microsoft', 'apple', 'zitadel'].includes(provider)) {
+      return jsonResponse(res, { error: 'Invalid desktop login request' }, 400);
+    }
+    if (!desktopAvailableProviders().includes(provider)) {
+      return jsonResponse(res, { error: 'Desktop sign-in provider unavailable' }, 503, { 'Cache-Control': 'no-store' });
+    }
+    const intent = await sessionStore.createAuthState({ type: 'desktop-login-intent', nonce, challenge, issuedAt: Date.now() });
+    const complete = new URL('/auth/desktop/complete', CONFIG.publicBaseUrl);
+    complete.searchParams.set('intent', intent);
+    const authorize = new URL(provider === 'google' ? '/auth/google' : '/auth/login', CONFIG.publicBaseUrl);
+    authorize.searchParams.set('return_to', complete.toString());
+    if (provider === 'microsoft' || provider === 'apple') authorize.searchParams.set('idp_hint', provider);
+    return redirect(res, authorize.toString());
+  }
+  if (pathname === '/auth/desktop/complete' && req.method === 'GET') {
+    if (!(await desktopAuthReady())) return jsonResponse(res, { error: 'Desktop sign-in unavailable' }, 503, { 'Cache-Control': 'no-store' });
+    const current = await getCurrentSession(req);
+    if (!current) return jsonResponse(res, { error: 'Finish signing in, then retry in SINGULANCE' }, 401);
+    const intent = await sessionStore.consumeAuthStateOnce(url.searchParams.get('intent'));
+    if (intent?.type !== 'desktop-login-intent' || !validDesktopIssuedAt(intent.issuedAt)
+        || !validDesktopNonce(intent.nonce) || !validDesktopChallenge(intent.challenge)) {
+      return jsonResponse(res, { error: 'Desktop sign-in expired; retry in SINGULANCE' }, 400);
+    }
+    const code = await sessionStore.createAuthState({
+      type: 'desktop-login-code', nonce: intent.nonce, challenge: intent.challenge,
+      sessionId: current.sessionId, issuedAt: Date.now(),
+    });
+    const callback = new URL('singulance://auth/callback');
+    callback.searchParams.set('code', code);
+    callback.searchParams.set('state', intent.nonce);
+    res.setHeader('Cache-Control', 'no-store');
+    return redirect(res, callback.toString());
+  }
+  if (pathname === '/auth/desktop/exchange' && req.method === 'POST') {
+    if (!(await desktopAuthReady())) return jsonResponse(res, { error: 'Desktop sign-in unavailable' }, 503, { 'Cache-Control': 'no-store' });
+    let body;
+    try { body = (await parseBodyWithRaw(req, 4096)).parsed; }
+    catch { return jsonResponse(res, { error: 'Invalid desktop exchange' }, 400); }
+    const code = await sessionStore.consumeAuthStateOnce(body?.code);
+    if (!validDesktopExchange({ codeRecord: code, state: body?.state, verifier: body?.verifier })) {
+      return jsonResponse(res, { error: 'Desktop sign-in expired or invalid' }, 400, { 'Cache-Control': 'no-store' });
+    }
+    const original = await sessionStore.getSession(code.sessionId);
+    if (!original?.userId) return jsonResponse(res, { error: 'Desktop sign-in expired' }, 401);
+    const nativeSession = await sessionStore.createSession({
+      userId: original.userId, email: original.email, orgId: original.orgId || null,
+    });
+    return jsonResponse(res, { authenticated: true }, 200, {
+      'Cache-Control': 'no-store', 'Set-Cookie': makeSessionCookie(nativeSession),
+    });
+  }
+
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
   if (pathname === '/auth/google' && req.method === 'GET') {
     const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
@@ -5316,7 +5409,10 @@ const server = http.createServer(async (req, res) => {
       response_type: 'code',
       scope: 'openid email profile',
       access_type: 'offline',
-      prompt: nativeIntent ? 'select_account' : 'consent',
+      // Preserve the mobile account chooser and ordinary web consent behavior;
+      // desktop handoff does not force a new Google consent grant.
+      ...(nativeIntent ? { prompt: 'select_account' }
+        : isDesktopHandoffReturn(returnToValue) ? {} : { prompt: 'consent' }),
       state: compositeState,
     });
     return redirect(res, `https://accounts.google.com/o/oauth2/v2/auth?${googleParams}`);
@@ -5448,7 +5544,10 @@ const server = http.createServer(async (req, res) => {
       console.log(`[google-auth] Preparing redirect - initial finalRedirect: ${finalRedirect}`);
 
       // Cross-origin handshake support for external tools (MiroFish, VS Code, etc.)
-      const isExternalTool = finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback');
+      // Desktop handoff must never receive a raw session token, including on
+      // localhost development deployments where the legacy heuristic matches.
+      const isDesktopHandoff = isDesktopHandoffReturn(finalRedirect);
+      const isExternalTool = !isDesktopHandoff && (finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback'));
       console.log(`[google-auth] External tool check - includes localhost: ${finalRedirect.includes('localhost')}, includes hivemind_auth: ${finalRedirect.includes('?hivemind_auth=callback')}, isExternalTool: ${isExternalTool}`);
 
       if (isExternalTool) {
@@ -5860,7 +5959,8 @@ const server = http.createServer(async (req, res) => {
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
       // Cross-origin handshake support for external tools (MiroFish, VS Code, etc.)
-      if (finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback')) {
+      const isDesktopHandoff = isDesktopHandoffReturn(finalRedirect);
+      if (!isDesktopHandoff && (finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback'))) {
           const separator = finalRedirect.includes('?') ? '&' : '?';
           finalRedirect += `${separator}token=${sessionId}`;
       }

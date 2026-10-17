@@ -23,3 +23,9 @@ test('a foreign receipt cannot replace the owned object coordinates',async()=>{
 test('an unavailable configured archive leaves dispatch to fail rather than claim retention',async()=>{
  await assert.rejects(retainConfiguredKnowledgeOriginal({...input,objectClient:{configured:()=>true,persistFile:async()=>{throw Error('offline');}}}),/offline/);
 });
+
+test('native Worker receipt retains decoded spaces and Unicode filenames',async()=>{
+ const name='会社 source.txt';const objectKey=`org/${input.orgId}/sha256/${input.checksum}/${name}`;
+ const receipt=await retainConfiguredKnowledgeOriginal({...input,filename:name,objectClient:{configured:()=>true,persistFile:async()=>({objectKey})}});
+ assert.equal(receipt.sourceObjectKey,objectKey);
+});

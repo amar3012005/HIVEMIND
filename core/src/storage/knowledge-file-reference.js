@@ -54,10 +54,11 @@ export async function readOwnedKnowledgeFile({
   if (await isRemoteOrg(job.orgId)) throw fail('file_requires_selected_remote_store', 409);
   let bytes;
   if (job.sourceObjectKey) {
-    const expected = `org/${job.orgId}/sha256/${job.checksum}/${encodeURIComponent(safeUploadFilename(job.filename))}`;
-    if (job.sourceObjectKey !== expected) throw fail('file_storage_identity_mismatch', 409);
+    const prefix = `org/${job.orgId}/sha256/${job.checksum}/`;
+    const name = safeUploadFilename(job.filename);
+    if (![prefix + name, prefix + encodeURIComponent(name)].includes(job.sourceObjectKey)) throw fail('file_storage_identity_mismatch', 409);
     if (!cloudflareQueue) throw fail('file_store_unavailable', 503);
-    bytes = await cloudflareQueue.getObject(expected, { expectedEtag: job.sourceObjectEtag });
+    bytes = await cloudflareQueue.getObject(job.sourceObjectKey, { expectedEtag: job.sourceObjectEtag });
   } else {
     const path = localQueue?.rawFilePath({ orgId: job.orgId, checksum: job.checksum, filename: job.filename });
     if (!path) throw fail('original_file_unavailable', 404);

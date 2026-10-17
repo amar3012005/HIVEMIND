@@ -70,3 +70,9 @@ test('delegated project, team, container and service keys cannot inherit private
   await assert.rejects(readOwnedKnowledgeFile(d),{code:'file_not_found'});
  }
 });
+
+test('a native decoded Unicode object key reads without renaming persisted coordinates',async()=>{
+ const name='会社 source.txt';const objectKey=`org/${orgId}/sha256/${job.checksum}/${name}`;
+ const d=deps({...job,filename:name,sourceObjectKey:objectKey});d.cloudflareQueue={getObject:async key=>{assert.equal(key,objectKey);return bytes;}};
+ assert.deepEqual((await readOwnedKnowledgeFile(d)).bytes,bytes);
+});

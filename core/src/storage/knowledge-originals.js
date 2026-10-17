@@ -13,8 +13,10 @@ export async function retainConfiguredKnowledgeOriginal({
   }
   const name = safeUploadFilename(filename);
   const receipt = await objectClient.persistFile({ orgId, checksum, filename: name, fileBuffer });
-  const expected = `org/${orgId}/sha256/${checksum}/${encodeURIComponent(name)}`;
-  if (receipt?.objectKey !== expected) {
+  const prefix = `org/${orgId}/sha256/${checksum}/`;
+  // The native Worker decodes the URL path before returning its R2 key.
+  const expected = new Set([prefix + name, prefix + encodeURIComponent(name)]);
+  if (!expected.has(receipt?.objectKey)) {
     throw Object.assign(new Error('Durable original-file storage returned an invalid receipt.'), { code: 'SOURCE_OBJECT_STORE_FAILED' });
   }
   return { sourceObjectKey: receipt.objectKey, sourceObjectEtag: receipt.etag || null };

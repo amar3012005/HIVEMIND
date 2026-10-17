@@ -10,7 +10,7 @@ const orgId='11111111-1111-4111-8111-111111111111', userId='22222222-2222-4222-8
 const bytes=Buffer.from('a real source document');
 const job={ id:'33333333-3333-4333-8333-333333333333', orgId,userId,filename:'original.txt',contentType:'text/plain',
  checksum:createHash('sha256').update(bytes).digest('hex'),scopeType:'personal',scopeId:userId,scopeKey:`personal:${userId}` };
-function deps(row=job) { return { principal:{orgId,userId},jobId:job.id, jobStore:{findOwned:async(id,principal)=>{
+function deps(row=job) { return { principal:{orgId,userId,scopes:['memory.read']},jobId:job.id, jobStore:{findOwned:async(id,principal)=>{
  assert.equal(id,job.id);assert.deepEqual(principal,{orgId,userId});return row;
 }}, prisma:{userOrganization:{findFirst:async()=>({role:'member',roles:[]})}},localQueue:{rawFilePath:()=>'/owned/source'},readLocal:async()=>bytes }; }
 test('portable reference retains original identity without storage paths or credentials',()=>{
@@ -62,4 +62,11 @@ test('storage outage cannot trigger an unverified local fallback',async()=>{
  let result;
  await handleKnowledgeFileRoute({...d,req:{method:'GET'},res:{},url:new URL(`https://example.test?job_id=${job.id}`),jsonResponse:(_r,body,status)=>result={body,status}});
  assert.deepEqual(result,{body:{error:'file_store_unavailable'},status:503});
+});
+
+test('delegated project, team, container and service keys cannot inherit private source access',async()=>{
+ for(const limits of [{scopes:[]},{projectId:orgId},{teamId:orgId},{containerTags:['restricted']},{isServiceKey:true}]) {
+  const d=deps();Object.assign(d.principal,limits);d.readLocal=()=>assert.fail('must not read');
+  await assert.rejects(readOwnedKnowledgeFile(d),{code:'file_not_found'});
+ }
 });

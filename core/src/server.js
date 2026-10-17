@@ -13782,7 +13782,7 @@ exit \$RC
 
         case '/api/knowledge/file':
           if (req.method === 'GET') return handleKnowledgeFileRoute({
-            req, res, url, principal: { orgId, userId }, jsonResponse, prisma,
+            req, res, url, principal, jsonResponse, prisma,
             jobStore: knowledgeUploadJobStore, cloudflareQueue: cloudflareKnowledgeIngestClient,
             localQueue: kbIngestQueue, isRemoteOrg: orgIsRemote,
           });

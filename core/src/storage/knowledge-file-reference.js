@@ -32,10 +32,19 @@ export async function readOwnedKnowledgeFile({
   if (!UUID.test(principal?.orgId || '') || !UUID.test(principal?.userId || '') || !UUID.test(jobId || '')) {
     throw fail('file_not_found', 404);
   }
-  const job = await jobStore.findOwned(jobId, principal);
+  const scopes = principal.scopes || [];
+  if (!principal.master && !scopes.includes('*') && !scopes.includes('memory.read')) throw fail('file_not_found', 404);
+  // A user-owned file is not automatically available to every delegated key
+  // issued by that user. Unknown container scope and unscoped service keys deny.
+  if (principal.containerTags?.length || (principal.isServiceKey && !principal.projectId && !principal.teamId)) {
+    throw fail('file_not_found', 404);
+  }
+  const job = await jobStore.findOwned(jobId, { orgId: principal.orgId, userId: principal.userId });
   if (!job || job.orgId !== principal.orgId || job.userId !== principal.userId) throw fail('file_not_found', 404);
+  if ((principal.projectId && (job.scopeType !== 'project' || job.scopeId !== principal.projectId)) ||
+      (principal.teamId && (job.scopeType !== 'team' || job.scopeId !== principal.teamId))) throw fail('file_not_found', 404);
   const scope = await authorizeKnowledgeScope({
-    prisma, ...principal, targetScope: job.scopeType,
+    prisma, userId: principal.userId, orgId: principal.orgId, targetScope: job.scopeType,
     projectIds: job.scopeType === 'project' ? [job.scopeId] : [],
     primaryTeamId: job.scopeType === 'team' ? job.scopeId : null,
   });

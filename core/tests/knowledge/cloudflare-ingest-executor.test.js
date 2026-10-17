@@ -116,7 +116,7 @@ test('the Workflow executor verifies bytes, evidence coverage, persistence and t
   assert.deepEqual(events.find(([kind]) => kind === 'get').slice(1), [
     `org/${ids.org}/source`, { expectedEtag: 'etag-at-admission' },
   ]);
-  assert.deepEqual(events.find(([kind]) => kind === 'delete').slice(1), [`org/${ids.org}/source`]);
+  assert.equal(events.some(([kind]) => kind === 'delete'), false);
 });
 
 test('materialization records real evidence and promotion checkpoints', async () => {
@@ -397,4 +397,12 @@ test('Core restart requeues every current Workflow in-process checkpoint', async
   assert.match(sql.at(-1), /s\.status = 'processing'/);
   assert.match(sql.at(-1), /j\.processing_version = s\.processing_version/);
   assert.doesNotMatch(sql.at(-1), /stage_key LIKE 'capacity/);
+});
+
+test('remote policy still removes the central staging original after settlement', async () => {
+ const { executor, events } = fixture({remote:true});
+ const input={jobId:ids.job,orgId:ids.org,userId:ids.user,processingVersion:3};
+ await executor.execute({...input,stage:'materialize'});
+ await executor.execute({...input,stage:'reconcile'});
+ assert.equal(events.filter(([kind])=>kind==='delete').length,1);
 });

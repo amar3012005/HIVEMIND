@@ -530,7 +530,11 @@ export class CloudflareKnowledgeIngestExecutor {
           code: 'STALE_WORKFLOW', retryable: false,
         });
       }
-      await this.objectClient.deleteObject(job.sourceObjectKey);
+      // Hybrid originals are the durable download source, not temporary staging.
+      // Remote/AMR policies retain their existing central-copy cleanup.
+      if (job.storageMode !== 'hybrid' || remoteStorage) {
+        await this.objectClient.deleteObject(job.sourceObjectKey);
+      }
       await this._releaseProcessingLease(job);
       return {
         outputRefs: {

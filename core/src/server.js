@@ -31,6 +31,7 @@ import { transcribeAudio } from './llm/stt-route.js';
 import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
+import { handleKnowledgeFileRoute } from './routes/knowledge-file.js';
 import { KnowledgeUploadService } from './knowledge/upload-service.js';
 import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
 import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
@@ -13777,6 +13778,14 @@ exit \$RC
               return jsonResponse(res, { duplicate: false, in_progress: false, precheck_error: e.message });
             }
           }
+          break;
+
+        case '/api/knowledge/file':
+          if (req.method === 'GET') return handleKnowledgeFileRoute({
+            req, res, url, principal: { orgId, userId }, jsonResponse, prisma,
+            jobStore: knowledgeUploadJobStore, cloudflareQueue: cloudflareKnowledgeIngestClient,
+            localQueue: kbIngestQueue, isRemoteOrg: orgIsRemote,
+          });
           break;
 
         case '/api/knowledge/status':

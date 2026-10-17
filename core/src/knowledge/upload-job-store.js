@@ -1,3 +1,5 @@
+import { knowledgeFileReference } from '../storage/knowledge-file-reference.js';
+
 const TERMINAL = new Set(['ready', 'failed', 'dead', 'cancelled']);
 const LIVE_UPLOAD_STATUSES = ['queued', 'processing'];
 
@@ -383,6 +385,8 @@ export class KnowledgeUploadJobStore {
 
   static response(job) {
     if (!job) return null;
+    let fileReference = null;
+    try { fileReference = knowledgeFileReference(job); } catch { /* Legacy incomplete rows have no portable file reference. */ }
     const ready = job.status === 'ready';
     const evidenceOnly = ready && Number(job.segmentCount || 0) > 0 && Number(job.promotedCount || 0) === 0;
     const ingestMode = job.ingestMode === 'evidence' || job.metadata?.ingest_mode === 'evidence'
@@ -391,6 +395,7 @@ export class KnowledgeUploadJobStore {
     return {
       job_id: job.id, status: job.status, stage: ready ? 'ready' : job.stage, progress: ready ? 100 : job.progress,
       document_id: job.documentId, memory_ids: job.memoryIds || [], storage_mode: job.storageMode,
+      file_ref: fileReference,
       ingest_mode: ingestMode, evidence_only: evidenceOnly,
       evidence_only_reason: evidenceOnly ? (job.evidenceOnlyReason || 'extraction_yield_zero') : null,
       memory_generation_failed: ready && job.evidenceOnlyReason === 'promotion_failed',

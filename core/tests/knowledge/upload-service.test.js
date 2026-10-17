@@ -352,12 +352,12 @@ test('credit exhaustion returns the canonical quota contract without changing th
 
 test('BullMQ retains the original in the configured object store before dispatch', async () => {
  const d=dependencies();let archived=false;
- d.cloudflareQueue={isEnabled:async()=>false,configured:()=>true,persistFile:async({orgId,fileBuffer})=>{
-  assert.equal(orgId,ids.org);assert.deepEqual(fileBuffer,request().file.data);archived=true;return {objectKey:`org/${ids.org}/source`,etag:'receipt'};
+ d.cloudflareQueue={isEnabled:async()=>false,configured:()=>true,persistFile:async({orgId,fileBuffer,checksum,filename})=>{
+  assert.equal(orgId,ids.org);assert.deepEqual(fileBuffer,request().file.data);archived=true;return {objectKey:`org/${orgId}/sha256/${checksum}/${encodeURIComponent(filename)}`,etag:'receipt'};
  }};
  d.queue.enqueue=async()=>{assert.equal(archived,true);return {queue_job_id:'queue-1'};};
  const result=await new KnowledgeUploadService(d).admit(request());assert.equal(result.ok,true);
- assert.ok(d.updates.some(([,orgId,patch])=>orgId===ids.org && patch.sourceObjectKey===`org/${ids.org}/source`));
+ assert.ok(d.updates.some(([,orgId,patch])=>orgId===ids.org && patch.sourceObjectKey?.startsWith(`org/${ids.org}/sha256/`)));
 });
 test('original archive failure never dispatches a job with only an ephemeral working copy', async()=>{
  const d=dependencies();let queued=false;

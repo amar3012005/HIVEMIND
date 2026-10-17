@@ -10,6 +10,7 @@ import {
 } from './upload-contract.js';
 import { countPages } from './page-count.js';
 import { orgIsRemote } from '../vector/mneme/driver.js';
+import { retainConfiguredKnowledgeOriginal } from '../storage/knowledge-originals.js';
 import { planLimitBody } from '../billing/limit-response.js';
 
 const ACTIVE_UPLOAD_STATUSES = new Set(['queued', 'processing']);
@@ -300,13 +301,12 @@ export class KnowledgeUploadService {
       // existing object store is configured, retain the original through that
       // same store before dispatch; queue selection must not decide file lifetime.
       // Existing remote-memory policy remains authoritative.
-      if (filePath && this.cloudflareQueue?.configured?.() && !await this.isRemoteOrg(orgId)) {
-        const archived = await this.cloudflareQueue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
-        if (!archived?.objectKey) throw Object.assign(new Error('Durable original-file storage returned no receipt.'), {
-          code: 'SOURCE_OBJECT_STORE_FAILED',
+      if (filePath) {
+        const archived = await retainConfiguredKnowledgeOriginal({
+          orgId, checksum, filename, fileBuffer: file.data, storageMode,
+          objectClient: this.cloudflareQueue, isRemoteOrg: this.isRemoteOrg,
         });
-        sourceObjectKey = archived.objectKey;
-        sourceObjectEtag = archived.etag || null;
+        if (archived) ({ sourceObjectKey, sourceObjectEtag } = archived);
       }
       if (sourceObjectKey) {
         await this.jobStore.updateOwned(job.id, orgId, { sourceObjectKey, sourceObjectEtag });

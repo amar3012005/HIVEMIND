@@ -32,6 +32,7 @@ import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
 import { handleKnowledgeFileRoute } from './routes/knowledge-file.js';
+import { retainConfiguredKnowledgeOriginal } from './storage/knowledge-originals.js';
 import { KnowledgeUploadService } from './knowledge/upload-service.js';
 import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
 import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
@@ -13666,11 +13667,18 @@ exit \$RC
                     + 'retention, or passed the retention window). Re-upload the file to ingest it.',
                 }, 409);
               }
+              const originalReceipt = !workflowReplay && filePath && !job.sourceObjectKey
+                ? await retainConfiguredKnowledgeOriginal({
+                    orgId, checksum: job.checksum, filename: job.filename, fileBuffer: fs.readFileSync(filePath),
+                    storageMode: job.storageMode, objectClient: cloudflareKnowledgeIngestClient, isRemoteOrg: orgIsRemote,
+                  })
+                : null;
               const processingVersion = (job.processingVersion || 1) + 1;
               await knowledgeUploadJobStore.updateOwned(job.id, orgId, {
                 status: 'queued', stage: 'queued', progress: 0, processingVersion,
                 attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
                 workflowInstanceId: null, queueJobId: null,
+                ...(originalReceipt || {}),
               });
               const queued = await selectedQueue.enqueue({
                 userId: job.userId || userId, orgId,

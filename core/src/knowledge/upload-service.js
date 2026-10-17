@@ -294,8 +294,20 @@ export class KnowledgeUploadService {
         persisted = await selectedQueue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
       }
       const filePath = typeof persisted === 'string' ? persisted : null;
-      const sourceObjectKey = persisted && typeof persisted === 'object' ? persisted.objectKey : null;
-      const sourceObjectEtag = persisted && typeof persisted === 'object' ? persisted.etag : null;
+      let sourceObjectKey = persisted && typeof persisted === 'object' ? persisted.objectKey : promotionOnly ? job.sourceObjectKey || null : null;
+      let sourceObjectEtag = persisted && typeof persisted === 'object' ? persisted.etag : promotionOnly ? job.sourceObjectEtag || null : null;
+      // BullMQ's working copy is removed after successful ingestion. When the
+      // existing object store is configured, retain the original through that
+      // same store before dispatch; queue selection must not decide file lifetime.
+      // Existing remote-memory policy remains authoritative.
+      if (filePath && this.cloudflareQueue?.configured?.() && !await this.isRemoteOrg(orgId)) {
+        const archived = await this.cloudflareQueue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
+        if (!archived?.objectKey) throw Object.assign(new Error('Durable original-file storage returned no receipt.'), {
+          code: 'SOURCE_OBJECT_STORE_FAILED',
+        });
+        sourceObjectKey = archived.objectKey;
+        sourceObjectEtag = archived.etag || null;
+      }
       if (sourceObjectKey) {
         await this.jobStore.updateOwned(job.id, orgId, { sourceObjectKey, sourceObjectEtag });
       }

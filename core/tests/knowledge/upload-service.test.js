@@ -117,10 +117,11 @@ test('force reprocesses a ready evidence-only job as both without creating anoth
   assert.equal(queued.metadata.ingest_mode, 'both');
 });
 
-test('evidence-to-both upgrade queues stored-evidence promotion without persisting or reparsing bytes', async () => {
+test('evidence-to-both upgrade retains the original receipt without persisting or reparsing bytes', async () => {
   const duplicate = {
     id: ids.job, userId: ids.user, status: 'ready', documentId: '44444444-4444-4444-8444-444444444444',
     processingVersion: 1, ingestMode: 'evidence', metadata: { ingest_mode: 'evidence' }, memoryIds: [],
+    sourceObjectKey: `org/${ids.org}/source`, sourceObjectEtag: 'original-etag',
   };
   const deps = dependencies({ duplicate });
   let persisted = false;
@@ -141,6 +142,9 @@ test('evidence-to-both upgrade queues stored-evidence promotion without persisti
   const reset = deps.updates.find(([, , data]) => data?.processingVersion === 2)?.[2];
   assert.equal(reset.ingestMode, 'both');
   assert.equal(reset.metadata.promotion_existing_evidence, true);
+  const receipt = deps.updates.at(-1)[2];
+  assert.equal(receipt.sourceObjectKey, duplicate.sourceObjectKey);
+  assert.equal(receipt.sourceObjectEtag, duplicate.sourceObjectEtag);
 });
 
 test('accepted upload persists one durable job before enqueue', async () => {
@@ -344,4 +348,25 @@ test('credit exhaustion returns the canonical quota contract without changing th
     referral_trial: false, commercial_action: null,
   });
   assert.equal(deps.created.length, 1);
+});
+
+test('BullMQ retains the original in the configured object store before dispatch', async () => {
+ const d=dependencies();let archived=false;
+ d.cloudflareQueue={isEnabled:async()=>false,configured:()=>true,persistFile:async({orgId,fileBuffer})=>{
+  assert.equal(orgId,ids.org);assert.deepEqual(fileBuffer,request().file.data);archived=true;return {objectKey:`org/${ids.org}/source`,etag:'receipt'};
+ }};
+ d.queue.enqueue=async()=>{assert.equal(archived,true);return {queue_job_id:'queue-1'};};
+ const result=await new KnowledgeUploadService(d).admit(request());assert.equal(result.ok,true);
+ assert.ok(d.updates.some(([,orgId,patch])=>orgId===ids.org && patch.sourceObjectKey===`org/${ids.org}/source`));
+});
+test('original archive failure never dispatches a job with only an ephemeral working copy', async()=>{
+ const d=dependencies();let queued=false;
+ d.cloudflareQueue={isEnabled:async()=>false,configured:()=>true,persistFile:async()=>{throw new Error('archive unavailable');}};
+ d.queue.enqueue=async()=>{queued=true;return {};};
+ await assert.rejects(new KnowledgeUploadService(d).admit(request()),/archive unavailable/);assert.equal(queued,false);
+});
+test('remote-memory uploads do not add a new central original-file archive',async()=>{
+ const d=dependencies({isRemoteOrg:()=>true});
+ d.cloudflareQueue={isEnabled:async()=>false,configured:()=>true,persistFile:()=>assert.fail('remote policy must not be bypassed')};
+ assert.equal((await new KnowledgeUploadService(d).admit(request())).ok,true);
 });

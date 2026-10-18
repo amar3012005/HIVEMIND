@@ -76,3 +76,11 @@ test('session execution rejects writes and returns a read receipt', async () => 
   assert.equal(result.data.messages[0].id, 'm1');
   assert.deepEqual(result.receipt, { provider: 'composio', transport: 'tool_router_session', tool_slug: 'GMAIL_FETCH_EMAILS', session_log_id: 'log-1', effect: 'read' });
 });
+
+
+test('draft inspection is read-only while creating and sending drafts remain approval-gated', () => {
+  assert.equal(isGovernedReadTool({ slug: 'GMAIL_GET_DRAFT' }), true);
+  assert.equal(isGovernedReadTool({ slug: 'GMAIL_CREATE_EMAIL_DRAFT' }), false);
+  assert.equal(isGovernedReadTool({ slug: 'GMAIL_SEND_DRAFT' }), false);
+  assert.equal(isGovernedReadTool({ slug: 'GMAIL_DELETE_DRAFT' }), false);
+});

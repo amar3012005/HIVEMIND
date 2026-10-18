@@ -18,6 +18,8 @@ const LEGACY_TOOL_SLUGS = Object.freeze({
 });
 
 const WRITE_TOOL_MARKERS = /(?:^|_)(?:SEND|CREATE|UPDATE|DELETE|REMOVE|ARCHIVE|PUBLISH|POST|UPLOAD|INVITE|ADD|CANCEL|MOVE|COPY|REPLY|FORWARD|DRAFT)(?:_|$)/i;
+// Verified provider read: DRAFT is the resource name here, not an action.
+const EXACT_READ_TOOLS = new Set(['GMAIL_GET_DRAFT']);
 const READ_TOOL_MARKERS = /(?:^|_)(?:GET|LIST|SEARCH|FETCH|FIND|RETRIEVE|LOOKUP|QUERY|READ|CHECK|DESCRIBE|EXTRACT|VIEW|DOWNLOAD)(?:_|$)/i;
 const GOVERNED_READ_GRANT_TTL_MS = Math.max(30_000, Number(process.env.HYPER_COMPOSIO_READ_GRANT_TTL_MS || 300_000));
 
@@ -29,7 +31,7 @@ function governedGrantKey(secret) {
 
 export function isGovernedReadTool(tool) {
   const slug = String(tool?._composio?.slug || tool?.slug || tool?.function?.name || '').trim();
-  if (!slug || WRITE_TOOL_MARKERS.test(slug) || !READ_TOOL_MARKERS.test(slug)) return false;
+  if (!slug || (!EXACT_READ_TOOLS.has(slug) && (WRITE_TOOL_MARKERS.test(slug) || !READ_TOOL_MARKERS.test(slug)))) return false;
   const description = String(tool?.function?.description || tool?.description || '');
   return !/\b(?:send|create|update|delete|remove|publish|post|upload|invite|modify|write)\b/i.test(description);
 }

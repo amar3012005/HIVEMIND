@@ -20,6 +20,7 @@ const LEGACY_TOOL_SLUGS = Object.freeze({
 const WRITE_TOOL_MARKERS = /(?:^|_)(?:SEND|CREATE|UPDATE|DELETE|REMOVE|ARCHIVE|PUBLISH|POST|UPLOAD|INVITE|ADD|CANCEL|MOVE|COPY|REPLY|FORWARD|DRAFT)(?:_|$)/i;
 // Verified provider read: DRAFT is the resource name here, not an action.
 const EXACT_READ_TOOLS = new Set(['GMAIL_GET_DRAFT']);
+export function isDraftOnlyTool(slug) { return slug === 'GMAIL_CREATE_EMAIL_DRAFT'; }
 const READ_TOOL_MARKERS = /(?:^|_)(?:GET|LIST|SEARCH|FETCH|FIND|RETRIEVE|LOOKUP|QUERY|READ|CHECK|DESCRIBE|EXTRACT|VIEW|DOWNLOAD)(?:_|$)/i;
 const GOVERNED_READ_GRANT_TTL_MS = Math.max(30_000, Number(process.env.HYPER_COMPOSIO_READ_GRANT_TTL_MS || 300_000));
 
@@ -91,11 +92,12 @@ export function issueGovernedToolGrant({ orgId, userId, toolkit, sessionId, tool
   }
   if (!['composio', 'nango-native-gmail'].includes(providerSource)) throw new Error('governed_tool_grant_denied');
   const effect = toolSlug === '__connection__' ? 'connection' : isGovernedReadTool({ slug: toolSlug }) ? 'read' : 'write';
-  const grant = { orgId, userId, toolkit, sessionId, toolSlug, effect, providerSource, expiresAt: now + GOVERNED_READ_GRANT_TTL_MS };
+  const grant = { orgId, userId, toolkit, sessionId, toolSlug, effect, providerSource,
+    approvalRequired: effect === 'write' && !(providerSource === 'composio' && isDraftOnlyTool(toolSlug)), expiresAt: now + GOVERNED_READ_GRANT_TTL_MS };
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', governedGrantKey(secret), iv);
   const encrypted = Buffer.concat([cipher.update(JSON.stringify(grant), 'utf8'), cipher.final()]);
-  return { grantId: `v2.${iv.toString('base64url')}.${encrypted.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}`, effect, expiresAt: grant.expiresAt };
+  return { grantId: `v2.${iv.toString('base64url')}.${encrypted.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}`, effect, approvalRequired: grant.approvalRequired, expiresAt: grant.expiresAt };
 }
 
 export function resolveGovernedToolGrant({ grantId, orgId, userId, toolSlug }, { now = Date.now(), secret } = {}) {

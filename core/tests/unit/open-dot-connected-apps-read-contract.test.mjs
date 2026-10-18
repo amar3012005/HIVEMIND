@@ -29,7 +29,8 @@ test('Open Dot service bridge derives identity and separates reads from approval
   assert.match(route, /server-derived-from-api-key/);
   assert.doesNotMatch(route, /body\.(?:org_id|user_id|orgId|userId)/);
   assert.doesNotMatch(route, /action === '(?:execute|execute_write|manage_connection|schemas)'/);
-  assert.doesNotMatch(route, /executeSessionTool\(/);
+  assert.match(route, /grant\.approvalRequired === false && provider === 'composio'/);
+  assert.match(route, /executeDraftOnly\(/);
   assert.doesNotMatch(route, /execute_write/);
 });
 

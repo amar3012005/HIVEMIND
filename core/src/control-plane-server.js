@@ -10515,7 +10515,7 @@ const server = http.createServer(async (req, res) => {
             name: tool.function?.name || `composio_${toolSlug.toLowerCase()}`,
             toolSlug, description: tool.function?.description || '',
             inputSchema: tool.function?.parameters || { type: 'object', properties: {} },
-            toolkit: tool._composio.toolkit || toolkit, effect: grant.effect,
+            toolkit: tool._composio.toolkit || toolkit, effect: grant.effect, approvalRequired: grant.approvalRequired,
             providerSource: 'composio', grantId: grant.grantId, grantExpiresAt: grant.expiresAt,
             ...(grant.effect === 'write' ? { attemptKey: crypto.randomBytes(24).toString('base64url') } : {}),
           };
@@ -10626,6 +10626,12 @@ const server = http.createServer(async (req, res) => {
             draft = await prisma.pendingWrite.findFirst({ where: { idempotencyKey, orgId: principal.orgId, userId: principal.userId } });
             if (!draft) throw error;
           }
+        }
+        if (grant.approvalRequired === false && provider === 'composio') {
+          const { executeDraftOnly } = await import('./connectors/composio/draft-only-execution.js');
+          const result = await executeDraftOnly({ prisma, row: draft, orgId: principal.orgId, userId: principal.userId,
+            execute: () => composioService.executeSessionTool(sessionId, toolSlug, args) });
+          return jsonResponse(res, { ok: true, action, ...result, authority: 'user-scoped-draft-only-write' }, 200, privateHeaders);
         }
         return jsonResponse(res, {
           ok: true, action, status: draft.status === 'draft' ? 'approval_required' : draft.status,

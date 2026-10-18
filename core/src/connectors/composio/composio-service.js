@@ -17,10 +17,10 @@
  * Multi-tenant model: ONE Composio project (one COMPOSIO_API_KEY, set only
  * on the control plane, never sent to the frontend). Tenant isolation is
  * the `user_id` parameter Composio scopes connected_accounts/executions
- * by. Governed runs use a stable `${orgId}:${userId}` subject so one user's
- * connected account is never silently reused by another person in the same
- * organization. Older non-governed routes remain explicitly org-scoped until
- * their connection migration is complete.
+ * by. Personal connections use the native Harness `hivemind:${userId}`
+ * subject. The resolver also recognizes prior user/workspace subjects and
+ * explicitly shared legacy workspace accounts; it never queries another user
+ * or workspace. Workflow sessions remain separate from connection ownership.
  * Auth configs (one per toolkit) are created once, ops-time, in the
  * Composio dashboard or via createAuthConfig() below — never per-tenant.
  */
@@ -94,7 +94,7 @@ function composioDelete(path) { return _composioRequest('DELETE', path); }
  */
 export function composioConnectionSubject(orgId, { userId = null, connectionScope = null } = {}) {
   const scope = String(connectionScope || process.env.COMPOSIO_GOVERNED_CONNECTION_SCOPE || (userId ? 'user' : 'org')).toLowerCase();
-  if (scope === 'user' && userId) return `${orgId}:${userId}`;
+  if (scope === 'user' && userId) return `hivemind:${userId}`;
   return String(orgId || '');
 }
 
@@ -102,19 +102,13 @@ export function composioConnectionSubject(orgId, { userId = null, connectionScop
  * Delete every connected account an org has for one toolkit (disconnect).
  * Returns the number of accounts removed.
  */
-export async function disconnectToolkit(orgId, toolkitSlug) {
-  const accountData = await _composioRequest(
-    'GET',
-    `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(orgId)}`,
-    null,
-    { retries: 0, timeoutMs: 3_000 },
-  );
-  const accounts = (accountData?.items || []).map((item) => ({
-    id: item.id,
-    toolkit: item.toolkit?.slug,
-    status: item.status,
-  }));
-  const rows = accounts.filter((a) => a.toolkit === toolkitSlug);
+export async function disconnectToolkit(orgId, toolkitSlug, opts = {}) {
+  const accounts = await listConnectedAccounts(orgId, opts);
+  const preferred = accounts.find(row => row.toolkit === toolkitSlug && row.status === 'ACTIVE')
+    || accounts.find(row => row.toolkit === toolkitSlug);
+  // Remove only the selected account owner's attempts, not another scope's
+  // account for the same app. Invalidate router caches after provider deletion.
+  const rows = accounts.filter(row => row.toolkit === toolkitSlug && row.subject === preferred?.subject);
   let removed = 0;
   for (const row of rows) {
     try {
@@ -125,6 +119,8 @@ export async function disconnectToolkit(orgId, toolkitSlug) {
       if (err.status !== 404) throw err;
     }
   }
+  TOOL_ROUTER_SESSION_CACHE.clear();
+  TOOL_ROUTER_DISCOVERY_CACHE.clear();
   return removed;
 }
 
@@ -139,14 +135,34 @@ export async function disconnectToolkit(orgId, toolkitSlug) {
  * @param {string} orgId — used as Composio's user_id (tenant key)
  * @returns {Promise<Array<{ id, toolkit, status }>>}
  */
+/** All subjects are derived from authenticated server identity, never tool arguments.
+ * Organization accounts are the pre-existing shared workspace connections.
+ * Listing them does not transfer ownership to the invoking user.
+ */
+export function authorizedConnectionSubjects(orgId, opts = {}) {
+  if (!orgId) throw new Error('connection_workspace_required');
+  const canonical = composioConnectionSubject(orgId, opts);
+  if (!opts.userId || opts.connectionScope === 'org') return [String(orgId)];
+  return [...new Set([canonical, `hivemind:${opts.userId}`, `${orgId}:${opts.userId}`, String(orgId)])];
+}
+
 export async function listConnectedAccounts(orgId, opts = {}) {
-  const subject = composioConnectionSubject(orgId, opts);
-  return listAccountsForSubject(subject);
+  const subjects = authorizedConnectionSubjects(orgId, opts);
+  // A failed provider lookup is unknown, never an empty/disconnected catalog.
+  const catalogs = await Promise.all(subjects.map(async subject =>
+    (await listAccountsForSubject(subject, { native: true })).map(row => ({
+      ...row, subject, connectionScope: subject === String(orgId) ? 'org' : 'user',
+    }))));
+  const seen = new Set();
+  return catalogs.flat().filter(row => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id); return true;
+  });
 }
 
 /** Native Harness account identity is fixed by its authenticated session witness. */
 export async function listNativeConnectedAccounts(orgId, userId, subject) {
-  if (![String(orgId), `hivemind:${userId}`].includes(subject)) throw new Error('native_connection_subject_not_authorized');
+  if (!authorizedConnectionSubjects(orgId, { userId }).includes(subject)) throw new Error('native_connection_subject_not_authorized');
   return listAccountsForSubject(subject, { native: true });
 }
 
@@ -362,7 +378,7 @@ function normalizedSessionKey(orgId, toolkits, {
     manageConnections ? 'connections' : 'no-connections',
     manageConnections && callbackUrl ? `callback:${String(callbackUrl).slice(0, 400)}` : '',
   ].filter(Boolean).join('|');
-  return `${subject}:${[...new Set(toolkits || [])].map(String).sort().join(',')}:${modes}`;
+  return `${orgId}:${userId || "workspace"}:${subject}:${[...new Set(toolkits || [])].map(String).sort().join(',')}:${modes}`;
 }
 
 function collectToolSlugs(value, prefixes, output = new Set()) {
@@ -422,7 +438,7 @@ export async function getToolRouterSession(orgId, toolkits, {
 } = {}) {
   const enabled = [...new Set((toolkits || []).map((toolkit) => String(toolkit).toLowerCase()).filter(Boolean))].sort();
   if (!orgId || !enabled.length) throw new Error('Composio Session requires an org and at least one toolkit');
-  const subject = composioConnectionSubject(orgId, { userId, connectionScope });
+  let subject = composioConnectionSubject(orgId, { userId, connectionScope });
   const sessionOptions = { userId, connectionScope, includeCustomToolkit, manageConnections, callbackUrl };
   const key = normalizedSessionKey(orgId, enabled, sessionOptions);
 
@@ -433,7 +449,8 @@ export async function getToolRouterSession(orgId, toolkits, {
     try {
       const existing = await composioGet(`/api/v3.1/tool_router/session/${encodeURIComponent(String(sessionId))}`);
       const sessionSubject = existing?.config?.user_id || existing?.user_id || null;
-      if (sessionSubject && String(sessionSubject) !== subject) throw new Error('Composio session subject mismatch');
+      if (!sessionSubject || !authorizedConnectionSubjects(orgId, { userId, connectionScope }).includes(String(sessionSubject))) throw new Error('Composio session subject mismatch');
+      subject = String(sessionSubject);
       const value = {
         id: String(sessionId), subject, toolkits: enabled, connectedAccounts: {},
         customToolkitAttached: false, customToolkitError: null,
@@ -447,11 +464,9 @@ export async function getToolRouterSession(orgId, toolkits, {
       if (error?.status !== 404) throw error;
     }
   }
-  const cached = TOOL_ROUTER_SESSION_CACHE.get(key);
-  if (cached && Date.now() - cached.at < SESSION_TTL_MS) return { ...cached.value, cacheHit: true };
-
   const accounts = await listConnectedAccounts(orgId, { userId, connectionScope });
   const connectedAccounts = {};
+  const selectedSubjects = new Set();
   for (const toolkit of enabled) {
     const account = accounts.find((row) => row.toolkit === toolkit && row.status === 'ACTIVE');
     if (!account) {
@@ -459,6 +474,19 @@ export async function getToolRouterSession(orgId, toolkits, {
       throw new Error(`No active Composio account for ${toolkit}`);
     }
     connectedAccounts[toolkit] = account.id;
+    selectedSubjects.add(account.subject);
+  }
+  // A provider session has one owner. Never silently bind accounts belonging
+  // to different historical subjects to it; callers can discover one app at a time.
+  if (selectedSubjects.size > 1) throw new Error('connection_scopes_require_separate_toolkit_sessions');
+  if (selectedSubjects.size === 1) subject = [...selectedSubjects][0];
+  const cached = TOOL_ROUTER_SESSION_CACHE.get(key);
+  // Reconcile the account binding before reuse: an OAuth completion or account
+  // removal must not leave a cached disconnected/obsolete session for ten minutes.
+  if (cached && Date.now() - cached.at < SESSION_TTL_MS
+    && cached.value.subject === subject
+    && JSON.stringify(cached.value.connectedAccounts) === JSON.stringify(connectedAccounts)) {
+    return { ...cached.value, cacheHit: true };
   }
   const body = {
     // The remote Tool Router session must use the same authority subject that
@@ -1032,7 +1060,7 @@ export async function getOrCreateAuthConfigId(toolkitSlug, toolkitMeta) {
  * @param {string} toolkitSlug
  * @param {string} apiKey
  */
-export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
+export async function createApiKeyConnection(orgId, toolkitSlug, apiKey, opts = {}) {
   const authConfigId = getAuthConfigId(toolkitSlug) || await (async () => {
     const data = await composioPost('/api/v3.1/auth_configs', {
       toolkit: { slug: toolkitSlug },
@@ -1050,7 +1078,7 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey) {
 
   const data = await composioPost('/api/v3/connected_accounts', {
     auth_config: { id: authConfigId },
-    connection: { user_id: orgId, state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } } },
+    connection: { user_id: composioConnectionSubject(orgId, opts), state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } } },
   });
   return { id: data?.id, status: data?.status };
 }

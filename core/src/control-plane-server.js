@@ -8074,7 +8074,7 @@ const server = http.createServer(async (req, res) => {
         const orgId = current.session.orgId || current.session.org_id;
         if (orgId) {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
-          const accounts = await composioService.listConnectedAccounts(orgId);
+          const accounts = await composioService.listConnectedAccounts(orgId, { userId: current.session.userId });
           reconcileConnectedActivity({ prisma, orgId, userId: current.session.userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
           result.splice(0, result.length, ...overlayActiveApps(result, accounts));
           const knownProviders = new Set(result.map((e) => e.provider));
@@ -8178,6 +8178,7 @@ const server = http.createServer(async (req, res) => {
       // gets one auto-provisioned instead of 400ing.
       const link = await composioService.createConnectLink(toolkitSlug, orgId, {
         callbackUrl,
+        userId: current.session.userId,
         toolkitMeta: body.toolkit_meta && typeof body.toolkit_meta === 'object' ? {
           composioManagedAuthSchemes: Array.isArray(body.toolkit_meta.composio_managed_auth_schemes) ? body.toolkit_meta.composio_managed_auth_schemes : [],
           noAuth: Boolean(body.toolkit_meta.no_auth),
@@ -8217,7 +8218,7 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req).catch(() => ({}));
       const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
       if (!apiKey) return jsonResponse(res, { error: 'api_key is required' }, 400);
-      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey);
+      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey, { userId: current.session.userId });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_connect_started', eventCategory: 'connectors', action: 'create',
@@ -8246,7 +8247,7 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
-      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug);
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, { userId: current.session.userId });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
@@ -8281,7 +8282,7 @@ const server = http.createServer(async (req, res) => {
         });
       const [page, accounts] = await Promise.all([
         pagePromise,
-        orgId ? composioService.listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
+        orgId ? composioService.listConnectedAccounts(orgId, { userId: current.session.userId }).catch(() => []) : Promise.resolve([]),
       ]);
       // Real per-org connection state, not something the FE has to remember
       // client-side across reloads — the "connected" flag here reflects

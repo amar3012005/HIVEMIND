@@ -36,12 +36,13 @@
   ],
   "release": {
     "requested": true,
-    "source_sha": "1c1524c8c809fc66509f1fcad51853f352462485",
-    "artifact": "hivemind/control-plane:complete-erasure-v4",
-    "rollback": "hivemind/control-plane:admin-erasure-31088de7"
+    "source_sha": "0955809732a6d0743fa93e0bc8b0d6a366fcda46",
+    "artifact": "hivemind/control-plane:selected-erasure-09558097",
+    "rollback": "hivemind/control-plane:selected-erasure-6e3f9836"
   },
   "blockers": [
     "Legacy content-addressed attachment objects without recoverable ownership coordinates cannot be safely attributed for physical purge.",
     "Company-managed native histories bound to a human need a supported ownership-transfer adapter; erasure blocks instead of deleting them."
-  ]
+  ],
+  "latest_selected_account_evidence": "/Users/amar/Downloads/runtime-repair-tracker/admin-user-erasure/selected-users/CHECKLIST.md"
 }

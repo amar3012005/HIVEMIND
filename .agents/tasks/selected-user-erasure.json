@@ -1,44 +1,59 @@
 {
   "title": "Selected user permanent erasure and shared ownership preservation",
-  "status": "open",
+  "status": "complete",
   "baseline_sha": "f8633a7e09",
   "native_owner": "Control durable account erasure worker and native controller",
   "outcome": "Verify disposable account; delete exactly 19 authorized emails; preserve other members and shared organization records",
   "scope": [
     "account lifecycle cleanup",
-    "explicitly selected accounts"
+    "explicitly selected accounts",
+    "Visual Worker scoped object lifecycle"
   ],
   "criteria": [
     {
       "id": "cleanup-regression",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/admin-user-erasure/selected-users/status.json"
+      ]
     },
     {
       "id": "disposable-readback",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/admin-user-erasure/selected-users/status.json"
+      ]
     },
     {
       "id": "selected-account-receipts",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/admin-user-erasure/selected-users/status.json"
+      ]
     },
     {
       "id": "shared-data-preserved",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/admin-user-erasure/selected-users/status.json"
+      ]
     }
   ],
   "release": {
     "requested": true,
-    "source_sha": null,
-    "artifact": null,
-    "rollback": "hivemind/control-plane:aster-erasure-7195ee0e"
+    "source_sha": "0955809732a6d0743fa93e0bc8b0d6a366fcda46",
+    "artifact": "hivemind/control-plane:selected-erasure-09558097",
+    "rollback": "hivemind/control-plane:selected-erasure-6e3f9836",
+    "worker_version": "6369294f-a90b-4ded-94f3-c2b27cf0f207"
   },
-  "blockers": []
+  "blockers": [],
+  "limitations": [
+    "Legacy unindexed content-addressed files without recoverable ownership coordinates",
+    "Company-managed native histories/private browser ownership needs a safe supported transfer adapter",
+    "Unsupported remote/BYOD data stores require a verified provider adapter"
+  ]
 }

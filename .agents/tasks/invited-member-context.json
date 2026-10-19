@@ -1,1 +1,51 @@
-{"title":"Shared onboarding memories and invited member context","status":"in_progress","native_owner":"Core ProfileStore and Control company onboarding","outcome":"Every authorized workspace member reads company onboarding memories and organization profile while keeping individual identity separate","criteria":[{"id":"shared-memory","required":true,"passed":false,"evidence":[]},{"id":"personal-identity","required":true,"passed":false,"evidence":[]},{"id":"production-release","required":true,"passed":false,"evidence":[]}],"preserve":["owner personal chat memories","cross-tenant isolation","native Brain and Runtime harnesses"],"release":{"requested":true},"blockers":[]}
+{
+  "title": "Shared onboarding memories and invited member context",
+  "status": "complete",
+  "native_owner": "Core ProfileStore and Control company onboarding",
+  "outcome": "Every authorized workspace member reads company onboarding memories and organization profile while keeping individual identity separate",
+  "criteria": [
+    {
+      "id": "shared-memory",
+      "required": true,
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/live-acceptance.json",
+        "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/cutover.json"
+      ]
+    },
+    {
+      "id": "personal-identity",
+      "required": true,
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/live-acceptance.json",
+        "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/cutover.json"
+      ]
+    },
+    {
+      "id": "production-release",
+      "required": true,
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/live-acceptance.json",
+        "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/cutover.json"
+      ]
+    }
+  ],
+  "preserve": [
+    "owner personal chat memories",
+    "cross-tenant isolation",
+    "native Brain and Runtime harnesses"
+  ],
+  "release": {
+    "requested": true,
+    "source_sha": "9ac953066ed9401c9a9f8ab728829aa44cb32d54",
+    "deployed": true,
+    "receipt": "/Users/amar/Downloads/runtime-repair-tracker/invited-member-context/cutover.json"
+  },
+  "blockers": [],
+  "limitations": [
+    "Live acceptance used existing internal service authentication with explicit caller identities; signed-in browser visual acceptance remains pending.",
+    "Original intermittent latency incident root cause is a separate unresolved investigation."
+  ]
+}

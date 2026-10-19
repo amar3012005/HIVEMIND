@@ -165,9 +165,8 @@ export class ControlPlaneSessionStore {
     const redis = await getRedisClient(this.config);
     if (redis) {
       const key = `cp:${memoryStateKey(stateId)}`;
-      const raw = await redis.get(key);
+      const raw = await redis.eval("local v = redis.call('GET', KEYS[1]); if v then redis.call('DEL', KEYS[1]); end; return v", 1, key);
       if (!raw) return null;
-      await redis.del(key);
       return JSON.parse(raw);
     }
 

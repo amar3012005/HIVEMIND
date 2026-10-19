@@ -3,3 +3,15 @@ test('private Nango grants deleted; shared provider grant retained for surviving
 test('provider failure leaves local coordinates for retry',async()=>{let removed=false;const db={nangoConnection:{findMany:async()=>[{providerKey:'gmail',connectionId:'p'}],count:async()=>0,deleteMany:async()=>{removed=true}}};await assert.rejects(erasePrivateConnectorGrants(db,'u',[],{eraseComposio:async()=>{},eraseNango:async()=>{throw Error('outage')}}));assert.equal(removed,false);});
 test('native adapter must be configured and return matching operation receipt',async()=>{const old={...process.env};try{delete process.env.ACCOUNT_ERASURE_NATIVE_URL;await assert.rejects(eraseNativeAccount({operationId:'a',workerId:'b'}),e=>e.code==='NATIVE_ERASURE_UNAVAILABLE');process.env.ACCOUNT_ERASURE_NATIVE_URL='http://private/erase';process.env.ACCOUNT_ERASURE_NATIVE_TOKEN='secret';await assert.rejects(eraseNativeAccount({operationId:'a',workerId:'b'},async()=>({ok:true,json:async()=>({verified:true,operationId:'wrong'})})),e=>e.code==='NATIVE_ERASURE_INCOMPLETE');}finally{for(const k of ['ACCOUNT_ERASURE_NATIVE_URL','ACCOUNT_ERASURE_NATIVE_TOKEN']){if(old[k]===undefined)delete process.env[k];else process.env[k]=old[k]}}});
 test('personal notification deliveries are erased using base tables only',async()=>{const removed=[];const db={$queryRawUnsafe:async(sql,...args)=>{assert(sql.includes("table_type='BASE TABLE'"));return[{column_name:'user_id'}]},$executeRawUnsafe:async sql=>{removed.push(sql);return 0}};const {cleanupPrivateAccountRows}=await import('../../src/security/account-private-cleanup.js');await cleanupPrivateAccountRows(db,'u',[]);assert(removed.some(sql=>sql.includes('system_email_deliveries')));assert(!removed.some(sql=>sql.includes('audit_logs')));});
+test('private trigger event children are erased before subscriptions; another user is untouched',async()=>{
+ const target='11111111-1111-4111-8111-111111111111';const other='22222222-2222-4222-8222-222222222222';
+ const rows={events:[{userId:target},{userId:other}],subscriptions:[{userId:target},{userId:other}]};const order=[];
+ const db={$queryRawUnsafe:async(_sql,table)=>['hivemind_trigger_events','hivemind_trigger_subscriptions'].includes(table)?[{column_name:'user_id'}]:[],$executeRawUnsafe:async(sql,id)=>{
+  assert.equal(id,target);assert.match(sql,/WHERE user_id::text=\$1::text/);
+  if(sql.includes('hivemind_trigger_events')){rows.events=rows.events.filter(x=>x.userId!==id);order.push('events');}
+  else if(sql.includes('hivemind_trigger_subscriptions')){assert(!rows.events.some(x=>x.userId===id),'subscription FK still has an owned child');rows.subscriptions=rows.subscriptions.filter(x=>x.userId!==id);order.push('subscriptions');}
+  return 1;
+ }};
+ const {cleanupPrivateAccountRows}=await import('../../src/security/account-private-cleanup.js');await cleanupPrivateAccountRows(db,target,[]);
+ assert.deepEqual(order,['events','subscriptions']);assert.deepEqual(rows.events,[{userId:other}]);assert.deepEqual(rows.subscriptions,[{userId:other}]);
+});

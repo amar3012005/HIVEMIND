@@ -1,0 +1,46 @@
+{
+  "title": "Separate universal company onboarding from optional workspace modes",
+  "status": "open",
+  "native_owner": "Outer Da-vinci shell and Worker route guard",
+  "scope": [
+    "My Company onboarding",
+    "Brain landing",
+    "optional mode flag"
+  ],
+  "preserve": [
+    "saved conversations",
+    "native Runtime/Brain harnesses",
+    "admin grants"
+  ],
+  "criteria": [
+    {
+      "id": "onboarding-independent-of-mode-flag",
+      "passed": false,
+      "required": true,
+      "evidence": []
+    },
+    {
+      "id": "brain-only-sidebar",
+      "passed": false,
+      "required": true,
+      "evidence": []
+    },
+    {
+      "id": "production-release",
+      "passed": false,
+      "required": true,
+      "evidence": []
+    },
+    {
+      "id": "authenticated-acceptance",
+      "passed": false,
+      "required": true,
+      "evidence": []
+    }
+  ],
+  "release": {
+    "requested": true,
+    "frontend_source_sha": "5d241a8295c113bc8153e173ee98943cd6d74ab7"
+  },
+  "blockers": []
+}

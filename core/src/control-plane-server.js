@@ -13074,7 +13074,7 @@ Write the persona now.`;
               mode: 'atomic',
               scope: 'organization',
               source: { type: 'api', platform: 'hyperagents-onboarding', url: siteUrl, title },
-              metadata: { memory_type: memoryType, priority: 'high', authority_level: authorityLevel },
+              metadata: { memory_type: memoryType, priority: 'high', authority_level: authorityLevel, visibility: 'organization' },
             }),
           });
           return r.ok;

@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {erasureCatalogRead} from '../../src/connectors/composio/composio-service.js';
+test('erasure catalog retries transient GET failures and returns verified listing',async()=>{let n=0;const waits=[];const result=await erasureCatalogRead(async()=>{if(++n<3)throw Object.assign(Error('outage'),{status:503});return[]},10000,{now:()=>0,wait:async ms=>waits.push(ms)});assert.deepEqual(result,[]);assert.equal(n,3);assert.deepEqual(waits,[500,1000]);});
+test('erasure cannot treat exhausted lookup or denied authorization as no accounts',async()=>{for(const status of [403,429,503]){let n=0;await assert.rejects(erasureCatalogRead(async()=>{n++;throw Object.assign(Error('failure'),{status})},10000,{now:()=>0,wait:async()=>{}}),e=>e.code==='COMPOSIO_ERASURE_UNAVAILABLE');assert.equal(n,status===403?1:3)}});
+test('expired erasure deadline prevents provider call',async()=>{let n=0;await assert.rejects(erasureCatalogRead(async()=>{n++},1,{now:()=>2,wait:async()=>{}}),e=>e.code==='COMPOSIO_ERASURE_UNAVAILABLE');assert.equal(n,0)});

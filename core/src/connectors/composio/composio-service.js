@@ -166,13 +166,13 @@ export async function listNativeConnectedAccounts(orgId, userId, subject) {
   return listAccountsForSubject(subject, { native: true });
 }
 
-async function listAccountsForSubject(subject, { native = false } = {}) {
+async function listAccountsForSubject(subject, { native = false, erasureDeadline = null } = {}) {
   const items = []; const seen = new Set(); let cursor; let pages = 0;
-  const deadline = Date.now() + 8000;
+  const deadline = erasureDeadline || Date.now() + 8000;
   do {
     if (native && (++pages > 10 || Date.now() >= deadline)) throw new Error('Native account verification exceeds bounded reconciliation.');
     const path = `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(subject)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-    const data = native ? await _composioRequest('GET', path, undefined, { retries: 0, timeoutMs: Math.max(1, Math.min(3000, deadline-Date.now())) }) : await composioGet(path);
+    const data = erasureDeadline ? await erasureCatalogRead(() => _composioRequest('GET', path, undefined, { retries: 0, timeoutMs: Math.max(1, Math.min(10000, deadline-Date.now())) }), deadline) : native ? await _composioRequest('GET', path, undefined, { retries: 0, timeoutMs: Math.max(1, Math.min(3000, deadline-Date.now())) }) : await composioGet(path);
     items.push(...(data?.items || [])); cursor = data?.next_cursor;
     if (cursor && seen.has(cursor)) throw new Error('Connected-account catalog cursor repeated.');
     if (cursor) seen.add(cursor);
@@ -1093,11 +1093,24 @@ export async function triggerRequest(method, path, body) {
 export async function erasePrivateUserAccounts(userId,orgIds) {
  if(!isComposioConfigured())return {configured:false};
  const subjects=new Set([`hivemind:${userId}`,...orgIds.map(orgId=>`${orgId}:${userId}`)]);
+ const erasureDeadline=Date.now()+90000;
  for(const subject of subjects){
-  for(const account of await listAccountsForSubject(subject,{native:true})){
+  for(const account of await listAccountsForSubject(subject,{native:true,erasureDeadline})){
    try{await composioDelete(`/api/v3.1/connected_accounts/${encodeURIComponent(account.id)}`);}catch(error){if(error.status!==404)throw error;}
   }
-  if((await listAccountsForSubject(subject,{native:true})).length)throw Error('Private connector erasure unverified');
+  if((await listAccountsForSubject(subject,{native:true,erasureDeadline})).length)throw Error('Private connector erasure unverified');
  }
  clearToolRouterCaches();return {verified:true};
+}
+
+/** Erasure is durable background reconciliation, not an interactive three-second lookup. */
+export async function erasureCatalogRead(read,deadline,{wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),now=Date.now}={}) {
+ for(let attempt=0;attempt<3;attempt++){
+  try{if(now()>=deadline)throw Object.assign(new Error('Erasure provider deadline'),{name:'TimeoutError'});return await read();}
+  catch(cause){
+   const transient=!cause.status||cause.status===429||cause.status>=500;
+   if(!transient||attempt===2||now()+500*(attempt+1)>=deadline)throw Object.assign(new Error('Private connected-account catalog unavailable'),{code:'COMPOSIO_ERASURE_UNAVAILABLE',status:cause.status});
+   await wait(500*(attempt+1));
+  }
+ }
 }

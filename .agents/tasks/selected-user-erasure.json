@@ -1,0 +1,44 @@
+{
+  "title": "Selected user permanent erasure and shared ownership preservation",
+  "status": "open",
+  "baseline_sha": "f8633a7e09",
+  "native_owner": "Control durable account erasure worker and native controller",
+  "outcome": "Verify disposable account; delete exactly 19 authorized emails; preserve other members and shared organization records",
+  "scope": [
+    "account lifecycle cleanup",
+    "explicitly selected accounts"
+  ],
+  "criteria": [
+    {
+      "id": "cleanup-regression",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "disposable-readback",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "selected-account-receipts",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "shared-data-preserved",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    }
+  ],
+  "release": {
+    "requested": true,
+    "source_sha": null,
+    "artifact": null,
+    "rollback": "hivemind/control-plane:aster-erasure-7195ee0e"
+  },
+  "blockers": []
+}

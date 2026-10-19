@@ -15,3 +15,14 @@ test('private trigger event children are erased before subscriptions; another us
  const {cleanupPrivateAccountRows}=await import('../../src/security/account-private-cleanup.js');await cleanupPrivateAccountRows(db,target,[]);
  assert.deepEqual(order,['events','subscriptions']);assert.deepEqual(rows.events,[{userId:other}]);assert.deepEqual(rows.subscriptions,[{userId:other}]);
 });
+test('exclusive company output cleanup is scoped; shared company output is reassigned first',async()=>{
+ const mutations=[];const db={$queryRawUnsafe:async(_sql,table,column)=>column?[{column_name:'org_id'},{column_name:column}]:[{column_name:'user_id'}],$executeRawUnsafe:async(sql,...args)=>{mutations.push({sql,args});return 1}};
+ const {cleanupPrivateAccountRows}=await import('../../src/security/account-private-cleanup.js');
+ await cleanupPrivateAccountRows(db,'target',[{orgId:'shared',disposition:'retain_shared',remainingMembers:[{userId:'colleague',role:'owner'}]},{orgId:'exclusive',disposition:'delete_exclusive'}]);
+ const update=mutations.findIndex(x=>x.sql.includes('UPDATE hivemind.web_intel_jobs'));
+ const erase=mutations.findIndex(x=>x.sql.includes('DELETE FROM hivemind.web_intel_jobs'));
+ assert(update>=0&&erase>update);assert.deepEqual(mutations[erase].args,['target',['exclusive']]);
+ for(const table of ['tara_turns','tara_insights','tara_calls']){const row=mutations.find(x=>x.sql.includes('DELETE FROM hivemind.'+table));assert.deepEqual(row.args,['target',['exclusive']]);assert(mutations.some(x=>x.sql.includes('UPDATE hivemind.'+table)));}
+ assert(mutations.some(x=>x.sql.includes('DELETE FROM hivemind.tara_voice_sessions')&&x.args[0]==='target'));
+ assert(!mutations.some(x=>x.sql.includes('DELETE FROM hivemind.audit_logs')||x.sql.includes('DELETE FROM hivemind.knowledge_usage_settlements')));
+});

@@ -58,7 +58,7 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,transf
     return {status:'completed',operationId:op.id};
   } catch(error) {
     // Unsettled writes and missing ownership adapters remain blocked, never erased.
-    await blockAccountErasure(prisma,{operationId:op.id,workerId,code:error.code||'ERASURE_RECONCILIATION_FAILED',retrySeconds:3600}).catch(()=>{});
+    await blockAccountErasure(prisma,{operationId:op.id,workerId,code:error.code||'ERASURE_RECONCILIATION_FAILED',retrySeconds:error.code==='COMPOSIO_ERASURE_UNAVAILABLE'?30:3600}).catch(()=>{});
     return {status:'blocked',operationId:op.id,code:error.code||'ERASURE_RECONCILIATION_FAILED'};
   }
 }

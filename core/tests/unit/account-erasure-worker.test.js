@@ -17,3 +17,9 @@ test('administrator erasure stops when the confirmed email has changed',async()=
  const result=await runAccountErasureOnce({prisma:db,workerId,finalize:async()=>{finalized=true;return{ok:true};}});
  assert.equal(result.code,'ERASURE_EMAIL_CHANGED');assert.deepEqual(removed,[]);assert.equal(finalized,false);
 });
+test('temporary catalog outage schedules automatic recovery without discarding identity',async()=>{
+ const {db,removed}=fixture();let retry=null,finalized=false;const original=db.$executeRawUnsafe;
+ db.$executeRawUnsafe=async(sql,...args)=>{if(sql.includes("failure_code=$3"))retry=args[3];return original(sql,...args)};
+ const result=await runAccountErasureOnce({prisma:db,workerId,eraseNative:async()=>{throw Object.assign(Error('catalog unavailable'),{code:'COMPOSIO_ERASURE_UNAVAILABLE'})},finalize:async()=>{finalized=true}});
+ assert.equal(result.code,'COMPOSIO_ERASURE_UNAVAILABLE');assert.equal(retry,30);assert.equal(finalized,false);assert.deepEqual(removed,[]);
+});

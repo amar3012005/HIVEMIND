@@ -301,7 +301,12 @@ sed \
   -e "s#env_file: \[../.env\]#env_file: [$ENVF]#g" \
   -e "s#env_file: \[../.env,#env_file: [$ENVF,#g" \
   "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
-if ! docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q; then
+# Capture the affected service's approved live integrations before dry-run
+# validation as well as cutover. The versioned file is root-private and
+# preserves the existing credential source without printing its values.
+CRM_OVERRIDE="$STATE_ROOT/crm-activation.json"
+python3 "$REL/scripts/preserve-crm-activation.py" "$CRM_OVERRIDE" "$ENVF" "$SERVICES"
+if ! docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$CRM_OVERRIDE" --env-file "$ENVF" config -q; then
   echo "FATAL: canonical Compose configuration failed validation; no deployment"
   exit 1
 fi
@@ -406,8 +411,6 @@ done
 mv "$OVERRIDE.tmp" "$OVERRIDE"
 # Preserve approved feature activation independently of image defaults. The
 # credential stays Core-only in a root-private versioned release artifact.
-CRM_OVERRIDE="$STATE_ROOT/crm-activation.json"
-python3 "$REL/scripts/preserve-crm-activation.py" "$CRM_OVERRIDE" "$ENVF" "$SERVICES"
 docker compose --project-name "$COMPOSE_PROJECT" "${COMPOSE_PROFILES[@]}" --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" -f "$CRM_OVERRIDE" --env-file "$ENVF" config -q
 
 # Open Dot's database is a dedicated persistent dependency. Create or start it

@@ -1,3 +1,4 @@
+import {eraseOwnedVisualAsset} from './account-erasure';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
 import { assetPrefix, dimensionsForAspect, imageContentType, safeProductionSpec, type VisualTrigger, validTrigger, workflowInstanceId } from './contract';
@@ -269,6 +270,7 @@ export class VisualGenerationWorkflow extends WorkflowEntrypoint<Env, VisualTrig
 export default {
   async fetch(request: Request, env: Env) {
     if (!auth(request, env)) return Response.json({ error: 'unauthorized' }, { status: 401 }); const url = new URL(request.url);
+    if(request.method==='POST' && url.pathname==='/erase-owned-asset')return eraseOwnedVisualAsset(env.VISUAL_ASSETS,await request.json().catch(()=>null));
     if (request.method === 'POST' && url.pathname === '/start') {
       const trigger = await request.json().catch(() => null); if (!validTrigger(trigger)) return Response.json({ error: 'invalid_trigger' }, { status: 400 });
       await env.VISUAL_GENERATION_QUEUE.send(trigger); return Response.json({ accepted: true, queued: true, job_id: trigger.job_id, instance_id: workflowInstanceId(trigger) }, { status: 202 });

@@ -1,3 +1,4 @@
+import { renderIcarusDeveloperSignIn } from './email/templates/icarus-developer-sign-in.js';
 import { developerRequest, handleDeveloperCli } from './auth/developer-cli.js';
 import {eraseNativeAccount} from './security/account-native-erasure.js';
 import {erasePrivateConnectorGrants,cleanupPrivateAccountRows} from './security/account-private-cleanup.js';
@@ -1830,13 +1831,14 @@ async function verifyEmailTurnstile(token, req) {
 async function dispatchAuthEmailOutbox(outboxId) {
   const claimed = await emailIdentity.claimOutbox(outboxId).catch(() => null);
   if (!claimed) return;
-  const { email, otp, fragmentUrl } = claimed.payload;
-  const rendered = {
+  const { email, otp, fragmentUrl, templateId } = claimed.payload;
+  const developer = templateId === 'icarus_developer_sign_in';
+  const rendered = developer ? renderIcarusDeveloperSignIn({ otp, fragmentUrl }) : {
     subject: 'Your SINGULANCE sign-in code',
     text: `Your one-time sign-in code is ${otp}. It expires in 10 minutes.\n\nYou can also continue securely here: ${fragmentUrl}\n\nOpening the link alone does not sign you in.`,
     html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#111"><p style="font-size:12px;letter-spacing:.15em;color:#117dff">SINGULANCE · SECURE SIGN IN</p><h1 style="font-size:24px">Your sign-in code</h1><p style="font-size:34px;font-weight:700;letter-spacing:.3em">${otp}</p><p>This code expires in 10 minutes and can be used once.</p><p><a href="${fragmentUrl}" style="display:inline-block;background:#117dff;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none">Continue securely</a></p><p style="font-size:12px;color:#666">Opening this link does not sign you in automatically. Confirm in the browser to finish.</p></div>`,
   };
-  const delivery = await sendRenderedSystemEmail({ to: email, rendered, templateId: 'email_identity_sign_in' });
+  const delivery = await sendRenderedSystemEmail({ to: email, rendered, templateId: developer ? 'icarus_developer_sign_in' : 'email_identity_sign_in', ...(developer ? { requiredProvider: 'cloudflare', providerFallback: false } : {}) });
   await emailIdentity.settleOutbox(outboxId, { ok: delivery.ok, status: delivery.status, messageId: delivery.messageId, code: delivery.error });
   if (!delivery.ok) throw new Error('Auth email delivery failed');
 }

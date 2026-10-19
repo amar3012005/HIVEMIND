@@ -1,3 +1,4 @@
+import { developerRequest } from './developer-cli.js';
 import crypto from 'node:crypto';
 
 const MODES = new Set(['off', 'shadow', 'primary', 'email_only']);
@@ -65,15 +66,24 @@ export function safeReturnTo(candidate, fallback, allowedOrigins = null) {
   } catch { return fallback; }
 }
 
+export function emailSignInContext(returnTo, issuer = process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.singulancelabs.com') {
+  const developer = Boolean(developerRequest(returnTo, issuer));
+  return {
+    templateId: developer ? 'icarus_developer_sign_in' : 'email_identity_sign_in',
+    loginSearch: developer ? `?${new URLSearchParams({ account: 'developer', cli_return_to: returnTo })}` : '',
+  };
+}
+
 export function createEmailIdentityService({ prisma, publicBaseUrl }) {
   if (!prisma) throw new Error('Prisma is required');
 
   async function createOutbox(tx, challenge, email, otp, linkToken) {
-    const fragmentUrl = `${publicBaseUrl.replace(/\/$/, '')}/hivemind/login#email_challenge=${encodeURIComponent(challenge.id)}&email_token=${encodeURIComponent(linkToken)}`;
+    const context = emailSignInContext(challenge.returnTo);
+    const fragmentUrl = `${publicBaseUrl.replace(/\/$/, '')}/hivemind/login${context.loginSearch}#email_challenge=${encodeURIComponent(challenge.id)}&email_token=${encodeURIComponent(linkToken)}`;
     return tx.authEmailOutbox.create({ data: {
       challengeId: challenge.id,
       environment: challenge.environment,
-      payloadCiphertext: seal(JSON.stringify({ email, otp, fragmentUrl })),
+      payloadCiphertext: seal(JSON.stringify({ email, otp, fragmentUrl, templateId: context.templateId })),
       status: 'pending',
     } });
   }

@@ -1,3 +1,4 @@
+import {handleAdminAccountErasure} from './security/admin-account-erasure.js';
 import { starterCreationKey, provisionOpenDotStarter } from './onboarding/open-dot-starters.js';
 import { nameOnboardingTeam } from './onboarding/employee-names.js';
 import { STARTER_EMPLOYEES, starterAppearance, starterPersonaContract } from './onboarding/starter-employees.js';
@@ -4136,6 +4137,8 @@ const server = http.createServer(async (req, res) => {
       'Set-Cookie': makePlatformAdminCookie(operator),
     });
   }
+
+  if (pathname.startsWith('/admin/api/platform/users/') && await handleAdminAccountErasure({req,res,pathname,prisma:getCentralPrismaClient(),getPlatformAdminSession,parseBody,jsonResponse,recover:recoverAccountErasure,audit})) return;
 
   if (pathname === '/admin/api/platform/users' && req.method === 'GET') {
     if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);

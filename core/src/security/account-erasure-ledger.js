@@ -1,19 +1,23 @@
 import crypto from 'node:crypto';
+import {validPlatformErasureAuthority} from './account-erasure-authority.js';
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 const fail = code => {throw Object.assign(new Error(code),{code,status:409});};
 /** Admission is called only after authenticated DELETE confirmation and read-only ownership validation. */
-export async function admitAccountErasure(prisma,{userId,actorId,confirmation,ownershipSnapshot}) {
- if(!uuid(userId) || actorId!==userId || confirmation!=='DELETE' || !ownershipSnapshot) fail('ERASURE_SCOPE_REQUIRED');
+export async function admitAccountErasure(prisma,{userId,actorId,confirmation,ownershipSnapshot,platformAdmin}) {
+ const administrator=validPlatformErasureAuthority(platformAdmin,actorId,userId);
+ if(!uuid(userId)||!uuid(actorId)||(actorId!==userId&&!administrator)||confirmation!=='DELETE'||!ownershipSnapshot||(!administrator&&ownershipSnapshot.platformAdmin))fail('ERASURE_SCOPE_REQUIRED');
+ if(administrator&&ownershipSnapshot.userId!==userId)fail('ERASURE_SCOPE_REQUIRED');
+ const scope=administrator?{...ownershipSnapshot,platformAdmin}:ownershipSnapshot;
  return prisma.$transaction(async tx=>{
   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))',`account-erasure:${userId}`);
   for (const orgId of (ownershipSnapshot.organizations||[]).map(org=>org.orgId).sort()) {
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))',`account-erasure-org:${orgId}`);
   }
-  const rows=await tx.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_operations(user_id,ownership_snapshot,actor_id,confirmation) VALUES($1::uuid,$2::jsonb,$1::uuid,'DELETE')
+  const rows=await tx.$queryRawUnsafe(`INSERT INTO hivemind.account_erasure_operations(user_id,ownership_snapshot,actor_id,confirmation) VALUES($1::uuid,$2::jsonb,$3::uuid,'DELETE')
    ON CONFLICT(user_id) WHERE state<>'completed' DO UPDATE SET user_id=EXCLUDED.user_id,
      state=CASE WHEN account_erasure_operations.state='blocked' THEN 'pending' ELSE account_erasure_operations.state END,
      next_attempt_at=CASE WHEN account_erasure_operations.state='blocked' OR account_erasure_operations.failure_code IS NOT NULL THEN now() ELSE account_erasure_operations.next_attempt_at END,
-     failure_code=CASE WHEN account_erasure_operations.state='blocked' OR account_erasure_operations.failure_code IS NOT NULL THEN NULL ELSE account_erasure_operations.failure_code END RETURNING *`,userId,JSON.stringify(ownershipSnapshot));
+     failure_code=CASE WHEN account_erasure_operations.state='blocked' OR account_erasure_operations.failure_code IS NOT NULL THEN NULL ELSE account_erasure_operations.failure_code END RETURNING *`,userId,JSON.stringify(scope),actorId);
   return rows[0];
  });
 }

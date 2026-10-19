@@ -9,3 +9,11 @@ function fixture({shared=false,unknown=false,reconciled=false,missing=false}={})
 test('shared company and unknown provider work block without destructive actions',async()=>{for(const args of [{shared:true},{unknown:true}]){const{db,removed}=fixture(args);let finalized=false;const result=await runAccountErasureOnce({prisma:db,workerId,finalize:async()=>{finalized=true;return{ok:true};}});assert.equal(result.status,'blocked');assert.deepEqual(removed,[]);assert.equal(finalized,false);}});
 test('exclusive empty source class reconciles before finalization',async()=>{const{db,removed}=fixture();let finalized=false;const result=await runAccountErasureOnce({prisma:db,workerId,finalize:async()=>{assert.equal(removed.length,3);finalized=true;return{ok:true};}});assert.equal(result.status,'completed');assert.equal(finalized,true);});
 test('crash after final identity deletion can complete a reconciled operation without replay',async()=>{const{db}=fixture({reconciled:true,missing:true});let replay=false;const result=await runAccountErasureOnce({prisma:db,workerId,finalize:async()=>{replay=true;}});assert.equal(result.status,'completed');assert.equal(replay,false);});
+test('administrator erasure stops when the confirmed email has changed',async()=>{
+ const {erasureEmailHash}=await import('../../src/security/account-erasure-authority.js');const {db,removed}=fixture();
+ const authority={kind:'platform_admin',operator:'admin',sessionId:workerId,userId,targetEmailHash:erasureEmailHash('original@example.com')};
+ const original=db.$queryRawUnsafe;db.$queryRawUnsafe=async(sql,...args)=>sql.includes('WITH candidate')?[{id:'33333333-3333-3333-3333-333333333333',user_id:userId,actor_id:workerId,confirmation:'DELETE',state:'processing',ownership_snapshot:{organizations:[],platformAdmin:authority}}]:original(sql,...args);
+ db.user.findUnique=async()=>({id:userId,email:'changed@example.com'});let finalized=false;
+ const result=await runAccountErasureOnce({prisma:db,workerId,finalize:async()=>{finalized=true;return{ok:true};}});
+ assert.equal(result.code,'ERASURE_EMAIL_CHANGED');assert.deepEqual(removed,[]);assert.equal(finalized,false);
+});

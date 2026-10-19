@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {validPlatformErasureAuthority,erasureEmailHash} from './account-erasure-authority.js';
 import {claimAccountErasure,saveErasureReceipt,blockAccountErasure} from './account-erasure-ledger.js';
 import {planAccountErasureScope,countForeignExclusiveStoreRecords,countForeignEvidenceReferences} from './account-erasure-scope.js';
 import {inventoryAccountErasureSources,reconcileOwnedSourceObjects} from './account-erasure-sources.js';
@@ -10,8 +11,10 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
   const op=await claimAccountErasure(prisma,{workerId,leaseSeconds:300});
   if(!op)return null;
   try {
-    if(op.actor_id!==op.user_id||op.confirmation!=='DELETE')fail('ERASURE_CONFIRMATION_REQUIRED');
-    const user=await prisma.user.findUnique({where:{id:op.user_id},select:{id:true}});
+    const administrator=validPlatformErasureAuthority(op.ownership_snapshot?.platformAdmin,op.actor_id,op.user_id);
+    if((op.actor_id!==op.user_id&&!administrator)||op.confirmation!=='DELETE')fail('ERASURE_CONFIRMATION_REQUIRED');
+    const user=await prisma.user.findUnique({where:{id:op.user_id},select:{id:true,email:true}});
+    if(user&&administrator&&erasureEmailHash(user.email)!==op.ownership_snapshot.platformAdmin.targetEmailHash)fail('ERASURE_EMAIL_CHANGED');
     if(!user && op.state!=='reconciled')fail('ERASURE_IDENTITY_STATE_UNKNOWN');
     if(user && op.state!=='reconciled') {
       const scope=op.ownership_snapshot;

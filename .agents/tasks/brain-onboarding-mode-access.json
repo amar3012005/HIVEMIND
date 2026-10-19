@@ -15,21 +15,27 @@
   "criteria": [
     {
       "id": "onboarding-independent-of-mode-flag",
-      "passed": false,
+      "passed": true,
       "required": true,
-      "evidence": []
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/brain-onboarding-mode-access/status.json"
+      ]
     },
     {
       "id": "brain-only-sidebar",
-      "passed": false,
+      "passed": true,
       "required": true,
-      "evidence": []
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/brain-onboarding-mode-access/status.json"
+      ]
     },
     {
       "id": "production-release",
-      "passed": false,
+      "passed": true,
       "required": true,
-      "evidence": []
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/brain-onboarding-mode-access/status.json"
+      ]
     },
     {
       "id": "authenticated-acceptance",
@@ -40,7 +46,12 @@
   ],
   "release": {
     "requested": true,
-    "frontend_source_sha": "5d241a8295c113bc8153e173ee98943cd6d74ab7"
+    "frontend_source_sha": "5d241a8295c113bc8153e173ee98943cd6d74ab7",
+    "worker_version": "7110e065-8bfd-442d-b26e-173b07c56515",
+    "rollback": "c509f4e3-58fd-478f-84a9-3f863a6cb1fc",
+    "deployed": true
   },
-  "blockers": []
+  "blockers": [
+    "Real signed-in ordinary-account acceptance remains unverified; deployed UI fixture checks passed."
+  ]
 }

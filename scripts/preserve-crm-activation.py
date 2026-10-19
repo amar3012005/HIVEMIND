@@ -5,8 +5,16 @@ import json, os, pathlib, stat, subprocess, sys, urllib.parse
 def capture(args):
     return subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True)
 
+def control_plane_integrations(live, managed_keys):
+    # These integrations were activated in versioned production overlays.
+    # Preserve only this service's allowlisted settings when the managed env
+    # has no explicit value; never copy a whole environment or widen a gate.
+    keys = ('ACCOUNT_ERASURE_NATIVE_URL', 'ACCOUNT_ERASURE_NATIVE_TOKEN', 'HIVEMIND_RUNTIME_ATTENTION_URL')
+    return {key: live[key] for key in keys if live.get(key) and key not in managed_keys}
+
 def main():
     output, env_file, services = sys.argv[1:]
+    managed_keys = {x.split('=',1)[0].strip() for x in pathlib.Path(env_file).read_text().splitlines() if '=' in x and not x.lstrip().startswith('#')}
     names = {'core':'hm-core', 'control-plane':'hm-control', 'harness-runner':'hivemind-harness-runner-1'}
     overrides = {}
     for service in services.split(','):
@@ -14,7 +22,7 @@ def main():
             continue
         info = json.loads(capture(['docker','inspect',names[service]]))[0]
         live = dict(x.split('=',1) for x in info['Config']['Env'] if '=' in x)
-        environment = {}
+        environment = control_plane_integrations(live, managed_keys) if service == 'control-plane' else {}
         # Native mobile admission was verified and activated independently of
         # CRM. Preserve that approved gate on Control-only releases, never
         # enable it merely because a new image supports it.

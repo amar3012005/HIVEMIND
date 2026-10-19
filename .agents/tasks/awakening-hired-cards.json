@@ -1,0 +1,42 @@
+{
+  "title": "Restore awakening hired-agent cards and alignment",
+  "status": "open",
+  "native_owner": "Da-vinci shared AwakeningOverlay",
+  "outcome": "Show actual authenticated hires or saved planned roles in the same awakening experience for every account",
+  "criteria": [
+    {
+      "id": "saved-roster-cards",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "responsive-alignment",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "frontend-release",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    },
+    {
+      "id": "browser-fixture",
+      "required": true,
+      "passed": false,
+      "evidence": []
+    }
+  ],
+  "release": {
+    "requested": true,
+    "frontend_source_sha": "542d1f119d64c4187cd7a40c450e878c5f8cbf4f"
+  },
+  "preserve": [
+    "same blue artwork and awakening stages",
+    "optional-mode boundaries",
+    "native harnesses"
+  ],
+  "blockers": []
+}

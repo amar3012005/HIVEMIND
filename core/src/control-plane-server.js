@@ -11123,6 +11123,23 @@ Write the persona now.`;
     }
   }
 
+  if (pathname === '/v1/runtime/appearance' && ['GET','POST'].includes(req.method)) {
+    const current = await requireSession(req,res);
+    if (!current) return;
+    const headers = { 'Cache-Control':'private, no-store' };
+    if (req.method === 'POST' && !CONFIG.allowedOrigins.includes(req.headers.origin)) return jsonResponse(res,{error:'Trusted origin required'},403,headers);
+    try {
+      const {readRuntimeAppearance,saveRuntimeAppearance} = await import('./employees/runtime-appearance.js');
+      const principal = {userId:current.session.userId,orgId:current.session.orgId};
+      if ((req.headers['x-hivemind-appearance-user'] && req.headers['x-hivemind-appearance-user'] !== principal.userId)
+        || (req.headers['x-hivemind-appearance-org'] && req.headers['x-hivemind-appearance-org'] !== principal.orgId)) return jsonResponse(res,{error:'runtime_appearance_scope_changed'},403,headers);
+      const value = req.method === 'GET'
+        ? await readRuntimeAppearance(prisma,principal)
+        : await saveRuntimeAppearance(prisma,principal,await parseBody(req));
+      return jsonResponse(res,value,200,headers);
+    } catch (failure) { return jsonResponse(res,{error:failure.status ? failure.message : 'runtime_appearance_unavailable'},failure.status || 503,headers); }
+  }
+
   if (pathname === '/v1/employees/native-lifecycle' && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;

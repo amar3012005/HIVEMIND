@@ -1,3 +1,4 @@
+import { saveCompanyProfileFacts } from './identity/company-profile.js';
 import { renderIcarusDeveloperSignIn } from './email/templates/icarus-developer-sign-in.js';
 import { developerRequest, handleDeveloperCli } from './auth/developer-cli.js';
 import {eraseNativeAccount} from './security/account-native-erasure.js';
@@ -13071,6 +13072,7 @@ Write the persona now.`;
             body: JSON.stringify({
               title, content, tags,
               mode: 'atomic',
+              scope: 'organization',
               source: { type: 'api', platform: 'hyperagents-onboarding', url: siteUrl, title },
               metadata: { memory_type: memoryType, priority: 'high', authority_level: authorityLevel },
             }),
@@ -13539,16 +13541,8 @@ Write the persona now.`;
             try {
               await Promise.all(sections.map((section) => saveMemory({ ...section, tags: section.tags || canonTags })));
 
-          // Mirror the company identity into ORG-SCOPED profile facts so the
-          // /hivemind/app/profile page + the get_user_profile chat tool show the
-          // organization, not just the person. Onboarding already writes these as
-          // org-canon MEMORIES (above); profile facts are the structured,
-          // page-rendered surface. Best-effort — a fact-write failure must never
-          // break onboarding. orgId scopes them; the onboarding userId is the
-          // owner. Reuses ProfileStore.upsertFact (same store the API + dreamer use).
+          // Company facts belong to the shared organization, never the caller persona.
           try {
-            const { getSharedProfileStore } = await import('./memory/profile-store.js');
-            const _ps = getSharedProfileStore(prisma);
             const companyFacts = [
               { key: 'company', value: companyName },
               { key: 'company:mission', value: mission },
@@ -13570,16 +13564,11 @@ Write the persona now.`;
               { key: 'company:contact_phones', value: (profile.contact_details?.phones || []).join('\n') || null },
               { key: 'company:operating_context', value: companyContext || null },
               { key: 'company:location', value: profile.location || null },
-              { key: 'location', value: profile.location ? `Company HQ: ${profile.location}` : null },
               { key: 'company:location_city', value: profile.location_city || null },
               { key: 'company:location_region', value: profile.location_region || null },
               { key: 'company:location_country', value: profile.location_country || null },
             ].filter((f) => f.value && String(f.value).trim());
-            await Promise.all(companyFacts.map((fact) => _ps.upsertFact({
-                userId, orgId, category: 'static',
-                key: fact.key, value: String(fact.value).slice(0, fact.key === 'company:operating_context' ? 2400 : 900),
-                confidence: 0.95, sourceMemoryId: null,
-              }).catch(() => {})));
+            await saveCompanyProfileFacts(prisma, { orgId, userId, facts: companyFacts });
             } catch (err) {
               console.warn('[onboarding] company→profile facts failed (non-fatal):', err.message);
             }
@@ -14003,22 +13992,7 @@ Write the persona now.`;
           JSON.stringify({ _company: company }), row.id,
         );
         try {
-          const { getSharedProfileStore } = await import('./memory/profile-store.js');
-          const profileStore = getSharedProfileStore(prisma);
-          for (const fact of [
-            { key: 'company:location', value: location },
-            { key: 'location', value: `Company HQ: ${location}` },
-          ]) {
-            await profileStore.upsertFact({
-              userId: current.session.userId,
-              orgId: current.session.orgId,
-              category: 'static',
-              key: fact.key,
-              value: fact.value,
-              confidence: 1,
-              sourceMemoryId: null,
-            });
-          }
+          await saveCompanyProfileFacts(prisma, { orgId: current.session.orgId, userId: current.session.userId, facts: [{ key: 'company:location', value: location }] });
         } catch (error) {
           console.warn('[hyper-company] HQ profile fact update failed:', error.message);
         }
@@ -14063,13 +14037,11 @@ Write the persona now.`;
           JSON.stringify({ _company: company }), row.id,
         );
         try {
-          const { getSharedProfileStore } = await import('./memory/profile-store.js');
-          const profileStore = getSharedProfileStore(prisma);
-          await Promise.all([
-            profileStore.upsertFact({ userId: current.session.userId, orgId: current.session.orgId, category: 'static', key: 'company:contact_emails', value: emails.join('\n'), confidence: 1, sourceMemoryId: null }),
-            profileStore.upsertFact({ userId: current.session.userId, orgId: current.session.orgId, category: 'static', key: 'company:contact_phones', value: phones.join('\n'), confidence: 1, sourceMemoryId: null }),
-            profileStore.upsertFact({ userId: current.session.userId, orgId: current.session.orgId, category: 'static', key: 'company:social_profiles', value: socialProfiles.map((item) => `${item.platform}: ${item.url}`).join('\n'), confidence: 1, sourceMemoryId: null }),
-          ]);
+          await saveCompanyProfileFacts(prisma, { orgId: current.session.orgId, userId: current.session.userId, facts: [
+            { key: 'company:contact_emails', value: emails.join('\n') },
+            { key: 'company:contact_phones', value: phones.join('\n') },
+            { key: 'company:social_profiles', value: socialProfiles.map(item => `${item.platform}: ${item.url}`).join('\n') },
+          ] });
         } catch (error) { console.warn('[hyper-company] contact profile fact update failed:', error.message); }
         return jsonResponse(res, { ok: true, company });
       } catch (err) { return jsonResponse(res, { error: err.message }, 500); }

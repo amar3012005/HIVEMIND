@@ -122,6 +122,21 @@ export class ProfileStore {
       lastDreamedAt: r.lastDreamedAt,
       evidenceMemoryIds: r.evidenceMemoryIds || [],
     }));
+    // Provider-backed account identity is available to invited members without
+    // repeating company onboarding. Explicit personal profile facts take priority.
+    if (this.prisma.user?.findUnique) {
+      const account = await this.prisma.user.findUnique({
+        where: { id: userId }, select: { displayName: true, locale: true, deletedAt: true },
+      });
+      if (account && !account.deletedAt) {
+        for (const [key, value] of [['name', account.displayName], ['language', account.locale]]) {
+          if (value && !facts.some(f => f.key === key)) facts.push({
+            key, value, category: 'static', confidence: 1, confirmedCount: 1,
+            evidenceMemoryIds: [], source: 'authenticated_account',
+          });
+        }
+      }
+    }
     this._cache.set(cacheKey, { facts, ts: Date.now() });
     return facts;
   }
@@ -423,12 +438,14 @@ export class ProfileStore {
     maxFacts = 8,
     maxChars = 900,
   } = {}) {
-    const allFacts = await this.getProfile(userId, orgId, projectId);
+    const [allFacts, organizationFacts] = await Promise.all([
+      this.getProfile(userId, orgId, projectId), this.getOrganizationProfile(orgId),
+    ]);
     const facts = allFacts.filter((fact) => (
       !fact.lastDreamedAt
       || (Array.isArray(fact.evidenceMemoryIds) && fact.evidenceMemoryIds.length > 0)
     ));
-    if (!facts.length) return '';
+    if (!facts.length && !organizationFacts.length) return '';
 
     const staticPriority = new Map([
       ['name', 0], ['role', 1], ['company', 2], ['location', 3],
@@ -457,7 +474,7 @@ export class ProfileStore {
       selected.push(fact);
       if (selected.length >= Math.max(1, maxFacts)) break;
     }
-    if (!selected.length) return '';
+    if (!selected.length && !organizationFacts.length) return '';
 
     const lines = ['Authenticated user profile (authoritative; values describe the caller unless marked organization):'];
     for (const fact of selected) {
@@ -471,6 +488,14 @@ export class ProfileStore {
       const line = `- ${label}: ${fact.value}`;
       if (`${lines.join('\n')}\n${line}`.length > Math.max(80, maxChars)) break;
       lines.push(line);
+    }
+    // Bounded shared identity, separate from the caller's personal facts.
+    const orgKeys = ['company.name', 'company.what_it_does', 'company.mission', 'company.industry'];
+    for (const key of orgKeys) {
+      const fact = organizationFacts.find(f => f.key === key);
+      if (!fact) continue;
+      const line = `- organization ${key.slice(8)}: ${String(fact.value).slice(0, 220)}`;
+      if (`${lines.join('\n')}\n${line}`.length <= Math.max(80, maxChars)) lines.push(line);
     }
     return lines.length > 1 ? lines.join('\n') : '';
   }

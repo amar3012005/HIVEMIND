@@ -1,1 +1,47 @@
-{"title":"Complete account erasure with shared company retention","status":"open","baseline_sha":"fcb5df7c52fe4575c407144c54bffd076980b0b6","native_owner":"Control erasure worker; native Codex bridge and OpenDot computer controller","outcome":"Erase private grants and data; transfer explicitly shared company content; verify scoped receipts","scope":["Control","Codex bridge erasure endpoint","OpenDot controller lifecycle"],"preserve":["native harness loops","shared organization data","other users credentials","immutable audit retention"],"criteria":[{"id":"disposable-shared-user","required":true,"passed":false,"evidence":[]},{"id":"native-credentials","required":true,"passed":false,"evidence":[]}],"release":{"requested":true},"blockers":[]}
+{
+  "title": "Complete account erasure with shared company retention",
+  "status": "open",
+  "baseline_sha": "fcb5df7c52fe4575c407144c54bffd076980b0b6",
+  "native_owner": "Control erasure worker; native Codex bridge and OpenDot computer controller",
+  "outcome": "Erase private grants and data; transfer explicitly shared company content; verify scoped receipts",
+  "scope": [
+    "Control",
+    "Codex bridge erasure endpoint",
+    "OpenDot controller lifecycle"
+  ],
+  "preserve": [
+    "native harness loops",
+    "shared organization data",
+    "other users credentials",
+    "immutable audit retention"
+  ],
+  "criteria": [
+    {
+      "id": "disposable-shared-user",
+      "required": true,
+      "passed": true,
+      "evidence": [
+        "Live operation aea11cf0-19f9-44b2-a40a-7d396ebfd6c4; SQL/vector colleague-preservation readback"
+      ]
+    },
+    {
+      "id": "native-credentials",
+      "required": true,
+      "passed": true,
+      "evidence": [
+        "Bridge isolated two-user erase canary: other OAuth grant retained and cross-user denial403",
+        "Native private login/settings/volume/file readback; operation c23648ad-bbee-4abe-bf9d-33fb08d27dc9"
+      ]
+    }
+  ],
+  "release": {
+    "requested": true,
+    "source_sha": "1c1524c8c809fc66509f1fcad51853f352462485",
+    "artifact": "hivemind/control-plane:complete-erasure-v4",
+    "rollback": "hivemind/control-plane:admin-erasure-31088de7"
+  },
+  "blockers": [
+    "Legacy content-addressed attachment objects without recoverable ownership coordinates cannot be safely attributed for physical purge.",
+    "Company-managed native histories bound to a human need a supported ownership-transfer adapter; erasure blocks instead of deleting them."
+  ]
+}

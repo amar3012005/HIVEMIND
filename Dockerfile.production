@@ -72,7 +72,7 @@ RUN mkdir -p /app/data/extension && \
     cd extensions-src/chrome && \
     zip -r /app/data/extension/hivemind-chrome-extension.zip . \
       -x "*.md" -x ".DS_Store" -x "node_modules/*" \
-      -x "*.bak" -x ".git/*" -x "*.test.js" -x "store-assets/*" && \
+      -x "*.bak" -x ".git/*" -x "*.test.js" -x "tests/*" -x "store-assets/*" && \
     EXT_VERSION=$(node -e "console.log(require('./manifest.json').version)") && \
     cp /app/data/extension/hivemind-chrome-extension.zip \
        /app/data/extension/hivemind-chrome-extension-v${EXT_VERSION}.zip && \
@@ -114,6 +114,8 @@ COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nodejs:nodejs /app/data/extension ./data/extension
+# Public extension downloads must not be masked by the persistent /app/data volume.
+COPY --from=builder --chown=nodejs:nodejs /app/data/extension ./extension
 
 RUN chmod -R 550 /app && chmod -R 770 /app/logs /app/data
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "HIVEMIND \u2014 Persistent Memory for AI",
-  "version": "1.2.0",
-  "description": "Talk to HIVE \u2014 AI chat with perfect memory and browser context.",
+  "name": "HIVEMIND \u2014 Memory & Meeting Intelligence",
+  "version": "2.3.0",
+  "description": "Company memory, private meeting assistance, and durable meeting notes for Google Meet, Teams, Zoom, Webex and Jitsi.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -16,14 +16,16 @@
     "tabs",
     "sidePanel",
     "identity",
-    "clipboardWrite"
+    "clipboardWrite",
+    "notifications",
+    "alarms"
   ],
   "host_permissions": [
-    "https://core.hivemind.davinciai.eu:8050/*",
-    "https://api.hivemind.davinciai.eu:8040/*",
-    "https://hivemind.davinciai.eu/*",
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "https://core.singulancelabs.com/*",
+    "https://api.singulancelabs.com/*",
+    "https://next.singulancelabs.com/*"
   ],
   "web_accessible_resources": [
     {
@@ -63,5 +65,26 @@
       },
       "description": "Toggle Talk to HIVE side panel"
     }
-  }
+  },
+  "minimum_chrome_version": "116",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*",
+        "https://teams.microsoft.com/*",
+        "https://teams.live.com/*",
+        "https://teams.cloud.microsoft/*",
+        "https://*.zoom.us/*",
+        "https://zoom.us/*",
+        "https://*.webex.com/*",
+        "https://webex.com/*",
+        "https://meet.jit.si/*"
+      ],
+      "js": [
+        "meeting-common.js",
+        "meeting-detect.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }

@@ -5464,7 +5464,7 @@ const server = http.createServer(async (req, res) => {
   // GET /install/chrome-extension.zip → serves the prebuilt extension zip.
   // Production image bakes it at /app/data/extension/hivemind-chrome-extension.zip.
   // Local dev: builds on demand from repo's extensions/chrome/.
-  if ((pathname === '/install/chrome-extension.zip' ||
+  if ((pathname === '/install/chrome-extension.json' || pathname === '/install/chrome-extension.zip' ||
        pathname === '/install/extension.zip' ||
        pathname === '/install/hivemind-chrome.zip') && req.method === 'GET') {
     try {
@@ -5472,6 +5472,7 @@ const server = http.createServer(async (req, res) => {
       const path = await import('node:path');
       const candidates = [
         process.env.HIVEMIND_EXTENSION_DIR,
+        path.join(PROJECT_ROOT, 'extension'), // Immutable image assets, outside the mounted data volume.
         path.join(PROJECT_ROOT, 'data', 'extension'),
         path.join(REPO_ROOT, 'extensions', 'chrome'),
         '/opt/HIVEMIND/extensions/chrome',
@@ -5486,16 +5487,26 @@ const server = http.createServer(async (req, res) => {
           zips.sort();
           const zipPath = path.join(dir, zips[zips.length - 1]);
           const stat = fs.statSync(zipPath);
+          if (pathname === '/install/chrome-extension.json') {
+            const versionPath = path.join(dir, 'VERSION');
+            const version = fs.existsSync(versionPath) ? fs.readFileSync(versionPath, 'utf8').trim() : null;
+            res.setHeader('Cache-Control', 'no-store');
+            return jsonResponse(res, { version, bytes: stat.size,
+              sha256: crypto.createHash('sha256').update(fs.readFileSync(zipPath)).digest('hex'),
+              download_url: 'https://core.singulancelabs.com/install/chrome-extension.zip' });
+          }
           const filename = `hivemind-chrome-extension.zip`;
           res.setHeader('Content-Type', 'application/zip');
           res.setHeader('Content-Length', stat.size);
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-          res.setHeader('Cache-Control', 'public, max-age=300');
+          res.setHeader('Cache-Control', 'no-cache');
           res.writeHead(200);
           fs.createReadStream(zipPath).pipe(res);
           return;
         }
       }
+
+      if (pathname === '/install/chrome-extension.json') return jsonResponse(res, { error: 'packaged_extension_unavailable' }, 404);
 
       // Fallback: zip on-demand from extensions/chrome (dev mode).
       const chromeDir = candidates.find((d) =>
@@ -5512,7 +5523,7 @@ const server = http.createServer(async (req, res) => {
         '-r', tmpZip, '.',
         '-x', '*.md', '-x', '.DS_Store',
         '-x', 'node_modules/*', '-x', '*.bak',
-        '-x', '.git/*', '-x', '*.test.js',
+        '-x', '.git/*', '-x', '*.test.js', '-x', 'tests/*',
         '-x', 'store-assets/*',
       ], { cwd: chromeDir });
       await new Promise((resolve, reject) => {

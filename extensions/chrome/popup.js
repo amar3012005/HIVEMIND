@@ -27,7 +27,7 @@ function renderSignedOut() {
     try {
       const resp = await chrome.runtime.sendMessage({
         action: 'signIn',
-        apiBase: 'https://api.hivemind.davinciai.eu:8040',
+        apiBase: 'https://api.singulancelabs.com',
       });
       if (!resp?.success) throw new Error(resp?.error || 'sign-in failed');
 

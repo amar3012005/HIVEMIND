@@ -10,7 +10,7 @@
 
 // ── Import AI Chat Schemas ──────────────────────────────
 
-importScripts('ai-chat-schemas.js');
+importScripts('ai-chat-schemas.js', 'meeting-common.js', 'meeting-background.js');
 
 // ── Context Menu ────────────────────────────────────────
 
@@ -288,7 +288,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const cfg = await getConfig();
         if (!cfg.apiKey) { sendResponse({ projects: [], error: 'not signed in' }); return; }
-        const cpBase = cfg.controlPlaneBase || 'https://api.hivemind.davinciai.eu:8040';
+        const cpBase = cfg.controlPlaneBase || 'https://api.singulancelabs.com';
         // Prefer core API first (cookies + api-key already wired); fall back
         // to control-plane if core route is absent in older builds.
         let resp = await fetch(`${cfg.apiBase}/api/team/projects`, {
@@ -1022,14 +1022,14 @@ async function handleChatStream(message, sender) {
 // ── OAuth Sign-in (browser flow, like @hivemind/cli) ───────
 
 async function handleSignIn(apiBaseOverride) {
-  const apiBase = apiBaseOverride || 'https://api.hivemind.davinciai.eu:8040';
+  const apiBase = apiBaseOverride || 'https://api.singulancelabs.com';
   // Use a stable redirect URL per extension installation. Chrome guarantees
   // https://<extension-id>.chromiumapp.org/<path>.
   const redirectUri = chrome.identity.getRedirectURL('cb');
   const state = crypto.randomUUID().replace(/-/g, '');
   const startUrl = `${apiBase}/auth/cli/start?callback=${encodeURIComponent(redirectUri)}&state=${state}`;
 
-  console.log('[hivemind:auth] opening regular tab for sign-in', { redirectUri, startUrl });
+  console.log('[hivemind:auth] opening sign-in');
 
   // CRITICAL: do NOT use chrome.identity.launchWebAuthFlow — it runs in an
   // isolated popup with cookie/storage sandboxing, which blocks Zitadel
@@ -1066,7 +1066,7 @@ async function handleSignIn(apiBaseOverride) {
       if (!token) return reject(new Error('no token in callback URL — server may have lost session mid-flow'));
       if (echoState !== state) return reject(new Error('state mismatch — possible CSRF, ignoring'));
 
-      const coreApiBase = 'https://core.hivemind.davinciai.eu:8050';
+      const coreApiBase = 'https://core.singulancelabs.com';
       await chrome.storage.local.set({
         apiKey: token,
         apiBase: coreApiBase,
@@ -1086,7 +1086,7 @@ async function handleSignIn(apiBaseOverride) {
       // Chrome tries to navigate to chromiumapp.org but the host doesn't
       // resolve — onUpdated fires with that URL before the network error,
       // which is exactly when we capture the redirect.
-      if (candidateUrl.startsWith('https://') && candidateUrl.includes('.chromiumapp.org/')) {
+      if (candidateUrl.startsWith(redirectUri + '?')) {
         finalize(candidateUrl);
       }
     };
@@ -1115,7 +1115,7 @@ async function getConfig() {
   const result = await chrome.storage.local.get(['apiKey', 'apiBase', 'userId']);
   return {
     apiKey: result.apiKey || '',
-    apiBase: result.apiBase || 'https://core.hivemind.davinciai.eu:8050',
+    apiBase: result.apiBase || 'https://core.singulancelabs.com',
     userId: result.userId || '',
   };
 }

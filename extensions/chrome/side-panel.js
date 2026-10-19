@@ -76,7 +76,7 @@ function wireEvents() {
     try {
       const resp = await chrome.runtime.sendMessage({
         action: 'signIn',
-        apiBase: 'https://api.hivemind.davinciai.eu:8040',
+        apiBase: 'https://api.singulancelabs.com',
       });
       if (!resp?.success) throw new Error(resp?.error || 'sign-in failed');
       const cfg = await chrome.storage.local.get(['apiKey', 'userEmail']);
@@ -670,7 +670,7 @@ function finalizeSavingChip(toolName, summary) {
 
 // ── Mobile QR pairing (welcome state) ──────────────────────────────────────
 
-const MOBILE_DEEP_LINK_BASE = 'https://hivemind.davinciai.eu/hivemind/m/chat';
+const MOBILE_DEEP_LINK_BASE = 'https://next.singulancelabs.com/hivemind/m/chat';
 
 function renderMobileQR() {
   const card = document.getElementById('qrCard');
@@ -805,7 +805,7 @@ async function appendDraftCards(wrap, draftIds) {
   try {
     const storage = await chrome.storage.local.get(['apiKey']);
     const config = {
-      apiBase: 'https://core.hivemind.davinciai.eu:8050',
+      apiBase: 'https://core.singulancelabs.com',
       apiKey: storage.apiKey,
     };
     if (!config.apiKey) return;
@@ -1098,7 +1098,7 @@ async function handleFileUpload(file) {
   // NOW fetch config from chrome.storage.local (background SW also has
   // a getConfig() helper but it's not in the side-panel scope; reading
   // storage directly is the simpler + race-free path here).
-  let cfg = { apiKey: '', apiBase: 'https://core.hivemind.davinciai.eu:8050' };
+  let cfg = { apiKey: '', apiBase: 'https://core.singulancelabs.com' };
   try {
     const stored = await chrome.storage.local.get(['apiKey', 'apiBase']);
     cfg.apiKey = stored.apiKey || '';

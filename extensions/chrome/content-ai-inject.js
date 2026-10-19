@@ -18,7 +18,7 @@
   const config = await chrome.storage.local.get(['apiKey', 'apiBase']);
   if (!config.apiKey) return; // Extension not configured
 
-  const API_BASE = config.apiBase || 'https://core.hivemind.davinciai.eu:8050';
+  const API_BASE = config.apiBase || 'https://core.singulancelabs.com';
   const API_KEY = config.apiKey;
   const platform = detectPlatform();
 

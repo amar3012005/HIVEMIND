@@ -15,10 +15,14 @@ export async function cleanupPrivateAccountRows(prisma,userId,orgs) {
   if(!owner)continue;
   for(const table of ['digital_employees','projects','teams','app_runtime_apps','app_runtime_versions','app_runtime_records','audience_contacts','campaign_plan_versions','org_invites','hyper_approval_rules','workspace_announcements','zernio_org_profiles','webhook_subscriptions']){
    const c=await prisma.$queryRawUnsafe("SELECT column_name FROM information_schema.columns WHERE table_schema='hivemind' AND table_name=$1 AND column_name IN ('org_id','created_by')",table);
-   if(c.length===2)await prisma.$executeRawUnsafe(`UPDATE hivemind.${table} SET created_by=$3::uuid WHERE created_by=$1::uuid AND org_id=$2::uuid`,userId,org.orgId,owner);
+   if(c.length===2)await prisma.$executeRawUnsafe(`UPDATE hivemind.${table} SET created_by=$3::uuid WHERE created_by::text=$1::text AND org_id::text=$2::text`,userId,org.orgId,owner);
+  }
+  for(const [table,column] of [['hq_runtimes','owner_user_id'],['hyper_rooms','user_id'],['task_outcome','user_id'],['contacts','user_id'],['meetings','user_id'],['outreach_campaigns','user_id'],['tara_campaigns','user_id'],['visual_generation_jobs','user_id'],['visual_intelligence_runs','user_id'],['web_intel_jobs','user_id'],['campaigns','owner_user_id'],['growth_goals','owner_user_id']]){
+   const c=await prisma.$queryRawUnsafe("SELECT column_name FROM information_schema.columns WHERE table_schema='hivemind' AND table_name=$1 AND column_name IN ('org_id',$2)",table,column);
+   if(c.length===2)await prisma.$executeRawUnsafe(`UPDATE hivemind.${table} SET ${column}=$3::uuid WHERE ${column}::text=$1::text AND org_id::text=$2::text`,userId,org.orgId,owner);
   }
  }
  // These rows are personal scheduling/access/state, not shared company content.
- const tables=['pending_writes','governed_composio_sessions','x_ads_oauth_states','x_ads_credentials','chatgpt_plan_oauth_attempts','chatgpt_plan_connections','proactive_user_schedules','workspace_notifications','account_admin_notifications','workspace_announcement_deliveries','hivemind_attention_subscriptions','hivemind_native_slack_attention_sources','hivemind_trigger_subscriptions','user_entity_identity_links','user_identities','user_profiles'];
- for(const table of tables){const c=await prisma.$queryRawUnsafe("SELECT column_name FROM information_schema.columns WHERE table_schema='hivemind' AND table_name=$1 AND column_name='user_id'",table);if(c.length)await prisma.$executeRawUnsafe(`DELETE FROM hivemind.${table} WHERE user_id=$1::uuid`,userId);}
+ const tables=['pending_writes','governed_composio_sessions','x_ads_oauth_states','x_ads_credentials','chatgpt_plan_oauth_attempts','chatgpt_plan_connections','proactive_user_schedules','workspace_notifications','account_admin_notifications','workspace_announcement_deliveries','hivemind_attention_subscriptions','hivemind_native_slack_attention_sources','hivemind_trigger_subscriptions','user_entity_identity_links','user_identities','user_profiles','activation_lifecycles','cluster_index','working_sets','durable_chat_continuations','durable_chat_turns','memory_save_operations','connector_sync_jobs','account_ingestion_leases'];
+ for(const table of tables){const c=await prisma.$queryRawUnsafe("SELECT column_name FROM information_schema.columns WHERE table_schema='hivemind' AND table_name=$1 AND column_name='user_id'",table);if(c.length)await prisma.$executeRawUnsafe(`DELETE FROM hivemind.${table} WHERE user_id::text=$1::text`,userId);}
 }

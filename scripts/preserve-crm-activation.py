@@ -23,6 +23,12 @@ def main():
         info = json.loads(capture(['docker','inspect',names[service]]))[0]
         live = dict(x.split('=',1) for x in info['Config']['Env'] if '=' in x)
         environment = control_plane_integrations(live) if service == 'control-plane' else {}
+        if service == 'core':
+            # Scoped Core releases must retain the approved runner proxy routes
+            # and origin allowlist from the live managed configuration.
+            for key in ('HIVEMIND_ALLOWED_ORIGINS', 'HIVEMIND_EMPLOYEE_LIFECYCLE_URL', 'HIVEMIND_RUNTIME_ATTENTION_URL'):
+                if live.get(key):
+                    environment[key] = live[key]
         # Native mobile admission was verified and activated independently of
         # CRM. Preserve that approved gate on Control-only releases, never
         # enable it merely because a new image supports it.

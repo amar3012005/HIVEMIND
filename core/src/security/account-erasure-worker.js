@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {transferSharedAccountData} from './account-shared-erasure.js';
 import {validPlatformErasureAuthority,erasureEmailHash} from './account-erasure-authority.js';
 import {claimAccountErasure,saveErasureReceipt,blockAccountErasure} from './account-erasure-ledger.js';
 import {planAccountErasureScope,countForeignExclusiveStoreRecords,countForeignEvidenceReferences} from './account-erasure-scope.js';
@@ -7,7 +8,7 @@ import {verifiedAccountIngestionDrain} from './account-ingestion-lease.js';
 import {cleanupExclusiveSourceCopies} from './account-erasure-cleanup.js';
 import {requireReconciledSourceErasure} from './account-erasure-inventory.js';
 const fail=code=>{throw Object.assign(new Error(code),{code});};
-export async function runAccountErasureOnce({prisma,objectClient,finalize,workerId=crypto.randomUUID()}) {
+export async function runAccountErasureOnce({prisma,objectClient,finalize,transferVectors,eraseNative,workerId=crypto.randomUUID()}) {
   const op=await claimAccountErasure(prisma,{workerId,leaseSeconds:300});
   if(!op)return null;
   try {
@@ -22,18 +23,16 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
       const current=await planAccountErasureScope(prisma,op.user_id);
       const identity=items=>JSON.stringify(items.map(x=>({orgId:x.orgId,disposition:x.disposition,storageMode:x.storageMode,hostingMode:x.hostingMode,remainingMembers:x.remainingMembers.map(member=>({userId:member.userId,role:member.role})).sort((a,b)=>a.userId.localeCompare(b.userId))})).sort((a,b)=>a.orgId.localeCompare(b.orgId)));
       if(identity(scope.organizations)!==identity(current.organizations))fail('ERASURE_OWNERSHIP_CHANGED');
+      if(scope.organizations.some(x=>x.disposition==='retain_shared')) {
+        if(!transferVectors)fail('SHARED_MEMORY_TRANSFER_REQUIRED');
+        await transferSharedAccountData(prisma,{userId:op.user_id,scope,transferVectors});
+      }
       if(await countForeignEvidenceReferences(prisma,op.user_id))fail('FOREIGN_EVIDENCE_REFERENCES_RETAINED');
       if(await countForeignExclusiveStoreRecords(prisma,op.user_id,scope.organizations))fail('FOREIGN_ORGANIZATION_COPIES_RETAINED');
       const knownOrgIds=scope.organizations.map(org=>org.orgId);
       const outsideMemories=await prisma.memory.count({where:{userId:op.user_id,orgId:knownOrgIds.length?{notIn:knownOrgIds}:{not:null}}});
       if(outsideMemories)fail('SHARED_MEMORY_SCOPE_UNVERIFIED');
       const shared=scope.organizations.filter(x=>x.disposition==='retain_shared').map(x=>x.orgId);
-      if(shared.length) {
-        const sharedMemories=await prisma.memory.count({where:{userId:op.user_id,orgId:{in:shared}}});
-        if(sharedMemories)fail('SHARED_MEMORY_TRANSFER_REQUIRED');
-        const memberships=await prisma.userOrganization.count({where:{userId:op.user_id,orgId:{in:shared},role:'owner'}});
-        if(memberships)fail('SHARED_OWNER_TRANSFER_REQUIRED');
-      }
       const inventory=await inventoryAccountErasureSources(prisma,{userId:op.user_id,ownershipSnapshot:scope});
       // All shared/remote classes block BEFORE physical deletion begins.
       const knownOrgs=new Set(scope.organizations.map(org=>org.orgId));
@@ -43,6 +42,7 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,worker
       if(inventory.remote.length)fail('SOURCE_ERASURE_AUTHORIZATION_REQUIRED');
       if([...inventory.jobs,...inventory.documents,...inventory.artifacts].some(row=>shared.includes(row.orgId)))fail('SHARED_SOURCE_TRANSFER_REQUIRED');
       const drain=await verifiedAccountIngestionDrain(prisma,op.user_id);
+      if(eraseNative){const receipt=await eraseNative({userId:op.user_id,operationId:op.id,workerId,scope});await saveErasureReceipt(prisma,{operationId:op.id,workerId,store:'native_accounts',coordinate:op.user_id,outcome:'erased',evidence:{verified:true,...receipt}});}
       await reconcileOwnedSourceObjects({inventory,objectClient,drainReceipt:drain,saveReceipt:receipt=>saveErasureReceipt(prisma,{operationId:op.id,workerId,...receipt})});
       await cleanupExclusiveSourceCopies(prisma,{userId:op.user_id,operationId:op.id,workerId,ownershipSnapshot:scope,inventory,verifiedObjects:true});
       await requireReconciledSourceErasure(prisma,op.user_id);

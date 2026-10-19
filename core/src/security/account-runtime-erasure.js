@@ -1,6 +1,18 @@
 /** Remove owned native Runtime references before deleting their human identity. */
 export async function cleanupAccountRuntimeReferences(prisma, userId, orgIds) {
   return prisma.$transaction(async tx => {
+    // Shared company scheduling survives its creator; transfer only explicit
+    // lifecycle ownership to an authenticated surviving member.
+    const memberships=await tx.userOrganization.findMany({where:{userId},select:{orgId:true}});
+    for(const {orgId} of memberships.filter(x=>!orgIds.includes(x.orgId))){
+      const replacement=await tx.userOrganization.findFirst({where:{orgId,userId:{not:userId}},orderBy:{userId:'asc'}});
+      if(!replacement)continue;
+      for(const table of ['harness_dream_settings','harness_dream_runs','harness_dream_due','harness_dream_connector_settings','harness_dream_connector_evidence','harness_scheduled_tasks','harness_scheduled_due','harness_company_hq']){
+        const columns=await tx.$queryRawUnsafe("SELECT column_name FROM information_schema.columns WHERE table_schema='hivemind' AND table_name=$1 AND column_name IN ('org_id','user_id','actor_user_id')",table);
+        const names=columns.map(x=>x.column_name);if(!names.includes('org_id'))continue;
+        for(const column of names.filter(x=>x!=='org_id'))await tx.$executeRawUnsafe(`UPDATE hivemind.${table} SET ${column}=$3::uuid WHERE org_id=$2::uuid AND ${column}=$1::uuid`,userId,orgId,replacement.userId);
+      }
+    }
     const tables = ['harness_dream_settings','harness_dream_runs','harness_dream_due','harness_dream_connector_evidence','harness_scheduled_tasks','harness_company_hq'];
     const present = new Set();
     for (const table of tables) {

@@ -1,7 +1,10 @@
+import {eraseNativeAccount} from './security/account-native-erasure.js';
+import {erasePrivateConnectorGrants,cleanupPrivateAccountRows} from './security/account-private-cleanup.js';
 import {handleAdminAccountErasure} from './security/admin-account-erasure.js';
 import { starterCreationKey, provisionOpenDotStarter } from './onboarding/open-dot-starters.js';
 import { nameOnboardingTeam } from './onboarding/employee-names.js';
 import { STARTER_EMPLOYEES, starterAppearance, starterPersonaContract } from './onboarding/starter-employees.js';
+import {transferSharedMemoryVectors} from './security/account-shared-vector-erasure.js';
 import { cleanupAccountRuntimeReferences } from './security/account-runtime-erasure.js';
 import { issueErasureStatusToken, readErasureStatusToken } from './security/account-erasure-status-token.js';
 import { admitAccountErasure } from './security/account-erasure-ledger.js';
@@ -2994,7 +2997,7 @@ async function recoverAccountErasure() {
   erasureWorkerRunning = true;
   try {
     for (let batch=0;batch<4;batch++) {
-      const result=await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion});
+      const result=await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion,transferVectors:transferSharedMemoryVectors,eraseNative:async input=>{await eraseNativeAccount(input);await erasePrivateConnectorGrants(getCentralPrismaClient(),input.userId,input.scope.organizations.map(x=>x.orgId),{eraseComposio:composioService.erasePrivateUserAccounts,eraseNango:(await import('./connectors/mcp/nango-service.js')).deleteConnection});return {verified:true,nativeCredentialsRemoved:true};}});
       if (!result) break;
       if (batch===3) setImmediate(recoverAccountErasure);
     }
@@ -3071,6 +3074,8 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
       emit(70, 'No memories to delete');
     }
 
+    const erasureScope=await (await import('./security/account-erasure-scope.js')).planAccountErasureScope(getCentralPrismaClient(),userId);
+    await cleanupPrivateAccountRows(getCentralPrismaClient(),userId,erasureScope.organizations);
     await prisma.platformIntegration.deleteMany({ where: { userId } });
     emit(75, 'Deleted integrations');
 
@@ -3084,6 +3089,12 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     await prisma.session.deleteMany({ where: { userId } });
     emit(83, 'Deleted sessions');
 
+    // A surviving company keeps an accountable owner before this membership disappears.
+    for(const {orgId} of userOrgs.filter(x=>!orgIdsToDelete.includes(x.orgId))) {
+      const owner=await prisma.userOrganization.findFirst({where:{orgId,userId:{not:userId},role:'owner'}});
+      if(!owner){const successor=await prisma.userOrganization.findFirst({where:{orgId,userId:{not:userId}},orderBy:{userId:'asc'}});if(successor)await prisma.userOrganization.updateMany({where:{orgId,userId:successor.userId},data:{role:'owner'}});}
+    }
+    await cleanupAccountRuntimeReferences(getCentralPrismaClient(), userId, orgIdsToDelete);
     await prisma.userOrganization.deleteMany({ where: { userId } });
     emit(85, 'Deleted org memberships');
 
@@ -3127,7 +3138,6 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
         console.warn(`[account-delete] ⚠ reassign ${model}: ${err.message}`);
       }
     };
-    await cleanupAccountRuntimeReferences(getCentralPrismaClient(), userId, orgIdsToDelete);
     await reassignCreatedBy('team');
     await reassignCreatedBy('project');
     emit(89, 'Detached created_by references');

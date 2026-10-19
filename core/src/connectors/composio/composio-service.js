@@ -1088,3 +1088,16 @@ export async function triggerRequest(method, path, body) {
   try { return await _composioRequest(method, `/api/v3.1${path}`, body, { retries: method === 'GET' ? 2 : 0 }); }
   catch (cause) { const error = new Error('HIVEMIND connected activity provider could not complete this request.'); error.status = cause.status || 502; throw error; }
 }
+
+/** Erasure removes only the private user's subjects; shared org accounts survive. */
+export async function erasePrivateUserAccounts(userId,orgIds) {
+ if(!isComposioConfigured())return {configured:false};
+ const subjects=new Set([`hivemind:${userId}`,...orgIds.map(orgId=>`${orgId}:${userId}`)]);
+ for(const subject of subjects){
+  for(const account of await listAccountsForSubject(subject,{native:true})){
+   try{await composioDelete(`/api/v3.1/connected_accounts/${encodeURIComponent(account.id)}`);}catch(error){if(error.status!==404)throw error;}
+  }
+  if((await listAccountsForSubject(subject,{native:true})).length)throw Error('Private connector erasure unverified');
+ }
+ clearToolRouterCaches();return {verified:true};
+}

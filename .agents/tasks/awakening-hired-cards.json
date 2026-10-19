@@ -1,42 +1,56 @@
 {
   "title": "Restore awakening hired-agent cards and alignment",
-  "status": "open",
+  "status": "complete",
   "native_owner": "Da-vinci shared AwakeningOverlay",
   "outcome": "Show actual authenticated hires or saved planned roles in the same awakening experience for every account",
   "criteria": [
     {
       "id": "saved-roster-cards",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/awakening-hired-cards/status.json"
+      ]
     },
     {
       "id": "responsive-alignment",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/awakening-hired-cards/status.json"
+      ]
     },
     {
       "id": "frontend-release",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/awakening-hired-cards/status.json"
+      ]
     },
     {
       "id": "browser-fixture",
       "required": true,
-      "passed": false,
-      "evidence": []
+      "passed": true,
+      "evidence": [
+        "/Users/amar/Downloads/runtime-repair-tracker/awakening-hired-cards/status.json"
+      ]
     }
   ],
   "release": {
     "requested": true,
-    "frontend_source_sha": "542d1f119d64c4187cd7a40c450e878c5f8cbf4f"
+    "frontend_source_sha": "542d1f119d64c4187cd7a40c450e878c5f8cbf4f",
+    "worker_version": "abef1a7a-f419-4750-b1e7-7f1b11ee09c0",
+    "rollback": "7110e065-8bfd-442d-b26e-173b07c56515",
+    "deployed": true
   },
   "preserve": [
     "same blue artwork and awakening stages",
     "optional-mode boundaries",
     "native harnesses"
   ],
-  "blockers": []
+  "blockers": [],
+  "limitations": [
+    "Browser verification used isolated API fixtures against the deployed bundle; real signed-in customer roster acceptance remains unverified."
+  ]
 }

@@ -66,7 +66,10 @@ export async function decideActivityRelevance({ event, context, env = process.en
 
 async function deliverAttention(db,ctx,row,receipt,bridge,toolkit) {
           const delivery = await bridge.deliver({ ...row, relevance_decision: receipt });
-          if (['notify','wake'].includes(receipt.runtimeAttention.action)) {
+          // New assessment receipts defer alerts to Runtime; the durable signal/inbox remains visible.
+          const quietAssessment = receipt.runtimeAttention.action === 'wake'
+            && receipt.runtimeAttention.assessmentVersion === 1 && receipt.runtimeAttention.notification === 'runtime';
+          if (['notify','wake'].includes(receipt.runtimeAttention.action) && !quietAssessment) {
             const notification=await createWorkspaceNotification(db,{orgId:ctx.orgId,userId:ctx.userId,type:'runtime.attention',title:`${toolkit} update`,body:receipt.runtimeAttention.action==='wake'?'Activity received for Runtime assessment.':'Activity queued for Runtime’s next wake.',resourceType:'runtime',resourceId:delivery.targetSessionId,dedupeKey:`runtime-attention:${row.id}`,data:{eventId:row.id,action:receipt.runtimeAttention.action,href:'/hivemind/app/overview?runtime=1',inboxPersisted:delivery.inboxPersisted===true,wakeRequested:receipt.runtimeAttention.action==='wake'}});
             if (!notification) throw Error('attention_notification_unavailable');
             delivery.notificationId=notification.id;

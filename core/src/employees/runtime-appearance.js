@@ -4,7 +4,7 @@ export function validateRuntimeAppearance(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !['version','provider','character','asset_version'].includes(key))
     || value.version !== 1 || value.provider !== 'runtime-character' || value.asset_version !== '1'
-    || !['capsule','pebble','prism','orbit','spark','fold'].includes(value.character)) error('invalid_runtime_appearance',400);
+    || !['capsule','pebble','prism','orbit','spark','fold','classic'].includes(value.character)) error('invalid_runtime_appearance',400);
   return {version:1,provider:'runtime-character',character:value.character,asset_version:'1'};
 }
 

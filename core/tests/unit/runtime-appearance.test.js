@@ -8,8 +8,8 @@ function database(role='admin') {
  const db={userOrganization:{findUnique:async query=>{assert.deepEqual(query.where.userId_orgId,principal);return {role,isActive:active};}}, organization:{findUnique:async query=>{assert.equal(query.where.id,principal.orgId);return org;}},$queryRawUnsafe:async(_sql,key)=>assert.equal(key,`runtime-appearance:${principal.orgId}`),$executeRawUnsafe:async(sql,json,id)=>{assert.match(sql,/jsonb_set/);assert.equal(id,principal.orgId);org.companyProfile.runtimeAppearance=JSON.parse(json);}};
  db.$transaction=async callback=>callback(db); return {db,org,deactivate:()=>{active=false;}};
 }
-test('default and six strict Runtime-only choices',()=>{
- for(const name of ['capsule','pebble','prism','orbit','spark','fold']) assert.equal(validateRuntimeAppearance(look(name)).character,name);
+test('default and seven strict Runtime-only choices',()=>{
+ for(const name of ['capsule','pebble','prism','orbit','spark','fold','classic']) assert.equal(validateRuntimeAppearance(look(name)).character,name);
  for(const value of [null,[],{},look('https://bad.test'),{...look('orbit'),employee_id:'other'},{...look('orbit'),asset_version:'2'}]) assert.throws(()=>validateRuntimeAppearance(value),{status:400});
 });
 test('workspace save survives read, increments revision, preserves unrelated fields',async()=>{

@@ -6,6 +6,14 @@ import { nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-
 const VERSION = 1;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export function lifecycleError(code, status = 409) { const error = new Error(code); error.status = status; throw error; }
+// Session persistence is configured for the hivemind schema. Restored or
+// archived schemas may contain tables with the same name; they are never an
+// authority for live employee lifecycle decisions.
+async function nativeHarnessSchema(tx) {
+  const rows = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_schema='hivemind' AND table_name='harness_sessions' AND table_type='BASE TABLE'");
+  if (rows.length !== 1) lifecycleError('native_storage_unavailable', 503);
+  return 'hivemind';
+}
 function text(value, name, max) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) lifecycleError(`invalid_${name}`, 400);
   return value.trim();
@@ -183,9 +191,7 @@ export async function requireNativeRuntime(db, principal) {
   principal = await nativeAgentStoragePrincipal(db,principal);
   await db.$transaction(async tx => {
     await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)", principal.orgId, principal.userId);
-    const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
-    if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable', 503);
-    const schema = schemas[0].table_schema;
+    const schema = await nativeHarnessSchema(tx);
     const sessions = await tx.$queryRawUnsafe(`SELECT header FROM ${schema}.harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid`, principal.runtimeSessionId, principal.orgId, principal.userId);
     const header = sessions[0]?.header;
     if (!header || header.parentSession) lifecycleError('runtime_session_required', 403);
@@ -206,9 +212,7 @@ export async function requireNativeEmployeeProfile(db, principal) {
   if (!UUID.test(principal.employeeId || '')) lifecycleError('employee_profile_scope_required',403);
   await db.$transaction(async tx => {
     await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",principal.orgId,principal.userId);
-    const schemas=await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
-    if (schemas.length!==1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable',503);
-    const schema=schemas[0].table_schema;
+    const schema=await nativeHarnessSchema(tx);
     const sessions=await tx.$queryRawUnsafe(`SELECT header FROM ${schema}.harness_sessions WHERE id=$1 AND org_id=$2::uuid AND user_id=$3::uuid`,principal.employeeSessionId,principal.orgId,principal.userId);
     const header=sessions[0]?.header;
     if (!header || header.parentSession) lifecycleError('employee_profile_scope_required',403);
@@ -238,9 +242,7 @@ function employeeSessionIds(sessions, owners, employeeId) {
 
 /** Read current native task acceptance and successful private closeout memory, never employee prose. */
 export async function inspectNativeCloseout(tx, principal, employee) {
-  const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
-  if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable', 503);
-  const schema = schemas[0].table_schema;
+  const schema = await nativeHarnessSchema(tx);
   // Organization employee closeout must not silently omit another authorized user's work.
   // Core's existing authority pool can read these records; the restricted runner cannot.
   const roles = await tx.$queryRawUnsafe('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user');
@@ -292,9 +294,7 @@ export async function nativeLifecycleHostProof(db, principal, employeeId) {
     const employee = await tx.digitalEmployee.findFirst({ where: { id: employeeId, orgId: principal.orgId } });
     const lifecycle = nativeLifecycle(employee);
     if (!employee || !lifecycle) lifecycleError('native_employee_not_found', 404);
-    const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
-    if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) lifecycleError('native_storage_unavailable', 503);
-    const schema = schemas[0].table_schema;
+    const schema = await nativeHarnessSchema(tx);
     const roles = await tx.$queryRawUnsafe('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user');
     if (!roles[0]?.rolsuper && !roles[0]?.rolbypassrls) lifecycleError('organization_closeout_read_authority_required', 503);
     const sessions = await tx.$queryRawUnsafe(`SELECT id,user_id,header FROM ${schema}.harness_sessions WHERE org_id=$1::uuid ORDER BY updated_at DESC`, principal.orgId);

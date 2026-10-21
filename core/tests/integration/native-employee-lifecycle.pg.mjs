@@ -17,6 +17,9 @@ await admin.query(`CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE 
 INSERT INTO organizations VALUES('${a.orgId}'),('${b.orgId}');INSERT INTO users VALUES('${a.userId}'),('${b.userId}')`);
 await admin.query(fs.readFileSync('/source/session-baseline.sql','utf8'));
 await admin.query(fs.readFileSync('/source/session-hardening.sql','utf8'));
+// A preserved archive may have an old Harness table. Live lifecycle reads must
+// stay bound to the configured schema instead of failing or reading the archive.
+await admin.query('CREATE SCHEMA restored_archive; CREATE TABLE restored_archive.harness_sessions(id text)');
 await admin.query(`CREATE TABLE digital_employees(id uuid PRIMARY KEY,org_id uuid,slug text,data jsonb,UNIQUE(org_id,slug));
 CREATE TABLE fixture_memberships(org_id uuid,user_id uuid,role text,is_active bool);
 CREATE TABLE fixture_memories(id text,org_id uuid,agent_slug text,status text,kind text,created_at timestamptz);

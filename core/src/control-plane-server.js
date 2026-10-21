@@ -84,6 +84,7 @@ import {
 import {
   amendEntitlementGrant,
   createPromotion,
+  digestPromotionValue,
   findPromotionForCode,
   grantPromotionToOrganization,
   listPromotions,
@@ -6207,8 +6208,28 @@ const server = http.createServer(async (req, res) => {
       accountType: admissionAccountType,
       secret: SIGNUP_ADMISSION_SECRET,
     });
-    if (partnerReferral && signupAdmission?.partnerReferral?.id !== partnerReferral.row.id) {
+    if (partnerReferral && (signupAdmission?.partnerReferral?.id !== partnerReferral.row.id
+      || signupAdmission.partnerReferral.version !== partnerReferral.row.shareTokenVersion)) {
       return jsonResponse(res, { error: 'referral invitation unavailable', code: 'invitation_unavailable' }, 403);
+    }
+    // An invitation still admits a deleted account's returning email, but its
+    // one-per-email trial must not be issued twice. Require an explicit choice
+    // before creating a free workspace from that same invitation.
+    const priorReferralUses = partnerReferral && signupUser?.email
+      ? await prisma.promotionRedemption.count({ where: {
+        promotionId: partnerReferral.row.promotionId,
+        emailHash: digestPromotionValue(signupUser.email),
+      } }) : 0;
+    const referralOfferUsed = Boolean(partnerReferral && priorReferralUses >= partnerReferral.row.promotion.perEmailMax);
+    const acceptReferralFreeFallback = body.accept_referral_free_fallback === true;
+    if (referralOfferUsed && !acceptReferralFreeFallback) {
+      return jsonResponse(res, { error: 'This email has already used this invitation’s trial.', code: 'referral_offer_used' }, 409);
+    }
+    if (acceptReferralFreeFallback && !referralOfferUsed) {
+      return jsonResponse(res, { error: 'Free fallback is unavailable.', code: 'invalid_referral_fallback' }, 400);
+    }
+    if (acceptReferralFreeFallback && (requestedPlanInput !== 'free' || !partnerReferral)) {
+      return jsonResponse(res, { error: 'Free fallback requires an invitation and the Free plan.', code: 'invalid_referral_fallback' }, 400);
     }
     const enterpriseInvitationAdmission = requestedPlanInput === 'enterprise'
       ? signupAdmission?.enterpriseInvitation || null : null;
@@ -6249,7 +6270,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'choose one referral invitation' }, 400);
     }
     let referralCampaign = null;
-    let signupPromotion = partnerReferral?.promotion || null;
+    let signupPromotion = acceptReferralFreeFallback ? null : partnerReferral?.promotion || null;
     if (referralCode) {
       const codeSignupUser = await prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null);
       signupPromotion = await findPromotionForCode({ prisma, code: referralCode, email: codeSignupUser?.email || '', orgId: null }).catch(() => null);

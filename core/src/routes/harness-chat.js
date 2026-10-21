@@ -329,7 +329,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       }
       const result = await manageNativeEmployee(prisma, principal, input);
       const usesOpenDotExecutor = Object.hasOwn(result.employee?.policyRules || {}, 'open_dot_employee');
-      if (!usesOpenDotExecutor && (['create','configure'].includes(input.operation) || (input.operation === 'archive' && result.employee.archivedAt))) {
+      if (!usesOpenDotExecutor && (['create','configure'].includes(input.operation) || (['archive','fresh_reset_archive'].includes(input.operation) && result.employee.archivedAt))) {
         const { activateNativeEmployeeLifecycle } = await import('../employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee, {env,fetchImpl});
       }

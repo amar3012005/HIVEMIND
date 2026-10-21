@@ -21,6 +21,29 @@ test('only a current active administrator may change the registry', async () => 
   }
 });
 
+test('confirmed fresh archive retires only the requesting user\'s non-starter employee after private work is gone', async () => {
+  const principal={orgId:'org',userId:'admin'};
+  const row={id:'11111111-1111-4111-8111-111111111111',slug:'employee-owned',createdBy:'admin',status:'ready',
+    policyRules:{native_lifecycle:{version:1,revision:2,phase:'active',kind:'durable'}}};
+  let surviving=[];let foreignMemory=0;
+  const tx={$queryRawUnsafe:async sql=>sql.includes('information_schema') ? [{table_schema:'hivemind'}]
+    : sql.includes('harness_session_events') ? surviving : [],
+    digitalEmployee:{findFirst:async()=>row,update:async({data})=>Object.assign(row,data)},
+    hyperAgentOperatingMemory:{count:async()=>foreignMemory}};
+  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$transaction:async fn=>fn(tx)};
+  const input={operation:'fresh_reset_archive',employee_id:row.id,expected_revision:2,confirmed:true};
+  await assert.rejects(manageNativeEmployee(db,principal,{...input,confirmed:false}),/fresh_archive_not_authorized/);
+  surviving=[{one:1}];
+  await assert.rejects(manageNativeEmployee(db,principal,input),/fresh_archive_surviving_work/);
+  surviving=[];foreignMemory=1;
+  await assert.rejects(manageNativeEmployee(db,principal,input),/fresh_archive_shared_memory/);
+  foreignMemory=0;
+  const result=await manageNativeEmployee(db,principal,input,{now:Date.parse('2026-10-21T00:00:00Z')});
+  assert.equal(result.freshReset,true);assert.ok(result.employee.archivedAt);
+  assert.equal(result.employee.policyRules.native_lifecycle.phase,'archived');
+  assert.equal((await manageNativeEmployee(db,principal,input)).replayed,true);
+});
+
 test('reserved malformed lifecycle policies fail closed rather than reverting to legacy', () => {
   for (const native_lifecycle of [null, 'invalid', {version:2,phase:'active',kind:'durable'},
     {version:1,phase:'active',kind:'unknown'}, {version:1,phase:'active',kind:'temporary',expires_at:'invalid'}]) {

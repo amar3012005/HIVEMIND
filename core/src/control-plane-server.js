@@ -11158,7 +11158,7 @@ Write the persona now.`;
       if (openDotBound && input.operation === 'configure' && !result.appearanceOnly) {
         const { activateBoundOpenDotEmployee } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateBoundOpenDotEmployee(principal, result.employee);
-      } else if (!hasOpenDotMarker && !result.appearanceOnly && ['create','configure','archive'].includes(input.operation)) {
+      } else if (!hasOpenDotMarker && !result.appearanceOnly && ['create','configure','archive','fresh_reset_archive'].includes(input.operation)) {
         const { activateNativeEmployeeLifecycle } = await import('./employees/native-lifecycle-bridge.js');
         result.native_activation = await activateNativeEmployeeLifecycle(principal, result.employee);
       }

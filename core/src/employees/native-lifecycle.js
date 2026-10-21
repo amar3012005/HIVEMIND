@@ -117,7 +117,7 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     });
   }
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);
-  if (!['configure','begin_closeout','inspect_closeout','archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
+  if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
   return db.$transaction(async tx => {
     await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS lock', `${principal.orgId}:${input.employee_id}`);
     const row = await tx.digitalEmployee.findFirst({ where: { id: input.employee_id, orgId: principal.orgId } });
@@ -127,6 +127,27 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     if (row.archivedAt) {
       if (input.operation === 'configure') lifecycleError('employee_profile_not_active');
       return { employee: publicEmployee(row), replayed: true, closeout: { ready: true, archived: true } };
+    }
+    if (input.operation === 'fresh_reset_archive') {
+      // A human-initiated fresh start discards this user's private work. It is
+      // distinct from ordinary closeout, which still requires accepted tasks
+      // and a saved handoff. Never retire a starter or an employee referenced
+      // by another user's surviving native work.
+      if (input.confirmed !== true || input.expected_revision !== lifecycle.revision
+        || row.createdBy !== principal.userId || lifecycle.predefined_starter) lifecycleError('fresh_archive_not_authorized', 403);
+      const schema = await nativeHarnessSchema(tx);
+      const references = await tx.$queryRawUnsafe(`SELECT 1 FROM ${schema}.harness_session_events
+        WHERE org_id=$1::uuid AND event_type IN ('hivemind/session-owner','hivemind/hq-employee-assignment')
+          AND (COALESCE(payload->'data',payload)->>'id'=$2 OR COALESCE(payload->'data',payload)->>'employeeId'=$2)
+        LIMIT 1`, principal.orgId, row.id);
+      if (references.length) lifecycleError('fresh_archive_surviving_work', 409);
+      const foreignMemory = await tx.hyperAgentOperatingMemory.count({ where: { orgId:principal.orgId,
+        agentSlug:row.slug, authorUserId:{ not:principal.userId } } });
+      if (foreignMemory) lifecycleError('fresh_archive_shared_memory', 409);
+      const updated = await tx.digitalEmployee.update({ where:{ id:row.id }, data:{ archivedAt:new Date(now), status:'paused',
+        policyRules:{ ...row.policyRules, native_lifecycle:{ ...lifecycle, phase:'archived', revision:lifecycle.revision+1,
+          archived_by:principal.userId, archived_at:new Date(now).toISOString(), fresh_reset:true } } } });
+      return { employee:publicEmployee(updated), replayed:false, freshReset:true };
     }
     if (input.operation === 'configure') {
       const dot = row.policyRules?.open_dot_employee;

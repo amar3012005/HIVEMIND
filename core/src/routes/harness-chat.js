@@ -627,6 +627,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
       const known = /^(invalid_|reserved_|runtime_|canonical_|organization_agent_|superseded_|agenda_|memory_idempotency_conflict)/.test(String(error?.message || ''));
       jsonResponse(res, { error: known ? error.message : 'operating_memory_unavailable',
         ...(error.message === 'invalid_uncertainty_update_state' ? { message: error.hint } : {}),
+        ...(error.message === 'superseded_memory_already_replaced' && error.currentId ? { current_id: error.currentId } : {}),
       }, error.status || (known ? 400 : 503));
     }
     return true;

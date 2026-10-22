@@ -90,3 +90,24 @@ test('explicit resolved uncertainty saves directly to private memory with a reso
  assert.equal(result.memory.context.state,'resolved');
  assert.equal(result.memory.supersedesId,prior);
 });
+
+test('agent memory supersession is compare-and-set against the replaced head',async()=>{
+ const prior='0b8e1f0e-2a37-4c58-9c3d-4f0f8f3a1b11', winner='9a0c2d3e-4f5a-4b6c-8d7e-0f1a2b3c4d5e';
+ const learning={kind:'learning',agent_slug:'sofia',title:'Pricing note',summary:'Use annual pricing.',idempotency_key:'learning-b',supersedes_id:prior};
+ const calls=[];let transactions=0;
+ const db={
+  $transaction:async(work)=>{transactions++;return work(db);},
+  $queryRawUnsafe:async(sql,...args)=>{calls.push(sql);
+   if(/WHERE id = \$1::uuid/.test(sql))return [{id:prior}];
+   if(/context->>'supersedesId'=\$2 AND idempotency_key<>\$3/.test(sql))return [{id:winner}];
+   return [];},
+ };
+ await assert.rejects(saveOperatingMemory(db,learning,{orgId:identity.orgId,userId:identity.userId},{source:'agent'}),error=>{
+  assert.equal(error.message,'superseded_memory_already_replaced');
+  assert.equal(error.status,409);
+  assert.equal(error.currentId,winner);
+  return true;
+ });
+ assert.equal(transactions,1);
+ assert.match(calls.find(sql=>/WHERE id = \$1::uuid/.test(sql)),/FOR UPDATE/);
+});

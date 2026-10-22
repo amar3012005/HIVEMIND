@@ -36,3 +36,42 @@ edited or removed messages.
 ## Desktop Google sign-in (2.1.7)
 
 Google application login opens the system browser through the existing `/auth/google` external-tool return contract. A random-port IPv4 loopback listener validates a one-use 256-bit nonce, exact host, GET method and five-minute deadline. The returned application session is verified at `/auth/session` without old cookies; only the server-issued Secure/HttpOnly application cookie is installed. No Google password, Chrome cookie database, client secret, or new persistent API key is accessed. Core and Control are unchanged. The existing server contract returns a session token to loopback, not a PKCE authorization code; replacing that server-side contract requires separate scope. Connector OAuth flows are unchanged.
+
+
+## Desktop frontend refresh (2.1.8)
+
+Ships the current outer SPA, OpenDot static chunks, and separate Brain and Runtime
+native browser packages and shells. Host-specific revision checks prevent mixing
+Brain and Runtime code. API requests, authentication, native boot authorization,
+Next route documents/server actions and fresh conversation data remain remote.
+This is frontend asset bundling, not an offline Next server.
+
+Update checks run on launch/focus and every ten minutes. A published outer build
+change or an unmatched native/static revision exposes **Get updated desktop app**
+in the sidebar (bottom-left fallback). Packaged code requires a new desktop build;
+a reload alone cannot update it. Distributed builds offer **Download update**, then
+**Restart to update** using electron-updater. No active conversation is reloaded
+automatically. Local-test builds link to the release page and do not install unsigned
+remote code. Publishing a signed update remains a separate distribution step.
+
+The 2.1.8 package is built into a separate output directory to preserve the running
+2.1.7 application. Credentials and cached conversations are not included in assets.
+
+## Local OpenDot employee entry (2.1.9)
+
+The prebuilt `/desktop` document now ships in the app and is served locally at
+OpenDot `/employees/:id` and `/dots/:id` document requests. It contains no tenant
+or conversation data. It mounts the existing OpenDot UI and uses local history
+navigation for employee chat switching. Native web routing is unchanged.
+
+The existing authenticated ownership/setup services are exposed through the narrow
+`/api/desktop/entry` JSON endpoint. That endpoint, history, live streams and server
+actions remain online; an offline first opening displays the packaged connection
+state rather than downloading a page. Other OpenDot product routes outside employee
+chats still use the existing web route. This supersedes the 2.1.8 employee-document
+limitation; it does not make private data or agent execution available offline.
+
+
+## Local 2.1.10 controls and live-history repair
+
+Runtime UI bundle `1e689fe8d2` preserves the later getting-started update and adds a three-control identity popover. OpenDot `264359c` orders delayed message events by original timestamp and prevents layout-driven history paging. Packaged offline hydration and 55 desktop tests passed. Installed side by side; running older app is unchanged. Server reset receipt change is not deployed: active execution host migrated to 100.85.110.36 during this task and current SSH access was denied. Authenticated Sakana rendering and cross-device reset acceptance remain unchecked.

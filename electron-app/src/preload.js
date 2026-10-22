@@ -67,3 +67,31 @@ contextBridge.exposeInMainWorld('electron', {
     return () => ipcRenderer.removeListener('deep-link', h);
   },
 });
+
+// Keep the update action visible in the sidebar even when the hosted UI has no
+// desktop-updater component. Do not interrupt work or reload active calls.
+if (window.top === window && ['next.singulancelabs.com', 'runtime-runner.singulancelabs.com'].includes(location.hostname)) {
+  let state = {};
+  const paint = () => {
+    const visible = ['available', 'downloading', 'downloaded', 'frontend-update'].includes(state.status);
+    let button = document.getElementById('singulance-desktop-update');
+    if (!visible) { button?.remove(); return; }
+    if (!document.body) return;
+    if (!button) {
+      button = document.createElement('button'); button.id = 'singulance-desktop-update'; button.type = 'button';
+      button.style.cssText = 'margin:8px;padding:10px 14px;border:1px solid #ddd;border-radius:12px;background:#fff;color:#111;font:13px system-ui;z-index:2147483000;cursor:pointer';
+      button.addEventListener('click', () => ipcRenderer.invoke(state.status === 'downloaded' ? 'install-update' : 'download-update'));
+      const sidebar = document.querySelector('aside, [data-sidebar="sidebar"]');
+      if (sidebar) sidebar.append(button);
+      else { button.style.position = 'fixed'; button.style.bottom = '12px'; button.style.left = '12px'; document.body.append(button); }
+    }
+    const label = state.status === 'downloaded' ? 'Restart to update' : state.status === 'downloading' ? `Downloading update ${state.percent || 0}%` : state.status === 'frontend-update' ? 'Get updated desktop app' : 'Download update';
+    if (button.textContent !== label) button.textContent = label;
+    button.disabled = state.status === 'downloading';
+  };
+  ipcRenderer.on('update-status', (_event, value) => { state = value; paint(); });
+  window.addEventListener('DOMContentLoaded', () => {
+    ipcRenderer.invoke('get-update-status').then(value => { state = value; paint(); });
+    new MutationObserver(paint).observe(document.body, {childList:true, subtree:true});
+  });
+}

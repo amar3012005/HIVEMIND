@@ -37,6 +37,7 @@ let mainWindow = null;
 let splashWindow = null;
 let tray = null;
 let isQuitting = false;
+let updatePayload = {};
 let updateState = 'idle'; // idle | checking | downloading | downloaded | none | error
 
 // ── App metadata ──────────────────────────────────────────────
@@ -47,7 +48,7 @@ log.transports.file.level = 'info';
 log.transports.console.level = isDev ? 'debug' : 'warn';
 if (autoUpdater) {
   autoUpdater.logger = log;
-  autoUpdater.autoDownload = true;
+  autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 }
 
@@ -225,6 +226,31 @@ function createWindow() {
     mainWindow.on('focus', checkFrontendUpdate);
     mainWindow.webContents.once('did-finish-load', checkFrontendUpdate); // set baseline
     mainWindow.on('closed', () => clearInterval(feTimer));
+  }
+
+  // Packaged code stays pinned until a desktop update is installed. Reloading
+  // cannot update an old bundle, so distinguish download from a web reload.
+  if (!isDev && hasBundledFrontends) {
+    const { frontendChanged } = require('./desktop-update-status');
+    const packaged = JSON.parse(fs.readFileSync(path.join(FRONTEND_BUNDLE, 'manifest.json'), 'utf8'));
+    let lastCheck = 0;
+    let checking = false;
+    const check = async () => {
+      if (checking || Date.now() - lastCheck < 60_000) return;
+      checking = true; lastCheck = Date.now();
+      try {
+        const response = await fetch('https://next.singulancelabs.com/asset-manifest.json', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
+        if (response.ok && frontendChanged(packaged, await response.json()) && !['available', 'downloading', 'downloaded'].includes(updateState)) {
+          sendUpdate('frontend-update');
+        }
+        if (autoUpdater && !['checking', 'downloading', 'downloaded'].includes(updateState)) checkForUpdates();
+      } catch { /* Offline: retain current code and retry on the next check. */ }
+      finally { checking = false; }
+    };
+    const timer = setInterval(check, 10 * 60_000);
+    mainWindow.on('focus', check);
+    mainWindow.webContents.once('did-finish-load', check);
+    mainWindow.on('closed', () => clearInterval(timer));
   }
 
   // First-party hosts that stay in the main window on top-level navigation.
@@ -469,6 +495,7 @@ let manualCheck = false;
 
 function sendUpdate(status, payload = {}) {
   updateState = status;
+  updatePayload = { status, ...payload };
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('update-status', { status, ...payload });
   }
@@ -508,7 +535,7 @@ function checkForUpdates(manual = false) {
 if (autoUpdater) {
 autoUpdater.on('update-available', (info) => {
   log.info('update available', info && info.version);
-  sendUpdate('downloading', { version: info && info.version });
+  sendUpdate('available', { version: info && info.version });
 });
 
 autoUpdater.on('update-not-available', () => {
@@ -566,6 +593,11 @@ ipcMain.handle('cancel-browser-sign-in', event => {
 });
 
 ipcMain.handle('check-for-updates', () => { checkForUpdates(true); });
+ipcMain.handle('get-update-status', () => updatePayload);
+ipcMain.handle('download-update', async () => {
+  if (autoUpdater && updateState === 'available') { sendUpdate('downloading'); await autoUpdater.downloadUpdate(); }
+  else if (updateState === 'frontend-update') await shell.openExternal('https://github.com/amar3012005/HIVEMIND/releases');
+});
 ipcMain.handle('install-update', () => {
   if (autoUpdater && updateState === 'downloaded') { isQuitting = true; autoUpdater.quitAndInstall(); }
 });
@@ -580,7 +612,12 @@ ipcMain.handle('launch-app', () => {
 
 app.whenReady().then(() => {
   offlineHistory = createOfflineHistory({ app, safeStorage, BrowserWindow, ipcMain, getMainWindow: () => mainWindow, log });
-  if (!isDev && hasBundledFrontends) installBundledFrontends(session.defaultSession, FRONTEND_BUNDLE, log, offlineHistory);
+  if (!isDev && hasBundledFrontends) {
+    offlineHistory.frontendUpdateNeeded = () => {
+      if (!['available', 'downloading', 'downloaded', 'frontend-update'].includes(updateState)) sendUpdate('frontend-update');
+    };
+    installBundledFrontends(session.defaultSession, FRONTEND_BUNDLE, log, offlineHistory);
+  }
   if (process.platform === 'darwin' && app.dock) app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
   if (process.platform === 'darwin') {
     desktopBrowserService = createDesktopBrowserService({ app, BrowserWindow, dialog, ipcMain, session,

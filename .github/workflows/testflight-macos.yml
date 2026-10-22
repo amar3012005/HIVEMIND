@@ -1,0 +1,89 @@
+name: SINGULANCE macOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: New positive CFBundleVersion for this TestFlight build
+        required: true
+        type: string
+      upload_to_testflight:
+        description: Validate and upload the signed MAS package to App Store Connect
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: singulance-macos-testflight
+  cancel-in-progress: false
+
+jobs:
+  mas:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: electron-app
+    env:
+      SINGULANCE_MAS_BUILD_NUMBER: ${{ inputs.build_number }}
+      SINGULANCE_APPLE_TEAM_ID: ${{ vars.SINGULANCE_APPLE_TEAM_ID }}
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: electron-app/package-lock.json
+      - name: Select and verify the Xcode 27 delivery toolchain
+        env:
+          SINGULANCE_XCODE_PATH: ${{ vars.SINGULANCE_XCODE_PATH }}
+        run: |
+          node -e 'const fs=require("node:fs");const path=require("node:path");const selected=process.env.SINGULANCE_XCODE_PATH;if(selected){if(!path.isAbsolute(selected)||!fs.statSync(selected).isDirectory())throw Error("SINGULANCE_XCODE_PATH must identify the approved Xcode developer directory");process.env.DEVELOPER_DIR=selected;fs.appendFileSync(process.env.GITHUB_ENV,"DEVELOPER_DIR="+selected+"\n");}console.log(JSON.stringify(require("./scripts/mas-preflight.cjs").verifyAppleTools()));'
+      - name: Install the frozen dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify browser policy and MAS release contracts
+        run: npm test
+      - name: Prepare the macOS distribution profile
+        env:
+          MAS_PROFILE_BASE64: ${{ secrets.SINGULANCE_MAS_PROFILE_BASE64 }}
+        run: |
+          python3 -I -c 'import base64,os,pathlib; value=os.environ.get("MAS_PROFILE_BASE64",""); assert value,"Configure SINGULANCE_MAS_PROFILE_BASE64 with a macOS App Store distribution profile"; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"singulance-mas.provisionprofile"; p.write_bytes(base64.b64decode(value,validate=True)); p.chmod(0o600); pathlib.Path(os.environ["GITHUB_ENV"]).open("a").write("SINGULANCE_MAS_PROVISIONING_PROFILE="+str(p)+"\n")'
+      - name: Build and verify the signed universal MAS package
+        env:
+          CSC_LINK: ${{ secrets.SINGULANCE_MAS_APP_CERT }}
+          CSC_KEY_PASSWORD: ${{ secrets.SINGULANCE_MAS_APP_CERT_PASSWORD }}
+          CSC_INSTALLER_LINK: ${{ secrets.SINGULANCE_MAS_INSTALLER_CERT }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.SINGULANCE_MAS_INSTALLER_CERT_PASSWORD }}
+        run: npm run build:mas
+      - name: Prepare App Store Connect upload authentication
+        if: inputs.upload_to_testflight
+        env:
+          ASC_KEY_BASE64: ${{ secrets.SINGULANCE_ASC_KEY_BASE64 }}
+        run: |
+          python3 -I -c 'import base64,os,pathlib; value=os.environ.get("ASC_KEY_BASE64",""); assert value,"Configure SINGULANCE_ASC_KEY_BASE64 before requesting TestFlight upload"; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"singulance-asc.p8"; p.write_bytes(base64.b64decode(value,validate=True)); p.chmod(0o600)'
+      - name: Validate and upload to App Store Connect
+        if: inputs.upload_to_testflight
+        env:
+          SINGULANCE_ASC_KEY_ID: ${{ vars.SINGULANCE_ASC_KEY_ID }}
+          SINGULANCE_ASC_ISSUER_ID: ${{ vars.SINGULANCE_ASC_ISSUER_ID }}
+          SINGULANCE_ASC_KEY_PATH: ${{ runner.temp }}/singulance-asc.p8
+        run: |
+          PACKAGE_PATH=$(node -p "require('./dist/SINGULANCE-testflight-package.json').packagePath")
+          npm run testflight:upload -- "$PACKAGE_PATH"
+      - name: Preserve the verified signing and package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SINGULANCE-macOS-TestFlight-${{ inputs.build_number }}
+          path: |
+            electron-app/dist/**/*.pkg
+            electron-app/dist/SINGULANCE-testflight-package.json
+            electron-app/dist/**/SINGULANCE-mas-signing-receipt.json
+          if-no-files-found: error
+      - name: Remove temporary signing inputs
+        if: always()
+        run: |
+          python3 -I -c 'import os,pathlib; root=pathlib.Path(os.environ["RUNNER_TEMP"]); [(root/name).unlink(missing_ok=True) for name in ("singulance-mas.provisionprofile","singulance-asc.p8")]'

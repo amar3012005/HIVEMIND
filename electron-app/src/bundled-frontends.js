@@ -53,11 +53,13 @@ function createBundledFrontends(root) {
     for (const part of [Buffer.from(record.body, 'base64'), ...(record.map ? [Buffer.from(record.map, 'base64')] : [])]) hash.update(`${part.byteLength}:`).update(part);
     return hash.digest('hex').slice(0, 12);
   }
-  function observeBootGraph(boot) {
+  const recordsFor = host => manifest.pluginsByHost?.[host] ?? manifest.plugins;
+  function observeBootGraph(boot, host = 'runtime-runner.singulancelabs.com') {
+    const records = recordsFor(host);
     const graph = boot?.injections?.find(row => row.kind === 'global' && row.name === '__DSH_BOOT__')?.value;
     if (!graph || !/^[a-f0-9]{12}$/.test(graph.rev) || !Array.isArray(graph.entries) || !graph.entries.length) return;
-    if (!graph.entries.every(entry => manifest.plugins[entry.id] && artifactRevision(manifest.plugins[entry.id]) === entry.rev)) return;
-    shellRevisions.add(graph.rev);
+    if (!graph.entries.every(entry => records[entry.id] && artifactRevision(records[entry.id]) === entry.rev)) return;
+    shellRevisions.add(host + ":" + graph.rev);
   }
   const read = entry => {
     const file = path.resolve(root, entry.file);
@@ -71,15 +73,20 @@ function createBundledFrontends(root) {
     const url = new URL(request.url);
     if (url.protocol !== 'https:') return null;
     const app = APP_HOSTS.has(url.hostname);
+    if (url.hostname === DOT_HOST && /^\/(dots|employees)\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)
+      && manifest.dotDocument && !url.searchParams.has('_rsc') && (request.destination === 'document' || request.headers?.get('accept')?.includes('text/html'))) return read(manifest.dotDocument);
     if (!app && url.hostname !== DOT_HOST) return null;
     if (app && /^\/hivemind\/(?:app(?:\/|$)|login(?:\/|$))/.test(url.pathname)
       && (request.destination === 'document' || request.headers?.get('accept')?.includes('text/html'))) return read(manifest.index);
+    const brainKey = `brain:${url.pathname}`;
+    if (url.hostname === 'next.singulancelabs.com' && manifest.assets[brainKey]) return read(manifest.assets[brainKey]);
     const key = `${app ? 'app' : 'dot'}:${url.pathname}`;
     if (manifest.assets[key]) return read(manifest.assets[key]);
-    if (url.hostname !== 'runtime-runner.singulancelabs.com') return null;
+    if (!app) return null;
+    const records = recordsFor(url.hostname);
     if (url.pathname === '/assets/harness-shell.js') {
-      const entry = manifest.nativeShell;
-      if (entry && shellRevisions.has(url.searchParams.get('rev'))) return read(entry);
+      const entry = manifest.shellsByHost?.[url.hostname] ?? manifest.nativeShell;
+      if (entry && shellRevisions.has(url.hostname + ':' + url.searchParams.get('rev'))) return read(entry);
       return null;
     }
     if (url.pathname !== '/plugins/' || !/^\?\?@deepseek-ai\//.test(url.search)) return null;
@@ -87,15 +94,15 @@ function createBundledFrontends(root) {
     if (!match) return null;
     const resources = match[1].split(',');
     if (resources.length > 128 || !resources.every(value => /^@deepseek-ai\/[a-z0-9_-]+\/client\.js$/.test(value))) return null;
-    let combo = combos.get(url.search);
+    let combo = combos.get(url.hostname + url.search);
     if (!combo) {
-      combo = nativeCombo(manifest.plugins, resources.map(value => value.slice(0, -'/client.js'.length)));
+      combo = nativeCombo(records, resources.map(value => value.slice(0, -'/client.js'.length)));
       if (combo && combo.rev !== match[2] && resources.length === 1) {
         const id = resources[0].slice(0, -'/client.js'.length);
-        if (artifactRevision(manifest.plugins[id]) === match[2]) combo = nativeCombo(manifest.plugins, [id], match[2]);
+        if (artifactRevision(records[id]) === match[2]) combo = nativeCombo(records, [id], match[2]);
       }
       if (!combo || combo.rev !== match[2]) return null;
-      combos.set(url.search, combo);
+      combos.set(url.hostname + url.search, combo);
     }
     return { body: combo.body, type: 'text/javascript; charset=utf-8', headers: {} };
   }
@@ -159,6 +166,8 @@ function installBundledFrontends(ses, root, log, observer = {}) {
     const result = bundle.resolve(request);
     if (!result) {
       const url = new URL(request.url);
+      if (request.method === 'GET' && (APP_HOSTS.has(url.hostname) || url.hostname === DOT_HOST)
+        && ((url.pathname === '/plugins/' && url.search.includes('&rev=')) || url.pathname.startsWith('/_next/static/'))) observer.frontendUpdateNeeded?.();
       // Main-process fetch has no renderer origin to resolve `same-origin`
       // against. Keep the browser's existing first-party session credential.
       const firstParty = url.hostname === 'singulancelabs.com' || url.hostname.endsWith('.singulancelabs.com');
@@ -178,8 +187,8 @@ function installBundledFrontends(ses, root, log, observer = {}) {
       if (firstParty && ['/api/hivemind/session/establish', '/api/hivemind/boot'].includes(url.pathname) && !response.ok) {
         log?.warn('Desktop session admission', { path: url.pathname, method: request.method, status: response.status, origin: headers.get('origin'), referrerOrigin: (() => { try { return new URL(request.referrer || headers.get('referer')).origin; } catch { return null; } })() });
       }
-      if (url.origin === 'https://runtime-runner.singulancelabs.com' && url.pathname === '/api/hivemind/boot' && response.ok) {
-        try { bundle.observeBootGraph(await response.clone().json()); } catch { /* The server remains the boot authority. */ }
+      if (APP_HOSTS.has(url.hostname) && url.pathname === '/api/hivemind/boot' && response.ok) {
+        try { bundle.observeBootGraph(await response.clone().json(), url.hostname); } catch { /* The server remains the boot authority. */ }
       }
       return response;
     }

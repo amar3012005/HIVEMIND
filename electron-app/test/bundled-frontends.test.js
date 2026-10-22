@@ -13,3 +13,30 @@ test('native read forwarding exposes redirects without following or replaying',a
  const result=await require('../src/bundled-frontends').forwardReadRequest(request,{},new Headers(),'include',{request:value=>{options=value;return outgoing;}});
  assert.equal(options.redirect,'manual');assert.equal(options.bypassCustomProtocolHandlers,true);assert.equal(options.credentials,'include');assert.equal(result.status,308);assert.equal(result.headers.get('location'),'https://dots.singulancelabs.com/apps');assert.equal(result.headers.getSetCookie().length,2);
 });
+test('Brain and Runtime resolve different revisions of the same native plugin locally',()=>{
+ const {root,manifest}=setup();
+ try {
+  const id='@deepseek-ai/test';
+  const brain={ [id]: {body:Buffer.from('window.brain=true;\n').toString('base64'),map:null} };
+  manifest.pluginsByHost={'next.singulancelabs.com':brain,'runtime-runner.singulancelabs.com':manifest.plugins};
+  fs.writeFileSync(path.join(root,'manifest.json'),JSON.stringify(manifest));
+  const bundle=createBundledFrontends(root);
+  for(const [host,records] of Object.entries(manifest.pluginsByHost)) {
+   const combo=nativeCombo(records,[id]);
+   const reply=bundle.resolve(new Request(`https://${host}/plugins/??${id}/client.js&rev=${combo.rev}`));
+   assert.ok(reply);assert.deepEqual(reply.body,combo.body);
+  }
+  const runtime=nativeCombo(manifest.plugins,[id]);
+  assert.equal(bundle.resolve(new Request(`https://next.singulancelabs.com/plugins/??${id}/client.js&rev=${runtime.rev}`)),null);
+ } finally {fs.rmSync(root,{recursive:true});}
+});
+test('desktop employee documents load locally while APIs, actions and RSC remain server-owned',()=>{
+ const {root,manifest}=setup();
+ try{
+ manifest.dotDocument=manifest.index;fs.writeFileSync(path.join(root,'manifest.json'),JSON.stringify(manifest));const bundle=createBundledFrontends(root);
+ for(const route of ['/employees/123?embed=hivemind','/dots/abc?c=conv_test'])assert.ok(bundle.resolve(new Request('https://dots.singulancelabs.com'+route,{headers:{accept:'text/html'}})));
+ assert.equal(bundle.resolve(new Request('https://dots.singulancelabs.com/dots/abc?_rsc=123',{headers:{accept:'text/html'}})),null);
+ assert.equal(bundle.resolve(new Request('https://dots.singulancelabs.com/dots/abc',{method:'POST',headers:{accept:'text/html'}})),null);
+ assert.equal(bundle.resolve(new Request('https://dots.singulancelabs.com/api/desktop/entry?dot=abc')),null);
+ }finally{fs.rmSync(root,{recursive:true});}
+});

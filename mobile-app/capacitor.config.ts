@@ -9,6 +9,8 @@ const config: CapacitorConfig = {
   appId: 'com.singulancelabs.mobile',
   appName: 'SINGULANCE',
   webDir: 'www',
+  // Capacitor bridge payload logs include authentication material. Use only
+  // the native bridge's bounded, credential-free diagnostics in debug builds.
   loggingBehavior: 'none',
   backgroundColor: '#faf9f6',
   server: {

@@ -93,7 +93,9 @@ function publicRecord(row) {
 export async function saveOperatingMemory(prisma, input, identity, options = {}) {
   // Serialize successors to prevent delayed calls from branching an already
   // resolved question or superseded user direction. Replay keeps its receipt.
-  if (RUNTIME_MEMORY_KINDS.includes(input?.kind) && !options.runtimeTransaction) {
+  // A supersession is compare-and-set against the replaced head: serialize it
+  // so two agents cannot both replace the same memory and fork its history.
+  if ((RUNTIME_MEMORY_KINDS.includes(input?.kind) || input?.supersedes_id != null) && !options.runtimeTransaction) {
     return prisma.$transaction(tx => saveOperatingMemory(tx, input, identity, { ...options, runtimeTransaction: true }));
   }
   const row = validateOperatingMemory(input, { ...identity, source: options.source || 'agent' });
@@ -118,14 +120,17 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
       WHERE id = $1::uuid AND org_id = $2::uuid AND project_slug = 'hyper-agents'
         AND kind = $3 AND agent_slug = $4
         AND ($5::uuid IS NULL OR author_user_id = $5::uuid)
-        AND ($6::text IS NULL OR context->>'sessionId'=$6) LIMIT 1 ${RUNTIME_MEMORY_KINDS.includes(row.kind) ? 'FOR UPDATE' : ''}`,
+        AND ($6::text IS NULL OR context->>'sessionId'=$6) LIMIT 1 FOR UPDATE`,
     row.context.supersedesId, row.orgId, row.kind, row.agentSlug, RUNTIME_MEMORY_KINDS.includes(row.kind) && !options.runtimeSessionId ? row.userId : null, options.runtimeSessionId || null);
     if (!prior.length) throw new Error('superseded_memory_unavailable');
-    if (RUNTIME_MEMORY_KINDS.includes(row.kind)) {
-      const successors = await prisma.$queryRawUnsafe(`SELECT id FROM hivemind.hyper_agent_operating_memories
-        WHERE org_id=$1::uuid AND context->>'supersedesId'=$2 AND idempotency_key<>$3 LIMIT 1`,
-        row.orgId, row.context.supersedesId, row.idempotencyKey);
-      if (successors.length) throw new Error('superseded_memory_already_replaced');
+    const successors = await prisma.$queryRawUnsafe(`SELECT id FROM hivemind.hyper_agent_operating_memories
+      WHERE org_id=$1::uuid AND context->>'supersedesId'=$2 AND idempotency_key<>$3 LIMIT 1`,
+      row.orgId, row.context.supersedesId, row.idempotencyKey);
+    if (successors.length) {
+      const conflict = new Error('superseded_memory_already_replaced');
+      conflict.status = 409;
+      conflict.currentId = successors[0].id;
+      throw conflict;
     }
   }
   const project = await prisma.project.upsert({

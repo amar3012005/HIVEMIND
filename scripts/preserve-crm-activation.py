@@ -5,6 +5,20 @@ import json, os, pathlib, stat, subprocess, sys, urllib.parse
 def capture(args):
     return subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True)
 
+def attention_destination(core, control):
+    """Validate enabled attention routes before preserving either service."""
+    key = 'HIVEMIND_RUNTIME_ATTENTION_URL'
+    values = [service[key] for service in (core, control) if service.get(key)]
+    for value in values:
+        url = urllib.parse.urlsplit(value)
+        if (url.scheme not in ('http', 'https') or not url.hostname
+                or url.username or url.password or url.query or url.fragment
+                or url.path != '/internal/hivemind/runtime-attention'
+                or url.hostname in ('harness-runner', 'hivemind-harness-runner', 'hivemind-harness-runner-1')):
+            raise ValueError('runtime_attention_destination_invalid')
+    if len(set(values)) > 1:
+        raise ValueError('runtime_attention_destination_mismatch')
+
 def control_plane_integrations(live):
     # These integrations were activated in versioned production overlays.
     # Retain the currently approved overlay even when the shared env file
@@ -17,6 +31,12 @@ def main():
     output, env_file, services = sys.argv[1:]
     names = {'core':'hm-core', 'control-plane':'hm-control', 'harness-runner':'hivemind-harness-runner-1'}
     overrides = {}
+    if {'core', 'control-plane'} & set(services.split(',')):
+        live_services = []
+        for name in ('hm-core', 'hm-control'):
+            info = json.loads(capture(['docker', 'inspect', name]))[0]
+            live_services.append(dict(x.split('=', 1) for x in info['Config']['Env'] if '=' in x))
+        attention_destination(*live_services)
     for service in services.split(','):
         if service not in names:
             continue

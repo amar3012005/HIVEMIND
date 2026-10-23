@@ -16,7 +16,7 @@ async function readSaved(db, orgId, userId, sharedOrganizationAgents) {
   return db.$transaction(async tx => {
     await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
     await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)",orgId,userId);
-    const schemas=await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
+    const schemas=await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_schema='hivemind' AND table_name='harness_sessions' AND table_type='BASE TABLE'");
     if(schemas.length!==1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) throw Error('native_storage_unavailable');
     const schema=schemas[0].table_schema;
     const roots=await tx.$queryRawUnsafe(`SELECT session_id FROM ${schema}.harness_company_hq WHERE org_id=$1::uuid`,orgId);

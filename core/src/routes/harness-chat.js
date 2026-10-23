@@ -853,7 +853,7 @@ async function requireRuntimeAgendaConfirmation(db, principal, reference) {
   if (!match) throw new Error('invalid_agenda_confirmation');
   await db.$transaction(async tx => {
     await tx.$queryRawUnsafe("SELECT set_config('app.hivemind_org_id',$1,true),set_config('app.hivemind_user_id',$2,true)", principal.orgId, principal.userId);
-    const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
+    const schemas = await tx.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_schema='hivemind' AND table_name='harness_sessions' AND table_type='BASE TABLE'");
     if (schemas.length !== 1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema)) throw new Error('runtime_storage_unavailable');
     const events = await tx.$queryRawUnsafe(`SELECT payload FROM ${schemas[0].table_schema}.harness_session_events
       WHERE session_id=$1 AND org_id=$2::uuid AND user_id=$3::uuid AND

@@ -10,7 +10,7 @@ function database({role='admin',active=true,enabled=true,events=[],parents=[]}={
   $transaction:async fn=>fn(db),
   $queryRawUnsafe:async (sql,...args)=>{
    if(sql.includes('set_config'))return [];
-   if(sql.includes('information_schema'))return[{table_schema:'harness'}];
+   if(sql.includes('information_schema'))return[{table_schema:'hivemind'},{table_schema:'reset_backup_20261021'}].filter(r=>!sql.includes("table_schema='hivemind'")||r.table_schema==='hivemind');
    if(sql.includes('harness_sessions'))return[{id:claims.operating_session}];
    if(sql.includes('harness_session_events'))return events;
    if(sql.startsWith('INSERT')) {row??={id:'33333333-3333-4333-8333-333333333333',content_hash:args[4],status:'pending',message:JSON.parse(args[5])};return[{id:row.id}];}

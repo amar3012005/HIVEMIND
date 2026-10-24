@@ -8,6 +8,7 @@ import { dispatchOpenDotRuntime, readOpenDotRuntimeStatus, cancelOpenDotRuntime 
 import { readOpenDotEmployeeArtifact, relayOpenDotEmployeeOperation, verifyOpenDotRuntimeBridgeAuthorization } from '../employees/open-dot-runtime-employee-operation.js';
 import { messageAdministrator } from '../harness-chat/runtime-administrator-messages.js';
 import { relayOpenDotModelStream } from '../employees/open-dot-model-relay.js';
+import { verifyOpenDotModelRelayRequest } from '../employees/open-dot-model-relay-auth.js';
 import { proposeAdvisoryMethod, readAdvisoryMethods, decideAdvisoryMethod } from '../runtime-playbooks/advisory-methods.js';
 import crypto from 'node:crypto';
 import { forwardAppRuntimeRequest } from '../app-runtime/gateway.js';
@@ -181,7 +182,7 @@ async function scopedProjects(prisma, claims) {
   };
 }
 
-async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService, decisionHandler = decideRuntimeStage }) {
+async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, getRedis = getRedisClient, env, fetchImpl, creditService, decisionHandler = decideRuntimeStage }) {
   const receiptRequest = pathname === RECEIPT_PREFIX || pathname.startsWith(`${RECEIPT_PREFIX}/`);
   const creditOperationRequest = pathname === CREDIT_OPERATION_PREFIX;
   const dotEmployeeOperationRequest = pathname === `${INTERNAL_PREFIX}/open-dot/runtime/employee-operation`;
@@ -189,10 +190,23 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   if (!receiptRequest && !creditOperationRequest && !pathname.startsWith(`${INTERNAL_PREFIX}/`)) return false;
   if (dotModelRequest) {
     if (req.method !== 'POST') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
-    if (!verifyOpenDotRuntimeBridgeAuthorization(req.headers.authorization, env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN)) {
-      jsonResponse(res, { error: 'Unauthorized' }, 401); return true;
+    // The relay signature covers the exact body bytes, so read them before parsing.
+    const chunks = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const rawBody = Buffer.concat(chunks);
+    let authorization;
+    try {
+      authorization = await verifyOpenDotModelRelayRequest({ headers: req.headers, method: req.method, body: rawBody, env,
+        loadRedis: () => getRedis(redisConfig || {}) });
+    } catch {
+      jsonResponse(res, { error: 'open_dot_model_relay_auth_unavailable' }, 503); return true;
     }
-    try { await relayOpenDotModelStream(prisma, req, res, await parseBody(req), { env, fetchImpl }); }
+    if (authorization.reason === 'nonce_store_full') { jsonResponse(res, { error: 'open_dot_model_relay_auth_unavailable' }, 503); return true; }
+    if (!authorization.ok) { jsonResponse(res, { error: 'Unauthorized' }, 401); return true; }
+    let input = {};
+    // Matches parseBody: an unparseable body becomes {} and fails relay validation.
+    try { input = rawBody.length ? JSON.parse(rawBody.toString('utf8')) : {}; } catch { input = {}; }
+    try { await relayOpenDotModelStream(prisma, req, res, input, { env, fetchImpl }); }
     catch (error) {
       if (!res.destroyed && !res.writableEnded) {
         if (res.headersSent) {
@@ -723,7 +737,7 @@ export async function handleHarnessChatBootstrapRoute({
   creditService,
   decisionHandler,
 } = {}) {
-  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, env, fetchImpl, creditService, decisionHandler })) return true;
+  if (await handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, jsonResponse, redisConfig, getRedis, env, fetchImpl, creditService, decisionHandler })) return true;
   const deleteSessionMatch = pathname.match(/^\/v1\/harness-chat\/sessions\/([A-Za-z0-9._:-]{1,180})$/);
   if (deleteSessionMatch && req.method === 'DELETE') {
     const current = await requireSession(req, res);

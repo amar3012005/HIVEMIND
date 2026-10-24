@@ -60,10 +60,10 @@ test('a signed request never falls back to the legacy bearer', async () => {
   assert.deepEqual(unconfigured, { ok: false, reason: 'relay_secret_unconfigured' });
 });
 
-test('the legacy bridge bearer stays accepted during rollout, and only that bearer', async () => {
+test('an unsigned request is refused, including the shared bridge bearer', async () => {
   let redisLoads = 0;
   const loadRedis = async () => { redisLoads++; return null; };
-  assert.deepEqual(await verify({ authorization: `Bearer ${bridgeToken}` }, { loadRedis }), { ok: true, scheme: 'legacy-bearer' });
+  assert.deepEqual(await verify({ authorization: `Bearer ${bridgeToken}` }, { loadRedis }), { ok: false, reason: 'unauthorized' });
   assert.equal(redisLoads, 0);
   assert.equal((await verify({ authorization: `Bearer ${relaySecret}` })).ok, false);
   assert.equal((await verify({})).ok, false);
@@ -96,11 +96,12 @@ async function callRoute(headers, routeEnv = env) {
   return res;
 }
 
-test('relay route rejects unsigned or wrongly signed requests and admits signed or legacy ones', async () => {
+test('relay route rejects unsigned, bearer-only or wrongly signed requests and admits signed ones', async () => {
   const realNowSigned = () => signed({ at: Date.now() });
   assert.equal((await callRoute({})).status, 401);
+  assert.equal((await callRoute({ authorization: `Bearer ${bridgeToken}` })).status, 401);
   assert.equal((await callRoute({ ...realNowSigned(), [H.signature]: 'a'.repeat(64) })).status, 401);
-  for (const headers of [realNowSigned(), { authorization: `Bearer ${bridgeToken}` }]) {
+  for (const headers of [realNowSigned()]) {
     const res = await callRoute(headers);
     // Authenticated requests reach relay validation, which rejects this minimal body.
     assert.equal(res.status, 400);

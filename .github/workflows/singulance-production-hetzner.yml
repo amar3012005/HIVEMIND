@@ -54,53 +54,97 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: github.ref == 'refs/heads/singulance-main'
+    # Required reviewers and the singulance-main deployment-branch rule are
+    # configured on this environment in the repository settings.
+    environment: singulance-production
     steps:
       - uses: actions/checkout@v4
         with:
           ref: singulance-main
+      # Dispatch inputs are untrusted strings. They reach shell only through
+      # env and are allowlisted here before anything runs on the host.
+      - name: Validate dispatch inputs
+        env:
+          INPUT_SHA: ${{ github.event.inputs.sha }}
+          INPUT_SERVICES: ${{ github.event.inputs.services }}
+          INPUT_HARNESS_IMAGE: ${{ github.event.inputs.harness_image }}
+          INPUT_OPEN_DOT_IMAGE: ${{ github.event.inputs.open_dot_image }}
+          INPUT_OPEN_DOT_SOURCE_SHA: ${{ github.event.inputs.open_dot_source_sha }}
+          INPUT_OPEN_DOT_MODE: ${{ github.event.inputs.open_dot_mode }}
+          INPUT_OPEN_DOT_IMAGE_ARCHIVE: ${{ github.event.inputs.open_dot_image_archive }}
+          INPUT_OPEN_DOT_IMAGE_RECEIPT: ${{ github.event.inputs.open_dot_image_receipt }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          SERVICE_RE='^(core|control-plane|control|employees|byod-broker|playwright|tara-grok|tara-deepgram|hm-extract|harness-runner|harness-tunnel|open-dot)$'
+          IMAGE_RE='^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
+          SHA_RE='^[0-9a-f]{40}$'
+          ARTIFACT_DIR_RE='^/root/releases/artifacts/open-dot/[0-9a-f]{64}/'
+          [ -n "$INPUT_SERVICES" ] || fail "services is required"
+          [[ "$INPUT_SERVICES" =~ ^[a-z,-]+$ ]] || fail "services must be a comma-separated list of canonical service names"
+          IFS=',' read -r -a services <<< "$INPUT_SERVICES"
+          [ "${#services[@]}" -gt 0 ] || fail "services is required"
+          for service in "${services[@]}"; do
+            [[ "$service" =~ $SERVICE_RE ]] || fail "unknown service in services"
+          done
+          [ -z "$INPUT_SHA" ] || [[ "$INPUT_SHA" =~ $SHA_RE ]] || fail "sha must be a 40-character lowercase commit SHA"
+          [ -z "$INPUT_HARNESS_IMAGE" ] || [[ "$INPUT_HARNESS_IMAGE" =~ $IMAGE_RE ]] || fail "harness_image must be pinned by @sha256"
+          [ -z "$INPUT_OPEN_DOT_IMAGE" ] || [[ "$INPUT_OPEN_DOT_IMAGE" =~ $IMAGE_RE ]] || fail "open_dot_image must be pinned by @sha256"
+          [ -z "$INPUT_OPEN_DOT_SOURCE_SHA" ] || [[ "$INPUT_OPEN_DOT_SOURCE_SHA" =~ $SHA_RE ]] || fail "open_dot_source_sha must be a 40-character commit SHA"
+          [ -z "$INPUT_OPEN_DOT_MODE" ] || [[ "$INPUT_OPEN_DOT_MODE" =~ ^(cloud|local-prototype)$ ]] || fail "open_dot_mode must be cloud or local-prototype"
+          [ -z "$INPUT_OPEN_DOT_IMAGE_ARCHIVE" ] || [[ "$INPUT_OPEN_DOT_IMAGE_ARCHIVE" =~ ${ARTIFACT_DIR_RE}open-dot-image\.tar\.gz$ ]] || fail "open_dot_image_archive is not a staged artifact path"
+          [ -z "$INPUT_OPEN_DOT_IMAGE_RECEIPT" ] || [[ "$INPUT_OPEN_DOT_IMAGE_RECEIPT" =~ ${ARTIFACT_DIR_RE}image-transfer-receipt\.json$ ]] || fail "open_dot_image_receipt is not a staged artifact path"
       - name: Refuse anything except origin/singulance-main
+        env:
+          REQUESTED_SHA: ${{ github.event.inputs.sha }}
         run: |
           git fetch origin singulance-main
           HEAD=$(git rev-parse HEAD)
           MAIN=$(git rev-parse origin/singulance-main)
-          echo "HEAD=$HEAD origin/singulance-main=$MAIN requested=${{ github.event.inputs.sha }}"
+          echo "HEAD=$HEAD origin/singulance-main=$MAIN requested=$REQUESTED_SHA"
           test "$HEAD" = "$MAIN"
-          if [ -n "${{ github.event.inputs.sha }}" ]; then
-            test "$HEAD" = "${{ github.event.inputs.sha }}"
+          if [ -n "$REQUESTED_SHA" ]; then
+            test "$HEAD" = "$REQUESTED_SHA"
           fi
           echo "RELEASE_SOURCE_SHA=$HEAD" >> "$GITHUB_ENV"
       - name: SSH canonical release
         uses: appleboy/ssh-action@v1.2.0
         env:
+          RELEASE_SERVICES: ${{ github.event.inputs.services }}
+          HARNESS_IMAGE_INPUT: ${{ github.event.inputs.harness_image }}
           OPEN_DOT_IMAGE: ${{ github.event.inputs.open_dot_image }}
           OPEN_DOT_SOURCE_SHA: ${{ github.event.inputs.open_dot_source_sha }}
           OPEN_DOT_MODE: ${{ github.event.inputs.open_dot_mode }}
           OPEN_DOT_IMAGE_ARCHIVE: ${{ github.event.inputs.open_dot_image_archive }}
           OPEN_DOT_IMAGE_RECEIPT: ${{ github.event.inputs.open_dot_image_receipt }}
           RELEASE_SOURCE_SHA: ${{ env.RELEASE_SOURCE_SHA }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
         with:
           host: ${{ secrets.SINGULANCE_SSH_HOST }}
           username: ${{ secrets.SINGULANCE_SSH_USER }}
           key: ${{ secrets.SINGULANCE_SSH_KEY }}
           script_stop: true
           command_timeout: 25m
-          envs: OPEN_DOT_IMAGE,OPEN_DOT_SOURCE_SHA,OPEN_DOT_MODE,OPEN_DOT_IMAGE_ARCHIVE,OPEN_DOT_IMAGE_RECEIPT,RELEASE_SOURCE_SHA
+          envs: RELEASE_SERVICES,HARNESS_IMAGE_INPUT,OPEN_DOT_IMAGE,OPEN_DOT_SOURCE_SHA,OPEN_DOT_MODE,OPEN_DOT_IMAGE_ARCHIVE,OPEN_DOT_IMAGE_RECEIPT,RELEASE_SOURCE_SHA,RELEASE_RUN_ID
           script: |
             set -euo pipefail
             [[ "$RELEASE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$RELEASE_RUN_ID" =~ ^[0-9]+$ ]]
+            [[ "$RELEASE_SERVICES" =~ ^[a-z,-]+$ ]]
+            [ -z "$HARNESS_IMAGE_INPUT" ] || [[ "$HARNESS_IMAGE_INPUT" =~ ^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$ ]]
             git -C /root/hivemind-main fetch --quiet https://github.com/amar3012005/HIVEMIND.git "$RELEASE_SOURCE_SHA"
             git -C /root/hivemind-main cat-file -e "$RELEASE_SOURCE_SHA^{commit}"
             BOOTSTRAP=$(mktemp /tmp/quick-deploy.XXXXXX.sh)
             trap 'rm -f "$BOOTSTRAP"' EXIT
             git -C /root/hivemind-main show "$RELEASE_SOURCE_SHA:scripts/quick-deploy.sh" > "$BOOTSTRAP"
             chmod 700 "$BOOTSTRAP"
-            export RELEASE_SESSION_ID="gha-${{ github.run_id }}"
+            export RELEASE_SESSION_ID="gha-$RELEASE_RUN_ID"
             export SINGULANCE_EXPECTED_SHA="$RELEASE_SOURCE_SHA"
             export RELEASE_MIN_DISK_GB="${RELEASE_MIN_DISK_GB:-12}"
-            if [ -n "${{ github.event.inputs.harness_image }}" ]; then
-              export HIVEMIND_HARNESS_IMAGE="${{ github.event.inputs.harness_image }}"
+            if [ -n "$HARNESS_IMAGE_INPUT" ]; then
+              export HIVEMIND_HARNESS_IMAGE="$HARNESS_IMAGE_INPUT"
             fi
-            IFS=',' read -r -a services <<< "${{ github.event.inputs.services }}"
+            IFS=',' read -r -a services <<< "$RELEASE_SERVICES"
             "$BOOTSTRAP" singulance-main "${services[@]}"
       - name: Canary API
         run: curl -fsS -o /dev/null https://api.singulancelabs.com/health

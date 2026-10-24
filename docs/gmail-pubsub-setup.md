@@ -95,6 +95,7 @@ Add to the core container `.env`:
 ```bash
 GCP_PUBSUB_TOPIC="projects/hivemind-prod/topics/gmail-changes"
 GCP_PUBSUB_AUDIENCE="https://core.hivemind.davinciai.eu:8050/api/connectors/gmail/pubsub-webhook"
+GCP_PUBSUB_SERVICE_ACCOUNT_EMAIL="hivemind-pubsub@hivemind-prod.iam.gserviceaccount.com"
 CRON_TOKEN="<random 32-char string for watch renewal cron auth>"
 HIVEMIND_PUBLIC_URL="https://core.hivemind.davinciai.eu:8050"
 ```
@@ -187,7 +188,9 @@ Audience mismatch. The `--push-auth-token-audience` from Step 4 must equal `GCP_
 ### Webhook returns 401
 - Token might be expired (Pub/Sub rotates them; retries will succeed)
 - Wrong audience or issuer claim
-- In dev mode, set `NODE_ENV=development` to skip verification
+- The token's `email` differs from `GCP_PUBSUB_SERVICE_ACCOUNT_EMAIL` (the `--push-auth-service-account` from Step 4)
+- Core cannot reach `https://www.googleapis.com/oauth2/v3/certs` to verify the signature
+- Verification runs in every environment; there is no development bypass
 
 ### Notifications stop after 7 days
 Watch renewal cron isn't running. Check Step 7. Re-register manually:

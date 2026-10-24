@@ -47,6 +47,7 @@ import {
 import { authorizeOpenDotRecoveryRequest } from './auth/open-dot-recovery.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
+import { evaluateCookieMutation, trustedOriginSet } from './control-plane/cookie-mutation-guard.js';
 import {
   createPersonalInvitationLink,
   createSignupAdmission,
@@ -1766,8 +1767,11 @@ function getConnectorCallbackUrl(provider) {
   return `${CONFIG.publicBaseUrl}/v1/connectors/${provider}/callback`;
 }
 
-function isAdminAuthorized(req, url) {
-  return req.headers['x-admin-secret'] === ADMIN_SECRET || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+// Header only: a query-string secret would be written to access, proxy and
+// CDN logs, browser history and Referer headers.
+function isAdminAuthorized(req, _url) {
+  const candidate = req.headers['x-admin-secret'];
+  return Boolean(ADMIN_SECRET) && typeof candidate === 'string' && candidate !== '' && secretsMatch(candidate, ADMIN_SECRET);
 }
 
 function secretsMatch(left, right) {
@@ -2577,6 +2581,15 @@ function isCanonicalUuid(value) {
 
 function canManageOrg(role) {
   return role === 'owner' || role === 'admin';
+}
+
+/**
+ * Whether the session's person is an owner/admin of the organization, the
+ * authority required to add or remove organization-wide connections.
+ */
+async function sessionManagesOrganization(session, orgId) {
+  const membership = await getActiveOrganizationMembership(prisma, { userId: session.userId, orgId });
+  return Boolean(membership && (isOrganizationAdmin(membership) || canManageOrg(membership.role)));
 }
 
 async function requireOrgAdmin(req, res, userId, orgId) {
@@ -3534,6 +3547,16 @@ async function proxyCanonicalProjectionToCore(req, res, pathname) {
   }
 }
 
+// Browser origins allowed to send cookie-authenticated mutations: the CORS
+// allowlist plus the Control Plane's own public origin.
+const COOKIE_MUTATION_TRUSTED_ORIGINS = trustedOriginSet([
+  ...CONFIG.allowedOrigins,
+  CONFIG.publicBaseUrl,
+  process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL,
+]);
+// Routes that accept browser file uploads as multipart/form-data.
+const COOKIE_MUTATION_MULTIPART_PREFIXES = ['/v1/proxy/', '/v1/campaigns'];
+
 const server = http.createServer(async (req, res) => {
   applyCorsHeaders(req, res);
 
@@ -3716,6 +3739,23 @@ const server = http.createServer(async (req, res) => {
       userAgent: req.headers?.['user-agent'] || null,
       platformType: 'webapp',
     };
+  }
+
+  // Cookie-authenticated mutations must come from a trusted first-party
+  // origin with a JSON (or upload-route multipart) body. SameSite=None makes
+  // the session cookie ride on cross-site posts; CORS alone does not stop them.
+  {
+    const csrf = evaluateCookieMutation({
+      method: req.method,
+      headers: req.headers,
+      pathname: (req.url || '').split('?')[0],
+      cookieName: CONFIG.sessionCookieName,
+      trustedOrigins: COOKIE_MUTATION_TRUSTED_ORIGINS,
+      multipartPathPrefixes: COOKIE_MUTATION_MULTIPART_PREFIXES,
+    });
+    if (!csrf.allowed) {
+      return jsonResponse(res, { error: csrf.error }, csrf.status);
+    }
   }
 
   const mobileUrl = new URL(req.url, `http://${req.headers.host}`);
@@ -8186,6 +8226,10 @@ const server = http.createServer(async (req, res) => {
     }
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectionSubject(orgId, { userId: current.session.userId }))
+      && !(await sessionManagesOrganization(current.session, orgId))) {
+      return jsonResponse(res, { error: 'Only an organization owner or admin can connect a shared workspace app' }, 403);
+    }
     try {
       const body = await parseBody(req).catch(() => ({}));
       const callbackUrl = typeof body.callback_url === 'string' && body.callback_url
@@ -8233,6 +8277,10 @@ const server = http.createServer(async (req, res) => {
     const toolkitSlug = composioApiKeyMatch[1].toLowerCase();
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectionSubject(orgId, { userId: current.session.userId }))
+      && !(await sessionManagesOrganization(current.session, orgId))) {
+      return jsonResponse(res, { error: 'Only an organization owner or admin can connect a shared workspace app' }, 403);
+    }
     try {
       const body = await parseBody(req).catch(() => ({}));
       const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
@@ -8266,7 +8314,10 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
-      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, { userId: current.session.userId });
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, {
+        userId: current.session.userId,
+        allowOrganizationAccount: await sessionManagesOrganization(current.session, orgId),
+      });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
@@ -8275,7 +8326,7 @@ const server = http.createServer(async (req, res) => {
       });
       return jsonResponse(res, { ok: true, removed });
     } catch (err) {
-      return jsonResponse(res, { error: err.message }, 400);
+      return jsonResponse(res, { error: err.message }, err.status === 403 ? 403 : 400);
     }
   }
 
@@ -8684,10 +8735,12 @@ const server = http.createServer(async (req, res) => {
       const orgId = current.session.orgId || current.session.org_id;
       if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
       try {
-        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id);
+        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id, {
+          allowOrganizationAccount: await sessionManagesOrganization(current.session, orgId),
+        });
         return jsonResponse(res, { success: removed > 0, provider: providerId });
       } catch (err) {
-        return jsonResponse(res, { error: err.message }, 500);
+        return jsonResponse(res, { error: err.message }, err.status === 403 ? 403 : 500);
       }
     }
 

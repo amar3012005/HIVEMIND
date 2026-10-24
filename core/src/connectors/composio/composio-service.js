@@ -99,11 +99,37 @@ export function composioConnectionSubject(orgId, { userId = null, connectionScop
 }
 
 /**
- * Delete every connected account an org has for one toolkit (disconnect).
+ * Whether a Composio subject is the organization-wide (shared workspace)
+ * subject rather than one person's.
+ *
+ * @param {string} orgId organization id
+ * @param {string} subject Composio user_id
+ * @returns {boolean}
+ */
+export function isOrganizationSubject(orgId, subject) {
+  return Boolean(orgId) && String(subject || '') === String(orgId);
+}
+
+/**
+ * Delete the connected accounts of one owner for one toolkit (disconnect).
+ * Organization-wide accounts are removed only when the caller passes
+ * `allowOrganizationAccount: true` (an organization owner or admin); a member
+ * removes only their own account, and a member request that would reach only
+ * the shared account fails with status 403.
  * Returns the number of accounts removed.
  */
 export async function disconnectToolkit(orgId, toolkitSlug, opts = {}) {
-  const accounts = await listConnectedAccounts(orgId, opts);
+  const { allowOrganizationAccount = false, ...listOpts } = opts;
+  const listed = await listConnectedAccounts(orgId, listOpts);
+  const accounts = allowOrganizationAccount
+    ? listed
+    : listed.filter(row => !isOrganizationSubject(orgId, row.subject));
+  if (!allowOrganizationAccount && accounts.every(row => row.toolkit !== toolkitSlug)
+    && listed.some(row => row.toolkit === toolkitSlug)) {
+    const error = new Error('organization_connection_requires_admin');
+    error.status = 403;
+    throw error;
+  }
   const preferred = accounts.find(row => row.toolkit === toolkitSlug && row.status === 'ACTIVE')
     || accounts.find(row => row.toolkit === toolkitSlug);
   // Remove only the selected account owner's attempts, not another scope's

@@ -18,6 +18,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
+import { resolveGenerateLimits, resolveGenerateRequest, generateRateLimitKey } from './middleware/generate-request-limits.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
 import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrMemoryClaims, amrCanonicalProjection, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate, isRemoteMemoryUnavailableError } from './vector/mneme/remote-backend.js';
@@ -2887,6 +2888,8 @@ const DEFAULT_ORG = process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8
 // with the legacy fallback so an unset env cannot leave admin endpoints open.
 // Local/dev still allowed: set HIVEMIND_ADMIN_SECRET=local-… explicitly.
 const ADMIN_SECRET = requireAdminSecret();
+// /api/generate bounds; invalid values fail at load.
+const GENERATE_LIMITS = resolveGenerateLimits();
 
 // SECURITY: HMAC-signed state for OAuth callbacks. Without this the state
 // blob (which carries userId/orgId) is trivially mintable, letting an attacker
@@ -4394,12 +4397,22 @@ function extractApiKey(req) {
   return '';
 }
 
-function isAdminRequest(req) {
-  return req.headers['x-admin-secret'] === ADMIN_SECRET;
+function adminSecretMatches(candidate) {
+  if (!ADMIN_SECRET || typeof candidate !== 'string' || !candidate) return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(ADMIN_SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function isAdminAuthorized(req, url) {
-  return isAdminRequest(req) || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+function isAdminRequest(req) {
+  return adminSecretMatches(req.headers['x-admin-secret']);
+}
+
+// The admin secret is accepted only in the X-Admin-Secret header. A query
+// parameter would be written to access, proxy and CDN logs, browser history
+// and Referer headers.
+function isAdminAuthorized(req, _url) {
+  return isAdminRequest(req);
 }
 
 // ── Consumer URL / Meta MCP token helpers ──
@@ -4944,7 +4957,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
 
-    const adminSecret = req.headers['x-admin-secret'] || url.searchParams.get('admin_secret') || '';
+    const adminSecret = req.headers['x-admin-secret'] || '';
     const core = buildAdminServiceSnapshot();
     let controlPlane = {
       service: 'control-plane',
@@ -9905,9 +9918,10 @@ exit \$RC
       }
 
       // Gmail/Google Workspace OAuth callback — browser redirect, no API key.
-      // SECURITY: state is HMAC-signed via signOAuthState in /connect endpoint.
-      // verifyOAuthState rejects forged/expired state → falls back to DEFAULT_USER
-      // so an attacker can't bind to a victim. Multi-service grant logic merged
+      // SECURITY: state is HMAC-signed via signOAuthState in /connect endpoint
+      // and bound to the initiating browser session plus a one-time nonce, so
+      // an attacker-minted state cannot bind a victim's Google account to the
+      // attacker's principal. Multi-service grant logic merged
       // here (was previously duplicated + dead in main switch).
       if (pathname === '/api/connectors/gmail/callback' && req.method === 'GET') {
         const callbackCode = url.searchParams.get('code');
@@ -9931,7 +9945,25 @@ exit \$RC
           res.end();
           return;
         }
-        const stateUserId = verified.userId || DEFAULT_USER;
+        // SECURITY: bind the state to the browser that completes consent.
+        // The completing browser must hold the dashboard session of the
+        // principal named in the state, and the one-time nonce minted at
+        // /connect must still be unconsumed.
+        {
+          const { checkGmailStateBinding } = await import('./connectors/providers/gmail/oauth-session-binding.js');
+          const callbackSession = await resolveOAuthSession(req).catch(() => null);
+          const nonceRecord = typeof verified.nonce === 'string' && verified.nonce
+            ? await oauthSessionStore.consumeAuthState(verified.nonce).catch(() => null)
+            : null;
+          const binding = checkGmailStateBinding(verified, callbackSession, nonceRecord);
+          if (!binding.ok) {
+            console.warn(`[gmail-oauth] state binding failed (${binding.reason}) — refusing to bind`);
+            res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(binding.reason)}` });
+            res.end();
+            return;
+          }
+        }
+        const stateUserId = verified.userId;
         const stateOrgId = verified.orgId || DEFAULT_ORG;
         const stateTargetScope = verified.targetScope === 'organization' ? 'organization' : 'personal';
         const requestedShort = Array.isArray(verified.services) ? verified.services : ['gmail'];
@@ -13297,15 +13329,22 @@ exit \$RC
             if (!groqClient.isAvailable()) {
               return jsonResponse(res, { error: 'Groq not configured. Set GROQ_API_KEY.' }, 503);
             }
-            const prompt = body.prompt || '';
-            if (!prompt.trim()) {
-              return jsonResponse(res, { error: 'prompt is required' }, 400);
+            // Shared platform key: bound prompt size, output tokens and the
+            // per-organization request rate before any provider call.
+            const generateRequest = resolveGenerateRequest(body, GENERATE_LIMITS);
+            if (!generateRequest.ok) {
+              return jsonResponse(res, { error: generateRequest.error }, generateRequest.status);
             }
+            const generateBucket = generateRateLimitKey({ orgId, userId });
+            if (!generateBucket || !rateLimitAllowOrgRequest(generateBucket, { rpm: GENERATE_LIMITS.rpmPerOrg })) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 2 }, 429);
+            }
+            const prompt = generateRequest.prompt;
             try {
               const content = await groqClient.generate(prompt, {
                 model: body.model,
                 temperature: body.temperature,
-                maxTokens: body.max_tokens || body.maxTokens
+                maxTokens: generateRequest.maxTokens
               });
               return jsonResponse(res, {
                 content,
@@ -15528,8 +15567,14 @@ exit \$RC
 
             // SECURITY: state is HMAC-signed so the callback can trust the
             // userId/orgId we encode here. _ts caps lifetime to 30 min in
-            // verifyOAuthState.
-            const gmailState = signOAuthState({ userId, orgId, targetScope, services, _ts: Date.now() });
+            // verifyOAuthState. The nonce is a one-time server-side record
+            // for this principal; the callback also requires the completing
+            // browser's dashboard session to be this principal, so a state
+            // minted by one account cannot bind another person's Google
+            // consent (see oauth-session-binding.js).
+            const { GMAIL_CONNECT_STATE_PURPOSE } = await import('./connectors/providers/gmail/oauth-session-binding.js');
+            const gmailNonce = await oauthSessionStore.createAuthState({ purpose: GMAIL_CONNECT_STATE_PURPOSE, userId, orgId });
+            const gmailState = signOAuthState({ userId, orgId, targetScope, services, nonce: gmailNonce, _ts: Date.now() });
             const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState, services });
             return jsonResponse(res, {
               url: authorizationUrl,
@@ -15630,6 +15675,17 @@ exit \$RC
 
               if (!prisma) {
                 return jsonResponse(res, { error: 'Database unavailable' }, 503);
+              }
+
+              // SECURITY: connection_id is client-supplied. Bind it only when
+              // Nango confirms the connection was created by this principal's
+              // Connect session (end_user/organization recorded by
+              // /api/connectors/connect-session).
+              const { verifyConnectionOwnership } = await import('./connectors/mcp/nango-service.js');
+              const ownership = await verifyConnectionOwnership({ providerKey, connectionId, userId, orgId });
+              if (!ownership.ok) {
+                console.warn(`[nango-finalize] refused connection binding (${ownership.reason}) provider=${providerKey}`);
+                return jsonResponse(res, { error: ownership.reason }, ownership.reason === 'connection_unverifiable' ? 503 : 403);
               }
 
               const existingConnection = await prisma.nangoConnection.findUnique({
@@ -17141,11 +17197,14 @@ exit \$RC
               // Verify OIDC token from Pub/Sub
               const expectedAudience = process.env.GCP_PUBSUB_AUDIENCE
                 || `${process.env.HIVEMIND_PUBLIC_URL || 'https://core.singulancelabs.com'}/api/connectors/gmail/pubsub-webhook`;
+              // Signature, issuer, audience and (when configured) the push
+              // service account are verified in every environment.
               const authValid = await verifyPubSubAuth(
                 req.headers['authorization'] || '',
                 expectedAudience,
+                { expectedEmail: process.env.GCP_PUBSUB_SERVICE_ACCOUNT_EMAIL || null },
               );
-              if (!authValid && process.env.NODE_ENV === 'production') {
+              if (!authValid) {
                 return jsonResponse(res, { error: 'Invalid Pub/Sub auth token' }, 401);
               }
 

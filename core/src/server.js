@@ -10813,14 +10813,18 @@ exit \$RC
                 const slug = row.toolName || row.toolArgs?._composio_slug;
                 const args = progressiveArgs || { ...(row.toolArgs || {}) };
                 delete args._composio_slug;
-                if (!progressiveArgs && !args.from_email && typeof listConnectedAccounts === 'function') {
+                // Execute under the subject that owns this toolkit's account: user-scoped
+                // connections live under hivemind:<userId>, legacy ones under the org.
+                const toolkit = String(slug || '').split('_')[0].toLowerCase();
+                let owner = null;
+                if (typeof listConnectedAccounts === 'function') {
                   try {
-                    const accounts = await listConnectedAccounts(orgId);
-                    const mailbox = (accounts || []).find((account) => account?.status === 'ACTIVE' && account.email);
-                    if (mailbox?.email) args.from_email = mailbox.email;
-                  } catch { /* execute with stored args */ }
+                    const accounts = await listConnectedAccounts(orgId, { userId });
+                    owner = (accounts || []).find((account) => account?.status === 'ACTIVE' && String(account.toolkit || '').toLowerCase() === toolkit) || null;
+                    if (!progressiveArgs && !args.from_email && owner?.email) args.from_email = owner.email;
+                  } catch { /* execute with stored args and the legacy subject */ }
                 }
-                const result = await composioExecute(orgId, slug, args);
+                const result = await composioExecute(orgId, slug, args, owner?.subject ? { subject: owner.subject } : {});
                 if (creditService && !approvalCredit?.duplicate) await creditService.settle({ orgId, idempotencyKey: approvalCreditKey });
                 const ok = Boolean(result?.successful);
                 const final = await prisma.pendingWrite.update({

@@ -1,5 +1,4 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { verifyOpenDotRuntimeBridgeAuthorization } from './open-dot-runtime-employee-operation.js';
 
 /**
  * Authentication for Open Dot's model fallback relay
@@ -14,9 +13,8 @@ import { verifyOpenDotRuntimeBridgeAuthorization } from './open-dot-runtime-empl
  * accepts a timestamp within `OPEN_DOT_MODEL_RELAY_WINDOW_SECONDS` of its clock
  * and rejects a nonce it has already accepted inside that window.
  *
- * During rollout Control also accepts the legacy `Authorization: Bearer
- * OPEN_DOT_RUNTIME_BRIDGE_TOKEN`. A request that carries any signature header
- * is verified only as a signed request and never falls back to the bearer.
+ * Only signed requests are accepted; the shared `OPEN_DOT_RUNTIME_BRIDGE_TOKEN`
+ * bearer is not a relay credential.
  */
 export const OPEN_DOT_MODEL_RELAY_PATH = '/internal/v1/harness-chat/core/open-dot/model/stream';
 export const OPEN_DOT_MODEL_RELAY_HEADERS = Object.freeze({
@@ -85,15 +83,12 @@ async function claimNonce(loadRedis, nonce, expiresAtMs, nowMs) {
  * @param {{ headers: Record<string, string|string[]|undefined>, method: string, body: Buffer,
  *   env: Record<string, string|undefined>, loadRedis?: () => Promise<{ set: Function } | null>, nowMs?: number }} input
  *   `loadRedis` runs only for a signed request whose signature is valid.
- * @returns {Promise<{ ok: true, scheme: 'hmac'|'legacy-bearer' } | { ok: false, reason: string }>}
+ * @returns {Promise<{ ok: true, scheme: 'hmac' } | { ok: false, reason: string }>}
  *   `reason` is `nonce_store_full` when the in-memory nonce window is full.
  */
 export async function verifyOpenDotModelRelayRequest({ headers, method, body, env, loadRedis = async () => null, nowMs = Date.now() }) {
   const signed = Object.values(OPEN_DOT_MODEL_RELAY_HEADERS).some(name => headers?.[name] !== undefined);
-  if (!signed) {
-    return verifyOpenDotRuntimeBridgeAuthorization(headers?.authorization, env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN)
-      ? { ok: true, scheme: 'legacy-bearer' } : { ok: false, reason: 'unauthorized' };
-  }
+  if (!signed) return { ok: false, reason: 'unauthorized' };
   const secret = env.OPEN_DOT_MODEL_RELAY_SECRET;
   if (typeof secret !== 'string' || Buffer.byteLength(secret, 'utf8') < 32) return { ok: false, reason: 'relay_secret_unconfigured' };
   const signature = header(headers, OPEN_DOT_MODEL_RELAY_HEADERS.signature);

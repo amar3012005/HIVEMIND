@@ -319,11 +319,15 @@ export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
  *   matched schema from getSession()/getToolkitTools() rather than parse it
  *   back out of the function name.
  * @param {object} args — tool arguments
+ * @param {{ subject?: string, userId?: string, connectionScope?: string }} [opts] — connection subject that owns the account
  * @returns {Promise<{ successful: boolean, data: any, error: string|null }>}
  */
-export async function executeTool(orgId, toolSlug, args = {}) {
+export async function executeTool(orgId, toolSlug, args = {}, opts = {}) {
+  // An explicit subject is the one that owns the connected account; otherwise the
+  // legacy organization subject keeps existing callers unchanged.
+  const subject = typeof opts.subject === 'string' && opts.subject ? opts.subject : composioConnectionSubject(orgId, opts);
   const result = await composioPost(`/api/v3.1/tools/execute/${encodeURIComponent(toolSlug)}`, {
-    user_id: orgId,
+    user_id: subject,
     arguments: args || {},
     version: 'latest',
   });

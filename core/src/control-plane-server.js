@@ -47,6 +47,7 @@ import {
 import { authorizeOpenDotRecoveryRequest } from './auth/open-dot-recovery.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
+import { evaluateCookieMutation, trustedOriginSet } from './control-plane/cookie-mutation-guard.js';
 import {
   createPersonalInvitationLink,
   createSignupAdmission,
@@ -3534,6 +3535,16 @@ async function proxyCanonicalProjectionToCore(req, res, pathname) {
   }
 }
 
+// Browser origins allowed to send cookie-authenticated mutations: the CORS
+// allowlist plus the Control Plane's own public origin.
+const COOKIE_MUTATION_TRUSTED_ORIGINS = trustedOriginSet([
+  ...CONFIG.allowedOrigins,
+  CONFIG.publicBaseUrl,
+  process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL,
+]);
+// Routes that accept browser file uploads as multipart/form-data.
+const COOKIE_MUTATION_MULTIPART_PREFIXES = ['/v1/proxy/', '/v1/campaigns'];
+
 const server = http.createServer(async (req, res) => {
   applyCorsHeaders(req, res);
 
@@ -3716,6 +3727,23 @@ const server = http.createServer(async (req, res) => {
       userAgent: req.headers?.['user-agent'] || null,
       platformType: 'webapp',
     };
+  }
+
+  // Cookie-authenticated mutations must come from a trusted first-party
+  // origin with a JSON (or upload-route multipart) body. SameSite=None makes
+  // the session cookie ride on cross-site posts; CORS alone does not stop them.
+  {
+    const csrf = evaluateCookieMutation({
+      method: req.method,
+      headers: req.headers,
+      pathname: (req.url || '').split('?')[0],
+      cookieName: CONFIG.sessionCookieName,
+      trustedOrigins: COOKIE_MUTATION_TRUSTED_ORIGINS,
+      multipartPathPrefixes: COOKIE_MUTATION_MULTIPART_PREFIXES,
+    });
+    if (!csrf.allowed) {
+      return jsonResponse(res, { error: csrf.error }, csrf.status);
+    }
   }
 
   const mobileUrl = new URL(req.url, `http://${req.headers.host}`);

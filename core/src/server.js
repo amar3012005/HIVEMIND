@@ -15653,6 +15653,17 @@ exit \$RC
                 return jsonResponse(res, { error: 'Database unavailable' }, 503);
               }
 
+              // SECURITY: connection_id is client-supplied. Bind it only when
+              // Nango confirms the connection was created by this principal's
+              // Connect session (end_user/organization recorded by
+              // /api/connectors/connect-session).
+              const { verifyConnectionOwnership } = await import('./connectors/mcp/nango-service.js');
+              const ownership = await verifyConnectionOwnership({ providerKey, connectionId, userId, orgId });
+              if (!ownership.ok) {
+                console.warn(`[nango-finalize] refused connection binding (${ownership.reason}) provider=${providerKey}`);
+                return jsonResponse(res, { error: ownership.reason }, ownership.reason === 'connection_unverifiable' ? 503 : 403);
+              }
+
               const existingConnection = await prisma.nangoConnection.findUnique({
                 where: { userId_providerKey_orgId: { userId, providerKey, orgId } },
                 select: { status: true },

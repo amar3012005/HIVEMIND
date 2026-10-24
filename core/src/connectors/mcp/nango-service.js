@@ -127,6 +127,45 @@ export async function fetchBearerFromNango(providerKey, connectionId) {
   return bearer;
 }
 
+/**
+ * Confirm with Nango that a connection was created through a Connect session
+ * for this principal before HIVEMIND binds it. A client-supplied
+ * `connection_id` is otherwise only an identifier: without this check a
+ * caller could bind another tenant's connection to their own user and read
+ * that tenant's data through it.
+ *
+ * Nango records the Connect session's `end_user` (and organization) on the
+ * connection; newer Nango releases expose the same identity as reserved
+ * `tags`. Both are accepted. A connection with no recorded owner is rejected.
+ *
+ * @param {{ providerKey: string, connectionId: string, userId: string, orgId?: string | null }} params
+ * @param {{ get?: (path: string) => Promise<any> }} [deps] Nango GET implementation (tests)
+ * @returns {Promise<{ ok: true } | { ok: false, reason: 'connection_not_found' | 'connection_unverifiable' | 'connection_owner_mismatch' }>}
+ */
+export async function verifyConnectionOwnership({ providerKey, connectionId, userId, orgId = null }, { get = nangoGet } = {}) {
+  if (!providerKey || !connectionId || !userId) return { ok: false, reason: 'connection_owner_mismatch' };
+  let connection;
+  try {
+    connection = await get(
+      `/connection/${encodeURIComponent(connectionId)}?provider_config_key=${encodeURIComponent(providerKey)}`,
+    );
+  } catch (err) {
+    return { ok: false, reason: /\b404\b/.test(String(err?.message)) ? 'connection_not_found' : 'connection_unverifiable' };
+  }
+  if (!connection || typeof connection !== 'object') return { ok: false, reason: 'connection_unverifiable' };
+  const configKey = connection.provider_config_key ?? connection.providerConfigKey;
+  if (configKey !== undefined && String(configKey) !== String(providerKey)) {
+    return { ok: false, reason: 'connection_owner_mismatch' };
+  }
+  const tags = connection.tags && typeof connection.tags === 'object' ? connection.tags : {};
+  const endUser = connection.end_user && typeof connection.end_user === 'object' ? connection.end_user : {};
+  const ownerUserId = endUser.id ?? endUser.end_user_id ?? tags.end_user_id ?? null;
+  const ownerOrgId = endUser.organization?.id ?? endUser.organization_id ?? tags.organization_id ?? null;
+  if (!ownerUserId || String(ownerUserId) !== String(userId)) return { ok: false, reason: 'connection_owner_mismatch' };
+  if (orgId && ownerOrgId && String(ownerOrgId) !== String(orgId)) return { ok: false, reason: 'connection_owner_mismatch' };
+  return { ok: true };
+}
+
 export function isPermanentNangoCredentialError(error) {
   return /refresh limit|invalid_credentials|unknown_account|authentication failed|\b401\b|\b424\b/i
     .test(String(error?.message || error || ''));

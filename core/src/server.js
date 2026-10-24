@@ -4394,12 +4394,22 @@ function extractApiKey(req) {
   return '';
 }
 
-function isAdminRequest(req) {
-  return req.headers['x-admin-secret'] === ADMIN_SECRET;
+function adminSecretMatches(candidate) {
+  if (!ADMIN_SECRET || typeof candidate !== 'string' || !candidate) return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(ADMIN_SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function isAdminAuthorized(req, url) {
-  return isAdminRequest(req) || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+function isAdminRequest(req) {
+  return adminSecretMatches(req.headers['x-admin-secret']);
+}
+
+// The admin secret is accepted only in the X-Admin-Secret header. A query
+// parameter would be written to access, proxy and CDN logs, browser history
+// and Referer headers.
+function isAdminAuthorized(req, _url) {
+  return isAdminRequest(req);
 }
 
 // ── Consumer URL / Meta MCP token helpers ──
@@ -4944,7 +4954,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
 
-    const adminSecret = req.headers['x-admin-secret'] || url.searchParams.get('admin_secret') || '';
+    const adminSecret = req.headers['x-admin-secret'] || '';
     const core = buildAdminServiceSnapshot();
     let controlPlane = {
       service: 'control-plane',

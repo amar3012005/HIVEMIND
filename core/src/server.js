@@ -9905,9 +9905,10 @@ exit \$RC
       }
 
       // Gmail/Google Workspace OAuth callback — browser redirect, no API key.
-      // SECURITY: state is HMAC-signed via signOAuthState in /connect endpoint.
-      // verifyOAuthState rejects forged/expired state → falls back to DEFAULT_USER
-      // so an attacker can't bind to a victim. Multi-service grant logic merged
+      // SECURITY: state is HMAC-signed via signOAuthState in /connect endpoint
+      // and bound to the initiating browser session plus a one-time nonce, so
+      // an attacker-minted state cannot bind a victim's Google account to the
+      // attacker's principal. Multi-service grant logic merged
       // here (was previously duplicated + dead in main switch).
       if (pathname === '/api/connectors/gmail/callback' && req.method === 'GET') {
         const callbackCode = url.searchParams.get('code');
@@ -9931,7 +9932,25 @@ exit \$RC
           res.end();
           return;
         }
-        const stateUserId = verified.userId || DEFAULT_USER;
+        // SECURITY: bind the state to the browser that completes consent.
+        // The completing browser must hold the dashboard session of the
+        // principal named in the state, and the one-time nonce minted at
+        // /connect must still be unconsumed.
+        {
+          const { checkGmailStateBinding } = await import('./connectors/providers/gmail/oauth-session-binding.js');
+          const callbackSession = await resolveOAuthSession(req).catch(() => null);
+          const nonceRecord = typeof verified.nonce === 'string' && verified.nonce
+            ? await oauthSessionStore.consumeAuthState(verified.nonce).catch(() => null)
+            : null;
+          const binding = checkGmailStateBinding(verified, callbackSession, nonceRecord);
+          if (!binding.ok) {
+            console.warn(`[gmail-oauth] state binding failed (${binding.reason}) — refusing to bind`);
+            res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(binding.reason)}` });
+            res.end();
+            return;
+          }
+        }
+        const stateUserId = verified.userId;
         const stateOrgId = verified.orgId || DEFAULT_ORG;
         const stateTargetScope = verified.targetScope === 'organization' ? 'organization' : 'personal';
         const requestedShort = Array.isArray(verified.services) ? verified.services : ['gmail'];
@@ -15524,8 +15543,14 @@ exit \$RC
 
             // SECURITY: state is HMAC-signed so the callback can trust the
             // userId/orgId we encode here. _ts caps lifetime to 30 min in
-            // verifyOAuthState.
-            const gmailState = signOAuthState({ userId, orgId, targetScope, services, _ts: Date.now() });
+            // verifyOAuthState. The nonce is a one-time server-side record
+            // for this principal; the callback also requires the completing
+            // browser's dashboard session to be this principal, so a state
+            // minted by one account cannot bind another person's Google
+            // consent (see oauth-session-binding.js).
+            const { GMAIL_CONNECT_STATE_PURPOSE } = await import('./connectors/providers/gmail/oauth-session-binding.js');
+            const gmailNonce = await oauthSessionStore.createAuthState({ purpose: GMAIL_CONNECT_STATE_PURPOSE, userId, orgId });
+            const gmailState = signOAuthState({ userId, orgId, targetScope, services, nonce: gmailNonce, _ts: Date.now() });
             const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState, services });
             return jsonResponse(res, {
               url: authorizationUrl,

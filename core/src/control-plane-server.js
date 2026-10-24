@@ -1767,8 +1767,11 @@ function getConnectorCallbackUrl(provider) {
   return `${CONFIG.publicBaseUrl}/v1/connectors/${provider}/callback`;
 }
 
-function isAdminAuthorized(req, url) {
-  return req.headers['x-admin-secret'] === ADMIN_SECRET || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+// Header only: a query-string secret would be written to access, proxy and
+// CDN logs, browser history and Referer headers.
+function isAdminAuthorized(req, _url) {
+  const candidate = req.headers['x-admin-secret'];
+  return Boolean(ADMIN_SECRET) && typeof candidate === 'string' && candidate !== '' && secretsMatch(candidate, ADMIN_SECRET);
 }
 
 function secretsMatch(left, right) {

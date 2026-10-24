@@ -35,3 +35,25 @@ test('Composio execution uses the v3.1 catalog with tenant-scoped structured arg
     else process.env.COMPOSIO_API_KEY = originalKey;
   }
 });
+
+test('an approved write executes under the subject that owns the connected account', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.COMPOSIO_API_KEY;
+  const bodies = [];
+  process.env.COMPOSIO_API_KEY = 'test-key';
+  globalThis.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ successful: true, data: {}, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const { executeTool } = await import(`../../src/connectors/composio/composio-service.js?subject=${Date.now()}`);
+    await executeTool('org-1', 'GMAIL_SEND_EMAIL', { recipient_email: 'a@example.com' }, { subject: 'hivemind:user-1' });
+    await executeTool('org-1', 'GMAIL_SEND_EMAIL', {}, { userId: 'user-1', connectionScope: 'user' });
+    await executeTool('org-1', 'GMAIL_SEND_EMAIL', {});
+    assert.deepEqual(bodies.map(body => body.user_id), ['hivemind:user-1', 'hivemind:user-1', 'org-1']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;
+    else process.env.COMPOSIO_API_KEY = originalKey;
+  }
+});

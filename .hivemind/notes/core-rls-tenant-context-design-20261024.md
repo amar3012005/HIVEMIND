@@ -2,6 +2,8 @@
 
 Status: design only (security audit 2026-10-24, finding 08 F1). No migration, policy or role change ships with this note, because enabling enforcement on the legacy tables without the steps below would fail closed on every unscoped query and take Core down.
 
+Stage 1 (tenant-context helper behind `HIVEMIND_RLS_TENANT_CONTEXT`, the keyword-fallback personal-tier fix, and unapplied staging SQL for `hivemind_app` plus `FORCE` on `memories`) is described in [core-rls-staging-runbook-20261024.md](core-rls-staging-runbook-20261024.md).
+
 ## Current state (singulance-main)
 
 - Legacy tables (`users`, `organizations`, `user_organizations`, `platform_integrations`, `memories`, `relationships`, `vector_embeddings`, `sessions`, `sync_logs`, `audit_logs`) use `ENABLE ROW LEVEL SECURITY` without `FORCE` (`core/src/db/schema.sql`, `core/prisma/migrations/001_initial_schema/up.sql`). Their policies read `app.current_user_id` / `app.current_org_id`. No Core code sets either variable, so these policies never constrain the table owner and isolation rests on application predicates alone.

@@ -2580,6 +2580,15 @@ function canManageOrg(role) {
   return role === 'owner' || role === 'admin';
 }
 
+/**
+ * Whether the session's person is an owner/admin of the organization, the
+ * authority required to add or remove organization-wide connections.
+ */
+async function sessionManagesOrganization(session, orgId) {
+  const membership = await getActiveOrganizationMembership(prisma, { userId: session.userId, orgId });
+  return Boolean(membership && (isOrganizationAdmin(membership) || canManageOrg(membership.role)));
+}
+
 async function requireOrgAdmin(req, res, userId, orgId) {
   const membership = await getActiveOrganizationMembership(prisma, { userId, orgId });
   if (!membership) {
@@ -8214,6 +8223,10 @@ const server = http.createServer(async (req, res) => {
     }
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectionSubject(orgId, { userId: current.session.userId }))
+      && !(await sessionManagesOrganization(current.session, orgId))) {
+      return jsonResponse(res, { error: 'Only an organization owner or admin can connect a shared workspace app' }, 403);
+    }
     try {
       const body = await parseBody(req).catch(() => ({}));
       const callbackUrl = typeof body.callback_url === 'string' && body.callback_url
@@ -8261,6 +8274,10 @@ const server = http.createServer(async (req, res) => {
     const toolkitSlug = composioApiKeyMatch[1].toLowerCase();
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectionSubject(orgId, { userId: current.session.userId }))
+      && !(await sessionManagesOrganization(current.session, orgId))) {
+      return jsonResponse(res, { error: 'Only an organization owner or admin can connect a shared workspace app' }, 403);
+    }
     try {
       const body = await parseBody(req).catch(() => ({}));
       const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
@@ -8294,7 +8311,10 @@ const server = http.createServer(async (req, res) => {
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
-      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, { userId: current.session.userId });
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug, {
+        userId: current.session.userId,
+        allowOrganizationAccount: await sessionManagesOrganization(current.session, orgId),
+      });
       await audit({
         organizationId: orgId, userId: current.session.userId,
         eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
@@ -8303,7 +8323,7 @@ const server = http.createServer(async (req, res) => {
       });
       return jsonResponse(res, { ok: true, removed });
     } catch (err) {
-      return jsonResponse(res, { error: err.message }, 400);
+      return jsonResponse(res, { error: err.message }, err.status === 403 ? 403 : 400);
     }
   }
 
@@ -8712,10 +8732,12 @@ const server = http.createServer(async (req, res) => {
       const orgId = current.session.orgId || current.session.org_id;
       if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
       try {
-        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id);
+        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id, {
+          allowOrganizationAccount: await sessionManagesOrganization(current.session, orgId),
+        });
         return jsonResponse(res, { success: removed > 0, provider: providerId });
       } catch (err) {
-        return jsonResponse(res, { error: err.message }, 500);
+        return jsonResponse(res, { error: err.message }, err.status === 403 ? 403 : 500);
       }
     }
 

@@ -201,6 +201,7 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     } catch {
       jsonResponse(res, { error: 'open_dot_model_relay_auth_unavailable' }, 503); return true;
     }
+    if (authorization.reason === 'nonce_store_full') { jsonResponse(res, { error: 'open_dot_model_relay_auth_unavailable' }, 503); return true; }
     if (!authorization.ok) { jsonResponse(res, { error: 'Unauthorized' }, 401); return true; }
     let input = {};
     // Matches parseBody: an unparseable body becomes {} and fails relay validation.

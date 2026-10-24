@@ -17177,11 +17177,14 @@ exit \$RC
               // Verify OIDC token from Pub/Sub
               const expectedAudience = process.env.GCP_PUBSUB_AUDIENCE
                 || `${process.env.HIVEMIND_PUBLIC_URL || 'https://core.singulancelabs.com'}/api/connectors/gmail/pubsub-webhook`;
+              // Signature, issuer, audience and (when configured) the push
+              // service account are verified in every environment.
               const authValid = await verifyPubSubAuth(
                 req.headers['authorization'] || '',
                 expectedAudience,
+                { expectedEmail: process.env.GCP_PUBSUB_SERVICE_ACCOUNT_EMAIL || null },
               );
-              if (!authValid && process.env.NODE_ENV === 'production') {
+              if (!authValid) {
                 return jsonResponse(res, { error: 'Invalid Pub/Sub auth token' }, 401);
               }
 

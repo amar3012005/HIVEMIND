@@ -138,32 +138,77 @@ export function decodePubSubMessage(rawBody) {
   }
 }
 
+const GOOGLE_OIDC_CERTS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+const GOOGLE_OIDC_ISSUERS = new Set(['https://accounts.google.com', 'accounts.google.com']);
+const GOOGLE_CERTS_DEFAULT_TTL_MS = 60 * 60 * 1000;
+const PUBSUB_CLOCK_SKEW_SECONDS = 60;
+let googleCertsCache = { keys: null, expiresAt: 0 };
+
+/** Reset the cached Google signing keys (tests). */
+export function resetGoogleCertsCache() {
+  googleCertsCache = { keys: null, expiresAt: 0 };
+}
+
+async function googleSigningKeys(fetchImpl, now) {
+  if (googleCertsCache.keys && googleCertsCache.expiresAt > now) return googleCertsCache.keys;
+  const response = await fetchImpl(GOOGLE_OIDC_CERTS_URL, { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`google_certs_unavailable_${response.status}`);
+  const body = await response.json();
+  if (!Array.isArray(body?.keys) || body.keys.length === 0 || body.keys.length > 50) throw new Error('google_certs_invalid');
+  const maxAge = /max-age=(\d+)/i.exec(response.headers?.get?.('cache-control') || '');
+  const ttlMs = maxAge ? Math.min(Number(maxAge[1]) * 1000, 6 * GOOGLE_CERTS_DEFAULT_TTL_MS) : GOOGLE_CERTS_DEFAULT_TTL_MS;
+  googleCertsCache = { keys: body.keys, expiresAt: now + ttlMs };
+  return body.keys;
+}
+
 /**
- * Verify the OIDC JWT Pub/Sub attaches to push requests.
- * Returns true if signature + audience + issuer check out.
+ * Verify the Google-signed OIDC JWT that Pub/Sub attaches to push requests.
  *
- * @param {string} authHeader - "Bearer <jwt>" from Authorization header
- * @param {string} expectedAudience - our webhook URL (must match topic push config)
+ * Checks the RS256 signature against Google's published signing keys (cached
+ * for the certificate endpoint's max-age), then the issuer, audience, expiry,
+ * issued-at, and, when configured, the push subscription's service-account
+ * email. Any missing or invalid element returns false; this function never
+ * accepts decoded claims without a valid signature.
+ *
+ * @param {string} authHeader "Bearer <jwt>" from the Authorization header
+ * @param {string} expectedAudience audience configured on the push subscription
+ * @param {{ expectedEmail?: string | null, fetchImpl?: typeof fetch, now?: number }} [options]
+ * @returns {Promise<boolean>} whether the push is authenticated
  */
-export async function verifyPubSubAuth(authHeader, expectedAudience) {
-  if (!authHeader?.startsWith('Bearer ')) return false;
-  const token = authHeader.slice(7);
+export async function verifyPubSubAuth(authHeader, expectedAudience, { expectedEmail = null, fetchImpl = fetch, now = Date.now() } = {}) {
+  if (typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ') || !expectedAudience) return false;
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length > 8192) return false;
   try {
-    // Lightweight: decode without verifying signature in dev mode.
-    // In production, use google-auth-library OAuth2Client.verifyIdToken().
-    const [, payloadB64] = token.split('.');
-    if (!payloadB64) return false;
-    const claims = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf-8'));
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    if (header?.alg !== 'RS256' || typeof header.kid !== 'string' || header.crit) return false;
 
-    const issuerOk = claims.iss === 'https://accounts.google.com' ||
-                     claims.iss === 'accounts.google.com';
-    const audienceOk = claims.aud === expectedAudience;
-    const notExpired = !claims.exp || claims.exp * 1000 > Date.now();
+    const keys = await googleSigningKeys(fetchImpl, now);
+    const jwk = keys.find((key) => key.kid === header.kid && key.kty === 'RSA' && (!key.alg || key.alg === 'RS256') && (!key.use || key.use === 'sig'));
+    if (!jwk) return false;
+    const { createPublicKey, verify } = await import('node:crypto');
+    const signatureOk = verify(
+      'sha256',
+      Buffer.from(`${parts[0]}.${parts[1]}`),
+      createPublicKey({ key: jwk, format: 'jwk' }),
+      Buffer.from(parts[2], 'base64url'),
+    );
+    if (!signatureOk) return false;
 
-    // TODO: cryptographic signature verification via Google JWK fetched from
-    //       https://www.googleapis.com/oauth2/v3/certs (cache 6h). For now,
-    //       presence of valid claims is the gate.
-    return issuerOk && audienceOk && notExpired;
+    const nowSeconds = Math.floor(now / 1000);
+    const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (!GOOGLE_OIDC_ISSUERS.has(claims.iss)) return false;
+    if (!audiences.includes(expectedAudience)) return false;
+    if (!Number.isFinite(claims.exp) || claims.exp + PUBSUB_CLOCK_SKEW_SECONDS < nowSeconds) return false;
+    if (Number.isFinite(claims.iat) && claims.iat - PUBSUB_CLOCK_SKEW_SECONDS > nowSeconds) return false;
+    if (expectedEmail) {
+      if (String(claims.email || '').toLowerCase() !== String(expectedEmail).toLowerCase()) return false;
+      if (claims.email_verified !== true && claims.email_verified !== 'true') return false;
+    }
+    return true;
   } catch (_err) {
     return false;
   }

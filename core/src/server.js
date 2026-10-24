@@ -18,6 +18,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
+import { resolveGenerateLimits, resolveGenerateRequest, generateRateLimitKey } from './middleware/generate-request-limits.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
 import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrMemoryClaims, amrCanonicalProjection, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate, isRemoteMemoryUnavailableError } from './vector/mneme/remote-backend.js';
@@ -2887,6 +2888,8 @@ const DEFAULT_ORG = process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8
 // with the legacy fallback so an unset env cannot leave admin endpoints open.
 // Local/dev still allowed: set HIVEMIND_ADMIN_SECRET=local-… explicitly.
 const ADMIN_SECRET = requireAdminSecret();
+// /api/generate bounds; invalid values fail at load.
+const GENERATE_LIMITS = resolveGenerateLimits();
 
 // SECURITY: HMAC-signed state for OAuth callbacks. Without this the state
 // blob (which carries userId/orgId) is trivially mintable, letting an attacker
@@ -13322,15 +13325,22 @@ exit \$RC
             if (!groqClient.isAvailable()) {
               return jsonResponse(res, { error: 'Groq not configured. Set GROQ_API_KEY.' }, 503);
             }
-            const prompt = body.prompt || '';
-            if (!prompt.trim()) {
-              return jsonResponse(res, { error: 'prompt is required' }, 400);
+            // Shared platform key: bound prompt size, output tokens and the
+            // per-organization request rate before any provider call.
+            const generateRequest = resolveGenerateRequest(body, GENERATE_LIMITS);
+            if (!generateRequest.ok) {
+              return jsonResponse(res, { error: generateRequest.error }, generateRequest.status);
             }
+            const generateBucket = generateRateLimitKey({ orgId, userId });
+            if (!generateBucket || !rateLimitAllowOrgRequest(generateBucket, { rpm: GENERATE_LIMITS.rpmPerOrg })) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 2 }, 429);
+            }
+            const prompt = generateRequest.prompt;
             try {
               const content = await groqClient.generate(prompt, {
                 model: body.model,
                 temperature: body.temperature,
-                maxTokens: body.max_tokens || body.maxTokens
+                maxTokens: generateRequest.maxTokens
               });
               return jsonResponse(res, {
                 content,

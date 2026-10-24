@@ -21,6 +21,15 @@ for helper in storage-manifest.mjs storage-restore-drill.sh; do
   fi
 done
 
+# Every BYOD image runs `npm ci`, which refuses to build without a lockfile.
+# Fail here too so a missing lockfile never reaches the published setup branch.
+for service in agent broker; do
+  if [ ! -f "$SOURCE_ROOT/byod/$service/package-lock.json" ]; then
+    echo "Missing BYOD lockfile: byod/$service/package-lock.json" >&2
+    exit 66
+  fi
+done
+
 mkdir -p "$DESTINATION"
 DESTINATION="$(cd "$DESTINATION" && pwd)"
 if [ "$DESTINATION" = "/" ] || [ "$DESTINATION" = "$SOURCE_ROOT" ]; then

@@ -8,8 +8,10 @@ import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
 import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrMemRelationshipsBatch, amrGraph } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList, isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
-import { currentOrg } from '../db/prisma.js';
+import { currentOrg, currentUser } from '../db/prisma.js';
 import { buildTrigramFallbackForms, buildWideTsQuery, shouldRunTrigramFallback } from './lexical-query.js';
+import { buildFtsScopeWhere } from './fts-scope-where.js';
+import { applyPrismaTenantContext, isTenantContextEnabled, runTenantScoped } from '../db/tenant-context.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -347,10 +349,37 @@ function memoryInventoryHiddenTags(tags, hideNoise) {
   return hidden;
 }
 
+// Tenant context applies only where memory rows live in central Postgres.
+function isCentralTenantOrg(orgId) {
+  return !!orgId && !(orgIsRemote(orgId) || pgUrlFor(orgId) || isMnemeOrg(orgId));
+}
+
 export class PrismaGraphStore {
   constructor(client, { inTransaction = false } = {}) {
     this.client = client;
     this.inTransaction = inTransaction;
+  }
+
+  // HIVEMIND_RLS_TENANT_CONTEXT (default off): run one tenant-scoped statement
+  // group with transaction-local app.current_org_id / app.current_user_id.
+  // Flag off → fn(this.client), no extra statement. Orgs whose memory does not
+  // live in central Postgres (.amr, remote agent, self-host customer PG) are
+  // skipped, because a central $transaction would bypass their routing.
+  _tenantScoped({ orgId, userId } = {}, fn) {
+    if (!isTenantContextEnabled()) return fn(this.client);
+    return runTenantScoped({
+      client: this.client,
+      inTransaction: this.inTransaction,
+      ctx: { orgId, userId },
+      routable: isCentralTenantOrg(orgId),
+    }, fn);
+  }
+
+  // Same context for a transaction this store has just opened (advisoryLock,
+  // transaction). No-op with the flag off or without an org id.
+  async _applyTenantContextInTransaction(tx, orgId, userId) {
+    if (!isTenantContextEnabled() || !orgId || !isCentralTenantOrg(orgId)) return;
+    await applyPrismaTenantContext(tx, { orgId, userId });
   }
 
   async advisoryLock(userId, fn, orgId) {
@@ -360,11 +389,13 @@ export class PrismaGraphStore {
       return withAmrLock(orgId, `mem:${userId}`, () => fn(new PrismaGraphStore(this.client, { inTransaction: true })));
     }
     if (this.inTransaction) {
+      await this._applyTenantContextInTransaction(this.client, orgId, userId);
       await this.client.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       return fn(this);
     }
 
     return this.client.$transaction(async tx => {
+      await this._applyTenantContextInTransaction(tx, orgId, userId);
       await tx.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       const scopedStore = new PrismaGraphStore(tx, { inTransaction: true });
       return fn(scopedStore);
@@ -377,7 +408,7 @@ export class PrismaGraphStore {
     return new PrismaGraphStore(this.client, { inTransaction: true });
   }
 
-  async transaction(fn, orgId) {
+  async transaction(fn, orgId, userId) {
     if (this.inTransaction) {
       return fn(this);
     }
@@ -389,6 +420,9 @@ export class PrismaGraphStore {
     }
 
     return this.client.$transaction(async tx => {
+      if (isTenantContextEnabled()) {
+        await this._applyTenantContextInTransaction(tx, orgId || currentOrg(), userId || currentUser());
+      }
       return fn(new PrismaGraphStore(tx, { inTransaction: true }));
     }, { timeout: 180000 });
   }
@@ -714,7 +748,7 @@ export class PrismaGraphStore {
       }
       return access_context?.orgRole === 'guest' ? null : memory;
     }
-    const record = await this.client.memory.findFirst({
+    const record = await this._tenantScoped({ orgId: org_id, userId: user_id }, (db) => db.memory.findFirst({
       where: {
         id,
         ...scopedMemoryWhere({
@@ -730,7 +764,7 @@ export class PrismaGraphStore {
         memoryProjects: true,
         versions: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
-    });
+    }));
     return mapMemoryRecord(record);
   }
 
@@ -865,7 +899,7 @@ export class PrismaGraphStore {
       const { memories } = await remoteList(_org, filter, null, REMOTE_LATEST_CAP, 0);
       return (memories || []).map(mapAgentRow);
     }
-    const records = await this.client.memory.findMany({
+    const records = await this._tenantScoped({ orgId: org_id, userId: user_id }, (db) => db.memory.findMany({
       where: { ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }), isLatest: true },
       include: {
         sourceMetadata: true,
@@ -876,7 +910,7 @@ export class PrismaGraphStore {
         }
       },
       orderBy: { createdAt: 'desc' }
-    });
+    }));
 
     return records.map(mapMemoryRecord);
   }
@@ -978,47 +1012,50 @@ export class PrismaGraphStore {
     // explicitly asks for superseded versions. Was undefined → counted every
     // historical version, inflating the list total vs the graph/overview.
     const isLatestFilter = is_latest === false ? false : true;
-    const records = await this.client.memory.findMany({
-      where: {
-        ...baseWhere,
-        ...auditExclusionAnd,
-        memoryType: memory_type || undefined,
-        isLatest: isLatestFilter,
-        tags: tags?.length ? { hasEvery: tags } : undefined,
-      },
-      include: {
-        sourceMetadata: true,
-        codeMetadata: true,
-        user: { select: { id: true, displayName: true, email: true } },
-        versions: {
-          orderBy: { createdAt: 'desc' },
-          take: 1
-        }
-      },
-      orderBy: [
-        { documentDate: 'desc' },
-        { createdAt: 'desc' }
-      ],
-      skip: offset,
-      take: limit
-    });
+    const { records, total } = await this._tenantScoped({ orgId: org_id, userId: user_id }, async (db) => {
+      const records = await db.memory.findMany({
+        where: {
+          ...baseWhere,
+          ...auditExclusionAnd,
+          memoryType: memory_type || undefined,
+          isLatest: isLatestFilter,
+          tags: tags?.length ? { hasEvery: tags } : undefined,
+        },
+        include: {
+          sourceMetadata: true,
+          codeMetadata: true,
+          user: { select: { id: true, displayName: true, email: true } },
+          versions: {
+            orderBy: { createdAt: 'desc' },
+            take: 1
+          }
+        },
+        orderBy: [
+          { documentDate: 'desc' },
+          { createdAt: 'desc' }
+        ],
+        skip: offset,
+        take: limit
+      });
 
-    // Count must use the SAME scope (scope + access_context + project join) as
-    // the findMany above — previously it dropped both, so the total counted a
-    // different set than the rows it returned.
-    const countWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context, owner_only });
-    if (project_id) {
-      if (baseWhere.memoryProjects) { delete countWhere.OR; delete countWhere.userId; countWhere.memoryProjects = { some: { projectId: project_id } }; }
-      else countWhere.projectId = project_id;
-    }
-    const total = await this.client.memory.count({
-      where: {
-        ...countWhere,
-        ...auditExclusionAnd,
-        memoryType: memory_type || undefined,
-        isLatest: isLatestFilter,
-        tags: tags?.length ? { hasEvery: tags } : undefined
+      // Count must use the SAME scope (scope + access_context + project join) as
+      // the findMany above — previously it dropped both, so the total counted a
+      // different set than the rows it returned.
+      const countWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context, owner_only });
+      if (project_id) {
+        if (baseWhere.memoryProjects) { delete countWhere.OR; delete countWhere.userId; countWhere.memoryProjects = { some: { projectId: project_id } }; }
+        else countWhere.projectId = project_id;
       }
+      const total = await db.memory.count({
+        where: {
+          ...countWhere,
+          ...auditExclusionAnd,
+          memoryType: memory_type || undefined,
+          isLatest: isLatestFilter,
+          tags: tags?.length ? { hasEvery: tags } : undefined
+        }
+      });
+      return { records, total };
     });
 
     return {
@@ -1169,66 +1206,7 @@ export class PrismaGraphStore {
           // reflects the newly-added element — no +1 needed.
           const nextParam = () => `$${ftsParams.length}`;
 
-          let scopeWhere;
-          if (access_context && (Array.isArray(access_context.projectIds) || Array.isArray(access_context.teamIds))) {
-            const projectIds = Array.isArray(access_context.projectIds) ? access_context.projectIds : [];
-            const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
-
-            // personal tier — always present
-            ftsParams.push(user_id);
-            const userParam = `$${ftsParams.length}`;
-            const tiers = [
-              `(m.user_id = ${userParam}::uuid AND m.scope = 'personal')`,
-            ];
-
-            // Guest gate mirrors scopedMemoryWhere: org guests (project-scoped
-            // invitees) never get the org-wide tier — keyword search included.
-            if (access_context.orgRole !== 'guest') {
-              ftsParams.push(org_id);
-              const orgTierParam = `$${ftsParams.length}`;
-              tiers.push(`(m.scope = 'organization' AND m.org_id = ${orgTierParam}::uuid)`);
-            }
-
-            if (projectIds.length > 0) {
-              const placeholders = projectIds.map(id => {
-                ftsParams.push(id);
-                return `$${ftsParams.length}::uuid`;
-              }).join(',');
-              tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${placeholders})))`);
-            }
-
-            if (teamIds.length > 0) {
-              const placeholders = teamIds.map(id => {
-                ftsParams.push(id);
-                return `$${ftsParams.length}::uuid`;
-              }).join(',');
-              tiers.push(`(m.scope = 'team' AND m.primary_team_id IN (${placeholders}))`);
-            }
-
-            // Always require org scope match for safety
-            ftsParams.push(org_id);
-            const orgScopeParam = `$${ftsParams.length}`;
-            scopeWhere = `AND m.org_id = ${orgScopeParam}::uuid AND (${tiers.join(' OR ')})`;
-            // M2b: drop cross-project syntheses for guests (always) and for all users
-            // when the org disabled cross_project (parameterized, no interpolation).
-            if (access_context.orgRole === 'guest' || access_context.crossProject === false) {
-              ftsParams.push('scope:cross-project');
-              scopeWhere += ` AND NOT (${'$' + ftsParams.length} = ANY(m.tags))`;
-            }
-          } else {
-            if (scope === 'personal') {
-              ftsParams.push(user_id);
-              const userParam = `$${ftsParams.length}`;
-              // LOW-1: also scope by org_id in personal branch (matches Prisma fallback)
-              ftsParams.push(org_id);
-              const orgParam = `$${ftsParams.length}`;
-              scopeWhere = `AND m.user_id = ${userParam}::uuid AND m.org_id = ${orgParam}::uuid`;
-            } else {
-              ftsParams.push(org_id);
-              const orgParam = `$${ftsParams.length}`;
-              scopeWhere = `AND m.org_id = ${orgParam}::uuid`;
-            }
-          }
+          const scopeWhere = buildFtsScopeWhere({ user_id, org_id, scope, access_context }, ftsParams);
 
           const projectWhere = project
             ? (ftsParams.push(project), `AND m.project = ${nextParam()}`)
@@ -1282,7 +1260,7 @@ export class PrismaGraphStore {
             WHERE m.deleted_at IS NULL
               ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${validAtWhere} ${knownAtWhere}
               ${memoryTypeWhere} ${sourcePlatformWhere} ${tagsWhere}`;
-          const ftsResults = await this.client.$queryRawUnsafe(`
+          const ftsResults = await this._tenantScoped({ orgId: org_id, userId: user_id }, (db) => db.$queryRawUnsafe(`
             ${selectColumns},
                    ts_rank(to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, '')),
                            to_tsquery('simple', $1)) as fts_score
@@ -1291,7 +1269,7 @@ export class PrismaGraphStore {
                   @@ to_tsquery('simple', $1)
             ORDER BY fts_score DESC
             LIMIT $2
-          `, ...ftsParams);
+          `, ...ftsParams));
 
           let lexicalResults = ftsResults;
           if (shouldRunTrigramFallback({
@@ -1310,13 +1288,13 @@ export class PrismaGraphStore {
               ors.push(`public.word_similarity(${param}, ${_txt}) > 0.4`);
               sims.push(`public.word_similarity(${param}, ${_txt})`);
             }
-            const fuzzyResults = await this.client.$queryRawUnsafe(`
+            const fuzzyResults = await this._tenantScoped({ orgId: org_id, userId: user_id }, (db) => db.$queryRawUnsafe(`
               ${selectColumns}, GREATEST(${sims.join(', ')}) AS fts_score
               ${commonWhere}
                 AND (${ors.join(' OR ')})
               ORDER BY fts_score DESC
               LIMIT $2
-            `, ...trgmParams);
+            `, ...trgmParams));
             lexicalResults = [...new Map(
               [...ftsResults, ...fuzzyResults].map((row) => [row.id, row]),
             ).values()]
@@ -1375,7 +1353,7 @@ export class PrismaGraphStore {
     }
 
     // Fallback: Prisma query + token similarity scoring
-    const records = await this.client.memory.findMany({
+    const records = await this._tenantScoped({ orgId: org_id, userId: user_id }, (db) => db.memory.findMany({
       where: {
         ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }),
         memoryType: memory_type || undefined,
@@ -1406,7 +1384,7 @@ export class PrismaGraphStore {
       },
       take: Math.max(n_results * 10, 50),
       orderBy: { createdAt: 'desc' }
-    });
+    }));
 
     return records
       .map(record => {

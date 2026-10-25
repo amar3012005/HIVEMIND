@@ -1,6 +1,6 @@
 import { saveCompanyProfileFacts } from './identity/company-profile.js';
 import { renderIcarusDeveloperSignIn } from './email/templates/icarus-developer-sign-in.js';
-import { developerRequest, handleDeveloperCli } from './auth/developer-cli.js';
+import { developerRequest, developerWebReturn, handleDeveloperCli } from './auth/developer-cli.js';
 import {eraseNativeAccount} from './security/account-native-erasure.js';
 import {erasePrivateConnectorGrants,cleanupPrivateAccountRows} from './security/account-private-cleanup.js';
 import {handleAdminAccountErasure} from './security/admin-account-erasure.js';
@@ -308,6 +308,8 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     'https://singulancelabs.com',
     'https://www.singulancelabs.com',
     'https://chat.singulancelabs.com',
+    // SINGULANCE developer community: browser sign-in and developer enrollment.
+    'https://dev.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -5155,6 +5157,9 @@ const server = http.createServer(async (req, res) => {
   }
   const developerOrigin = process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.singulancelabs.com';
   const isDeveloperReturn = (value) => Boolean(developerRequest(value, developerOrigin));
+  const isDeveloperWebReturn = (value) => Boolean(developerWebReturn(value));
+  // Either developer entry admits a new verified identity without a customer invitation.
+  const admitsDeveloper = (value) => isDeveloperReturn(value) || isDeveloperWebReturn(value);
   if (pathname.startsWith('/auth/developer/')) {
     const handled = await handleDeveloperCli({ pathname, req, res, url: new URL(req.url, developerOrigin), origin: developerOrigin,
       frontend: defaultFrontendBaseUrl, currentSession: getCurrentSession, sessionStore, prisma,
@@ -5180,7 +5185,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseBody(req);
       const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req);
-      const returnTo = isDeveloperReturn(body?.return_to) ? body.return_to : safeReturnTo(body?.return_to, emailPostLoginRedirect, emailAllowedOrigins);
+      const returnTo = admitsDeveloper(body?.return_to) ? body.return_to : safeReturnTo(body?.return_to, emailPostLoginRedirect, emailAllowedOrigins);
       const intent = body?.intent === 'register' ? 'register' : 'login';
       const email = normalizeEmail(body?.email);
       const signupTicket = intent === 'register' ? String(body?.signup_ticket || '').trim() : null;
@@ -5189,7 +5194,7 @@ const server = http.createServer(async (req, res) => {
       let started = { accepted: false };
       // Developer enrollment verifies identity without customer admission.
       // Ordinary customer creation still requires its signed invitation. Generic responses preserve privacy.
-      const admitted = isDeveloperReturn(returnTo) || (intent === 'login'
+      const admitted = admitsDeveloper(returnTo) || (intent === 'login'
         ? Boolean(existingUser && !existingUser.deletedAt)
         : Boolean(admission));
       if (turnstileOk && admitted && emailDeliveryConfigured()) started = await emailIdentity.start({
@@ -5233,7 +5238,7 @@ const server = http.createServer(async (req, res) => {
         const admission = verified.challenge.intent === 'register'
           ? emailSignupAdmission(emailIdentity.signupTicket(verified.challenge))
           : null;
-        if (!admission && !isDeveloperReturn(verified.challenge.returnTo)) return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
+        if (!admission && !admitsDeveloper(verified.challenge.returnTo)) return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
         user = await upsertVerifiedEmailUser(verified.email);
         createdAccount = true;
       } else {
@@ -5247,10 +5252,10 @@ const server = http.createServer(async (req, res) => {
       const membership = isDeveloperReturn(verified.challenge.returnTo) ? { org: null } : await resolveSessionOrg(user.id);
       if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
-      if (createdAccount && !isDeveloperReturn(verified.challenge.returnTo)) queueSignupAdminNotification(user, 'email_signup');
+      if (createdAccount && !admitsDeveloper(verified.challenge.returnTo)) queueSignupAdminNotification(user, 'email_signup');
       // A newly authenticated person without an organization has reached the
       // next activation stage. Generation invalidates any queued invite mail.
-      if (!membership.org && !isDeveloperReturn(verified.challenge.returnTo)) {
+      if (!membership.org && !admitsDeveloper(verified.challenge.returnTo)) {
         await startSignupActivation({
           prisma, email: user.email, userId: user.id,
           metadata: { activation_source: 'email_signup' },
@@ -5264,8 +5269,8 @@ const server = http.createServer(async (req, res) => {
           scheduleActivationWorkflow({ activation }).catch((error) => console.warn('[activation-lifecycle] signup scheduling failed:', error.message));
         }
       }
-      const redirectTo = isDeveloperReturn(verified.challenge.returnTo) ? verified.challenge.returnTo : safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
-      return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org && !isDeveloperReturn(redirectTo) }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
+      const redirectTo = admitsDeveloper(verified.challenge.returnTo) ? verified.challenge.returnTo : safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
+      return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org && !admitsDeveloper(redirectTo) }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
     } catch (error) {
       console.error('[email-auth] verification failed', { error: error.message });
       return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
@@ -5363,6 +5368,7 @@ const server = http.createServer(async (req, res) => {
       mobileIntent: nativeIntent,
       provider: 'google',
       developerAccount: isDeveloperReturn(returnToValue),
+      developerWeb: isDeveloperWebReturn(returnToValue),
       signupAdmission: admission,
       workspaceInviteToken: workspaceInvite?.token || null,
     });
@@ -5457,7 +5463,7 @@ const server = http.createServer(async (req, res) => {
       const workspaceInviteAccepted = authState.workspaceInviteToken
         ? await workspaceInviteMatchesAuthenticatedEmail(authState.workspaceInviteToken, userInfo.email)
         : false;
-      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted && !authState.developerAccount) {
+      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted && !authState.developerAccount && !authState.developerWeb) {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel({
@@ -5469,7 +5475,7 @@ const server = http.createServer(async (req, res) => {
         locale: userInfo.locale,
       });
       console.log(`[google-auth] User upserted - id: ${user.id}, email: ${user.email}`);
-      if (!existingPlatformUser && !authState.developerAccount) queueSignupAdminNotification(user, 'google_signup');
+      if (!existingPlatformUser && !authState.developerAccount && !authState.developerWeb) queueSignupAdminNotification(user, 'google_signup');
 
       if (user.deletedAt) return jsonResponse(res, { error: 'Account unavailable' }, 403);
       const { org } = authState.developerAccount ? { org: null } : await resolveCurrentOrg(user.id);
@@ -5480,7 +5486,7 @@ const server = http.createServer(async (req, res) => {
         email: user.email,
         orgId: org?.id || null,
       });
-      if (!org && !authState.developerAccount) {
+      if (!org && !authState.developerAccount && !authState.developerWeb) {
         await startSignupActivation({
           prisma, email: user.email, userId: user.id,
           metadata: { activation_source: 'google_signup' },
@@ -5502,6 +5508,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (authState.developerAccount && isDeveloperReturn(authState.returnTo)) return redirect(res, authState.returnTo, [makeSessionCookie(sessionId)]);
+      if (authState.developerWeb && isDeveloperWebReturn(authState.returnTo)) return redirect(res, authState.returnTo, [makeSessionCookie(sessionId)]);
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
       console.log(`[google-auth] Preparing redirect - initial finalRedirect: ${finalRedirect}`);

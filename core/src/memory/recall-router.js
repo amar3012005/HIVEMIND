@@ -22,6 +22,7 @@
  */
 
 import { boundedRecallEmbedding } from '../embeddings/recall-deadline.js';
+import { EMBEDDING_STATUS, readTimeoutMsEnv } from './recall-degradation.js';
 import { recallPersistedMemories, crossClusterEntityBoost, normalizeQueryTemporalTokens } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
 // Two-reranker contract: this `rerank` is the OPT-IN CROSS-ENCODER pass (external model,
@@ -44,6 +45,9 @@ import { prepareUnifiedRecallCandidates } from './recall-evidence-dedup.js';
 import { filterEvidenceByMetadata } from '../knowledge/evidence-retrieval.js';
 import { filterMemoriesByEntities, loadSelectedEntityLinkMatches } from './selected-entity-filter.js';
 export { filterMemoriesByEntities } from './selected-entity-filter.js';
+
+// Deadline for the query embedding of fact-mode recalls. Other modes use their latency budget.
+const RECALL_FACT_EMBEDDING_TIMEOUT_MS = readTimeoutMsEnv('RECALL_QUERY_EMBEDDING_TIMEOUT_MS', 1500);
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -1981,17 +1985,22 @@ export class RecallRouter {
     // source-specific and can hide better product evidence. Legacy /api/recall
     // callers retain metadata-based filename resolution for compatibility.
     const allowImplicitSource = !recallPlan.source.requested;
+    // Query-embedding outcome for this recall, reported on the trace and in the route log line.
+    // A failed embedding does not stop retrieval: the lexical lane runs with skip_vector.
+    let queryEmbeddingStatus = EMBEDDING_STATUS.NOT_ATTEMPTED;
     const queryVectorPromise = this.evidence?.qdrantClient?.generateEmbedding
       ? boundedRecallEmbedding(this.evidence.qdrantClient, query, {
           tenantId: ctx.orgId, signal: options.signal,
-          timeoutMs: recallPlan.mode === 'fact' ? 1500 : recallPlan.latency_budget_ms,
+          timeoutMs: recallPlan.mode === 'fact' ? RECALL_FACT_EMBEDDING_TIMEOUT_MS : recallPlan.latency_budget_ms,
+          onOutcome: (outcome) => {
+            queryEmbeddingStatus = outcome === 'timeout' ? EMBEDDING_STATUS.TIMEOUT
+              : outcome === 'ok' ? EMBEDDING_STATUS.OK : EMBEDDING_STATUS.UNAVAILABLE;
+          },
         }).catch((error) => {
           if (options.signal?.aborted) throw error;
           return null;
         })
-      : (options.reliability_v1 === true
-        ? Promise.resolve(null)
-        : Promise.resolve(null));
+      : Promise.resolve(null);
     const [implicitSource, canonicalEntities, queryVector] = await Promise.all([
       allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,
@@ -2931,6 +2940,7 @@ export class RecallRouter {
         recall_plan:     recallPlan,
         embedding_passes: 1,
         embedding_unavailable: embeddingUnavailable,
+        embedding_status: queryEmbeddingStatus,
         retrieval_passes: 1,
         hybrid_ranking_mode: hybridRankingMode,
         rerank_passes: hybridRerankPasses,

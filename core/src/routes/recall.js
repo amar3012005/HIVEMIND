@@ -3,6 +3,25 @@ import { initialMemoryCrossRerank } from '../memory/recall-rerank-policy.js';
 import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { resolveAuthorizedEntityIds } from '../memory/entity-discovery.js';
+import {
+  EMBEDDING_STATUS,
+  EVALUATION_STATUS,
+  combineEvaluationStatus,
+  recallOutcomeLogLine,
+} from '../memory/recall-degradation.js';
+
+// Injected clients may implement only the legacy method. Their evaluation is then reported as ok.
+async function evaluateReliability(client, identity) {
+  if (!client) return { enabled: false, status: EVALUATION_STATUS.NOT_CONFIGURED };
+  if (typeof client.evaluate === 'function') return client.evaluate(identity);
+  return { enabled: (await client.enabledFor(identity)) === true, status: EVALUATION_STATUS.OK };
+}
+
+async function evaluateQuality(client, identity) {
+  if (!client) return { mode: 'off', status: EVALUATION_STATUS.NOT_CONFIGURED };
+  if (typeof client.evaluate === 'function') return client.evaluate(identity);
+  return { mode: await client.modeFor(identity), status: EVALUATION_STATUS.OK };
+}
 
 export function normalizeRecallLimit(value, fallback = 15) {
   const parsed = Number(value);
@@ -267,12 +286,16 @@ export async function handleRecallRoute(ctx = {}) {
       ? { ...resolvedRecallPlan, legacy: false }
       : resolvedRecallPlan;
     // Evaluate once and latch for the entire request. Flag changes cannot split
-    // one recall between old/new lane semantics; evaluation failure is the exact
-    // rollback path and preserves the existing response behavior.
-    const [recallReliabilityV1, recallQualityMode] = await Promise.all([
-      recallReliabilityClient ? recallReliabilityClient.enabledFor({ orgId, userId }) : false,
-      recallQualityClient ? recallQualityClient.modeFor({ orgId, userId }) : 'off',
+    // one recall between old/new lane semantics. An evaluation that times out or
+    // fails leaves its feature off and retrieval runs unscored; the status is
+    // reported in the response as `evaluation`.
+    const [reliabilityEvaluation, qualityEvaluation] = await Promise.all([
+      evaluateReliability(recallReliabilityClient, { orgId, userId }),
+      evaluateQuality(recallQualityClient, { orgId, userId }),
     ]);
+    const recallReliabilityV1 = reliabilityEvaluation.enabled;
+    const recallQualityMode = qualityEvaluation.mode;
+    const evaluationStatus = combineEvaluationStatus([reliabilityEvaluation.status, qualityEvaluation.status]);
 
     // Auto and explicit quick/fact/explain/full use the bounded service.
     // Explicit compatibility modes retain the established pipeline below.
@@ -346,6 +369,13 @@ export async function handleRecallRoute(ctx = {}) {
         });
       } catch (error) {
         if (res.destroyed || requestController.signal.aborted) return;
+        if (isRemoteMemoryUnavailableError(error)
+          || ['TEMPORAL_INVENTORY_UNAVAILABLE', 'MEMORY_RETRIEVAL_UNAVAILABLE'].includes(error?.code)) {
+          console.log(recallOutcomeLogLine({
+            route: '/api/recall', retrieval: 'failed', embedding: 'unknown',
+            evaluation: evaluationStatus, status: 503, latencyMs: Date.now() - _recallT0,
+          }));
+        }
         if (isRemoteMemoryUnavailableError(error)) {
           return jsonResponse(res, {
             error: 'memory_unavailable',
@@ -418,6 +448,16 @@ export async function handleRecallRoute(ctx = {}) {
         rankedCandidates: bounded.ranked_candidates || [],
       });
       const routeLatencyMs = Date.now() - _recallT0;
+      // Without a query vector only the lexical lane retrieved memories. Those hits cannot establish
+      // that no other authorized memory matches, so absence_conclusive is false in that case.
+      const embeddingUnavailable = bounded.trace?.embedding_unavailable === true;
+      const embeddingStatus = bounded.trace?.embedding_status
+        || (embeddingUnavailable ? EMBEDDING_STATUS.UNAVAILABLE : EMBEDDING_STATUS.OK);
+      const retrieval = embeddingUnavailable ? 'lexical_fallback' : 'hybrid';
+      console.log(recallOutcomeLogLine({
+        route: '/api/recall', retrieval, embedding: embeddingStatus,
+        evaluation: evaluationStatus, status: 200, latencyMs: routeLatencyMs,
+      }));
       return jsonResponse(res, {
         results: unifiedResults,
         memories: _boundedScoped.memories,
@@ -425,6 +465,10 @@ export async function handleRecallRoute(ctx = {}) {
         live: bounded.live || [],
         mode_used: String(body.mode || '').toLowerCase() === 'quick' ? 'quick' : effectivePlan.mode,
         search_method: 'hybrid',
+        retrieval,
+        degraded: embeddingUnavailable,
+        absence_conclusive: !embeddingUnavailable,
+        evaluation: evaluationStatus,
         recall_plan: effectivePlan,
         retrieval_trace: {
           embedding_passes: Number(bounded.trace?.embedding_passes) || 0,
@@ -435,7 +479,8 @@ export async function handleRecallRoute(ctx = {}) {
           recall_quality_mode: recallQualityMode,
           status: bounded.trace?.reliability?.status || 'legacy',
           lane_states: bounded.trace?.reliability?.lanes || null,
-          embedding_unavailable: bounded.trace?.embedding_unavailable === true,
+          embedding_unavailable: embeddingUnavailable,
+          embedding_status: embeddingStatus,
         },
         evidence_packet: packet,
         cutoff_reason: cutoffReason,

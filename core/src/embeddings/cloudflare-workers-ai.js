@@ -1,6 +1,7 @@
 import { embeddingCancellationOwnerKey } from './recall-deadline.js';
 import { currentOrg } from '../db/prisma.js';
 import { getEmbeddingAdmissionController } from './admission.js';
+import { readTimeoutMsEnv } from '../memory/recall-degradation.js';
 
 const BATCH_SIZE = 48;
 const DEFAULT_BATCH_CHAR_BUDGET = 45_000;
@@ -35,7 +36,7 @@ export class CloudflareWorkersAIEmbedService {
     apiToken = process.env.CLOUDFLARE_WORKERS_AI_TOKEN || process.env.CLOUDFLARE_AI_GATEWAY_TOKEN || '',
     gatewayId = process.env.CLOUDFLARE_AI_GATEWAY_ID || '',
     model = process.env.CLOUDFLARE_EMBED_MODEL || '@cf/baai/bge-m3',
-    timeoutMs = Number(process.env.CLOUDFLARE_EMBED_TIMEOUT_MS || 8000),
+    timeoutMs = readTimeoutMsEnv('CLOUDFLARE_EMBED_TIMEOUT_MS', 8000),
     fetchImpl = globalThis.fetch,
   } = {}) {
     this.accountId = String(accountId).trim();

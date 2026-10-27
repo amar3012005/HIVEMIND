@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "check": "node scripts/check-native.mjs",
-    "test": "node --test scripts/navigation.test.mjs",
+    "test": "node --test scripts/navigation.test.mjs scripts/package-runtime.test.mjs",
     "package:web": "node scripts/package-web.mjs",
+    "package:runtime": "node scripts/package-runtime.mjs",
     "sync": "cap sync",
     "android:debug": "cap sync android && cd android && ./gradlew assembleDebug",
     "android:release": "node scripts/check-native.mjs --release && cap sync android && cd android && ./gradlew bundleRelease",

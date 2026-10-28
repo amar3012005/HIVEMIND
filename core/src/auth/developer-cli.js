@@ -14,6 +14,18 @@ export function developerRequest(value, origin) {
   } catch { return null; }
 }
 
+// Browser enrollment for the SINGULANCE developer community. Only an exact https origin listed in
+// DEVELOPER_WEB_ORIGINS (default dev.singulancelabs.com) qualifies; it admits a verified identity
+// without customer admission, but never grants an organization or skips an existing one.
+export function developerWebReturn(value, origins = process.env.DEVELOPER_WEB_ORIGINS || 'https://dev.singulancelabs.com') {
+  try {
+    const u = new URL(String(value));
+    const allowed = String(origins).split(',').map((entry) => entry.trim()).filter(Boolean);
+    if (u.protocol !== 'https:' || !allowed.includes(u.origin) || u.username || u.password || u.hash) return null;
+    return u.toString();
+  } catch { return null; }
+}
+
 // A distinct audience: these credentials are never customer API keys or browser sessions.
 function credentialKey(secret) {
   return crypto.createHash('sha256').update(`icarus-developer-identity\0${secret}`).digest();

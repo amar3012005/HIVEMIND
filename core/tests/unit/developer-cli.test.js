@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { developerRequest, developerCredential, readDeveloperCredential, handleDeveloperCli } from '../../src/auth/developer-cli.js';
+import { developerRequest, developerWebReturn, developerCredential, readDeveloperCredential, handleDeveloperCli } from '../../src/auth/developer-cli.js';
 const origin = 'https://api.example.test';
 const verifier = 'v'.repeat(43);
 const callback = 'http://127.0.0.1:45678/callback';
@@ -85,24 +85,25 @@ async function route(from, to, deps) {
 }
 test('email enrollment uses verified developer return and skips company activation; customer admission remains required', async () => {
   let admitted = 0;
-  for (const returnTo of [start.toString(), 'https://app.example.test/hivemind/app/overview']) {
+  const admitsDeveloper = v => Boolean(developerRequest(v, origin) || developerWebReturn(v, 'https://dev.singulancelabs.com'));
+  for (const returnTo of [start.toString(), 'https://dev.singulancelabs.com/join', 'https://app.example.test/hivemind/app/overview']) {
     await route("  if (pathname === '/auth/email/start'", "  if (pathname === '/auth/email/resend'", {
       pathname: '/auth/email/start', req: { method: 'POST' }, res: {},
       effectiveEmailIdentityMode: async () => 'primary', parseBody: async () => ({ email: 'new@example.test', return_to: returnTo }),
       verifyEmailTurnstile: async () => true, safeReturnTo: v => v, emailPostLoginRedirect: '', emailAllowedOrigins: [],
-      isDeveloperReturn: v => Boolean(developerRequest(v, origin)), normalizeEmail: v => v, emailSignupAdmission: () => null,
+      isDeveloperReturn: v => Boolean(developerRequest(v, origin)), admitsDeveloper, normalizeEmail: v => v, emailSignupAdmission: () => null,
       prisma: { user: { findUnique: async () => null } }, emailDeliveryConfigured: () => true,
       emailIdentity: { start: async () => { admitted++; return {}; } }, emailRequestFingerprint: () => 'fixture',
       EMAIL_AUTH_PUBLIC_RESPONSE: {}, jsonResponse: () => {}, crypto, process, console, setTimeout: fn => { fn(); },
     });
   }
-  assert.equal(admitted, 1);
+  assert.equal(admitted, 2);
   let sessionPayload;
   await route("  if (pathname === '/auth/email/verify'", '  // rollback.', {
     pathname: '/auth/email/verify', req: { method: 'POST' }, res: {},
     effectiveEmailIdentityMode: async () => 'primary', parseBody: async () => ({ challenge_id: 'fixture', code: '123456' }), isCanonicalUuid: () => true,
     emailIdentity: { verify: async () => ({ ok: true, email: 'new@example.test', challenge: { intent: 'login', returnTo: start.toString() } }), consume: async () => true },
-    prisma: { user: { findUnique: async () => null } }, isDeveloperReturn: v => Boolean(developerRequest(v, origin)),
+    prisma: { user: { findUnique: async () => null } }, isDeveloperReturn: v => Boolean(developerRequest(v, origin)), admitsDeveloper,
     upsertVerifiedEmailUser: async () => ({ id: 'person', email: 'new@example.test' }), resolveSessionOrg: () => assert.fail('developer must not resolve a tenant'),
     sessionStore: { createSession: async v => { sessionPayload = v; return 'session'; } },
     queueSignupAdminNotification: () => assert.fail('no customer signup notifications'), startSignupActivation: () => assert.fail('no company activation'),
@@ -125,4 +126,35 @@ test('Google developer enrollment reuses provider verification without selecting
     CONFIG: {}, process: { env: { GOOGLE_CLIENT_ID: 'fixture', GOOGLE_CLIENT_SECRET: 'fixture' } }, console: { log() {}, error: (...v) => assert.fail(v.join(' ')) }, URLSearchParams,
   });
   assert.equal(sessionPayload.orgId, null);
+});
+
+test('developer web returns accept only the configured https community origin', async () => {
+  const origins = 'https://dev.singulancelabs.com';
+  assert.equal(developerWebReturn('https://dev.singulancelabs.com/join?next=/forum', origins), 'https://dev.singulancelabs.com/join?next=/forum');
+  for (const bad of ['http://dev.singulancelabs.com/join', 'https://dev.singulancelabs.com.evil.test/join', 'https://evil.test/?u=https://dev.singulancelabs.com',
+    'https://user:pw@dev.singulancelabs.com/', 'https://dev.singulancelabs.com/#token', 'javascript:alert(1)', '', null]) {
+    assert.equal(developerWebReturn(bad, origins), null, String(bad));
+  }
+  assert.equal(developerWebReturn('https://dev.singulancelabs.com/'), 'https://dev.singulancelabs.com/');
+});
+
+test('Google community enrollment admits a new person, keeps an existing tenant and returns to the community', async () => {
+  const returnTo = 'https://dev.singulancelabs.com/join';
+  for (const existing of [false, true]) {
+    let sessionPayload; let target;
+    await route("  if (pathname === '/auth/google/callback'", '  // ─── CLI browser-auth handshake', {
+      pathname: '/auth/google/callback', req: { method: 'GET', headers: { host: 'api.example.test' } }, res: {},
+      url: new URL('/auth/google/callback?code=provider-code&state=fixture', origin),
+      sessionStore: { consumeAuthState: async () => ({ developerWeb: true, returnTo }), createSession: async v => { sessionPayload = v; return 'session'; } },
+      fetch: async t => ({ ok: true, json: async () => t.includes('/token') ? { access_token: 'provider-secret' } : { id: 'google-person', email: 'dev@example.test', verified_email: true } }),
+      normalizeEmail: v => v, platformUserExists: async () => existing, upsertUserFromZitadel: async () => ({ id: 'person', email: 'dev@example.test' }),
+      resolveCurrentOrg: async () => ({ org: existing ? { id: 'org-1' } : null }),
+      queueSignupAdminNotification: () => assert.fail('no customer signup notification'), startSignupActivation: () => assert.fail('no company activation'),
+      isDeveloperReturn: v => Boolean(developerRequest(v, origin)), isDeveloperWebReturn: v => Boolean(developerWebReturn(v, 'https://dev.singulancelabs.com')),
+      makeSessionCookie: () => 'cookie', redirect: (_res, t) => { target = t; }, jsonResponse: () => assert.fail('unexpected failure'),
+      CONFIG: {}, process: { env: { GOOGLE_CLIENT_ID: 'fixture', GOOGLE_CLIENT_SECRET: 'fixture' } }, console: { log() {}, error: (...v) => assert.fail(v.join(' ')) }, URLSearchParams,
+    });
+    assert.equal(target, returnTo);
+    assert.equal(sessionPayload.orgId, existing ? 'org-1' : null);
+  }
 });

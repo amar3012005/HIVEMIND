@@ -40,6 +40,11 @@ agentscope = "^1.0.19"
 # Bounded Evidence Roundtable state graph. Pin the exact validated runtime so
 # production imports cannot drift independently of the governed protocol.
 langgraph = "1.1.9"
+# SQLAlchemy's asyncio module, imported by AgentScope, needs greenlet. It used
+# to arrive as a transitive dependency; the image built for 2211db0a did not
+# include it and the service crashed on import. This is the version in the
+# last healthy image (hivemind/employees:rollback).
+greenlet = "3.5.6"
 # AgentScope 1.0.x imports the MCP 1.x streamable HTTP symbol. MCP 2.0
 # renamed that API and makes the service fail during module import.
 mcp = ">=1.13,<2.0"

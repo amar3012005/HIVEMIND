@@ -25,18 +25,22 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Exact versions of the last verified image; see the header of constraints.txt.
+# Installed without dependency resolution because that environment is not
+# resolver-consistent (httpx 0.27.2 beside litellm, which asks for >=0.28), so a
+# resolving install of the same pins fails.
 COPY constraints.txt /app/constraints.txt
+RUN pip install --no-cache-dir --no-deps -r /app/constraints.txt
 
 # 1. Install vendored SlackAgents (Apache 2.0)
 COPY vendor/slackagents /app/vendor/slackagents
-RUN pip install --no-cache-dir -c /app/constraints.txt -e /app/vendor/slackagents
+RUN pip install --no-cache-dir --no-deps -e /app/vendor/slackagents
 
 # 2. Install our wrapper + deps via pyproject
 COPY pyproject.toml ./
 COPY src/ ./src/
 COPY README.md ./
 COPY NOTICE ./
-RUN pip install --no-cache-dir -c /app/constraints.txt -e .
+RUN pip install --no-cache-dir --no-deps -e .
 
 # Fail the build, not the running container, when an import the service needs is
 # missing (28 Oct: SQLAlchemy 2.1 stopped bringing greenlet and the service

@@ -2011,7 +2011,13 @@ if (process.env.DOCLING_URL) {
 
         // ── Audio (mp3/wav/m4a/ogg/flac) → STT via the single ground-truth route ──
         //    (sttRoute / STT_PROVIDER); this feature's model = INGEST_STT_MODEL.
-        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext) && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext)) {
+          // Audio has no document parser to fall back to: without a transcript
+          // the file would be sent to Docling as bytes and fail with an unrelated
+          // message. Fail here with the actual cause.
+          if (!(process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+            throw new Error(`Audio transcription is not configured on this server (no speech-to-text provider key), so ${filename} was not indexed.`);
+          }
           try {
             const t = await transcribeAudio({
               audio: fs.readFileSync(tempPath),
@@ -2041,6 +2047,7 @@ if (process.env.DOCLING_URL) {
             };
           } catch (audioErr) {
             console.warn(`[docling-adapter] whisper failed: ${audioErr.message}`);
+            throw new Error(`Transcription failed for ${filename}: ${String(audioErr.message).slice(0, 200)}`);
           }
         }
 

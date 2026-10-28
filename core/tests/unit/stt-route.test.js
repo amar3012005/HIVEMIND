@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sttRoute, transcribeAudio } from '../../src/llm/stt-route.js';
+import { sttRoute, transcribeAudio, cloudflareSttAvailable } from '../../src/llm/stt-route.js';
 
 const ENV_KEYS = [
   'STT_PROVIDER', 'STT_MODEL', 'MEETING_STT_MODEL', 'GROQ_API_KEY',
@@ -9,7 +9,7 @@ const ENV_KEYS = [
   'OPENROUTER_STT_FALLBACK_MODEL', 'OPENROUTER_CHAT_URL',
   'CLOUDFLARE_AI_GATEWAY_ENABLED', 'CLOUDFLARE_ACCOUNT_ID',
   'CLOUDFLARE_AI_GATEWAY_ID', 'CLOUDFLARE_AI_GATEWAY_TOKEN',
-  'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS',
+  'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS', 'STT_CLOUDFLARE_FIRST', 'CLOUDFLARE_STT_MODEL',
 ];
 
 function restoreEnv(snapshot) {
@@ -109,6 +109,7 @@ test('meeting chat-audio STT uses Cloudflare AI Gateway as the primary transport
     process.env.CLOUDFLARE_AI_GATEWAY_ID = 'hivemind-test';
     process.env.CLOUDFLARE_AI_GATEWAY_TOKEN = 'gateway-test';
     process.env.CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS = 'openrouter-byok';
+    process.env.STT_CLOUDFLARE_FIRST = 'false';
     globalThis.fetch = async (url, options) => {
       captured = { url: String(url), options };
       return new Response(JSON.stringify({ choices: [{ message: { content: 'Gateway transcript' } }] }), {
@@ -134,4 +135,81 @@ test('meeting chat-audio STT uses Cloudflare AI Gateway as the primary transport
     globalThis.fetch = originalFetch;
     restoreEnv(snapshot);
   }
+});
+
+test('Cloudflare Whisper is tried first and returns timestamped segments', async () => {
+  const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    process.env.STT_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'or-test';
+    process.env.CLOUDFLARE_ACCOUNT_ID = 'acct';
+    process.env.CLOUDFLARE_AI_GATEWAY_ID = 'gw';
+    process.env.CLOUDFLARE_AI_GATEWAY_TOKEN = 'gw-token';
+    delete process.env.STT_CLOUDFLARE_FIRST;
+    assert.equal(cloudflareSttAvailable(), true);
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url: String(url), options });
+      return new Response(JSON.stringify({ success: true, result: {
+        text: 'Maria owns pricing.', transcription_info: { language: 'en' },
+        segments: [{ start: 0, end: 1.5, text: ' Maria owns pricing.' }],
+      } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const result = await transcribeAudio({
+      audio: Buffer.from('audio'), contentType: 'audio/webm', filename: 'm.webm',
+      model: 'google/gemini-2.5-flash', prompt: 'Maria', maxAttempts: 1,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.provider, 'cloudflare');
+    assert.equal(result.model, '@cf/openai/whisper-large-v3-turbo');
+    assert.deepEqual(result.segments, [{ start: 0, end: 1.5, text: 'Maria owns pricing.' }]);
+    assert.equal(result.language, 'en');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/openai/whisper-large-v3-turbo');
+    const headers = new Headers(calls[0].options.headers);
+    assert.equal(headers.get('authorization'), 'Bearer gw-token');
+    assert.equal(headers.get('cf-aig-gateway-id'), 'gw');
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.vad_filter, true);
+    assert.equal(body.initial_prompt, 'Maria');
+    assert.equal(body.language, undefined);
+  } finally { globalThis.fetch = originalFetch; restoreEnv(snapshot); }
+});
+
+test('STT falls back to the configured provider when Cloudflare Whisper fails', async () => {
+  const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    process.env.STT_PROVIDER = 'groq';
+    process.env.GROQ_API_KEY = 'groq-test';
+    process.env.GROQ_BASE_URL = 'https://groq.test/openai/v1';
+    delete process.env.OPENROUTER_API_KEY;
+    process.env.CLOUDFLARE_ACCOUNT_ID = 'acct';
+    process.env.CLOUDFLARE_AI_GATEWAY_ID = 'gw';
+    process.env.CLOUDFLARE_AI_GATEWAY_TOKEN = 'gw-token';
+    process.env.CLOUDFLARE_AI_GATEWAY_ENABLED = 'false';
+    delete process.env.STT_CLOUDFLARE_FIRST;
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).includes('api.cloudflare.com')) return new Response('{"success":false,"errors":[{"code":10000}]}', { status: 401 });
+      return new Response(JSON.stringify({ text: 'from groq' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const result = await transcribeAudio({ audio: Buffer.from('a'), contentType: 'audio/webm', filename: 'm.webm', model: 'whisper-large-v3', maxAttempts: 1 });
+    assert.equal(result.ok, true);
+    assert.equal(result.provider, 'groq');
+    assert.match(result.cloudflareFailure, /^401/);
+    assert.equal(calls.length, 2);
+  } finally { globalThis.fetch = originalFetch; restoreEnv(snapshot); }
+});
+
+test('STT_CLOUDFLARE_FIRST=false skips Cloudflare Whisper', () => {
+  const snapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  try {
+    process.env.STT_PROVIDER = 'groq';
+    process.env.GROQ_API_KEY = 'groq-test';
+    process.env.STT_CLOUDFLARE_FIRST = 'false';
+    assert.equal(sttRoute('whisper-large-v3').provider, 'groq');
+  } finally { restoreEnv(snapshot); }
 });

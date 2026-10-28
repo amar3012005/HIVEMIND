@@ -27,6 +27,21 @@ import { gatewayFirstFetch } from './cloudflare-gateway.js';
 const GROQ_STT_DEFAULT = 'whisper-large-v3';
 const OPENROUTER_STT_DEFAULT = 'nvidia/parakeet-tdt-0.6b-v3';
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const CF_STT_DEFAULT = '@cf/openai/whisper-large-v3-turbo';
+
+/**
+ * Cloudflare Workers AI speech-to-text is usable when the AI Gateway credentials
+ * the rest of Core already uses are present. It is tried first (see
+ * transcribeAudio) unless STT_CLOUDFLARE_FIRST=false.
+ * @returns {boolean}
+ */
+export function cloudflareSttAvailable() {
+  return Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_AI_GATEWAY_ID && process.env.CLOUDFLARE_AI_GATEWAY_TOKEN);
+}
+
+function cloudflareSttFirst() {
+  return cloudflareSttAvailable() && String(process.env.STT_CLOUDFLARE_FIRST ?? 'true').toLowerCase() !== 'false';
+}
 
 /**
  * Resolve the single STT api reference (provider + url + key) and the model for a
@@ -36,6 +51,19 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  * @returns {{provider:string,shape?:string,url:string,key:string,model:string}}
  */
 export function sttRoute(featureModel, providerOverride) {
+  if ((providerOverride === 'cloudflare' || (!providerOverride && String(process.env.STT_PROVIDER || '').toLowerCase() === 'cloudflare')) && cloudflareSttAvailable()) {
+    // Only an @cf/ model id is meaningful to Workers AI; feature models written for
+    // Groq or OpenRouter (whisper-large-v3, google/gemini-…) are ignored here.
+    const requested = [process.env.CLOUDFLARE_STT_MODEL, featureModel, process.env.STT_MODEL].find((m) => typeof m === 'string' && m.startsWith('@cf/'));
+    return {
+      provider: 'cloudflare',
+      shape: 'cf-whisper',
+      url: `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${requested || CF_STT_DEFAULT}`,
+      key: process.env.CLOUDFLARE_AI_GATEWAY_TOKEN,
+      gatewayId: process.env.CLOUDFLARE_AI_GATEWAY_ID,
+      model: requested || CF_STT_DEFAULT,
+    };
+  }
   const requestedProvider = (providerOverride || process.env.STT_PROVIDER || 'groq').toLowerCase();
   const provider = !providerOverride && requestedProvider === 'groq' && !process.env.GROQ_API_KEY && process.env.OPENROUTER_API_KEY
     ? 'openrouter'
@@ -87,6 +115,21 @@ async function _post(route, opts, timeoutMs) {
   const { audio, filename, contentType, prompt, temperature, response_format } = opts;
   const signal = AbortSignal.timeout(timeoutMs);
   const fmt = ((contentType || 'audio/wav').split('/')[1] || 'wav').split(';')[0];
+
+  if (route.provider === 'cloudflare') {
+    // Workers AI Whisper through the AI Gateway: the gateway token authenticates,
+    // cf-aig-gateway-id selects the gateway (logging, limits). Language is left to
+    // auto-detection unless the caller supplies one; vad_filter drops silence so
+    // the model does not invent text for it; initial_prompt carries names/terms.
+    const body = { audio: Buffer.from(audio).toString('base64'), task: 'transcribe', vad_filter: true };
+    if (opts.language) body.language = String(opts.language);
+    if (prompt) body.initial_prompt = String(prompt).slice(0, 600);
+    return fetch(route.url, {
+      method: 'POST', signal,
+      headers: { Authorization: `Bearer ${route.key}`, 'cf-aig-gateway-id': route.gatewayId, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
 
   if (route.provider === 'openrouter') {
     const b64 = Buffer.from(audio).toString('base64');
@@ -143,6 +186,16 @@ async function _run(route, opts, maxAttempts, timeoutMs) {
       const r = await _post(route, opts, timeoutMs);
       if (r.ok) {
         const j = await r.json();
+        if (route.shape === 'cf-whisper') {
+          const out = j.result || {};
+          if (j.success === false) { status = 502; detail = JSON.stringify(j.errors || []).slice(0, 200); break; }
+          return {
+            ok: true, status: 200, provider: route.provider, model: route.model,
+            text: String(out.text || '').trim(),
+            segments: Array.isArray(out.segments) ? out.segments.map((g) => ({ start: g.start, end: g.end, text: String(g.text || '').trim() })) : [],
+            language: out.transcription_info?.language || null,
+          };
+        }
         // Chat-audio returns the transcript in the chat message content; whisper
         // shapes return { text, segments, language }.
         if (route.shape === 'chat-audio') {
@@ -191,9 +244,19 @@ async function _run(route, opts, maxAttempts, timeoutMs) {
  */
 export async function transcribeAudio(opts) {
   const { model, maxAttempts = 3, timeoutMs = 300000 } = opts;
+  // Cloudflare Workers AI Whisper first: it returns timestamped segments, which the
+  // chat-audio route (an LLM asked to transcribe) cannot. Any failure falls through
+  // to the configured provider chain below, unchanged.
+  let cloudflareFailure = null;
+  if (cloudflareSttFirst() && String(process.env.STT_PROVIDER || '').toLowerCase() !== 'cloudflare') {
+    const cf = await _run(sttRoute(model, 'cloudflare'), opts, Math.min(maxAttempts, 2), timeoutMs);
+    if (cf.ok) return cf;
+    cloudflareFailure = `${cf.status} ${cf.detail || ''}`.trim();
+    console.warn(`[stt] cloudflare whisper failed (${cloudflareFailure}); using configured provider`);
+  }
   const primary = sttRoute(model);
   let res = await _run(primary, opts, maxAttempts, timeoutMs);
-  if (res.ok) return res;
+  if (res.ok) { if (cloudflareFailure) res.cloudflareFailure = cloudflareFailure; return res; }
 
   // OpenRouter intermittently returns a 400 "model does not exist" for a model
   // that DOES exist (upstream routing flake — verified: the same request

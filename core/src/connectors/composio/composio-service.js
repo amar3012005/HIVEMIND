@@ -183,6 +183,45 @@ export function chooseToolkitSubjects(orgId, accounts = []) {
   return chosen;
 }
 
+/**
+ * One listing row per toolkit that has at least one ACTIVE, EXPIRED or FAILED
+ * account, derived from {@link chooseToolkitSubjects}. This is the row shape
+ * the Connectors page and the Runtime apps listing both render, so the two
+ * surfaces cannot disagree about status or chosen account. The organization
+ * subject is reported as the `workspace` origin, the Runtime's vocabulary.
+ *
+ * @param {string} orgId organization id
+ * @param {Array<{ id, toolkit, status, subject, updatedAt?, createdAt? }>} accounts rows from {@link listConnectedAccounts}
+ * @returns {Map<string, { toolkit: string, status: 'connected'|'reconnect', origin: 'personal'|'workspace'|null, accountId: string|null }>}
+ */
+export function toolkitConnectionRows(orgId, accounts = []) {
+  const rows = new Map();
+  for (const [toolkit, choice] of chooseToolkitSubjects(orgId, accounts)) {
+    rows.set(toolkit, choice.state === 'active'
+      ? { toolkit, status: 'connected', origin: choice.origin === 'organization' ? 'workspace' : 'personal', accountId: choice.accountId }
+      : { toolkit, status: 'reconnect', origin: null, accountId: null });
+  }
+  return rows;
+}
+
+/**
+ * Attach the chosen connection to each catalog toolkit. A toolkit without
+ * an ACTIVE or EXPIRED account is `available`. `connected` stays for older
+ * clients and is true only when the chosen account is ACTIVE.
+ *
+ * @param {Array<{ slug: string }>} toolkits catalog items
+ * @param {Map<string, object>} rows result of {@link toolkitConnectionRows}
+ * @returns {Array<object>} the items with connected, connection_status, connection_origin and connected_account_id
+ */
+export function withToolkitConnections(toolkits, rows) {
+  return toolkits.map((toolkit) => {
+    const row = rows.get(String(toolkit.slug || '').toLowerCase());
+    const status = row?.status || 'available';
+    return { ...toolkit, connected: status === 'connected', connection_status: status,
+      connection_origin: row?.origin || null, connected_account_id: row?.accountId || null };
+  });
+}
+
 const SUBJECT_CHOICE_TTL_MS = 15_000;
 const SUBJECT_CHOICE_CACHE = new Map();
 

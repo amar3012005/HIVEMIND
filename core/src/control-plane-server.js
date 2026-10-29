@@ -63,7 +63,7 @@ import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/ema
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
-import { overlayActiveApps } from './connectors/connected-app-overlay.js';
+import { overlayActiveApps, overlayToolkitRows } from './connectors/connected-app-overlay.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { SEAM_SCHEMA_VERSION, buildWorkRoomExecutionIdentity } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
@@ -8142,22 +8142,24 @@ const server = http.createServer(async (req, res) => {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
           const accounts = await composioService.listConnectedAccounts(orgId, { userId: current.session.userId });
           reconcileConnectedActivity({ prisma, orgId, userId: current.session.userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
-          result.splice(0, result.length, ...overlayActiveApps(result, accounts));
+          // One row per toolkit by the shared rule (see toolkitConnectionRows); the catalog loop below only
+          // adds label and display fields, it never re-derives status from the raw account list.
+          const toolkitRows = composioService.toolkitConnectionRows(orgId, accounts);
+          result.splice(0, result.length, ...overlayToolkitRows(result, toolkitRows));
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
-            const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
-            const active = rows.find((r) => r.status === 'ACTIVE');
-            const dead = rows.find((r) => r.status === 'EXPIRED' || r.status === 'FAILED');
-            const status = active ? 'connected' : dead ? 'needs_reauth' : 'available';
+            const row = toolkitRows.get(entry.composioToolkit || entry.id);
+            const status = row?.status === 'connected' ? 'connected' : row?.status === 'reconnect' ? 'needs_reauth' : 'available';
             const overlay = {
               provider: entry.id,
               label: entry.name,
               status,
-              account_ref: active?.id || dead?.id || null,
+              account_ref: row?.accountId || null,
+              origin: row?.origin || null,
               last_sync_at: null,
               last_error: null,
-              is_active: Boolean(active),
-              created_at: (active || dead)?.createdAt || null,
+              is_active: status === 'connected',
+              created_at: null,
               source: 'composio',
             };
             if (knownProviders.has(entry.id)) {
@@ -8361,11 +8363,11 @@ const server = http.createServer(async (req, res) => {
         pagePromise,
         orgId ? composioService.listConnectedAccounts(orgId, { userId: current.session.userId }).catch(() => []) : Promise.resolve([]),
       ]);
-      // Real per-org connection state, not something the FE has to remember
-      // client-side across reloads — the "connected" flag here reflects
-      // whichever of THIS page's toolkits the org actually has an ACTIVE
-      // connected account for, so the frontend can sort them to the top.
-      const connectedToolkits = new Set(accounts.filter((a) => a.status === 'ACTIVE').map((a) => a.toolkit));
+      // One row per toolkit by the shared rule: the ACTIVE account (personal
+      // first, newest when both subjects have one); expired-only is
+      // `reconnect`; no account is `available`. The Runtime apps listing
+      // applies the same rule.
+      const rows = composioService.toolkitConnectionRows(orgId, accounts);
       // Slack is native-only (see /connect guard above) — its "connected"
       // state lives in PlatformIntegration, not Composio's connected_accounts,
       // so the card would otherwise always read as disconnected even when
@@ -8376,12 +8378,15 @@ const server = http.createServer(async (req, res) => {
             where: { userId: current.session.userId, platformType: 'slack', isActive: true },
             select: { id: true },
           });
-          if (nativeSlack) connectedToolkits.add('slack');
+          if (nativeSlack) rows.set('slack', { toolkit: 'slack', status: 'connected', origin: 'personal', accountId: null });
         } catch { /* best-effort overlay */ }
       }
-      const toolkits = page.items.map((tk) => ({ ...tk, connected: connectedToolkits.has(tk.slug) }));
+      const toolkits = composioService.withToolkitConnections(page.items, rows);
+      const connections = [...rows.values()].sort((a, b) => a.toolkit.localeCompare(b.toolkit))
+        .map((row) => ({ toolkit: row.toolkit, status: row.status, origin: row.origin, account_id: row.accountId }));
       return jsonResponse(res, {
         toolkits,
+        connections,
         next_cursor: page.nextCursor,
         total_items: page.totalItems,
       });

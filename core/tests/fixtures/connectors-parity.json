@@ -1,0 +1,478 @@
+{
+ "_comment": "Shared parity fixture. An identical copy lives in the Core repo (core/tests/fixtures/connectors-parity.json) and in Runtime-Runner (packages/hivemind/connected-apps/tests/fixtures/connectors-parity.json). Ids are synthetic; subject is 'personal' (hivemind:<userId>) or 'org' (legacy <orgId>).",
+ "orgId": "org-1",
+ "userId": "user-1",
+ "accounts": [
+  {
+   "id": "ca_p_gmail",
+   "toolkit": "gmail",
+   "status": "ACTIVE",
+   "subject": "personal",
+   "updatedAt": "2026-10-20T10:00:00Z"
+  },
+  {
+   "id": "ca_p_linkedin",
+   "toolkit": "linkedin",
+   "status": "ACTIVE",
+   "subject": "personal",
+   "updatedAt": "2026-10-18T10:00:00Z"
+  },
+  {
+   "id": "ca_p_gcal",
+   "toolkit": "googlecalendar",
+   "status": "ACTIVE",
+   "subject": "personal",
+   "updatedAt": "2026-10-15T10:00:00Z"
+  },
+  {
+   "id": "ca_p_github",
+   "toolkit": "github",
+   "status": "EXPIRED",
+   "subject": "personal",
+   "updatedAt": "2026-10-12T10:00:00Z"
+  },
+  {
+   "id": "ca_o_gmail",
+   "toolkit": "gmail",
+   "status": "ACTIVE",
+   "subject": "org",
+   "updatedAt": "2026-10-03T10:00:00Z"
+  },
+  {
+   "id": "ca_o_asana",
+   "toolkit": "asana",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-01T10:00:00Z"
+  },
+  {
+   "id": "ca_o_airtable",
+   "toolkit": "airtable",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-02T10:00:00Z"
+  },
+  {
+   "id": "ca_o_dropbox",
+   "toolkit": "dropbox",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-03T10:00:00Z"
+  },
+  {
+   "id": "ca_o_hubspot",
+   "toolkit": "hubspot",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-04T10:00:00Z"
+  },
+  {
+   "id": "ca_o_jira",
+   "toolkit": "jira",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-05T10:00:00Z"
+  },
+  {
+   "id": "ca_o_linear",
+   "toolkit": "linear",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-06T10:00:00Z"
+  },
+  {
+   "id": "ca_o_mailchimp",
+   "toolkit": "mailchimp",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-07T10:00:00Z"
+  },
+  {
+   "id": "ca_o_notion",
+   "toolkit": "notion",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-08T10:00:00Z"
+  },
+  {
+   "id": "ca_o_salesforce",
+   "toolkit": "salesforce",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-09T10:00:00Z"
+  },
+  {
+   "id": "ca_o_shopify",
+   "toolkit": "shopify",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-01T10:00:00Z"
+  },
+  {
+   "id": "ca_o_slackbot",
+   "toolkit": "slackbot",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-02T10:00:00Z"
+  },
+  {
+   "id": "ca_o_stripe",
+   "toolkit": "stripe",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-03T10:00:00Z"
+  },
+  {
+   "id": "ca_o_trello",
+   "toolkit": "trello",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-04T10:00:00Z"
+  },
+  {
+   "id": "ca_o_twitter",
+   "toolkit": "twitter",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-05T10:00:00Z"
+  },
+  {
+   "id": "ca_o_zendesk",
+   "toolkit": "zendesk",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-06T10:00:00Z"
+  },
+  {
+   "id": "ca_o_zoom",
+   "toolkit": "zoom",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-07T10:00:00Z"
+  },
+  {
+   "id": "ca_o_calendly",
+   "toolkit": "calendly",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-08T10:00:00Z"
+  },
+  {
+   "id": "ca_o_clickup",
+   "toolkit": "clickup",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-09T10:00:00Z"
+  },
+  {
+   "id": "ca_o_figma",
+   "toolkit": "figma",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-01T10:00:00Z"
+  },
+  {
+   "id": "ca_o_intercom",
+   "toolkit": "intercom",
+   "status": "EXPIRED",
+   "subject": "org",
+   "updatedAt": "2026-10-02T10:00:00Z"
+  }
+ ],
+ "expectedRows": [
+  {
+   "toolkit": "airtable",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "asana",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "calendly",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "clickup",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "dropbox",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "figma",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "github",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "gmail",
+   "status": "connected",
+   "origin": "personal",
+   "accountId": "ca_p_gmail"
+  },
+  {
+   "toolkit": "googlecalendar",
+   "status": "connected",
+   "origin": "personal",
+   "accountId": "ca_p_gcal"
+  },
+  {
+   "toolkit": "hubspot",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "intercom",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "jira",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "linear",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "linkedin",
+   "status": "connected",
+   "origin": "personal",
+   "accountId": "ca_p_linkedin"
+  },
+  {
+   "toolkit": "mailchimp",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "notion",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "salesforce",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "shopify",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "slackbot",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "stripe",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "trello",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "twitter",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "zendesk",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "zoom",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  }
+ ],
+ "catalog": [
+  "gmail",
+  "googlecalendar",
+  "linkedin",
+  "github",
+  "notion",
+  "slack",
+  "googledrive",
+  "outlook"
+ ],
+ "expectedListing": [
+  {
+   "toolkit": "github",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "gmail",
+   "status": "connected",
+   "origin": "personal",
+   "accountId": "ca_p_gmail"
+  },
+  {
+   "toolkit": "googlecalendar",
+   "status": "connected",
+   "origin": "personal",
+   "accountId": "ca_p_gcal"
+  },
+  {
+   "toolkit": "googledrive",
+   "status": "available",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "linkedin",
+   "status": "connected",
+   "origin": "personal",
+   "accountId": "ca_p_linkedin"
+  },
+  {
+   "toolkit": "notion",
+   "status": "reconnect",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "outlook",
+   "status": "available",
+   "origin": null,
+   "accountId": null
+  },
+  {
+   "toolkit": "slack",
+   "status": "available",
+   "origin": null,
+   "accountId": null
+  }
+ ],
+ "rules": [
+  {
+   "name": "both active, workspace newer wins",
+   "accounts": [
+    {
+     "id": "p",
+     "toolkit": "hubspot",
+     "status": "ACTIVE",
+     "subject": "personal",
+     "updatedAt": "2026-10-01T10:00:00Z"
+    },
+    {
+     "id": "o",
+     "toolkit": "hubspot",
+     "status": "ACTIVE",
+     "subject": "org",
+     "updatedAt": "2026-10-09T10:00:00Z"
+    }
+   ],
+   "expected": {
+    "toolkit": "hubspot",
+    "status": "connected",
+    "origin": "workspace",
+    "accountId": "o"
+   }
+  },
+  {
+   "name": "both active, tie goes to personal",
+   "accounts": [
+    {
+     "id": "p",
+     "toolkit": "slack",
+     "status": "ACTIVE",
+     "subject": "personal",
+     "updatedAt": "2026-10-05T10:00:00Z"
+    },
+    {
+     "id": "o",
+     "toolkit": "slack",
+     "status": "ACTIVE",
+     "subject": "org",
+     "updatedAt": "2026-10-05T10:00:00Z"
+    }
+   ],
+   "expected": {
+    "toolkit": "slack",
+    "status": "connected",
+    "origin": "personal",
+    "accountId": "p"
+   }
+  },
+  {
+   "name": "expired personal never beats active workspace",
+   "accounts": [
+    {
+     "id": "p",
+     "toolkit": "notion",
+     "status": "EXPIRED",
+     "subject": "personal",
+     "updatedAt": "2026-10-09T10:00:00Z"
+    },
+    {
+     "id": "o",
+     "toolkit": "notion",
+     "status": "ACTIVE",
+     "subject": "org",
+     "updatedAt": "2026-10-01T10:00:00Z"
+    }
+   ],
+   "expected": {
+    "toolkit": "notion",
+    "status": "connected",
+    "origin": "workspace",
+    "accountId": "o"
+   }
+  },
+  {
+   "name": "initiated only is not listed",
+   "accounts": [
+    {
+     "id": "i",
+     "toolkit": "asana",
+     "status": "INITIATED",
+     "subject": "personal",
+     "updatedAt": "2026-10-01T10:00:00Z"
+    }
+   ],
+   "expected": null
+  }
+ ]
+}

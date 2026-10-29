@@ -67,3 +67,24 @@ test('a recording with almost no words for its length is reported, a normal one 
   assert.equal(isTranscriptTooThin({ words: 1, durationSec: 20 }), false);
   assert.equal(isTranscriptTooThin({ words: 6, durationSec: 60 }), false);
 });
+
+test('a recording where every chunk was silent fails once with a plain message instead of retrying', async () => {
+  const updates = [];
+  const prisma = {
+    $queryRawUnsafe: async (sql) => {
+      if (/FROM hivemind\.meeting_sessions s\s+LEFT JOIN/.test(sql)) return [{
+        status: 'queued', expected_segments: 1, finalized_meeting_id: null, finalization_payload: {}, finalization_attempts: 0,
+        segment_count: 1, indexes: [0], audio_count: 1, audio_transcribed: 1, audio_terminal_errors: 0,
+      }];
+      if (/UPDATE hivemind\.meeting_sessions/.test(sql)) return [{ finalization_payload: { duration_sec: 12 }, finalization_attempts: 1 }];
+      return [{ idx: 0, text: '', speakers: null, start_ms: 0, end_ms: 12000 }];
+    },
+    $executeRawUnsafe: async (...args) => { updates.push(args); return 1; },
+  };
+  const { processMeetingFinalization } = await import('../../src/knowledge/meeting-finalization-worker.js');
+  const result = await processMeetingFinalization(prisma, IDS);
+  assert.equal(result.terminal, true);
+  assert.equal(updates[0][1], 'failed');
+  assert.equal(updates[0][3], 'no_speech_detected');
+  assert.match(updates[0][4], /No speech was detected/);
+});

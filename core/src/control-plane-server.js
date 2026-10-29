@@ -15,6 +15,7 @@ import { planAccountErasureScope } from './security/account-erasure-scope.js';
 import { runAccountErasureOnce } from './security/account-erasure-worker.js';
 import { CloudflareKnowledgeIngestClient } from './knowledge/cloudflare-ingest-client.js';
 import { handleOrganizationSettings } from './billing/organization-policy.js';
+import { handleRuntimeSettingRoute, readRuntimeEnabled } from './organizations/runtime-setting.js';
 import { recoverPendingActivity } from './connectors/composio/activity-relevance.js';
 import { changeSessionOrganization } from './mobile/session-organization.js';
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
@@ -2945,6 +2946,7 @@ async function buildBootstrapPayload(user, req, preferredOrgId = null, session =
       hosting_mode: org.hostingMode || 'managed',
       memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode),
       memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode)),
+      runtime_enabled: await readRuntimeEnabled(prisma, org.id),
     } : null,
     onboarding: {
       needs_org_setup: !org,
@@ -6535,6 +6537,9 @@ const server = http.createServer(async (req, res) => {
       'Set-Cookie': makeSessionCookie(sessionId)
     });
   }
+
+  // Per-company "Enable Runtime" switch (owner/admin only; audited).
+  if (await handleRuntimeSettingRoute({ req, res, pathname, prisma, requireSession, requireOrgAdmin, parseBody, jsonResponse, audit })) return;
 
   // Workspace identity is a durable, organization-scoped profile. It is kept
   // out of UserProfile on purpose: chat, ingestion and agent tools can read it

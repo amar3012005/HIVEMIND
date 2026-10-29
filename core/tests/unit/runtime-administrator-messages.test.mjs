@@ -132,3 +132,13 @@ test('bounded native identifiers reject injection characters while allowing only
  assert.equal(validateAdministratorMessage({...input,request_call_id:'x'.repeat(180),kind:'decision'}).request_call_id.length,180);
  assert.equal(validateAdministratorMessage({...input,message_key:'x'.repeat(180)}).message_key.length,180);
 });
+
+test('an employee notice names its sender and needs no Runtime request reference',()=>{
+  const sender={employee_id:'ebee6f09-62df-4fc7-a8ef-363b961d2ca9',name:'Turing',role:'Sales Operations'};
+  const decision=validateAdministratorMessage({message_key:'employee-notice-1',kind:'decision',subject:'Blocked on CRM access',message:'Connect the CRM so I can finish the pipeline.',sender});
+  assert.deepEqual(decision.sender,sender);
+  assert.equal(decision.request_call_id,undefined);
+  assert.throws(()=>validateAdministratorMessage({message_key:'k',kind:'decision',subject:'s',message:'m'}),/native_request_reference_required/);
+  for (const bad of [{...sender,employee_id:'nope'},{...sender,name:'Evil <x@y>'},{...sender,extra:1},{...sender,role:'a\nb'}])
+    assert.throws(()=>validateAdministratorMessage({message_key:'k',kind:'completion',subject:'s',message:'m',sender:bad}),/invalid_message_sender/);
+});

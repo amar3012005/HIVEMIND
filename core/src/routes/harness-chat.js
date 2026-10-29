@@ -31,6 +31,7 @@ import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
 import { recallOperatingMemory, saveOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
 import { organizationAgentAccess, nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
+import { readRuntimeEnabled } from '../organizations/runtime-setting.js';
 import { reconcileDelegatedConnections } from '../harness-chat/delegated-connection-completion.js';
 import { verifyDelegatedConnection } from '../harness-chat/delegated-connection-verification.js';
 
@@ -307,7 +308,9 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
   }
   if (pathname === `${INTERNAL_PREFIX}/principal`) {
     if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }
-    jsonResponse(res, { active: true }); return true;
+    try { jsonResponse(res, { active: true, runtime_enabled: await readRuntimeEnabled(prisma, claims.org_id) }); }
+    catch { jsonResponse(res, { error: 'organization_setting_unavailable' }, 503); }
+    return true;
   }
   if (pathname === `${INTERNAL_PREFIX}/organization-agent-access`) {
     if (req.method !== 'GET') { jsonResponse(res, { error: 'Method not allowed' }, 405); return true; }

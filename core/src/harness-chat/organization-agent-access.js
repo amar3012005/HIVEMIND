@@ -1,3 +1,4 @@
+import { readRuntimeEnabled } from '../organizations/runtime-setting.js';
 // Organization agent storage identity is distinct from the human actor. This
 // resolver never issues connector authority or changes the actor's credentials.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -21,12 +22,14 @@ export async function organizationAgentAccess(db, { userId, orgId }, { schema = 
   const root = roots[0];
   const initial = root ? null : await nativeAgentStoragePrincipal(db,{userId,orgId,sharedOrganizationAgents:true});
 
+  const runtimeEnabled = await readRuntimeEnabled(db, orgId);
   return {
     contract: 'hivemind.organization-agent-access.v1',
     actor: { user_id: userId, org_id: orgId, role: membership.role,
       name: typeof user.displayName === 'string' ? user.displayName.trim().slice(0, 180) : '',
       authority: 'authenticated-profile' },
     agent: { org_id: orgId, runtime_session_id: root?.session_id ?? null, storage_user_id: root?.user_id ?? initial.userId },
+    organization: { runtime_enabled: runtimeEnabled },
     access: 'read-write',
   };
 }

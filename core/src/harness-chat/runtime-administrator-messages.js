@@ -105,7 +105,7 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  const conversation=new URL('/hivemind/app/employee/harness',app);conversation.searchParams.set('session',claims.operating_session);
  if(message.request_call_id)conversation.searchParams.set('request',message.request_call_id);
  const portrait=new URL('/assets/runtime-computer-c2305f5b.webp',portraitBase || 'https://chat.singulancelabs.com');
- const rendered=renderRuntimeAdministratorEmail({companyName:organization.name,administratorName:user.displayName,subject:message.subject,message:message.message,kind:message.kind,connection,conversationUrl:conversation.href,portraitUrl:portrait.href});
+ const rendered=renderRuntimeAdministratorEmail({companyName:organization.name,administratorName:user.displayName,subject:message.subject,message:message.message,kind:message.kind,connection,conversationUrl:conversation.href,portraitUrl:portrait.href,...(message.sender?{sender:message.sender}:{})});
  rendered.subject=`${organization.name} · Runtime updates`;
  let receipt;
  try {receipt=await send({to:user.email,rendered,from:sender,thread:row.thread,templateId:'runtime-administrator-v1',notification:{orgId:claims.org_id,userId:claims.sub},providerAttempts:1,providerFallback:false,requiredProvider:'cloudflare'});}catch{receipt={ok:false,error:'outcome_unknown'};}

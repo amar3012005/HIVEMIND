@@ -24,7 +24,7 @@ function database({role='admin',active=true,enabled=true,events=[],parents=[]}={
 }
 test('Runtime overlay reuses branded shell and escapes all human text',()=>{
  const r=renderRuntimeAdministratorEmail({companyName:'SINGULANCE <organization>',administratorName:'<Amar>',subject:'Review <ready>',message:'<script>bad()</script>\nYour review is ready.',kind:'approval',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://chat.singulancelabs.com/assets/runtime-computer-c2305f5b.webp'});
- assert.ok(r.html.includes('HIVEMIND / SYSTEM MESSAGE'));assert.ok(r.html.includes('Your AI Chief of Staff'));assert.ok(!r.html.includes('<script>'));assert.ok(r.html.includes('Hi admin, this is Runtime from SINGULANCE &lt;organization&gt;'));assert.ok(r.text.includes('Hi admin, this is Runtime from SINGULANCE <organization>'));assert.ok(!r.html.includes('&lt;Amar&gt;'));assert.ok(r.html.includes('Opening this email or its link does not grant approval'));assert.ok(r.text.includes('Approve:'));
+ assert.ok(r.html.includes('HIVEMIND / SYSTEM MESSAGE'));assert.ok(r.html.includes('Your AI Chief of Staff'));assert.ok(!r.html.includes('<script>'));assert.ok(r.html.includes('Hi &lt;Amar&gt;, this is Runtime from SINGULANCE &lt;organization&gt;.'));assert.ok(r.text.includes('Hi <Amar>, this is Runtime from SINGULANCE <organization>'));assert.ok(r.html.includes('Opening this email or its link does not grant approval'));assert.ok(r.text.includes('Approve:'));
 });
 test('recipient overrides and unbound decision references are rejected',()=>{
  assert.throws(()=>validateAdministratorMessage({...input,to:'someone@example.com'}));assert.throws(()=>validateAdministratorMessage({...input,kind:'decision'}));assert.throws(()=>validateAdministratorMessage({...input,subject:'Header\ninjection'}));
@@ -141,4 +141,12 @@ test('an employee notice names its sender and needs no Runtime request reference
   assert.throws(()=>validateAdministratorMessage({message_key:'k',kind:'decision',subject:'s',message:'m'}),/native_request_reference_required/);
   for (const bad of [{...sender,employee_id:'nope'},{...sender,name:'Evil <x@y>'},{...sender,extra:1},{...sender,role:'a\nb'}])
     assert.throws(()=>validateAdministratorMessage({message_key:'k',kind:'completion',subject:'s',message:'m',sender:bad}),/invalid_message_sender/);
+});
+
+test('an employee notice is signed by the employee and greets the administrator by first name',()=>{
+  const r=renderRuntimeAdministratorEmail({companyName:'SINGULANCE',administratorName:'Amar Sai',subject:'Pipeline ready',message:'Ten drafts are saved.',kind:'completion',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://next.singulancelabs.com/p.png',sender:{employee_id:'ebee6f09-62df-4fc7-a8ef-363b961d2ca9',name:'Turing',role:'Sales Operations'}});
+  assert.ok(r.html.includes('Hi Amar, this is Turing, your Sales Operations at SINGULANCE.'));
+  assert.ok(r.html.includes('Sales Operations · SINGULANCE'));
+  assert.ok(!r.html.includes('Your AI Chief of Staff'));
+  assert.ok(r.text.startsWith('Turing — SINGULANCE'));
 });

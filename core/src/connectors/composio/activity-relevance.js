@@ -3,6 +3,8 @@ import { createOpenRouterJevProvider } from '../../agent/decision-gateway.js';
 import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-service.js';
 import { createWorkspaceNotification } from '../../workspace/notifications.js';
 import { createRuntimeAttentionBridge } from './runtime-attention-bridge.js';
+import { readRuntimeEnabled } from '../../organizations/runtime-setting.js';
+import { routeApprovedEvent } from '../employee-event-routing.js';
 
 export const ACTIVITY_RELEVANCE_POLICY = 'company_activity_relevance_v3';
 const POLICY = ACTIVITY_RELEVANCE_POLICY;
@@ -106,12 +108,15 @@ export function classifyPendingActivity(ctx) {
         RETURNING *`, ctx.orgId, ctx.userId, allowedAccountIds, POLICY);
       if (!rows.length) return;
       for (const row of rows) {
-        const sub = await db.$queryRawUnsafe("SELECT toolkit,runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])", row.subscription_id, ctx.orgId, ctx.userId, allowedAccountIds);
+        const sub = await db.$queryRawUnsafe("SELECT toolkit,slug,subject,runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])", row.subscription_id, ctx.orgId, ctx.userId, allowedAccountIds);
         if (!sub.length) continue;
-        const bridge = ctx.runtimeAttention || createRuntimeAttentionBridge();
+        // A company with Runtime switched off has no Chief of Staff to assess or receive events; they take the company relevance path.
+        const runtimeOn = await readRuntimeEnabled(db, ctx.orgId).catch(() => true);
+        const bridge = runtimeOn ? (ctx.runtimeAttention || createRuntimeAttentionBridge()) : undefined;
+        const routeToEmployees = () => (ctx.employeeRouter || routeApprovedEvent)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] }).catch(() => {});
         if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
           && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
-          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); continue; }
+          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); await routeToEmployees(); continue; }
           catch { /* Native revision and consent validation own whether reassessment is required. */ }
         }
         const optedIn = sub[0].runtime_attention === true && bridge && sub[0].runtime_attention_enabled_at
@@ -136,8 +141,11 @@ export function classifyPendingActivity(ctx) {
             // Outcome unknown stays pending for existing classifier reconciliation.
             // Native admission deduplication uses this exact persisted event identity.
             await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='pending',evaluated_at=now() WHERE id=$1", row.id);
+            continue;
           }
         }
+        // Employee routing follows relevance approval and never changes what Runtime received.
+        if (receipt.status === 'approved') await routeToEmployees();
       }
       if (rows.length < 6 && !worker.rerun) break;
     }

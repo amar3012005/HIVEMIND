@@ -19,6 +19,7 @@ import { decideRuntimeStage, decisionGatewayToolNames } from './decision-gateway
 import { CAPABILITY_OPTIONS } from './decision-gateway.js';
 import { normalizeSearchableFollowUps } from './chat-synthesis-prompt.js';
 import { destinationAppsForEnableTools } from './chat-enable-tools-gate.js';
+import { chatConnectCallbackUrl } from '../connectors/composio/connect-callback.js';
 
 export const UNIFIED_META_HARNESS_VERSION = 'langgraph-meta-loop-v2';
 const MAX_STEPS = 12;
@@ -657,6 +658,18 @@ function narrowConnectedSearch(compact, slug) {
   };
 }
 
+/**
+ * Toolkits with an ACTIVE account under the per-toolkit rule (personal first, newest when both
+ * subjects hold one; expired accounts never win), the same rule Tool Router sessions and
+ * `executeToolForUser` apply, so the organization fallback cannot pick a different account.
+ */
+function activeToolkits(orgId, accounts, composio) {
+  if (typeof composio?.chooseToolkitSubjects === 'function') {
+    return [...composio.chooseToolkitSubjects(orgId, accounts || [])].filter(([, choice]) => choice.state === 'active').map(([toolkit]) => toolkit);
+  }
+  return [...new Set((accounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+}
+
 async function defaultConnectedExecutor(args, state, ctx, composio, decisionStage = decideRuntimeStage, onDecision = () => {}) {
   const action = String(args.action || '');
   if (action === 'search') {
@@ -669,7 +682,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
     if (typeof composio.listConnectedAccounts === 'function') {
       const userAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope });
       const requestText = requestedTask.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ');
-      let active = [...new Set((userAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+      let active = activeToolkits(ctx.orgId, userAccounts, composio);
       const explicitlyNamed = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
       if (explicitlyNamed.length) toolkits = explicitlyNamed;
       if (!toolkits.length) toolkits = active.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
@@ -689,7 +702,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
       // org scope when the requested app is active only there.
       if (connectionScope === 'user' && (!explicitlyNamed.length || !toolkits.length || toolkits.some(toolkit => !active.includes(toolkit)))) {
         const orgAccounts = await composio.listConnectedAccounts(ctx.orgId, { userId: ctx.userId, connectionScope: 'org' });
-        const orgActive = [...new Set((orgAccounts || []).filter(row => row?.status === 'ACTIVE').map(row => String(row.toolkit || '').toLowerCase()).filter(Boolean))];
+        const orgActive = activeToolkits(ctx.orgId, orgAccounts, composio);
         const explicitlyNamedOrg = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
         if (explicitlyNamedOrg.length) toolkits = explicitlyNamedOrg;
         if (!toolkits.length) toolkits = orgActive.filter(toolkit => requestText.includes(toolkit.replace(/[-_]+/g, ' ')));
@@ -720,7 +733,7 @@ async function defaultConnectedExecutor(args, state, ctx, composio, decisionStag
       userId: ctx.userId, connectionScope, toolkits, useCases,
       allowDisconnected: true, sessionId: sessionCompatible ? state.sessionId : null, includeCustomToolkit: false,
       manageConnections: false, hydrateSchemas: false, candidateLimit: 12,
-      callbackUrl: ctx.composioCallbackOrigin,
+      callbackUrl: chatConnectCallbackUrl(ctx, toolkits.length === 1 ? toolkits[0] : undefined) || undefined,
       searchPayload: {
         queries,
         // A model-provided workflow session is also provider-scoped. Do not

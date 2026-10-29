@@ -927,12 +927,16 @@ test('connect link uses the HIVEMIND callback origin so OAuth returns to chat', 
     ctx: {
       orgId: 'o1', userId: 'u1', threadId: 'connect-li',
       composioCallbackOrigin: 'https://next.singulancelabs.com',
+      composioReturnPath: '/hivemind/app/chat?thread=li',
       _tracedDispatch: async () => ({}),
     },
     composio,
   });
   assert.equal(result.status, 'needs_input');
-  assert.match(captured.callbackUrl, /\/hivemind\/app\/connect\/composio\/callback\?composio_toolkit=linkedin/);
+  const callback = new URL(captured.callbackUrl);
+  assert.equal(callback.pathname, '/hivemind/connect-return');
+  assert.equal(callback.searchParams.get('composio_toolkit'), 'linkedin');
+  assert.equal(callback.searchParams.get('return'), '/hivemind/app/chat?thread=li');
 });
 
 test('ambiguous apps ask do you mean this', async () => {

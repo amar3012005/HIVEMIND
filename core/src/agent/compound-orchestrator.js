@@ -19,6 +19,7 @@
  * Flag-gated by COMPOUND_ORCHESTRATOR_ENABLED (default false) in the caller.
  */
 
+import { chatConnectCallbackUrl } from '../connectors/composio/connect-callback.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { canonicalNativeToolGroup, isNativeHivemindGroup } from './native-tool-groups.js';
 
@@ -1425,7 +1426,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         try {
           const link = await composioSvc.createConnectLink(composioToolkit, ctx.orgId, {
             userId: ctx.userId || undefined,
-            callbackUrl: ctx.composioCallbackUrl || undefined,
+            callbackUrl: ctx.composioCallbackUrl || chatConnectCallbackUrl(ctx, composioToolkit) || undefined,
             toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
           });
           redirectUrl = link?.redirectUrl || link?.redirect_url || null;

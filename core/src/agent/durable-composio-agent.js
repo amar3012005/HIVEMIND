@@ -5,6 +5,7 @@
  * picks the safest next action from compact receipts. Writes are pendingWrite
  * only — never live send.
  */
+import { chatConnectCallbackUrl } from '../connectors/composio/connect-callback.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { executeHivemindCustomTool, nativeNameFromComposioSlug } from '../connectors/composio/hivemind-custom-toolkit.js';
 import { formatComposioSearch, formatKnownFields, isReadLookupUseCase } from '../connectors/composio/composio-search-formatter.js';
@@ -1401,7 +1402,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
       if (!toolkit || ![...intent.apps, ...cards.map(c => c.toolkit)].includes(toolkit)) throw new Error('Connection target is not a known capability');
       const link = await svc.createConnectLink(toolkit, ctx.orgId, {
         userId: ctx.userId || undefined,
-        callbackUrl: ctx.composioCallbackUrl || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin) || undefined,
+        callbackUrl: ctx.composioCallbackUrl || chatConnectCallbackUrl(ctx, toolkit) || undefined,
         toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
       });
       run.status = 'waiting_connection';
@@ -1773,7 +1774,7 @@ export async function runDurableComposioAgent({
       try {
         const link = await composioSvc.createConnectLink(toolkit, orgId, {
           userId: ctx.userId || undefined,
-          callbackUrl: ctx.composioCallbackUrl || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin) || undefined,
+          callbackUrl: ctx.composioCallbackUrl || chatConnectCallbackUrl(ctx, toolkit) || undefined,
           toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
         });
         redirectUrl = link?.redirectUrl || link?.redirect_url || null;

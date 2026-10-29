@@ -173,7 +173,12 @@ export async function processMeetingFinalization(prisma, identity, { creditServi
       identity.sessionId, identity.orgId, identity.userId,
     );
     const transcript = (segments || []).map((segment) => segment.text).filter(Boolean).join('\n').trim();
-    if (!transcript) throw new Error('no transcript available for finalization');
+    if (!transcript) {
+      // Every chunk was transcribed and none contained speech: retrying cannot change that.
+      return settleFailure(prisma, identity, Number(job.finalization_attempts), new Error(
+        'No speech was detected in this recording. Check that the meeting audio and your microphone are on, then record again.',
+      ), { terminal: true, code: 'no_speech_detected' });
+    }
     const payload = job.finalization_payload && typeof job.finalization_payload === 'object' ? job.finalization_payload : {};
     const inferredDurationSec = Math.max(0, ...segments.map((segment) => Number(segment.end_ms || 0))) / 1000;
     const words = transcript.split(/\s+/).filter(Boolean).length;

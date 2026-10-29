@@ -18,9 +18,9 @@ for (const [name, membership, method, invalid, status] of [
 ]) test(`principal validation ${name}`, async () => {
   const res={}; let downstream=false;
   await handleHarnessChatBootstrapRoute({req:{method,headers:{authorization:`Bearer ${invalid ? 'invalid' : token()}`}},res,
-    pathname:'/internal/v1/harness-chat/core/principal',prisma:{userOrganization:{findUnique:async()=>membership}},
+    pathname:'/internal/v1/harness-chat/core/principal',prisma:{userOrganization:{findUnique:async()=>membership},$queryRawUnsafe:async()=>[]},
     env:{HIVE_HARNESS_RUNNER_SERVICE_SECRET:secret},parseBody:async()=>{throw Error('must not parse')},
     jsonResponse:(r,b,status=200)=>Object.assign(r,{body:b,status}),fetchImpl:async()=>{downstream=true;throw Error('must not proxy')},redisConfig:{}});
   assert.equal(res.status,status);assert.equal(downstream,false);
-  if(status===200)assert.deepEqual(res.body,{active:true});
+  if(status===200)assert.deepEqual(res.body,{active:true,runtime_enabled:true});
 });

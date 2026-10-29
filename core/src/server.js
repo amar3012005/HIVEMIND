@@ -101,6 +101,7 @@ import { processQueuedCampaignAssets } from './campaigns/image-service.js';
 import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
 import { SEO_SITE_INTELLIGENCE, runSeoSiteIntelligence } from './capabilities/seo-site-intelligence.js';
 import { SeoSearchConsoleService } from './capabilities/seo-search-console.js';
+import { returnPathFromReferer } from './connectors/composio/connect-callback.js';
 
 // TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
 // transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
@@ -3048,6 +3049,17 @@ const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemi
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
+
+/**
+ * Chat turn fields that let a connect card return the person to the page they started from:
+ * the Referer path, accepted only when its origin is the frontend or the request Origin.
+ */
+function chatConnectReturnContext(req) {
+  const requestOrigin = /^https:\/\//i.test(String(req.headers.origin || '')) ? String(req.headers.origin) : null;
+  const composioAllowedOrigins = [process.env.HIVEMIND_FRONTEND_URL, requestOrigin].filter(Boolean);
+  const composioReturnPath = returnPathFromReferer(req.headers.referer, composioAllowedOrigins);
+  return { composioAllowedOrigins, ...(composioReturnPath ? { composioReturnPath } : {}) };
+}
 
 function loadIngestionPipeline() {
   for (const candidate of INGESTION_MODULE_CANDIDATES) {
@@ -25361,6 +25373,7 @@ exit \$RC
                       composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                         ? String(req.headers.origin)
                         : process.env.HIVEMIND_FRONTEND_URL) || undefined,
+                      ...chatConnectReturnContext(req),
                       _trace: { traceId: crypto.randomUUID() },
                     },
                     onEvent: emit,
@@ -25426,6 +25439,7 @@ exit \$RC
                     composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                       ? String(req.headers.origin)
                       : process.env.HIVEMIND_FRONTEND_URL) || undefined,
+                    ...chatConnectReturnContext(req),
                     _trace: { traceId: crypto.randomUUID() },
                   };
                   const durable = stored.resumeState.kind === 'unified_langgraph'
@@ -25827,6 +25841,7 @@ exit \$RC
                         composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                           ? String(req.headers.origin)
                           : process.env.HIVEMIND_FRONTEND_URL) || undefined,
+                        ...chatConnectReturnContext(req),
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
                         prisma,
@@ -25926,6 +25941,7 @@ exit \$RC
                     composioCallbackOrigin: (req.headers.origin && /^https:\/\//i.test(String(req.headers.origin))
                       ? String(req.headers.origin)
                       : process.env.HIVEMIND_FRONTEND_URL) || undefined,
+                    ...chatConnectReturnContext(req),
                     projectId: requestProjectId,
                     scopeFilter: requestScopeFilter,
                     prisma,

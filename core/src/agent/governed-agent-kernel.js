@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import Ajv from 'ajv';
+import { chatConnectCallbackUrl } from '../connectors/composio/connect-callback.js';
 import { Annotation, Command, END, START, StateGraph, interrupt } from '@langchain/langgraph';
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { normalizeSearchableFollowUps } from './chat-synthesis-prompt.js';
@@ -319,9 +320,7 @@ function pendingConnectionToolkit(state) {
 }
 
 function callbackUrlFor(ctx) {
-  if (!ctx.composioCallbackOrigin) return null;
-  const url = new URL('/hivemind/app/connect/composio/callback', ctx.composioCallbackOrigin);
-  return url.toString();
+  return chatConnectCallbackUrl(ctx);
 }
 
 function governedConnectionScope(ctx = {}) {

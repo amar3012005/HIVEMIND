@@ -4,6 +4,30 @@ import crypto from 'node:crypto';
 
 const MAX_LIST_LIMIT = 100;
 
+/**
+ * Columns that accounting reads need. The jsonb columns (`request`, `result`,
+ * `progress`, `providerAttempts`) can hold megabytes per job and are never
+ * selected by usage, limit, metric or export queries: loading every settled job
+ * with them exhausted the Core heap in `JSON.parse`.
+ */
+const ACCOUNTING_SELECT = Object.freeze({
+  id: true, type: true, status: true, userId: true, orgId: true, createdAt: true,
+  pagesProcessed: true, durationMs: true, runtimeUsed: true, errorMessage: true,
+});
+
+/** Job summary for listings: everything except the large jsonb outputs (`result`, `progress`, `providerAttempts`). */
+const LIST_SELECT = Object.freeze({
+  ...ACCOUNTING_SELECT, request: true, idempotencyKey: true, fallbackApplied: true, errorCode: true,
+  retriedFromId: true, updatedAt: true, completedAt: true,
+});
+
+const startOfUtcDay = () => { const d = new Date(); d.setUTCHours(0, 0, 0, 0); return d; };
+const startOfUtcMonth = () => { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), 1)); };
+const isSearch = (job) => ['search', 'research'].includes(job.type);
+const isCrawl = (job) => ['crawl', 'seo_audit'].includes(job.type);
+const countSearches = (jobs) => jobs.filter(isSearch).length;
+const sumPages = (jobs) => jobs.filter(isCrawl).reduce((sum, job) => sum + (job.pages_processed || 0), 0);
+
 function ensureFile(filePath) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
@@ -152,26 +176,37 @@ export class WebJobStore {
   async list(scope = {}, { limit = 50, type } = {}) {
     const take = Math.max(1, Math.min(Number(limit) || 50, MAX_LIST_LIMIT));
     if (this.prisma) {
-      return (await this.prisma.webIntelJob.findMany({ where: { ...scope, ...(type ? { type } : {}) }, orderBy: { updatedAt: 'desc' }, take })).map(toLegacy);
+      return (await this.prisma.webIntelJob.findMany({ where: { ...scope, ...(type ? { type } : {}) }, orderBy: { updatedAt: 'desc' }, take, select: LIST_SELECT })).map(toLegacy);
     }
     let jobs = readJson(this.filePath).filter((job) => matchesScope(job, scope) && (!type || job.type === type));
     jobs.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at)); return jobs.slice(0, take);
   }
 
   async _all(scope = {}) {
-    if (this.prisma) return (await this.prisma.webIntelJob.findMany({ where: scope })).map(toLegacy);
+    if (this.prisma) return (await this.prisma.webIntelJob.findMany({ where: scope, select: ACCOUNTING_SELECT })).map(toLegacy);
     return readJson(this.filePath).filter((job) => matchesScope(job, scope));
+  }
+
+  _dailyFrom(jobs) {
+    const start = startOfUtcDay();
+    const today = jobs.filter((job) => new Date(job.created_at) >= start);
+    return { web_search_requests: countSearches(today), web_crawl_pages: sumPages(today) };
+  }
+
+  _monthlyFrom(jobs) {
+    const now = new Date(); const monthStart = startOfUtcMonth();
+    const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+    const current = jobs.filter((job) => new Date(job.created_at) >= monthStart);
+    return {
+      web_search_requests: { used: countSearches(current), limit: Number(process.env.HIVEMIND_WEB_SEARCH_MONTHLY_LIMIT || 3000) },
+      web_crawl_pages: { used: sumPages(current), limit: Number(process.env.HIVEMIND_WEB_CRAWL_MONTHLY_LIMIT || 15000) },
+      month: monthStart.toISOString().slice(0, 7), reset_at: nextMonth.toISOString(),
+    };
   }
 
   async getUsage(scope) {
     const normalized = typeof scope === 'string' ? { userId: scope } : scope;
-    const jobs = await this._settledJobs(normalized || {});
-    const start = new Date(); start.setUTCHours(0, 0, 0, 0);
-    const today = jobs.filter((job) => new Date(job.created_at) >= start);
-    return {
-      web_search_requests: today.filter((job) => ['search', 'research'].includes(job.type)).length,
-      web_crawl_pages: today.filter((job) => ['crawl', 'seo_audit'].includes(job.type)).reduce((sum, job) => sum + (job.pages_processed || 0), 0),
-    };
+    return this._dailyFrom(await this._settledJobs(normalized || {}, { since: startOfUtcDay() }));
   }
 
   async retry(jobId, scope = {}) {
@@ -183,15 +218,7 @@ export class WebJobStore {
 
   async getMonthlyUsage(scope) {
     const normalized = typeof scope === 'string' ? { userId: scope } : scope;
-    const jobs = await this._settledJobs(normalized || {});
-    const now = new Date(); const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-    const current = jobs.filter((job) => new Date(job.created_at) >= monthStart);
-    return {
-      web_search_requests: { used: current.filter((job) => ['search', 'research'].includes(job.type)).length, limit: Number(process.env.HIVEMIND_WEB_SEARCH_MONTHLY_LIMIT || 3000) },
-      web_crawl_pages: { used: current.filter((job) => ['crawl', 'seo_audit'].includes(job.type)).reduce((sum, job) => sum + (job.pages_processed || 0), 0), limit: Number(process.env.HIVEMIND_WEB_CRAWL_MONTHLY_LIMIT || 15000) },
-      month: monthStart.toISOString().slice(0, 7), reset_at: nextMonth.toISOString(),
-    };
+    return this._monthlyFrom(await this._settledJobs(normalized || {}, { since: startOfUtcMonth() }));
   }
 
   async getMetrics(orgId) {
@@ -221,7 +248,9 @@ export class WebJobStore {
 
   async checkLimits(scope) {
     const normalized = typeof scope === 'string' ? { userId: scope } : scope;
-    const daily = await this.getUsage(normalized); const monthly = await this.getMonthlyUsage(normalized);
+    // One settled-job read serves both windows; the month window contains the day window.
+    const jobs = await this._settledJobs(normalized || {}, { since: startOfUtcMonth() });
+    const daily = this._dailyFrom(jobs); const monthly = this._monthlyFrom(jobs);
     const bucket = (used, hard) => ({ used, soft: Math.floor(hard * 0.8), hard, exceeded: used >= hard });
     return { daily: { search: bucket(daily.web_search_requests, Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 100)), crawl: bucket(daily.web_crawl_pages, Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 500)) }, monthly: { search: bucket(monthly.web_search_requests.used, monthly.web_search_requests.limit), crawl: bucket(monthly.web_crawl_pages.used, monthly.web_crawl_pages.limit) } };
   }
@@ -240,9 +269,9 @@ export class WebJobStore {
   // Customer allowance reflects successful, durably settled work only. Jobs
   // are intentionally not the ledger: a provider failure or a cancelled job
   // must never consume an organization's Web Intel allowance.
-  async _settledJobs(scope = {}) {
+  async _settledJobs(scope = {}, { since = null } = {}) {
     if (!this.prisma) {
-      return (await this._all(scope)).filter((job) => job.status === 'succeeded');
+      return (await this._all(scope)).filter((job) => job.status === 'succeeded' && (!since || new Date(job.created_at) >= since));
     }
 
     const settlements = await this.prisma.webIntelUsageSettlement.findMany({
@@ -252,7 +281,8 @@ export class WebJobStore {
     const jobIds = [...new Set(settlements.map((settlement) => settlement.jobId))];
     if (jobIds.length === 0) return [];
     return (await this.prisma.webIntelJob.findMany({
-      where: { id: { in: jobIds }, ...scope, status: 'succeeded' },
+      where: { id: { in: jobIds }, ...scope, status: 'succeeded', ...(since ? { createdAt: { gte: since } } : {}) },
+      select: ACCOUNTING_SELECT,
     })).map(toLegacy);
   }
 }

@@ -2,7 +2,11 @@ import { transcribeAudio } from '../llm/stt-route.js';
 import { readMeetingAudio, removeMeetingAudio } from './meeting-audio-store.js';
 import { processMeetingSegmentExtraction } from './meeting-segment-extractor.js';
 
-const MAX_ATTEMPTS = 3;
+// A speech-to-text outage of a few minutes must not permanently fail a meeting:
+// six attempts with the backoff below span roughly 15 minutes. The finalization
+// worker reads this same constant when it decides an audio chunk is terminal.
+export const MEETING_AUDIO_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.MEETING_AUDIO_MAX_ATTEMPTS) || 6));
+const MAX_ATTEMPTS = MEETING_AUDIO_MAX_ATTEMPTS;
 const LEASE_MS = 10 * 60 * 1000;
 export function audioRetryDelayMs(attempt) { return Math.min(30 * 60 * 1000, 30_000 * (2 ** Math.max(0, Number(attempt) - 1))); }
 
@@ -25,12 +29,29 @@ export async function processMeetingAudioSegment(prisma, { sessionId, idx, orgId
       audio, contentType: row.content_type, filename: `meeting-${idx}`, model: process.env.MEETING_STT_MODEL,
       temperature: 0, response_format: 'verbose_json', timeoutMs: 300_000,
     });
-    if (!result.ok || !String(result.text || '').trim()) throw new Error(result.detail || `transcription ${result.status || 'empty'}`);
+    if (!result.ok) throw new Error(result.detail || `transcription ${result.status || 'failed'}`);
+    // A chunk the speech-to-text service accepted but found no speech in is a
+    // valid silent segment, not a failure: retrying it would exhaust the retry
+    // budget and fail the whole meeting at the first pause.
+    const text = String(result.text || '').trim();
+    if (!text) {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, start_ms, end_ms, extraction, extraction_status)
+         VALUES ($1::uuid,$2::uuid,$3::uuid,$4,'',$5,$6,'{}'::jsonb,'done')
+         ON CONFLICT (session_id, idx) DO UPDATE SET text=EXCLUDED.text, start_ms=EXCLUDED.start_ms, end_ms=EXCLUDED.end_ms`,
+        sessionId, orgId, userId, idx, row.start_ms, row.end_ms,
+      );
+      await prisma.$executeRawUnsafe(
+        `UPDATE hivemind.meeting_audio_segments SET status='transcribed', lease_expires_at=NULL, last_error='silent chunk', updated_at=now()
+         WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`, sessionId, idx, orgId, userId,
+      );
+      return { claimed: true, ok: true, silent: true, language: result.language || null };
+    }
     await prisma.$executeRawUnsafe(
       `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, start_ms, end_ms)
        VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7)
        ON CONFLICT (session_id, idx) DO UPDATE SET text=EXCLUDED.text, start_ms=EXCLUDED.start_ms, end_ms=EXCLUDED.end_ms`,
-      sessionId, orgId, userId, idx, String(result.text).slice(0, 200000), row.start_ms, row.end_ms,
+      sessionId, orgId, userId, idx, text.slice(0, 200000), row.start_ms, row.end_ms,
     );
     await prisma.$executeRawUnsafe(
       `UPDATE hivemind.meeting_audio_segments SET status='transcribed', lease_expires_at=NULL, last_error=NULL, updated_at=now()

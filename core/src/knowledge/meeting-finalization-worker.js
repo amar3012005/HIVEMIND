@@ -1,8 +1,22 @@
 import { generateMeetingInsights } from './meeting-insights.js';
+import { MEETING_AUDIO_MAX_ATTEMPTS } from './meeting-audio-worker.js';
 
 const MAX_ATTEMPTS = Math.max(1, Number(process.env.MEETING_FINALIZATION_MAX_ATTEMPTS || 3));
 const LEASE_MS = Math.max(60_000, Number(process.env.MEETING_FINALIZATION_LEASE_MS || 10 * 60 * 1000));
 const ABANDONED_AFTER_MS = Math.max(5 * 60_000, Number(process.env.MEETING_ABANDONED_AFTER_MS || 30 * 60_000));
+
+/**
+ * A recording whose transcript has almost no words for its length did not capture
+ * the speech (wrong audio source, muted tab, dropped chunks). Saving it as a
+ * finished meeting with generated notes hides that; it is reported as a failure.
+ * @param {{words:number,durationSec:number}} input
+ * @returns {boolean}
+ */
+export function isTranscriptTooThin({ words, durationSec }) {
+  const minPerMinute = Math.max(0, Number(process.env.MEETING_MIN_WORDS_PER_MINUTE) || 3);
+  if (!(durationSec >= 45)) return false;
+  return words < Math.max(5, Math.ceil((durationSec / 60) * minPerMinute));
+}
 
 export function finalizationRetryDelayMs(attempt) {
   return Math.min(60 * 60 * 1000, 30_000 * (2 ** Math.max(0, Number(attempt) - 1)));
@@ -24,7 +38,7 @@ export async function queueAbandonedMeetingSessions(prisma, { limit = 5, now = n
             SELECT 1 FROM hivemind.meeting_audio_segments a
              WHERE a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
                AND a.status NOT IN ('transcribed','expired')
-               AND NOT (a.status='error' AND a.attempts >= 3)
+               AND NOT (a.status='error' AND a.attempts >= ${MEETING_AUDIO_MAX_ATTEMPTS})
           )
         ORDER BY s.updated_at ASC
         LIMIT $3
@@ -75,6 +89,16 @@ export async function queueMeetingFinalization(prisma, { sessionId, orgId, userI
           AND extraction IS NULL`,
       sessionId, orgId, userId,
     ).catch((error) => console.warn('[meeting-finalization] segment extraction requeue failed:', error?.message || error));
+    // An explicit finalize retry also reopens audio chunks that exhausted their
+    // attempts (for example during a speech-to-text outage); their stored bytes
+    // are still on disk, so nothing needs to be re-recorded.
+    await prisma.$executeRawUnsafe(
+      `UPDATE hivemind.meeting_audio_segments
+          SET status='queued', attempts=0, next_attempt_at=NULL, lease_expires_at=NULL, updated_at=now()
+        WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+          AND status='error' AND attempts >= ${MEETING_AUDIO_MAX_ATTEMPTS}`,
+      sessionId, orgId, userId,
+    ).catch((error) => console.warn('[meeting-finalization] audio requeue failed:', error?.message || error));
   }
   return rows?.[0] || null;
 }
@@ -86,7 +110,7 @@ async function readiness(prisma, { sessionId, orgId, userId }) {
             ARRAY_REMOVE(ARRAY_AGG(DISTINCT g.idx ORDER BY g.idx),NULL) AS indexes,
             COUNT(DISTINCT a.id)::int AS audio_count,
             COUNT(DISTINCT a.id) FILTER (WHERE a.status='transcribed')::int AS audio_transcribed,
-            COUNT(DISTINCT a.id) FILTER (WHERE a.status='error' AND a.attempts >= 3)::int AS audio_terminal_errors
+            COUNT(DISTINCT a.id) FILTER (WHERE a.status='error' AND a.attempts >= ${MEETING_AUDIO_MAX_ATTEMPTS})::int AS audio_terminal_errors
        FROM hivemind.meeting_sessions s
        LEFT JOIN hivemind.meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
        LEFT JOIN hivemind.meeting_audio_segments a ON a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
@@ -152,6 +176,12 @@ export async function processMeetingFinalization(prisma, identity, { creditServi
     if (!transcript) throw new Error('no transcript available for finalization');
     const payload = job.finalization_payload && typeof job.finalization_payload === 'object' ? job.finalization_payload : {};
     const inferredDurationSec = Math.max(0, ...segments.map((segment) => Number(segment.end_ms || 0))) / 1000;
+    const words = transcript.split(/\s+/).filter(Boolean).length;
+    if (isTranscriptTooThin({ words, durationSec: Number(payload.duration_sec) || inferredDurationSec })) {
+      return settleFailure(prisma, identity, Number(job.finalization_attempts), new Error(
+        `Only ${words} word${words === 1 ? '' : 's'} were captured from this recording. Check that the meeting audio (tab or system sound, and your microphone) is being shared, then try again.`,
+      ), { terminal: true, code: 'transcript_too_thin' });
+    }
     const meetingMinutes = Math.max(1, Math.ceil((Number(payload.duration_sec) || inferredDurationSec || 60) / 60));
     const meetingCreditKey = `meeting:${identity.sessionId}`;
     const meetingCredit = creditService ? await creditService.reserve({
@@ -233,7 +263,7 @@ export async function reconcileMeetingFinalizations(prisma, { limit = 5, creditS
           SELECT 1 FROM hivemind.meeting_audio_segments a
            WHERE a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
              AND a.status NOT IN ('transcribed','expired')
-             AND NOT (a.status='error' AND a.attempts >= 3)
+             AND NOT (a.status='error' AND a.attempts >= ${MEETING_AUDIO_MAX_ATTEMPTS})
         )
       ORDER BY s.updated_at ASC LIMIT $2`, MAX_ATTEMPTS, Math.max(1, Math.min(20, Number(limit) || 5)),
   );
@@ -242,4 +272,4 @@ export async function reconcileMeetingFinalizations(prisma, { limit = 5, creditS
   return { recovered: recovered.length, scanned: rows?.length || 0, completed: results.filter((result) => result.ok).length, failed: results.filter((result) => result.claimed && !result.ok).length };
 }
 
-export const __test = { readiness, abandonedAfterMs: ABANDONED_AFTER_MS };
+export const __test = { readiness, abandonedAfterMs: ABANDONED_AFTER_MS, isTranscriptTooThin };

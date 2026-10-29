@@ -15,8 +15,25 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Audit sentinel for a skip that belongs to the event, not to one employee. */
 export const EVENT_LEVEL = '*';
 const FREE_MAIL = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'yahoo.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com', 'aol.com', 'gmx.de', 'gmx.net', 'web.de']);
+/** Hosts anyone can publish on: an address there proves nothing about the company, so none of them can be the company domain. */
+const SHARED_HOSTING = ['github.io', 'githubusercontent.com', 'vercel.app', 'netlify.app', 'calendly.com', 'notion.site', 'notion.so', 'wixsite.com', 'wix.com', 'webflow.io', 'herokuapp.com', 'pages.dev', 'workers.dev', 'web.app', 'firebaseapp.com', 'azurewebsites.net', 'blogspot.com', 'wordpress.com', 'squarespace.com', 'carrd.co', 'framer.app', 'framer.website', 'ghost.io', 'substack.com', 'medium.com', 'linktr.ee', 'typeform.com', 'hubspot.com', 'mailchimpsites.com', 'surge.sh', 'render.com', 'onrender.com', 'fly.dev', 'railway.app', 'repl.co', 'glitch.me', 'bubbleapps.io', 'airtable.com', 'google.com', 'sites.google.com', 'canva.site', 'my.canva.site', 'carrd.co', 'godaddysites.com', 'weebly.com', 'myshopify.com', 'zoom.us', 'slack.com', 'linkedin.com', 'facebook.com', 'instagram.com', 'x.com', 'twitter.com'];
+const SECOND_LEVEL = new Set(['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.in', 'co.za', 'com.br', 'com.mx', 'com.sg', 'com.hk', 'com.tr', 'com.cn', 'co.kr', 'com.ar']);
 const LOOP_MARKER = /hivemind_runtime_output|\[Event:[a-z0-9_-]+\]|\[Duty:[a-z]+\]/i;
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/i;
+/**
+ * The registrable domain of a host: the last two labels, or three under a known two-part suffix such as co.uk.
+ * @param {string} host A host name.
+ * @returns {string} Lower-case registrable domain, or '' for a single label.
+ */
+export function registrableDomain(host) {
+  const labels = lower(host).replace(/\.$/, '').split('.').filter(Boolean);
+  if (labels.length < 2) return '';
+  const tail2 = labels.slice(-2).join('.');
+  return SECOND_LEVEL.has(tail2) && labels.length >= 3 ? labels.slice(-3).join('.') : tail2;
+}
+/** True for a free mail or shared hosting domain, which can never be the company's. */
+export const untrustedDomain = domain => FREE_MAIL.has(domain) || SHARED_HOSTING.some(entry => domain === entry || domain.endsWith(`.${entry}`));
+
 const clip = (value, n) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 const str = value => (typeof value === 'string' ? value : '');
 const lower = value => String(value ?? '').toLowerCase();
@@ -35,6 +52,8 @@ export function routingConfig(env = process.env) {
     maxEventsPerWake: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_EVENTS_PER_WAKE, 10, 1, 25),
     mentionEmailChars: int(env.HIVEMIND_EMPLOYEE_EVENT_MENTION_EMAIL_CHARS, 2000, 200, 10_000),
     maxAttempts: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_ATTEMPTS, 5, 1, 10),
+    routeTimeoutMs: int(env.HIVEMIND_EMPLOYEE_EVENT_ROUTE_TIMEOUT_MS, 2000, 100, 30_000),
+    maxWakeAgeMs: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_WAKE_AGE_MS, 7_200_000, 60_000, 86_400_000),
     maxWatchesPerEmployee: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_WATCHES, 20, 1, 100),
     // GitHub has no link between a login and a company member, so a GitHub author counts as inside only when GitHub itself calls
     // them OWNER or MEMBER of an organization this company lists here. Empty by default: GitHub mentions then never wake anyone.
@@ -62,25 +81,90 @@ export function eventFacts(toolkit, slug, data = {}, config = routingConfig()) {
   const title = str(d.subject) || str(message.subject) || str(issue.title) || str(d.title) || str(d._hivemind?.title);
   const rawSender = [d.sender, d.from, message.from, d.user_email, d.sender_email].find(item => typeof item === 'string' && item.trim())
     ?? (typeof d.sender === 'object' && d.sender ? d.sender.email : '') ?? '';
-  const login = str(d.sender?.login) || str(comment.user?.login) || str(issue.user?.login) || str(d.user?.login);
   const hivemindSender = d._hivemind?.sender && typeof d._hivemind.sender === 'object' ? d._hivemind.sender : null;
   const isEmail = toolkit === 'gmail' || toolkit === 'outlook';
   const labels = [...(Array.isArray(d.label_ids) ? d.label_ids : []).map(String), ...names(d.labels), ...names(issue.labels)].map(lower);
-  const mentionText = isEmail ? `${title}\n${bodyText.slice(0, config.mentionEmailChars)}`
-    : toolkit === 'github' ? `${title}\n${bodyText.slice(0, 12_000)}` : `${title && toolkit !== 'slack' ? `${title}\n` : ''}${bodyText.slice(0, 12_000)}`;
+  // GitHub: the text a person wrote is the comment, or for an issue or pull request event the issue itself; its author is the identity that counts.
+  const hasComment = typeof comment.body === 'string' && comment.body.trim() !== '';
+  const author = hasComment ? comment : issue;
+  const login = lower(str(author.user?.login) || (hasComment || issue.user ? '' : str(d.sender?.login) || str(d.user?.login)));
+  const address = isEmail ? parseAddress(rawSender) : '';
+  const evidence = isEmail ? senderEvidence(d, message, address) : { verified: false };
+  let mentionText;
+  if (isEmail) {
+    // Only what the verified sender typed: the new body without quoted replies, and the subject only when the sender began the thread.
+    const replied = /^\s*(re|fwd?|aw|sv|wg|tr)\s*:/iu.test(title) || Boolean(d['in-reply-to'] ?? d.in_reply_to ?? message.in_reply_to ?? headerValue(d, message, 'in-reply-to') ?? headerValue(d, message, 'references'));
+    mentionText = `${replied ? '' : `${title}\n`}${stripQuoted(bodyText).slice(0, config.mentionEmailChars)}`;
+  } else if (toolkit === 'github') {
+    mentionText = hasComment ? comment.body.slice(0, 12_000) : `${str(issue.title)}\n${str(issue.body)}`.slice(0, 12_000);
+  } else mentionText = bodyText.slice(0, 12_000);
   return {
     toolkit, slug, title: clip(title, 200), body: bodyText, mentionText,
-    senderRaw: clip(rawSender || login, 200),
-    senderEmail: lower((EMAIL.exec(String(rawSender)) ?? [])[0] ?? ''),
-    senderLogin: lower(login),
+    senderRaw: clip(isEmail ? (address || rawSender) : rawSender || login, 200),
+    senderEmail: address,
+    senderEmailVerified: evidence.verified,
+    senderLogin: login,
     senderId: lower(typeof d.user === 'string' ? d.user : d.user_id ?? ''),
     verifiedInternal: hivemindSender?.verified === true,
-    association: str(comment.author_association || issue.author_association || d.author_association).toUpperCase(),
+    association: str(author.author_association || d.author_association).toUpperCase(),
     labels, repository: lower(d.repository?.full_name), repoOwner: lower(d.repository?.owner?.login ?? String(d.repository?.full_name ?? '').split('/')[0]),
     bot: Boolean(d.bot_id || d.app_id || d.subtype === 'bot_message' || d.sender?.type === 'Bot' || comment.user?.type === 'Bot' || issue.user?.type === 'Bot'),
     marked: LOOP_MARKER.test(`${title}\n${bodyText}`) || d.metadata?.event_type === 'hivemind_runtime_output' || ['runtime', 'employee'].includes(d._hivemind?.origin),
     occurredAt: d.message_timestamp ?? d.timestamp ?? d.ts ?? d.updated_at ?? null,
   };
+}
+
+/**
+ * The sender address of a From value, taken only from the address itself: the angle-bracket form at the end, else a bare address.
+ * A display name, which the sender controls, is never read.
+ * @param {string} raw From header value.
+ * @returns {string} Lower-case address, or '' when none can be read.
+ */
+export function parseAddress(raw) {
+  const value = String(raw ?? '').trim();
+  const angle = /<\s*([^<>\s,;"]+@[^<>\s,;"]+)\s*>\s*$/u.exec(value);
+  if (angle) return lower(angle[1]);
+  return /^[^<>\s,;"]+@[^<>\s,;"]+$/u.test(value) ? lower(value) : '';
+}
+
+/** The new text of a message: quoted lines, "On ... wrote:" and forwarded or original-message blocks and everything after them are removed. */
+export function stripQuoted(text) {
+  const out = [];
+  for (const line of String(text ?? '').split(/\r?\n/u)) {
+    if (/^\s*(on .{3,200} wrote:|-{2,}\s*(original message|forwarded message)\s*-{2,}|_{5,}|from:\s.+@.+|de :\s.+@.+)\s*$/iu.test(line)) break;
+    if (/^\s*>/u.test(line)) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function headerValue(d, message, name) {
+  const lists = [d.headers, d.payload?.headers, message.headers, message.payload?.headers];
+  for (const list of lists) {
+    if (Array.isArray(list)) { const found = list.find(item => lower(item?.name) === name); if (found && typeof found.value === 'string') return found.value; }
+    else if (list && typeof list === 'object') { const key = Object.keys(list).find(item => lower(item) === name); if (key && typeof list[key] === 'string') return list[key]; }
+  }
+  return undefined;
+}
+
+/**
+ * Whether the event proves the sender address: explicit sender-verification metadata from the connector, or an Authentication-Results
+ * (else ARC-Authentication-Results) header with a DMARC pass for that domain, or SPF and DKIM both passing for that domain.
+ * @returns {{verified:boolean}} The verdict.
+ */
+function senderEvidence(d, message, address) {
+  const domain = address.split('@')[1];
+  if (!domain) return { verified: false };
+  if (d.sender_verified === true || message.sender_verified === true) return { verified: true };
+  const header = headerValue(d, message, 'authentication-results') ?? headerValue(d, message, 'arc-authentication-results') ?? str(d.authentication_results);
+  if (!header) return { verified: false };
+  // Relaxed alignment, as DMARC defines it: the authenticated domain and the sender share a registrable domain.
+  const aligned = other => { const o = lower(other).replace(/[>;\s]+$/u, ''); return o !== '' && registrableDomain(o) === registrableDomain(domain); };
+  const prop = (key) => [...header.matchAll(new RegExp(`${key}\\s*=\\s*([^\\s;]+)`, 'giu'))].map(match => match[1]);
+  const dmarc = /dmarc\s*=\s*pass/iu.test(header) && prop('header\\.from').some(aligned);
+  const spf = /spf\s*=\s*pass/iu.test(header) && [...prop('smtp\\.mailfrom'), ...prop('smtp\\.helo')].some(value => aligned(value.split('@').pop()));
+  const dkim = /dkim\s*=\s*pass/iu.test(header) && prop('header\\.(?:d|i)').some(value => aligned(value.split('@').pop()));
+  return { verified: dmarc || (spf && dkim) };
 }
 
 /**
@@ -105,24 +189,29 @@ export function mentionedEmployees(text, employees) {
 }
 
 /**
- * Whether the sender is inside the company: an active member's email, an address on the company domain, a verified native Slack
+ * How the sender relates to the company: "internal", "unverified" (a company address with no proof the domain sent it) or "external". Inside means: an active member's email, an address on the company domain, a verified native Slack
  * sender, or (GitHub) an author association the configuration trusts. Everyone else is external.
  * @param {object} facts Event facts.
  * @param {{memberEmails:Set<string>,companyDomains:Set<string>,githubLogins?:Set<string>,slackIds?:Set<string>}} directory Company directory.
  * @param {object} config Routing limits.
  * @returns {boolean} True for an internal sender.
  */
-export function internalSender(facts, directory, config = routingConfig()) {
-  if (facts.verifiedInternal) return true;
+export function senderStatus(facts, directory, config = routingConfig()) {
+  if (facts.verifiedInternal) return 'internal';
   if (facts.senderEmail) {
-    if (directory.memberEmails.has(facts.senderEmail)) return true;
-    const domain = facts.senderEmail.split('@')[1];
-    if (domain && directory.companyDomains.has(domain) && !FREE_MAIL.has(domain)) return true;
+    const domain = facts.senderEmail.split('@')[1] ?? '';
+    const known = directory.memberEmails.has(facts.senderEmail)
+      || (domain && !untrustedDomain(domain) && directory.companyDomains.has(registrableDomain(domain)));
+    // An address alone proves nothing: the message must carry evidence that its domain sent it.
+    if (known) return facts.senderEmailVerified ? 'internal' : 'unverified';
   }
-  if (facts.toolkit === 'github' && (directory.githubLogins?.has(facts.senderLogin) || (['OWNER', 'MEMBER'].includes(facts.association) && config.githubOrgs.has(facts.repoOwner)))) return true;
-  if (facts.toolkit === 'slack' && facts.senderId && directory.slackIds?.has(facts.senderId)) return true;
-  return false;
+  if (facts.toolkit === 'github' && (directory.githubLogins?.has(facts.senderLogin) || (['OWNER', 'MEMBER'].includes(facts.association) && config.githubOrgs.has(facts.repoOwner)))) return 'internal';
+  if (facts.toolkit === 'slack' && facts.senderId && directory.slackIds?.has(facts.senderId)) return 'internal';
+  return 'external';
 }
+
+/** True when {@link senderStatus} is "internal". */
+export const internalSender = (facts, directory, config = routingConfig()) => senderStatus(facts, directory, config) === 'internal';
 
 /**
  * Whether a watch matches an event. Every filter key that is set must match.
@@ -166,9 +255,9 @@ export function decideRouting({ facts, orgId, eventUserId, subject, employees, w
     candidates.set(employeeId, entry);
   };
   const external = mentionedEmployees(facts.mentionText, employees);
-  const internal = internalSender(facts, directory, config);
+  const status = senderStatus(facts, directory, config);
   for (const employeeId of external) {
-    if (internal) add(employeeId, 'mention'); else skips.push({ employeeId, reason: 'external_sender' });
+    if (status === 'internal') add(employeeId, 'mention'); else skips.push({ employeeId, reason: status === 'unverified' ? 'unverified_sender' : 'external_sender' });
   }
   for (const watch of watches) {
     if (watch.user_id !== eventUserId && subject !== orgId) continue;
@@ -185,7 +274,9 @@ export function decideRouting({ facts, orgId, eventUserId, subject, employees, w
     if (reason) { skips.push({ employeeId, reason }); continue; }
     targets.push({ employeeId, reason: entry.mention && entry.watchIds.length ? 'mention+watch' : entry.mention ? 'mention' : 'watch', watchIds: entry.watchIds });
   }
-  return { targets, skips };
+  // A skip for one reason never hides a valid wake for the same employee, such as a watch on the same event.
+  const woken = new Set(targets.map(target => target.employeeId));
+  return { targets, skips: skips.filter(skip => !woken.has(skip.employeeId)) };
 }
 
 /**
@@ -235,7 +326,7 @@ export async function ensureEmployeeEventStore(db) {
       id uuid PRIMARY KEY, org_id text NOT NULL, user_id text NOT NULL, employee_id text NOT NULL, event_id text NOT NULL,
       toolkit text NOT NULL, trigger_slug text NOT NULL, reason text NOT NULL, watch_id uuid,
       status text NOT NULL, skip_reason text, wake_id text, summary text, attempts integer NOT NULL DEFAULT 0, last_error text,
-      created_at timestamptz NOT NULL DEFAULT now(), claimed_at timestamptz, delivered_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(), claimed_at timestamptz, delivered_at timestamptz, retry_at timestamptz,
       UNIQUE(event_id, employee_id))`);
     await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS hivemind_employee_event_deliveries_employee ON hivemind_employee_event_deliveries(org_id, employee_id, created_at DESC)');
     await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_employee_brief_reads (
@@ -283,17 +374,20 @@ export async function loadCompanyDirectory(db, orgId) {
     db.organization.findUnique({ where: { id: orgId }, select: { companyProfile: true } }),
   ]);
   const legacy = org?.companyProfile && typeof org.companyProfile === 'object' ? org.companyProfile.website : undefined;
-  const host = item => { try { const value = String(item).trim(); return value ? new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).hostname.toLowerCase().replace(/^www\./, '') : ''; } catch { return ''; } };
+  const host = item => { try { const value = String(item ?? '').trim(); return value ? new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).hostname.toLowerCase().replace(/^www\./, '') : ''; } catch { return ''; } };
+  // Only the registrable domain of the website counts, and never a free mail or shared hosting domain.
   return {
     memberEmails: new Set(members.filter(row => row.user && !row.user.deletedAt).map(row => lower(row.user.email))),
-    companyDomains: new Set([...facts.map(row => row.value), legacy].map(host).filter(item => item.includes('.') && !FREE_MAIL.has(item))),
+    companyDomains: new Set([...facts.map(row => row.value), legacy].map(host).map(registrableDomain).filter(item => item && !untrustedDomain(item))),
   };
 }
 
+// A routing skip never blocks a later valid target: the same (event, employee) row is upgraded from skipped to pending. Delivery outcomes are final.
 async function recordDelivery(db, row) {
   return db.$queryRawUnsafe(`INSERT INTO hivemind_employee_event_deliveries
     (id,org_id,user_id,employee_id,event_id,toolkit,trigger_slug,reason,watch_id,status,skip_reason,summary)
-    VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9::uuid,$10,$11,$12) ON CONFLICT(event_id,employee_id) DO NOTHING RETURNING id`,
+    VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9::uuid,$10,$11,$12) ON CONFLICT(event_id,employee_id) DO UPDATE SET status='pending',reason=EXCLUDED.reason,watch_id=EXCLUDED.watch_id,skip_reason=NULL
+    WHERE hivemind_employee_event_deliveries.status='skipped' AND hivemind_employee_event_deliveries.attempts=0 AND EXCLUDED.status='pending' RETURNING id`,
   randomUUID(), row.orgId, row.userId, row.employeeId, row.eventId, row.toolkit, row.slug, row.reason, row.watchId ?? null, row.status, row.skipReason ?? null, row.summary ?? null);
 }
 
@@ -339,7 +433,32 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
   return decision;
 }
 
-const permanent = error => Number.isInteger(error?.status) && error.status >= 400 && error.status < 500;
+/**
+ * Routing as the classifier calls it: it can never fail or hold up intake. A call that outlasts routeTimeoutMs or throws is cut loose and
+ * audited as an event-level skip (`routing_timeout`, `routing_error`) on a best-effort basis.
+ * @param {object} db Prisma client.
+ * @param {object} input See {@link routeApprovedEvent}.
+ * @param {object} [deps] Same hooks; `config` also carries routeTimeoutMs.
+ * @returns {Promise<object>} The routing result, or `{skipped}`.
+ */
+export async function routeEventGuarded(db, input, deps = {}) {
+  const config = deps.config ?? routingConfig();
+  if (!config.enabled) return { skipped: 'routing_disabled' };
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('routing_timeout'), { timeout: true })), config.routeTimeoutMs); timer.unref?.(); });
+  try { return await Promise.race([routeApprovedEvent(db, input, { ...deps, config }), timeout]); }
+  catch (error) {
+    const skipReason = error?.timeout ? 'routing_timeout' : 'routing_error';
+    const audit = recordDelivery(db, { orgId: input.orgId, userId: input.userId, eventId: input.event?.id, toolkit: input.sub?.toolkit ?? '', slug: input.sub?.slug ?? '', employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason, summary: null }).catch(() => undefined);
+    await Promise.race([audit, new Promise(resolve => setTimeout(resolve, 1000).unref?.())]);
+    return { skipped: skipReason };
+  }
+  finally { clearTimeout(timer); }
+}
+
+/** Server errors, timeouts, and 401, 408, 409 and 429 from OpenDot are temporary; any other 4xx will not change on retry. */
+const RETRYABLE_STATUS = new Set([401, 408, 409, 429]);
+const permanent = error => Number.isInteger(error?.status) && error.status >= 400 && error.status < 500 && !RETRYABLE_STATUS.has(error.status);
 
 /**
  * Sends every due batch: the pending rows of one employee whose oldest row is at least the coalescing window old become one wake.
@@ -355,9 +474,9 @@ export async function flushEmployeeWakes(db, deps = {}) {
   await ensureEmployeeEventStore(db);
   const now = deps.now ? new Date(deps.now) : new Date();
   const due = await db.$queryRawUnsafe(`SELECT org_id,employee_id FROM hivemind_employee_event_deliveries
-    WHERE employee_id<>$3 AND (status='pending' OR (status='sending' AND claimed_at < $2::timestamptz))
+    WHERE employee_id<>$3 AND ((status='pending' AND (retry_at IS NULL OR retry_at <= $4::timestamptz)) OR (status='sending' AND claimed_at < $2::timestamptz))
     GROUP BY org_id,employee_id HAVING min(created_at) <= $1::timestamptz ORDER BY min(created_at) LIMIT 32`,
-  new Date(now.getTime() - config.coalesceMs).toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), EVENT_LEVEL);
+  new Date(now.getTime() - config.coalesceMs).toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), EVENT_LEVEL, now.toISOString());
   for (const { org_id: orgId, employee_id: employeeId } of due) {
     try { const part = await flushEmployee(db, orgId, employeeId, now, config, deps); for (const key of Object.keys(totals)) totals[key] += part[key] ?? 0; }
     catch { totals.failed += 1; }
@@ -369,8 +488,8 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
   const out = { wakes: 0, briefed: 0, skipped: 0, failed: 0 };
   const rows = await db.$queryRawUnsafe(`UPDATE hivemind_employee_event_deliveries SET status='sending',claimed_at=now(),attempts=attempts+1
     WHERE id IN (SELECT id FROM hivemind_employee_event_deliveries WHERE org_id=$1 AND employee_id=$2 AND created_at <= $3::timestamptz
-      AND (status='pending' OR (status='sending' AND claimed_at < $4::timestamptz)) ORDER BY created_at LIMIT 200 FOR UPDATE SKIP LOCKED) RETURNING *`,
-  orgId, employeeId, now.toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString());
+      AND ((status='pending' AND (retry_at IS NULL OR retry_at <= $5::timestamptz)) OR (status='sending' AND claimed_at < $4::timestamptz)) ORDER BY created_at LIMIT 200 FOR UPDATE SKIP LOCKED) RETURNING *`,
+  orgId, employeeId, now.toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), now.toISOString());
   if (!rows.length) return out;
   const finish = (ids, status, reason, error) => db.$executeRawUnsafe(
     `UPDATE hivemind_employee_event_deliveries SET status=$2,skip_reason=$3,last_error=$4,delivered_at=CASE WHEN $2='delivered' THEN now() ELSE delivered_at END WHERE id = ANY($1::uuid[])`,
@@ -378,6 +497,9 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
   const watchOutcome = (ids, error) => ids.length ? db.$executeRawUnsafe(
     error ? 'UPDATE hivemind_employee_watches SET last_error=$2,updated_at=now() WHERE id = ANY($1::uuid[])' : 'UPDATE hivemind_employee_watches SET last_fired_at=now(),last_error=NULL,updated_at=now() WHERE id = ANY($1::uuid[])',
     ...(error ? [ids, error] : [ids])) : undefined;
+  // A wake that waited too long is stale news: it goes to the brief instead.
+  const stale = rows.filter(row => now.getTime() - new Date(row.created_at).getTime() > config.maxWakeAgeMs);
+  if (stale.length) { await finish(stale.map(row => row.id), 'briefed', 'too_old'); out.briefed += stale.length; rows.splice(0, rows.length, ...rows.filter(row => !stale.includes(row))); if (!rows.length) return out; }
   const watchIds = [...new Set(rows.map(row => row.watch_id).filter(Boolean))];
   const allIds = rows.map(row => row.id);
   const employees = await loadRoutableEmployees(db, orgId, rows[0].user_id);
@@ -409,7 +531,12 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
     await watchOutcome(kitWatchIds, code);
     if (permanent(error)) { await finish(keptIds, 'skipped', code, code); out.skipped += kept.length; }
     else if (Math.max(...kept.map(row => row.attempts)) >= config.maxAttempts) { await finish(keptIds, 'failed', 'delivery_failed', code); out.failed += kept.length; }
-    else await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='pending',last_error=$2 WHERE id = ANY($1::uuid[])", keptIds, code);
+    else {
+      // Retry with exponential backoff (1, 2, 4 ... up to 15 minutes); the age cap ends it earlier.
+      const attempts = Math.max(...kept.map(row => row.attempts));
+      const retryAt = new Date(now.getTime() + Math.min(60_000 * 2 ** (attempts - 1), 900_000)).toISOString();
+      await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='pending',last_error=$2,retry_at=$3::timestamptz WHERE id = ANY($1::uuid[])", keptIds, code, retryAt);
+    }
   }
   return out;
 }

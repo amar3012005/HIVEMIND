@@ -77,21 +77,21 @@ export async function runEventWatch(args, ctx) {
   const employee = employees.find(item => item.id === args.employee_id);
   if (!employee) fail('This employee is not available to you, or is not an active OpenDot employee.', 403);
   if (op === 'list') {
-    const rows = await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_watches WHERE org_id=$1 AND employee_id=$2 ORDER BY created_at DESC LIMIT 100', ctx.orgId, employee.id);
+    const rows = await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_watches WHERE org_id=$1 AND employee_id=$2 AND user_id=$3 ORDER BY created_at DESC LIMIT 100', ctx.orgId, employee.id, ctx.userId);
     return { watches: rows.map(view), routing_enabled: config.enabled };
   }
   if (op === 'recent') {
-    const rows = await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_event_deliveries WHERE org_id=$1 AND employee_id=$2 ORDER BY created_at DESC LIMIT $3', ctx.orgId, employee.id, args.limit ?? 12);
+    const rows = await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_event_deliveries WHERE org_id=$1 AND employee_id=$2 AND user_id=$4 ORDER BY created_at DESC LIMIT $3', ctx.orgId, employee.id, args.limit ?? 12, ctx.userId);
     return { events: rows.map(delivery) };
   }
   if (op === 'brief') {
     // Events saved for the next brief: wakes held back by the hourly cap, and (Runtime off) approved events nobody was addressed or watching for,
     // limited to apps this employee watches. Each leaves the list once consumed.
     const limit = Math.min(args.limit ?? 5, 5);
-    const watched = await db.$queryRawUnsafe('SELECT DISTINCT toolkit FROM hivemind_employee_watches WHERE org_id=$1 AND employee_id=$2 AND enabled', ctx.orgId, employee.id);
-    const held = await db.$queryRawUnsafe(`SELECT d.* FROM hivemind_employee_event_deliveries d WHERE d.org_id=$1 AND d.employee_id=$2 AND d.status='briefed'
+    const watched = await db.$queryRawUnsafe('SELECT DISTINCT toolkit FROM hivemind_employee_watches WHERE org_id=$1 AND employee_id=$2 AND user_id=$3 AND enabled', ctx.orgId, employee.id, ctx.userId);
+    const held = await db.$queryRawUnsafe(`SELECT d.* FROM hivemind_employee_event_deliveries d WHERE d.org_id=$1 AND d.employee_id=$2 AND d.user_id=$4 AND d.status='briefed'
       AND d.created_at > now()-interval '7 days' AND NOT EXISTS (SELECT 1 FROM hivemind_employee_brief_reads r WHERE r.employee_id=$2 AND r.event_id=d.event_id)
-      ORDER BY d.created_at DESC LIMIT $3`, ctx.orgId, employee.id, limit);
+      ORDER BY d.created_at DESC LIMIT $3`, ctx.orgId, employee.id, limit, ctx.userId);
     const unmatched = watched.length ? await db.$queryRawUnsafe(`SELECT d.* FROM hivemind_employee_event_deliveries d WHERE d.org_id=$1 AND d.user_id=$4 AND d.employee_id='*'
       AND d.skip_reason='no_target_runtime_off' AND d.toolkit = ANY($2::text[]) AND d.created_at > now()-interval '7 days'
       AND NOT EXISTS (SELECT 1 FROM hivemind_employee_brief_reads r WHERE r.employee_id=$5 AND r.event_id=d.event_id)
@@ -104,11 +104,13 @@ export async function runEventWatch(args, ctx) {
     const ids = Array.isArray(args.event_ids) ? [...new Set(args.event_ids.filter(id => typeof id === 'string' && id && id.length <= 240))].slice(0, 10) : [];
     if (!ids.length) fail('event_ids: the ids from brief.');
     await db.$executeRawUnsafe(`INSERT INTO hivemind_employee_brief_reads (org_id,employee_id,event_id)
-      SELECT DISTINCT $1,$2,event_id FROM hivemind_employee_event_deliveries WHERE org_id=$1 AND event_id = ANY($3::text[]) AND employee_id IN ($2,'*')
-      ON CONFLICT DO NOTHING`, ctx.orgId, employee.id, ids);
+      SELECT DISTINCT $1,$2,event_id FROM hivemind_employee_event_deliveries WHERE org_id=$1 AND user_id=$4 AND event_id = ANY($3::text[]) AND employee_id IN ($2,'*')
+      ON CONFLICT DO NOTHING`, ctx.orgId, employee.id, ids, ctx.userId);
     return { successful: true, consumed: ids.length };
   }
   if (op === 'add') {
+    // Watches route this user's apps into the chat of the Dot's owner, so only that person may add one.
+    if (employee.tenantUserId !== ctx.userId) fail('Only the person who owns this employee can add watches for it.', 403);
     if (!/^[a-z0-9_-]+$/.test(args.toolkit || '') || !/^[A-Z0-9_]+$/.test(args.trigger_slug || '')) fail('toolkit and trigger_slug: an event of a connected app, such as gmail and GMAIL_NEW_GMAIL_MESSAGE.');
     const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : '';
     if (!instruction || instruction.length > 1000) fail('instruction: say what to do when it fires, in at most 1000 characters.');
@@ -128,12 +130,12 @@ export async function runEventWatch(args, ctx) {
   }
   if (!UUID.test(args.watch_id || '')) fail('watch_id: the id from list.');
   if (op === 'remove') {
-    const rows = await db.$queryRawUnsafe('DELETE FROM hivemind_employee_watches WHERE id=$1::uuid AND org_id=$2 AND employee_id=$3 RETURNING id', args.watch_id, ctx.orgId, employee.id);
+    const rows = await db.$queryRawUnsafe('DELETE FROM hivemind_employee_watches WHERE id=$1::uuid AND org_id=$2 AND employee_id=$3 AND user_id=$4 RETURNING id', args.watch_id, ctx.orgId, employee.id, ctx.userId);
     if (!rows.length) fail('Watch not found for this employee.', 404);
     return { successful: true, removed: args.watch_id };
   }
-  const rows = await db.$queryRawUnsafe('UPDATE hivemind_employee_watches SET enabled=$4::boolean,last_error=CASE WHEN $4::boolean THEN NULL ELSE last_error END,updated_at=now() WHERE id=$1::uuid AND org_id=$2 AND employee_id=$3 RETURNING *',
-    args.watch_id, ctx.orgId, employee.id, op === 'resume');
+  const rows = await db.$queryRawUnsafe('UPDATE hivemind_employee_watches SET enabled=$4::boolean,last_error=CASE WHEN $4::boolean THEN NULL ELSE last_error END,updated_at=now() WHERE id=$1::uuid AND org_id=$2 AND employee_id=$3 AND user_id=$5 RETURNING *',
+    args.watch_id, ctx.orgId, employee.id, op === 'resume', ctx.userId);
   if (!rows.length) fail('Watch not found for this employee.', 404);
   return { successful: true, watch: view(rows[0]) };
 }

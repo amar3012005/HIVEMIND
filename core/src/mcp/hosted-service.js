@@ -23,7 +23,8 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import Redis from 'ioredis';
 import { getOpsToolsManifest, invokeOpsTool, isOpsTool } from './ops-release-gateway.js';
-import { recallOperatingMemory, saveOperatingMemory } from '../hyperagents/operating-memory.js';
+import { recallOperatingMemory, saveOperatingMemory, confirmOperatingMemory } from '../hyperagents/operating-memory.js';
+import { TEAM_KINDS, TEAM_FIELD_NAMES } from '../hyperagents/team-memory.js';
 
 // ==========================================
 // Configuration
@@ -513,21 +514,44 @@ function generateToolsManifest(userId, orgId, options = {}) {
     triggerTool,
     {
       name: 'hyperagents_memory',
-      description: `Read and write private Hyper Agents operating memory for the authenticated tenant. This is a separate lane from HIVE-MIND company memory: it is never included in hivemind_recall, company profiles, or the approval-gated company memory graph. Agents may save their own reusable learnings, decision notes, and handoffs without company-memory approval. Use action="recall" to retrieve notes from any agent in the tenant; optionally filter by agent_slug. Use action="save" only for durable agent operating knowledge, not transient user/company facts. Tenant and author identity come from the authenticated credential; never pass or infer org/user IDs. Supply a stable idempotency_key for retries.`,
+      description: `Read and write private Hyper Agents operating memory for the authenticated tenant. This is a separate lane from HIVE-MIND company memory: it is never included in hivemind_recall, company profiles, or the approval-gated company memory graph. Agents may save their own reusable learnings, decision notes, and handoffs without company-memory approval. Use action="recall" to retrieve notes from any agent in the tenant; optionally filter by agent_slug. Call recall with mode="brief" (optionally context and hints) before substantial work for a compact ranked overview across all kinds; fetch full content with recall by id or query. Team kinds: lesson (when/do/because/confidence), procedure (trigger/steps/check/source), progress (task_key upsert) and agenda (agenda_key upsert). Use action="confirm" with a lesson or procedure id when you verified it works; two confirmations promote it. Use action="save" only for durable agent operating knowledge, not transient user/company facts. Tenant and author identity come from the authenticated credential; never pass or infer org/user IDs. Supply a stable idempotency_key for retries.`,
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['recall', 'save'], description: 'Read private agent memory or save a durable agent note.' },
+          action: { type: 'string', enum: ['recall', 'save', 'confirm'], description: 'Read private agent memory, save a durable agent note, or confirm a lesson/procedure.' },
+          mode: { type: 'string', enum: ['brief', 'full'], description: 'Recall only. "brief" returns up to limit (default 8) compact items {id, kind, title, gist, author, updated_at}; recall without any filter is brief.' },
+          hints: { type: 'array', items: { type: 'string' }, maxItems: 8, description: 'Recall brief only: customer or app names to boost.' },
+          promoted: { type: 'boolean', description: 'Recall only: true returns only promoted lessons and procedures.' },
+          id: { type: 'string', description: 'Recall: fetch one memory in full by UUID. Confirm: the lesson or procedure UUID.' },
+          when: { type: 'string', description: 'lesson: the situation (max 300).' },
+          do: { type: 'string', description: 'lesson: the action (max 500).' },
+          because: { type: 'string', description: 'lesson: the evidence (max 500).' },
+          confidence: { type: 'number', minimum: 0, maximum: 1, description: 'lesson: 0 to 1 (default 0.5).' },
+          trigger: { type: 'string', description: 'procedure: when to use it (max 300).' },
+          steps: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'procedure: ordered steps (1 to 12, each max 300).' },
+          check: { type: 'string', description: 'procedure: how to verify it worked (max 300).' },
+          source: { type: 'string', enum: ['learned', 'shown'], description: 'procedure: learned by doing, or shown by the person (default learned).' },
+          task_key: { type: 'string', description: 'progress: stable task key; the latest save per key replaces the previous.' },
+          goal: { type: 'string', description: 'progress: goal (max 400).' },
+          done: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          next: { type: 'array', items: { type: 'string' }, maxItems: 8 },
+          open_questions: { type: 'array', items: { type: 'string' }, maxItems: 8 },
+          evidence: { type: 'array', items: { type: 'string' }, maxItems: 8 },
+          agenda_key: { type: 'string', description: 'agenda: stable key; the latest save per key replaces the previous.' },
+          outcome: { type: 'string', description: 'agenda: desired outcome (max 400).' },
+          target: { type: 'object', description: 'agenda: {text, value?, unit?}.' },
+          milestones: { type: 'array', maxItems: 12, description: 'agenda: strings or {text, done?, due?}.' },
+          task_keys: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'agenda: related progress task keys.' },
           agent_slug: { type: 'string', description: 'Required for save; on recall, optionally filter to this agent. Use a stable slug such as "researcher".' },
-          kind: { type: 'string', enum: ['learning', 'decision_note', 'handoff'], description: 'Required for save; categorizes the private operating note.' },
-          title: { type: 'string', description: 'Required for save; short searchable heading.' },
-          summary: { type: 'string', description: 'Required for save; concise durable note, up to 2400 characters.' },
-          idempotency_key: { type: 'string', description: 'Required for save; stable key for this logical note so tool retries do not duplicate it.' },
+          kind: { type: 'string', enum: ['learning', 'decision_note', 'handoff', 'lesson', 'procedure', 'progress', 'agenda'], description: 'Required for save; categorizes the private operating note.' },
+          title: { type: 'string', description: 'Required for learning, decision_note and handoff; optional for team kinds (derived).' },
+          summary: { type: 'string', description: 'Required for learning, decision_note and handoff (up to 2400 characters); optional for team kinds (derived).' },
+          idempotency_key: { type: 'string', description: 'Required for learning, decision_note and handoff; optional for team kinds (derived from content).' },
           query: { type: 'string', description: 'Optional terms to search in recall.' },
-          status: { type: 'string', enum: ['recorded'], description: 'Save-only. Agent writes are always recorded; runtime status receipts are server-authored.' },
+          status: { type: 'string', description: 'Save-only. Agent notes are always recorded (runtime status receipts are server-authored). For kind=agenda: active, paused, done or dropped.' },
           room_id: { type: 'string', description: 'Optional UUID of the originating room.' },
           run_id: { type: 'string', description: 'Optional ID of the originating run.' },
-          context: { type: 'object', description: 'Optional small structured context for the note.' },
+          context: { description: 'Save (legacy kinds): optional small structured context object. Recall brief: optional string describing the current task, used for relevance ranking.' },
           supersedes_id: { type: 'string', description: 'Optional prior private-memory UUID superseded by this note.' },
           limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum recall results (default 10).' },
         },
@@ -2557,31 +2581,45 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             run_id: args.run_id,
             query: args.query,
             limit: args.limit,
+            mode: args.mode,
+            context: typeof args.context === 'string' ? args.context : undefined,
+            hints: args.hints,
+            promoted: args.promoted,
+            id: args.id,
           });
           return formatToolContent(result);
         }
-        if (action === 'save') {
+        if (action === 'save' || action === 'confirm') {
           const scopes = Array.isArray(options.scopes) ? options.scopes : [];
           const hasWriteAccess = options.isMaster === true
             || scopes.includes('*') || scopes.includes('memory:write') || scopes.includes('memory.write');
           if (!hasWriteAccess) {
             return formatToolContent({ ok: false, error: 'memory_write_scope_required', message: 'This API credential can recall private agent memory but does not allow writes.' });
           }
+          if (action === 'confirm') {
+            return formatToolContent(await confirmOperatingMemory(prisma, {
+              id: args.id, agent_slug: args.agent_slug, idempotency_key: args.idempotency_key,
+            }, { orgId, userId }));
+          }
+          const teamFields = TEAM_KINDS.includes(args.kind)
+            ? Object.fromEntries(TEAM_FIELD_NAMES.filter(name => args[name] !== undefined).map(name => [name, args[name]]))
+            : {};
           const result = await saveOperatingMemory(prisma, {
+            ...teamFields,
             kind: args.kind,
-            status: 'recorded',
+            status: args.kind === 'agenda' ? args.status : 'recorded',
             agent_slug: args.agent_slug,
             title: args.title,
             summary: args.summary,
             idempotency_key: args.idempotency_key,
             room_id: args.room_id,
             run_id: args.run_id,
-            context: args.context,
+            context: TEAM_KINDS.includes(args.kind) ? undefined : args.context,
             supersedes_id: args.supersedes_id,
           }, { orgId, userId }, { source: 'agent' });
           return formatToolContent(result);
         }
-        return formatToolContent({ ok: false, error: 'invalid_action', allowed: ['recall', 'save'] });
+        return formatToolContent({ ok: false, error: 'invalid_action', allowed: ['recall', 'save', 'confirm'] });
       }
 
       case 'hivemind_save_memory': {

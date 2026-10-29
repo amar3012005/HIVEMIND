@@ -29,7 +29,8 @@ import { getInternalApiKey } from '../security/internal-auth.js';
 import { TeamStore } from '../teams/team-store.js';
 import { decideRuntimeStage } from '../agent/decision-gateway-service.js';
 import { dshTaskMemory } from '../hyperagents/dsh-task-memory.js';
-import { recallOperatingMemory, saveOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
+import { recallOperatingMemory, saveOperatingMemory, confirmOperatingMemory, RUNTIME_MEMORY_KINDS } from '../hyperagents/operating-memory.js';
+import { TEAM_KINDS, TEAM_FIELD_NAMES } from '../hyperagents/team-memory.js';
 import { organizationAgentAccess, nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
 import { readRuntimeEnabled } from '../organizations/runtime-setting.js';
 import { reconcileDelegatedConnections } from '../harness-chat/delegated-connection-completion.js';
@@ -614,12 +615,15 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
     }
     const action = input.action;
     const allowed = action === 'recall'
-      ? new Set(['action', 'query', 'agent_slug', 'kind', 'room_id', 'run_id', 'limit', 'state'])
+      ? new Set(['action', 'query', 'agent_slug', 'kind', 'room_id', 'run_id', 'limit', 'state', 'mode', 'context', 'hints', 'promoted', 'id'])
       : action === 'save'
-        ? new Set(['action', 'agent_slug', 'kind', 'title', 'summary', 'idempotency_key', 'room_id', 'run_id', 'trigger_id', 'context', 'supersedes_id'])
+        ? new Set(['action', 'agent_slug', 'kind', 'title', 'summary', 'idempotency_key', 'room_id', 'run_id', 'trigger_id', 'context', 'supersedes_id',
+          ...(TEAM_KINDS.includes(input.kind) ? TEAM_FIELD_NAMES : []), ...(input.kind === 'agenda' ? ['status'] : [])])
         : action === 'record_task'
           ? new Set(['action', 'agent_slug', 'title', 'summary', 'idempotency_key', 'run_id', 'context'])
-          : null;
+          : action === 'confirm'
+            ? new Set(['action', 'id', 'agent_slug', 'idempotency_key'])
+            : null;
     if (!allowed || Object.keys(input).some(key => !allowed.has(key))) {
       jsonResponse(res, { error: 'invalid_operating_memory_input' }, 400); return true;
     }
@@ -636,12 +640,14 @@ async function handleHarnessCoreProxy({ req, res, pathname, prisma, parseBody, j
           await requireRuntimeAgendaConfirmation(prisma, runtimePrincipal, input.context?.confirmationRef);
         }
       }
-      const result = action === 'recall'
+      const result = action === 'confirm'
+        ? await confirmOperatingMemory(prisma, input, { orgId: claims.org_id, userId: claims.sub })
+        : action === 'recall'
         ? await recallOperatingMemory(prisma, claims.org_id, input, special ? { runtimeUserId: claims.sub, ...(runtimePrincipal.sharedOrganizationAgents ? {runtimeSessionId:claims.operating_session} : {}) } : {})
         : await saveOperatingMemory(prisma, action === 'record_task' ? dshTaskMemory(input) : input, { orgId: claims.org_id, userId: claims.sub }, { source: action === 'record_task' || special ? 'runtime' : 'agent', ...(special && runtimePrincipal.sharedOrganizationAgents ? {runtimeSessionId:claims.operating_session} : {}) });
       jsonResponse(res, result, 200);
     } catch (error) {
-      const known = /^(invalid_|reserved_|runtime_|canonical_|organization_agent_|superseded_|agenda_|memory_idempotency_conflict)/.test(String(error?.message || ''));
+      const known = /^(invalid_|reserved_|runtime_|canonical_|organization_agent_|superseded_|agenda_|memory_idempotency_conflict|memory_not_found)/.test(String(error?.message || ''));
       jsonResponse(res, { error: known ? error.message : 'operating_memory_unavailable',
         ...(error.message === 'invalid_uncertainty_update_state' ? { message: error.hint } : {}),
         ...(error.message === 'superseded_memory_already_replaced' && error.currentId ? { current_id: error.currentId } : {}),

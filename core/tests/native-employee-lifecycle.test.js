@@ -44,6 +44,28 @@ test('confirmed fresh archive retires only the requesting user\'s non-starter em
   assert.equal((await manageNativeEmployee(db,principal,input)).replayed,true);
 });
 
+test('fresh archive ignores references only inside the storage user\'s own reset sessions', async () => {
+  const principal={orgId:'org',userId:'human',sharedOrganizationAgents:true};
+  const row={id:'11111111-1111-4111-8111-111111111111',slug:'employee-owned',createdBy:'human',status:'ready',
+    policyRules:{native_lifecycle:{version:1,revision:2,phase:'active',kind:'durable'}}};
+  let referencesCall;
+  const tx={$queryRawUnsafe:async (sql,...args)=>{
+    if(sql.includes('information_schema')) return [{table_schema:'hivemind'}];
+    if(sql.includes('organization_agent_storage_scope')) return [{storage_user_id:'22222222-2222-4222-8222-222222222222',runtime_session_id:null}];
+    if(sql.includes('harness_session_events')) { referencesCall={sql,args}; return []; }
+    return [];},
+    digitalEmployee:{findFirst:async()=>row,update:async({data})=>Object.assign(row,data)},
+    hyperAgentOperatingMemory:{count:async()=>0}};
+  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$transaction:async fn=>fn(tx),};
+  const input={operation:'fresh_reset_archive',employee_id:row.id,expected_revision:2,confirmed:true,reset_session_ids:['session-a','session-b']};
+  await manageNativeEmployee(db,principal,input,{now:Date.parse('2026-10-21T00:00:00Z')});
+  assert.match(referencesCall.sql,/NOT \(user_id=\$4::uuid AND session_id=ANY\(\$3::text\[\]\)\)/);
+  assert.deepEqual(referencesCall.args.slice(2),[['session-a','session-b'],'22222222-2222-4222-8222-222222222222']);
+  for (const bad of ['session-a',['x; DROP'],[1],Array(501).fill('session-a')]) {
+    await assert.rejects(manageNativeEmployee(db,principal,{...input,reset_session_ids:bad}),/invalid_reset_session_ids/);
+  }
+});
+
 test('reserved malformed lifecycle policies fail closed rather than reverting to legacy', () => {
   for (const native_lifecycle of [null, 'invalid', {version:2,phase:'active',kind:'durable'},
     {version:1,phase:'active',kind:'unknown'}, {version:1,phase:'active',kind:'temporary',expires_at:'invalid'}]) {

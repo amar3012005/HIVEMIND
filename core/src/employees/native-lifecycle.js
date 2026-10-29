@@ -14,6 +14,12 @@ async function nativeHarnessSchema(tx) {
   if (rows.length !== 1) lifecycleError('native_storage_unavailable', 503);
   return 'hivemind';
 }
+/** Session ids named by a fresh reset; anything malformed is rejected so the exclusion cannot widen by accident. */
+function resetSessionIds(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 500 || value.some(id => typeof id !== 'string' || !/^session-[A-Za-z0-9_-]{1,120}$/.test(id))) lifecycleError('invalid_reset_session_ids', 400);
+  return value;
+}
 function text(value, name, max) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) lifecycleError(`invalid_${name}`, 400);
   return value.trim();
@@ -118,6 +124,8 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
   }
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);
   if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
+  const resetSessions = input.operation === 'fresh_reset_archive' ? resetSessionIds(input.reset_session_ids) : [];
+  const storageUserId = resetSessions.length ? (await nativeAgentStoragePrincipal(db, principal)).userId : null;
   return db.$transaction(async tx => {
     await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS lock', `${principal.orgId}:${input.employee_id}`);
     const row = await tx.digitalEmployee.findFirst({ where: { id: input.employee_id, orgId: principal.orgId } });
@@ -136,10 +144,14 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       if (input.confirmed !== true || input.expected_revision !== lifecycle.revision
         || row.createdBy !== principal.userId || lifecycle.predefined_starter) lifecycleError('fresh_archive_not_authorized', 403);
       const schema = await nativeHarnessSchema(tx);
+      // The Runtime passes the sessions its reset is deleting. References inside those sessions are this user's own
+      // private work, so they never block the archive; the exclusion applies only to the storage user's own sessions,
+      // so a caller cannot hide another user's surviving work by naming its sessions.
       const references = await tx.$queryRawUnsafe(`SELECT 1 FROM ${schema}.harness_session_events
         WHERE org_id=$1::uuid AND event_type IN ('hivemind/session-owner','hivemind/hq-employee-assignment')
           AND (COALESCE(payload->'data',payload)->>'id'=$2 OR COALESCE(payload->'data',payload)->>'employeeId'=$2)
-        LIMIT 1`, principal.orgId, row.id);
+          AND NOT (user_id=$4::uuid AND session_id=ANY($3::text[]))
+        LIMIT 1`, principal.orgId, row.id, resetSessions, storageUserId ?? '00000000-0000-0000-0000-000000000000');
       if (references.length) lifecycleError('fresh_archive_surviving_work', 409);
       const foreignMemory = await tx.hyperAgentOperatingMemory.count({ where: { orgId:principal.orgId,
         agentSlug:row.slug, authorUserId:{ not:principal.userId } } });

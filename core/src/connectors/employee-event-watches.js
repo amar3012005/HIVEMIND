@@ -115,9 +115,15 @@ export async function runEventWatch(args, ctx) {
     const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : '';
     if (!instruction || instruction.length > 1000) fail('instruction: say what to do when it fires, in at most 1000 characters.');
     const filter = cleanFilter(args.filter);
-    const active = await db.$queryRawUnsafe(`SELECT DISTINCT toolkit,slug FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND (user_id=$2 OR subject=$1) AND status='active' ORDER BY slug LIMIT 40`, ctx.orgId, ctx.userId);
+    const active = await db.$queryRawUnsafe(`SELECT DISTINCT toolkit,slug,subject FROM hivemind_trigger_subscriptions WHERE org_id=$1 AND (user_id=$2 OR subject=$1) AND status='active' ORDER BY slug LIMIT 40`, ctx.orgId, ctx.userId);
     if (!active.some(row => row.toolkit === args.toolkit && row.slug === args.trigger_slug)) {
       fail(`No active ${args.trigger_slug} event for ${args.toolkit}. Active events: ${active.map(row => row.slug).join(', ') || 'none; connect the app first'}.`, 409);
+    }
+    // An organization-wide account is shared by the company, so only an owner or admin may watch it.
+    const matching = active.filter(row => row.toolkit === args.toolkit && row.slug === args.trigger_slug);
+    if (matching.every(row => row.subject === ctx.orgId)) {
+      const role = await db.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { role: true } });
+      if (!['owner', 'admin'].includes(role?.role)) fail('Watching an organization-wide account needs an owner or admin.', 403);
     }
     const key = watchKey(args.toolkit, args.trigger_slug, filter);
     const count = await db.$queryRawUnsafe('SELECT count(*)::int AS n FROM hivemind_employee_watches WHERE org_id=$1 AND employee_id=$2 AND dedupe_key<>$3', ctx.orgId, employee.id, key);

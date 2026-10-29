@@ -76,7 +76,10 @@ test('watch: every set filter key must match, and the watch needs the same trigg
   const routed = decide(facts, [watch({ from: 'client.io' })]);
   assert.deepEqual(routed.targets.map(t => [t.employeeId, t.reason]), [[LEO, 'watch']], 'an external sender can still match an explicit watch');
   assert.deepEqual(decide(facts, [watch({}, { user_id: 'someone-else' })]).targets, [], "another user's watch does not read this user's account");
-  assert.equal(decideRouting({ facts, orgId: ORG, eventUserId: USER, subject: ORG, employees, watches: [watch({}, { user_id: 'someone-else' })], directory, config: on }).targets.length, 1, 'an organization-wide account is visible to every watch');
+  const orgWide = (adminUserIds, userId) => decideRouting({ facts, orgId: ORG, eventUserId: USER, subject: ORG, employees, watches: [watch({}, { user_id: userId })], directory, adminUserIds, config: on });
+  assert.equal(orgWide(new Set(['admin-2']), 'admin-2').targets.length, 1, 'an organization-wide account reaches an admin\'s watch');
+  assert.deepEqual(orgWide(new Set(['admin-2']), 'member-3').skips, [{ employeeId: LEO, reason: 'watch_creator_not_admin' }], 'but not a member\'s');
+  assert.equal(orgWide(new Set(), 'admin-2').targets.length, 0, 'nor the watch of someone who is no longer an admin');
   assert.deepEqual(decide(facts, [watch({}, { employee_id: '99999999-9999-4999-8999-999999999999' })]).skips, [{ employeeId: '99999999-9999-4999-8999-999999999999', reason: 'employee_unavailable' }]);
 });
 
@@ -110,7 +113,7 @@ function fakeDb({ watches = [], runtimeOn = true, bound = true } = {}) {
   const policyRules = bound ? { open_dot_employee: { version: 1, execution_backend: 'open-dot', state: 'bound', dot_id: 'dot_abc' }, native_lifecycle: { version: 1, phase: 'active' } } : {};
   const emp = (id, name, slug) => ({ id, name, slug, createdBy: USER, teamId: null, scope: 'organization', status: 'running', policyRules, slackBotUserId: null });
   const db = {
-    userOrganization: { findUnique: async () => ({ role: 'admin', isActive: true, deactivatedAt: null }), findMany: async () => [{ user: { email: 'boss@acme.com', deletedAt: null } }] },
+    userOrganization: { findUnique: async () => ({ role: 'admin', isActive: true, deactivatedAt: null }), findMany: async () => [{ userId: USER, role: 'admin', user: { email: 'boss@acme.com', deletedAt: null } }] },
     digitalEmployee: { findMany: async () => [emp(MAYA, 'Maya Chen', 'maya-chen'), emp(LEO, 'Leo', 'leo')] },
     teamMember: { findMany: async () => [] },
     organization: { findUnique: async () => ({ companyProfile: {} }) },
@@ -426,17 +429,20 @@ test('sender: a company address needs proof that the domain sent it, otherwise u
   assert.equal(status(ar('mx.google.com; dmarc=fail header.from=acme.com')), 'unverified');
   assert.equal(status(ar('mx.google.com; spf=pass smtp.mailfrom=acme.com; dkim=pass header.d=acme.com')), 'internal');
   assert.equal(status(ar('mx.google.com; spf=pass smtp.mailfrom=acme.com; dkim=fail header.d=acme.com')), 'unverified', 'SPF alone is not enough');
-  assert.equal(status(ar('i=1; mx.google.com; dmarc=pass header.from=acme.com', 'ARC-Authentication-Results')), 'internal');
-  assert.equal(status({ sender: 'boss@acme.com', headers: { 'Authentication-Results': 'x; dmarc=pass header.from=acme.com' } }), 'internal', 'headers as an object');
+  assert.equal(status(ar('i=1; mx.google.com; dmarc=pass header.from=acme.com', 'ARC-Authentication-Results')), 'unverified', 'ARC results are not believed');
+  assert.equal(status({ sender: 'boss@acme.com', headers: { 'Authentication-Results': 'mx.google.com; dmarc=pass header.from=acme.com' } }), 'internal', 'headers as an object');
   assert.equal(status({ sender: 'boss@acme.com', sender_verified: true }), 'internal', 'connector sender metadata');
   assert.equal(status({ sender: 'stranger@evil.example', sender_verified: true }), 'external');
 });
 
 test('company domain: the website\'s registrable domain only; shared hosting and free mail are never the company', async () => {
   assert.equal(registrableDomain('mail.acme.co.uk'), 'acme.co.uk');
-  assert.equal(registrableDomain('www.acme.com'), 'www.acme.com'.split('.').slice(-2).join('.'));
+  assert.equal(registrableDomain('www.acme.com'), 'acme.com');
+  assert.equal(registrableDomain('acme.io'), 'acme.io');
+  for (const host of ['acme.com.au', 'acme.co.jp', 'acme.co.in', 'acme.com.co', 'acme.uk.com', 'x.acme.us.com', 'acme.shop', 'acme.museum', 'acme.org.uk', 'localhost']) assert.equal(registrableDomain(host), '', `${host} has no derivable company domain`);
   const dirFor = async (site) => loadDir({ ...fakeDb().db, organizationProfile: { findMany: async () => [{ value: site }] } }, ORG);
   assert.deepEqual([...(await dirFor('https://www.acme.co.uk/x')).companyDomains], ['acme.co.uk']);
+  for (const site of ['https://acme.co.in', 'https://acme.com.au', 'https://acme.uk.com', 'https://acme.shop']) assert.deepEqual([...(await dirFor(site)).companyDomains], [], `${site}: unknown suffix means no company domain`);
   for (const site of ['https://acme.github.io', 'https://acme.vercel.app', 'https://acme.netlify.app', 'https://calendly.com/acme', 'https://acme.notion.site', 'https://acme.wixsite.com/x', 'https://acme.webflow.io', 'https://gmail.com']) {
     assert.deepEqual([...(await dirFor(site)).companyDomains], [], site);
   }
@@ -585,4 +591,98 @@ test('delivery: 401, 408, 409 and 429 retry with backoff and a cap; other 4xx ar
   const sent = [];
   await flushEmployeeWakes(old.db, { config: on, now: t0 + 3 * 3_600_000, deliver: async p => { sent.push(p); } });
   assert.deepEqual([sent.length, old.deliveries[0].status, old.deliveries[0].skip_reason], [0, 'briefed', 'too_old']);
+});
+
+// ---------- second review ----------
+const gmailHeaders = (authResults, extra = []) => [
+  { name: 'Delivered-To', value: 'me@acme.com' },
+  { name: 'Received', value: 'by 2002:a05:6a00 with SMTP id x; Tue, 28 Oct 2026 09:00:00 -0700 (PDT)' },
+  { name: 'ARC-Seal', value: 'i=1; a=rsa-sha256; s=arcselector10001; d=google.com; cv=none; b=abc' },
+  { name: 'ARC-Authentication-Results', value: 'i=1; mx.google.com; dkim=pass header.i=@forged.example; spf=pass smtp.mailfrom=boss@forged.example; dmarc=pass header.from=forged.example' },
+  ...(authResults === null ? [] : [{ name: 'Authentication-Results', value: authResults }]),
+  ...extra,
+  { name: 'Received-SPF', value: 'pass (google.com: domain of boss@acme.com designates 203.0.113.9 as permitted sender) client-ip=203.0.113.9;' },
+  { name: 'DKIM-Signature', value: 'v=1; a=rsa-sha256; c=relaxed/relaxed; d=acme.com; s=g; b=abc' },
+  { name: 'From', value: 'Boss <boss@acme.com>' },
+];
+const GOOD = 'mx.google.com; dkim=pass header.i=@acme.com header.s=g header.b=abc; spf=pass (google.com: domain of boss@acme.com designates 203.0.113.9 as permitted sender) smtp.mailfrom=boss@acme.com; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=acme.com';
+const viaGmail = (value, extra, from = 'Boss <boss@acme.com>') => status({ sender: from, payload: { headers: gmailHeaders(value, extra) } });
+
+test('Authentication-Results: Gmail layout, same-segment method/result/property, top-most trusted header only', () => {
+  assert.equal(viaGmail(GOOD), 'internal', 'a real Gmail layout verifies');
+  assert.equal(viaGmail(null), 'unverified', 'Received-SPF, DKIM-Signature and ARC results alone prove nothing');
+  // The method, its pass and the aligned property must sit in one segment.
+  assert.equal(viaGmail('mx.google.com; dmarc=fail header.from=acme.com; spf=pass header.from=acme.com'), 'unverified');
+  assert.equal(viaGmail('mx.google.com; dmarc=pass header.from=evil.com; dkim=fail header.d=acme.com'), 'unverified');
+  assert.equal(viaGmail('mx.google.com; dmarc=none header.from=acme.com; spf=pass smtp.mailfrom=evil.com; dkim=pass header.d=other.org'), 'unverified');
+  assert.equal(viaGmail('mx.google.com; dmarc=fail (p=REJECT) header.from=acme.com; dkim=pass header.d=evil.com'), 'unverified');
+  // A pass written in a comment is not a result.
+  assert.equal(viaGmail('mx.google.com; dmarc=fail (dmarc=pass header.from=acme.com) header.from=acme.com'), 'unverified');
+  // SPF and DKIM together, each aligned, still work; SPF alone does not.
+  assert.equal(viaGmail('mx.google.com; spf=pass smtp.mailfrom=boss@acme.com; dkim=pass header.d=acme.com'), 'internal');
+  assert.equal(viaGmail('mx.google.com; spf=pass smtp.mailfrom=boss@acme.com'), 'unverified');
+  // Only the top-most header, and only from a trusted server.
+  assert.equal(viaGmail('evil.example; dmarc=pass header.from=acme.com'), 'unverified', 'the top-most header is another server\'s');
+  assert.equal(status({ sender: 'boss@acme.com', payload: { headers: [{ name: 'Authentication-Results', value: 'evil.example; dmarc=pass header.from=acme.com' }, { name: 'Authentication-Results', value: GOOD }] } }), 'unverified', 'a lower trusted header does not rescue a forged top one');
+  assert.equal(status({ sender: 'boss@acme.com', payload: { headers: [{ name: 'Authentication-Results', value: 'mx.google.com; dmarc=fail header.from=acme.com' }, { name: 'Authentication-Results', value: GOOD }] } }), 'unverified', 'nor does a lower header override a failing top one');
+  assert.equal(viaGmail('ARC-looking; i=1; mx.google.com; dmarc=pass header.from=acme.com'), 'unverified');
+  // DMARC header.from must equal the sender's domain.
+  assert.equal(viaGmail(GOOD, [], 'Boss <boss@evil.com>'), 'external', 'the passes are for acme.com, and evil.com is not the company');
+  const custom = routingConfig({ HIVEMIND_EMPLOYEE_EVENT_ROUTING: '1', HIVEMIND_EMPLOYEE_EVENT_AUTHSERV_IDS: 'mx.example.net' });
+  assert.equal(senderStatus(eventFacts('gmail', 'S', { sender: 'boss@acme.com', headers: [{ name: 'Authentication-Results', value: 'mx.example.net; dmarc=pass header.from=acme.com' }] }, custom), dirAcme, custom), 'internal', 'a configured server list');
+  assert.equal(senderStatus(eventFacts('gmail', 'S', { sender: 'boss@acme.com', headers: [{ name: 'Authentication-Results', value: GOOD }] }, custom), dirAcme, custom), 'unverified', 'and then Google\'s is not on it');
+});
+
+test('organization-wide accounts reach only watches whose creator is still an owner or admin', async () => {
+  const watch = { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', user_id: 'member-9', employee_id: LEO, enabled: true, toolkit: 'gmail', trigger_slug: 'GMAIL_NEW_GMAIL_MESSAGE', filter: {} };
+  const orgSub = { ...sub, subject: ORG };
+  const run = async (admins) => {
+    const { db, deliveries, store } = fakeDb({ watches: [watch] });
+    const adminDb = { ...db, userOrganization: { ...db.userOrganization, findMany: async (args) => args?.where?.role ? admins.map(userId => ({ userId })) : db.userOrganization.findMany(args) } };
+    store.events.set('o1', { sender: 'a@b.io', subject: 'hello' });
+    await routeApprovedEvent(adminDb, { orgId: ORG, userId: USER, event: { id: 'o1', data: store.events.get('o1') }, sub: orgSub }, { config: on, schedule: () => {} });
+    return deliveries.map(r => [r.status, r.skip_reason ?? null]);
+  };
+  assert.deepEqual(await run(['member-9']), [['pending', null]], 'creator is an admin');
+  assert.deepEqual(await run([USER]), [['skipped', 'watch_creator_not_admin']], 'creator lost the role or never had it');
+});
+
+test('adding a watch on an organization-wide account needs an owner or admin', async () => {
+  const { db } = toolDb({ active: [{ toolkit: 'gmail', slug: 'GMAIL_NEW_GMAIL_MESSAGE', subject: ORG }] });
+  const as = (role) => ({ ...db, userOrganization: { ...db.userOrganization, findUnique: async () => ({ role, isActive: true, deactivatedAt: null }) } });
+  const add = (prisma) => runEventWatch({ operation: 'add', employee_id: LEO, toolkit: 'gmail', trigger_slug: 'GMAIL_NEW_GMAIL_MESSAGE', instruction: 'x' }, { orgId: ORG, userId: USER, prisma, config: on });
+  await assert.rejects(add(as('member')), { status: 403, message: /owner or admin/ });
+  assert.equal((await add(as('admin'))).successful, true);
+  const personal = toolDb({ active: [{ toolkit: 'gmail', slug: 'GMAIL_NEW_GMAIL_MESSAGE', subject: USER }] });
+  assert.equal((await add({ ...personal.db, userOrganization: { ...personal.db.userOrganization, findUnique: async () => ({ role: 'member', isActive: true, deactivatedAt: null }) } })).successful, true, 'a personal account needs no role');
+});
+
+test('a wake is checked per row: events from a user who cannot see the employee are not sent', async () => {
+  const { db, deliveries, store } = fakeDb();
+  const t0 = Date.parse('2026-10-29T10:00:00Z');
+  await mention(70, db, store, t0);
+  await mention(71, db, store, t0 + 1000);
+  deliveries[1].user_id = 'other-user';
+  const seen = [];
+  const mixed = { ...db, userOrganization: { ...db.userOrganization, findUnique: async (args) => (seen.push(args.where.userId_orgId.userId), args.where.userId_orgId.userId === 'other-user' ? { role: 'member', isActive: true, deactivatedAt: null } : db.userOrganization.findUnique(args)) },
+    digitalEmployee: { findMany: async () => (await db.digitalEmployee.findMany()).map(e => ({ ...e, scope: 'private', createdBy: USER })) } };
+  const sent = [];
+  await flushEmployeeWakes(mixed, { config: on, now: t0 + 200_000, deliver: async p => { sent.push(p); } });
+  assert.ok(seen.includes('other-user'), 'the second row is checked against its own user');
+  assert.deepEqual(sent[0].events.map(e => e.eventId), ['ev70']);
+  assert.deepEqual(deliveries.map(r => [r.status, r.skip_reason ?? null]), [['delivered', null], ['skipped', 'employee_unavailable']]);
+});
+
+test('the classifier does not wait for routing', async () => {
+  const row = { id: 'slow-route', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-04T12:00:00Z', data: { subject: '@leo' } };
+  const db = { userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) },
+    $queryRawUnsafe: async sql => sql.includes('UPDATE hivemind_trigger_events') ? [row] : sql.includes('runtime_enabled') ? [{ runtime_enabled: true }] : [{ toolkit: 'gmail', slug: 'S', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-04T11:00:00Z' }],
+    $executeRawUnsafe: async () => {}, workspaceNotification: { upsert: async () => ({ id: 'n' }) } };
+  let started = 0;
+  const finished = classifyPendingActivity({ orgId: ORG, userId: USER, allowedAccountIds: ['a'], prisma: db, routingConfig: on,
+    employeeRouter: () => { started += 1; return new Promise(() => {}); },
+    runtimeAttention: { assess: async () => ({ action: 'retain' }), deliver: async () => ({}) } });
+  const outcome = await Promise.race([finished.then(() => 'done'), new Promise(resolve => setTimeout(() => resolve('blocked'), 1000))]);
+  assert.equal(outcome, 'done');
+  assert.equal(started, 1);
 });

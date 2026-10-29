@@ -116,11 +116,11 @@ export function classifyPendingActivity(ctx) {
         const runtimeOn = routing.enabled ? await readRuntimeEnabled(db, ctx.orgId).catch(() => true) : true;
         const bridge = runtimeOn ? (ctx.runtimeAttention || createRuntimeAttentionBridge()) : undefined;
         // Routing runs once per event, after the decision: an approved event takes mentions and watches, any other event only an in-company @mention.
-        // It cannot fail or hold up intake (routeEventGuarded bounds and audits it).
+        // It is started after the decision is stored and never awaited: it cannot fail or hold up intake (routeEventGuarded bounds and audits it).
         const routeToEmployees = (mentionsOnly) => (ctx.employeeRouter || routeEventGuarded)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] }, { config: routing, ...(mentionsOnly ? { mentionsOnly: true } : {}) }).catch(() => {});
         if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
           && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
-          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); if (routing.enabled) await routeToEmployees(false); continue; }
+          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); if (routing.enabled) void routeToEmployees(false); continue; }
           catch { /* Native revision and consent validation own whether reassessment is required. */ }
         }
         const optedIn = sub[0].runtime_attention === true && bridge && sub[0].runtime_attention_enabled_at
@@ -145,11 +145,11 @@ export function classifyPendingActivity(ctx) {
             // Outcome unknown stays pending for existing classifier reconciliation.
             // Native admission deduplication uses this exact persisted event identity.
             await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='pending',evaluated_at=now() WHERE id=$1", row.id);
-            if (routing.enabled) await routeToEmployees(true);
+            if (routing.enabled) void routeToEmployees(true);
             continue;
           }
         }
-        if (routing.enabled) await routeToEmployees(receipt.status !== 'approved');
+        if (routing.enabled) void routeToEmployees(receipt.status !== 'approved');
       }
       if (rows.length < 6 && !worker.rerun) break;
     }

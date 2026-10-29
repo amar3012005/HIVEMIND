@@ -17,19 +17,32 @@ export const EVENT_LEVEL = '*';
 const FREE_MAIL = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'yahoo.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com', 'aol.com', 'gmx.de', 'gmx.net', 'web.de']);
 /** Hosts anyone can publish on: an address there proves nothing about the company, so none of them can be the company domain. */
 const SHARED_HOSTING = ['github.io', 'githubusercontent.com', 'vercel.app', 'netlify.app', 'calendly.com', 'notion.site', 'notion.so', 'wixsite.com', 'wix.com', 'webflow.io', 'herokuapp.com', 'pages.dev', 'workers.dev', 'web.app', 'firebaseapp.com', 'azurewebsites.net', 'blogspot.com', 'wordpress.com', 'squarespace.com', 'carrd.co', 'framer.app', 'framer.website', 'ghost.io', 'substack.com', 'medium.com', 'linktr.ee', 'typeform.com', 'hubspot.com', 'mailchimpsites.com', 'surge.sh', 'render.com', 'onrender.com', 'fly.dev', 'railway.app', 'repl.co', 'glitch.me', 'bubbleapps.io', 'airtable.com', 'google.com', 'sites.google.com', 'canva.site', 'my.canva.site', 'carrd.co', 'godaddysites.com', 'weebly.com', 'myshopify.com', 'zoom.us', 'slack.com', 'linkedin.com', 'facebook.com', 'instagram.com', 'x.com', 'twitter.com'];
-const SECOND_LEVEL = new Set(['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.in', 'co.za', 'com.br', 'com.mx', 'com.sg', 'com.hk', 'com.tr', 'com.cn', 'co.kr', 'com.ar']);
+/** Top-level domains where a name is registered directly under the TLD. Anything else has no derivable company domain (see registrableDomain). */
+const PLAIN_TLDS = new Set(['com', 'org', 'net', 'io', 'ai', 'co', 'dev', 'app', 'de', 'fr', 'nl', 'es', 'it', 'se', 'no', 'dk', 'fi', 'ch', 'at', 'be', 'pl', 'cz', 'pt', 'ie', 'eu', 'us', 'ca', 'in', 'info', 'biz', 'tech', 'xyz', 'cloud', 'online', 'site', 'store', 'agency', 'digital', 'global', 'group', 'company', 'email', 'team', 'tools', 'works', 'studio', 'solutions', 'systems', 'services', 'consulting', 'capital', 'finance', 'health', 'media', 'design', 'software', 'me', 'so', 'sh']);
+/** Second labels that mark a public two-part suffix under a country TLD (co.in, com.co, org.in ...). */
+const PUBLIC_SECOND = new Set(['co', 'com', 'org', 'net', 'gov', 'ac', 'edu', 'or', 'ne', 'go', 'mil', 'sch', 'nic', 'gob', 'ltd', 'plc', 'me', 'id', 'ind', 'res', 'firm', 'gen']);
+/** Private multi-part suffixes under generic TLDs that anyone can register a name below. */
+const PRIVATE_SUFFIXES = new Set(['uk.com', 'us.com', 'eu.com', 'de.com', 'br.com', 'cn.com', 'jpn.com', 'ru.com', 'sa.com', 'za.com', 'kr.com', 'co.com', 'gb.net', 'uk.net', 'se.net', 'hu.net', 'ae.org', 'us.org', 'za.org', 'co.org']);
 const LOOP_MARKER = /hivemind_runtime_output|\[Event:[a-z0-9_-]+\]|\[Duty:[a-z]+\]/i;
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/i;
 /**
- * The registrable domain of a host: the last two labels, or three under a known two-part suffix such as co.uk.
+ * The registrable domain of a host, without the public suffix list (no maintained library is in the HIVEMIND lockfile or node_modules,
+ * and nothing is installed). It answers only where that is certain: a name directly under a plain generic or country TLD, or under co.uk.
+ * Every other suffix (co.in, com.au, uk.com, an unknown TLD) answers '' and so yields no company domain; such a company is recognised
+ * only by member email or connector-verified sender metadata.
  * @param {string} host A host name.
- * @returns {string} Lower-case registrable domain, or '' for a single label.
+ * @returns {string} Lower-case registrable domain, or '' when it cannot be derived with certainty.
  */
 export function registrableDomain(host) {
   const labels = lower(host).replace(/\.$/, '').split('.').filter(Boolean);
-  if (labels.length < 2) return '';
+  if (labels.length < 2 || labels.some(label => !/^[a-z0-9-]+$/u.test(label))) return '';
   const tail2 = labels.slice(-2).join('.');
-  return SECOND_LEVEL.has(tail2) && labels.length >= 3 ? labels.slice(-3).join('.') : tail2;
+  if (tail2 === 'co.uk') return labels.length >= 3 ? labels.slice(-3).join('.') : '';
+  const tld = labels.at(-1);
+  if (!PLAIN_TLDS.has(tld) || PRIVATE_SUFFIXES.has(tail2)) return '';
+  if (labels.length >= 3 && PRIVATE_SUFFIXES.has(labels.slice(-2).join('.'))) return '';
+  if (tld.length === 2 && labels.length >= 3 && PUBLIC_SECOND.has(labels.at(-2))) return '';
+  return tail2;
 }
 /** True for a free mail or shared hosting domain, which can never be the company's. */
 export const untrustedDomain = domain => FREE_MAIL.has(domain) || SHARED_HOSTING.some(entry => domain === entry || domain.endsWith(`.${entry}`));
@@ -52,6 +65,8 @@ export function routingConfig(env = process.env) {
     maxEventsPerWake: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_EVENTS_PER_WAKE, 10, 1, 25),
     mentionEmailChars: int(env.HIVEMIND_EMPLOYEE_EVENT_MENTION_EMAIL_CHARS, 2000, 200, 10_000),
     maxAttempts: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_ATTEMPTS, 5, 1, 10),
+    // Only an Authentication-Results header written by one of these receiving servers is believed (Gmail's is mx.google.com).
+    authservIds: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_AUTHSERV_IDS ?? 'mx.google.com').split(',').map(item => item.trim().toLowerCase()).filter(Boolean)),
     routeTimeoutMs: int(env.HIVEMIND_EMPLOYEE_EVENT_ROUTE_TIMEOUT_MS, 2000, 100, 30_000),
     maxWakeAgeMs: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_WAKE_AGE_MS, 7_200_000, 60_000, 86_400_000),
     maxWatchesPerEmployee: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_WATCHES, 20, 1, 100),
@@ -89,7 +104,7 @@ export function eventFacts(toolkit, slug, data = {}, config = routingConfig()) {
   const author = hasComment ? comment : issue;
   const login = lower(str(author.user?.login) || (hasComment || issue.user ? '' : str(d.sender?.login) || str(d.user?.login)));
   const address = isEmail ? parseAddress(rawSender) : '';
-  const evidence = isEmail ? senderEvidence(d, message, address) : { verified: false };
+  const evidence = isEmail ? senderEvidence(d, message, address, config) : { verified: false };
   let mentionText;
   if (isEmail) {
     // Only what the verified sender typed: the new body without quoted replies, and the subject only when the sender began the thread.
@@ -148,22 +163,30 @@ function headerValue(d, message, name) {
 }
 
 /**
- * Whether the event proves the sender address: explicit sender-verification metadata from the connector, or an Authentication-Results
- * (else ARC-Authentication-Results) header with a DMARC pass for that domain, or SPF and DKIM both passing for that domain.
+ * Whether the event proves the sender address: explicit connector sender-verification metadata, or the top-most Authentication-Results
+ * header, written by a trusted receiving server (authserv-id in config.authservIds, Gmail's mx.google.com by default). In that header one
+ * `;` segment must carry the method, `=pass` and the aligned property together: DMARC pass with header.from equal to the sender domain,
+ * or both an SPF pass with smtp.mailfrom and a DKIM pass with header.d or header.i aligned to it. Lower headers, other servers' headers
+ * and ARC results are ignored.
  * @returns {{verified:boolean}} The verdict.
  */
-function senderEvidence(d, message, address) {
+function senderEvidence(d, message, address, config) {
   const domain = address.split('@')[1];
   if (!domain) return { verified: false };
   if (d.sender_verified === true || message.sender_verified === true) return { verified: true };
-  const header = headerValue(d, message, 'authentication-results') ?? headerValue(d, message, 'arc-authentication-results') ?? str(d.authentication_results);
+  const header = headerValue(d, message, 'authentication-results') ?? (typeof d.authentication_results === 'string' ? d.authentication_results : undefined);
   if (!header) return { verified: false };
-  // Relaxed alignment, as DMARC defines it: the authenticated domain and the sender share a registrable domain.
-  const aligned = other => { const o = lower(other).replace(/[>;\s]+$/u, ''); return o !== '' && registrableDomain(o) === registrableDomain(domain); };
-  const prop = (key) => [...header.matchAll(new RegExp(`${key}\\s*=\\s*([^\\s;]+)`, 'giu'))].map(match => match[1]);
-  const dmarc = /dmarc\s*=\s*pass/iu.test(header) && prop('header\\.from').some(aligned);
-  const spf = /spf\s*=\s*pass/iu.test(header) && [...prop('smtp\\.mailfrom'), ...prop('smtp\\.helo')].some(value => aligned(value.split('@').pop()));
-  const dkim = /dkim\s*=\s*pass/iu.test(header) && prop('header\\.(?:d|i)').some(value => aligned(value.split('@').pop()));
+  const segments = header.replace(/\([^)]*\)/gu, ' ').split(';').map(item => item.trim()).filter(Boolean);
+  const serverId = lower(segments[0]?.split(/\s+/u)[0]);
+  if (!serverId || serverId.includes('=') || !config.authservIds.has(serverId)) return { verified: false };
+  const results = segments.slice(1);
+  const props = (segment) => Object.fromEntries([...segment.matchAll(/\b([a-z]+\.[a-z]+)\s*=\s*([^\s;]+)/giu)].map(match => [lower(match[1]), match[2].replace(/^"|"$/gu, '')]));
+  const passed = (segment, method) => new RegExp(`^${method}\\s*=\\s*pass(?![a-z])`, 'iu').test(segment);
+  const hostOf = (value) => lower(String(value ?? '').split('@').pop());
+  const aligned = (other) => other !== '' && (other === domain || (registrableDomain(other) !== '' && registrableDomain(other) === registrableDomain(domain)));
+  const dmarc = results.some(segment => passed(segment, 'dmarc') && hostOf(props(segment)['header.from']) === domain);
+  const spf = results.some(segment => passed(segment, 'spf') && aligned(hostOf(props(segment)['smtp.mailfrom'])));
+  const dkim = results.some(segment => passed(segment, 'dkim') && [props(segment)['header.d'], props(segment)['header.i']].some(value => aligned(hostOf(value))));
   return { verified: dmarc || (spf && dkim) };
 }
 
@@ -242,10 +265,11 @@ export function watchMatches(watch, facts) {
  * @param {{id:string,name:string,slug:string,slackBotUserId?:string|null}[]} input.employees Routable employees.
  * @param {object[]} input.watches Enabled watches of the organization.
  * @param {object} input.directory Company directory, see {@link internalSender}.
+ * @param {Set<string>} [input.adminUserIds] Users who are currently owner or admin; needed for organization-wide accounts.
  * @param {object} [input.config] Routing limits.
  * @returns {{targets:{employeeId:string,reason:string,watchIds:string[]}[],skips:{employeeId:string,reason:string}[]}} Wake targets and skip reasons.
  */
-export function decideRouting({ facts, orgId, eventUserId, subject, employees, watches, directory, config = routingConfig() }) {
+export function decideRouting({ facts, orgId, eventUserId, subject, employees, watches, directory, adminUserIds = new Set(), config = routingConfig() }) {
   const byId = new Map(employees.map(employee => [employee.id, employee]));
   const candidates = new Map();
   const skips = [];
@@ -260,7 +284,9 @@ export function decideRouting({ facts, orgId, eventUserId, subject, employees, w
     if (status === 'internal') add(employeeId, 'mention'); else skips.push({ employeeId, reason: status === 'unverified' ? 'unverified_sender' : 'external_sender' });
   }
   for (const watch of watches) {
-    if (watch.user_id !== eventUserId && subject !== orgId) continue;
+    // An organization-wide account is shared: its events reach only watches whose creator is still an owner or admin. A personal account's events reach only its owner's watches.
+    if (subject === orgId) { if (!adminUserIds.has(watch.user_id)) { if (watchMatches(watch, facts) && byId.has(watch.employee_id)) skips.push({ employeeId: watch.employee_id, reason: 'watch_creator_not_admin' }); continue; } }
+    else if (watch.user_id !== eventUserId) continue;
     if (!watchMatches(watch, facts)) continue;
     if (!byId.has(watch.employee_id)) { skips.push({ employeeId: watch.employee_id, reason: 'employee_unavailable' }); continue; }
     add(watch.employee_id, 'watch', watch.id);
@@ -383,6 +409,12 @@ export async function loadCompanyDirectory(db, orgId) {
 }
 
 // A routing skip never blocks a later valid target: the same (event, employee) row is upgraded from skipped to pending. Delivery outcomes are final.
+/** Users who are currently active owners or admins of the organization. */
+export async function loadAdminIds(db, orgId) {
+  const rows = await db.userOrganization.findMany({ where: { orgId, isActive: true, deactivatedAt: null, role: { in: ['owner', 'admin'] } }, select: { userId: true } });
+  return new Set(rows.map(row => row.userId));
+}
+
 async function recordDelivery(db, row) {
   return db.$queryRawUnsafe(`INSERT INTO hivemind_employee_event_deliveries
     (id,org_id,user_id,employee_id,event_id,toolkit,trigger_slug,reason,watch_id,status,skip_reason,summary)
@@ -422,8 +454,9 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
     if (!mentionsOnly && !(deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId))) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
     return { targets: [], skips: [] };
   }
-  const [employees, directory] = await Promise.all([loadRoutableEmployees(db, orgId, userId), loadCompanyDirectory(db, orgId)]);
-  const decision = decideRouting({ facts, orgId, eventUserId: userId, subject: sub.subject ?? null, employees, watches, directory, config });
+  const orgWide = (sub.subject ?? null) === orgId;
+  const [employees, directory, adminUserIds] = await Promise.all([loadRoutableEmployees(db, orgId, userId), loadCompanyDirectory(db, orgId), orgWide && watches.length ? loadAdminIds(db, orgId) : new Set()]);
+  const decision = decideRouting({ facts, orgId, eventUserId: userId, subject: sub.subject ?? null, employees, watches, directory, adminUserIds, config });
   for (const skip of decision.skips) await recordDelivery(db, { ...base, employeeId: skip.employeeId, reason: 'candidate', status: 'skipped', skipReason: skip.reason });
   if (!mentionsOnly && !decision.targets.length && !decision.skips.length && !(deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId))) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
   for (const target of decision.targets) {
@@ -500,11 +533,24 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
   // A wake that waited too long is stale news: it goes to the brief instead.
   const stale = rows.filter(row => now.getTime() - new Date(row.created_at).getTime() > config.maxWakeAgeMs);
   if (stale.length) { await finish(stale.map(row => row.id), 'briefed', 'too_old'); out.briefed += stale.length; rows.splice(0, rows.length, ...rows.filter(row => !stale.includes(row))); if (!rows.length) return out; }
+  // Every row is checked against the user whose account produced it: rows may come from different users' accounts.
+  const lists = new Map();
+  let employee;
+  const hidden = [];
+  for (const row of rows) {
+    if (!lists.has(row.user_id)) lists.set(row.user_id, await loadRoutableEmployees(db, orgId, row.user_id));
+    const found = lists.get(row.user_id).find(item => item.id === employeeId);
+    if (found) employee ??= found; else hidden.push(row);
+  }
+  if (hidden.length) {
+    await finish(hidden.map(row => row.id), 'skipped', 'employee_unavailable');
+    await watchOutcome([...new Set(hidden.map(row => row.watch_id).filter(Boolean))], 'employee_unavailable');
+    out.skipped += hidden.length;
+    rows.splice(0, rows.length, ...rows.filter(row => !hidden.includes(row)));
+    if (!rows.length) return out;
+  }
   const watchIds = [...new Set(rows.map(row => row.watch_id).filter(Boolean))];
   const allIds = rows.map(row => row.id);
-  const employees = await loadRoutableEmployees(db, orgId, rows[0].user_id);
-  const employee = employees.find(item => item.id === employeeId);
-  if (!employee) { await finish(allIds, 'skipped', 'employee_unavailable'); await watchOutcome(watchIds, 'employee_unavailable'); out.skipped += rows.length; return out; }
   const recent = await db.$queryRawUnsafe(`SELECT count(DISTINCT wake_id)::int AS wakes FROM hivemind_employee_event_deliveries
     WHERE org_id=$1 AND employee_id=$2 AND status='delivered' AND delivered_at > $3::timestamptz`, orgId, employeeId, new Date(now.getTime() - 3_600_000).toISOString());
   if ((recent[0]?.wakes ?? 0) >= config.maxWakesPerHour) { await finish(allIds, 'briefed', 'rate_limited'); out.briefed += rows.length; return out; }

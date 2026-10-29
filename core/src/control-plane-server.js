@@ -10457,6 +10457,8 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, {
         ok: true,
         contract: 'hivemind.hyperagent-profiles.v1',
+        // Employees learn the company's "Enable Runtime" switch with every roster read.
+        runtime_enabled: await readRuntimeEnabled(prisma, principal.orgId),
         scope: {
           user_id: principal.userId,
           org_id: principal.orgId,

@@ -8361,11 +8361,11 @@ const server = http.createServer(async (req, res) => {
         pagePromise,
         orgId ? composioService.listConnectedAccounts(orgId, { userId: current.session.userId }).catch(() => []) : Promise.resolve([]),
       ]);
-      // Real per-org connection state, not something the FE has to remember
-      // client-side across reloads — the "connected" flag here reflects
-      // whichever of THIS page's toolkits the org actually has an ACTIVE
-      // connected account for, so the frontend can sort them to the top.
-      const connectedToolkits = new Set(accounts.filter((a) => a.status === 'ACTIVE').map((a) => a.toolkit));
+      // One row per toolkit by the shared rule: the ACTIVE account (personal
+      // first, newest when both subjects have one); expired-only is
+      // `reconnect`; no account is `available`. The Runtime apps listing
+      // applies the same rule.
+      const rows = composioService.toolkitConnectionRows(orgId, accounts);
       // Slack is native-only (see /connect guard above) — its "connected"
       // state lives in PlatformIntegration, not Composio's connected_accounts,
       // so the card would otherwise always read as disconnected even when
@@ -8376,12 +8376,15 @@ const server = http.createServer(async (req, res) => {
             where: { userId: current.session.userId, platformType: 'slack', isActive: true },
             select: { id: true },
           });
-          if (nativeSlack) connectedToolkits.add('slack');
+          if (nativeSlack) rows.set('slack', { toolkit: 'slack', status: 'connected', origin: 'personal', accountId: null });
         } catch { /* best-effort overlay */ }
       }
-      const toolkits = page.items.map((tk) => ({ ...tk, connected: connectedToolkits.has(tk.slug) }));
+      const toolkits = composioService.withToolkitConnections(page.items, rows);
+      const connections = [...rows.values()].sort((a, b) => a.toolkit.localeCompare(b.toolkit))
+        .map((row) => ({ toolkit: row.toolkit, status: row.status, origin: row.origin, account_id: row.accountId }));
       return jsonResponse(res, {
         toolkits,
+        connections,
         next_cursor: page.nextCursor,
         total_items: page.totalItems,
       });

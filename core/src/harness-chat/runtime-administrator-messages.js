@@ -2,6 +2,7 @@ import { nativeAgentStoragePrincipal } from './organization-agent-access.js';
 import crypto from 'node:crypto';
 import { validThreadMessageId } from '../email/thread-headers.js';
 import { renderRuntimeAdministratorEmail } from '../email/templates/runtime-administrator.js';
+import { employeeAvatarUrl } from '../email/employee-avatar.js';
 import { resolvePublicFrontendBaseUrl } from '../public-frontend-url.js';
 
 const kinds = new Set(['completion','decision','approval']);
@@ -54,7 +55,7 @@ export function validateAdministratorMessage(input) {
  if (input.kind !== 'completion' && !input.request_call_id && !sender) fail('native_request_reference_required');
  return { message_key: input.message_key, kind: input.kind, subject: input.subject.trim(), message: input.message.trim(), ...(input.request_call_id ? { request_call_id: input.request_call_id } : {}), ...(sender ? { sender } : {}) };
 }
-export async function messageAdministrator({ db, claims, input, send, publicBase, portraitBase, sharedOrganizationAgents = false }) {
+export async function messageAdministrator({ db, claims, input, send, publicBase, portraitBase, avatarBase, sharedOrganizationAgents = false }) {
  if (claims.operating_role !== 'runtime' || !/^session-[a-z0-9-]{1,120}$/.test(claims.operating_session || '')) fail('runtime_authority_required',403);
  const membership = await db.userOrganization.findUnique({ where:{userId_orgId:{userId:claims.sub,orgId:claims.org_id}}, select:{role:true,isActive:true,deactivatedAt:true} });
  if (!membership?.isActive || membership.deactivatedAt || !['owner','admin'].includes(membership.role)) fail('administrator_membership_required',403);
@@ -105,7 +106,10 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  const conversation=new URL('/hivemind/app/employee/harness',app);conversation.searchParams.set('session',claims.operating_session);
  if(message.request_call_id)conversation.searchParams.set('request',message.request_call_id);
  const portrait=new URL('/assets/runtime-computer-c2305f5b.webp',portraitBase || 'https://chat.singulancelabs.com');
- const rendered=renderRuntimeAdministratorEmail({companyName:organization.name,administratorName:user.displayName,subject:message.subject,message:message.message,kind:message.kind,connection,conversationUrl:conversation.href,portraitUrl:portrait.href,...(message.sender?{sender:message.sender}:{})});
+ // The sender's saved look is read only from an employee of this administrator's organization; any miss keeps the initial-letter tile.
+ const saved=message.sender?await db.digitalEmployee?.findFirst({where:{id:message.sender.employee_id,orgId:claims.org_id},select:{policyRules:true}}).catch(()=>null):null;
+ const avatarUrl=employeeAvatarUrl(saved?.policyRules?.appearance,{env:process.env,baseUrl:avatarBase});
+ const rendered=renderRuntimeAdministratorEmail({companyName:organization.name,administratorName:user.displayName,subject:message.subject,message:message.message,kind:message.kind,connection,conversationUrl:conversation.href,portraitUrl:portrait.href,...(message.sender?{sender:{...message.sender,...(avatarUrl?{avatarUrl}:{})}}:{})});
  rendered.subject=`${organization.name} · Runtime updates`;
  let receipt;
  try {receipt=await send({to:user.email,rendered,from:sender,thread:row.thread,templateId:'runtime-administrator-v1',notification:{orgId:claims.org_id,userId:claims.sub},providerAttempts:1,providerFallback:false,requiredProvider:'cloudflare'});}catch{receipt={ok:false,error:'outcome_unknown'};}

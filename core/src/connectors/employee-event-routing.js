@@ -157,7 +157,11 @@ function headerValue(d, message, name) {
   const lists = [d.headers, d.payload?.headers, message.headers, message.payload?.headers];
   for (const list of lists) {
     if (Array.isArray(list)) { const found = list.find(item => lower(item?.name) === name); if (found && typeof found.value === 'string') return found.value; }
-    else if (list && typeof list === 'object') { const key = Object.keys(list).find(item => lower(item) === name); if (key && typeof list[key] === 'string') return list[key]; }
+    else if (list && typeof list === 'object') {
+      const key = Object.keys(list).find(item => lower(item) === name);
+      // A map form can hold several same-named headers joined into one value; their order is then unknown, so it proves nothing.
+      if (key && typeof list[key] === 'string') return /\n\s*[A-Za-z-]+:|authentication-results\s*:/iu.test(list[key]) ? undefined : list[key];
+    }
   }
   return undefined;
 }

@@ -150,3 +150,36 @@ test('an employee notice is signed by the employee and greets the administrator 
   assert.ok(!r.html.includes('Your AI Chief of Staff'));
   assert.ok(r.text.startsWith('Turing — SINGULANCE'));
 });
+
+test('an employee notice shows the employee avatar from the saved look, name and role', () => {
+  const sender={employee_id:'ebee6f09-62df-4fc7-a8ef-363b961d2ca9',name:'Turing',role:'Sales Operations',avatarUrl:'https://api.example.test/v1/public/employee-avatar/x.y.png'};
+  const r=renderRuntimeAdministratorEmail({companyName:'SINGULANCE',administratorName:'Amar Sai',subject:'Pipeline ready',message:'Done.',kind:'completion',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://next.singulancelabs.com/p.png',sender});
+  assert.ok(r.html.includes('<img src="https://api.example.test/v1/public/employee-avatar/x.y.png" width="56" height="56" alt="Turing"'));
+  assert.ok(r.html.includes('Sales Operations · SINGULANCE'));
+  assert.ok(!r.html.includes('runtime-computer'));
+  const fallback=renderRuntimeAdministratorEmail({companyName:'SINGULANCE',administratorName:'Amar Sai',subject:'s',message:'m',kind:'completion',conversationUrl:'https://next.singulancelabs.com/hivemind/app/employee/harness',portraitUrl:'https://next.singulancelabs.com/p.png',sender:{...sender,avatarUrl:undefined}});
+  assert.ok(!fallback.html.includes('<img src="https://api.example'));
+  assert.ok(fallback.html.includes('line-height:56px;text-align:center">T</div>'));
+});
+
+test('an employee notice looks up the sender look inside the administrator organization only', async () => {
+  const sender={employee_id:'ebee6f09-62df-4fc7-a8ef-363b961d2ca9',name:'Turing',role:'Sales Operations'};
+  const appearance={version:1,provider:'humation',template:'humation-1',asset_version:'1.0.1',seed:'s',crop:'avatar',selections:{head:'hm1-p-000011',body:'hm1-p-000030',bottom:'hm1-p-000033',item:'hm1-p-000053',glasses:'hm1-p-000056'},colors:{stroke:'171717',hair:'171717',skin:'FFFFFF',clothes:'E9A637',bottom:'283345'},background:'FFF0CC'};
+  const previous=process.env.HIVEMIND_EMAIL_AVATAR_SECRET;process.env.HIVEMIND_EMAIL_AVATAR_SECRET='test-secret';
+  try {
+    const send=async (db,key,employee)=>{let html;let where;db.digitalEmployee={findFirst:async args=>{where=args.where;return employee;}};
+      await messageAdministrator({db,claims,input:{message_key:key,kind:'completion',subject:'Pipeline ready',message:'Done.',sender},send:async args=>{html=args.rendered.html;return{ok:true,provider:'cloudflare',messageId:'<id@x>'};},avatarBase:'https://api.example.test'});
+      return {html,where};};
+    const withLook=await send(database(),'employee-look-1',{policyRules:{appearance}});
+    assert.deepEqual(withLook.where,{id:sender.employee_id,orgId:claims.org_id});
+    assert.match(withLook.html,/<img src="https:\/\/api\.example\.test\/v1\/public\/employee-avatar\/[^"]+\.png" width="56" height="56" alt="Turing"/);
+    assert.ok(!withLook.html.includes(sender.employee_id));
+    for (const [key,employee] of [['employee-look-2',null],['employee-look-3',{policyRules:{}}],['employee-look-4',{policyRules:{appearance:{version:1}}}]]) {
+      const { html }=await send(database(),key,employee);
+      assert.ok(!html.includes('employee-avatar'));assert.ok(html.includes('line-height:56px;text-align:center">T</div>'));
+    }
+    const failing=database();failing.digitalEmployee={findFirst:async()=>{throw Error('db down');}};let html;
+    await messageAdministrator({db:failing,claims,input:{message_key:'employee-look-5',kind:'completion',subject:'s',message:'m',sender},send:async args=>{html=args.rendered.html;return{ok:true,provider:'cloudflare',messageId:'<id@x>'};}});
+    assert.ok(html.includes('line-height:56px;text-align:center">T</div>'));
+  } finally { if(previous===undefined)delete process.env.HIVEMIND_EMAIL_AVATAR_SECRET;else process.env.HIVEMIND_EMAIL_AVATAR_SECRET=previous; }
+});

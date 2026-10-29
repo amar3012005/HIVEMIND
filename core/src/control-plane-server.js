@@ -147,6 +147,7 @@ import { buildRoomChatRequest, compactRoomContext, normalizeRoomText, roomProjec
 import { advanceRoomBrief, claimRoomResponse, patchRoomState, releaseRoomResponse, synthesizeRoomResponse, transcriptEventId } from './operating-room/conversation-state.js';
 import { renderPartnerReferralInvitation } from './email/templates/partner-referral-invitation.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
+import { EMPLOYEE_AVATAR_PATH, renderEmployeeAvatarPng } from './email/employee-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { createSignupAdminNotificationDispatcher } from './email/signup-admin-notification-dispatcher.js';
 import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
@@ -13928,6 +13929,19 @@ Write the persona now.`;
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }
+    }
+
+    // Signed, immutable PNG of an employee's saved look for administrator email; the URL carries no tenant data.
+    if (pathname.startsWith(EMPLOYEE_AVATAR_PATH) && req.method === 'GET') {
+      const png = await renderEmployeeAvatarPng(pathname.slice(EMPLOYEE_AVATAR_PATH.length), process.env);
+      if (!png) return jsonResponse(res, { error: 'not_found' }, 404);
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Length': png.length,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      return res.end(png);
     }
 
     // Public, immutable avatar asset used by lifecycle emails. It renders the

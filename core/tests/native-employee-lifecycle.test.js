@@ -155,3 +155,18 @@ test('appearance-only configuration is canonical, revision-guarded and preserves
   await assert.rejects(manageNativeEmployee(db,principal,{...input,appearance:{...changed,permissions:['write']}}),/invalid_employee_appearance/);
   await assert.rejects(manageNativeEmployee(db,principal,{...input,tools:['write']}),/invalid_employee_configuration/);
 });
+
+test('remove deletes the employee row for good, archived or not, and only for an administrator', async () => {
+  for (const archivedAt of [null, new Date()]) {
+    const row={id:'11111111-1111-4111-8111-111111111111',name:'Zozo',status:'draft',archivedAt,
+      policyRules:{native_lifecycle:{version:1,phase:'active',kind:'durable',revision:2,profile_revision:2}}};
+    const deleted=[];
+    const tx={$queryRawUnsafe:async()=>[],digitalEmployee:{findFirst:async()=>row,update:async()=>{throw Error('no update');},delete:async({where})=>{deleted.push(where.id);return row;}}};
+    const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$transaction:async fn=>fn(tx)};
+    const result=await manageNativeEmployee(db,{orgId:'org',userId:'admin'},{operation:'remove',employee_id:row.id});
+    assert.equal(result.removed,true);
+    assert.deepEqual(deleted,[row.id]);
+  }
+  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'member'})},$transaction:async()=>{throw Error('no transaction');}};
+  await assert.rejects(manageNativeEmployee(db,{orgId:'org',userId:'member'},{operation:'remove',employee_id:'11111111-1111-4111-8111-111111111111'}),/administrator_membership_required/);
+});

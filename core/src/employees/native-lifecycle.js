@@ -123,7 +123,7 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     });
   }
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);
-  if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
+  if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive','remove'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
   const resetSessions = input.operation === 'fresh_reset_archive' ? resetSessionIds(input.reset_session_ids) : [];
   const storageUserId = resetSessions.length ? (await nativeAgentStoragePrincipal(db, principal)).userId : null;
   return db.$transaction(async tx => {
@@ -132,6 +132,12 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     if (!row) lifecycleError('employee_not_found', 404);
     const lifecycle = nativeLifecycle(row);
     if (!lifecycle) lifecycleError('native_employee_required');
+    if (input.operation === 'remove') {
+      // An administrator deletes the employee for good: the row goes, with its action intents. Library artifacts and
+      // team memory are separate records and stay. An archived employee can be removed too.
+      await tx.digitalEmployee.delete({ where: { id: row.id } });
+      return { employee: publicEmployee(row), removed: true };
+    }
     if (row.archivedAt) {
       if (input.operation === 'configure') lifecycleError('employee_profile_not_active');
       return { employee: publicEmployee(row), replayed: true, closeout: { ready: true, archived: true } };

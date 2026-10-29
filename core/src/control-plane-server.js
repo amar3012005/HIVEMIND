@@ -62,6 +62,8 @@ import { cleanIdentityName, isGenericDisplayName, providerDisplayNameForExisting
 import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/email-turnstile.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
+import { actionableToolkitRows } from './connectors/composio/actionable-connections.js';
+import { resolveComposioCallbackUrl } from './connectors/composio/connect-callback.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
 import { overlayActiveApps, overlayToolkitRows } from './connectors/connected-app-overlay.js';
 import { provisionForPlan } from './vector/container-router.js';
@@ -8144,7 +8146,7 @@ const server = http.createServer(async (req, res) => {
           reconcileConnectedActivity({ prisma, orgId, userId: current.session.userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
           // One row per toolkit by the shared rule (see toolkitConnectionRows); the catalog loop below only
           // adds label and display fields, it never re-derives status from the raw account list.
-          const toolkitRows = composioService.toolkitConnectionRows(orgId, accounts);
+          const toolkitRows = actionableToolkitRows(orgId, accounts, composioService.toolkitConnectionRows(orgId, accounts));
           result.splice(0, result.length, ...overlayToolkitRows(result, toolkitRows));
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
@@ -8241,9 +8243,13 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const body = await parseBody(req).catch(() => ({}));
-      const callbackUrl = typeof body.callback_url === 'string' && body.callback_url
-        ? body.callback_url
-        : `${req.headers.origin || ''}/hivemind/app/connectors?composio_connected=${encodeURIComponent(toolkitSlug)}`;
+      const callbackUrl = resolveComposioCallbackUrl({
+        requested: body.callback_url,
+        requestOrigin: req.headers.origin,
+        frontendBaseUrl: defaultFrontendBaseUrl,
+        allowedOrigins: [...CONFIG.allowedOrigins, 'https://next.singulancelabs.com'],
+        toolkit: toolkitSlug,
+      });
       // When the FE already knows the toolkit's metadata (browse-the-full-
       // catalog grid — every card carries its own toolkits.list() result),
       // it passes it along so a toolkit with no ops-curated auth config yet
@@ -8367,7 +8373,7 @@ const server = http.createServer(async (req, res) => {
       // first, newest when both subjects have one); expired-only is
       // `reconnect`; no account is `available`. The Runtime apps listing
       // applies the same rule.
-      const rows = composioService.toolkitConnectionRows(orgId, accounts);
+      const rows = actionableToolkitRows(orgId, accounts, composioService.toolkitConnectionRows(orgId, accounts));
       // Slack is native-only (see /connect guard above) — its "connected"
       // state lives in PlatformIntegration, not Composio's connected_accounts,
       // so the card would otherwise always read as disconnected even when

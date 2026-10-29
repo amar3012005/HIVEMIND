@@ -36,14 +36,23 @@ export function savedAdministratorRequest(events, message, runtimeSessionId) {
  });
 }
 function fail(code, status = 400) { const e = new Error(code); e.status = status; throw e; }
+/** An employee that sends its own administrator notice: verified id plus display name and role, no control characters. */
+function validateEmployeeSender(value) {
+ if (!value || typeof value !== 'object' || Object.keys(value).some(k => !['employee_id','name','role'].includes(k))) fail('invalid_message_sender');
+ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.employee_id || '')) fail('invalid_message_sender');
+ for (const key of ['name','role']) if (typeof value[key] !== 'string' || !value[key].trim() || value[key].length > 80 || /[\r\n\u0000-\u001f<>"]/.test(value[key])) fail('invalid_message_sender');
+ return { employee_id: value.employee_id, name: value.name.trim(), role: value.role.trim() };
+}
 export function validateAdministratorMessage(input) {
  // Native providers may correlate call and function IDs with '|'; preserve the exact bounded ID.
- if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['message_key','kind','subject','message','request_call_id'].includes(k))) fail('invalid_administrator_message');
+ if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['message_key','kind','subject','message','request_call_id','sender'].includes(k))) fail('invalid_administrator_message');
+ const sender = input.sender === undefined ? undefined : validateEmployeeSender(input.sender);
  if (typeof input.message_key !== 'string' || !/^[A-Za-z0-9._:|\-]{1,180}$/.test(input.message_key || '') || !kinds.has(input.kind)) fail('invalid_message_identity');
  for (const [key, limit] of [['subject',120],['message',4000]]) if (typeof input[key] !== 'string' || !input[key].trim() || input[key].length > limit || (key === 'subject' && /[\r\n]/.test(input[key]))) fail('invalid_message_content');
  if (input.request_call_id !== undefined && !/^[A-Za-z0-9._:|\-]{1,180}$/.test(input.request_call_id)) fail('invalid_request_reference');
- if (input.kind !== 'completion' && !input.request_call_id) fail('native_request_reference_required');
- return { message_key: input.message_key, kind: input.kind, subject: input.subject.trim(), message: input.message.trim(), ...(input.request_call_id ? { request_call_id: input.request_call_id } : {}) };
+ // An employee's own done/blocked notice has no native Runtime request to correlate.
+ if (input.kind !== 'completion' && !input.request_call_id && !sender) fail('native_request_reference_required');
+ return { message_key: input.message_key, kind: input.kind, subject: input.subject.trim(), message: input.message.trim(), ...(input.request_call_id ? { request_call_id: input.request_call_id } : {}), ...(sender ? { sender } : {}) };
 }
 export async function messageAdministrator({ db, claims, input, send, publicBase, portraitBase, sharedOrganizationAgents = false }) {
  if (claims.operating_role !== 'runtime' || !/^session-[a-z0-9-]{1,120}$/.test(claims.operating_session || '')) fail('runtime_authority_required',403);
@@ -75,7 +84,9 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  });
  if(connection){message.subject=`Connect ${connection.appLabel}`;message.message=`I need access to ${connection.appLabel} to continue.\n\nWhy access is needed: ${connection.reason}\n\nThe work is paused until the connection is verified. Connecting an app does not authorize unrelated work.`;}
  const recipientHash=crypto.createHash('sha256').update(user.email.trim().toLowerCase()).digest('hex');
- const sender=process.env.RUNTIME_EMAIL_FROM || 'Runtime <runtime@admin.singulancelabs.com>';
+ const runtimeFrom=process.env.RUNTIME_EMAIL_FROM || 'Runtime <runtime@admin.singulancelabs.com>';
+ // An employee notice keeps the verified sending address and shows the employee as the display name.
+ const sender=message.sender ? `${message.sender.name} <${(runtimeFrom.match(/<([^>]+)>/)||[null,runtimeFrom])[1]}>` : runtimeFrom;
  const senderHash=crypto.createHash('sha256').update(sender).digest('hex');
  const hash=crypto.createHash('sha256').update(JSON.stringify(message)).digest('hex');
  const row=await db.$transaction(async tx=>{

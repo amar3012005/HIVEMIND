@@ -1344,6 +1344,8 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     try {
       try { await recoverPendingActivity(prisma); }
       catch { console.warn('[runtime-attention] pending recovery unavailable'); }
+      try { await (await import('./connectors/employee-event-routing.js')).flushEmployeeWakes(prisma); }
+      catch { console.warn('[employee-events] wake delivery unavailable'); }
       try {
         const { recoverBoundOpenDotLifecycles } = await import('./employees/open-dot-lifecycle-recovery.js');
         await recoverBoundOpenDotLifecycles(prisma);

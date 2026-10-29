@@ -56,7 +56,7 @@ async function visibleBoundEmployee(db, claims, employeeId, requestedDotId) {
   return { employeeId: employee.id, dotId: marker.dot_id };
 }
 
-async function postDot(path, payload, { env, fetchImpl = fetch } = {}) {
+export async function postDot(path, payload, { env, fetchImpl = fetch } = {}) {
   const token = env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
   if (typeof token !== 'string' || token.length < 32) lifecycleError('open_dot_runtime_bridge_unavailable', 503);
   let response;
@@ -137,4 +137,15 @@ export async function cancelOpenDotRuntime(db, claims, input, { env, fetchImpl }
   return postDot('cancel', { version: 1, organizationId: claims.org_id, userId: claims.sub,
     employeeId: binding.employeeId, dotId: binding.dotId, messageId: input.message_id,
     rootSessionId: input.root_session_id }, { env, fetchImpl });
+}
+
+/**
+ * Delivers one coalesced employee wake (routed connected-app events) to OpenDot over the same bearer-authenticated bridge
+ * that carries Runtime dispatches. OpenDot answers a replay of the same wake id with the saved receipt.
+ * @param {object} payload Wake: version 1, organizationId, userId, employeeId, dotId, wakeId, events[], omitted?.
+ * @param {{env?:object,fetchImpl?:Function}} [options] Environment and fetch for tests.
+ * @returns {Promise<object>} OpenDot's receipt.
+ */
+export async function dispatchOpenDotEvent(payload, { env = process.env, fetchImpl } = {}) {
+  return postDot('event', payload, { env, fetchImpl });
 }

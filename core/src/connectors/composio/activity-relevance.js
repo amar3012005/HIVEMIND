@@ -3,6 +3,8 @@ import { createOpenRouterJevProvider } from '../../agent/decision-gateway.js';
 import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-service.js';
 import { createWorkspaceNotification } from '../../workspace/notifications.js';
 import { createRuntimeAttentionBridge } from './runtime-attention-bridge.js';
+import { readRuntimeEnabled } from '../../organizations/runtime-setting.js';
+import { routeEventGuarded, routingConfig } from '../employee-event-routing.js';
 
 export const ACTIVITY_RELEVANCE_POLICY = 'company_activity_relevance_v3';
 const POLICY = ACTIVITY_RELEVANCE_POLICY;
@@ -89,6 +91,7 @@ export function classifyPendingActivity(ctx) {
   workers.set(key, worker);
   const job = (async () => {
     const db = ctx.prisma;
+    const routing = ctx.routingConfig || routingConfig();
     const membership = await db.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { isActive: true, role: true, deactivatedAt: true } });
     if (!membership?.isActive || membership.deactivatedAt || !['owner', 'admin'].includes(membership.role)) return;
     for (let batch = 0; batch < 8; batch++) {
@@ -106,12 +109,18 @@ export function classifyPendingActivity(ctx) {
         RETURNING *`, ctx.orgId, ctx.userId, allowedAccountIds, POLICY);
       if (!rows.length) return;
       for (const row of rows) {
-        const sub = await db.$queryRawUnsafe("SELECT toolkit,runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])", row.subscription_id, ctx.orgId, ctx.userId, allowedAccountIds);
+        const sub = await db.$queryRawUnsafe(`SELECT toolkit,${routing.enabled ? 'slug,subject,' : ''}runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])`, row.subscription_id, ctx.orgId, ctx.userId, allowedAccountIds);
         if (!sub.length) continue;
-        const bridge = ctx.runtimeAttention || createRuntimeAttentionBridge();
+        // With employee routing switched on, a company with Runtime switched off has no Chief of Staff to assess or receive events and takes the company relevance path.
+        // With it switched off nothing here differs from before.
+        const runtimeOn = routing.enabled ? await readRuntimeEnabled(db, ctx.orgId).catch(() => true) : true;
+        const bridge = runtimeOn ? (ctx.runtimeAttention || createRuntimeAttentionBridge()) : undefined;
+        // Routing runs once per event, after the decision: an approved event takes mentions and watches, any other event only an in-company @mention.
+        // It is started after the decision is stored and never awaited: it cannot fail or hold up intake (routeEventGuarded bounds and audits it).
+        const routeToEmployees = (mentionsOnly) => (ctx.employeeRouter || routeEventGuarded)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] }, { config: routing, ...(mentionsOnly ? { mentionsOnly: true } : {}) }).catch(() => {});
         if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
           && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
-          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); continue; }
+          try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); if (routing.enabled) void routeToEmployees(false); continue; }
           catch { /* Native revision and consent validation own whether reassessment is required. */ }
         }
         const optedIn = sub[0].runtime_attention === true && bridge && sub[0].runtime_attention_enabled_at
@@ -136,8 +145,11 @@ export function classifyPendingActivity(ctx) {
             // Outcome unknown stays pending for existing classifier reconciliation.
             // Native admission deduplication uses this exact persisted event identity.
             await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='pending',evaluated_at=now() WHERE id=$1", row.id);
+            if (routing.enabled) void routeToEmployees(true);
+            continue;
           }
         }
+        if (routing.enabled) void routeToEmployees(receipt.status !== 'approved');
       }
       if (rows.length < 6 && !worker.rerun) break;
     }

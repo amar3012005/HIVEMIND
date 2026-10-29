@@ -1,5 +1,6 @@
 import { requiredSecret } from '../security/brain-boundaries.js';
 import { triggerTool, runTriggers } from '../connectors/composio/hivemind-triggers.js';
+import { eventWatchTool, runEventWatch } from '../connectors/employee-event-watches.js';
 /**
  * Hosted MCP Service
  * "Context-as-a-Service" - Cloud-hosted MCP server for cross-platform AI memory
@@ -512,6 +513,7 @@ function generateToolsManifest(userId, orgId, options = {}) {
 
   const tools = [
     triggerTool,
+    eventWatchTool,
     {
       name: 'hyperagents_memory',
       description: `Read and write private Hyper Agents operating memory for the authenticated tenant. This is a separate lane from HIVE-MIND company memory: it is never included in hivemind_recall, company profiles, or the approval-gated company memory graph. Agents may save their own reusable learnings, decision notes, and handoffs without company-memory approval. Use action="recall" to retrieve notes from any agent in the tenant; optionally filter by agent_slug. Call recall with mode="brief" (optionally context and hints) before substantial work for a compact ranked overview across all kinds; fetch full content with recall by id or query. Team kinds: lesson (when/do/because/confidence), procedure (trigger/steps/check/source), progress (task_key upsert) and agenda (agenda_key upsert). Use action="confirm" with a lesson or procedure id when you verified it works; two confirmations promote it. Use action="save" only for durable agent operating knowledge, not transient user/company facts. Tenant and author identity come from the authenticated credential; never pass or infer org/user IDs. Supply a stable idempotency_key for retries.`,
@@ -2444,6 +2446,15 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
     const { getPrismaClient } = await import('../db/prisma.js');
     try { return formatToolContent(await runTriggers(args || {}, { userId, orgId, prisma: getPrismaClient() })); }
     catch (error) { return formatToolContent({ successful: false, error: error.status ? error.message : 'HIVEMIND Triggers is temporarily unavailable.' }); }
+  }
+
+  if (name === 'hyperagents_event_watch') {
+    const read = ['list', 'recent', 'brief'].includes(args?.operation);
+    const scopes = options.scopes || [];
+    if (!read && !isMaster && !scopes.some(scope => ['*', 'memory:write', 'memory.write'].includes(scope))) return formatToolContent({ successful: false, error: 'Full access is required to change event watches.' });
+    const { getPrismaClient } = await import('../db/prisma.js');
+    try { return formatToolContent(await runEventWatch(args || {}, { userId, orgId, prisma: getPrismaClient() })); }
+    catch (error) { return formatToolContent({ successful: false, error: error.status ? error.message : 'Event watches are temporarily unavailable.' }); }
   }
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

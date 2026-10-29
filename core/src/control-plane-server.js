@@ -1350,6 +1350,13 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
   setInterval(recoverAttention, 60000).unref();
 }
 
+// Parallel monitor events reach Runtime attention by polling; off unless PARALLEL_MONITOR_POLL_INTERVAL_MS is set.
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  import('./connectors/composio/parallel-monitor-poll.js')
+    .then(({ startParallelMonitorPoller }) => startParallelMonitorPoller({ prisma }))
+    .catch((error) => console.error('[parallel-monitors] not started:', error.message));
+}
+
 let hqScheduler = null;
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   startHqScheduler({ prisma })
@@ -8226,7 +8233,7 @@ const server = http.createServer(async (req, res) => {
     }
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
-    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectionSubject(orgId, { userId: current.session.userId }))
+    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectSubject(orgId, toolkitSlug, { userId: current.session.userId }))
       && !(await sessionManagesOrganization(current.session, orgId))) {
       return jsonResponse(res, { error: 'Only an organization owner or admin can connect a shared workspace app' }, 403);
     }
@@ -8277,7 +8284,7 @@ const server = http.createServer(async (req, res) => {
     const toolkitSlug = composioApiKeyMatch[1].toLowerCase();
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
-    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectionSubject(orgId, { userId: current.session.userId }))
+    if (composioService.isOrganizationSubject(orgId, composioService.composioConnectSubject(orgId, toolkitSlug, { userId: current.session.userId }))
       && !(await sessionManagesOrganization(current.session, orgId))) {
       return jsonResponse(res, { error: 'Only an organization owner or admin can connect a shared workspace app' }, 403);
     }
@@ -10452,6 +10459,11 @@ const server = http.createServer(async (req, res) => {
   // for Open Dot. Identity is derived from the persisted API key and active
   // organization membership; caller-supplied identity fields are rejected.
   // This endpoint deliberately has no connection-management or write action.
+  // Per toolkit, every Composio call uses the subject holding its ACTIVE account
+  // (personal first, newest if both; EXPIRED ignored; see chooseToolkitSubjects).
+  // WRITES STAY OUT OF HERE: prepare_write only stores an approval draft (or a
+  // provider-side draft for draft-only tools); it never sends. Employee writes run
+  // through Runtime's relay under the company's autonomy. Do not add an execute_write.
   if (pathname === '/v1/service/connected-apps/tasks' && req.method === 'POST') {
     const privateHeaders = { 'Cache-Control': 'private, no-store', Pragma: 'no-cache' };
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503, privateHeaders);
@@ -10499,14 +10511,22 @@ const server = http.createServer(async (req, res) => {
 
       if (action === 'connection_status') {
         const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
-        const connections = (accounts || []).map((row) => ({
-          toolkit: row.toolkit, status: row.status, updatedAt: row.updatedAt || null, source: 'composio',
-        }));
+        // One row per toolkit, from the subject that holds its ACTIVE account (personal first,
+        // newest when both are active). Toolkits that only have EXPIRED/FAILED accounts are "reconnect".
+        const chosen = composioService.chooseToolkitSubjects(principal.orgId, accounts);
+        const connections = [...chosen.values()].map((row) => row.state === 'active'
+          ? { toolkit: row.toolkit, status: 'ACTIVE', state: 'connected', origin: row.origin, updatedAt: row.updatedAt || null, source: 'composio' }
+          : { toolkit: row.toolkit, status: 'EXPIRED', state: 'reconnect', action: 'reconnect', updatedAt: null, source: 'composio' });
         const nangoGmail = await prisma.nangoConnection?.findFirst({
           where: { userId: principal.userId, orgId: principal.orgId, providerKey: 'gmail', status: 'active' },
           select: { connectedAt: true },
         });
-        if (nangoGmail) connections.push({ toolkit: 'gmail', status: 'ACTIVE', updatedAt: nangoGmail.connectedAt || null, source: 'nango-native-gmail' });
+        if (nangoGmail) {
+          const at = connections.findIndex((row) => row.toolkit === 'gmail');
+          const native = { toolkit: 'gmail', status: 'ACTIVE', state: 'connected', origin: 'personal', updatedAt: nangoGmail.connectedAt || null, source: 'nango-native-gmail' };
+          if (at < 0) connections.push(native);
+          else if (connections[at].state !== 'connected') connections[at] = native;
+        }
         const filteredConnections = connections.filter((row) => !toolkit || String(row.toolkit || '').toLowerCase() === toolkit);
         const cursor = typeof body.cursor === 'string' && body.cursor.length <= 512 ? body.cursor : null;
         const catalog = await composioService.listToolkits({
@@ -10518,15 +10538,19 @@ const server = http.createServer(async (req, res) => {
           const account = accountByToolkit.get(String(item.slug || '').toLowerCase());
           const status = account ? String(account.status) : 'AVAILABLE';
           return { toolkit: item.slug, name: item.name, status, source: account?.source || 'composio',
+            ...(account?.state === 'reconnect' ? { state: 'reconnect', action: 'reconnect' } : {}),
             connected: status.toUpperCase() === 'ACTIVE', noAuth: item.noAuth === true };
         });
         if (nangoGmail && (!toolkit || toolkit === 'gmail')) {
-          catalogRows.push({ toolkit: 'gmail', name: 'Gmail', status: 'ACTIVE', source: 'nango-native-gmail', connected: true, noAuth: false });
+          const row = catalogRows.find((entry) => String(entry.toolkit).toLowerCase() === 'gmail');
+          if (row) Object.assign(row, { status: 'ACTIVE', source: 'nango-native-gmail', connected: true, state: undefined, action: undefined });
+          else catalogRows.push({ toolkit: 'gmail', name: 'Gmail', status: 'ACTIVE', source: 'nango-native-gmail', connected: true, noAuth: false });
         }
         return jsonResponse(res, {
           ok: true, action, connections: filteredConnections,
           catalog: catalogRows, nextCursor: catalog.nextCursor || null, totalItems: catalog.totalItems || 0,
           activeToolkits: [...new Set(filteredConnections.filter((row) => String(row.status).toUpperCase() === 'ACTIVE').map((row) => String(row.toolkit).toLowerCase()))],
+          reconnectToolkits: filteredConnections.filter((row) => row.state === 'reconnect').map((row) => String(row.toolkit).toLowerCase()),
           authority: 'user-scoped-connected-apps',
           scope: { org_id: principal.orgId, user_id: principal.userId, authority: 'server-derived-from-api-key' },
         }, 200, privateHeaders);
@@ -10536,8 +10560,9 @@ const server = http.createServer(async (req, res) => {
         const useCase = String(body.use_case || '').trim().slice(0, 1200);
         if (!useCase) return jsonResponse(res, { error: 'use_case is required' }, 400, privateHeaders);
         const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
-        const active = (accounts || []).some((row) => String(row.toolkit || '').toLowerCase() === toolkit
-          && String(row.status || '').toUpperCase() === 'ACTIVE');
+        // The Composio session below is bound to the subject chosen for this toolkit
+        // (see getToolRouterSession), so search, schemas and reads share one subject.
+        const active = composioService.chooseToolkitSubjects(principal.orgId, accounts).get(toolkit)?.state === 'active';
         const nativeTools = [];
         if (toolkit === 'gmail') {
           const nangoGmail = await prisma.nangoConnection?.findFirst({

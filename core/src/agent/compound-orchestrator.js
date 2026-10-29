@@ -1241,6 +1241,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     return {
       getToolkitTools: m.getToolkitTools,
       executeTool: m.executeTool,
+      executeToolForUser: m.executeToolForUser,
       generateToolInputs: m.generateToolInputs,
       discoverSessionTools: m.discoverSessionTools,
       executeSessionTool: m.executeSessionTool,
@@ -1423,6 +1424,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       if (typeof composioSvc.createConnectLink === 'function') {
         try {
           const link = await composioSvc.createConnectLink(composioToolkit, ctx.orgId, {
+            userId: ctx.userId || undefined,
             callbackUrl: ctx.composioCallbackUrl || undefined,
             toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
           });
@@ -1609,10 +1611,14 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
             status: 'fallback',
             summary: `Composio Session unavailable; using rapid connector fallback: ${sessionExecutionError.message}`,
           });
-          return composioSvc.executeTool(_orgId, slug, toolArgs);
+          return ctx?.userId && typeof composioSvc.executeToolForUser === 'function'
+            ? composioSvc.executeToolForUser(_orgId, ctx.userId, slug, toolArgs)
+            : composioSvc.executeTool(_orgId, slug, toolArgs);
         }
       }
-    : composioSvc.executeTool;
+    : (ctx?.userId && typeof composioSvc.executeToolForUser === 'function'
+      ? (_orgId, slug, toolArgs) => composioSvc.executeToolForUser(_orgId, ctx.userId, slug, toolArgs)
+      : composioSvc.executeTool);
   const orgId = ctx?.orgId;
   if (!orgId || !composioSlug) {
     emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'no composio connection' });

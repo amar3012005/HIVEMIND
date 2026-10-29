@@ -147,5 +147,7 @@ export async function cancelOpenDotRuntime(db, claims, input, { env, fetchImpl }
  * @returns {Promise<object>} OpenDot's receipt.
  */
 export async function dispatchOpenDotEvent(payload, { env = process.env, fetchImpl } = {}) {
-  return postDot('event', payload, { env, fetchImpl });
+  // Core holds an event-only secret that opens OpenDot's event route and no other Runtime route.
+  const token = env.OPEN_DOT_EVENT_BRIDGE_TOKEN || env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
+  return postDot('event', payload, { env: { ...env, OPEN_DOT_RUNTIME_BRIDGE_TOKEN: token }, fetchImpl });
 }

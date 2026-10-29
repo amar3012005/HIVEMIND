@@ -1,7 +1,14 @@
 // A private, chronological HIVEMIND project lane for Hyper Agents. It is never
 // queried through /api/recall or promoted into the company memory graph.
 export const OPERATING_MEMORY_PROJECT = 'hyper-agents';
-export const OPERATING_MEMORY_KINDS = Object.freeze(['learning', 'decision_note', 'handoff', 'task_status', 'trigger_status', 'user_agenda', 'uncertainty']);
+import {
+  TEAM_KINDS, KEYED_KINDS, CONFIRMABLE_KINDS, PROMOTION_THRESHOLD, MAX_CONFIRMATIONS, TEAM_CONTEXT_MAX_CHARS,
+  BRIEF_DEFAULT_LIMIT, normalizeTeamFields, assertNoForeignTeamFields, deriveIdempotencyKey,
+  publicConfirmations, publicTeamContext, tokenize, buildBrief,
+} from './team-memory.js';
+
+export const OPERATING_MEMORY_KINDS = Object.freeze(['learning', 'decision_note', 'handoff', 'task_status', 'trigger_status', 'user_agenda', 'uncertainty', ...TEAM_KINDS]);
+const AGENT_KINDS = Object.freeze(['learning', 'decision_note', 'handoff', ...TEAM_KINDS]);
 export const RUNTIME_MEMORY_KINDS = Object.freeze(['user_agenda', 'uncertainty']);
 const STATUSES = new Set(['recorded', 'active', 'completed', 'incomplete', 'errored', 'paused']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -11,13 +18,19 @@ const SLUG = /^[a-z0-9][a-z0-9-]{0,119}$/;
 export function validateOperatingMemory(input, { orgId, userId, source = 'agent' } = {}) {
   if (!UUID.test(String(orgId || '')) || !UUID.test(String(userId || ''))) throw new Error('invalid_identity');
   const kind = String(input?.kind || '');
-  const status = String(input?.status || 'recorded');
+  const isTeam = TEAM_KINDS.includes(kind);
+  // For `agenda`, the request's `status` is the agenda status (in context); the row stays `recorded`.
+  const status = isTeam ? 'recorded' : String(input?.status || 'recorded');
   const agentSlug = String(input?.agent_slug || '').trim();
-  const title = String(input?.title || '').trim();
-  const summary = String(input?.summary || '').trim();
-  const idempotencyKey = String(input?.idempotency_key || '').trim();
   if (!OPERATING_MEMORY_KINDS.includes(kind) || !STATUSES.has(status)) throw new Error('invalid_memory_type_or_status');
-  if (source === 'agent' && !['learning', 'decision_note', 'handoff'].includes(kind)) throw new Error('runtime_receipt_required');
+  let team = null;
+  if (isTeam) team = normalizeTeamFields(kind, input);
+  else assertNoForeignTeamFields(kind, input);
+  const title = String(input?.title || team?.title || '').trim();
+  const summary = String(input?.summary || team?.summary || '').trim();
+  const suppliedKey = String(input?.idempotency_key || '').trim();
+  const idempotencyKey = suppliedKey || (team ? deriveIdempotencyKey(kind, agentSlug, team.fields) : '');
+  if (source === 'agent' && !AGENT_KINDS.includes(kind)) throw new Error('runtime_receipt_required');
   if (source === 'agent' && status !== 'recorded') throw new Error('runtime_status_required');
   if (RUNTIME_MEMORY_KINDS.includes(kind) && (source !== 'runtime' || agentSlug !== 'runtime')) throw new Error('runtime_memory_required');
   if (!SLUG.test(agentSlug)) throw new Error('invalid_agent_slug');
@@ -32,11 +45,13 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
     }
   }
   if ((kind === 'task_status' && !ids.run_id) || (kind === 'trigger_status' && !ids.trigger_id)) throw new Error('receipt_reference_required');
-  const context = input?.context && typeof input.context === 'object' && !Array.isArray(input.context) ? { ...input.context } : {};
+  const context = team ? { ...team.fields }
+    : input?.context && typeof input.context === 'object' && !Array.isArray(input.context) ? { ...input.context } : {};
   const supersedesId = input?.supersedes_id == null ? null : String(input.supersedes_id);
   if (Object.hasOwn(context, 'supersedesId')) throw new Error('reserved_memory_context_key');
   if (supersedesId && !UUID.test(supersedesId)) throw new Error('invalid_supersedes_id');
-  if (supersedesId && !['learning', 'decision_note', 'handoff', ...RUNTIME_MEMORY_KINDS].includes(kind)) throw new Error('invalid_supersession_kind');
+  // progress and agenda replace their predecessor by key; the server links it.
+  if (supersedesId && !['learning', 'decision_note', 'handoff', 'lesson', 'procedure', ...RUNTIME_MEMORY_KINDS].includes(kind)) throw new Error('invalid_supersession_kind');
   if (RUNTIME_MEMORY_KINDS.includes(kind)) {
     const permitted = new Set(['sessionId', 'state', 'priority', 'evidence', 'impact', 'confirmationRef', 'agendaKey']);
     if (Object.keys(context).some(key => !permitted.has(key))) throw new Error('invalid_runtime_memory_metadata');
@@ -57,8 +72,8 @@ export function validateOperatingMemory(input, { orgId, userId, source = 'agent'
     if (context.state !== (kind === 'user_agenda' ? 'confirmed' : 'open') && !supersedesId) throw new Error('invalid_runtime_memory_resolution');
   }
   if (supersedesId) context.supersedesId = supersedesId;
-  if (JSON.stringify(context).length > 4000) throw new Error('memory_context_too_large');
-  return { orgId, userId, kind, status, agentSlug, title, summary, idempotencyKey, context, ...ids };
+  if (JSON.stringify(context).length > (team ? TEAM_CONTEXT_MAX_CHARS : 4000)) throw new Error('memory_context_too_large');
+  return { orgId, userId, kind, status, agentSlug, title, summary, idempotencyKey, context, teamKey: team?.key, keyDerived: Boolean(team && !suppliedKey), ...ids };
 }
 
 export function validateOperatingMemoryFilter(input) {
@@ -70,23 +85,40 @@ export function validateOperatingMemoryFilter(input) {
   const roomId = input?.room_id == null ? null : String(input.room_id);
   const runId = input?.run_id == null ? null : String(input.run_id);
   const query = input?.query == null ? null : String(input.query).trim();
+  const mode = input?.mode == null ? null : String(input.mode);
+  if (mode && !['brief', 'full'].includes(mode)) throw new Error('invalid_recall_mode');
+  const context = input?.context == null ? null : input.context;
+  if (context != null && (typeof context !== 'string' || context.length > 2000)) throw new Error('invalid_recall_context');
+  const hints = input?.hints == null ? [] : input.hints;
+  if (!Array.isArray(hints) || hints.length > 8 || hints.some(hint => typeof hint !== 'string' || !hint.trim() || hint.length > 80)) throw new Error('invalid_recall_hints');
+  if (input?.promoted != null && typeof input.promoted !== 'boolean') throw new Error('invalid_promoted');
+  const id = input?.id == null ? null : String(input.id);
+  if (id && !UUID.test(id)) throw new Error('invalid_memory_id');
   if (kind && !OPERATING_MEMORY_KINDS.includes(kind)) throw new Error('invalid_memory_type');
   if (agentSlug && !SLUG.test(agentSlug)) throw new Error('invalid_agent_slug');
   if (status && !STATUSES.has(status)) throw new Error('invalid_memory_status');
   if (roomId && !UUID.test(roomId)) throw new Error('invalid_room_id');
   if (runId && !RUN_ID.test(runId)) throw new Error('invalid_run_id');
   if (query && query.length > 500) throw new Error('invalid_query');
-  const limit = Number(input?.limit ?? 10);
+  // A bare recall (no targeting filter) is the compact brief; any legacy filter keeps the full listing.
+  const targeted = [kind, status, roomId, runId, query, state, id, agentSlug].some(Boolean);
+  const brief = mode === 'brief' || (mode == null && !targeted);
+  if (brief && [kind, status, roomId, runId, state, id].some(Boolean)) throw new Error('invalid_brief_filter');
+  const limit = Number(input?.limit ?? (brief ? BRIEF_DEFAULT_LIMIT : 10));
   if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('invalid_limit');
-  return { kind, agentSlug, status, roomId, runId, query, limit, state };
+  const promoted = input?.promoted === true;
+  return { kind, agentSlug, status, roomId, runId, query, limit, state, brief, context, hints: hints.map(hint => hint.trim()), promoted, id };
 }
 
 function publicRecord(row) {
+  const team = TEAM_KINDS.includes(row.kind);
   return {
     id: row.id, project: OPERATING_MEMORY_PROJECT, kind: row.kind, status: row.status,
     agentSlug: row.agent_slug, title: row.title, summary: row.summary,
     roomId: row.room_id, runId: row.run_id, triggerId: row.trigger_id,
-    context: row.context, supersedesId: row.context?.supersedesId || null, createdAt: row.created_at,
+    context: team ? publicTeamContext(row.context) : row.context, supersedesId: row.context?.supersedesId || null, createdAt: row.created_at,
+    ...(team ? { updatedAt: row.created_at } : {}),
+    ...(CONFIRMABLE_KINDS.includes(row.kind) ? { promoted: row.context?.promoted === true, confirmedBy: publicConfirmations(row.context) } : {}),
   };
 }
 
@@ -95,7 +127,7 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
   // resolved question or superseded user direction. Replay keeps its receipt.
   // A supersession is compare-and-set against the replaced head: serialize it
   // so two agents cannot both replace the same memory and fork its history.
-  if ((RUNTIME_MEMORY_KINDS.includes(input?.kind) || input?.supersedes_id != null) && !options.runtimeTransaction) {
+  if ((RUNTIME_MEMORY_KINDS.includes(input?.kind) || KEYED_KINDS.includes(input?.kind) || input?.supersedes_id != null) && !options.runtimeTransaction) {
     return prisma.$transaction(tx => saveOperatingMemory(tx, input, identity, { ...options, runtimeTransaction: true }));
   }
   const row = validateOperatingMemory(input, { ...identity, source: options.source || 'agent' });
@@ -114,14 +146,35 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
     if (current.some(prior => prior.idempotency_key !== row.idempotencyKey && prior.id !== row.context.supersedesId)) throw new Error('agenda_supersession_required');
   }
 
+  if (KEYED_KINDS.includes(row.kind)) {
+    // Upsert by key: serialize writers, replay an identical retry, and link the
+    // current head so the newest revision replaces it (history is kept).
+    const keyField = row.kind === 'progress' ? 'task_key' : 'agenda_key';
+    await prisma.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', `${row.orgId}:${row.kind}:${row.teamKey}`);
+    const head = await prisma.$queryRawUnsafe(`
+      SELECT m.id FROM hivemind.hyper_agent_operating_memories m
+      WHERE m.org_id = $1::uuid AND m.project_slug = 'hyper-agents' AND m.kind = $2 AND m.context->>'${keyField}' = $3
+        AND NOT EXISTS (SELECT 1 FROM hivemind.hyper_agent_operating_memories successor
+          WHERE successor.org_id = m.org_id AND successor.context->>'supersedesId' = m.id::text)
+      ORDER BY m.created_at DESC, m.id DESC LIMIT 1 FOR UPDATE`, row.orgId, row.kind, row.teamKey);
+    const replay = (await prisma.$queryRawUnsafe(`
+      SELECT * FROM hivemind.hyper_agent_operating_memories WHERE org_id = $1::uuid AND idempotency_key = $2 LIMIT 1`, row.orgId, row.idempotencyKey))[0];
+    if (replay) {
+      if (replay.kind !== row.kind || replay.agent_slug !== row.agentSlug || replay.summary !== row.summary) throw new Error('memory_idempotency_conflict');
+      // A content-derived key that matches an older revision is a new revision (A, B, A again), not a retry.
+      if (!row.keyDerived || replay.id === head[0]?.id) return { ok: true, replayed: true, memory: publicRecord(replay) };
+      row.idempotencyKey = `${row.idempotencyKey}:r${Date.now().toString(36)}`;
+    }
+    if (head.length) row.context.supersedesId = head[0].id;
+  }
   if (row.context.supersedesId) {
     const prior = await prisma.$queryRawUnsafe(`
       SELECT id FROM hivemind.hyper_agent_operating_memories
       WHERE id = $1::uuid AND org_id = $2::uuid AND project_slug = 'hyper-agents'
-        AND kind = $3 AND agent_slug = $4
+        AND kind = $3 AND ($4::text IS NULL OR agent_slug = $4)
         AND ($5::uuid IS NULL OR author_user_id = $5::uuid)
         AND ($6::text IS NULL OR context->>'sessionId'=$6) LIMIT 1 FOR UPDATE`,
-    row.context.supersedesId, row.orgId, row.kind, row.agentSlug, RUNTIME_MEMORY_KINDS.includes(row.kind) && !options.runtimeSessionId ? row.userId : null, options.runtimeSessionId || null);
+    row.context.supersedesId, row.orgId, row.kind, TEAM_KINDS.includes(row.kind) ? null : row.agentSlug, RUNTIME_MEMORY_KINDS.includes(row.kind) && !options.runtimeSessionId ? row.userId : null, options.runtimeSessionId || null);
     if (!prior.length) throw new Error('superseded_memory_unavailable');
     const successors = await prisma.$queryRawUnsafe(`SELECT id FROM hivemind.hyper_agent_operating_memories
       WHERE org_id=$1::uuid AND context->>'supersedesId'=$2 AND idempotency_key<>$3 LIMIT 1`,
@@ -166,9 +219,86 @@ export async function saveOperatingMemory(prisma, input, identity, options = {})
   return { ok: true, replayed: !created.length, memory: publicRecord(persisted) };
 }
 
+const PROMOTED_CLAUSE = `(m.kind IN ('lesson', 'procedure') AND m.context->>'promoted' = 'true')`;
+const RECALL_COLUMNS = 'm.id, m.kind, m.status, m.agent_slug, m.title, m.summary, m.room_id, m.run_id, m.trigger_id, m.context, m.created_at';
+const SUPERSEDED_EXISTS = `EXISTS (
+    SELECT 1 FROM hivemind.hyper_agent_operating_memories successor
+    WHERE successor.org_id = m.org_id AND successor.project_slug = 'hyper-agents'
+      AND successor.context->>'supersedesId' = m.id::text)`;
+const NOT_SUPERSEDED = `NOT ${SUPERSEDED_EXISTS}`;
+
+// Compact ranked brief across every shared kind. Runtime-private kinds are never included.
+async function briefOperatingMemory(prisma, orgId, filter) {
+  const clauses = ['m.org_id = $1::uuid', "m.project_slug = 'hyper-agents'", NOT_SUPERSEDED, "m.kind NOT IN ('user_agenda', 'uncertainty')"];
+  if (filter.promoted) clauses.push(PROMOTED_CLAUSE);
+  const where = clauses.join(' AND ');
+  const contextText = [filter.context, filter.query].filter(Boolean).join(' ');
+  const recent = await prisma.$queryRawUnsafe(`
+    SELECT ${RECALL_COLUMNS} FROM hivemind.hyper_agent_operating_memories m
+    WHERE ${where} ORDER BY m.created_at DESC, m.id DESC LIMIT 200`, orgId);
+  const terms = [...new Set([...tokenize(contextText), ...filter.hints.flatMap(tokenize)])].slice(0, 16);
+  let related = [];
+  if (terms.length) {
+    related = await prisma.$queryRawUnsafe(`
+      SELECT ${RECALL_COLUMNS} FROM hivemind.hyper_agent_operating_memories m
+      WHERE ${where} AND to_tsvector('simple', m.title || ' ' || m.summary) @@ to_tsquery('simple', $2)
+      ORDER BY ts_rank(to_tsvector('simple', m.title || ' ' || m.summary), to_tsquery('simple', $2)) DESC, m.created_at DESC LIMIT 100`,
+    orgId, terms.join(' | '));
+  }
+  const rows = [...new Map([...recent, ...related].map(row => [row.id, row])).values()];
+  const { items, truncated } = buildBrief(rows, { context: contextText, hints: filter.hints, agentSlug: filter.agentSlug, limit: filter.limit });
+  return { ok: true, project: OPERATING_MEMORY_PROJECT, mode: 'brief', count: items.length, truncated, items };
+}
+
+/**
+ * Record an employee's confirmation of a lesson or procedure. Two confirmations
+ * promote it. Authorship is bound to the authenticated principal; the employee
+ * slug is recorded as supplied, like on save.
+ * @param {object} prisma Prisma client or transaction.
+ * @param {{ id: string, agent_slug: string, idempotency_key?: string }} input
+ * @param {{ orgId: string, userId: string }} identity Server-bound identity.
+ * @returns {Promise<{ ok: true, replayed: boolean, promoted: boolean, confirmations: number, memory: object }>}
+ */
+export async function confirmOperatingMemory(prisma, input, identity, options = {}) {
+  if (!options.transaction) return prisma.$transaction(tx => confirmOperatingMemory(tx, input, identity, { ...options, transaction: true }));
+  const { orgId, userId } = identity;
+  if (!UUID.test(String(orgId || '')) || !UUID.test(String(userId || ''))) throw new Error('invalid_identity');
+  const id = String(input?.id || '');
+  const agentSlug = String(input?.agent_slug || '').trim();
+  const key = input?.idempotency_key == null ? null : String(input.idempotency_key).trim();
+  if (!UUID.test(id)) throw new Error('invalid_memory_id');
+  if (!SLUG.test(agentSlug)) throw new Error('invalid_agent_slug');
+  if (key !== null && (!key || key.length > 200)) throw new Error('invalid_idempotency_key');
+  const rows = await prisma.$queryRawUnsafe(`
+    SELECT m.*, ${SUPERSEDED_EXISTS} AS superseded
+    FROM hivemind.hyper_agent_operating_memories m
+    WHERE m.id = $1::uuid AND m.org_id = $2::uuid AND m.project_slug = 'hyper-agents' LIMIT 1 FOR UPDATE OF m`, id, orgId);
+  const row = rows[0];
+  if (!row || RUNTIME_MEMORY_KINDS.includes(row.kind)) { const error = new Error('memory_not_found'); error.status = 404; throw error; }
+  if (!CONFIRMABLE_KINDS.includes(row.kind)) throw new Error('invalid_confirm_kind');
+  if (row.superseded) throw new Error('superseded_memory_unavailable');
+  const context = { ...(row.context || {}) };
+  const confirmations = Array.isArray(context.confirmations) ? [...context.confirmations] : [];
+  const replayed = key !== null && confirmations.some(entry => entry.key === key);
+  if (!replayed) {
+    confirmations.push({ agent_slug: agentSlug, user_id: userId, at: new Date().toISOString(), ...(key !== null ? { key } : {}) });
+    context.confirmations = confirmations.slice(-MAX_CONFIRMATIONS);
+    if (context.promoted !== true && confirmations.length >= PROMOTION_THRESHOLD) {
+      context.promoted = true;
+      context.promoted_at = new Date().toISOString();
+    }
+    const updated = await prisma.$queryRawUnsafe(`
+      UPDATE hivemind.hyper_agent_operating_memories SET context = $1::jsonb
+      WHERE id = $2::uuid AND org_id = $3::uuid RETURNING *`, JSON.stringify(context), id, orgId);
+    row.context = updated[0]?.context ?? context;
+  }
+  return { ok: true, replayed, promoted: row.context.promoted === true, confirmations: (row.context.confirmations || []).length, memory: publicRecord(row) };
+}
+
 export async function recallOperatingMemory(prisma, orgId, input = {}, options = {}) {
   if (!UUID.test(String(orgId || ''))) throw new Error('invalid_identity');
   const filter = validateOperatingMemoryFilter(input);
+  if (filter.brief) return briefOperatingMemory(prisma, orgId, filter);
   if ((RUNTIME_MEMORY_KINDS.includes(filter.kind) || filter.state) && !options.runtimeUserId) throw new Error('runtime_memory_required');
   const clauses = ['m.org_id = $1::uuid', "m.project_slug = 'hyper-agents'", `NOT EXISTS (
     SELECT 1 FROM hivemind.hyper_agent_operating_memories successor
@@ -188,6 +318,8 @@ export async function recallOperatingMemory(prisma, orgId, input = {}, options =
     }
   }
   if (filter.state) { args.push(filter.state); clauses.push(`m.context->>'state' = $${args.length}`); }
+  if (filter.id) { args.push(filter.id); clauses.push(`m.id = $${args.length}::uuid`); }
+  if (filter.promoted) clauses.push(PROMOTED_CLAUSE);
   for (const [column, value, cast] of [
     ['kind', filter.kind, ''], ['agent_slug', filter.agentSlug, ''], ['status', filter.status, ''],
     ['room_id', filter.roomId, '::uuid'], ['run_id', filter.runId, ''],
@@ -209,7 +341,7 @@ export async function recallOperatingMemory(prisma, orgId, input = {}, options =
   }
   args.push(filter.limit);
   const rows = await prisma.$queryRawUnsafe(`
-    SELECT m.id, m.kind, m.status, m.agent_slug, m.title, m.summary, m.room_id, m.run_id, m.trigger_id, m.context, m.created_at
+    SELECT ${RECALL_COLUMNS}
     FROM hivemind.hyper_agent_operating_memories m
     WHERE ${clauses.join(' AND ')}
     ORDER BY ${filter.kind === 'uncertainty' ? "(m.context->>'priority')::integer DESC, " : ''}${ranking}m.created_at DESC, m.id DESC LIMIT $${args.length}`, ...args);

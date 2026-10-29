@@ -111,6 +111,128 @@ export function isOrganizationSubject(orgId, subject) {
 }
 
 /**
+ * Toolkits that policy shares across the whole organization. Every other
+ * toolkit connects to the person's own subject. Set
+ * `COMPOSIO_ORG_SHARED_TOOLKITS` to a comma-separated list of toolkit slugs;
+ * the default is empty, so no toolkit is organization-shared.
+ *
+ * @returns {Set<string>} lower-case toolkit slugs
+ */
+export function organizationSharedToolkits() {
+  return new Set(String(process.env.COMPOSIO_ORG_SHARED_TOOLKITS || '')
+    .split(',').map((slug) => slug.trim().toLowerCase()).filter(Boolean));
+}
+
+/**
+ * The one subject a NEW connection for this toolkit is created under.
+ * A signed-in user's connection is personal (`hivemind:<userId>`, the subject
+ * the Runtime and Core read first) unless policy shares the toolkit with the
+ * organization. It does not depend on COMPOSIO_GOVERNED_CONNECTION_SCOPE,
+ * which affects only how existing accounts are looked up. A call without a
+ * user (legacy server-side caller) can only own an organization connection.
+ *
+ * @param {string} orgId organization id
+ * @param {string} toolkitSlug toolkit being connected
+ * @param {{ userId?: string|null }} [opts]
+ * @returns {string} Composio user_id for the new connected account
+ */
+export function composioConnectSubject(orgId, toolkitSlug, { userId = null } = {}) {
+  if (!userId || organizationSharedToolkits().has(String(toolkitSlug || '').toLowerCase())) return String(orgId || '');
+  return `hivemind:${userId}`;
+}
+
+const accountTime = (row) => Date.parse(row?.updatedAt || row?.createdAt || '') || 0;
+
+/**
+ * For each toolkit, the subject whose ACTIVE account Core should use.
+ * Personal subjects (`hivemind:<userId>`, `<orgId>:<userId>`) win; when the
+ * organization subject also holds an ACTIVE account, the most recently updated
+ * origin wins and a tie goes to the personal one. EXPIRED/FAILED accounts never
+ * win; a toolkit with only those is `reconnect`. This mirrors the Runtime rule.
+ *
+ * @param {string} orgId organization id
+ * @param {Array<{ id, toolkit, status, subject, updatedAt?, createdAt? }>} accounts rows from {@link listConnectedAccounts}
+ * @returns {Map<string, { toolkit: string, state: 'active'|'reconnect', origin?: 'personal'|'organization',
+ *   subject?: string, accountId?: string, updatedAt?: string|null }>}
+ */
+export function chooseToolkitSubjects(orgId, accounts = []) {
+  const per = new Map();
+  for (const row of Array.isArray(accounts) ? accounts : []) {
+    const toolkit = String(row?.toolkit || '').toLowerCase();
+    if (!toolkit) continue;
+    const entry = per.get(toolkit) || { active: {}, dead: false };
+    const status = String(row.status || '').toUpperCase();
+    if (status === 'ACTIVE') {
+      const origin = isOrganizationSubject(orgId, row.subject) ? 'organization' : 'personal';
+      if (!entry.active[origin] || accountTime(row) > accountTime(entry.active[origin])) entry.active[origin] = row;
+    } else if (status === 'EXPIRED' || status === 'FAILED') entry.dead = true;
+    per.set(toolkit, entry);
+  }
+  const chosen = new Map();
+  for (const [toolkit, { active, dead }] of per) {
+    const { personal, organization } = active;
+    if (!personal && !organization) {
+      if (dead) chosen.set(toolkit, { toolkit, state: 'reconnect' });
+      continue;
+    }
+    const origin = personal && (!organization || accountTime(personal) >= accountTime(organization)) ? 'personal' : 'organization';
+    const row = origin === 'personal' ? personal : organization;
+    chosen.set(toolkit, { toolkit, state: 'active', origin, subject: row.subject, accountId: row.id,
+      updatedAt: row.updatedAt || row.createdAt || null });
+  }
+  return chosen;
+}
+
+const SUBJECT_CHOICE_TTL_MS = 15_000;
+const SUBJECT_CHOICE_CACHE = new Map();
+
+/**
+ * Chosen subject per toolkit for one user, from a fresh (15 s cached) account listing.
+ *
+ * @param {string} orgId organization id
+ * @param {string} userId authenticated user id
+ * @returns {Promise<Map<string, object>>} see {@link chooseToolkitSubjects}
+ */
+export async function resolveToolkitSubjects(orgId, userId) {
+  const key = `${orgId}:${userId}`;
+  const hit = SUBJECT_CHOICE_CACHE.get(key);
+  if (hit && Date.now() - hit.at < SUBJECT_CHOICE_TTL_MS) return hit.value;
+  const value = chooseToolkitSubjects(orgId, await listConnectedAccounts(orgId, { userId }));
+  SUBJECT_CHOICE_CACHE.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** Toolkit that owns a tool slug: the longest known toolkit whose upper-case slug prefixes it. */
+function toolkitOfToolSlug(toolSlug, toolkits) {
+  const upper = String(toolSlug || '').toUpperCase();
+  return [...toolkits]
+    .filter((toolkit) => upper.startsWith(`${toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase()}_`))
+    .sort((a, b) => b.length - a.length)[0] || null;
+}
+
+/**
+ * Execute a tool for a user under the subject that holds that toolkit's ACTIVE
+ * account (personal first, newest on a tie of both). If the account listing
+ * fails or the toolkit has no ACTIVE account, the personal subject is used, so
+ * a failed lookup never widens to the organization subject.
+ *
+ * @param {string} orgId organization id
+ * @param {string} userId authenticated user id
+ * @param {string} toolSlug Composio tool slug
+ * @param {object} [args] tool arguments
+ * @returns {Promise<{ successful: boolean, data: any, error: string|null }>}
+ */
+export async function executeToolForUser(orgId, userId, toolSlug, args = {}) {
+  let subject = null;
+  try {
+    const chosen = await resolveToolkitSubjects(orgId, userId);
+    const toolkit = toolkitOfToolSlug(toolSlug, chosen.keys());
+    subject = (toolkit && chosen.get(toolkit)?.subject) || null;
+  } catch { /* listing unavailable: the personal subject below is the safe default */ }
+  return executeTool(orgId, toolSlug, args, { subject: subject || `hivemind:${userId}` });
+}
+
+/**
  * Delete the connected accounts of one owner for one toolkit (disconnect).
  * Organization-wide accounts are removed only when the caller passes
  * `allowOrganizationAccount: true` (an organization owner or admin); a member
@@ -146,6 +268,7 @@ export async function disconnectToolkit(orgId, toolkitSlug, opts = {}) {
     }
   }
   TOOL_ROUTER_SESSION_CACHE.clear();
+  SUBJECT_CHOICE_CACHE.clear();
   TOOL_ROUTER_DISCOVERY_CACHE.clear();
   return removed;
 }
@@ -320,7 +443,7 @@ export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
   }
   const body = {
     auth_config_id: authConfigId,
-    user_id: composioConnectionSubject(orgId, opts),
+    user_id: composioConnectSubject(orgId, toolkitSlug, opts),
     ...(opts.callbackUrl ? { callback_url: opts.callbackUrl } : {}),
   };
   const data = await composioPost('/api/v3/connected_accounts/link', body);
@@ -495,21 +618,28 @@ export async function getToolRouterSession(orgId, toolkits, {
     }
   }
   const accounts = await listConnectedAccounts(orgId, { userId, connectionScope });
+  const chosenSubjects = chooseToolkitSubjects(orgId, accounts);
   const connectedAccounts = {};
   const selectedSubjects = new Set();
   for (const toolkit of enabled) {
-    const account = accounts.find((row) => row.toolkit === toolkit && row.status === 'ACTIVE');
-    if (!account) {
+    const choice = chosenSubjects.get(toolkit);
+    if (choice?.state !== 'active') {
       if (unifiedDag || allowDisconnected) continue;
       throw new Error(`No active Composio account for ${toolkit}`);
     }
-    connectedAccounts[toolkit] = account.id;
-    selectedSubjects.add(account.subject);
+    connectedAccounts[toolkit] = choice.accountId;
+    selectedSubjects.add(choice.subject);
   }
   // A provider session has one owner. Never silently bind accounts belonging
   // to different historical subjects to it; callers can discover one app at a time.
   if (selectedSubjects.size > 1) throw new Error('connection_scopes_require_separate_toolkit_sessions');
   if (selectedSubjects.size === 1) subject = [...selectedSubjects][0];
+  // A session that connects a new account (nothing active yet) must create it on the
+  // personal subject, unless every toolkit is organization-shared by policy.
+  else if (userId && connectionScope !== 'org') {
+    const shared = organizationSharedToolkits();
+    subject = enabled.every((toolkit) => shared.has(toolkit)) ? String(orgId) : `hivemind:${userId}`;
+  }
   const cached = TOOL_ROUTER_SESSION_CACHE.get(key);
   // Reconcile the account binding before reuse: an OAuth completion or account
   // removal must not leave a cached disconnected/obsolete session for ten minutes.
@@ -958,6 +1088,7 @@ export function getToolRouterCacheStats() {
 
 export function clearToolRouterCaches() {
   TOOL_ROUTER_SESSION_CACHE.clear();
+  SUBJECT_CHOICE_CACHE.clear();
   TOOL_ROUTER_DISCOVERY_CACHE.clear();
 }
 
@@ -1108,7 +1239,7 @@ export async function createApiKeyConnection(orgId, toolkitSlug, apiKey, opts = 
 
   const data = await composioPost('/api/v3/connected_accounts', {
     auth_config: { id: authConfigId },
-    connection: { user_id: composioConnectionSubject(orgId, opts), state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } } },
+    connection: { user_id: composioConnectSubject(orgId, toolkitSlug, opts), state: { authScheme: 'API_KEY', val: { status: 'ACTIVE', generic_api_key: apiKey } } },
   });
   return { id: data?.id, status: data?.status };
 }
@@ -1143,4 +1274,29 @@ export async function erasureCatalogRead(read,deadline,{wait=ms=>new Promise(res
    await wait(500*(attempt+1));
   }
  }
+}
+
+/**
+ * ACTIVE accounts of one toolkit across every subject of the Composio project,
+ * for server-side jobs that act per company (not for request handling).
+ * Rows without a provider `user_id` are skipped; the walk is bounded.
+ *
+ * @param {string} toolkitSlug toolkit slug, for example `parallel`
+ * @param {{ maxPages?: number }} [opts]
+ * @returns {Promise<Array<{ id: string, subject: string, updatedAt: string|null }>>}
+ */
+export async function listActiveToolkitAccounts(toolkitSlug, { maxPages = 10 } = {}) {
+  const rows = []; const seen = new Set(); let cursor;
+  for (let page = 0; page < maxPages; page += 1) {
+    const path = `/api/v3.1/connected_accounts?toolkit_slugs=${encodeURIComponent(toolkitSlug)}&statuses=ACTIVE&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const data = await _composioRequest('GET', path, undefined, { retries: 1, timeoutMs: 10_000 });
+    for (const item of data?.items || []) {
+      if (item?.status !== 'ACTIVE' || item?.toolkit?.slug !== toolkitSlug || typeof item.user_id !== 'string' || !item.user_id) continue;
+      rows.push({ id: item.id, subject: item.user_id, updatedAt: item.updated_at || item.created_at || null });
+    }
+    cursor = data?.next_cursor;
+    if (!cursor || seen.has(cursor)) break;
+    seen.add(cursor);
+  }
+  return rows;
 }

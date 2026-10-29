@@ -10848,7 +10848,7 @@ exit \$RC
               // NOT the legacy toolkit. Execute via the Composio service
               // directly; the toolkit has no composio group/tool.
               if (row.provider === 'composio') {
-                const { executeTool: composioExecute, listConnectedAccounts } = await import('./connectors/composio/composio-service.js');
+                const { executeTool: composioExecute, listConnectedAccounts, chooseToolkitSubjects } = await import('./connectors/composio/composio-service.js');
                 const slug = row.toolName || row.toolArgs?._composio_slug;
                 const args = progressiveArgs || { ...(row.toolArgs || {}) };
                 delete args._composio_slug;
@@ -10859,7 +10859,8 @@ exit \$RC
                 if (typeof listConnectedAccounts === 'function') {
                   try {
                     const accounts = await listConnectedAccounts(orgId, { userId });
-                    owner = (accounts || []).find((account) => account?.status === 'ACTIVE' && String(account.toolkit || '').toLowerCase() === toolkit) || null;
+                    const choice = chooseToolkitSubjects(orgId, accounts).get(toolkit);
+                    owner = choice?.state === 'active' ? (accounts || []).find((account) => account.id === choice.accountId) || null : null;
                     if (!progressiveArgs && !args.from_email && owner?.email) args.from_email = owner.email;
                   } catch { /* execute with stored args and the legacy subject */ }
                 }

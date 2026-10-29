@@ -1400,6 +1400,7 @@ async function runProgressiveDurableAgent({ message, ctx, emit, composio, db, pi
     const connect = async (toolkit) => {
       if (!toolkit || ![...intent.apps, ...cards.map(c => c.toolkit)].includes(toolkit)) throw new Error('Connection target is not a known capability');
       const link = await svc.createConnectLink(toolkit, ctx.orgId, {
+        userId: ctx.userId || undefined,
         callbackUrl: ctx.composioCallbackUrl || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin) || undefined,
         toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
       });
@@ -1771,6 +1772,7 @@ export async function runDurableComposioAgent({
     if (typeof composioSvc.createConnectLink === 'function') {
       try {
         const link = await composioSvc.createConnectLink(toolkit, orgId, {
+          userId: ctx.userId || undefined,
           callbackUrl: ctx.composioCallbackUrl || connectCallbackUrl(toolkit, ctx.composioCallbackOrigin) || undefined,
           toolkitMeta: { composioManagedAuthSchemes: ['OAUTH2'], noAuth: false },
         });
@@ -1953,7 +1955,9 @@ export async function runDurableComposioAgent({
         });
         result = row || result;
       } else if (typeof composioSvc.executeTool === 'function') {
-        result = await composioSvc.executeTool(orgId, call.slug, args);
+        result = ctx?.userId && typeof composioSvc.executeToolForUser === 'function'
+          ? await composioSvc.executeToolForUser(orgId, ctx.userId, call.slug, args)
+          : await composioSvc.executeTool(orgId, call.slug, args);
       }
     } catch (error) {
       result = { successful: false, data: null, error: String(error.message || error) };

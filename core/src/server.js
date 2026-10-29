@@ -36,7 +36,7 @@ import { KnowledgeUploadService } from './knowledge/upload-service.js';
 import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
 import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
 import { persistMeetingAudio, meetingAudioStoreIsDurable } from './knowledge/meeting-audio-store.js';
-import { processMeetingAudioSegment, reconcileMeetingAudioSegments, pruneFinalizedMeetingAudio } from './knowledge/meeting-audio-worker.js';
+import { processMeetingAudioSegment, reconcileMeetingAudioSegments, pruneFinalizedMeetingAudio, onMeetingAudioTranscribed } from './knowledge/meeting-audio-worker.js';
 import { processRemoteMeetingAudioSegment, reconcileRemoteMeetingAudio } from './knowledge/meeting-remote-audio-worker.js';
 import { processRemoteMeetingFinalization, reconcileRemoteMeetingFinalizations } from './knowledge/meeting-remote-finalization-worker.js';
 import { generateMeetingInsights } from './knowledge/meeting-insights.js';
@@ -783,6 +783,8 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
       if (result.removed) console.info('[meeting-audio-retention]', result);
     },
   });
+  // Finish a meeting as soon as its last chunk is transcribed (no-op while still recording or already final).
+  onMeetingAudioTranscribed((identity) => processMeetingFinalization(prisma, identity, { creditService }));
   scheduleRecurringMaintenanceJob({
     enabled: true,
     prisma,

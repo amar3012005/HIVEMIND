@@ -8,6 +8,16 @@ import { processMeetingSegmentExtraction } from './meeting-segment-extractor.js'
 export const MEETING_AUDIO_MAX_ATTEMPTS = Math.max(1, Math.floor(Number(process.env.MEETING_AUDIO_MAX_ATTEMPTS) || 6));
 const MAX_ATTEMPTS = MEETING_AUDIO_MAX_ATTEMPTS;
 const LEASE_MS = 10 * 60 * 1000;
+// Finalization is asked for when the user presses Stop, usually before the last chunk is
+// transcribed; it then waits for the next 30-second sweep. The server registers a hook so the
+// meeting is finalized the moment the last chunk is transcribed instead.
+let afterTranscribed = null;
+export function onMeetingAudioTranscribed(callback) { afterTranscribed = typeof callback === 'function' ? callback : null; }
+function notifyTranscribed(identity) {
+  if (!afterTranscribed) return;
+  Promise.resolve().then(() => afterTranscribed(identity)).catch(() => { /* the 30-second sweep still finalizes it */ });
+}
+
 export function audioRetryDelayMs(attempt) { return Math.min(30 * 60 * 1000, 30_000 * (2 ** Math.max(0, Number(attempt) - 1))); }
 
 export async function processMeetingAudioSegment(prisma, { sessionId, idx, orgId, userId }) {
@@ -45,6 +55,7 @@ export async function processMeetingAudioSegment(prisma, { sessionId, idx, orgId
         `UPDATE hivemind.meeting_audio_segments SET status='transcribed', lease_expires_at=NULL, last_error='silent chunk', updated_at=now()
          WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`, sessionId, idx, orgId, userId,
       );
+      notifyTranscribed({ sessionId, orgId, userId });
       return { claimed: true, ok: true, silent: true, language: result.language || null };
     }
     await prisma.$executeRawUnsafe(
@@ -58,6 +69,7 @@ export async function processMeetingAudioSegment(prisma, { sessionId, idx, orgId
        WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`, sessionId, idx, orgId, userId,
     );
     void processMeetingSegmentExtraction(prisma, { sessionId, idx, orgId, userId }).catch(() => {});
+    notifyTranscribed({ sessionId, orgId, userId });
     return { claimed: true, ok: true, language: result.language || null };
   } catch (error) {
     const retryAt = Number(row.attempts) < MAX_ATTEMPTS ? new Date(Date.now() + audioRetryDelayMs(row.attempts)) : null;

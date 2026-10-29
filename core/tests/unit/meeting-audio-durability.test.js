@@ -88,3 +88,27 @@ test('a recording where every chunk was silent fails once with a plain message i
   assert.equal(updates[0][3], 'no_speech_detected');
   assert.match(updates[0][4], /No speech was detected/);
 });
+
+test('a transcribed chunk triggers finalization immediately instead of waiting for the next sweep', async () => {
+  const { onMeetingAudioTranscribed } = await import('../../src/knowledge/meeting-audio-worker.js');
+  const prevEnv = { ...process.env };
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  try {
+    process.env.MEETING_AUDIO_STORE_DIR = (await import('node:os')).tmpdir() + '/meeting-audio-hook-' + process.pid;
+    const { persistMeetingAudio } = await import('../../src/knowledge/meeting-audio-store.js');
+    const stored = await persistMeetingAudio({ orgId: IDS.orgId, sessionId: IDS.sessionId, idx: 0, contentType: 'audio/webm', bytes: Buffer.from('fake-audio') });
+    process.env.STT_PROVIDER = 'groq'; process.env.GROQ_API_KEY = 'k'; process.env.GROQ_BASE_URL = 'https://groq.test/openai/v1';
+    process.env.STT_CLOUDFLARE_FIRST = 'false'; delete process.env.OPENROUTER_API_KEY;
+    globalThis.fetch = async () => new Response(JSON.stringify({ text: 'Maria owns pricing.', language: 'en' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    onMeetingAudioTranscribed((identity) => { seen.push(identity); });
+    const prisma = {
+      $queryRawUnsafe: async () => [{ storage_key: stored.storageKey, content_type: 'audio/webm', attempts: 1, start_ms: 0, end_ms: 5000 }],
+      $executeRawUnsafe: async () => 1,
+    };
+    const result = await processMeetingAudioSegment(prisma, { ...IDS, idx: 0 });
+    assert.equal(result.ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(seen, [{ sessionId: IDS.sessionId, orgId: IDS.orgId, userId: IDS.userId }]);
+  } finally { globalThis.fetch = originalFetch; onMeetingAudioTranscribed(null); process.env = prevEnv; }
+});

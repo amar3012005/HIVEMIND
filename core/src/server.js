@@ -396,6 +396,7 @@ const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
 const { startGmailWatcherScheduler } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
+const { startWebIntelRetentionScheduler } = await import('./web/web-job-retention.js');
 
 // Derive a one-line title for a Tavily research report. Prefer the first
 // non-empty H1/H2 in the markdown; fall back to the original input
@@ -19396,6 +19397,8 @@ exit \$RC
                   savedIds.push(ingestResult.memoryId);
                 }
               }
+              // Pointer survives web-job retention, which trims the heavy result later.
+              await webJobStore.markSaved(jobId, savedIds).catch(() => null);
               return jsonResponse(res, { saved: savedIds.length, memory_ids: savedIds });
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
@@ -27414,6 +27417,8 @@ if (shouldStartHttpServer()) {
   }
 
   startGmailWatcherScheduler({ prisma });
+  // Trims heavy jsonb of finished Web Intel jobs after HIVEMIND_WEB_JOB_RETENTION_DAYS (default 30).
+  startWebIntelRetentionScheduler({ prisma });
 
   // Embedding reconciler (drift guard). Every persisted memory MUST land in its
   // org's Qdrant collection, but ~16 save paths write to PG and only some embed

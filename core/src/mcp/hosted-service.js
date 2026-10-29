@@ -2449,7 +2449,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   }
 
   if (name === 'hyperagents_event_watch') {
-    const read = ['list', 'recent'].includes(args?.operation);
+    const read = ['list', 'recent', 'brief'].includes(args?.operation);
     const scopes = options.scopes || [];
     if (!read && !isMaster && !scopes.some(scope => ['*', 'memory:write', 'memory.write'].includes(scope))) return formatToolContent({ successful: false, error: 'Full access is required to change event watches.' });
     const { getPrismaClient } = await import('../db/prisma.js');

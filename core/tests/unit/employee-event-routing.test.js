@@ -8,11 +8,11 @@ const USER = '22222222-2222-4222-8222-222222222222';
 const MAYA = '33333333-3333-4333-8333-333333333333';
 const LEO = '44444444-4444-4444-8444-444444444444';
 const on = routingConfig({ HIVEMIND_EMPLOYEE_EVENT_ROUTING: '1' });
-const employees = [{ id: MAYA, name: 'Maya Chen', slug: 'maya-chen', slackBotUserId: 'UBOTMAYA' }, { id: LEO, name: 'Leo', slug: 'leo' }];
+const employees = [{ id: MAYA, name: 'Maya Chen', slug: 'maya-chen', slackBotUserId: 'UBOTMAYA', tenantUserId: USER }, { id: LEO, name: 'Leo', slug: 'leo', tenantUserId: USER }];
 const directory = { memberEmails: new Set(['boss@acme.com']), companyDomains: new Set(['acme.com']) };
 const slackFacts = (data) => eventFacts('slack', 'SLACK_NEW_MESSAGE', data, on);
 const mail = (data) => eventFacts('gmail', 'GMAIL_NEW_GMAIL_MESSAGE', data, on);
-const decide = (facts, watches = []) => decideRouting({ facts, orgId: ORG, eventUserId: USER, subject: USER, employees, watches, directory, config: on });
+const decide = (facts, watches = [], config = on) => decideRouting({ facts, orgId: ORG, eventUserId: USER, subject: USER, employees, watches, directory, config });
 
 test('mention: name or slug, case-insensitive, word boundary, not an address, longest name wins', () => {
   assert.deepEqual(mentionedEmployees('hey @maya-chen please look', employees), [MAYA]);
@@ -40,12 +40,25 @@ test('external senders never wake an employee, and a free-mail domain is not the
   assert.equal(internalSender(mail({ sender: 'x@gmail.com' }), { memberEmails: new Set(), companyDomains: new Set(['gmail.com']) }, on), false);
 });
 
-test('Slack: only a verified native sender is inside; GitHub trusts OWNER and MEMBER association', () => {
+test('Slack: only a verified native sender is inside; GitHub trusts OWNER and MEMBER only of a listed organization', () => {
   assert.equal(decide(slackFacts({ text: '@leo look', user: 'U1', _hivemind: { sender: { verified: true } } })).targets.length, 1);
   assert.equal(decide(slackFacts({ text: '@leo look', user: 'U1', _hivemind: { sender: { verified: false } } })).targets.length, 0);
-  const gh = (assoc) => eventFacts('github', 'GITHUB_ISSUE_COMMENT', { comment: { body: 'cc @leo', user: { login: 'dev' }, author_association: assoc }, repository: { full_name: 'acme/app' } }, on);
-  assert.equal(decide(gh('MEMBER')).targets.length, 1);
-  assert.equal(decide(gh('NONE')).targets.length, 0);
+  const gh = (assoc, repo = 'acme/app') => eventFacts('github', 'GITHUB_ISSUE_COMMENT', { comment: { body: 'cc @leo', user: { login: 'dev' }, author_association: assoc }, repository: { full_name: repo } }, on);
+  const listed = routingConfig({ HIVEMIND_EMPLOYEE_EVENT_ROUTING: '1', HIVEMIND_EMPLOYEE_EVENT_GITHUB_ORGS: 'Acme' });
+  assert.equal(decide(gh('MEMBER'), [], listed).targets.length, 1);
+  assert.equal(decide(gh('OWNER'), [], listed).targets.length, 1);
+  assert.equal(decide(gh('NONE'), [], listed).targets.length, 0);
+  assert.equal(decide(gh('COLLABORATOR'), [], listed).targets.length, 0);
+  assert.equal(decide(gh('MEMBER', 'upstream/lib'), [], listed).targets.length, 0, 'a member of somebody else\'s organization is not inside');
+  assert.equal(decide(gh('MEMBER')).targets.length, 0, 'by default no GitHub author is inside');
+});
+
+test('a Dot owned by another user does not receive this user\'s mailbox unless the account is organization-wide', () => {
+  const facts = mail({ sender: 'boss@acme.com', subject: '@leo task' });
+  const foreign = [{ ...employees[1], tenantUserId: 'someone-else' }];
+  const run = (subject) => decideRouting({ facts, orgId: ORG, eventUserId: USER, subject, employees: foreign, watches: [], directory, config: on });
+  assert.deepEqual(run(USER).skips, [{ employeeId: LEO, reason: 'other_owner' }]);
+  assert.equal(run(ORG).targets.length, 1);
 });
 
 test('watch: every set filter key must match, and the watch needs the same trigger', () => {
@@ -99,7 +112,8 @@ function fakeDb({ watches = [], runtimeOn = true, bound = true } = {}) {
     userOrganization: { findUnique: async () => ({ role: 'admin', isActive: true, deactivatedAt: null }), findMany: async () => [{ user: { email: 'boss@acme.com', deletedAt: null } }] },
     digitalEmployee: { findMany: async () => [emp(MAYA, 'Maya Chen', 'maya-chen'), emp(LEO, 'Leo', 'leo')] },
     teamMember: { findMany: async () => [] },
-    organization: { findUnique: async () => ({ companyProfile: { email_domain: 'acme.com' } }) },
+    organization: { findUnique: async () => ({ companyProfile: {} }) },
+    organizationProfile: { findMany: async () => [{ value: 'https://www.acme.com/about' }] },
     $executeRawUnsafe: async (sql, ...a) => {
       if (/^\s*(CREATE|ALTER)/i.test(sql)) return 0;
       if (sql.includes('SET wake_id')) { for (const row of deliveries) if (a[0].includes(row.id)) row.wake_id = a[1]; return 1; }
@@ -306,4 +320,79 @@ test('event_watch tool refuses what is not real: no active event, bad filter, no
   await runEventWatch({ ...ok, filter: { from: 'a' } }, { ...ctx, config: capped });
   await assert.rejects(runEventWatch({ ...ok, filter: { from: 'b' } }, { ...ctx, config: capped }), { status: 409, message: /At most 1 watches/ });
   assert.equal(watchKey('gmail', 'S', { from: 'A' }), watchKey('gmail', 'S', { from: 'a' }));
+});
+
+test('the company domain comes from the profile website, the only key the profile editor writes', async () => {
+  const { loadCompanyDirectory } = await import('../../src/connectors/employee-event-routing.js');
+  const { db } = fakeDb();
+  const directory = await loadCompanyDirectory(db, ORG);
+  assert.deepEqual([...directory.companyDomains], ['acme.com']);
+  const webmail = { ...db, organizationProfile: { findMany: async () => [{ value: 'gmail.com' }] } };
+  assert.deepEqual([...(await loadCompanyDirectory(webmail, ORG)).companyDomains], [], 'a webmail host is never the company domain');
+});
+
+test('mention-only routing: an in-company mention is queued without reading watches; an external one is only audited', async () => {
+  const { db, deliveries, store } = fakeDb({ watches: [{ id: 'w', user_id: USER, employee_id: LEO, enabled: true, toolkit: 'gmail', trigger_slug: 'GMAIL_NEW_GMAIL_MESSAGE', filter: {} }] });
+  const watched = [];
+  const spy = { ...db, $queryRawUnsafe: async (sql, ...a) => { if (sql.includes('FROM hivemind_employee_watches')) watched.push(sql); return db.$queryRawUnsafe(sql, ...a); } };
+  const route = (id, data) => routeApprovedEvent(spy, { orgId: ORG, userId: USER, event: { id, data }, sub }, { config: on, schedule: () => {}, mentionsOnly: true });
+  await route('m1', { sender: 'boss@acme.com', subject: '@leo please look', message_text: 'x' });
+  await route('m2', { sender: 'stranger@evil.example', subject: '@leo now', message_text: 'x' });
+  await route('m3', { sender: 'boss@acme.com', subject: 'no mention', message_text: 'x' });
+  assert.deepEqual(watched, [], 'watches wait for approval');
+  assert.deepEqual(deliveries.map(r => [r.event_id, r.status, r.skip_reason ?? null]), [['m1', 'pending', null], ['m2', 'skipped', 'external_sender']]);
+  void store;
+});
+
+// ---------- the call from the classifier ----------
+import { classifyPendingActivity } from '../../src/connectors/composio/activity-relevance.js';
+function classifyRun(action, { routerCalls }) {
+  const row = { id: `ev-${routerCalls.length}`, subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-04T12:00:00Z', data: { sender: 'boss@acme.com', subject: '@leo hello' } };
+  const db = {
+    userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) },
+    $queryRawUnsafe: async sql => sql.includes('UPDATE hivemind_trigger_events') ? [row] : sql.includes('runtime_enabled') ? [{ runtime_enabled: true }] : [{ toolkit: 'gmail', slug: 'GMAIL_NEW_GMAIL_MESSAGE', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-04T11:00:00Z' }],
+    $executeRawUnsafe: async () => {}, workspaceNotification: { upsert: async () => ({ id: 'n' }) },
+  };
+  return classifyPendingActivity({ orgId: ORG, userId: USER, allowedAccountIds: ['a'], prisma: db,
+    employeeRouter: async (_db, input, deps) => { routerCalls.push({ id: input.event.id, mentionsOnly: deps?.mentionsOnly === true }); },
+    runtimeAttention: { assess: async () => ({ action, policy: 'runtime_attention_v3', targetSessionId: 'r' }), deliver: async () => ({ status: 'accepted', targetSessionId: 'r', inboxPersisted: true }) } });
+}
+
+test('the classifier routes mentions for a rejected event, and routes watches only after approval', async () => {
+  const rejected = [];
+  await classifyRun('retain', { routerCalls: rejected });
+  assert.deepEqual(rejected, [{ id: 'ev-0', mentionsOnly: true }], 'rejected: mention routing only');
+  const approved = [];
+  await classifyRun('notify', { routerCalls: approved });
+  assert.deepEqual(approved.map(c => c.mentionsOnly), [true, false], 'approved: mention routing, then the full routing step');
+});
+
+// ---------- brief ----------
+function briefDb() {
+  const reads = new Set();
+  const rows = [
+    { org_id: ORG, user_id: USER, employee_id: LEO, event_id: 'h1', toolkit: 'gmail', trigger_slug: 'S', status: 'briefed', skip_reason: 'rate_limited', summary: 'held back', created_at: '2026-10-29T09:00:00Z' },
+    { org_id: ORG, user_id: USER, employee_id: EVENT_LEVEL, event_id: 'u1', toolkit: 'gmail', trigger_slug: 'S', status: 'skipped', skip_reason: 'no_target_runtime_off', summary: 'newsletter', created_at: '2026-10-29T10:00:00Z' },
+    { org_id: ORG, user_id: USER, employee_id: EVENT_LEVEL, event_id: 'u2', toolkit: 'slack', trigger_slug: 'S', status: 'skipped', skip_reason: 'no_target_runtime_off', summary: 'other app', created_at: '2026-10-29T10:30:00Z' },
+  ];
+  const base = fakeDb();
+  const db = { ...base.db,
+    $executeRawUnsafe: async (sql, ...a) => { if (sql.includes('INSERT INTO hivemind_employee_brief_reads')) { for (const id of a[2]) if (rows.some(r => r.event_id === id && [LEO, EVENT_LEVEL].includes(r.employee_id))) reads.add(`${a[1]}:${id}`); return 1; } return base.db.$executeRawUnsafe(sql, ...a); },
+    $queryRawUnsafe: async (sql, ...a) => {
+      if (sql.includes('SELECT DISTINCT toolkit FROM hivemind_employee_watches')) return [{ toolkit: 'gmail' }];
+      if (sql.includes("d.status='briefed'")) return rows.filter(r => r.employee_id === a[1] && r.status === 'briefed' && !reads.has(`${a[1]}:${r.event_id}`));
+      if (sql.includes("d.employee_id='*'")) return rows.filter(r => r.employee_id === EVENT_LEVEL && a[1].includes(r.toolkit) && r.user_id === a[3] && !reads.has(`${a[4]}:${r.event_id}`));
+      return base.db.$queryRawUnsafe(sql, ...a);
+    } };
+  return { db, reads };
+}
+
+test('brief: held-back wakes and unmatched events of watched apps, newest first; consumed ones do not repeat', async () => {
+  const { db } = briefDb();
+  const ctx = { orgId: ORG, userId: USER, prisma: db, config: on };
+  const first = await runEventWatch({ operation: 'brief', employee_id: LEO }, ctx);
+  assert.deepEqual(first.items.map(i => [i.event_id, i.kind]), [['u1', 'unmatched'], ['h1', 'held_back']], 'the other app is not this employee\'s');
+  assert.deepEqual(await runEventWatch({ operation: 'consume', employee_id: LEO, event_ids: ['h1', 'u1'] }, ctx), { successful: true, consumed: 2 });
+  assert.deepEqual((await runEventWatch({ operation: 'brief', employee_id: LEO }, ctx)).items, []);
+  await assert.rejects(runEventWatch({ operation: 'consume', employee_id: LEO, event_ids: [] }, ctx), { status: 400 });
 });

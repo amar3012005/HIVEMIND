@@ -113,7 +113,9 @@ export function classifyPendingActivity(ctx) {
         // A company with Runtime switched off has no Chief of Staff to assess or receive events; they take the company relevance path.
         const runtimeOn = await readRuntimeEnabled(db, ctx.orgId).catch(() => true);
         const bridge = runtimeOn ? (ctx.runtimeAttention || createRuntimeAttentionBridge()) : undefined;
-        const routeToEmployees = () => (ctx.employeeRouter || routeApprovedEvent)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] }).catch(() => {});
+        const routeToEmployees = (mentionsOnly = false) => (ctx.employeeRouter || routeApprovedEvent)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] }, mentionsOnly ? { mentionsOnly: true } : {}).catch(() => {});
+        // An explicit in-company @mention routes whatever the relevance decision turns out to be (same sender rule, dedupe, coalescing and cap).
+        await routeToEmployees(true);
         if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
           && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
           try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); await routeToEmployees(); continue; }

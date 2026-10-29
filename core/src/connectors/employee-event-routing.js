@@ -36,7 +36,9 @@ export function routingConfig(env = process.env) {
     mentionEmailChars: int(env.HIVEMIND_EMPLOYEE_EVENT_MENTION_EMAIL_CHARS, 2000, 200, 10_000),
     maxAttempts: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_ATTEMPTS, 5, 1, 10),
     maxWatchesPerEmployee: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_WATCHES, 20, 1, 100),
-    githubAssociations: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_GITHUB_ASSOCIATIONS ?? 'OWNER,MEMBER').split(',').map(item => item.trim().toUpperCase()).filter(Boolean)),
+    // GitHub has no link between a login and a company member, so a GitHub author counts as inside only when GitHub itself calls
+    // them OWNER or MEMBER of an organization this company lists here. Empty by default: GitHub mentions then never wake anyone.
+    githubOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_GITHUB_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean)),
   });
 }
 
@@ -74,7 +76,7 @@ export function eventFacts(toolkit, slug, data = {}, config = routingConfig()) {
     senderId: lower(typeof d.user === 'string' ? d.user : d.user_id ?? ''),
     verifiedInternal: hivemindSender?.verified === true,
     association: str(comment.author_association || issue.author_association || d.author_association).toUpperCase(),
-    labels, repository: lower(d.repository?.full_name),
+    labels, repository: lower(d.repository?.full_name), repoOwner: lower(d.repository?.owner?.login ?? String(d.repository?.full_name ?? '').split('/')[0]),
     bot: Boolean(d.bot_id || d.app_id || d.subtype === 'bot_message' || d.sender?.type === 'Bot' || comment.user?.type === 'Bot' || issue.user?.type === 'Bot'),
     marked: LOOP_MARKER.test(`${title}\n${bodyText}`) || d.metadata?.event_type === 'hivemind_runtime_output' || ['runtime', 'employee'].includes(d._hivemind?.origin),
     occurredAt: d.message_timestamp ?? d.timestamp ?? d.ts ?? d.updated_at ?? null,
@@ -117,7 +119,7 @@ export function internalSender(facts, directory, config = routingConfig()) {
     const domain = facts.senderEmail.split('@')[1];
     if (domain && directory.companyDomains.has(domain) && !FREE_MAIL.has(domain)) return true;
   }
-  if (facts.toolkit === 'github' && (directory.githubLogins?.has(facts.senderLogin) || (facts.association && config.githubAssociations.has(facts.association)))) return true;
+  if (facts.toolkit === 'github' && (directory.githubLogins?.has(facts.senderLogin) || (['OWNER', 'MEMBER'].includes(facts.association) && config.githubOrgs.has(facts.repoOwner)))) return true;
   if (facts.toolkit === 'slack' && facts.senderId && directory.slackIds?.has(facts.senderId)) return true;
   return false;
 }
@@ -174,10 +176,12 @@ export function decideRouting({ facts, orgId, eventUserId, subject, employees, w
     if (!byId.has(watch.employee_id)) { skips.push({ employeeId: watch.employee_id, reason: 'employee_unavailable' }); continue; }
     add(watch.employee_id, 'watch', watch.id);
   }
+  // The wake lands in the chat of the user who owns the employee's Dot. Another user's mailbox content only goes there for an organization-wide account.
+  const foreign = new Set(employees.filter(employee => employee.tenantUserId !== eventUserId && subject !== orgId).map(employee => employee.id));
   const botIds = new Set(employees.map(employee => lower(employee.slackBotUserId)).filter(Boolean));
   const targets = [];
   for (const [employeeId, entry] of candidates) {
-    const reason = facts.bot ? 'bot_sender' : facts.marked ? 'loop_guard' : facts.senderId && botIds.has(facts.senderId) ? 'own_output' : null;
+    const reason = foreign.has(employeeId) ? 'other_owner' : facts.bot ? 'bot_sender' : facts.marked ? 'loop_guard' : facts.senderId && botIds.has(facts.senderId) ? 'own_output' : null;
     if (reason) { skips.push({ employeeId, reason }); continue; }
     targets.push({ employeeId, reason: entry.mention && entry.watchIds.length ? 'mention+watch' : entry.mention ? 'mention' : 'watch', watchIds: entry.watchIds });
   }
@@ -234,6 +238,9 @@ export async function ensureEmployeeEventStore(db) {
       created_at timestamptz NOT NULL DEFAULT now(), claimed_at timestamptz, delivered_at timestamptz,
       UNIQUE(event_id, employee_id))`);
     await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS hivemind_employee_event_deliveries_employee ON hivemind_employee_event_deliveries(org_id, employee_id, created_at DESC)');
+    await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hivemind_employee_brief_reads (
+      org_id text NOT NULL, employee_id text NOT NULL, event_id text NOT NULL, consumed_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(employee_id, event_id))`);
     await db.$executeRawUnsafe("CREATE INDEX IF NOT EXISTS hivemind_employee_event_deliveries_open ON hivemind_employee_event_deliveries(status, created_at) WHERE status IN ('pending','sending')");
   })().catch(error => { stores.delete(db); throw error; }));
   return stores.get(db);
@@ -269,16 +276,17 @@ export async function loadRoutableEmployees(db, orgId, userId) {
  * @returns {Promise<{memberEmails:Set<string>,companyDomains:Set<string>}>} Directory.
  */
 export async function loadCompanyDirectory(db, orgId) {
-  const [members, org] = await Promise.all([
+  // The profile editor writes only `company.website` (organization_profile, key `company.website`); the control plane itself treats its host as the company's verified domain.
+  const [members, facts, org] = await Promise.all([
     db.userOrganization.findMany({ where: { orgId, isActive: true, deactivatedAt: null }, select: { user: { select: { email: true, deletedAt: true } } } }),
+    db.organizationProfile.findMany({ where: { orgId, key: 'company.website', deletedAt: null }, select: { value: true } }),
     db.organization.findUnique({ where: { id: orgId }, select: { companyProfile: true } }),
   ]);
-  const profile = org?.companyProfile && typeof org.companyProfile === 'object' ? org.companyProfile : {};
-  const raw = [profile.email_domains, profile.email_domain, profile.domain, profile.website].flat().filter(item => typeof item === 'string');
-  const domain = item => lower(item).replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').replace(/^.*@/, '').split(/[/?#:]/)[0].trim();
+  const legacy = org?.companyProfile && typeof org.companyProfile === 'object' ? org.companyProfile.website : undefined;
+  const host = item => { try { const value = String(item).trim(); return value ? new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).hostname.toLowerCase().replace(/^www\./, '') : ''; } catch { return ''; } };
   return {
     memberEmails: new Set(members.filter(row => row.user && !row.user.deletedAt).map(row => lower(row.user.email))),
-    companyDomains: new Set(raw.flatMap(item => item.split(',')).map(domain).filter(item => item.includes('.') && !FREE_MAIL.has(item))),
+    companyDomains: new Set([...facts.map(row => row.value), legacy].map(host).filter(item => item.includes('.') && !FREE_MAIL.has(item))),
   };
 }
 
@@ -310,18 +318,20 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
   if (!UUID.test(orgId || '') || !UUID.test(userId || '') || !sub?.slug) return { skipped: 'scope_unavailable' };
   await ensureEmployeeEventStore(db);
   const facts = eventFacts(sub.toolkit, sub.slug, event.data, config);
-  const watches = await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_watches WHERE org_id=$1 AND toolkit=$2 AND trigger_slug=$3 AND enabled', orgId, sub.toolkit, sub.slug);
-  const runtimeEnabled = deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId);
+  // Mentions are routed for every received event, approved or not: addressing an employee by name is the signal. Watches wait for approval.
+  const mentionsOnly = deps.mentionsOnly === true;
+  const watches = mentionsOnly ? [] : await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_watches WHERE org_id=$1 AND toolkit=$2 AND trigger_slug=$3 AND enabled', orgId, sub.toolkit, sub.slug);
   const base = { orgId, userId, eventId: event.id, toolkit: sub.toolkit, slug: sub.slug, summary: clip(facts.title || facts.body, 140) };
-  if (!watches.length && !facts.mentionText.includes('@')) {
+  const hasMention = facts.mentionText.includes('@');
+  if (!watches.length && !hasMention) {
     // Runtime on: today's path is the whole story. Runtime off: nobody reads this event, so say so in the audit.
-    if (!runtimeEnabled) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
+    if (!mentionsOnly && !(deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId))) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
     return { targets: [], skips: [] };
   }
   const [employees, directory] = await Promise.all([loadRoutableEmployees(db, orgId, userId), loadCompanyDirectory(db, orgId)]);
   const decision = decideRouting({ facts, orgId, eventUserId: userId, subject: sub.subject ?? null, employees, watches, directory, config });
   for (const skip of decision.skips) await recordDelivery(db, { ...base, employeeId: skip.employeeId, reason: 'candidate', status: 'skipped', skipReason: skip.reason });
-  if (!decision.targets.length && !decision.skips.length && !runtimeEnabled) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
+  if (!mentionsOnly && !decision.targets.length && !decision.skips.length && !(deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId))) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
   for (const target of decision.targets) {
     await recordDelivery(db, { ...base, employeeId: target.employeeId, reason: target.reason, watchId: target.watchIds[0], status: 'pending' });
     (deps.schedule ?? (() => scheduleFlush(db, `${orgId}:${target.employeeId}`, config.coalesceMs + 500, deps)))(target);

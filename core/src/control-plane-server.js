@@ -63,7 +63,7 @@ import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/ema
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
-import { overlayActiveApps } from './connectors/connected-app-overlay.js';
+import { overlayActiveApps, overlayToolkitRows } from './connectors/connected-app-overlay.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { SEAM_SCHEMA_VERSION, buildWorkRoomExecutionIdentity } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
@@ -8142,22 +8142,24 @@ const server = http.createServer(async (req, res) => {
           const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
           const accounts = await composioService.listConnectedAccounts(orgId, { userId: current.session.userId });
           reconcileConnectedActivity({ prisma, orgId, userId: current.session.userId }).catch(error => console.warn('[connected-activity] automatic provisioning unavailable', error.status || 502));
-          result.splice(0, result.length, ...overlayActiveApps(result, accounts));
+          // One row per toolkit by the shared rule (see toolkitConnectionRows); the catalog loop below only
+          // adds label and display fields, it never re-derives status from the raw account list.
+          const toolkitRows = composioService.toolkitConnectionRows(orgId, accounts);
+          result.splice(0, result.length, ...overlayToolkitRows(result, toolkitRows));
           const knownProviders = new Set(result.map((e) => e.provider));
           for (const entry of composioEntries) {
-            const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
-            const active = rows.find((r) => r.status === 'ACTIVE');
-            const dead = rows.find((r) => r.status === 'EXPIRED' || r.status === 'FAILED');
-            const status = active ? 'connected' : dead ? 'needs_reauth' : 'available';
+            const row = toolkitRows.get(entry.composioToolkit || entry.id);
+            const status = row?.status === 'connected' ? 'connected' : row?.status === 'reconnect' ? 'needs_reauth' : 'available';
             const overlay = {
               provider: entry.id,
               label: entry.name,
               status,
-              account_ref: active?.id || dead?.id || null,
+              account_ref: row?.accountId || null,
+              origin: row?.origin || null,
               last_sync_at: null,
               last_error: null,
-              is_active: Boolean(active),
-              created_at: (active || dead)?.createdAt || null,
+              is_active: status === 'connected',
+              created_at: null,
               source: 'composio',
             };
             if (knownProviders.has(entry.id)) {

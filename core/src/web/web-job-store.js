@@ -150,7 +150,7 @@ export class WebJobStore {
       const data = fromLegacyPatch(patch);
       // Partial research progress is request metadata, never a second hidden
       // result field. This keeps the durable schema compact and route-compatible.
-      if ('partial_content' in patch || 'partial_sources' in patch || 'capability' in patch || 'capability_stage' in patch) {
+      if ('partial_content' in patch || 'partial_sources' in patch || 'capability' in patch || 'capability_stage' in patch || 'saved_memory_ids' in patch) {
         data.request = {
           ...(existing.request || {}),
           ...Object.fromEntries(Object.entries({
@@ -158,6 +158,7 @@ export class WebJobStore {
             partial_sources: patch.partial_sources,
             capability: patch.capability,
             capability_stage: patch.capability_stage,
+            saved_memory_ids: Array.isArray(patch.saved_memory_ids) ? patch.saved_memory_ids.slice(0, 10) : undefined,
           }).filter(([, value]) => value !== undefined)),
         };
       }
@@ -166,6 +167,12 @@ export class WebJobStore {
     const jobs = readJson(this.filePath);
     const next = jobs.map((job) => job.id === jobId ? { ...job, ...patch, updated_at: new Date().toISOString() } : job);
     writeJson(this.filePath, next); return next.find((job) => job.id === jobId) || null;
+  }
+
+  /** Records which memories hold this job's saved results; retention keeps these ids after trimming `result`. */
+  async markSaved(jobId, memoryIds) {
+    const ids = [...new Set((memoryIds || []).map(String))].slice(0, 10);
+    return ids.length ? this.update(jobId, { saved_memory_ids: ids }) : null;
   }
 
   async get(jobId, scope = {}) {

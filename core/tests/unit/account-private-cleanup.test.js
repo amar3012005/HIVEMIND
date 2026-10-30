@@ -26,3 +26,14 @@ test('exclusive company output cleanup is scoped; shared company output is reass
  assert(mutations.some(x=>x.sql.includes('DELETE FROM hivemind.tara_voice_sessions')&&x.args[0]==='target'));
  assert(!mutations.some(x=>x.sql.includes('DELETE FROM hivemind.audit_logs')||x.sql.includes('DELETE FROM hivemind.knowledge_usage_settlements')));
 });
+test('personal agent runs, meetings, model keys, watches and instructions are erased; Library artifacts only in exclusive companies, versions first',async()=>{
+ const mutations=[];const db={$queryRawUnsafe:async(_sql,table,column)=>column?[{column_name:'org_id'},{column_name:column}]:[{column_name:'user_id'}],$executeRawUnsafe:async(sql,...args)=>{mutations.push({sql,args});return 1}};
+ const {cleanupPrivateAccountRows}=await import('../../src/security/account-private-cleanup.js');
+ await cleanupPrivateAccountRows(db,'target',[{orgId:'shared',disposition:'retain_shared',remainingMembers:[{userId:'colleague',role:'owner'}]},{orgId:'exclusive',disposition:'delete_exclusive'}]);
+ const at=table=>mutations.findIndex(x=>x.sql.includes(`DELETE FROM hivemind.${table} `));
+ for(const table of ['agent_runs','governed_agent_events','meeting_sessions','meeting_audio_segments','custom_model_providers','hivemind_employee_watches','hivemind_employee_event_deliveries','hq_instructions']){assert(at(table)>=0,table);assert.equal(mutations[at(table)].args[0],'target');}
+ assert(at('governed_agent_events')<at('agent_runs'));assert(at('meeting_audio_segments')<at('meeting_sessions'));assert(at('hivemind_employee_event_deliveries')<at('hivemind_employee_watches'));
+ assert(at('harness_artifact_versions')>=0&&at('harness_artifact_versions')<at('harness_artifacts'));
+ assert.deepEqual(mutations[at('harness_artifacts')].args,['target',['exclusive']]);
+ assert(!mutations.some(x=>/UPDATE hivemind\.harness_artifacts|DELETE FROM hivemind\.(ai_usage_events|relationships) /.test(x.sql)));
+});

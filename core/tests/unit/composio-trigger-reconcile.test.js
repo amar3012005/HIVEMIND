@@ -24,7 +24,7 @@ function fixture({ accounts = { 'acct-live': 'ACTIVE', 'acct-gone': 'EXPIRED' } 
   };
   const db = {
     $queryRawUnsafe: async () => subscriptions,
-    $executeRawUnsafe: async (sql, ...args) => { writes.push([sql.includes("status='missing'") ? 'missing' : 'remote_id', ...args]); return 1; },
+    $executeRawUnsafe: async (sql, ...args) => { writes.push([sql.includes("status='missing'") ? 'missing' : sql.includes("status='orphaned'") ? 'orphaned' : 'remote_id', ...args]); return 1; },
   };
   const lines = [];
   return { request, db, calls, writes, lines, log: line => lines.push(line) };
@@ -51,7 +51,8 @@ test('apply disables unowned triggers, re-creates a live account trigger and mar
   assert.deepEqual(f.calls.filter(call => call.startsWith('PATCH')).sort(), ['PATCH /trigger_instances/manage/ti_erased', 'PATCH /trigger_instances/manage/ti_stranger']);
   assert.ok(!f.calls.some(call => call.startsWith('DELETE')));
   assert.deepEqual(f.calls.filter(call => call.startsWith('POST')), ['POST /trigger_instances/GMAIL_NEW_GMAIL_MESSAGE/upsert']);
-  assert.deepEqual(f.writes, [['remote_id', 'ti_new', '00000000-0000-4000-8000-000000000003'], ['missing', '00000000-0000-4000-8000-000000000004']]);
+  assert.deepEqual(f.writes, [['orphaned', '00000000-0000-4000-8000-000000000002'], ['remote_id', 'ti_new', '00000000-0000-4000-8000-000000000003'], ['missing', '00000000-0000-4000-8000-000000000004']]);
+  assert.equal(counts.markedOrphaned, 1);
   assert.equal(counts.disabled, 2);
   assert.equal(counts.recreated, 1);
   assert.equal(counts.markedMissing, 1);
@@ -61,6 +62,7 @@ test('the plan never treats a trigger owned by an active membership as unknown',
   const plan = planTriggerReconcile([{ id: 'a' }], [{ remote_id: 'a', member_active: true }]);
   assert.deepEqual(plan.disable, []);
   assert.deepEqual(plan.missing, []);
+  assert.deepEqual(plan.orphaned, []);
 });
 
 test('mode defaults to dry-run and rejects unknown values', () => {

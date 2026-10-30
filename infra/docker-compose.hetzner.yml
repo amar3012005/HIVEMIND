@@ -160,6 +160,9 @@ services:
       HIVE_HARNESS_RUNNER_SERVICE_SECRET: ${HIVE_HARNESS_RUNNER_SERVICE_SECRET:-}
       # HyperAgent activation belongs to the independent Runtime, not Brain.
       HIVEMIND_EMPLOYEE_LIFECYCLE_URL: ${HIVEMIND_RUNTIME_EMPLOYEE_LIFECYCLE_URL:-http://runtime-runner:3080/internal/hivemind/employee-lifecycle}
+      # Signed archive, unarchive and removal events to OpenDot (which owns that state); empty sends nothing.
+      OPEN_DOT_LIFECYCLE_EVENT_URL: ${OPEN_DOT_LIFECYCLE_EVENT_URL:-}
+      OPEN_DOT_LIFECYCLE_EVENT_SECRET: ${OPEN_DOT_LIFECYCLE_EVENT_SECRET:-}
       # Base64-encoded 32-byte AES-GCM key. Provider receipts fail closed when absent.
       HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY: ${HIVE_CONNECTED_APP_RECEIPT_ENCRYPTION_KEY:-}
       HIVE_HARNESS_EMBED_URL: ${HIVE_HARNESS_EMBED_URL:-https://chat.singulancelabs.com/embed}

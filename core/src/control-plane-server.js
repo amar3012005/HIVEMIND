@@ -1343,6 +1343,10 @@ if (prisma && HYPERAGENTS_LEGACY_ENABLED && HYPER_CYCLE_ENABLED && shouldRunRecu
 
 // Recovery uses the same durable attention ledger; no page visit is required.
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  import('./connectors/composio/runtime-attention-bridge.js').then(({ describeRuntimeAttentionConfig }) => {
+    const attention = describeRuntimeAttentionConfig();
+    if (!attention.ok) console.warn(`[runtime-attention] routing is not ready (${attention.reason}); connected-app events wait until HIVEMIND_RUNTIME_ATTENTION_URL names the Runtime runner`);
+  }).catch(() => undefined);
   let recoveringAttention = false;
   const recoverAttention = async () => {
     if (recoveringAttention) return;
@@ -1358,6 +1362,10 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
         const { recoverBoundOpenDotLifecycles } = await import('./employees/open-dot-lifecycle-recovery.js');
         await recoverBoundOpenDotLifecycles(prisma);
       } catch { console.warn('[open-dot-lifecycle] recovery unavailable'); }
+      try {
+        const { recoverPendingLifecycleEvents } = await import('./employees/open-dot-lifecycle-events.js');
+        await recoverPendingLifecycleEvents(prisma);
+      } catch { console.warn('[open-dot-lifecycle] event recovery unavailable'); }
     } finally { recoveringAttention = false; }
   };
   setTimeout(recoverAttention, 15000).unref();
@@ -11288,6 +11296,11 @@ Write the persona now.`;
         assertNativeEmployeeLifecycleConfigured();
       }
       const result = await manageNativeEmployee(prisma, principal, input);
+      if (['pause_archive','unarchive','archive','fresh_reset_archive','remove'].includes(input.operation)) {
+        // OpenDot and Runtime own the employee's local state; they are told in the background and the answer never waits for them.
+        import('./employees/open-dot-lifecycle-events.js').then(({ announceEmployeeLifecycle }) => announceEmployeeLifecycle(prisma, principal, input.operation, result))
+          .catch(() => console.warn('[open-dot-lifecycle] event announcement unavailable'));
+      }
       const hasOpenDotMarker = Object.hasOwn(result.employee?.policyRules || {}, 'open_dot_employee');
       const openDotBound = result.employee?.policyRules?.open_dot_employee?.state === 'bound'
         && result.employee?.policyRules?.open_dot_employee?.execution_backend === 'open-dot';

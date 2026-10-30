@@ -11,6 +11,21 @@ export function runtimeAttentionToken(row, operation, secret, now = Date.now()) 
 /** Hosts of Brain's chat runner, which is not a Runtime attention destination. */
 let warnedBrainRunner = false;
 const BRAIN_RUNNER_HOST = /^https?:\/\/(?:hivemind-)?harness-runner(?:-1)?[:/]/iu;
+/**
+ * Whether the attention routing environment can deliver, and why not. Checked once at server start so a wrong runner or a malformed
+ * URL is named in the logs when Core boots instead of showing up later as events that stay pending.
+ * @returns {{ok: true} | {ok: false, reason: 'not_configured' | 'secret_too_short' | 'invalid_url' | 'wrong_path' | 'brain_runner'}}
+ */
+export function describeRuntimeAttentionConfig(env = process.env) {
+  const configured = env.HIVEMIND_RUNTIME_ATTENTION_URL;
+  if (!configured) return { ok: false, reason: 'not_configured' };
+  if (!env.HIVE_HARNESS_RUNNER_SERVICE_SECRET || Buffer.byteLength(env.HIVE_HARNESS_RUNNER_SERVICE_SECRET, 'utf8') < 32) return { ok: false, reason: 'secret_too_short' };
+  let url;
+  try { url = new URL(configured); } catch { return { ok: false, reason: 'invalid_url' }; }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return { ok: false, reason: 'invalid_url' };
+  if (url.pathname !== '/internal/hivemind/runtime-attention') return { ok: false, reason: 'wrong_path' };
+  return BRAIN_RUNNER_HOST.test(configured) ? { ok: false, reason: 'brain_runner' } : { ok: true };
+}
 export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fetch } = {}) {
   const secret = env.HIVE_HARNESS_RUNNER_SERVICE_SECRET;
   const configured = env.HIVEMIND_RUNTIME_ATTENTION_URL;

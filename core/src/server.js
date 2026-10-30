@@ -68,6 +68,7 @@ import { createWorkspaceNotification } from './workspace/notifications.js';
 import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
 import { createSystemEmailDeliveryReceiptSink } from './workspace/system-email-delivery-ledger.js';
 import { configureSystemEmailDeliveryReceiptSink, configureSystemEmailNotificationSink } from './email/email-service.js';
+import { profileTimezone } from './profile-timezone.js';
 import { resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
@@ -20060,12 +20061,16 @@ exit \$RC
               const project = req.method === 'POST'
                 ? (body.project || null)
                 : (url.searchParams.get('project') || null);
-              const profile = await buildProfileSummary({ userId, orgId, project });
+              const [profile, timezone] = await Promise.all([
+                buildProfileSummary({ userId, orgId, project }),
+                prisma ? profileTimezone(prisma, userId, orgId) : Promise.resolve(null),
+              ]);
               return jsonResponse(res, {
                 ok: true,
                 profile: {
                   user_id: profile.user_id,
                   org_id: profile.org_id,
+                  timezone,
                   project: profile.project,
                   plan: profile.plan,
                   memory_count: profile.memory_count,

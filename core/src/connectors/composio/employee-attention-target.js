@@ -21,16 +21,30 @@ export function employeeRole(row) {
   return clip(row.role_archetype || fromPersona || 'Specialist', 80);
 }
 
+const rosters = new Map();
+/** How long one company's roster is reused, so a batch of events costs one roster read. */
+export const ROSTER_TTL_MS = 60_000;
+
 /**
  * Compact roster for the choice: role and the newest operating-memory titles of each routable employee.
  * @param {object} db Prisma client.
  * @param {string} orgId Company.
  * @param {{id:string,name:string,slug:string}[]} employees Routable employees.
+ * @param {number} [now] Clock, for the 60 s reuse window.
  * @returns {Promise<{id:string,name:string,role:string,recent:string[]}[]>} At most 12 employees.
  */
-export async function loadEmployeeRoster(db, orgId, employees) {
+export async function loadEmployeeRoster(db, orgId, employees, now = Date.now()) {
   const list = employees.slice(0, 12);
   if (!list.length) return [];
+  const key = `${orgId}:${list.map(e => e.id).sort().join(',')}`;
+  const cached = rosters.get(key);
+  if (cached && now - cached.at < ROSTER_TTL_MS) return cached.value;
+  const value = await readRoster(db, orgId, list);
+  if (rosters.size >= 256) rosters.delete(rosters.keys().next().value);
+  rosters.set(key, { at: now, value });
+  return value;
+}
+async function readRoster(db, orgId, list) {
   const [rows, recent] = await Promise.all([
     db.$queryRawUnsafe('SELECT id::text AS id, persona, role_archetype FROM digital_employees WHERE org_id=$1::uuid AND id = ANY($2::uuid[])', orgId, list.map(e => e.id)),
     db.$queryRawUnsafe(`SELECT agent_slug, title FROM (SELECT agent_slug, title, row_number() OVER (PARTITION BY agent_slug ORDER BY created_at DESC) AS n

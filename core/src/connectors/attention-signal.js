@@ -66,7 +66,7 @@ export function attentionProviderRef(toolkit, value) {
 export function signalHeader(data, toolkit, previewLength) {
   const item = object(data) ? data : {};
   const body = [item.message_text, item.text, item.body].find(value => typeof value === 'string' && value.trim() !== '');
-  const labels = Array.isArray(item.label_ids) ? item.label_ids.filter(label => typeof label === 'string').slice(0, 12) : [];
+  const labels = Array.isArray(item.label_ids) ? item.label_ids.filter(label => typeof label === 'string').slice(0, 12).map(label => label.slice(0, 80)) : [];
   const fields = { from: item.sender ?? item.from, to: item.to, subject: item.subject ?? item.title, date: item.message_timestamp ?? item.timestamp ?? item.date };
   const limits = { from: 300, to: 300, subject: 200, date: 60 };
   return { app: toolkit, ...Object.fromEntries(Object.entries(fields).filter(([, value]) => typeof value === 'string').map(([key, value]) => [key, value.slice(0, limits[key])])),

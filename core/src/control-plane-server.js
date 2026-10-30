@@ -16,6 +16,8 @@ import { runAccountErasureOnce } from './security/account-erasure-worker.js';
 import { CloudflareKnowledgeIngestClient } from './knowledge/cloudflare-ingest-client.js';
 import { handleOrganizationSettings } from './billing/organization-policy.js';
 import { handleRuntimeSettingRoute, readRuntimeEnabled } from './organizations/runtime-setting.js';
+import { handleLanguageSettingRoute } from './organizations/language-setting.js';
+import { readEmailLocale } from './email/email-locale.js';
 import { recoverPendingActivity } from './connectors/composio/activity-relevance.js';
 import { changeSessionOrganization } from './mobile/session-organization.js';
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
@@ -3645,9 +3647,10 @@ const server = http.createServer(async (req, res) => {
   // the request, making a valid invite look like a failed one. Completion is
   // reconciled against the invite row and recorded in the append-only audit.
   function queueWorkspaceInvitationDelivery({ invite, orgId, actorId, adminEmail, vars, expiresAt = null, requestMeta = {} }) {
-    queueEmailDelivery(() => sendTeamInvitationEmails({
+    queueEmailDelivery(async () => sendTeamInvitationEmails({
       memberEmail: invite.email,
       adminEmail,
+      adminLocale: await readEmailLocale(prisma, { userId: actorId, orgId }),
       vars,
     }), {
       context: { kind: 'workspace_invitation' },
@@ -6173,10 +6176,11 @@ const server = http.createServer(async (req, res) => {
       ? welcomeProfileForWorkspace(workspace, { returning: true }).templateId
       : 'welcome_login';
     // Don't await the send — return immediately so login UX is never delayed.
-    sendSystemEmail({
+    readEmailLocale(prisma, { userId: user.id, orgId: workspace?.id }).then((locale) => sendSystemEmail({
       templateId,
       to: user.email,
       vars: {
+        locale,
         name: firstName,
         email: user.email,
         orgName: workspace?.name || '',
@@ -6184,7 +6188,7 @@ const server = http.createServer(async (req, res) => {
         hostingMode: workspace?.hostingMode || 'managed',
         onboardingEndsAt: workspace?.trialEndsAt ? workspace.trialEndsAt.toISOString().slice(0, 10) : '',
       },
-    }).catch((err) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'welcome_dispatch_failed', error: err.message })));
+    })).catch((err) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'welcome_dispatch_failed', error: err.message })));
     return jsonResponse(res, { ok: true, template: templateId });
   }
 
@@ -6580,6 +6584,7 @@ const server = http.createServer(async (req, res) => {
 
   // Per-company "Enable Runtime" switch (owner/admin only; audited).
   if (await handleRuntimeSettingRoute({ req, res, pathname, prisma, requireSession, requireOrgAdmin, parseBody, jsonResponse, audit })) return;
+  if (await handleLanguageSettingRoute({ req, res, pathname, prisma, requireSession, requireOrgAdmin, parseBody, jsonResponse, audit })) return;
 
   // Workspace identity is a durable, organization-scoped profile. It is kept
   // out of UserProfile on purpose: chat, ingestion and agent tools can read it

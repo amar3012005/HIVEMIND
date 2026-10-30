@@ -26,6 +26,8 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { normalizeOrgLocale } from '../organizations/language-setting.js';
+import { RTL_EMAIL_LOCALES } from './email-locale.js';
 import { emailThreadHeaders } from './thread-headers.js';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +61,7 @@ const LEGACY_WELCOME_SENDERS = new Set([
 const APP_URL = resolvePublicAppUrl();
 
 let _templates = null;
+let _localeVariants = null;
 let _warnedNoProvider = false;
 let _notificationSink = null;
 let _deliveryReceiptSink = null;
@@ -79,6 +82,12 @@ function loadTemplates() {
   const raw = readFileSync(join(__dirname, 'templates.json'), 'utf8');
   _templates = JSON.parse(raw);
   return _templates;
+}
+
+function loadLocaleVariants() {
+  if (_localeVariants) return _localeVariants;
+  _localeVariants = JSON.parse(readFileSync(join(__dirname, 'templates.locales.json'), 'utf8'));
+  return _localeVariants;
 }
 
 /** Escape a value for safe interpolation into an HTML context. */
@@ -333,13 +342,19 @@ async function sendWithGmail({ connectionId, to, from, rendered, templateId, thr
 
 /**
  * Render a template into { subject, text, html }.
+ * `vars.locale` (a language tag) selects the variant in `templates.locales.json`; a template or field without one renders in English,
+ * and a right-to-left language gets a right-to-left body.
  * @param {string} templateId
  * @param {Record<string, any>} vars
  */
 export function renderTemplate(templateId, vars = {}) {
   const templates = loadTemplates();
-  const tpl = templates[templateId];
-  if (!tpl) throw new Error(`unknown_template:${templateId}`);
+  const base = templates[templateId];
+  if (!base) throw new Error(`unknown_template:${templateId}`);
+  const locale = normalizeOrgLocale(vars.locale) ?? 'en';
+  const variant = locale === 'en' ? null : loadLocaleVariants()[templateId]?.[locale] ?? null;
+  const tpl = variant ? { ...base, ...variant } : base;
+  const rtl = Boolean(variant) && RTL_EMAIL_LOCALES.includes(locale);
   const ctx = { appUrl: APP_URL, year: new Date().getFullYear(), ...vars };
   const subject = fill(tpl.subject, ctx, false);
   const text = tpl.text ? fill(tpl.text, ctx, false) : '';
@@ -347,9 +362,10 @@ export function renderTemplate(templateId, vars = {}) {
   // These are the actual first-contact paths before Day 0. Keep the canonical
   // Humation team in the renderer so copy stays data-only in templates.json.
   const lifecycleInvitation = new Set(['team_invite', 'enterprise_invitation', 'personal_invitation']);
-  const decoratedInner = lifecycleInvitation.has(templateId)
+  const framed = lifecycleInvitation.has(templateId)
     ? `${renderHivemindEmailTeam({ caption: 'BRAIN / OS / VOICE — READY WHEN YOU ARE' })}${inner}`
     : inner;
+  const decoratedInner = rtl ? `<div dir="rtl" style="text-align:right">${framed}</div>` : framed;
   const preheader = tpl.preheader ? fill(tpl.preheader, ctx, true) : '';
   const html = tpl.layout === 'hivemind_cartesia_welcome'
     ? renderHivemindWelcomeEmail({
@@ -593,11 +609,13 @@ export function queueSystemEmailBundle(messages = [], options = {}) {
  * inviting administrator. The confirmation never contains the invitation URL
  * or token, so forwarding an admin receipt cannot grant workspace access.
  */
-export async function sendTeamInvitationEmails({ memberEmail, adminEmail, vars = {} } = {}) {
+export async function sendTeamInvitationEmails({ memberEmail, adminEmail, adminLocale, vars = {} } = {}) {
   const { member } = await sendSystemEmailBundle([{ key: 'member', templateId: 'team_invite', to: memberEmail, vars }]);
   const admin = adminEmail
     ? (await sendSystemEmailBundle([{ key: 'admin', templateId: 'team_invite_admin_confirmation', to: adminEmail, vars: {
       ...vars,
+      // The confirmation goes to the inviter, so it follows the inviter's language, not the invitee's.
+      ...(adminLocale ? { locale: adminLocale } : {}),
       inviteeEmail: memberEmail,
       deliveryState: member.ok ? (member.deliveryStatus || 'accepted') : 'failed',
     } }])).admin

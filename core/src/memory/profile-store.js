@@ -437,6 +437,9 @@ export class ProfileStore {
   async buildCompactProfileContext(userId, orgId = null, projectId = null, {
     maxFacts = 8,
     maxChars = 900,
+    // Opt-in for callers that write about the company (an employee's persona): the organization's own facts, with their own budget.
+    organizationDetail = false,
+    organizationChars = 2400,
   } = {}) {
     const [allFacts, organizationFacts] = await Promise.all([
       this.getProfile(userId, orgId, projectId), this.getOrganizationProfile(orgId),
@@ -496,6 +499,21 @@ export class ProfileStore {
       if (!fact) continue;
       const line = `- organization ${key.slice(8)}: ${String(fact.value).slice(0, 220)}`;
       if (`${lines.join('\n')}\n${line}`.length <= Math.max(80, maxChars)) lines.push(line);
+    }
+    if (organizationDetail) {
+      // One line per organization key, newest version first, each bounded; the section has its own budget so caller facts never crowd it out.
+      const detailKeys = ['company.what_it_does', 'company.offer', 'company.capabilities', 'company.icp', 'company.positioning', 'company.business_model',
+        'company.location', 'company.website', 'company.tone', 'company.opportunities', 'company.risks', 'company.operating_context'];
+      const newest = (key) => organizationFacts.filter(f => f.key === key).sort((a, b) => (Number(b.version) || 0) - (Number(a.version) || 0))[0];
+      let used = 0;
+      for (const key of detailKeys) {
+        const fact = newest(key);
+        if (!fact) continue;
+        const line = `- organization ${key.slice(8)}: ${String(fact.value).replace(/\s+/g, ' ').slice(0, key === 'company.operating_context' ? 700 : 300)}`;
+        if (used + line.length + 1 > Math.max(200, organizationChars)) continue;
+        lines.push(line);
+        used += line.length + 1;
+      }
     }
     return lines.length > 1 ? lines.join('\n') : '';
   }

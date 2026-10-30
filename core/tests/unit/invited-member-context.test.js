@@ -21,3 +21,15 @@ await saveCompanyProfileFacts(p,{orgId:'a',userId:'owner',facts:[{key:'company',
 assert.deepEqual(writes.map(w=>w.create.key),['company.name','company.mission']);assert.ok(writes.every(w=>w.create.orgId==='a'));
 await assert.rejects(saveCompanyProfileFacts(p,{orgId:'a',userId:'owner',facts:[{key:'name',value:'Private person'}]}),/Not a company fact/);
 });
+test('the organization detail is opt-in, uses the newest version of each fact, has its own budget and stays in its organization',async()=>{
+const rich={a:[{key:'company.name',value:'Shared Company',version:1},{key:'company.offer',value:'Old offer',version:1},{key:'company.offer',value:'AI employees for companies',version:2},
+{key:'company.icp',value:'B2B founders in Europe',version:1},{key:'company.positioning',value:'A team, not a single agent',version:1},{key:'company.operating_context',value:'x'.repeat(1600),version:1}]};
+const store=new ProfileStore({...db,organizationProfile:{findMany:async({where})=>rich[where.orgId]||[]}});
+const compact=await store.buildCompactProfileContext('invitee','a');assert.doesNotMatch(compact,/organization offer/,'default packet unchanged');
+const full=await store.buildCompactProfileContext('invitee','a',null,{organizationDetail:true});
+assert.match(full,/- organization offer: AI employees for companies/);assert.doesNotMatch(full,/Old offer/);
+assert.match(full,/- organization icp: B2B founders in Europe/);assert.match(full,/- organization positioning: A team, not a single agent/);
+assert.ok(/- organization operating_context: x{700}$/m.test(full),'long facts are clipped');
+assert.ok(full.length<=900+2400+40,'bounded');
+assert.doesNotMatch(await store.buildCompactProfileContext('invitee','b',null,{organizationDetail:true}),/organization offer/,'no other organization');
+});

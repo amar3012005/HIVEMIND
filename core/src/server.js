@@ -19702,7 +19702,9 @@ exit \$RC
             // GET /api/profiles/context — lightweight endpoint for LLM context injection
             if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
             try {
-              const contextString = await profileStore.buildCompactProfileContext(userId, orgId);
+              // ?organization=full adds the organization's own facts (offer, audience, positioning...) for callers that write about the company.
+              const contextString = await profileStore.buildCompactProfileContext(userId, orgId, null,
+                url.searchParams.get('organization') === 'full' ? { organizationDetail: true } : {});
               return jsonResponse(res, { context: contextString });
             } catch (err) {
               console.error('[profiles/context] GET failed:', err.message);

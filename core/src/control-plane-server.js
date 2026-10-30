@@ -24,7 +24,7 @@ import { exportAccountRecords, collectOwnedRecords } from './security/account-ex
 import { checkedVectorDelete } from './security/vector-erasure.js';
 import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
-import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity } from './connectors/composio/hivemind-triggers.js';
+import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity, checkTriggerIntake } from './connectors/composio/hivemind-triggers.js';
 import http from 'http';
 import { handleMobilePrivacyRoutes } from './mobile/privacy-routes.js';
 import { handleMobileAuthRoutes, mobileOAuthIntent, completeMobileOAuth } from './mobile/auth-routes.js';
@@ -1346,6 +1346,8 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
       catch { console.warn('[runtime-attention] pending recovery unavailable'); }
       try { await (await import('./connectors/employee-event-routing.js')).flushEmployeeWakes(prisma); }
       catch { console.warn('[employee-events] wake delivery unavailable'); }
+      try { await checkTriggerIntake(prisma); }
+      catch { console.warn('[composio-webhook] intake check unavailable'); }
       try {
         const { recoverBoundOpenDotLifecycles } = await import('./employees/open-dot-lifecycle-recovery.js');
         await recoverBoundOpenDotLifecycles(prisma);

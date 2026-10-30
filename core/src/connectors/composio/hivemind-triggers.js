@@ -172,7 +172,31 @@ export async function runTriggers(args, ctx) {
   }, { timeout: 45000 });
   return { successful: true, operation: args.operation, subscription_id: row.id };
 }
+/** Webhook decisions since this process started, by outcome; names only, never event content. */
+const intake = { since: new Date().toISOString(), counts: {}, lastStoredAt: null };
+function noteIntake(outcome, slug) {
+  intake.counts[outcome] = (intake.counts[outcome] || 0) + 1;
+  if (outcome === 'stored') intake.lastStoredAt = new Date().toISOString();
+  console.info('[composio-webhook]', JSON.stringify({ outcome, slug: String(slug || '').slice(0, 80) || undefined }));
+}
+/**
+ * Webhook intake counts since process start, for the no-events alarm.
+ * @returns {{since:string,counts:Record<string,number>,lastStoredAt:string|null}} A copy of the counters.
+ */
+export function triggerIntakeStats() { return { since: intake.since, counts: { ...intake.counts }, lastStoredAt: intake.lastStoredAt }; }
+
+/**
+ * Receives one signed Composio webhook. Every decision is logged by outcome and trigger slug only.
+ * @param {Buffer} raw Request body.
+ * @param {object} headers Request headers.
+ * @param {object} db Prisma client.
+ * @returns {Promise<object>} What happened to the event.
+ */
 export async function receiveTriggerEvent(raw, headers, db) {
+  try { return await receiveTriggerEventOnce(raw, headers, db); }
+  catch (error) { noteIntake(error.status === 401 ? 'bad_signature' : error.status === 422 ? 'schema_mismatch' : error.status === 503 ? 'not_configured' : 'error'); throw error; }
+}
+async function receiveTriggerEventOnce(raw, headers, db) {
   const secret = process.env.COMPOSIO_WEBHOOK_SECRET;
   if (!secret) fail('Connected activity is not configured.', 503);
   const id = headers['webhook-id']; const timestamp = headers['webhook-timestamp'];
@@ -184,22 +208,22 @@ export async function receiveTriggerEvent(raw, headers, db) {
   });
   if (!valid) fail('Invalid event signature.', 401);
   const payload = JSON.parse(raw.toString('utf8'));
-  if (payload.type !== 'composio.trigger.message') return { ignored: true };
+  if (payload.type !== 'composio.trigger.message') { noteIntake('ignored_type'); return { ignored: true }; }
   await ensureTriggerStore(db);
   const m = payload.metadata || {};
   const rows = await db.$queryRawUnsafe("SELECT * FROM hivemind_trigger_subscriptions WHERE remote_id=$1 AND account_id=$2 AND slug=$3 AND status='active'", m.trigger_id || '', m.connected_account_id || '', m.trigger_slug || '');
-  if (!rows.length) return { ignored: true };
+  if (!rows.length) { noteIntake('unknown_trigger', m.trigger_slug); return { ignored: true }; }
   for (const row of rows) {
-    if (m.user_id !== (row.subject || composioConnectionSubject(row.org_id, { userId: row.user_id }))) continue;
+    if (m.user_id !== (row.subject || composioConnectionSubject(row.org_id, { userId: row.user_id }))) { noteIntake('subject_mismatch', row.slug); continue; }
     let active;
     try { active = await accounts({ orgId: row.org_id, userId: row.user_id, prisma: db }); }
-    catch (error) { if (error.status === 403) continue; throw error; }
-    if (!active.some(a => a.id === row.account_id)) continue;
+    catch (error) { if (error.status === 403) { noteIntake('account_forbidden', row.slug); continue; } throw error; }
+    if (!active.some(a => a.id === row.account_id)) { noteIntake('account_inactive', row.slug); continue; }
     const check = ajv.compile(row.payload_schema);
     if (!check(payload.data)) fail('Event does not match the subscribed schema.', 422);
     const eventId = attentionEventIdentity(row.toolkit,payload.data,row.org_id,row.user_id,`${payload.id || m.log_id || id}:${row.id}`);
     const duplicate = await db.$queryRawUnsafe('SELECT id FROM hivemind_trigger_events WHERE id=$1', eventId);
-    if (duplicate.length) continue;
+    if (duplicate.length) { noteIntake('duplicate', row.slug); continue; }
     const display = await eventDisplay(payload.data, row);
     const date = payload.data?.message_timestamp || payload.data?.timestamp || payload.data?.ts || payload.data?.updated_at || payload.data?.modified_time || null;
     const numeric = typeof date === 'number' || /^\d+(?:\.\d+)?$/.test(String(date)) ? Number(date) : null;
@@ -208,9 +232,33 @@ export async function receiveTriggerEvent(raw, headers, db) {
     await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events (id,subscription_id,org_id,user_id,data,occurred_at)
       VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`, eventId, row.id, row.org_id, row.user_id, JSON.stringify({ ...payload.data, _hivemind: display }), occurredAt);
     classifyPendingActivity({ orgId: row.org_id, userId: row.user_id, prisma: db, allowedAccountIds: active.map(account => account.id) });
+    noteIntake('stored', row.slug);
   }
   return { accepted: true };
 }
+let intakeWarnedAt = 0, intakeCheckedAt = 0;
+/**
+ * Checks at most every 15 minutes and warns at most hourly when active subscriptions exist but no connected-app event was stored for `quietMs`, with the
+ * webhook decisions this process has seen, so the log tells whether Composio stopped sending or the receiver drops events.
+ * @param {object} db Prisma client.
+ * @param {{now?:number,quietMs?:number}} [options] Clock and quiet window (default 3 h).
+ * @returns {Promise<{quietHours:number}|null>} The warning raised, or null.
+ */
+export async function checkTriggerIntake(db, { now = Date.now(), quietMs = 3 * 3_600_000 } = {}) {
+  // The table has no global received_at index, so the scan runs at most every 15 minutes and at most hourly after a warning.
+  if (now - intakeWarnedAt < 3_600_000 || now - intakeCheckedAt < 900_000) return null;
+  intakeCheckedAt = now;
+  await ensureTriggerStore(db);
+  const [state] = await db.$queryRawUnsafe(`SELECT (SELECT max(received_at) FROM hivemind_trigger_events) AS last,
+    (SELECT count(*)::int FROM hivemind_trigger_subscriptions WHERE status='active') AS subs`);
+  const last = state?.last ? new Date(state.last).getTime() : 0;
+  if (!state?.subs || (last && now - last < quietMs)) return null;
+  intakeWarnedAt = now;
+  const quietHours = last ? Math.round((now - last) / 360_000) / 10 : null;
+  console.warn('[composio-webhook] no connected-app event stored', JSON.stringify({ quietHours, activeSubscriptions: state.subs, ...triggerIntakeStats() }));
+  return { quietHours };
+}
+
 function eventSuggestion(event) {
   const data = event.data || {};
   if (event.toolkit === 'gmail' && (data.label_ids || []).some(label => ['SPAM', 'TRASH'].includes(label))) return null;

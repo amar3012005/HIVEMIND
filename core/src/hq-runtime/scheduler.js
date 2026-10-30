@@ -307,9 +307,12 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
   };
   const timer = setInterval(wake, intervalMs);
   timer.unref?.();
-  await warmRuntimeOrigin(employeesSidecarUrl(), { force: true }).catch((error) => {
-    logger.warn('[hq-runtime] Employees transport warmup was unavailable; normal reconciliation remains active:', error.message);
-  });
+  // The hm-employees sidecar belongs to the retired legacy HyperAgents; it is warmed only when they are switched on.
+  if (String(process.env.HYPERAGENTS_LEGACY_ENABLED || 'false').toLowerCase() === 'true') {
+    await warmRuntimeOrigin(employeesSidecarUrl(), { force: true }).catch((error) => {
+      logger.warn('[hq-runtime] Employees transport warmup was unavailable; normal reconciliation remains active:', error.message);
+    });
+  }
   wake();
   logger.log(`[hq-runtime] scheduler active as ${leaseOwner}`);
   return {

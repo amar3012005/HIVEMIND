@@ -25,6 +25,11 @@
  * Composio dashboard or via createAuthConfig() below — never per-tenant.
  */
 
+import {
+  ComposioConnectError, CONNECT_UNAVAILABLE_MESSAGE, REPLACEABLE_ACCOUNT_STATUSES,
+  classifyConnectError, classifyToolkitConnect, isStaleConnectionFailure,
+} from './connect-readiness.js';
+
 const COMPOSIO_BASE_URL = process.env.COMPOSIO_BASE_URL || 'https://backend.composio.dev';
 const COMPOSIO_API_KEY = process.env.COMPOSIO_API_KEY || '';
 
@@ -85,6 +90,9 @@ async function _composioRequest(method, path, body, { retries = 2, timeoutMs = 1
 function composioGet(path) { return _composioRequest('GET', path); }
 function composioPost(path, body) { return _composioRequest('POST', path, body); }
 function composioDelete(path) { return _composioRequest('DELETE', path); }
+
+/** Authenticated Composio request for sibling modules (connect health). Errors keep `status` and `composioCode`. */
+export function composioApiRequest(method, path, body, options) { return _composioRequest(method, path, body, options); }
 
 /**
  * A connection subject is authority, not a display identifier. New governed
@@ -471,26 +479,135 @@ export async function getToolkitTools(toolkitSlug) {
  * @returns {Promise<{ redirectUrl: string, connectedAccountId: string, expiresAt: string }>}
  */
 export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
-  // opts.toolkitMeta (from listToolkits) lets the browse-the-full-catalog
-  // grid connect a toolkit that has no ops-curated auth config yet, by
-  // auto-provisioning a Composio-managed one on first use.
-  const authConfigId = opts.toolkitMeta
-    ? await getOrCreateAuthConfigId(toolkitSlug, opts.toolkitMeta)
-    : getAuthConfigId(toolkitSlug);
-  if (!authConfigId) {
-    throw new Error(`No Composio auth config registered for toolkit "${toolkitSlug}"`);
+  const slug = String(toolkitSlug || '').toLowerCase();
+  const readiness = await resolveToolkitConnectability(slug, opts.toolkitMeta);
+  if (!readiness.connectable) {
+    throw new ComposioConnectError(
+      readiness.mode === 'no_auth' ? 'no_connection_needed' : 'connect_unavailable',
+      readiness.mode === 'no_auth' ? 'This app does not need a sign-in.' : CONNECT_UNAVAILABLE_MESSAGE,
+    );
   }
+  if (readiness.mode === 'api_key') {
+    throw new ComposioConnectError('api_key_required', 'This app connects with an API key, not a sign-in.');
+  }
+  const authConfigId = getAuthConfigId(slug) || await getOrCreateAuthConfigId(slug, readiness.toolkit);
+  if (!authConfigId) throw new ComposioConnectError('connect_unavailable', CONNECT_UNAVAILABLE_MESSAGE);
+  const subject = composioConnectSubject(orgId, slug, opts);
   const body = {
     auth_config_id: authConfigId,
-    user_id: composioConnectSubject(orgId, toolkitSlug, opts),
+    user_id: subject,
     ...(opts.callbackUrl ? { callback_url: opts.callbackUrl } : {}),
   };
-  const data = await composioPost('/api/v3/connected_accounts/link', body);
+  let data;
+  try {
+    data = await composioPost('/api/v3/connected_accounts/link', body);
+  } catch (error) {
+    if (!isStaleConnectionFailure(error)) throw classifyConnectError(error);
+    try {
+      await replaceStaleAccounts(subject, slug);
+      data = await composioPost('/api/v3/connected_accounts/link', body);
+    } catch (retryError) {
+      throw classifyConnectError(isStaleConnectionFailure(retryError) ? error : retryError);
+    }
+  }
   return {
     redirectUrl: data.redirect_url,
     connectedAccountId: data.connected_account_id,
     expiresAt: data.expires_at,
   };
+}
+
+/**
+ * Delete this subject's accounts for one toolkit that cannot serve requests (expired, failed, inactive or an
+ * abandoned sign-in). ACTIVE accounts are never touched.
+ * @param {string} subject - Composio user id the new link is created for.
+ * @param {string} toolkitSlug
+ * @returns {Promise<number>} accounts removed
+ */
+export async function replaceStaleAccounts(subject, toolkitSlug) {
+  const rows = (await listAccountsForSubject(subject))
+    .filter((row) => row.toolkit === toolkitSlug && REPLACEABLE_ACCOUNT_STATUSES.has(row.status));
+  let removed = 0;
+  for (const row of rows) {
+    try {
+      await composioDelete(`/api/v3.1/connected_accounts/${encodeURIComponent(row.id)}`);
+      removed += 1;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  return removed;
+}
+
+const TOOLKIT_DETAIL_TTL_MS = 10 * 60 * 1000;
+const toolkitDetailCache = new Map();
+
+function toolkitFromDetail(tk) {
+  return {
+    slug: tk.slug,
+    authSchemes: tk.auth_schemes || (tk.auth_config_details || []).map((detail) => detail.mode),
+    composioManagedAuthSchemes: tk.composio_managed_auth_schemes || [],
+    noAuth: Boolean(tk.no_auth),
+  };
+}
+
+/**
+ * Decide whether a toolkit can be connected from Composio's own record, never from caller-supplied metadata:
+ * the agent paths used to claim managed OAuth2 for every app, which Composio rejects for apps such as Twitter.
+ * Falls back to `callerMeta` only when Composio's record cannot be read.
+ *
+ * @param {string} toolkitSlug
+ * @param {{ authSchemes?: string[], composioManagedAuthSchemes?: string[], noAuth?: boolean }} [callerMeta]
+ * @returns {Promise<{ connectable: boolean, mode: string, reason: string|null, toolkit: object }>}
+ */
+export async function resolveToolkitConnectability(toolkitSlug, callerMeta) {
+  const slug = String(toolkitSlug || '').toLowerCase();
+  let toolkit = null;
+  const cached = toolkitDetailCache.get(slug);
+  if (cached && Date.now() - cached.loadedAt < TOOLKIT_DETAIL_TTL_MS) toolkit = cached.toolkit;
+  else {
+    try {
+      toolkit = toolkitFromDetail(await composioGet(`/api/v3.1/toolkits/${encodeURIComponent(slug)}`));
+      toolkitDetailCache.set(slug, { loadedAt: Date.now(), toolkit });
+    } catch (error) {
+      if (error.status === 404) throw new ComposioConnectError('connect_unavailable', CONNECT_UNAVAILABLE_MESSAGE, { cause: error });
+      if (!callerMeta) throw classifyConnectError(error);
+      toolkit = { slug, authSchemes: callerMeta.authSchemes || [], composioManagedAuthSchemes: callerMeta.composioManagedAuthSchemes || [], noAuth: Boolean(callerMeta.noAuth) };
+    }
+  }
+  const verdict = classifyToolkitConnect(toolkit, { authConfigId: getAuthConfigId(slug) });
+  if (verdict.connectable && connectHealthOverrides.has(slug)) {
+    return { connectable: false, mode: 'blocked', reason: connectHealthOverrides.get(slug), toolkit };
+  }
+  return { ...verdict, toolkit };
+}
+
+/**
+ * Toolkits the daily connect-health run found broken, slug -> reason. Replaced wholesale on every run, so a
+ * toolkit that recovers is released by the next run.
+ */
+const connectHealthOverrides = new Map();
+
+/** @param {Record<string, string>} broken slug -> reason from the latest connect-health run */
+export function setConnectHealthOverrides(broken) {
+  connectHealthOverrides.clear();
+  for (const [slug, reason] of Object.entries(broken || {})) connectHealthOverrides.set(slug, reason);
+}
+
+/**
+ * Add `connectable` and `connectBlockedReason` to listed toolkits so the web app can disable "Sign in" before a
+ * click fails. Uses the same rule as the connect route.
+ * @param {Array<object>} toolkits - Rows from {@link listToolkits}.
+ * @returns {Array<object>}
+ */
+export function annotateToolkitsConnectable(toolkits) {
+  return toolkits.map((toolkit) => {
+    const slug = String(toolkit.slug || '').toLowerCase();
+    const verdict = classifyToolkitConnect(toolkit, { authConfigId: getAuthConfigId(slug) });
+    const reason = verdict.connectable && connectHealthOverrides.has(slug) ? connectHealthOverrides.get(slug) : verdict.reason;
+    const connectable = verdict.connectable && !connectHealthOverrides.has(slug);
+    return { ...toolkit, connectable, connectBlockedReason: connectable ? null : reason, connectMode: verdict.mode };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,6 +1356,11 @@ export async function getOrCreateAuthConfigId(toolkitSlug, toolkitMeta) {
   if (existing) return existing;
   if (toolkitMeta?.noAuth) return null;
   if (!toolkitMeta?.composioManagedAuthSchemes?.includes('OAUTH2')) return null;
+
+  // Reuse the auto-provisioned config; creating one per click left dozens of duplicates per toolkit.
+  const found = await composioGet(`/api/v3.1/auth_configs?toolkit_slug=${encodeURIComponent(toolkitSlug)}&limit=50`).catch(() => null);
+  const reusable = (found?.items || []).find((item) => item?.name === `${toolkitSlug}-auto` && item?.status === 'ENABLED');
+  if (reusable?.id) return reusable.id;
 
   const data = await composioPost('/api/v3.1/auth_configs', {
     toolkit: { slug: toolkitSlug },

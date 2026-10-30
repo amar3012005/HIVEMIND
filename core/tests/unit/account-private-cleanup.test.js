@@ -24,9 +24,9 @@ test('exclusive company output cleanup is scoped; shared company output is reass
  assert(update>=0&&erase>update);assert.deepEqual(mutations[erase].args,['target',['exclusive']]);
  for(const table of ['tara_turns','tara_insights','tara_calls']){const row=mutations.find(x=>x.sql.includes('DELETE FROM hivemind.'+table));assert.deepEqual(row.args,['target',['exclusive']]);assert(mutations.some(x=>x.sql.includes('UPDATE hivemind.'+table)));}
  assert(mutations.some(x=>x.sql.includes('DELETE FROM hivemind.tara_voice_sessions')&&x.args[0]==='target'));
- assert(!mutations.some(x=>x.sql.includes('DELETE FROM hivemind.audit_logs')||x.sql.includes('DELETE FROM hivemind.knowledge_usage_settlements')));
+ assert(!mutations.some(x=>x.sql.includes('DELETE FROM hivemind.audit_logs')));
 });
-test('personal agent runs, meetings, model keys, watches and instructions are erased; Library artifacts only in exclusive companies, versions first',async()=>{
+test('personal agent runs, meetings, model keys, watches, instructions and usage ledgers are erased; Library artifacts only in exclusive companies, versions first',async()=>{
  const mutations=[];const db={$queryRawUnsafe:async(_sql,table,column)=>column?[{column_name:'org_id'},{column_name:column}]:[{column_name:'user_id'}],$executeRawUnsafe:async(sql,...args)=>{mutations.push({sql,args});return 1}};
  const {cleanupPrivateAccountRows}=await import('../../src/security/account-private-cleanup.js');
  await cleanupPrivateAccountRows(db,'target',[{orgId:'shared',disposition:'retain_shared',remainingMembers:[{userId:'colleague',role:'owner'}]},{orgId:'exclusive',disposition:'delete_exclusive'}]);
@@ -35,5 +35,6 @@ test('personal agent runs, meetings, model keys, watches and instructions are er
  assert(at('governed_agent_events')<at('agent_runs'));assert(at('meeting_audio_segments')<at('meeting_sessions'));assert(at('hivemind_employee_event_deliveries')<at('hivemind_employee_watches'));
  assert(at('harness_artifact_versions')>=0&&at('harness_artifact_versions')<at('harness_artifacts'));
  assert.deepEqual(mutations[at('harness_artifacts')].args,['target',['exclusive']]);
- assert(!mutations.some(x=>/UPDATE hivemind\.harness_artifacts|DELETE FROM hivemind\.(ai_usage_events|relationships) /.test(x.sql)));
+ assert(!mutations.some(x=>/UPDATE hivemind\.harness_artifacts|DELETE FROM hivemind\.relationships /.test(x.sql)));
+ for(const table of ['ai_usage_events','knowledge_usage_settlements','web_intel_usage_settlements']){assert(at(table)>=0,table);assert.equal(mutations[at(table)].args[0],'target');assert.match(mutations[at(table)].sql,/WHERE user_id::text=\$1::text/);}
 });

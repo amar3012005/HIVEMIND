@@ -40,10 +40,11 @@ export function employeeCanDispatch(employee, now = Date.now()) {
     (lifecycle.kind !== 'temporary' || Date.parse(lifecycle.expires_at) > now));
 }
 export function validateNativeCreation(input, now = Date.now()) {
-  const allowed = ['operation','creation_key','name','persona','role','avatar_url','lifecycle','expires_at','appearance'];
+  const allowed = ['operation','creation_key','name','persona','role','avatar_url','lifecycle','expires_at','appearance','employee_id'];
   if (!input || Object.keys(input).some(key => !allowed.includes(key))) lifecycleError('invalid_employee_creation', 400);
   const key = text(input.creation_key, 'creation_key', 160);
   if (!/^[A-Za-z0-9._:-]+$/.test(key)) lifecycleError('invalid_creation_key', 400);
+  if (input.employee_id !== undefined && !UUID.test(input.employee_id)) lifecycleError('invalid_employee_id', 400);
   const name = text(input.name, 'name', 100);
   const persona = input.persona == null ? 'You are a newly created company employee. Use your saved name and identity. Introduce yourself plainly, recall available company context, and ask the user which responsibilities they want you to own through the existing native question tool, with grounded suggestions and a free-text option. Do not invent a role, company facts or approval. Confirm the agreed responsibilities before saving your own bounded profile. Existing permissions remain unchanged.' : text(input.persona, 'persona', 12000);
   const role = text(input.role || 'Specialist', 'role', 40);
@@ -60,7 +61,7 @@ export function validateNativeCreation(input, now = Date.now()) {
     let url; try { url = new URL(avatar_url); } catch { lifecycleError('invalid_avatar_url', 400); }
     if (url.protocol !== 'https:') lifecycleError('invalid_avatar_url', 400);
   }
-  return { creation_key: key, name, persona, role, lifecycle: kind, expires_at, avatar_url, appearance: validateEmployeeAppearance(input.appearance) };
+  return { creation_key: key, employee_id: input.employee_id, name, persona, role, lifecycle: kind, expires_at, avatar_url, appearance: validateEmployeeAppearance(input.appearance) };
 }
 export async function requireLifecycleAdministrator(db, principal) {
   const membership = await db.userOrganization.findUnique({
@@ -84,6 +85,8 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
   }
   if (input?.operation === 'create') {
     const value = validateNativeCreation(input, -Infinity);
+    // Only OpenDot mints employee ids: it creates the employee locally and registers it here afterwards under the same creation key.
+    if (value.employee_id !== undefined && executionBackend !== 'open-dot') lifecycleError('employee_id_not_accepted', 400);
     if (predefinedStarter && (executionBackend !== 'open-dot' || !input.persona || !Number.isInteger(predefinedStarter.slot) || predefinedStarter.slot < 0 || predefinedStarter.slot > 2 || predefinedStarter.source !== 'hyperagents-onboarding')) lifecycleError('invalid_predefined_starter', 400);
     const profileReady = input.persona != null && (!!principal.runtimeSessionId || !!predefinedStarter);
     if (!['native','open-dot'].includes(executionBackend)) lifecycleError('invalid_execution_backend',400);
@@ -101,11 +104,15 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       const existing = await tx.digitalEmployee.findUnique({ where: { orgId_slug: { orgId: principal.orgId, slug } } });
       if (existing) {
         if (nativeLifecycle(existing)?.creation_hash !== hash) lifecycleError('creation_key_content_conflict');
+        // A replay must name the employee it created; a different id under the same creation key is a different employee.
+        if (value.employee_id !== undefined && existing.id !== value.employee_id) lifecycleError('employee_id_conflict');
         return { employee: publicEmployee(existing), replayed: true };
       }
+      // The provided id is taken from nobody: an employee with it under another creation key (or in another organization) is refused.
+      if (value.employee_id !== undefined && await tx.digitalEmployee.findUnique({ where: { id: value.employee_id }, select: { id: true } })) lifecycleError('employee_id_conflict');
       if (value.lifecycle === 'temporary' && Date.parse(value.expires_at) <= now) lifecycleError('future_deadline_required', 400);
       const employee = await tx.digitalEmployee.create({ data: {
-        id: randomUUID(), orgId: principal.orgId, createdBy: principal.userId, slug,
+        id: value.employee_id ?? randomUUID(), orgId: principal.orgId, createdBy: principal.userId, slug,
         name: value.name, persona: value.persona, roleArchetype: value.role, avatarUrl: value.avatar_url,
         scope: 'organization', status: 'draft', model: 'native-harness', llmProvider: 'native-harness',
         tools: [], enabledConnectors: [],
@@ -121,6 +128,10 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
           ...(executionBackend === 'open-dot' ? {open_dot_employee:{version:VERSION,execution_backend:'open-dot',state:'provisioning',execution_state:'pending',creation_key:value.creation_key,input_digest:inputDigest,binding_revision:1}} : {}) },
       } });
       return { employee: publicEmployee(employee), replayed: false };
+    }).catch(error => {
+      // Two registrations racing for one provided id: the loser sees the primary key (or slug) constraint.
+      if (error?.code === 'P2002' && value.employee_id !== undefined) lifecycleError('employee_id_conflict');
+      throw error;
     });
   }
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);

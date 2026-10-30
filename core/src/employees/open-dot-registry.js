@@ -91,7 +91,7 @@ export async function verifyOpenDotBinding({ employeeId, creationKey, principal,
 }
 
 export async function createOpenDotEmployee(db, principal, input) {
-  assertExactKeys(input, ['operation','creation_key','name','persona','role','avatar_url','appearance']);
+  assertExactKeys(input, ['operation','creation_key','employee_id','name','persona','role','avatar_url','appearance']);
   if (input.operation !== 'create') lifecycleError('invalid_open_dot_employee_operation', 400);
   const result = await manageNativeEmployee(db, principal, input, { executionBackend: 'open-dot' });
   const lifecycle = nativeLifecycle(result.employee);

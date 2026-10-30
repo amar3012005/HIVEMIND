@@ -10420,6 +10420,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // POST /v1/service/open-dot/lifecycle-notice — OpenDot tells Core that it removed an employee (OpenDot deletes first, Core follows).
+  // Authenticated by the shared lifecycle signature, not by a user session; see employees/open-dot-lifecycle-notice.js.
+  if (pathname === '/v1/service/open-dot/lifecycle-notice') {
+    const privateHeaders = { 'Cache-Control': 'private, no-store', Pragma: 'no-cache' };
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405, privateHeaders);
+    try {
+      const notice = await import('./employees/open-dot-lifecycle-notice.js');
+      const secret = notice.noticeSecret();
+      if (!secret) return jsonResponse(res, { error: 'lifecycle_notice_unconfigured' }, 503, privateHeaders);
+      const { raw } = await parseBodyWithRaw(req, 8 * 1024);
+      const verdict = notice.verifyNoticeSignature(secret, { method: req.method, path: new URL(req.url, 'http://localhost').pathname + new URL(req.url, 'http://localhost').search, headers: req.headers, body: raw });
+      if (verdict === 'unavailable') return jsonResponse(res, { error: 'lifecycle_notice_unavailable' }, 503, privateHeaders);
+      if (verdict !== 'verified') return jsonResponse(res, { error: 'invalid_lifecycle_notice_signature' }, 401, privateHeaders);
+      if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503, privateHeaders);
+      return jsonResponse(res, await notice.applyLifecycleNotice(prisma, notice.parseNotice(raw)), 200, privateHeaders);
+    } catch (error) {
+      return jsonResponse(res, { error: error.status === 413 ? 'lifecycle_notice_too_large' : error.code && error.status ? error.code : 'lifecycle_notice_unavailable' }, error.status || 503, privateHeaders);
+    }
+  }
+
   // GET /v1/service/open-dot/recovery-principal — tenant scope for the
   // service-owned Open Dot recovery dispatcher. Identity is derived only from
   // a persisted, explicitly scoped service key and a live membership check.

@@ -52,6 +52,7 @@ const clip = (value, n) => String(value ?? '').replace(/\s+/g, ' ').trim().slice
 const str = value => (typeof value === 'string' ? value : '');
 const lower = value => String(value ?? '').toLowerCase();
 const int = (value, fallback, min, max) => { const n = Number(value); return Number.isInteger(n) && n >= min && n <= max ? n : fallback; };
+const ratio = (value, fallback, min, max) => { const n = Number(value); return value !== undefined && value !== '' && Number.isFinite(n) && n >= min && n <= max ? n : fallback; };
 
 /**
  * Routing limits, all changeable from the environment.
@@ -61,6 +62,8 @@ const int = (value, fallback, min, max) => { const n = Number(value); return Num
 export function routingConfig(env = process.env) {
   return Object.freeze({
     enabled: env.HIVEMIND_EMPLOYEE_EVENT_ROUTING === '1',
+    // With Runtime off, a "useful company work" verdict between this probability and the usual 0.75 may still wake an employee that clearly owns it.
+    nearMissProbability: ratio(env.HIVEMIND_EMPLOYEE_EVENT_NEAR_MISS_PROBABILITY, 0.5, 0.3, 0.75),
     coalesceMs: int(env.HIVEMIND_EMPLOYEE_EVENT_COALESCE_MS, 120_000, 0, 900_000),
     maxWakesPerHour: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_WAKES_PER_HOUR, 6, 1, 120),
     maxEventsPerWake: int(env.HIVEMIND_EMPLOYEE_EVENT_MAX_EVENTS_PER_WAKE, 10, 1, 25),

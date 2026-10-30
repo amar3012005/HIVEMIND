@@ -27,3 +27,14 @@ test('nonreceipt and unknown transport outcomes remain unconfirmed', async () =>
     await assert.rejects(() => bridge.deliver(row));
   }
 });
+test('a destination on Brain\'s chat runner is reported once in the logs and the Runtime runner is not', () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    for (let i = 0; i < 3; i++) createRuntimeAttentionBridge({ env: { ...env, HIVEMIND_RUNTIME_ATTENTION_URL: 'http://harness-runner:3080/internal/hivemind/runtime-attention' } });
+    createRuntimeAttentionBridge({ env: { ...env, HIVEMIND_RUNTIME_ATTENTION_URL: 'http://runtime-runner:3080/internal/hivemind/runtime-attention' } });
+  } finally { console.warn = original; }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Brain chat runner/);
+});

@@ -123,7 +123,7 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     });
   }
   if (!UUID.test(input?.employee_id || '')) lifecycleError('invalid_employee_id', 400);
-  if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive','remove'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
+  if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive','remove','pause_archive','unarchive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
   const resetSessions = input.operation === 'fresh_reset_archive' ? resetSessionIds(input.reset_session_ids) : [];
   const storageUserId = resetSessions.length ? (await nativeAgentStoragePrincipal(db, principal)).userId : null;
   return db.$transaction(async tx => {
@@ -137,6 +137,27 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
       // team memory are separate records and stay. An archived employee can be removed too.
       await tx.digitalEmployee.delete({ where: { id: row.id } });
       return { employee: publicEmployee(row), removed: true };
+    }
+    if (input.operation === 'pause_archive' || input.operation === 'unarchive') {
+      // Reversible archive: the employee leaves the roster and every dispatch path (archivedAt + paused), while its
+      // profile, chats, memory and files stay. Retirement (`archive`, `fresh_reset_archive`) is a different phase and is never restorable.
+      const state = lifecycle.archive;
+      if (input.operation === 'pause_archive') {
+        if (row.archivedAt) return { employee: publicEmployee(row), replayed: true };
+        if (lifecycle.phase !== 'active') lifecycleError('employee_not_archivable');
+        const updated = await tx.digitalEmployee.update({ where: { id: row.id }, data: { archivedAt: new Date(now), status: 'paused',
+          policyRules: { ...row.policyRules, native_lifecycle: { ...lifecycle, revision: lifecycle.revision + 1,
+            archive: { reversible: true, previous_status: row.status, archived_by: principal.userId, archived_at: new Date(now).toISOString() } } } } });
+        return { employee: publicEmployee(updated), replayed: false };
+      }
+      if (!row.archivedAt) return { employee: publicEmployee(row), replayed: true };
+      if (state?.reversible !== true || lifecycle.phase !== 'active') lifecycleError('employee_not_restorable');
+      const { archive: _archive, ...rest } = lifecycle;
+      const restored = state.previous_status && state.previous_status !== 'paused' ? state.previous_status : 'draft';
+      const updated = await tx.digitalEmployee.update({ where: { id: row.id }, data: { archivedAt: null, status: restored,
+        policyRules: { ...row.policyRules, native_lifecycle: { ...rest, revision: lifecycle.revision + 1,
+          unarchived_by: principal.userId, unarchived_at: new Date(now).toISOString() } } } });
+      return { employee: publicEmployee(updated), replayed: false };
     }
     if (row.archivedAt) {
       if (input.operation === 'configure') lifecycleError('employee_profile_not_active');

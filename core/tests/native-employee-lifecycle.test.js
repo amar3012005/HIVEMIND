@@ -170,3 +170,28 @@ test('remove deletes the employee row for good, archived or not, and only for an
   const db={userOrganization:{findUnique:async()=>({isActive:true,role:'member'})},$transaction:async()=>{throw Error('no transaction');}};
   await assert.rejects(manageNativeEmployee(db,{orgId:'org',userId:'member'},{operation:'remove',employee_id:'11111111-1111-4111-8111-111111111111'}),/administrator_membership_required/);
 });
+
+test('pause_archive hides and pauses an employee reversibly; unarchive restores it; retired employees are never restorable', async () => {
+  const id='11111111-1111-4111-8111-111111111111';
+  const row={id,name:'Zozo',status:'ready',archivedAt:null,
+    policyRules:{native_lifecycle:{version:1,phase:'active',kind:'durable',revision:2}}};
+  const tx={$queryRawUnsafe:async()=>[],digitalEmployee:{findFirst:async()=>row,update:async({data})=>Object.assign(row,data)}};
+  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$transaction:async fn=>fn(tx)};
+  const principal={orgId:'org',userId:'admin'};
+  let result=await manageNativeEmployee(db,principal,{operation:'pause_archive',employee_id:id});
+  assert.equal(result.replayed,false);assert.ok(result.employee.archivedAt);assert.equal(result.employee.status,'paused');
+  assert.equal(result.employee.policyRules.native_lifecycle.archive.reversible,true);
+  assert.equal(employeeCanDispatch(row,0),false);
+  result=await manageNativeEmployee(db,principal,{operation:'pause_archive',employee_id:id});
+  assert.equal(result.replayed,true);
+  result=await manageNativeEmployee(db,principal,{operation:'unarchive',employee_id:id});
+  assert.equal(result.replayed,false);assert.equal(row.archivedAt,null);assert.equal(row.status,'ready');
+  assert.equal(row.policyRules.native_lifecycle.archive,undefined);assert.equal(row.policyRules.native_lifecycle.phase,'active');
+  assert.equal(employeeCanDispatch(row,0),true);
+  result=await manageNativeEmployee(db,principal,{operation:'unarchive',employee_id:id});
+  assert.equal(result.replayed,true);
+  Object.assign(row,{archivedAt:new Date(),status:'paused',policyRules:{native_lifecycle:{version:1,phase:'archived',revision:3}}});
+  await assert.rejects(manageNativeEmployee(db,principal,{operation:'unarchive',employee_id:id}),/employee_not_restorable/);
+  const member={userOrganization:{findUnique:async()=>({isActive:true,role:'member'})},$transaction:async()=>{throw Error('no transaction');}};
+  await assert.rejects(manageNativeEmployee(member,principal,{operation:'pause_archive',employee_id:id}),/administrator_membership_required/);
+});

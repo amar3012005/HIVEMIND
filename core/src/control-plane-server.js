@@ -25,6 +25,7 @@ import { checkedVectorDelete } from './security/vector-erasure.js';
 import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './security/brain-boundaries.js';
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
 import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity, checkTriggerIntake } from './connectors/composio/hivemind-triggers.js';
+import { reconcileComposioTriggers, triggerReconcileMode } from './connectors/composio/trigger-reconcile.js';
 import http from 'http';
 import { handleMobilePrivacyRoutes } from './mobile/privacy-routes.js';
 import { handleMobileAuthRoutes, mobileOAuthIntent, completeMobileOAuth } from './mobile/auth-routes.js';
@@ -1359,6 +1360,19 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
   };
   setTimeout(recoverAttention, 15000).unref();
   setInterval(recoverAttention, 60000).unref();
+}
+
+// Daily Composio trigger reconcile; COMPOSIO_TRIGGER_RECONCILE selects off, dry-run (default) or apply.
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  const mode = triggerReconcileMode();
+  if (mode !== 'off') {
+    const reconcileTriggers = async () => {
+      try { await reconcileComposioTriggers(prisma, { dryRun: mode !== 'apply' }); }
+      catch { console.warn('[composio-trigger-reconcile] unavailable'); }
+    };
+    setTimeout(reconcileTriggers, 10 * 60_000).unref();
+    setInterval(reconcileTriggers, 24 * 3_600_000).unref();
+  }
 }
 
 // Parallel monitor events reach Runtime attention by polling; off unless PARALLEL_MONITOR_POLL_INTERVAL_MS is set.

@@ -74,3 +74,36 @@ test('fixed Dot proof and adoption preserve the exact canonical employee identit
     sessionCookie: 'session.id.signature', fetchImpl: async () => new Response(JSON.stringify({ ...returnedProof,
       userId: '44444444-4444-4444-8444-444444444444' }), { status: 200 }) }), /open_dot_binding_unverified/);
 });
+
+test('Open Dot registration accepts the employee id OpenDot minted, once, and refuses any other claim on it', async () => {
+  const rows = new Map();
+  const tx = { $queryRawUnsafe: async () => [], digitalEmployee: {
+    findUnique: async ({ where }) => where.id ? rows.get(where.id) ?? null : [...rows.values()].find(row => row.slug === where.orgId_slug.slug) ?? null,
+    create: async ({ data }) => { const row = { ...data, archivedAt: null }; rows.set(row.id, row); return row; },
+  } };
+  const db = { userOrganization: { findUnique: async () => ({ isActive: true, role: 'owner' }) }, $transaction: async fn => fn(tx) };
+  const minted = '44444444-4444-4444-8444-444444444444';
+  const input = { operation: 'create', creation_key: 'open-dot:dot_a', employee_id: minted, name: 'Scout', role: 'Research' };
+  const first = await createOpenDotEmployee(db, principal, input);
+  assert.equal(first.employee.id, minted, 'Core keeps the id OpenDot created the employee under');
+  assert.equal(first.replayed, false);
+  assert.equal(first.open_dot_employee.creation_key, 'open-dot:dot_a');
+  const replay = await createOpenDotEmployee(db, principal, input);
+  assert.equal(replay.employee.id, minted);
+  assert.equal(replay.replayed, true, 'registering twice is idempotent');
+  assert.equal(rows.size, 1);
+  // The same creation key for a different employee id, or the id under another creation key, is a conflict.
+  await assert.rejects(createOpenDotEmployee(db, principal, { ...input, employee_id: '55555555-5555-4555-8555-555555555555' }), /employee_id_conflict/);
+  await assert.rejects(createOpenDotEmployee(db, principal, { ...input, creation_key: 'open-dot:dot_b' }), /employee_id_conflict/);
+  await assert.rejects(createOpenDotEmployee(db, principal, { ...input, creation_key: 'open-dot:dot_c', employee_id: 'not-a-uuid' }), /invalid_employee_id/);
+  // Without an id Core still mints one, as before.
+  const minted2 = await createOpenDotEmployee(db, principal, { operation: 'create', creation_key: 'open-dot:dot_d', name: 'Other' });
+  assert.notEqual(minted2.employee.id, minted);
+  assert.equal(rows.size, 2);
+});
+
+test('only an OpenDot registration may carry an employee id', async () => {
+  const { manageNativeEmployee } = await import('../src/employees/native-lifecycle.js');
+  const db = { userOrganization: { findUnique: async () => ({ isActive: true, role: 'owner' }) }, $transaction: async () => { throw new Error('must not reach the database'); } };
+  await assert.rejects(manageNativeEmployee(db, principal, { operation: 'create', creation_key: 'native-1', name: 'Native', employee_id: '44444444-4444-4444-8444-444444444444' }), /employee_id_not_accepted/);
+});

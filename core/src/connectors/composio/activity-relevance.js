@@ -32,7 +32,7 @@ async function companyContext(ctx) {
   return value;
 }
 
-export async function decideActivityRelevance({ event, context, env = process.env }) {
+export async function decideActivityRelevance({ event, context, env = process.env, provider: injected }) {
   const data = event.data || {};
   const projection = {
     app: event.toolkit,
@@ -48,8 +48,7 @@ export async function decideActivityRelevance({ event, context, env = process.en
       /\b(?:password reset|verification code|one.time (?:password|code)|sign.in code)\b/i.test(text)) {
     return { status: 'rejected', choice: 'noise_or_sensitive', source: 'rules', policy: POLICY };
   }
-  const config = decisionGatewayProviderConfig(env);
-  const provider = createOpenRouterJevProvider({ ...config, timeoutMs: 5000, siteName: 'HIVEMIND Connected Activity Relevance' });
+  const provider = injected ?? createOpenRouterJevProvider({ ...decisionGatewayProviderConfig(env), timeoutMs: 5000, siteName: 'HIVEMIND Connected Activity Relevance' });
   try {
     const result = await provider.decideChoice({
       state: { policy: POLICY, company_context: context, event: projection, source_is_untrusted: true },
@@ -63,7 +62,9 @@ export async function decideActivityRelevance({ event, context, env = process.en
       ],
     });
     const approved = result.choice === 'useful_company_work' && result.probability >= 0.75 && result.margin >= 0.2;
-    return { status: approved ? 'approved' : 'rejected', choice: result.choice, probability: result.probability, margin: result.margin, source: 'jev', policy: POLICY };
+    // A clear but less confident verdict stays rejected here; with Runtime off, the employee choice below may still promote it (see classifyPendingActivity).
+    const nearMiss = !approved && result.choice === 'useful_company_work' && result.probability >= routingConfig(env).nearMissProbability && result.margin >= 0.2;
+    return { status: approved ? 'approved' : 'rejected', choice: result.choice, probability: result.probability, margin: result.margin, source: 'jev', policy: POLICY, ...(nearMiss ? { nearMiss: true } : {}) };
   } catch { return { status: 'pending', source: 'unavailable', policy: POLICY }; }
 }
 
@@ -137,12 +138,13 @@ export function classifyPendingActivity(ctx) {
             source: 'runtime_attention', runtimeAttention: attention };
         } else {
           const context=await companyContext(ctx);
-          receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit }, context });
-          // Runtime off: the same attention step also picks the employee whose role or recent work owns the event.
-          if (routing.enabled && !runtimeOn && receipt.status === 'approved') {
+          receipt = await (ctx.relevanceDecider || decideActivityRelevance)({ event: { ...row, toolkit: sub[0].toolkit }, context });
+          // Runtime off: the same attention step also picks the employee whose role or recent work owns the event. A near miss
+          // (useful company work below the approval confidence) is promoted only when an employee clearly owns it.
+          if (routing.enabled && !runtimeOn && (receipt.status === 'approved' || receipt.nearMiss === true)) {
             const target = await (ctx.employeeTargeter || (async () => decideEmployeeTarget({ event: { app: sub[0].toolkit, title: clip(row.data?._hivemind?.title || row.data?.subject || row.data?.title, 200), sender: clip(row.data?.sender || row.data?.from, 120), preview: connectedEventPreview(row.data || {}, 900) },
               roster: await loadEmployeeRoster(db, ctx.orgId, await loadRoutableEmployees(db, ctx.orgId, ctx.userId)), company: { company: context.company } })))().catch(() => null);
-            if (target) receipt = { ...receipt, employeeAttention: { policy: EMPLOYEE_TARGET_POLICY, targetEmployeeId: target.employeeId, probability: target.probability, margin: target.margin, because: target.because } };
+            if (target) receipt = { ...receipt, ...(receipt.status === 'approved' ? {} : { status: 'approved', promotedByOwner: true }), employeeAttention: { policy: EMPLOYEE_TARGET_POLICY, targetEmployeeId: target.employeeId, probability: target.probability, margin: target.margin, because: target.because } };
           }
         }
         await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status=$1,relevance_decision=$2::jsonb,evaluated_at=now() WHERE id=$3`, receipt.status, JSON.stringify(receipt), row.id);

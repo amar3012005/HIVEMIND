@@ -8,9 +8,17 @@ export function runtimeAttentionToken(row, operation, secret, now = Date.now()) 
   const input = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(claims)}`;
   return `${input}.${createHmac('sha256', secret).update(input).digest('base64url')}`;
 }
+/** Hosts of Brain's chat runner, which is not a Runtime attention destination. */
+let warnedBrainRunner = false;
+const BRAIN_RUNNER_HOST = /^https?:\/\/(?:hivemind-)?harness-runner(?:-1)?[:/]/iu;
 export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fetch } = {}) {
   const secret = env.HIVE_HARNESS_RUNNER_SERVICE_SECRET;
   const configured = env.HIVEMIND_RUNTIME_ATTENTION_URL;
+  if (!warnedBrainRunner && BRAIN_RUNNER_HOST.test(String(configured ?? ''))) {
+    warnedBrainRunner = true;
+    // Brain's chat runner has no attention route: every assessment answers 405 and the event stays pending. Say so in the logs once.
+    console.warn('[runtime-attention] HIVEMIND_RUNTIME_ATTENTION_URL points at the Brain chat runner, which does not serve /internal/hivemind/runtime-attention; use the Runtime runner (http://runtime-runner:3080/internal/hivemind/runtime-attention).');
+  }
   if (!configured || !secret || Buffer.byteLength(secret, 'utf8') < 32) return undefined;
   let url;
   try { url = new URL(configured); } catch { return undefined; }

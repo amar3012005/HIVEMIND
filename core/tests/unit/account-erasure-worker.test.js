@@ -23,3 +23,15 @@ test('temporary catalog outage schedules automatic recovery without discarding i
  const result=await runAccountErasureOnce({prisma:db,workerId,eraseNative:async()=>{throw Object.assign(Error('catalog unavailable'),{code:'COMPOSIO_ERASURE_UNAVAILABLE'})},finalize:async()=>{finalized=true}});
  assert.equal(result.code,'COMPOSIO_ERASURE_UNAVAILABLE');assert.equal(retry,30);assert.equal(finalized,false);assert.deepEqual(removed,[]);
 });
+test('trigger and Runtime steps run before finalization and a failure in either blocks and retries',async()=>{
+ const{db}=fixture();const order=[];
+ const ok=await runAccountErasureOnce({prisma:db,workerId,eraseTriggers:async({userId:id})=>{assert.equal(id,userId);order.push('triggers');return{disabled:1,alreadyGone:0,sharedKept:0,removed:1};},eraseRuntime:async input=>{assert.equal(input.userId,userId);order.push('runtime');return{verified:true,operationId:input.operationId,archivedSessions:2,removedWakes:1};},finalize:async()=>{order.push('finalize');return{ok:true};}});
+ assert.equal(ok.status,'completed');assert.deepEqual(order,['triggers','runtime','finalize']);
+ for(const failing of ['eraseTriggers','eraseRuntime']){
+  const{db}=fixture();let finalized=false;
+  const steps={eraseTriggers:async()=>({disabled:0,alreadyGone:0,sharedKept:0,removed:0}),eraseRuntime:async input=>({verified:true,operationId:input.operationId,archivedSessions:0,removedWakes:0})};
+  steps[failing]=async()=>{throw Object.assign(new Error('down'),{code:failing==='eraseTriggers'?'COMPOSIO_TRIGGER_ERASURE_UNAVAILABLE':'RUNTIME_ERASURE_UNAVAILABLE'});};
+  const result=await runAccountErasureOnce({prisma:db,workerId,...steps,finalize:async()=>{finalized=true;return{ok:true};}});
+  assert.equal(result.status,'blocked');assert.equal(finalized,false);
+ }
+});

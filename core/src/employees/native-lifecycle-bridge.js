@@ -1,8 +1,8 @@
 /** Purpose-separated callback to native Schedule; no second task loop or scheduler. */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-export function lifecycleCallbackToken(payload, secret, now = Date.now()) {
+export function lifecycleCallbackToken(payload, secret, now = Date.now(), audience = 'hivemind-employee-lifecycle') {
   const at = Math.floor(now / 1000), encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const claims = { iss:'hivemind-control-plane', aud:'hivemind-employee-lifecycle', sub:payload.userId,
+  const claims = { iss:'hivemind-control-plane', aud:audience, sub:payload.userId,
     org_id:payload.orgId, body_sha256:createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
     iat:at, exp:at+30, jti:randomUUID() };
   const input = `${encode({alg:'HS256',typ:'JWT'})}.${encode(claims)}`;

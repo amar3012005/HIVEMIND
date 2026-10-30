@@ -3047,7 +3047,7 @@ async function recoverAccountErasure() {
   erasureWorkerRunning = true;
   try {
     for (let batch=0;batch<4;batch++) {
-      const result=await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion,transferVectors:transferSharedMemoryVectors,eraseNative:async input=>{await eraseNativeAccount(input);await erasePrivateConnectorGrants(getCentralPrismaClient(),input.userId,input.scope.organizations.map(x=>x.orgId),{eraseComposio:composioService.erasePrivateUserAccounts,eraseNango:(await import('./connectors/mcp/nango-service.js')).deleteConnection});return {verified:true,nativeCredentialsRemoved:true};}});
+      const result=await runAccountErasureOnce({prisma:getCentralPrismaClient(),objectClient:new CloudflareKnowledgeIngestClient(),finalize:performAccountDeletion,transferVectors:transferSharedMemoryVectors,eraseTriggers:async ({userId})=>(await import('./security/account-erasure-triggers.js')).eraseAccountTriggers(getCentralPrismaClient(),userId),eraseRuntime:async input=>(await import('./security/account-erasure-runtime.js')).eraseRuntimeAccount(input),eraseNative:async input=>{await eraseNativeAccount(input);await erasePrivateConnectorGrants(getCentralPrismaClient(),input.userId,input.scope.organizations.map(x=>x.orgId),{eraseComposio:composioService.erasePrivateUserAccounts,eraseNango:(await import('./connectors/mcp/nango-service.js')).deleteConnection});return {verified:true,nativeCredentialsRemoved:true};}});
       if (!result) break;
       if (batch===3) setImmediate(recoverAccountErasure);
     }

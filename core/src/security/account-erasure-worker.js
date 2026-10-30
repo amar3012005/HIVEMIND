@@ -8,7 +8,7 @@ import {verifiedAccountIngestionDrain} from './account-ingestion-lease.js';
 import {cleanupExclusiveSourceCopies} from './account-erasure-cleanup.js';
 import {requireReconciledSourceErasure} from './account-erasure-inventory.js';
 const fail=code=>{throw Object.assign(new Error(code),{code});};
-export async function runAccountErasureOnce({prisma,objectClient,finalize,transferVectors,eraseNative,workerId=crypto.randomUUID()}) {
+export async function runAccountErasureOnce({prisma,objectClient,finalize,transferVectors,eraseNative,eraseTriggers,eraseRuntime,workerId=crypto.randomUUID()}) {
   const op=await claimAccountErasure(prisma,{workerId,leaseSeconds:300});
   if(!op)return null;
   try {
@@ -42,6 +42,9 @@ export async function runAccountErasureOnce({prisma,objectClient,finalize,transf
       if(inventory.remote.length)fail('SOURCE_ERASURE_AUTHORIZATION_REQUIRED');
       if([...inventory.jobs,...inventory.documents,...inventory.artifacts].some(row=>shared.includes(row.orgId)))fail('SHARED_SOURCE_TRANSFER_REQUIRED');
       const drain=await verifiedAccountIngestionDrain(prisma,op.user_id);
+      // Connected-app triggers and Runtime sessions are cleared before any row is deleted; a failure blocks and retries.
+      if(eraseTriggers){const receipt=await eraseTriggers({userId:op.user_id});await saveErasureReceipt(prisma,{operationId:op.id,workerId,store:'composio_triggers',coordinate:op.user_id,outcome:'erased',evidence:{verified:true,...receipt}});}
+      if(eraseRuntime){const receipt=await eraseRuntime({operationId:op.id,userId:op.user_id,orgIds:scope.organizations.map(org=>org.orgId)});await saveErasureReceipt(prisma,{operationId:op.id,workerId,store:'runtime_sessions',coordinate:op.user_id,outcome:'erased',evidence:{verified:true,sessionData:'archived',archivedSessions:receipt.archivedSessions,removedWakes:receipt.removedWakes}});}
       if(eraseNative){const receipt=await eraseNative({userId:op.user_id,operationId:op.id,workerId,scope});await saveErasureReceipt(prisma,{operationId:op.id,workerId,store:'native_accounts',coordinate:op.user_id,outcome:'erased',evidence:{verified:true,...receipt}});}
       await reconcileOwnedSourceObjects({inventory,objectClient,drainReceipt:drain,saveReceipt:receipt=>saveErasureReceipt(prisma,{operationId:op.id,workerId,...receipt})});
       await cleanupExclusiveSourceCopies(prisma,{userId:op.user_id,operationId:op.id,workerId,ownershipSnapshot:scope,inventory,verifiedObjects:true});

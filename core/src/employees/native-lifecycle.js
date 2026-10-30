@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { validateEmployeeAppearance } from './humation-appearance.js';
 import { nativeAgentStoragePrincipal } from '../harness-chat/organization-agent-access.js';
+import { removeOpenDotEmployeeWithRetry } from './open-dot-removal.js';
 
 const VERSION = 1;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -74,7 +75,7 @@ function publicEmployee(row) {
     archivedAt: row.archivedAt, policyRules: row.policyRules };
 }
 /** One org-scoped transaction serializes replay and mutation on the existing registry. */
-export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now(), executionBackend = 'native', predefinedStarter } = {}) {
+export async function manageNativeEmployee(db, principal, input, { closeout = inspectNativeCloseout, now = Date.now(), executionBackend = 'native', predefinedStarter, openDotRemoval = removeOpenDotEmployeeWithRetry } = {}) {
   await requireLifecycleAdministrator(db, principal);
   if (principal.runtimeSessionId) await requireNativeRuntime(db, principal);
   if (principal.employeeSessionId) {
@@ -126,7 +127,9 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
   if (!['configure','begin_closeout','inspect_closeout','archive','fresh_reset_archive','remove','pause_archive','unarchive'].includes(input.operation)) lifecycleError('invalid_lifecycle_operation', 400);
   const resetSessions = input.operation === 'fresh_reset_archive' ? resetSessionIds(input.reset_session_ids) : [];
   const storageUserId = resetSessions.length ? (await nativeAgentStoragePrincipal(db, principal)).userId : null;
-  return db.$transaction(async tx => {
+  let outcome;
+  try {
+  outcome = await db.$transaction(async tx => {
     await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))::text AS lock', `${principal.orgId}:${input.employee_id}`);
     const row = await tx.digitalEmployee.findFirst({ where: { id: input.employee_id, orgId: principal.orgId } });
     if (!row) lifecycleError('employee_not_found', 404);
@@ -244,6 +247,21 @@ export async function manageNativeEmployee(db, principal, input, { closeout = in
     } });
     return { employee: publicEmployee(updated), closeout: evidence, replayed: false };
   });
+  } catch (error) {
+    // A repeated removal finishes an Open Dot cleanup that was still pending when the employee row went; the controller
+    // resolves the dot from its own employee binding, so nothing but the administrator's organization is trusted here.
+    if (input.operation === 'remove' && error?.message === 'employee_not_found') {
+      const cleanup = await openDotRemoval({ orgId: principal.orgId, employeeId: input.employee_id });
+      if (cleanup.status === 'verified' && cleanup.dotsRemoved > 0) return { employee: { id: input.employee_id }, removed: true, replayed: true, open_dot_cleanup: cleanup };
+    }
+    throw error;
+  }
+  if (input.operation === 'remove' && outcome.removed) {
+    const marker = outcome.employee.policyRules?.open_dot_employee;
+    // The employee row is already gone; a pending cleanup is reported, retried in the background and on a repeated removal.
+    if (marker) outcome.open_dot_cleanup = await openDotRemoval({ orgId: principal.orgId, employeeId: outcome.employee.id, dotId: marker.dot_id });
+  }
+  return outcome;
 }
 
 /** A signed operating claim must refer to this administrator's actual persistent Chief room. */

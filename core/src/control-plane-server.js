@@ -26,6 +26,8 @@ import { dsrMemoryWhere, dsrAuditWhere, requireDsrTargetMembership } from './sec
 import { handleAdvisoryMethodApproval } from './runtime-playbooks/advisory-method-routes.js';
 import { runTriggers, receiveTriggerEvent, reconcileConnectedActivity, checkTriggerIntake } from './connectors/composio/hivemind-triggers.js';
 import { reconcileComposioTriggers, triggerReconcileMode } from './connectors/composio/trigger-reconcile.js';
+import { runComposioConnectHealth } from './connectors/composio/connect-health.js';
+import { classifyConnectError } from './connectors/composio/connect-readiness.js';
 import http from 'http';
 import { handleMobilePrivacyRoutes } from './mobile/privacy-routes.js';
 import { handleMobileAuthRoutes, mobileOAuthIntent, completeMobileOAuth } from './mobile/auth-routes.js';
@@ -1373,6 +1375,14 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     setTimeout(reconcileTriggers, 10 * 60_000).unref();
     setInterval(reconcileTriggers, 24 * 3_600_000).unref();
   }
+}
+
+// Daily connect-health run beside the trigger reconcile: checks every listed app's auth config, publishes broken
+// ones so the web app disables "Sign in", and logs an ALARM line for failures. COMPOSIO_CONNECT_HEALTH=off disables it.
+if (composioService.isComposioConfigured() && shouldRunRecurringMaintenanceJobs() && String(process.env.COMPOSIO_CONNECT_HEALTH || 'on').toLowerCase() !== 'off') {
+  const checkConnectHealth = () => runComposioConnectHealth().catch(() => console.warn('[composio-connect-health] unavailable'));
+  setTimeout(checkConnectHealth, 5 * 60_000).unref();
+  setInterval(checkConnectHealth, 24 * 3_600_000).unref();
 }
 
 // Parallel monitor events reach Runtime attention by polling; off unless PARALLEL_MONITOR_POLL_INTERVAL_MS is set.
@@ -8301,7 +8311,10 @@ const server = http.createServer(async (req, res) => {
         expires_at: link.expiresAt,
       });
     } catch (err) {
-      return jsonResponse(res, { error: err.message }, err.status === 404 ? 404 : 400);
+      // Typed, user-safe failure: raw Composio text (status codes, auth config ids) never reaches the browser.
+      const failure = classifyConnectError(err);
+      console.warn('[composio-connect] failed', JSON.stringify({ toolkit: toolkitSlug, code: failure.code, upstream: err.status || null }));
+      return jsonResponse(res, { error: failure.message, code: failure.code, retryable: failure.retryable }, failure.status);
     }
   }
 
@@ -8414,7 +8427,7 @@ const server = http.createServer(async (req, res) => {
           if (nativeSlack) rows.set('slack', { toolkit: 'slack', status: 'connected', origin: 'personal', accountId: null });
         } catch { /* best-effort overlay */ }
       }
-      const toolkits = composioService.withToolkitConnections(page.items, rows);
+      const toolkits = composioService.annotateToolkitsConnectable(composioService.withToolkitConnections(page.items, rows));
       const connections = [...rows.values()].sort((a, b) => a.toolkit.localeCompare(b.toolkit))
         .map((row) => ({ toolkit: row.toolkit, status: row.status, origin: row.origin, account_id: row.accountId }));
       return jsonResponse(res, {
